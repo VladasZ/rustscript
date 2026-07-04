@@ -216,7 +216,16 @@ impl Compiler<'_> {
             }
             Expr::Index(idx) => {
                 let base = self.compile_expr(&idx.expr)?;
-                let key = self.compile_expr(&idx.index)?;
+                // A slice like `v[1..]` may leave the end open. Only an index
+                // position allows that, a plain range still needs both ends.
+                let key = match &*idx.index {
+                    Expr::Range(r) => {
+                        let key = self.alloc();
+                        self.compile_slice_range(key, r)?;
+                        key
+                    }
+                    other => self.compile_expr(other)?,
+                };
                 self.emit(Op::Index { dst, base, key });
             }
             Expr::Field(f) => {
@@ -381,6 +390,26 @@ impl Compiler<'_> {
         };
         let inclusive = matches!(r.limits, syn::RangeLimits::Closed(_));
         self.emit(Op::MakeRange { dst, start, end, inclusive });
+        Ok(())
+    }
+
+    /// A range in index position. An open end becomes an i64::MAX sentinel
+    /// that the slicing code reads as "to the end".
+    fn compile_slice_range(&mut self, dst: Reg, r: &syn::ExprRange) -> Result<()> {
+        if r.end.is_some() {
+            return self.compile_range(dst, r);
+        }
+        let start = match &r.start {
+            Some(e) => self.compile_expr(e)?,
+            None => {
+                let z = self.alloc();
+                self.emit(Op::LoadInt { dst: z, v: 0 });
+                z
+            }
+        };
+        let end = self.alloc();
+        self.emit(Op::LoadInt { dst: end, v: i64::MAX });
+        self.emit(Op::MakeRange { dst, start, end, inclusive: false });
         Ok(())
     }
 

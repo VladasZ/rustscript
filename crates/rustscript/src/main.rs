@@ -41,20 +41,25 @@ fn real_main() -> Result<()> {
             Ok(())
         }
         // `rust file.rs` and the shebang form both land here. Everything after
-        // the filename is passed through to the script.
-        path if path.ends_with(".rs") => run(path, true, &all[1..]),
+        // the filename is passed through to the script. An extensionless path
+        // still runs when it is a real file, e.g. a launcher symlink.
+        path if path.ends_with(".rs") || Path::new(path).is_file() => {
+            run(path, true, &all[1..])
+        }
         other => bail!("unknown command `{other}`, try `rust help`"),
     }
 }
 
 fn run(file: &str, check_first: bool, script_args: &[String]) -> Result<()> {
-    let path = Path::new(file);
-    let source = std::fs::read_to_string(path)
+    // A launcher symlink must resolve to the real script so module files are
+    // found next to the source, not next to the link.
+    let path = Path::new(file).canonicalize().unwrap_or_else(|_| Path::new(file).to_path_buf());
+    let source = std::fs::read_to_string(&path)
         .map_err(|e| anyhow::anyhow!("cannot read {file}: {e}"))?;
 
-    let program = loader::load(path, &source)?;
+    let program = loader::load(&path, &source)?;
     if check_first {
-        checker::check(path, &program.files)?;
+        checker::check(&path, &program.files)?;
     }
 
     // A real binary sees its own path as argv[0], then the caller's arguments.

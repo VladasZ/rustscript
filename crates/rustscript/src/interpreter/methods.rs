@@ -12,6 +12,7 @@ use super::bytecode::{BuiltinId, MethodName};
 use super::value::{Map, RStr, StructData, Value};
 
 use super::builtins::*;
+use super::ops::compare_values;
 use super::std_bridge::bytes_to_vec;
 
 
@@ -112,8 +113,19 @@ pub(super) fn str_method_slow(s: &Rc<RStr>, name: &str, args: &[Value]) -> Resul
             };
             Value::str(s.repeat(n))
         }
-        "as_str" | "as_string" => Value::some(Value::Str(s.clone())),
+        // String::as_str gives the string back. serde_json::Value::as_str
+        // gives an Option, and a json string is a plain Str here, so unwrap
+        // and expect on a string are identity to keep that pattern working.
+        "as_str" | "as_string" | "unwrap" | "expect" => Value::Str(s.clone()),
         "as_bytes" | "into_bytes" => bytes_to_vec(s.as_bytes()),
+        "strip_prefix" => match s.strip_prefix(&arg_str(0)) {
+            Some(rest) => Value::some(Value::str(rest.to_string())),
+            None => Value::none(),
+        },
+        "strip_suffix" => match s.strip_suffix(&arg_str(0)) {
+            Some(rest) => Value::some(Value::str(rest.to_string())),
+            None => Value::none(),
+        },
         "cmp" => make_ordering((***s).cmp(arg_str(0).as_str())),
         _ => {
             if let Some(colored) = color_method(s, name) {
@@ -276,6 +288,26 @@ pub(super) fn vec_method(v: &Rc<RefCell<Vec<Value>>>, method: &MethodName, args:
                     v.borrow_mut().extend(other.borrow().iter().cloned());
                 }
                 Value::Unit
+            }
+            // Iterators are eager vectors here, so `next` is the first item.
+            // The check gate keeps it off real vectors, where it won't compile.
+            "next" => v.borrow().first().cloned().map(Value::some).unwrap_or_else(Value::none),
+            "max" | "min" => {
+                let items = v.borrow();
+                let mut best: Option<&Value> = None;
+                for item in items.iter() {
+                    let better = match best {
+                        Some(b) => {
+                            let ord = compare_values(item, b)?;
+                            if method.text == "max" { ord.is_gt() } else { ord.is_lt() }
+                        }
+                        None => true,
+                    };
+                    if better {
+                        best = Some(item);
+                    }
+                }
+                best.cloned().map(Value::some).unwrap_or_else(Value::none)
             }
             name => bail!("unknown method `{name}` on Vec"),
         },

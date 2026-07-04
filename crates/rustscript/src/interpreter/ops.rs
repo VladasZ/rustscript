@@ -25,10 +25,10 @@ pub(super) fn apply_bin(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
         Add | Sub | Mul | Div | Rem => return arith(op, l, r),
         Eq => Value::Bool(l.eq_value(r)),
         Ne => Value::Bool(!l.eq_value(r)),
-        Lt => Value::Bool(compare(l, r)? == Ordering::Less),
-        Le => Value::Bool(compare(l, r)? != Ordering::Greater),
-        Gt => Value::Bool(compare(l, r)? == Ordering::Greater),
-        Ge => Value::Bool(compare(l, r)? != Ordering::Less),
+        Lt => Value::Bool(compare_values(l, r)? == Ordering::Less),
+        Le => Value::Bool(compare_values(l, r)? != Ordering::Greater),
+        Gt => Value::Bool(compare_values(l, r)? == Ordering::Greater),
+        Ge => Value::Bool(compare_values(l, r)? != Ordering::Less),
         BitAnd => int_bin(l, r, |a, b| a & b)?,
         BitOr => int_bin(l, r, |a, b| a | b)?,
         BitXor => int_bin(l, r, |a, b| a ^ b)?,
@@ -81,10 +81,10 @@ pub(super) fn cmp_test(op: BinKind, l: &Value, r: &Value) -> Result<bool> {
     Ok(match op {
         Eq => l.eq_value(r),
         Ne => !l.eq_value(r),
-        Lt => compare(l, r)? == Ordering::Less,
-        Le => compare(l, r)? != Ordering::Greater,
-        Gt => compare(l, r)? == Ordering::Greater,
-        Ge => compare(l, r)? != Ordering::Less,
+        Lt => compare_values(l, r)? == Ordering::Less,
+        Le => compare_values(l, r)? != Ordering::Greater,
+        Gt => compare_values(l, r)? == Ordering::Greater,
+        Ge => compare_values(l, r)? != Ordering::Less,
         _ => unreachable!("compare jump carries a non-comparison operator"),
     })
 }
@@ -158,7 +158,7 @@ fn int_bin(l: &Value, r: &Value, f: impl Fn(i64, i64) -> i64) -> Result<Value> {
     }
 }
 
-fn compare(l: &Value, r: &Value) -> Result<Ordering> {
+pub(super) fn compare_values(l: &Value, r: &Value) -> Result<Ordering> {
     Ok(match (l, r) {
         (Value::Int(a), Value::Int(b)) => a.cmp(b),
         (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).ok_or_else(|| anyhow!("cannot order NaN"))?,
