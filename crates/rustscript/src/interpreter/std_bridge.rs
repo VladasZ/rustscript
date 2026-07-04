@@ -317,7 +317,7 @@ pub(super) fn path_method(
         "is_absolute" => Value::Bool(p.is_absolute()),
         "exists" => Value::Bool(p.exists()),
         "file_name" => match p.file_name() {
-            Some(n) => make_path(n.to_string_lossy().into_owned()),
+            Some(n) => Value::some(make_path(n.to_string_lossy().into_owned())),
             None => Value::none(),
         },
         "file_stem" => opt_str(p.file_stem()),

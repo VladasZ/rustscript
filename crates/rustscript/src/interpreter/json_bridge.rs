@@ -174,6 +174,43 @@ pub(super) struct StructPlan {
     pub shape: Rc<StructShape>,
     /// One plan per shape field, same order.
     pub fields: Vec<JsonPlan>,
+    /// Whether field i was declared `Option<T>`, so a present value is wrapped
+    /// in `Some` and a missing key stays `None`.
+    pub optional: Vec<bool>,
+    /// Json object key to field slot. Holds the `#[serde(rename = "..")]` name
+    /// when set, otherwise the field name, so camelCase keys map correctly.
+    pub key_map: FxHashMap<String, usize>,
+}
+
+/// Read a field's `#[serde(rename = "..")]` value, if present.
+fn serde_rename(field: &syn::Field) -> Option<String> {
+    let mut renamed = None;
+    for attr in &field.attrs {
+        if !attr.path().is_ident("serde") {
+            continue;
+        }
+        // parse_nested_meta walks the `serde(...)` list, e.g. `rename = "x"`.
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("rename")
+                && let Ok(value) = meta.value()
+                && let Ok(lit) = value.parse::<syn::LitStr>()
+            {
+                renamed = Some(lit.value());
+            }
+            Ok(())
+        });
+    }
+    renamed
+}
+
+/// Whether a type is spelled `Option<..>` at the top level.
+fn is_option(ty: &syn::Type) -> bool {
+    if let syn::Type::Path(p) = ty
+        && let Some(seg) = p.path.segments.last()
+    {
+        return seg.ident == "Option";
+    }
+    false
 }
 
 impl Interp {
@@ -234,17 +271,29 @@ impl Interp {
                 let def = def.ast.clone();
                 building.push(canon.to_string());
                 let mut fields = Vec::with_capacity(shape.runtime.fields.len());
+                let mut optional = Vec::with_capacity(shape.runtime.fields.len());
+                let mut key_map = FxHashMap::default();
                 if let syn::Fields::Named(named) = &def.fields {
+                    let mut slot = 0;
                     for f in &named.named {
-                        if f.ident.is_none() {
+                        let Some(ident) = &f.ident else {
                             continue;
-                        }
+                        };
                         // Field types resolve where the struct is declared.
                         fields.push(self.json_plan(&f.ty, building, def_module));
+                        optional.push(is_option(&f.ty));
+                        let key = serde_rename(f).unwrap_or_else(|| ident.to_string());
+                        key_map.insert(key, slot);
+                        slot += 1;
                     }
                 }
                 building.pop();
-                JsonPlan::Struct(Rc::new(StructPlan { shape: shape.runtime.clone(), fields }))
+                JsonPlan::Struct(Rc::new(StructPlan {
+                    shape: shape.runtime.clone(),
+                    fields,
+                    optional,
+                    key_map,
+                }))
             }
         }
     }
@@ -300,7 +349,7 @@ impl<'de> serde::de::DeserializeSeed<'de> for PlanSeed<'_> {
 /// Key seed that resolves an object key to its slot in the target struct,
 /// without allocating. Unknown keys come back as None and are skipped.
 struct FieldSeed<'a> {
-    shape: &'a StructShape,
+    key_map: &'a FxHashMap<String, usize>,
 }
 
 impl<'de> serde::de::DeserializeSeed<'de> for FieldSeed<'_> {
@@ -322,7 +371,7 @@ impl<'de> serde::de::Visitor<'de> for FieldSeed<'_> {
     }
 
     fn visit_str<E: serde::de::Error>(self, s: &str) -> std::result::Result<Option<usize>, E> {
-        Ok(self.shape.slot(s))
+        Ok(self.key_map.get(s).copied())
     }
 }
 
@@ -394,12 +443,19 @@ impl<'de> serde::de::Visitor<'de> for PlanVisitor<'_> {
                 let mut values: Vec<Value> =
                     (0..sp.shape.fields.len()).map(|_| Value::none()).collect();
                 while let Some(slot) =
-                    access.next_key_seed(FieldSeed { shape: &sp.shape })?
+                    access.next_key_seed(FieldSeed { key_map: &sp.key_map })?
                 {
                     match slot {
                         Some(i) => {
-                            values[i] = access
+                            let v = access
                                 .next_value_seed(PlanSeed { plan: &sp.fields[i], keys: self.keys })?;
+                            // An Option field wraps a present, non-null value in
+                            // Some so a `match Some(x)` in the script matches.
+                            values[i] = if sp.optional[i] && !v.is_none_value() {
+                                Value::some(v)
+                            } else {
+                                v
+                            };
                         }
                         None => {
                             access.next_value::<serde::de::IgnoredAny>()?;
