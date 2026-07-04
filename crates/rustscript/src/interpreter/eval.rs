@@ -258,6 +258,9 @@ impl Interp {
     // -- indexing and fields ----------------------------------------------
 
     pub(super) fn index(&self, base: &Value, key: &Value) -> Result<Value> {
+        if let Value::Range { start, end, inclusive } = key {
+            return slice_value(base, *start, *end, *inclusive);
+        }
         Ok(match base {
             Value::Vec(items) => {
                 let i = as_index(key)?;
@@ -356,6 +359,42 @@ fn as_index(key: &Value) -> Result<usize> {
         Value::Int(i) if *i >= 0 => Ok(*i as usize),
         Value::Int(i) => bail!("negative index {i}"),
         other => bail!("index must be an integer, got {}", other.type_name()),
+    }
+}
+
+/// `v[a..b]` on vectors and byte-based `s[a..b]` on strings, matching real
+/// slice semantics. An i64::MAX end is the open-end sentinel meaning len.
+fn slice_value(base: &Value, start: i64, end: i64, inclusive: bool) -> Result<Value> {
+    let bounds = |len: usize| -> Result<(usize, usize)> {
+        if start < 0 {
+            bail!("negative slice start {start}");
+        }
+        let end = if end == i64::MAX {
+            len as i64
+        } else if inclusive {
+            end + 1
+        } else {
+            end
+        };
+        if end < start || end as usize > len {
+            bail!("slice {start}..{end} out of bounds (len {len})");
+        }
+        Ok((start as usize, end as usize))
+    };
+    match base {
+        Value::Vec(items) => {
+            let items = items.borrow();
+            let (a, b) = bounds(items.len())?;
+            Ok(Value::vec(items[a..b].to_vec()))
+        }
+        Value::Str(s) => {
+            let (a, b) = bounds(s.len())?;
+            match s.get(a..b) {
+                Some(sub) => Ok(Value::str(sub.to_string())),
+                None => bail!("slice {a}..{b} is not on a char boundary"),
+            }
+        }
+        other => bail!("cannot slice {}", other.type_name()),
     }
 }
 

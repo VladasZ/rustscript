@@ -37,6 +37,13 @@ impl Interp {
             {
                 return Ok(Value::structure(StructShape::new(name.as_str(), Vec::new()), Vec::new()));
             }
+            // A `use`d constant like `use std::env::consts::OS` then bare `OS`
+            // resolves through its full path.
+            if let Some(full) = self.uses.get(name.as_str())
+                && full.len() > 1
+            {
+                return self.eval_path_value(full);
+            }
             bail!("unknown variable `{name}`");
         }
 

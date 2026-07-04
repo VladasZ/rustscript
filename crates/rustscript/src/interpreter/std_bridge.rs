@@ -276,17 +276,18 @@ pub(super) fn make_dir_entry(entry: &std::fs::DirEntry) -> Value {
 }
 
 pub(super) fn make_file_type(path: &std::path::Path) -> Value {
+    // DirEntry::file_type does not follow symlinks, so a symlink to a dir
+    // reports is_symlink, not is_dir, same as the real std.
+    let ft = path.symlink_metadata().map(|m| m.file_type());
+    let is = |f: &dyn Fn(&std::fs::FileType) -> bool| {
+        Value::Bool(ft.as_ref().map(f).unwrap_or(false))
+    };
     Value::struct_of(
         "FileType",
         [
-            ("is_dir".into(), Value::Bool(path.is_dir())),
-            ("is_file".into(), Value::Bool(path.is_file())),
-            (
-                "is_symlink".into(),
-                Value::Bool(
-                    path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false),
-                ),
-            ),
+            ("is_dir".into(), is(&|t| t.is_dir())),
+            ("is_file".into(), is(&|t| t.is_file())),
+            ("is_symlink".into(), is(&|t| t.is_symlink())),
         ],
     )
 }

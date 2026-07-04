@@ -59,7 +59,9 @@ rust clean           clear the check cache
 ```
 
 A `#!/usr/bin/env rust` first line lets a `.rs` file run on its own. A shebang
-is legal Rust, so the file still passes `cargo check`.
+is legal Rust, so the file still passes `cargo check`. A symlink to a script
+runs too, even without an `.rs` extension. The link is resolved first, so
+module files are found next to the real source.
 
 ## Modules
 
@@ -115,6 +117,8 @@ example, and the common mistakes.
 - closures and the common iterator methods, `map`, `filter`, `fold`, `find`,
   `any`, `all`, `sort_by`, `sort_by_key`, and more
 - `Vec`, `String`, `HashMap`, `Option`, `Result`, the `?` operator
+- slicing with ranges, `&v[1..3]`, `&s[..n]`, and open ends like `v[1..]` in
+  index position
 - `format!` and `println!` with `{name}`, `{:?}`, width, and precision
 - `matches!`, byte string literals `b"..."`, and `unsafe` blocks run their body
 - `#[derive(...)]` is accepted, serialization is done by reflection
