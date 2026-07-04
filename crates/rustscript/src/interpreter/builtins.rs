@@ -361,9 +361,8 @@ pub(super) fn builtin_method(recv: &Value, method: &MethodName, args: &mut [Valu
             },
             "Command" => command_method(s, name, &*args),
             "ExitStatus" => exitstatus_method(s, name),
-            "HttpRequest" | "HttpResponse" | "HttpBody" | "StatusCode" => {
-                http_method(s, name, &*args)
-            }
+            "HttpRequest" | "HttpResponse" | "HttpBody" | "StatusCode" | "HeaderMap"
+            | "HeaderValue" => http_method(s, name, &*args),
             "StdStream" => std_stream_method(s, name, args),
             "Rng" => rng_method(name, &*args),
             "DateTime" => datetime_method(s, name, &*args),
