@@ -5,6 +5,7 @@ use std::rc::Rc;
 use anyhow::{Result, anyhow, bail};
 use syn::{Expr, ExprCall};
 
+use super::native::{self, Native};
 use super::value::{Fields, MapKey, Value};
 use super::{Flow, Frame, Interp, flow};
 
@@ -20,6 +21,9 @@ impl Interp {
             if name == "None" {
                 return Ok(Value::none());
             }
+            if let Some(v) = base64_engine(name) {
+                return Ok(v);
+            }
             if let Some(v) = self.unit_variant(None, name) {
                 return Ok(v);
             }
@@ -31,6 +35,20 @@ impl Interp {
         if ty == "Option" && last == "None" {
             return Ok(Value::none());
         }
+        // Path-value constants from std and bridged crates.
+        if ty == "consts" {
+            match last.as_str() {
+                "OS" => return Ok(Value::str(std::env::consts::OS)),
+                "ARCH" => return Ok(Value::str(std::env::consts::ARCH)),
+                "FAMILY" => return Ok(Value::str(std::env::consts::FAMILY)),
+                "EXE_EXTENSION" => return Ok(Value::str(std::env::consts::EXE_EXTENSION)),
+                "EXE_SUFFIX" => return Ok(Value::str(std::env::consts::EXE_SUFFIX)),
+                _ => {}
+            }
+        }
+        if let Some(v) = base64_engine(last) {
+            return Ok(v);
+        }
         if ty == "Ordering" {
             use std::cmp::Ordering::*;
             return Ok(make_ordering(match last.as_str() {
@@ -41,6 +59,18 @@ impl Interp {
         }
         if let Some(v) = self.unit_variant(Some(ty), last) {
             return Ok(v);
+        }
+        // A bare constructor path used as a value, e.g. `Vec::new` handed to
+        // `or_insert_with`. Wrap it in a zero-argument closure that calls it.
+        if matches!(last.as_str(), "new" | "default") {
+            let call = format!("{}()", segs.join("::"));
+            if let Ok(expr) = syn::parse_str::<Expr>(&call) {
+                return Ok(Value::Closure(Rc::new(super::value::ClosureData {
+                    params: vec![],
+                    body: expr,
+                    captured: std::collections::HashMap::new(),
+                })));
+            }
         }
         bail!("unsupported path `{}`", segs.join("::"));
     }
@@ -113,6 +143,25 @@ impl Interp {
         // two segments so `use` shortenings and full paths behave the same.
         let last = &canon[canon.len() - 1];
         let ns = &canon[canon.len() - 2];
+        // Threads run serially: spawn runs the closure now and hands back a
+        // handle whose value is ready. Needs the interpreter to call it.
+        if ns == "ctrlc" && last == "set_handler" {
+            let closure = args.first().cloned().unwrap_or(Value::Unit);
+            return Ok(match super::set_ctrlc_handler(closure) {
+                Ok(()) => Value::ok(Value::Unit),
+                Err(e) => Value::err(Value::str(e.to_string())),
+            });
+        }
+        if ns == "thread" && last == "spawn" {
+            let clo = as_closure(args.first())?;
+            let result = self.call_closure(&clo, &[])?;
+            let mut f = Fields::new();
+            f.insert("result".into(), result);
+            return Ok(Value::Struct {
+                name: "JoinHandle".into(),
+                fields: Rc::new(RefCell::new(f)),
+            });
+        }
         if let Some(v) = native_call(ns, last, &args)? {
             return Ok(v);
         }
@@ -228,6 +277,64 @@ impl Interp {
             }
             Value::Enum { enum_name, variant, data } if enum_name == "Result" => {
                 self.result_higher_order(variant, data, name, args)
+            }
+            Value::Struct { name: n, fields } if n == "Entry" => {
+                self.entry_higher_order(fields, name, args)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// The closure forms of `HashMap::entry`: `or_insert_with`, `or_insert_with_key`,
+    /// and `and_modify`. Non-closure forms fall through to `entry_method`.
+    fn entry_higher_order(
+        &self,
+        fields: &Rc<RefCell<Fields>>,
+        name: &str,
+        args: &[Value],
+    ) -> Result<Option<Value>> {
+        let (map, key) = {
+            let f = fields.borrow();
+            let key = f
+                .get("key")
+                .and_then(|k| k.as_key())
+                .ok_or_else(|| anyhow!("invalid entry key"))?;
+            let Some(Value::Map(m)) = f.get("map") else {
+                bail!("entry lost its map");
+            };
+            (m.clone(), key)
+        };
+        match name {
+            "or_insert_with" | "or_insert_with_key" => {
+                let present = map.borrow().contains_key(&key);
+                if !present {
+                    let clo = as_closure(args.first())?;
+                    let call_args = if name == "or_insert_with_key" {
+                        vec![key.to_value()]
+                    } else {
+                        vec![]
+                    };
+                    let v = self.call_closure(&clo, &call_args)?;
+                    map.borrow_mut().insert(key.clone(), v);
+                }
+                Ok(Some(map.borrow().get(&key).cloned().unwrap_or(Value::Unit)))
+            }
+            "and_modify" => {
+                if map.borrow().contains_key(&key) {
+                    let clo = as_closure(args.first())?;
+                    let current = map.borrow().get(&key).cloned().unwrap_or(Value::Unit);
+                    let updated = self.call_closure(&clo, &[current])?;
+                    // A closure that returns unit means it mutated in place via
+                    // a shared container; otherwise take its return value.
+                    if !matches!(updated, Value::Unit) {
+                        map.borrow_mut().insert(key.clone(), updated);
+                    }
+                }
+                // Return the Entry so further chaining (or_insert) still works.
+                Ok(Some(Value::Struct {
+                    name: "Entry".into(),
+                    fields: fields.clone(),
+                }))
             }
             _ => Ok(None),
         }
@@ -632,8 +739,7 @@ fn native_call(module: &str, func: &str, args: &[Value]) -> Result<Option<Value>
     }
     let s = |i: usize| -> Result<String> {
         match args.get(i) {
-            Some(Value::Str(s)) => Ok(s.borrow().clone()),
-            Some(other) => Ok(other.display()),
+            Some(v) => Ok(path_like(v)),
             None => bail!("missing argument {i} for {module}::{func}"),
         }
     };
@@ -668,13 +774,15 @@ fn native_call(module: &str, func: &str, args: &[Value]) -> Result<Option<Value>
                 Ok(p) => Value::ok(make_path(p.display().to_string())),
                 Err(e) => Value::err(Value::str(e.to_string())),
             },
-            ("env", "args") => Value::vec(std::env::args().map(Value::str).collect()),
+            ("env", "args") => {
+                Value::vec(super::script_args().into_iter().map(Value::str).collect())
+            }
             ("env", "var") => match std::env::var(s(0)?) {
                 Ok(v) => Value::ok(Value::str(v)),
                 Err(e) => Value::err(Value::str(e.to_string())),
             },
             ("env", "current_dir") => match std::env::current_dir() {
-                Ok(p) => Value::ok(Value::str(p.display().to_string())),
+                Ok(p) => Value::ok(make_path(p.display().to_string())),
                 Err(e) => Value::err(Value::str(e.to_string())),
             },
             ("env", "set_var") => {
@@ -682,13 +790,156 @@ fn native_call(module: &str, func: &str, args: &[Value]) -> Result<Option<Value>
                 unsafe { std::env::set_var(s(0)?, s(1)?) };
                 Value::Unit
             }
-            _ => return Ok(None),
+            ("env", "remove_var") => {
+                unsafe { std::env::remove_var(s(0)?) };
+                Value::Unit
+            }
+            ("env", "var_os") => match std::env::var_os(s(0)?) {
+                Some(v) => Value::some(Value::str(v.to_string_lossy().into_owned())),
+                None => Value::none(),
+            },
+            ("env", "vars") | ("env", "vars_os") => Value::vec(
+                std::env::vars()
+                    .map(|(k, v)| Value::Tuple(Rc::new(RefCell::new(vec![Value::str(k), Value::str(v)]))))
+                    .collect(),
+            ),
+            ("env", "set_current_dir") => wrap_unit(std::env::set_current_dir(s(0)?)),
+            ("env", "temp_dir") => make_path(std::env::temp_dir().display().to_string()),
+            ("process", "exit") => {
+                let code = args.first().and_then(as_i128).unwrap_or(0) as i32;
+                std::process::exit(code);
+            }
+            ("process", "abort") => std::process::abort(),
+            // -- io -------------------------------------------------------
+            ("io", "stdin") => make_std_stream(
+                "stdin",
+                Native::Reader(std::io::BufReader::new(Box::new(std::io::stdin()))),
+            ),
+            ("io", "stdout") => {
+                make_std_stream("stdout", Native::Writer(Box::new(std::io::stdout())))
+            }
+            ("io", "stderr") => {
+                make_std_stream("stderr", Native::Writer(Box::new(std::io::stderr())))
+            }
+            // -- fs metadata & links -------------------------------------
+            ("fs", "metadata") => match std::fs::metadata(s(0)?) {
+                Ok(m) => Value::ok(make_metadata(&m)),
+                Err(e) => Value::err(Value::str(e.to_string())),
+            },
+            ("fs", "symlink_metadata") => match std::fs::symlink_metadata(s(0)?) {
+                Ok(m) => Value::ok(make_metadata(&m)),
+                Err(e) => Value::err(Value::str(e.to_string())),
+            },
+            ("fs", "read_link") => match std::fs::read_link(s(0)?) {
+                Ok(p) => Value::ok(make_path(p.display().to_string())),
+                Err(e) => Value::err(Value::str(e.to_string())),
+            },
+            ("fs", "hard_link") => wrap_unit(std::fs::hard_link(s(0)?, s(1)?)),
+            ("fs", "symlink") => wrap_unit(make_symlink(&s(0)?, &s(1)?)),
+            // -- thread ---------------------------------------------------
+            ("thread", "sleep") => {
+                if let Some(d) = args.first().and_then(duration_from_value) {
+                    std::thread::sleep(d);
+                }
+                Value::Unit
+            }
+            _ => return crate_bridge(module, func, args),
         }))
     }
 
-/// Run a `Command` value once it has been fully built, returning an `Output`.
-fn run_command(fields: &Rc<RefCell<Fields>>) -> Value {
-    let f = fields.borrow();
+/// The interpreter has no real threads, so a symlink helper picks the right
+/// platform call. On Windows a file vs dir symlink needs distinct functions;
+/// we treat the target kind by whether the source exists as a directory.
+fn make_symlink(src: &str, dst: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(src, dst)
+    }
+    #[cfg(windows)]
+    {
+        if std::path::Path::new(src).is_dir() {
+            std::os::windows::fs::symlink_dir(src, dst)
+        } else {
+            std::os::windows::fs::symlink_file(src, dst)
+        }
+    }
+}
+
+fn as_i128(v: &Value) -> Option<i128> {
+    match v {
+        Value::Int(i) => Some(*i),
+        _ => None,
+    }
+}
+
+/// Turn a value into a path string. A `Path`/`PathBuf` value carries the path in
+/// its `s` field; anything else uses its display form.
+pub(super) fn path_like(v: &Value) -> String {
+    match v {
+        Value::Str(s) => s.borrow().clone(),
+        Value::Struct { name, fields } if name == "Path" || name == "PathBuf" => fields
+            .borrow()
+            .get("s")
+            .map(|s| s.display())
+            .unwrap_or_default(),
+        other => other.display(),
+    }
+}
+
+/// Wrap a std stream handle so `is_terminal` can name its stream while reads
+/// and writes delegate to the inner native handle.
+fn make_std_stream(kind: &str, inner: Native) -> Value {
+    let mut f = Fields::new();
+    f.insert("kind".into(), Value::str(kind));
+    f.insert("inner".into(), inner.wrap());
+    Value::Struct {
+        name: "StdStream".into(),
+        fields: Rc::new(RefCell::new(f)),
+    }
+}
+
+fn std_stream_method(fields: &Rc<RefCell<Fields>>, name: &str, args: &[Value]) -> Result<Value> {
+    use std::io::IsTerminal;
+    if name == "is_terminal" {
+        let kind = fields.borrow().get("kind").map(|v| v.display()).unwrap_or_default();
+        let tty = match kind.as_str() {
+            "stdin" => std::io::stdin().is_terminal(),
+            "stderr" => std::io::stderr().is_terminal(),
+            _ => std::io::stdout().is_terminal(),
+        };
+        return Ok(Value::Bool(tty));
+    }
+    if matches!(name, "lock" | "by_ref") {
+        return Ok(Value::Struct {
+            name: "StdStream".into(),
+            fields: fields.clone(),
+        });
+    }
+    let inner = match fields.borrow().get("inner") {
+        Some(Value::Native(h)) => h.clone(),
+        _ => bail!("std stream lost its handle"),
+    };
+    match native::native_method(&inner, name, args)? {
+        Some(v) => Ok(v),
+        None => bail!("unknown method `{name}` on a std stream"),
+    }
+}
+
+/// Turn a script `Duration` value into a real `std::time::Duration`.
+pub(super) fn duration_from_value(v: &Value) -> Option<std::time::Duration> {
+    if let Value::Struct { name, fields } = v
+        && name == "Duration"
+    {
+        let f = fields.borrow();
+        let secs = field_int(&f, "secs") as u64;
+        let nanos = field_int(&f, "nanos") as u32;
+        return Some(std::time::Duration::new(secs, nanos));
+    }
+    None
+}
+
+/// Build a real `Command` from a script `Command` value's fields.
+fn build_command(f: &Fields) -> std::process::Command {
     let program = f.get("program").map(|v| v.display()).unwrap_or_default();
     let mut cmd = std::process::Command::new(&program);
     if let Some(Value::Vec(a)) = f.get("args") {
@@ -699,41 +950,163 @@ fn run_command(fields: &Rc<RefCell<Fields>>) -> Value {
     if let Some(cwd) = f.get("cwd") {
         cmd.current_dir(cwd.display());
     }
-    match cmd.output() {
-        Ok(out) => {
-            let mut o = Fields::new();
-            o.insert(
-                "stdout".into(),
-                Value::str(String::from_utf8_lossy(&out.stdout).into_owned()),
-            );
-            o.insert(
-                "stderr".into(),
-                Value::str(String::from_utf8_lossy(&out.stderr).into_owned()),
-            );
-            let mut st = Fields::new();
-            st.insert("code".into(), Value::Int(out.status.code().unwrap_or(-1) as i128));
-            st.insert("success".into(), Value::Bool(out.status.success()));
-            o.insert(
-                "status".into(),
-                Value::Struct {
-                    name: "ExitStatus".into(),
-                    fields: Rc::new(RefCell::new(st)),
-                },
-            );
-            Value::ok(Value::Struct {
-                name: "Output".into(),
-                fields: Rc::new(RefCell::new(o)),
-            })
+    if let Some(Value::Map(envs)) = f.get("envs") {
+        for (k, v) in envs.borrow().iter() {
+            cmd.env(k.to_value().display(), v.display());
         }
+    }
+    cmd
+}
+
+/// Run a `Command` value once it has been fully built, returning an `Output`.
+fn run_command(fields: &Rc<RefCell<Fields>>) -> Value {
+    let f = fields.borrow();
+    match build_command(&f).output() {
+        Ok(out) => Value::ok(make_output(out)),
         Err(e) => Value::err(Value::str(e.to_string())),
+    }
+}
+
+/// Map a stored `Stdio` marker to a real `std::process::Stdio`, defaulting to
+/// inherit so a spawned child shares the terminal like a shell command.
+fn stdio_for(f: &Fields, key: &str) -> std::process::Stdio {
+    match f.get(key) {
+        Some(Value::Struct { name, fields }) if name == "Stdio" => {
+            match fields.borrow().get("kind").map(|v| v.display()).as_deref() {
+                Some("piped") => std::process::Stdio::piped(),
+                Some("null") => std::process::Stdio::null(),
+                _ => std::process::Stdio::inherit(),
+            }
+        }
+        _ => std::process::Stdio::inherit(),
+    }
+}
+
+/// Spawn a `Command`, returning a `Child` value whose stdin/stdout/stderr
+/// fields hold the piped ends as native handles.
+fn spawn_command(fields: &Rc<RefCell<Fields>>) -> Value {
+    let f = fields.borrow();
+    let mut cmd = build_command(&f);
+    cmd.stdin(stdio_for(&f, "stdin"));
+    cmd.stdout(stdio_for(&f, "stdout"));
+    cmd.stderr(stdio_for(&f, "stderr"));
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return Value::err(Value::str(e.to_string())),
+    };
+    let stdin = child
+        .stdin
+        .take()
+        .map(|w| Native::ChildStdin(w).wrap())
+        .map(Value::some)
+        .unwrap_or_else(Value::none);
+    let stdout = child
+        .stdout
+        .take()
+        .map(|r| Native::Reader(std::io::BufReader::new(Box::new(r) as Box<dyn std::io::Read>)).wrap())
+        .map(Value::some)
+        .unwrap_or_else(Value::none);
+    let stderr = child
+        .stderr
+        .take()
+        .map(|r| Native::Reader(std::io::BufReader::new(Box::new(r) as Box<dyn std::io::Read>)).wrap())
+        .map(Value::some)
+        .unwrap_or_else(Value::none);
+    let mut cf = Fields::new();
+    cf.insert("handle".into(), Native::Child(child).wrap());
+    cf.insert("stdin".into(), stdin);
+    cf.insert("stdout".into(), stdout);
+    cf.insert("stderr".into(), stderr);
+    Value::ok(Value::Struct {
+        name: "Child".into(),
+        fields: Rc::new(RefCell::new(cf)),
+    })
+}
+
+/// Build an `ExitStatus` value with `code` and `success`.
+pub(super) fn make_exit_status(status: std::process::ExitStatus) -> Value {
+    let mut st = Fields::new();
+    st.insert("code".into(), Value::Int(status.code().unwrap_or(-1) as i128));
+    st.insert("success".into(), Value::Bool(status.success()));
+    Value::Struct {
+        name: "ExitStatus".into(),
+        fields: Rc::new(RefCell::new(st)),
+    }
+}
+
+/// Build an `Output` value with `stdout`, `stderr`, and `status`.
+pub(super) fn make_output(out: std::process::Output) -> Value {
+    let mut o = Fields::new();
+    o.insert(
+        "stdout".into(),
+        Value::str(String::from_utf8_lossy(&out.stdout).into_owned()),
+    );
+    o.insert(
+        "stderr".into(),
+        Value::str(String::from_utf8_lossy(&out.stderr).into_owned()),
+    );
+    o.insert("status".into(), make_exit_status(out.status));
+    Value::Struct {
+        name: "Output".into(),
+        fields: Rc::new(RefCell::new(o)),
+    }
+}
+
+/// Build a `Duration` value carrying whole and sub-second parts.
+pub(super) fn make_duration(d: std::time::Duration) -> Value {
+    let mut f = Fields::new();
+    f.insert("secs".into(), Value::Int(d.as_secs() as i128));
+    f.insert("nanos".into(), Value::Int(d.subsec_nanos() as i128));
+    Value::Struct {
+        name: "Duration".into(),
+        fields: Rc::new(RefCell::new(f)),
+    }
+}
+
+/// Build a `Metadata` value with the common accessors materialized as fields.
+/// The Unix `MetadataExt` fields are gated so the interpreter still builds on
+/// Windows, where a script would use different accessors.
+pub(super) fn make_metadata(m: &std::fs::Metadata) -> Value {
+    let mut f = Fields::new();
+    f.insert("len".into(), Value::Int(m.len() as i128));
+    f.insert("is_dir".into(), Value::Bool(m.is_dir()));
+    f.insert("is_file".into(), Value::Bool(m.is_file()));
+    f.insert("is_symlink".into(), Value::Bool(m.is_symlink()));
+    f.insert("readonly".into(), Value::Bool(m.permissions().readonly()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::fs::PermissionsExt;
+        f.insert("mode".into(), Value::Int(m.permissions().mode() as i128));
+        f.insert("dev".into(), Value::Int(m.dev() as i128));
+        f.insert("ino".into(), Value::Int(m.ino() as i128));
+        f.insert("uid".into(), Value::Int(m.uid() as i128));
+        f.insert("gid".into(), Value::Int(m.gid() as i128));
+        f.insert("mtime".into(), Value::Int(m.mtime() as i128));
+    }
+    if let Ok(t) = m.modified() {
+        f.insert("modified".into(), super::native::Native::SystemTime(t).wrap());
+    }
+    Value::Struct {
+        name: "Metadata".into(),
+        fields: Rc::new(RefCell::new(f)),
     }
 }
 
 // -- ureq http bridge ------------------------------------------------------
 
 /// Build an `HttpRequest` value for `ureq::get`, `ureq::post`, and friends.
+/// `ureq::agent()` instead builds a cookie-persisting agent handle.
 fn make_request(func: &str, args: &[Value]) -> Option<Value> {
-    let method = match func {
+    if func == "agent" {
+        return Some(Native::Agent(ureq::agent()).wrap());
+    }
+    let method = http_verb(func)?;
+    Some(build_http_request(method, args.first(), None))
+}
+
+fn http_verb(func: &str) -> Option<&'static str> {
+    Some(match func {
         "get" => "GET",
         "post" => "POST",
         "put" => "PUT",
@@ -741,16 +1114,26 @@ fn make_request(func: &str, args: &[Value]) -> Option<Value> {
         "patch" => "PATCH",
         "head" => "HEAD",
         _ => return None,
-    };
-    let url = args.first().map(|v| v.display()).unwrap_or_default();
+    })
+}
+
+/// Build an `HttpRequest`, optionally bound to an agent so its cookie jar and
+/// config carry through the call.
+pub(super) fn build_http_request(method: &str, url: Option<&Value>, agent: Option<Value>) -> Value {
     let mut fields = Fields::new();
     fields.insert("method".into(), Value::str(method));
-    fields.insert("url".into(), Value::str(url));
+    fields.insert(
+        "url".into(),
+        Value::str(url.map(|v| v.display()).unwrap_or_default()),
+    );
     fields.insert("headers".into(), Value::vec(vec![]));
-    Some(Value::Struct {
+    if let Some(a) = agent {
+        fields.insert("agent".into(), a);
+    }
+    Value::Struct {
         name: "HttpRequest".into(),
         fields: Rc::new(RefCell::new(fields)),
-    })
+    }
 }
 
 fn http_method(
@@ -807,15 +1190,84 @@ fn request_method(
             }
             Ok(run_request(fields, Some(serde_json::to_string(&json)?)))
         }
-        "query" | "timeout" => Ok(this()),
+        "query" => {
+            let pair = vec![
+                args.first().cloned().unwrap_or(Value::Unit),
+                args.get(1).cloned().unwrap_or(Value::Unit),
+            ];
+            let mut f = fields.borrow_mut();
+            let entry = f.entry("query".into()).or_insert_with(|| Value::vec(vec![]));
+            if let Value::Vec(q) = entry {
+                q.borrow_mut().push(Value::Tuple(Rc::new(RefCell::new(pair))));
+            }
+            drop(f);
+            Ok(this())
+        }
+        // ureq 3 sets timeouts through `.config().timeout_global(Some(d)).build()`.
+        // `config` and `build` are pass-throughs; the timeout is stored for the call.
+        "config" | "build" => Ok(this()),
+        "timeout" | "timeout_global" | "timeout_connect" => {
+            // The argument may be a bare Duration or an Option<Duration>.
+            let dur = match args.first() {
+                Some(Value::Enum { data, .. }) => data.borrow().first().cloned(),
+                other => other.cloned(),
+            };
+            if let Some(d) = dur {
+                fields.borrow_mut().insert("timeout".into(), d);
+            }
+            Ok(this())
+        }
         _ => bail!("unknown method `{method}` on a request"),
     }
+}
+
+/// Percent-encode a query value the simple way, enough for API params.
+fn encode_query(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 fn run_request(fields: &Rc<RefCell<Fields>>, body: Option<String>) -> Value {
     let f = fields.borrow();
     let verb = f.get("method").map(|v| v.display()).unwrap_or_else(|| "GET".into());
-    let url = f.get("url").map(|v| v.display()).unwrap_or_default();
+    let mut url = f.get("url").map(|v| v.display()).unwrap_or_default();
+    // Append any query parameters onto the URL.
+    if let Some(Value::Vec(q)) = f.get("query") {
+        let q = q.borrow();
+        if !q.is_empty() {
+            let sep = if url.contains('?') { '&' } else { '?' };
+            url.push(sep);
+            let parts: Vec<String> = q
+                .iter()
+                .filter_map(|item| {
+                    if let Value::Tuple(pair) = item {
+                        let pair = pair.borrow();
+                        Some(format!(
+                            "{}={}",
+                            encode_query(&pair[0].display()),
+                            encode_query(&pair[1].display())
+                        ))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            url.push_str(&parts.join("&"));
+        }
+    }
+    let timeout = f.get("timeout").and_then(duration_from_value);
+    let agent = match f.get("agent") {
+        Some(Value::Native(h)) => Some(h.clone()),
+        _ => None,
+    };
     let mut headers = Vec::new();
     if let Some(Value::Vec(h)) = f.get("headers") {
         for item in h.borrow().iter() {
@@ -825,7 +1277,7 @@ fn run_request(fields: &Rc<RefCell<Fields>>, body: Option<String>) -> Value {
             }
         }
     }
-    match do_http(&verb, &url, &headers, body) {
+    match do_http(&verb, &url, &headers, body, timeout, agent.as_ref()) {
         Ok((status, text)) => {
             let mut rf = Fields::new();
             rf.insert("status".into(), Value::Int(status as i128));
@@ -844,24 +1296,45 @@ fn do_http(
     url: &str,
     headers: &[(String, String)],
     body: Option<String>,
+    timeout: Option<std::time::Duration>,
+    agent: Option<&Rc<RefCell<Native>>>,
 ) -> Result<(u16, String)> {
-    if matches!(method, "POST" | "PUT" | "PATCH") {
-        let mut b = match method {
-            "POST" => ureq::post(url),
-            "PUT" => ureq::put(url),
-            _ => ureq::patch(url),
+    // Build the request through the shared agent when one is given, so its
+    // cookie jar carries across calls; otherwise use ureq's free functions.
+    let agent = agent.and_then(|h| match &*h.borrow() {
+        Native::Agent(a) => Some(a.clone()),
+        _ => None,
+    });
+    let with_body = matches!(method, "POST" | "PUT" | "PATCH");
+    if with_body {
+        let mut b = match (&agent, method) {
+            (Some(a), "POST") => a.post(url),
+            (Some(a), "PUT") => a.put(url),
+            (Some(a), _) => a.patch(url),
+            (None, "POST") => ureq::post(url),
+            (None, "PUT") => ureq::put(url),
+            (None, _) => ureq::patch(url),
         };
+        if let Some(d) = timeout {
+            b = b.config().timeout_global(Some(d)).build();
+        }
         for (k, v) in headers {
             b = b.header(k, v);
         }
         let mut resp = b.send(body.as_deref().unwrap_or(""))?;
         Ok((resp.status().as_u16(), resp.body_mut().read_to_string()?))
     } else {
-        let mut b = match method {
-            "DELETE" => ureq::delete(url),
-            "HEAD" => ureq::head(url),
-            _ => ureq::get(url),
+        let mut b = match (&agent, method) {
+            (Some(a), "DELETE") => a.delete(url),
+            (Some(a), "HEAD") => a.head(url),
+            (Some(a), _) => a.get(url),
+            (None, "DELETE") => ureq::delete(url),
+            (None, "HEAD") => ureq::head(url),
+            (None, _) => ureq::get(url),
         };
+        if let Some(d) = timeout {
+            b = b.config().timeout_global(Some(d)).build();
+        }
         for (k, v) in headers {
             b = b.header(k, v);
         }
@@ -922,7 +1395,7 @@ fn status_method(fields: &Rc<RefCell<Fields>>, method: &str) -> Value {
 
 // -- path, directory entry, and file type ----------------------------------
 
-fn make_path(s: impl Into<String>) -> Value {
+pub(super) fn make_path(s: impl Into<String>) -> Value {
     let mut f = Fields::new();
     f.insert("s".into(), Value::str(s.into()));
     Value::Struct {
@@ -1240,6 +1713,25 @@ fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
         ("Box" | "Rc" | "Arc" | "RefCell" | "Cell", "new") => {
             args.first().cloned().unwrap_or(Value::Unit)
         }
+        // Our file and pipe readers are already buffered, so wrapping is a
+        // pass-through; a raw socket is turned into a buffered reader.
+        ("BufReader" | "BufWriter", "new" | "with_capacity") => {
+            match args.last() {
+                Some(Value::Native(h)) if matches!(&*h.borrow(), Native::Stream(_)) => {
+                    let Native::Stream(s) = &*h.borrow() else {
+                        unreachable!()
+                    };
+                    match s.try_clone() {
+                        Ok(clone) => Native::Reader(std::io::BufReader::new(
+                            Box::new(clone) as Box<dyn std::io::Read>,
+                        ))
+                        .wrap(),
+                        Err(e) => return Err(anyhow!("cannot buffer socket: {e}")),
+                    }
+                }
+                other => other.cloned().unwrap_or(Value::Unit),
+            }
+        }
         ("PathBuf", "new") => make_path(""),
         ("PathBuf" | "Path", "from") => {
             make_path(args.first().map(|v| v.display()).unwrap_or_default())
@@ -1256,8 +1748,327 @@ fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
         ("Option", "Some") => Value::some(args.first().cloned().unwrap_or(Value::Unit)),
         ("Result", "Ok") => Value::ok(args.first().cloned().unwrap_or(Value::Unit)),
         ("Result", "Err") => Value::err(args.first().cloned().unwrap_or(Value::Unit)),
+        // -- files -----------------------------------------------------
+        ("File", "open") => open_file(&arg_str(args, 0), std::fs::OpenOptions::new().read(true)),
+        ("File", "create") => open_file(
+            &arg_str(args, 0),
+            std::fs::OpenOptions::new().write(true).create(true).truncate(true),
+        ),
+        ("File", "create_new") => open_file(
+            &arg_str(args, 0),
+            std::fs::OpenOptions::new().write(true).create_new(true),
+        ),
+        ("OpenOptions", "new") => {
+            let mut f = Fields::new();
+            for k in ["read", "write", "append", "create", "create_new", "truncate"] {
+                f.insert(k.into(), Value::Bool(false));
+            }
+            Value::Struct {
+                name: "OpenOptions".into(),
+                fields: Rc::new(RefCell::new(f)),
+            }
+        }
+        // -- time ------------------------------------------------------
+        ("Instant", "now") => Native::Instant(std::time::Instant::now()).wrap(),
+        ("SystemTime", "now") => Native::SystemTime(std::time::SystemTime::now()).wrap(),
+        ("Duration", "from_secs") => make_duration(std::time::Duration::from_secs(
+            arg_int(args, 0) as u64,
+        )),
+        ("Duration", "from_millis") => make_duration(std::time::Duration::from_millis(
+            arg_int(args, 0) as u64,
+        )),
+        ("Duration", "from_micros") => make_duration(std::time::Duration::from_micros(
+            arg_int(args, 0) as u64,
+        )),
+        ("Duration", "from_nanos") => make_duration(std::time::Duration::from_nanos(
+            arg_int(args, 0) as u64,
+        )),
+        ("Duration", "new") => make_duration(std::time::Duration::new(
+            arg_int(args, 0) as u64,
+            arg_int(args, 1) as u32,
+        )),
+        // -- net -------------------------------------------------------
+        ("TcpListener", "bind") => match std::net::TcpListener::bind(arg_str(args, 0)) {
+            Ok(l) => Value::ok(Native::Listener(l).wrap()),
+            Err(e) => Value::err(Value::str(e.to_string())),
+        },
+        ("TcpStream", "connect") => match std::net::TcpStream::connect(arg_str(args, 0)) {
+            Ok(s) => Value::ok(Native::Stream(s).wrap()),
+            Err(e) => Value::err(Value::str(e.to_string())),
+        },
+        ("SeekFrom", "Start" | "End" | "Current") => Value::Enum {
+            enum_name: "SeekFrom".into(),
+            variant: func.to_string(),
+            data: Rc::new(RefCell::new(vec![args.first().cloned().unwrap_or(Value::Int(0))])),
+        },
+        ("Agent", "new_with_defaults") => Native::Agent(ureq::agent()).wrap(),
+        ("Stdio", "piped") | ("Stdio", "inherit") | ("Stdio", "null") => {
+            let mut f = Fields::new();
+            f.insert("kind".into(), Value::str(func));
+            Value::Struct {
+                name: "Stdio".into(),
+                fields: Rc::new(RefCell::new(f)),
+            }
+        }
         _ => return Ok(None),
     }))
+}
+
+fn arg_str(args: &[Value], i: usize) -> String {
+    args.get(i).map(path_like).unwrap_or_default()
+}
+
+fn arg_int(args: &[Value], i: usize) -> i128 {
+    match args.get(i) {
+        Some(Value::Int(n)) => *n,
+        _ => 0,
+    }
+}
+
+fn open_file(path: &str, opts: &std::fs::OpenOptions) -> Value {
+    match opts.open(path) {
+        Ok(f) => Value::ok(Native::File(std::io::BufReader::new(f)).wrap()),
+        Err(e) => Value::err(Value::str(e.to_string())),
+    }
+}
+
+/// Bridges for the extra crates a script may `use`. Reached when a
+/// `module::func` call is not a plain std bridge.
+fn crate_bridge(module: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
+    let s0 = || args.first().map(|v| v.display()).unwrap_or_default();
+    Ok(Some(match (module, func) {
+        // dirs -------------------------------------------------------------
+        ("dirs", "home_dir") => opt_path(dirs::home_dir()),
+        ("dirs", "cache_dir") => opt_path(dirs::cache_dir()),
+        ("dirs", "config_dir") => opt_path(dirs::config_dir()),
+        ("dirs", "config_local_dir") => opt_path(dirs::config_local_dir()),
+        ("dirs", "data_dir") => opt_path(dirs::data_dir()),
+        ("dirs", "data_local_dir") => opt_path(dirs::data_local_dir()),
+        ("dirs", "executable_dir") => opt_path(dirs::executable_dir()),
+        ("dirs", "runtime_dir") => opt_path(dirs::runtime_dir()),
+        ("dirs", "desktop_dir") => opt_path(dirs::desktop_dir()),
+        ("dirs", "download_dir") => opt_path(dirs::download_dir()),
+        ("dirs", "document_dir") => opt_path(dirs::document_dir()),
+        // which ------------------------------------------------------------
+        ("which", "which") => match which::which(s0()) {
+            Ok(p) => Value::ok(make_path(p.display().to_string())),
+            Err(e) => Value::err(Value::str(e.to_string())),
+        },
+        // glob -------------------------------------------------------------
+        ("glob", "glob") => match glob::glob(&s0()) {
+            Ok(paths) => Value::ok(Value::vec(
+                paths
+                    .map(|r| match r {
+                        Ok(p) => Value::ok(make_path(p.display().to_string())),
+                        Err(e) => Value::err(Value::str(e.to_string())),
+                    })
+                    .collect(),
+            )),
+            Err(e) => Value::err(Value::str(e.to_string())),
+        },
+        // hex --------------------------------------------------------------
+        ("hex", "encode") => Value::str(hex::encode(bytes_arg(args.first()))),
+        ("hex", "decode") => match hex::decode(s0()) {
+            Ok(b) => Value::ok(bytes_to_vec(&b)),
+            Err(e) => Value::err(Value::str(e.to_string())),
+        },
+        // toml -------------------------------------------------------------
+        ("toml", "from_str") => match toml::from_str::<serde_json::Value>(&s0()) {
+            Ok(j) => Value::ok(json_to_value(&j)),
+            Err(e) => Value::err(Value::str(e.to_string())),
+        },
+        ("toml", "to_string") | ("toml", "to_string_pretty") => {
+            match toml::to_string(&value_to_json(args.first().unwrap_or(&Value::Unit))?) {
+                Ok(s) => Value::ok(Value::str(s)),
+                Err(e) => Value::err(Value::str(e.to_string())),
+            }
+        }
+        // serde_yaml -------------------------------------------------------
+        ("serde_yaml", "from_str") => match serde_yaml::from_str::<serde_json::Value>(&s0()) {
+            Ok(j) => Value::ok(json_to_value(&j)),
+            Err(e) => Value::err(Value::str(e.to_string())),
+        },
+        ("serde_yaml", "to_string") => {
+            match serde_yaml::to_string(&value_to_json(args.first().unwrap_or(&Value::Unit))?) {
+                Ok(s) => Value::ok(Value::str(s)),
+                Err(e) => Value::err(Value::str(e.to_string())),
+            }
+        }
+        // rand -------------------------------------------------------------
+        ("rand", "rng") | ("rand", "thread_rng") => Value::Struct {
+            name: "Rng".into(),
+            fields: Rc::new(RefCell::new(Fields::new())),
+        },
+        ("rand", "random") => Value::Float(rand::random::<f64>()),
+        // chrono -----------------------------------------------------------
+        ("Utc", "now") | ("Local", "now") => now_datetime(module == "Local"),
+        // tempfile ---------------------------------------------------------
+        ("tempfile", "tempdir") => match tempfile::tempdir() {
+            Ok(d) => Value::ok(Native::TempDir(d).wrap()),
+            Err(e) => Value::err(Value::str(e.to_string())),
+        },
+        ("tempfile", "tempfile") => match tempfile::tempfile() {
+            Ok(f) => Value::ok(Native::File(std::io::BufReader::new(f)).wrap()),
+            Err(e) => Value::err(Value::str(e.to_string())),
+        },
+        _ => return Ok(None),
+    }))
+}
+
+/// Recognize a base64 engine constant name and build a marker value carrying
+/// which alphabet it uses, so `.encode`/`.decode` can pick the right engine.
+fn base64_engine(name: &str) -> Option<Value> {
+    let kind = match name {
+        "STANDARD" | "BASE64_STANDARD" => "standard",
+        "STANDARD_NO_PAD" | "BASE64_STANDARD_NO_PAD" => "standard_no_pad",
+        "URL_SAFE" | "BASE64_URL_SAFE" => "url_safe",
+        "URL_SAFE_NO_PAD" | "BASE64_URL_SAFE_NO_PAD" => "url_safe_no_pad",
+        _ => return None,
+    };
+    let mut f = Fields::new();
+    f.insert("kind".into(), Value::str(kind));
+    Some(Value::Struct {
+        name: "Base64Engine".into(),
+        fields: Rc::new(RefCell::new(f)),
+    })
+}
+
+fn base64_method(fields: &Rc<RefCell<Fields>>, method: &str, args: &[Value]) -> Result<Value> {
+    use base64::Engine;
+    use base64::engine::general_purpose::{
+        STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD,
+    };
+    let kind = fields.borrow().get("kind").map(|v| v.display()).unwrap_or_default();
+    macro_rules! pick {
+        ($m:ident, $($a:tt)*) => {
+            match kind.as_str() {
+                "standard_no_pad" => STANDARD_NO_PAD.$m($($a)*),
+                "url_safe" => URL_SAFE.$m($($a)*),
+                "url_safe_no_pad" => URL_SAFE_NO_PAD.$m($($a)*),
+                _ => STANDARD.$m($($a)*),
+            }
+        };
+    }
+    Ok(match method {
+        "encode" => Value::str(pick!(encode, bytes_arg(args.first()))),
+        "decode" => {
+            let input = args.first().map(|v| v.display()).unwrap_or_default();
+            match pick!(decode, &input) {
+                Ok(b) => Value::ok(bytes_to_vec(&b)),
+                Err(e) => Value::err(Value::str(e.to_string())),
+            }
+        }
+        _ => bail!("unknown method `{method}` on a base64 engine"),
+    })
+}
+
+/// Build a `DateTime` value for `Utc::now()` / `Local::now()`, storing the unix
+/// timestamp so `format` can reconstruct a real chrono value.
+fn now_datetime(local: bool) -> Value {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let mut f = Fields::new();
+    f.insert("secs".into(), Value::Int(now.as_secs() as i128));
+    f.insert("nanos".into(), Value::Int(now.subsec_nanos() as i128));
+    f.insert("local".into(), Value::Bool(local));
+    Value::Struct {
+        name: "DateTime".into(),
+        fields: Rc::new(RefCell::new(f)),
+    }
+}
+
+fn datetime_method(fields: &Rc<RefCell<Fields>>, name: &str, args: &[Value]) -> Result<Value> {
+    use chrono::{DateTime, Local, Utc};
+    let f = fields.borrow();
+    let secs = field_int(&f, "secs") as i64;
+    let nanos = field_int(&f, "nanos") as u32;
+    let local = matches!(f.get("local"), Some(Value::Bool(true)));
+    let utc: DateTime<Utc> = DateTime::from_timestamp(secs, nanos).unwrap_or_default();
+    Ok(match name {
+        "timestamp" => Value::Int(secs as i128),
+        "timestamp_millis" => Value::Int(secs as i128 * 1000 + (nanos / 1_000_000) as i128),
+        "to_rfc3339" => Value::str(utc.to_rfc3339()),
+        "format" => {
+            let fmt = args.first().map(|v| v.display()).unwrap_or_default();
+            if local {
+                Value::str(utc.with_timezone(&Local).format(&fmt).to_string())
+            } else {
+                Value::str(utc.format(&fmt).to_string())
+            }
+        }
+        "year" => Value::Int(chrono::Datelike::year(&utc) as i128),
+        "month" => Value::Int(chrono::Datelike::month(&utc) as i128),
+        "day" => Value::Int(chrono::Datelike::day(&utc) as i128),
+        "hour" => Value::Int(chrono::Timelike::hour(&utc) as i128),
+        "minute" => Value::Int(chrono::Timelike::minute(&utc) as i128),
+        "second" => Value::Int(chrono::Timelike::second(&utc) as i128),
+        _ => bail!("unknown method `{name}` on DateTime"),
+    })
+}
+
+fn rng_method(name: &str, args: &[Value]) -> Result<Value> {
+    use rand::RngExt;
+    let mut rng = rand::rng();
+    Ok(match name {
+        "random_range" | "gen_range" => match args.first() {
+            Some(Value::Range { start, end, inclusive }) => {
+                let hi = if *inclusive { end + 1 } else { *end };
+                if hi > *start {
+                    Value::Int(rng.random_range(*start..hi))
+                } else {
+                    Value::Int(*start)
+                }
+            }
+            _ => bail!("random_range needs a range"),
+        },
+        "random_bool" | "gen_bool" => {
+            let p = match args.first() {
+                Some(Value::Float(f)) => *f,
+                Some(Value::Int(i)) => *i as f64,
+                _ => 0.5,
+            };
+            Value::Bool(rng.random_bool(p.clamp(0.0, 1.0)))
+        }
+        "random" | "r#gen" | "gen" => Value::Float(rng.random::<f64>()),
+        "fill_bytes" | "fill" => {
+            if let Some(Value::Vec(v)) = args.first() {
+                let mut buf = v.borrow_mut();
+                for slot in buf.iter_mut() {
+                    *slot = Value::Int(rng.random::<u8>() as i128);
+                }
+            }
+            Value::Unit
+        }
+        _ => bail!("unknown method `{name}` on Rng"),
+    })
+}
+
+fn opt_path(p: Option<std::path::PathBuf>) -> Value {
+    match p {
+        Some(p) => Value::some(make_path(p.display().to_string())),
+        None => Value::none(),
+    }
+}
+
+fn bytes_arg(v: Option<&Value>) -> Vec<u8> {
+    match v {
+        Some(Value::Str(s)) => s.borrow().clone().into_bytes(),
+        Some(Value::Vec(items)) => items
+            .borrow()
+            .iter()
+            .filter_map(|x| match x {
+                Value::Int(i) => Some(*i as u8),
+                _ => None,
+            })
+            .collect(),
+        Some(other) => other.display().into_bytes(),
+        None => Vec::new(),
+    }
+}
+
+fn bytes_to_vec(b: &[u8]) -> Value {
+    Value::vec(b.iter().map(|x| Value::Int(*x as i128)).collect())
 }
 
 // -- serde_json bridge -----------------------------------------------------
@@ -1366,6 +2177,7 @@ fn value_to_json(v: &Value) -> Result<serde_json::Value> {
         }
         Value::Range { .. } => bail!("cannot serialize a range to json"),
         Value::Closure(_) => bail!("cannot serialize a closure to json"),
+        Value::Native(n) => bail!("cannot serialize a {} to json", n.borrow().type_name()),
     })
 }
 
@@ -1373,6 +2185,23 @@ fn value_to_json(v: &Value) -> Result<serde_json::Value> {
 
 fn builtin_method(recv: Value, name: &str, args: Vec<Value>) -> Result<Value> {
     match &recv {
+        Value::Native(h) => match super::native::native_method(h, name, &args)? {
+            Some(v) => Ok(v),
+            None => generic_method(&recv, name, &args),
+        },
+        Value::Struct { name: n, fields } if n == "Duration" => duration_method(fields, name),
+        Value::Struct { name: n, fields } if n == "Metadata" => {
+            metadata_method(fields, name, &args)
+        }
+        Value::Struct { name: n, fields } if n == "Permissions" => {
+            let f = fields.borrow();
+            match name {
+                "mode" => Ok(f.get("mode").cloned().unwrap_or(Value::Int(0))),
+                "readonly" => Ok(f.get("readonly").cloned().unwrap_or(Value::Bool(false))),
+                "set_readonly" => Ok(Value::Unit),
+                _ => bail!("unknown method `{name}` on Permissions"),
+            }
+        }
         Value::Str(s) => str_method(s, name, &args),
         Value::Vec(v) => vec_method(v, name, &args),
         Value::Map(m) => map_method(m, name, &args),
@@ -1393,6 +2222,26 @@ fn builtin_method(recv: Value, name: &str, args: Vec<Value>) -> Result<Value> {
         {
             http_method(n, fields, name, &args)
         }
+        Value::Struct { name: n, fields } if n == "StdStream" => {
+            std_stream_method(fields, name, &args)
+        }
+        Value::Struct { name: n, .. } if n == "Rng" => rng_method(name, &args),
+        Value::Struct { name: n, fields } if n == "DateTime" => {
+            datetime_method(fields, name, &args)
+        }
+        Value::Struct { name: n, fields } if n == "Base64Engine" => {
+            base64_method(fields, name, &args)
+        }
+        Value::Struct { name: n, fields } if n == "Entry" => entry_method(fields, name, &args),
+        Value::Struct { name: n, fields } if n == "JoinHandle" => {
+            let f = fields.borrow();
+            match name {
+                "join" => Ok(Value::ok(f.get("result").cloned().unwrap_or(Value::Unit))),
+                "is_finished" => Ok(Value::Bool(true)),
+                _ => bail!("unknown method `{name}` on JoinHandle"),
+            }
+        }
+        Value::Struct { name: n, fields } if n == "Child" => child_method(fields, name, &args),
         Value::Struct { name: n, fields } if n == "Path" => path_method(fields, name, &args),
         Value::Struct { name: n, fields } if n == "DirEntry" => dir_entry_method(fields, name),
         Value::Struct { name: n, fields } if n == "FileType" => file_type_method(fields, name),
@@ -1436,7 +2285,26 @@ fn command_method(
                 .insert("cwd".into(), args.first().cloned().unwrap_or(Value::Unit));
             cmd_value()
         }
-        "env" => cmd_value(),
+        "env" => {
+            let mut f = fields.borrow_mut();
+            let key = args.first().map(|v| v.display()).unwrap_or_default();
+            let val = args.get(1).cloned().unwrap_or(Value::Unit);
+            let entry = f
+                .entry("envs".into())
+                .or_insert_with(|| Value::Map(Rc::new(RefCell::new(BTreeMap::new()))));
+            if let Value::Map(m) = entry {
+                m.borrow_mut().insert(MapKey::Str(key), val);
+            }
+            drop(f);
+            cmd_value()
+        }
+        "stdin" | "stdout" | "stderr" => {
+            fields
+                .borrow_mut()
+                .insert(name.into(), args.first().cloned().unwrap_or(Value::Unit));
+            cmd_value()
+        }
+        "spawn" => return Ok(spawn_command(fields)),
         "output" => run_command(fields),
         "status" => match run_command(fields) {
             Value::Enum { data, .. } => {
@@ -1450,8 +2318,104 @@ fn command_method(
             }
             other => other,
         },
-        "spawn" => bail!("unsupported: Command::spawn is not modeled, use output or status"),
         _ => bail!("unknown method `{name}` on Command"),
+    })
+}
+
+/// Methods on a spawned `Child`. Lifecycle calls delegate to the real child
+/// handle; `wait_with_output` reads any piped stdout/stderr to the end first.
+fn child_method(fields: &Rc<RefCell<Fields>>, name: &str, args: &[Value]) -> Result<Value> {
+    // Waiting on a child that was fed piped stdin must first close that pipe,
+    // or the child blocks forever on EOF. Real Rust closes it when the taken
+    // `ChildStdin` drops; here we drop the handle we still hold in the field.
+    if matches!(name, "wait" | "wait_with_output") {
+        if let Some(slot) = fields.borrow_mut().get_mut("stdin") {
+            *slot = Value::none();
+        }
+    }
+    if name == "wait_with_output" {
+        let out = drain_child_pipe(fields, "stdout");
+        let err = drain_child_pipe(fields, "stderr");
+        let status = {
+            let handle = child_handle(fields)?;
+            let mut h = handle.borrow_mut();
+            if let Native::Child(c) = &mut *h {
+                match c.wait() {
+                    Ok(s) => s,
+                    Err(e) => return Ok(Value::err(Value::str(e.to_string()))),
+                }
+            } else {
+                bail!("child handle missing");
+            }
+        };
+        let mut o = Fields::new();
+        o.insert("stdout".into(), Value::str(out));
+        o.insert("stderr".into(), Value::str(err));
+        o.insert("status".into(), make_exit_status(status));
+        return Ok(Value::ok(Value::Struct {
+            name: "Output".into(),
+            fields: Rc::new(RefCell::new(o)),
+        }));
+    }
+    let handle = child_handle(fields)?;
+    match native::native_method(&handle, name, args)? {
+        Some(v) => Ok(v),
+        None => bail!("unknown method `{name}` on Child"),
+    }
+}
+
+fn child_handle(fields: &Rc<RefCell<Fields>>) -> Result<Rc<RefCell<Native>>> {
+    match fields.borrow().get("handle") {
+        Some(Value::Native(h)) => Ok(h.clone()),
+        _ => bail!("child handle missing"),
+    }
+}
+
+/// Read a child's piped stdout/stderr field to the end as a string.
+fn drain_child_pipe(fields: &Rc<RefCell<Fields>>, key: &str) -> String {
+    let handle = match fields.borrow().get(key) {
+        Some(Value::Enum { data, .. }) => match data.borrow().first() {
+            Some(Value::Native(h)) => h.clone(),
+            _ => return String::new(),
+        },
+        _ => return String::new(),
+    };
+    let target = Value::str("");
+    match native::native_method(&handle, "read_to_string", std::slice::from_ref(&target)) {
+        Ok(_) => {}
+        Err(_) => return String::new(),
+    }
+    if let Value::Str(s) = &target {
+        s.borrow().clone()
+    } else {
+        String::new()
+    }
+}
+
+/// The `HashMap::entry` slot, without closures. Returns the stored value; for
+/// container values that Rc-share, mutating the result mutates the map, so
+/// `map.entry(k).or_insert_with(Vec::new).push(x)` accumulates in place.
+fn entry_method(fields: &Rc<RefCell<Fields>>, name: &str, args: &[Value]) -> Result<Value> {
+    let f = fields.borrow();
+    let key = f
+        .get("key")
+        .and_then(|k| k.as_key())
+        .ok_or_else(|| anyhow!("invalid entry key"))?;
+    let Some(Value::Map(m)) = f.get("map") else {
+        bail!("entry lost its map");
+    };
+    Ok(match name {
+        "or_insert" => {
+            let default = args.first().cloned().unwrap_or(Value::Unit);
+            let mut map = m.borrow_mut();
+            map.entry(key).or_insert(default).clone()
+        }
+        "or_default" => {
+            let mut map = m.borrow_mut();
+            map.entry(key).or_insert(Value::Int(0)).clone()
+        }
+        "key" => key.to_value(),
+        _ => bail!("unknown method `{name}` on Entry"),
     })
 }
 
@@ -1465,6 +2429,58 @@ fn exitstatus_method(fields: &Rc<RefCell<Fields>>, name: &str) -> Result<Value> 
         },
         _ => bail!("unknown method `{name}` on ExitStatus"),
     })
+}
+
+fn duration_method(fields: &Rc<RefCell<Fields>>, name: &str) -> Result<Value> {
+    let f = fields.borrow();
+    let secs = field_int(&f, "secs") as u64;
+    let nanos = field_int(&f, "nanos") as u32;
+    let total_nanos = secs as u128 * 1_000_000_000 + nanos as u128;
+    Ok(match name {
+        "as_secs" => Value::Int(secs as i128),
+        "as_millis" => Value::Int((total_nanos / 1_000_000) as i128),
+        "as_micros" => Value::Int((total_nanos / 1_000) as i128),
+        "as_nanos" => Value::Int(total_nanos as i128),
+        "subsec_nanos" => Value::Int(nanos as i128),
+        "subsec_millis" => Value::Int((nanos / 1_000_000) as i128),
+        "subsec_micros" => Value::Int((nanos / 1_000) as i128),
+        "as_secs_f64" => Value::Float(secs as f64 + nanos as f64 / 1e9),
+        "is_zero" => Value::Bool(total_nanos == 0),
+        _ => bail!("unknown method `{name}` on Duration"),
+    })
+}
+
+fn metadata_method(fields: &Rc<RefCell<Fields>>, name: &str, _args: &[Value]) -> Result<Value> {
+    let f = fields.borrow();
+    let get = |k: &str| f.get(k).cloned().unwrap_or(Value::Unit);
+    Ok(match name {
+        "len" => get("len"),
+        "is_dir" => get("is_dir"),
+        "is_file" => get("is_file"),
+        "is_symlink" => get("is_symlink"),
+        "modified" | "created" | "accessed" => match f.get("modified") {
+            Some(v) => Value::ok(v.clone()),
+            None => Value::err(Value::str("timestamp not available".to_string())),
+        },
+        "mode" | "dev" | "ino" | "uid" | "gid" | "mtime" => get(name),
+        "permissions" => {
+            let mut p = Fields::new();
+            p.insert("mode".into(), get("mode"));
+            p.insert("readonly".into(), get("readonly"));
+            Value::Struct {
+                name: "Permissions".into(),
+                fields: Rc::new(RefCell::new(p)),
+            }
+        }
+        _ => bail!("unknown method `{name}` on Metadata"),
+    })
+}
+
+fn field_int(f: &Fields, k: &str) -> i128 {
+    match f.get(k) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    }
 }
 
 fn bytes_to_string(arg: Option<&Value>) -> String {
@@ -1555,8 +2571,47 @@ fn str_method(s: &Rc<RefCell<String>>, name: &str, args: &[Value]) -> Result<Val
                 Value::err(Value::str(format!("cannot parse `{t}`")))
             }
         }
-        _ => bail!("unknown method `{name}` on String"),
+        _ => {
+            if let Some(colored) = color_method(&s.borrow(), name) {
+                colored
+            } else {
+                bail!("unknown method `{name}` on String")
+            }
+        }
     })
+}
+
+/// The `colored` crate as string methods. Returns the styled text as a plain
+/// string carrying ANSI codes, so chaining and printing both work. Honors the
+/// crate's own NO_COLOR and terminal detection.
+fn color_method(s: &str, name: &str) -> Option<Value> {
+    use colored::Colorize;
+    let out = match name {
+        "red" => s.red(),
+        "green" => s.green(),
+        "yellow" => s.yellow(),
+        "blue" => s.blue(),
+        "magenta" | "purple" => s.magenta(),
+        "cyan" => s.cyan(),
+        "white" => s.white(),
+        "black" => s.black(),
+        "bright_red" => s.bright_red(),
+        "bright_green" => s.bright_green(),
+        "bright_yellow" => s.bright_yellow(),
+        "bright_blue" => s.bright_blue(),
+        "bright_cyan" => s.bright_cyan(),
+        "on_red" => s.on_red(),
+        "on_green" => s.on_green(),
+        "on_blue" => s.on_blue(),
+        "bold" => s.bold(),
+        "dimmed" => s.dimmed(),
+        "italic" => s.italic(),
+        "underline" => s.underline(),
+        "reversed" => s.reversed(),
+        "clear" | "normal" => s.normal(),
+        _ => return None,
+    };
+    Some(Value::str(out.to_string()))
 }
 
 fn vec_method(v: &Rc<RefCell<Vec<Value>>>, name: &str, args: &[Value]) -> Result<Value> {
@@ -1706,7 +2761,16 @@ fn map_method(m: &Rc<RefCell<BTreeMap<MapKey, Value>>>, name: &str, args: &[Valu
             None => Value::none(),
         },
         "keys" => Value::vec(m.borrow().keys().map(|k| k.to_value()).collect()),
-        "values" => Value::vec(m.borrow().values().cloned().collect()),
+        "values" | "values_mut" => Value::vec(m.borrow().values().cloned().collect()),
+        "entry" => {
+            let mut f = Fields::new();
+            f.insert("map".into(), Value::Map(m.clone()));
+            f.insert("key".into(), args.first().cloned().unwrap_or(Value::Unit));
+            Value::Struct {
+                name: "Entry".into(),
+                fields: Rc::new(RefCell::new(f)),
+            }
+        }
         "iter" | "into_iter" | "drain" => Value::vec(
             m.borrow()
                 .iter()
@@ -1766,7 +2830,7 @@ fn opt_method(recv: &Value, name: &str, args: &[Value]) -> Result<Value> {
             .ok_or_else(|| anyhow!("{}", args.first().map(|v| v.display()).unwrap_or_default()))?,
         "unwrap_or" => inner.unwrap_or_else(|| args.first().cloned().unwrap_or(Value::Unit)),
         "unwrap_or_default" => inner.unwrap_or(Value::Unit),
-        "cloned" | "copied" | "as_ref" | "as_deref" => recv.clone(),
+        "cloned" | "copied" | "as_ref" | "as_deref" | "take" | "as_mut" => recv.clone(),
         "ok_or" => match inner {
             Some(v) => Value::ok(v),
             None => Value::err(args.first().cloned().unwrap_or(Value::Unit)),

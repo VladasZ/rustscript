@@ -165,6 +165,7 @@ impl Interp {
     fn eval_block_inner(&self, block: &Block, frame: &mut Frame) -> Result<Flow> {
         let mut last = Value::Unit;
         for (i, stmt) in block.stmts.iter().enumerate() {
+            self.run_pending_ctrlc()?;
             let is_last = i + 1 == block.stmts.len();
             match self.eval_stmt(stmt, frame)? {
                 Flow::Value(v) => last = if is_last { v } else { Value::Unit },
@@ -309,7 +310,9 @@ impl Interp {
             Expr::Async(_) | Expr::Await(_) => {
                 bail!("unsupported feature: async is not supported")
             }
-            Expr::Unsafe(_) => bail!("unsupported feature: unsafe is not supported"),
+            // `unsafe` carries no runtime meaning here, and edition 2024 needs
+            // it around calls like `env::set_var`, so run the block normally.
+            Expr::Unsafe(u) => return self.eval_block(&u.block, frame),
             other => bail!("unsupported expression: {}", expr_kind(other)),
         };
         Ok(Flow::Value(value))
@@ -323,6 +326,9 @@ impl Interp {
             Lit::Str(s) => Value::str(s.value()),
             Lit::Char(c) => Value::Char(c.value()),
             Lit::Byte(b) => Value::Int(b.value() as i128),
+            Lit::ByteStr(bs) => {
+                Value::vec(bs.value().into_iter().map(|b| Value::Int(b as i128)).collect())
+            }
             other => bail!("unsupported literal: {:?}", other),
         })
     }
@@ -427,6 +433,24 @@ impl Interp {
 
     fn eval_for(&self, f: &syn::ExprForLoop, frame: &mut Frame) -> Result<Flow> {
         let iterable = flow!(self.eval_expr(&f.expr, frame));
+        // A lazy line iterator streams: pull one line, run the body, repeat, so
+        // a child's output appears live instead of buffering to the end first.
+        if let Value::Native(h) = &iterable
+            && matches!(&*h.borrow(), super::native::Native::Lines(_))
+        {
+            while let Some(item) = super::native::lines_next(h) {
+                frame.push();
+                self.bind_pattern(&f.pat, item, frame)?;
+                let flow = self.eval_block_inner(&f.body, frame);
+                frame.pop();
+                match flow? {
+                    Flow::Break(_) => break,
+                    Flow::Return(v) => return Ok(Flow::Return(v)),
+                    _ => {}
+                }
+            }
+            return Ok(Flow::Value(Value::Unit));
+        }
         let items = self.into_iter_items(iterable)?;
         for item in items {
             frame.push();
@@ -463,6 +487,9 @@ impl Interp {
                 })
                 .collect(),
             Value::Str(s) => s.borrow().chars().map(Value::Char).collect(),
+            Value::Native(h) if matches!(&*h.borrow(), super::native::Native::Lines(_)) => {
+                super::native::drain_lines(&h)
+            }
             other => bail!("{} is not iterable", other.type_name()),
         })
     }
@@ -965,6 +992,22 @@ impl Interp {
                 }
                 Value::Unit
             }
+            "matches" => {
+                let (expr, pat, guard) = mac.parse_body_with(parse_matches)?;
+                let v = flow_value(self.eval_expr(&expr, frame)?)?;
+                frame.push();
+                let matched = self.try_bind(&pat, &v, frame);
+                let result = if matched {
+                    match &guard {
+                        Some(g) => flow_value(self.eval_expr(g, frame)?)?.is_truthy(),
+                        None => true,
+                    }
+                } else {
+                    false
+                };
+                frame.pop();
+                Value::Bool(result)
+            }
             "anyhow" => Value::err(Value::str(self.expand_format(mac, frame)?)),
             "bail" => {
                 let err = Value::err(Value::str(self.expand_format(mac, frame)?));
@@ -1161,4 +1204,20 @@ fn parse_vec_repeat(input: syn::parse::ParseStream) -> syn::Result<(Expr, Expr)>
     input.parse::<syn::Token![;]>()?;
     let count: Expr = input.parse()?;
     Ok((value, count))
+}
+
+/// Parse the body of `matches!(expr, pat)` or `matches!(expr, pat if guard)`.
+fn parse_matches(
+    input: syn::parse::ParseStream,
+) -> syn::Result<(Expr, syn::Pat, Option<Expr>)> {
+    let expr: Expr = input.parse()?;
+    input.parse::<syn::Token![,]>()?;
+    let pat = syn::Pat::parse_multi_with_leading_vert(input)?;
+    let guard = if input.peek(syn::Token![if]) {
+        input.parse::<syn::Token![if]>()?;
+        Some(input.parse()?)
+    } else {
+        None
+    };
+    Ok((expr, pat, guard))
 }

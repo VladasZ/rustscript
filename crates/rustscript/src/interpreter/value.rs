@@ -5,6 +5,8 @@ use std::rc::Rc;
 
 use indexmap::IndexMap;
 
+use super::native::Native;
+
 /// Struct fields keep their declaration order so serialization and debug output
 /// match the real compiler.
 pub type Fields = IndexMap<String, Value>;
@@ -39,6 +41,9 @@ pub enum Value {
         inclusive: bool,
     },
     Closure(Rc<ClosureData>),
+    /// A live host resource: an open file, a child process, a socket, a
+    /// buffered reader. Shared by `Rc` so the same handle can be passed around.
+    Native(Rc<RefCell<Native>>),
 }
 
 /// A closure captures the variables visible where it was written, by value.
@@ -118,6 +123,7 @@ impl Value {
             Value::Enum { .. } => "enum",
             Value::Range { .. } => "range",
             Value::Closure(_) => "closure",
+            Value::Native(n) => n.borrow().type_name(),
         }
     }
 
@@ -180,6 +186,7 @@ impl Value {
                             .all(|(k, v)| fb.get(k).map(|o| v.eq_value(o)).unwrap_or(false))
                 }
             }
+            (Value::Native(a), Value::Native(b)) => Rc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -272,6 +279,7 @@ impl Value {
                 }
             }
             Value::Closure(_) => out.push_str("<closure>"),
+            Value::Native(n) => write!(out, "<{}>", n.borrow().type_name()).unwrap(),
             Value::Enum {
                 variant, data, ..
             } => {
