@@ -173,6 +173,20 @@ The equivalence suite runs every example both as a compiled cargo binary and
 through the interpreter, then checks the output matches byte for byte. It is the
 strongest guarantee that the interpreter behaves like the real compiler.
 
+## Benchmarks
+
+The `bench` crate compares rustscript against native Rust, Bun, and Python 3 on
+the same programs, each written three times with byte identical output. It
+measures wall-clock time with [hyperfine](https://github.com/sharkdp/hyperfine)
+and a self timed compute track, then draws one PNG per case. rustscript starts
+almost as fast as native and far faster than Bun or Python, and is much slower at
+raw compute, the cost of walking the tree. See `bench/README.md`.
+
+```
+cargo run --release --bin bench
+cargo run --release --bin chart
+```
+
 ## Status
 
 Early but usable. Script arguments, `std::io::stdin`, process spawning, files,
