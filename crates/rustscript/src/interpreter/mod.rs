@@ -1,15 +1,55 @@
 mod builtins;
 mod eval;
 mod format;
+mod native;
 mod value;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, anyhow, bail};
 use syn::{File, Item};
 
 pub use value::Value;
+
+/// Set by the real Ctrl-C handler, which must stay `Send`, and drained by the
+/// interpreter between statements so it can run the script's own handler.
+static CTRLC_HIT: AtomicBool = AtomicBool::new(false);
+static CTRLC_INSTALLED: OnceLock<bool> = OnceLock::new();
+
+thread_local! {
+    /// The script closure passed to `ctrlc::set_handler`, run on the interpreter
+    /// thread when a Ctrl-C is noticed.
+    static CTRLC_HANDLER: RefCell<Option<Value>> = const { RefCell::new(None) };
+}
+
+/// Register the script's Ctrl-C closure and install the OS handler once.
+pub(crate) fn set_ctrlc_handler(closure: Value) -> Result<()> {
+    CTRLC_HANDLER.with(|h| *h.borrow_mut() = Some(closure));
+    if CTRLC_INSTALLED.set(true).is_ok() {
+        ctrlc::set_handler(|| CTRLC_HIT.store(true, Ordering::SeqCst))
+            .map_err(|e| anyhow!("could not install ctrl-c handler: {e}"))?;
+    }
+    Ok(())
+}
+
+/// The arguments a script sees through `std::env::args()`. Set once from
+/// `main` before the script runs. Index 0 is the script path, matching a real
+/// compiled binary, then the arguments typed after the filename.
+static SCRIPT_ARGS: OnceLock<Vec<String>> = OnceLock::new();
+
+pub fn set_script_args(args: Vec<String>) {
+    SCRIPT_ARGS
+        .set(args)
+        .expect("script args are set exactly once");
+}
+
+pub(crate) fn script_args() -> Vec<String> {
+    SCRIPT_ARGS.get().cloned().unwrap_or_default()
+}
 
 /// Control flow result of evaluating a statement or expression.
 pub enum Flow {
@@ -148,6 +188,19 @@ impl Interp {
                 "unsupported item: {}",
                 quote_kind(other)
             ),
+        }
+        Ok(())
+    }
+
+    /// If a Ctrl-C arrived, run the script's registered handler closure. Called
+    /// between statements so the handler runs on the interpreter thread.
+    pub(super) fn run_pending_ctrlc(&self) -> Result<()> {
+        if !CTRLC_HIT.swap(false, Ordering::SeqCst) {
+            return Ok(());
+        }
+        let handler = CTRLC_HANDLER.with(|h| h.borrow().clone());
+        if let Some(Value::Closure(clo)) = handler {
+            self.call_closure(&clo, &[])?;
         }
         Ok(())
     }

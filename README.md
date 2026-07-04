@@ -70,6 +70,7 @@ is legal Rust, so the file still passes `cargo check`.
   `any`, `all`, `sort_by`, `sort_by_key`, and more
 - `Vec`, `String`, `HashMap`, `Option`, `Result`, the `?` operator
 - `format!` and `println!` with `{name}`, `{:?}`, width, and precision
+- `matches!`, byte string literals `b"..."`, and `unsafe` blocks run their body
 - `#[derive(...)]` is accepted, serialization is done by reflection
 
 ## Standard library subset
@@ -77,11 +78,20 @@ is legal Rust, so the file still passes `cargo check`.
 Scripts use plain `std`. The interpreter bridges the common parts.
 
 - `std::fs`, read, write, create and remove dirs, copy, rename, `read_dir`,
-  `canonicalize`
-- `std::process::Command`, build, run, read `stdout`, `stderr`, and status
-- `std::env`, args, vars, current dir
+  `canonicalize`, `metadata`, `symlink_metadata`, `read_link`, `File`,
+  `OpenOptions`, and the platform `symlink`
+- `std::io`, `stdin`, `stdout`, `stderr`, `Read`, `Write`, `BufReader`, `Seek`,
+  `lines` reading, and `IsTerminal`
+- `std::process::Command`, `output`, `status`, and `spawn` with `Stdio` piping
+  and a `Child` you can stream, feed, and `wait` on
+- `std::net`, blocking `TcpListener` and `TcpStream`
+- `std::thread`, `spawn` and `sleep`, run serially with no real parallelism
+- `std::time`, `Instant`, `SystemTime`, and `Duration`
+- `std::env`, real script args, `vars`, `var`, `set_var`, `remove_var`,
+  `current_dir`, `set_current_dir`, `temp_dir`, and `consts::OS` / `ARCH`
+- `std::process::exit`
 - `std::path`, `Path` and `PathBuf` with `display`, `is_dir`, `join`, and more
-- `std::collections`, `HashMap`, `BTreeMap`, sets
+- `std::collections`, `HashMap`, `BTreeMap`, sets, and the `entry` API
 
 ## Bridged crates
 
@@ -93,18 +103,34 @@ a native bridge for it. These are bridged today.
   `from_str::<T>` into your own structs
 - [`anyhow`](https://github.com/dtolnay/anyhow) for `Result`, `?`, `bail!`,
   `ensure!`, and `context`
-- [`ureq`](https://github.com/algesten/ureq) for HTTP and HTTPS over rustls
+- [`ureq`](https://github.com/algesten/ureq) for HTTP and HTTPS over rustls,
+  including query params, a global timeout, and a cookie-keeping `agent`
 - [`regex`](https://github.com/rust-lang/regex) for matching, capture groups,
   and replace
+- [`which`](https://github.com/harshadgavali/which-rs) to find a program on PATH
+- [`glob`](https://github.com/rust-lang/glob) for path matching
+- [`dirs`](https://github.com/dirs-dev/dirs-rs) for home, cache, and config dirs
+- [`chrono`](https://github.com/chronotope/chrono) for `Utc::now`, formatting,
+  and date parts
+- [`rand`](https://github.com/rust-random/rand) for random numbers and bytes
+- [`toml`](https://github.com/toml-rs/toml) and
+  [`serde_yaml`](https://github.com/dtolnay/serde-yaml) for typed config
+- [`colored`](https://github.com/colored-rs/colored) for terminal colors
+- [`base64`](https://github.com/marshallpierce/base64) and
+  [`hex`](https://github.com/KokaKiwi/rust-hex) for encoding
+- [`ctrlc`](https://github.com/Detegr/rust-ctrlc) for a Ctrl-C handler
+- [`tempfile`](https://github.com/Stebalien/tempfile) for temp dirs and files
 
 A crate without a bridge still passes `cargo check` but stops the interpreter
 with `unsupported crate` when its code runs.
 
 ## Not supported
 
-`async`, threads, and `unsafe` are not run. Reaching them is a clean runtime
-error, not a wrong result. Lifetimes and generics parse and run, they just carry
-no meaning at runtime.
+`async` is not run, and reaching it is a clean runtime error. Threads run
+serially, so `thread::spawn` returns a handle whose value is already computed and
+there is no real parallelism. `unsafe` blocks run their body, since edition 2024
+needs `unsafe` around calls like `env::set_var`. Lifetimes and generics parse and
+run, they just carry no meaning at runtime.
 
 ## Caching
 
@@ -118,6 +144,9 @@ The scripts in `crates/examples/examples` cover the common ground people use to
 judge a scripting language. Fizzbuzz, fibonacci, word count, quicksort, sieve,
 towers of hanoi, roman numerals, a state machine, file and directory work, a
 shell command, json config, typed json, an http fetch, and regex extraction.
+Newer ones show process spawning with streamed output, file and stdin I/O, file
+metadata and symlinks, tcp sockets, threads, dates, temp dirs, base64 and hex,
+toml and yaml config, terminal colors, and running a program from PATH.
 
 Run one with the interpreter.
 
@@ -146,6 +175,6 @@ strongest guarantee that the interpreter behaves like the real compiler.
 
 ## Status
 
-Early but usable. Known refinements still open are serde field attributes like
-`rename_all` and `default`, `std::io::stdin`, and passing real script arguments
-into `std::env::args`.
+Early but usable. Script arguments, `std::io::stdin`, process spawning, files,
+sockets, and time all work now. Known refinements still open are serde field
+attributes like `rename_all` and `default`.

@@ -13,17 +13,17 @@ fn main() {
 }
 
 fn real_main() -> Result<()> {
-    let mut args = std::env::args().skip(1);
-    let cmd = args.next().unwrap_or_default();
+    let all: Vec<String> = std::env::args().skip(1).collect();
+    let cmd = all.first().cloned().unwrap_or_default();
     match cmd.as_str() {
         "run" => {
-            let file = args.next().ok_or_else(|| err_usage())?;
-            run(&file, true)
+            let file = all.get(1).ok_or_else(err_usage)?;
+            run(file, true, &all[2..])
         }
         "check" => {
-            let file = args.next().ok_or_else(|| err_usage())?;
-            let source = std::fs::read_to_string(&file)?;
-            checker::check(Path::new(&file), &source)?;
+            let file = all.get(1).ok_or_else(err_usage)?;
+            let source = std::fs::read_to_string(file)?;
+            checker::check(Path::new(file), &source)?;
             println!("ok");
             Ok(())
         }
@@ -32,13 +32,14 @@ fn real_main() -> Result<()> {
             print_usage();
             Ok(())
         }
-        // `rust file.rs` and the shebang form both land here.
-        path if path.ends_with(".rs") => run(path, true),
+        // `rust file.rs` and the shebang form both land here. Everything after
+        // the filename is passed through to the script.
+        path if path.ends_with(".rs") => run(path, true, &all[1..]),
         other => bail!("unknown command `{other}`, try `rust help`"),
     }
 }
 
-fn run(file: &str, check_first: bool) -> Result<()> {
+fn run(file: &str, check_first: bool, script_args: &[String]) -> Result<()> {
     let path = Path::new(file);
     let source = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("cannot read {file}: {e}"))?;
@@ -46,6 +47,11 @@ fn run(file: &str, check_first: bool) -> Result<()> {
     if check_first {
         checker::check(path, &source)?;
     }
+
+    // A real binary sees its own path as argv[0], then the caller's arguments.
+    let mut args = vec![file.to_string()];
+    args.extend(script_args.iter().cloned());
+    interpreter::set_script_args(args);
 
     let ast = syn::parse_file(&source)
         .map_err(|e| anyhow::anyhow!("parse error: {e}"))?;

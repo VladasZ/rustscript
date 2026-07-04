@@ -83,8 +83,20 @@ path = "main.rs"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
-ureq = "3"
+ureq = { version = "3", features = ["cookies"] }
 regex = "1"
+which = "8"
+rand = "0.10"
+glob = "0.3"
+chrono = "0.4"
+dirs = "6"
+toml = "1"
+serde_yaml = "0.9"
+colored = "3"
+base64 = "0.22"
+hex = "0.4"
+ctrlc = "3"
+tempfile = "3"
 
 [workspace]
 "#;
