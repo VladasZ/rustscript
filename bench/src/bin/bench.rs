@@ -1,45 +1,83 @@
-//! Benchmark orchestrator. For every case it first proves all four languages
-//! print byte identical stdout, then measures two tracks. The wall-clock track
-//! uses hyperfine, startup included, what you feel when you run the script. The
-//! compute track reads each run's self timed COMPUTE_NS from stderr, startup
-//! excluded, the language at the actual work. rustscript is always measured warm
-//! with the check gate skipped. The gate cost is measured once on its own.
+//! Benchmark orchestrator. For every case and tier it first proves all four
+//! languages print byte identical stdout, then measures three tracks. The
+//! wall-clock track uses hyperfine, startup included, what you feel when you
+//! run the script. The compute track reads each run's self timed COMPUTE_NS
+//! from stderr, startup excluded, the language at the actual work. The memory
+//! track records peak RSS via /usr/bin/time. rustscript is always measured warm
+//! with the check gate skipped, and node gets its own compile cache for the
+//! same reason. The gate cost is measured once on its own.
 //!
-//! Usage: cargo run --release --bin bench [-- --quick]
+//! Every compute case runs at two sizes. The base tier is small, where startup
+//! dominates the wall clock. The big tier is 10x, where the work dominates and
+//! JIT warmup has amortized.
+//!
+//! Usage: cargo run --release --bin bench [-- --quick] [-- --no-gate]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use rustscript_bench::{CaseResult, CompStat, Gate, LANGS, Report, WallStat};
+use rustscript_bench::{CaseResult, CompStat, Gate, LANGS, MemStat, Meta, Report, WallStat};
+
+/// How one case gets its work size for the two tiers.
+enum Input {
+    /// No argument, startup cases.
+    None,
+    /// A numeric size passed as the single argument.
+    Size { base: u64, big: u64 },
+    /// A data file under the case dir passed as the single argument.
+    Data { base: &'static str, big: &'static str },
+}
 
 /// One benchmark case and how to invoke each language.
 struct Case {
     name: &'static str,
     kind: &'static str,
-    /// Data file under the case dir passed as the single argument, or "".
-    data: &'static str,
+    input: Input,
 }
 
 const CASES: &[Case] = &[
-    Case { name: "hello", kind: "startup", data: "" },
-    Case { name: "fib", kind: "compute", data: "" },
-    Case { name: "sieve", kind: "compute", data: "" },
-    Case { name: "mandelbrot", kind: "compute", data: "" },
-    Case { name: "collatz", kind: "compute", data: "" },
-    Case { name: "word_count", kind: "compute", data: "data.txt" },
-    Case { name: "json", kind: "compute", data: "data.json" },
+    Case { name: "hello", kind: "startup", input: Input::None },
+    Case { name: "big_script", kind: "startup", input: Input::None },
+    Case { name: "fib", kind: "compute", input: Input::Size { base: 27, big: 32 } },
+    Case { name: "sieve", kind: "compute", input: Input::Size { base: 250_000, big: 2_500_000 } },
+    Case { name: "mandelbrot", kind: "compute", input: Input::Size { base: 140, big: 440 } },
+    Case { name: "collatz", kind: "compute", input: Input::Size { base: 10_000, big: 100_000 } },
+    Case { name: "binary_trees", kind: "compute", input: Input::Size { base: 11, big: 14 } },
+    Case { name: "string_builder", kind: "compute", input: Input::Size { base: 200_000, big: 2_000_000 } },
+    Case { name: "higher_order", kind: "compute", input: Input::Size { base: 100_000, big: 1_000_000 } },
+    Case { name: "sort", kind: "compute", input: Input::Size { base: 50_000, big: 500_000 } },
+    Case { name: "hashmap_int", kind: "compute", input: Input::Size { base: 150_000, big: 1_500_000 } },
+    Case { name: "nbody", kind: "compute", input: Input::Size { base: 8_000, big: 80_000 } },
+    Case { name: "json_serialize", kind: "compute", input: Input::Size { base: 100_000, big: 1_000_000 } },
+    Case { name: "stdout_lines", kind: "compute", input: Input::Size { base: 20_000, big: 200_000 } },
+    Case {
+        name: "word_count",
+        kind: "compute",
+        input: Input::Data { base: "data.txt", big: "data_big.txt" },
+    },
+    Case {
+        name: "json",
+        kind: "compute",
+        input: Input::Data { base: "data.json", big: "data_big.json" },
+    },
+    Case {
+        name: "regex",
+        kind: "compute",
+        input: Input::Data { base: "../word_count/data.txt", big: "../word_count/data_big.txt" },
+    },
 ];
 
 fn main() -> Result<()> {
     let quick = std::env::args().any(|a| a == "--quick");
     let no_gate = std::env::args().any(|a| a == "--no-gate");
-    let wall_runs = if quick { 5 } else { 10 };
-    let comp_samples = if quick { 6 } else { 15 };
 
     let root = workspace_root()?;
     let results_dir = root.join("bench/results");
     std::fs::create_dir_all(&results_dir)?;
+    let node_cache = results_dir.join("node_cache");
+    std::fs::create_dir_all(&node_cache)?;
 
     ensure_tool("hyperfine")?;
     ensure_tool("node")?;
@@ -54,35 +92,57 @@ fn main() -> Result<()> {
         bail!("cargo build --examples failed");
     }
 
+    ensure_big_data(&root)?;
+
     let mut cases = Vec::new();
     for c in CASES {
-        println!("\n== {} ==", c.name);
-        let inv: Vec<Invocation> = LANGS.iter().map(|l| invocation(&root, c, l)).collect();
-
-        gate_check(c, &inv)?;
-
-        let mut wall = Vec::new();
-        for iv in &inv {
-            let s = hyperfine(iv, wall_runs, &results_dir)?;
-            println!("  wall   {:<11} {:>8.1} ms", iv.lang, s.mean * 1e3);
-            wall.push(s);
-        }
-
-        let mut compute = Vec::new();
-        if c.kind != "startup" {
-            for iv in &inv {
-                let s = compute_track(iv, comp_samples)?;
-                println!("  compute{:<11} {:>8.1} ms", iv.lang, s.min * 1e3);
-                compute.push(s);
+        for tier in ["base", "big"] {
+            if tier == "big" && matches!(c.input, Input::None) {
+                continue;
             }
-        }
+            // The big tier runs 10x the work, so it gets fewer samples.
+            let (wall_runs, comp_samples) = match (tier, quick) {
+                ("base", false) => (10, 15),
+                ("base", true) => (5, 6),
+                ("big", false) => (5, 5),
+                ("big", true) => (3, 3),
+                _ => unreachable!(),
+            };
 
-        cases.push(CaseResult {
-            name: c.name.to_string(),
-            kind: c.kind.to_string(),
-            wall,
-            compute,
-        });
+            println!("\n== {} {} ==", c.name, tier);
+            let inv: Vec<Invocation> =
+                LANGS.iter().map(|l| invocation(&root, c, l, tier, &node_cache)).collect();
+
+            gate_check(c, &inv)?;
+
+            let mut wall = Vec::new();
+            for iv in &inv {
+                let s = hyperfine(iv, wall_runs, &results_dir)?;
+                println!("  wall   {:<11} {:>8.1} ms", iv.lang, s.mean * 1e3);
+                wall.push(s);
+            }
+
+            let (compute, mem) = if c.kind == "startup" {
+                (Vec::new(), rss_track(&inv, 3)?)
+            } else {
+                compute_track(&inv, comp_samples)?
+            };
+            for s in &compute {
+                println!("  compute{:<11} {:>8.1} ms", s.lang, s.min * 1e3);
+            }
+            for m in &mem {
+                println!("  rss    {:<11} {:>8.1} MB", m.lang, m.rss_bytes as f64 / 1e6);
+            }
+
+            cases.push(CaseResult {
+                name: c.name.to_string(),
+                kind: c.kind.to_string(),
+                tier: tier.to_string(),
+                wall,
+                compute,
+                mem,
+            });
+        }
     }
 
     println!("\n== check gate cost ==");
@@ -97,7 +157,7 @@ fn main() -> Result<()> {
     };
     println!("  cold {:>7.2} s   warm {:>7.1} ms", gate.cold_mean, gate.warm_mean * 1e3);
 
-    let report = Report { cases, gate };
+    let report = Report { meta: gather_meta()?, cases, gate };
     let out = results_dir.join("results.json");
     std::fs::write(&out, serde_json::to_string_pretty(&report)?)?;
     println!("\nwrote {}", out.display());
@@ -105,50 +165,115 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// How to launch one language for one case.
+/// The 10x data files are gitignored for size. Regenerate them when missing.
+fn ensure_big_data(root: &Path) -> Result<()> {
+    let wc = root.join("bench/cases/word_count/data_big.txt");
+    let js = root.join("bench/cases/json/data_big.json");
+    if wc.exists() && js.exists() {
+        return Ok(());
+    }
+    println!("generating big tier data files ...");
+    let status = Command::new(env!("CARGO"))
+        .args(["run", "--release", "--bin", "gendata", "--", "--big"])
+        .current_dir(root)
+        .status()?;
+    if !status.success() {
+        bail!("gendata --big failed");
+    }
+    Ok(())
+}
+
+/// Tool versions and hardware, stored in the report so runs stay comparable.
+fn gather_meta() -> Result<Meta> {
+    let line = |program: &str, args: &[&str]| -> String {
+        Command::new(program)
+            .args(args)
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    };
+    Ok(Meta {
+        date_unix: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+        rustc: line("rustc", &["--version"]),
+        node: line("node", &["--version"]),
+        python: line("python3", &["--version"]),
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+        cpu: if cfg!(target_os = "macos") {
+            line("sysctl", &["-n", "machdep.cpu.brand_string"])
+        } else {
+            line("uname", &["-p"])
+        },
+    })
+}
+
+/// How to launch one language for one case at one tier.
 struct Invocation {
     lang: String,
     program: String,
     args: Vec<String>,
-    skip_check: bool,
+    /// Extra environment for both direct runs and hyperfine, which passes its
+    /// own environment through to the measured child.
+    env: Vec<(String, String)>,
 }
 
-fn invocation(root: &Path, c: &Case, lang: &str) -> Invocation {
+fn invocation(root: &Path, c: &Case, lang: &str, tier: &str, node_cache: &Path) -> Invocation {
     let case_dir = root.join("bench/cases").join(c.name);
-    let arg: Vec<String> = if c.data.is_empty() {
-        vec![]
-    } else {
-        vec![case_dir.join(c.data).to_string_lossy().into_owned()]
+    let arg: Vec<String> = match &c.input {
+        Input::None => vec![],
+        Input::Size { base, big } => {
+            vec![if tier == "big" { big.to_string() } else { base.to_string() }]
+        }
+        Input::Data { base, big } => {
+            let file = if tier == "big" { big } else { base };
+            vec![case_dir.join(file).to_string_lossy().into_owned()]
+        }
     };
     match lang {
-        "native" => {
-            let mut args = vec![];
+        "native" => Invocation {
+            lang: lang.into(),
+            program: root
+                .join("target/release/examples")
+                .join(c.name)
+                .to_string_lossy()
+                .into_owned(),
+            args: arg,
+            env: vec![],
+        },
+        "rustscript" => {
+            let mut args =
+                vec!["run".to_string(), case_dir.join("case.rs").to_string_lossy().into_owned()];
             args.extend(arg);
             Invocation {
                 lang: lang.into(),
-                program: root
-                    .join("target/release/examples")
-                    .join(c.name)
-                    .to_string_lossy()
-                    .into_owned(),
+                program: "rust".into(),
                 args,
-                skip_check: false,
+                // Warm and gate free, the one-time check cost is measured
+                // separately as the gate.
+                env: vec![("RUSTSCRIPT_SKIP_CHECK".into(), "1".into())],
             }
-        }
-        "rustscript" => {
-            let mut args = vec!["run".to_string(), case_dir.join("case.rs").to_string_lossy().into_owned()];
-            args.extend(arg);
-            Invocation { lang: lang.into(), program: "rust".into(), args, skip_check: true }
         }
         "node" => {
             let mut args = vec![case_dir.join("case.ts").to_string_lossy().into_owned()];
             args.extend(arg);
-            Invocation { lang: lang.into(), program: "node".into(), args, skip_check: false }
+            Invocation {
+                lang: lang.into(),
+                program: "node".into(),
+                args,
+                // The V8 compile cache, so node does not re-strip and
+                // re-compile the script on every run while rustscript runs
+                // from its warm cache.
+                env: vec![(
+                    "NODE_COMPILE_CACHE".into(),
+                    node_cache.to_string_lossy().into_owned(),
+                )],
+            }
         }
         "python" => {
             let mut args = vec![case_dir.join("case.py").to_string_lossy().into_owned()];
             args.extend(arg);
-            Invocation { lang: lang.into(), program: "python3".into(), args, skip_check: false }
+            Invocation { lang: lang.into(), program: "python3".into(), args, env: vec![] }
         }
         _ => unreachable!(),
     }
@@ -158,8 +283,21 @@ impl Invocation {
     fn command(&self) -> Command {
         let mut cmd = Command::new(&self.program);
         cmd.args(&self.args);
-        if self.skip_check {
-            cmd.env("RUSTSCRIPT_SKIP_CHECK", "1");
+        for (k, v) in &self.env {
+            cmd.env(k, v);
+        }
+        cmd
+    }
+
+    /// The same invocation wrapped in /usr/bin/time so stderr carries the peak
+    /// RSS next to the case's own COMPUTE_NS line.
+    fn timed_command(&self) -> Command {
+        let mut cmd = Command::new("/usr/bin/time");
+        cmd.arg(if cfg!(target_os = "macos") { "-l" } else { "-v" });
+        cmd.arg(&self.program);
+        cmd.args(&self.args);
+        for (k, v) in &self.env {
+            cmd.env(k, v);
         }
         cmd
     }
@@ -227,10 +365,10 @@ fn hyperfine(iv: &Invocation, runs: u32, dir: &Path) -> Result<WallStat> {
     .args(["--command-name", &iv.lang])
     .arg(iv.cmdline())
     .stdout(std::process::Stdio::null());
-    // Passed through to the child so rustscript stays warm and gate free. The
-    // other languages simply ignore it.
-    if iv.skip_check {
-        cmd.env("RUSTSCRIPT_SKIP_CHECK", "1");
+    // Passed through to the measured child. Other languages ignore foreign
+    // variables.
+    for (k, v) in &iv.env {
+        cmd.env(k, v);
     }
     let status = cmd.status()?;
     if !status.success() {
@@ -247,34 +385,85 @@ fn hyperfine(iv: &Invocation, runs: u32, dir: &Path) -> Result<WallStat> {
     })
 }
 
-/// Compute track. Run the case a number of times, read the self timed
-/// COMPUTE_NS from stderr each time, keep the min and median.
-fn compute_track(iv: &Invocation, samples: u32) -> Result<CompStat> {
-    let mut secs = Vec::new();
+/// Compute and memory track. Samples are interleaved round robin across
+/// languages so slow thermal drift spreads evenly instead of biasing whichever
+/// language runs last. Each run goes through /usr/bin/time, whose stderr adds
+/// peak RSS next to the case's self timed COMPUTE_NS. The wrapper only affects
+/// wall time, never the self timed value.
+fn compute_track(inv: &[Invocation], samples: u32) -> Result<(Vec<CompStat>, Vec<MemStat>)> {
+    let mut secs: Vec<Vec<f64>> = vec![Vec::new(); inv.len()];
+    let mut rss: Vec<u64> = vec![0; inv.len()];
     for _ in 0..samples {
-        let out = iv.command().output()?;
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let ns = stderr
-            .lines()
-            .find_map(|l| {
-                // Some runtimes color `console.error` even when piped, so the
-                // marker can arrive wrapped in ANSI escapes. Take the digits
-                // after it.
-                let start = l.find("COMPUTE_NS")? + "COMPUTE_NS".len();
-                let digits: String = l[start..]
-                    .chars()
-                    .skip_while(|c| !c.is_ascii_digit())
-                    .take_while(|c| c.is_ascii_digit())
-                    .collect();
-                digits.parse::<f64>().ok()
-            })
-            .with_context(|| format!("no COMPUTE_NS from {}", iv.lang))?;
-        secs.push(ns / 1e9);
+        for (i, iv) in inv.iter().enumerate() {
+            let out = iv.timed_command().output()?;
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let ns = parse_compute_ns(&stderr)
+                .with_context(|| format!("no COMPUTE_NS from {}", iv.lang))?;
+            secs[i].push(ns / 1e9);
+            if let Some(b) = parse_rss_bytes(&stderr) {
+                rss[i] = rss[i].max(b);
+            }
+        }
     }
-    secs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let min = secs[0];
-    let median = secs[secs.len() / 2];
-    Ok(CompStat { lang: iv.lang.clone(), min, median })
+    let mut compute = Vec::new();
+    let mut mem = Vec::new();
+    for (i, iv) in inv.iter().enumerate() {
+        secs[i].sort_by(|a, b| a.partial_cmp(b).unwrap());
+        compute.push(CompStat {
+            lang: iv.lang.clone(),
+            min: secs[i][0],
+            median: secs[i][secs[i].len() / 2],
+        });
+        mem.push(MemStat { lang: iv.lang.clone(), rss_bytes: rss[i] });
+    }
+    Ok((compute, mem))
+}
+
+/// Memory only track for the startup cases, which have no COMPUTE_NS.
+fn rss_track(inv: &[Invocation], samples: u32) -> Result<Vec<MemStat>> {
+    let mut mem = Vec::new();
+    for iv in inv {
+        let mut best: u64 = 0;
+        for _ in 0..samples {
+            let out = iv.timed_command().output()?;
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if let Some(b) = parse_rss_bytes(&stderr) {
+                best = best.max(b);
+            }
+        }
+        mem.push(MemStat { lang: iv.lang.clone(), rss_bytes: best });
+    }
+    Ok(mem)
+}
+
+fn parse_compute_ns(stderr: &str) -> Option<f64> {
+    stderr.lines().find_map(|l| {
+        // Some runtimes color `console.error` even when piped, so the marker
+        // can arrive wrapped in ANSI escapes. Take the digits after it.
+        let start = l.find("COMPUTE_NS")? + "COMPUTE_NS".len();
+        let digits: String = l[start..]
+            .chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        digits.parse::<f64>().ok()
+    })
+}
+
+/// Peak RSS from /usr/bin/time output. macOS `-l` prints bytes as
+/// `  123456  maximum resident set size`, GNU `-v` prints
+/// `Maximum resident set size (kbytes): 123456`.
+fn parse_rss_bytes(stderr: &str) -> Option<u64> {
+    for l in stderr.lines() {
+        let lower = l.to_ascii_lowercase();
+        if !lower.contains("maximum resident set size") {
+            continue;
+        }
+        let digits: String = l.chars().filter(|c| c.is_ascii_digit()).collect();
+        let n: u64 = digits.parse().ok()?;
+        return Some(if lower.contains("kbytes") { n * 1024 } else { n });
+    }
+    None
 }
 
 /// Measure the one-time gate. Cold clears the cache before each run so the full
@@ -285,7 +474,10 @@ fn gate_cost(root: &Path, dir: &Path) -> Result<Gate> {
     let run = format!("rust run {script}");
 
     // Warm: prime once, then measure with cache hits.
-    let _ = Command::new("rust").args(["run", &script]).status();
+    let prime = Command::new("rust").args(["run", &script]).status()?;
+    if !prime.success() {
+        bail!("priming the gate cache failed");
+    }
     let warm_json = dir.join("hf_gate_warm.json");
     Command::new("hyperfine")
         .args(["--warmup", "2", "--runs", "10", "-N", "--export-json"])

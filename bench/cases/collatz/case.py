@@ -14,7 +14,7 @@ def steps(start):
     return c
 
 
-limit = 10000
+limit = int(sys.argv[1]) if len(sys.argv) > 1 else 10000
 t = time.perf_counter_ns()
 total = 0
 for i in range(1, limit + 1):

@@ -1,7 +1,7 @@
 import sys
 import time
 
-n = 250000
+n = int(sys.argv[1]) if len(sys.argv) > 1 else 250000
 t = time.perf_counter_ns()
 is_prime = bytearray([1]) * (n + 1)
 is_prime[0] = 0

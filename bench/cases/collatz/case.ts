@@ -12,7 +12,7 @@ function steps(start: number): number {
   return c;
 }
 
-const limit = 10000;
+const limit = process.argv[2] ? parseInt(process.argv[2], 10) : 10000;
 const t = performance.now();
 let total = 0;
 for (let i = 1; i <= limit; i++) {

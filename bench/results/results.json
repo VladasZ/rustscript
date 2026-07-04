@@ -1,373 +1,2369 @@
 {
+  "meta": {
+    "date_unix": 1783184487,
+    "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)",
+    "node": "v24.16.0",
+    "python": "Python 3.14.6",
+    "os": "macos",
+    "arch": "aarch64",
+    "cpu": "Apple M4 Pro"
+  },
   "cases": [
     {
       "name": "hello",
       "kind": "startup",
+      "tier": "base",
       "wall": [
         {
           "lang": "native",
-          "mean": 0.0011300458000000002,
-          "stddev": 0.000038500021982100514,
-          "min": 0.00107225,
-          "median": 0.0011222290000000002
+          "mean": 0.0011377834000000002,
+          "stddev": 0.00003594671376913329,
+          "min": 0.0010916670000000002,
+          "median": 0.0011389590000000002
         },
         {
           "lang": "rustscript",
-          "mean": 0.0029645585,
-          "stddev": 0.00015821659641084856,
-          "min": 0.002721209,
-          "median": 0.0029586465000000003
+          "mean": 0.0028402168000000003,
+          "stddev": 0.0001634720168169463,
+          "min": 0.002763333,
+          "median": 0.002768584
         },
         {
           "lang": "node",
-          "mean": 0.046325466700000005,
-          "stddev": 0.0011546876263439337,
-          "min": 0.044277541,
-          "median": 0.046678562500000007
+          "mean": 0.021839975000000005,
+          "stddev": 0.0011454094479492914,
+          "min": 0.020177208,
+          "median": 0.021681
         },
         {
           "lang": "python",
-          "mean": 0.013546616500000002,
-          "stddev": 0.0004986627069313044,
-          "min": 0.012889666,
-          "median": 0.0133490205
+          "mean": 0.0138715166,
+          "stddev": 0.000656421111488121,
+          "min": 0.012849459,
+          "median": 0.014019792
         }
       ],
-      "compute": []
+      "compute": [],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 1376256
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 5144576
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 38256640
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 12124160
+        }
+      ]
+    },
+    {
+      "name": "big_script",
+      "kind": "startup",
+      "tier": "base",
+      "wall": [
+        {
+          "lang": "native",
+          "mean": 0.0011720918,
+          "stddev": 0.000044638404588425915,
+          "min": 0.001110584,
+          "median": 0.001176584
+        },
+        {
+          "lang": "rustscript",
+          "mean": 0.004950608,
+          "stddev": 0.00008747684376164942,
+          "min": 0.004834583,
+          "median": 0.004981833000000001
+        },
+        {
+          "lang": "node",
+          "mean": 0.0232187418,
+          "stddev": 0.000894462884168873,
+          "min": 0.022173625,
+          "median": 0.022853584
+        },
+        {
+          "lang": "python",
+          "mean": 0.016249800000000002,
+          "stddev": 0.0004117586389081589,
+          "min": 0.015628041000000002,
+          "median": 0.016368084
+        }
+      ],
+      "compute": [],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 1409024
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 9437184
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 38846464
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 15728640
+        }
+      ]
     },
     {
       "name": "fib",
       "kind": "compute",
+      "tier": "base",
       "wall": [
         {
           "lang": "native",
-          "mean": 0.0015006916000000002,
-          "stddev": 0.00009733877005158612,
-          "min": 0.001406041,
-          "median": 0.0014767085
+          "mean": 0.0015790584000000005,
+          "stddev": 0.0003211286282353226,
+          "min": 0.001410083,
+          "median": 0.001420042
         },
         {
           "lang": "rustscript",
-          "mean": 0.0182420667,
-          "stddev": 0.0003884533674424053,
-          "min": 0.0176005,
-          "median": 0.0182862505
+          "mean": 0.017814241600000003,
+          "stddev": 0.00030110756121741645,
+          "min": 0.017368917,
+          "median": 0.017907333
         },
         {
           "lang": "node",
-          "mean": 0.04984815830000001,
-          "stddev": 0.0017826428974484956,
-          "min": 0.046096584,
-          "median": 0.0503789375
+          "mean": 0.024166525,
+          "stddev": 0.0003763625958048968,
+          "min": 0.023613125,
+          "median": 0.024226208000000003
         },
         {
           "lang": "python",
-          "mean": 0.0270390291,
-          "stddev": 0.0006788552894001377,
-          "min": 0.025817417,
-          "median": 0.02703575
+          "mean": 0.02632905,
+          "stddev": 0.0006273740134094654,
+          "min": 0.025818042000000003,
+          "median": 0.026106958000000003
         }
       ],
       "compute": [
         {
           "lang": "native",
-          "min": 0.00033925,
-          "median": 0.000353875
+          "min": 0.000290041,
+          "median": 0.000305959
         },
         {
           "lang": "rustscript",
-          "min": 0.013956583,
-          "median": 0.014299459
+          "min": 0.013626833,
+          "median": 0.014097458
         },
         {
           "lang": "node",
-          "min": 0.001234708,
-          "median": 0.001306542
+          "min": 0.001177375,
+          "median": 0.001240292
         },
         {
           "lang": "python",
-          "min": 0.012596125,
-          "median": 0.012814625
+          "min": 0.01242925,
+          "median": 0.012648791
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 1409024
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 5718016
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 43384832
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 11862016
+        }
+      ]
+    },
+    {
+      "name": "fib",
+      "kind": "compute",
+      "tier": "big",
+      "wall": [
+        {
+          "lang": "native",
+          "mean": 0.004607096666666667,
+          "stddev": 0.00007066352610316977,
+          "min": 0.004526666,
+          "median": 0.004635416000000001
+        },
+        {
+          "lang": "rustscript",
+          "mean": 0.16348091633333334,
+          "stddev": 0.0022014222187536677,
+          "min": 0.16095541600000002,
+          "median": 0.164493375
+        },
+        {
+          "lang": "node",
+          "mean": 0.035309583,
+          "stddev": 0.000500778487096841,
+          "min": 0.034754,
+          "median": 0.035448541
+        },
+        {
+          "lang": "python",
+          "mean": 0.15624488866666666,
+          "stddev": 0.0007479796929371361,
+          "min": 0.155439625,
+          "median": 0.156377083
+        }
+      ],
+      "compute": [
+        {
+          "lang": "native",
+          "min": 0.00327775,
+          "median": 0.003578041
+        },
+        {
+          "lang": "rustscript",
+          "min": 0.15979525,
+          "median": 0.159837416
+        },
+        {
+          "lang": "node",
+          "min": 0.011437833,
+          "median": 0.011633875
+        },
+        {
+          "lang": "python",
+          "min": 0.140516625,
+          "median": 0.143041041
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 1441792
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 5750784
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 43106304
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 11894784
         }
       ]
     },
     {
       "name": "sieve",
       "kind": "compute",
+      "tier": "base",
       "wall": [
         {
           "lang": "native",
-          "mean": 0.0013672042,
-          "stddev": 0.00003472284436889737,
-          "min": 0.001313417,
-          "median": 0.001370625
+          "mean": 0.0014418916,
+          "stddev": 0.000030073608700985658,
+          "min": 0.001419375,
+          "median": 0.0014215
         },
         {
           "lang": "rustscript",
-          "mean": 0.020119483200000003,
-          "stddev": 0.0004388037132978201,
-          "min": 0.019708083,
-          "median": 0.0200830625
+          "mean": 0.0212902748,
+          "stddev": 0.0020808181843474933,
+          "min": 0.0200745,
+          "median": 0.020386375
         },
         {
           "lang": "node",
-          "mean": 0.05130667900000001,
-          "stddev": 0.0009846505230578,
-          "min": 0.049991791,
-          "median": 0.051153875
+          "mean": 0.025868958200000004,
+          "stddev": 0.001178254252532618,
+          "min": 0.023828625000000003,
+          "median": 0.026312625000000003
         },
         {
           "lang": "python",
-          "mean": 0.0440782958,
-          "stddev": 0.0011912438887998822,
-          "min": 0.04258425,
-          "median": 0.043784979
+          "mean": 0.0426329,
+          "stddev": 0.00178708893507906,
+          "min": 0.041483417,
+          "median": 0.041687875
         }
       ],
       "compute": [
         {
           "lang": "native",
-          "min": 0.000231834,
-          "median": 0.00023575
+          "min": 0.00025825,
+          "median": 0.000263292
         },
         {
           "lang": "rustscript",
-          "min": 0.015166792,
-          "median": 0.015299666
+          "min": 0.014988584,
+          "median": 0.015077625
         },
         {
           "lang": "node",
-          "min": 0.002281417,
-          "median": 0.002379708
+          "min": 0.002249917,
+          "median": 0.002355125
         },
         {
           "lang": "python",
-          "min": 0.027899416,
-          "median": 0.030051542
+          "min": 0.028966,
+          "median": 0.030857875
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 1720320
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 19775488
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 44924928
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 12861440
+        }
+      ]
+    },
+    {
+      "name": "sieve",
+      "kind": "compute",
+      "tier": "big",
+      "wall": [
+        {
+          "lang": "native",
+          "mean": 0.004492569333333334,
+          "stddev": 0.0001063563577052794,
+          "min": 0.004405541000000001,
+          "median": 0.004461042
+        },
+        {
+          "lang": "rustscript",
+          "mean": 0.2911256806666667,
+          "stddev": 0.0012447928874099415,
+          "min": 0.28999425,
+          "median": 0.290923667
+        },
+        {
+          "lang": "node",
+          "mean": 0.030474944333333337,
+          "stddev": 0.0004699043315658334,
+          "min": 0.03003025,
+          "median": 0.030428042
+        },
+        {
+          "lang": "python",
+          "mean": 0.35073747200000005,
+          "stddev": 0.027098302008501884,
+          "min": 0.326250875,
+          "median": 0.34611000000000003
+        }
+      ],
+      "compute": [
+        {
+          "lang": "native",
+          "min": 0.003105458,
+          "median": 0.003127708
+        },
+        {
+          "lang": "rustscript",
+          "min": 0.280802833,
+          "median": 0.28283575
+        },
+        {
+          "lang": "node",
+          "min": 0.007428917,
+          "median": 0.007466666
+        },
+        {
+          "lang": "python",
+          "min": 0.305696042,
+          "median": 0.316269708
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 3964928
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 145801216
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 46989312
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 17022976
         }
       ]
     },
     {
       "name": "mandelbrot",
       "kind": "compute",
+      "tier": "base",
       "wall": [
         {
           "lang": "native",
-          "mean": 0.0021647956,
-          "stddev": 0.000054521638330727674,
-          "min": 0.002091125,
-          "median": 0.002159062
+          "mean": 0.0021620668,
+          "stddev": 0.000018442511995387077,
+          "min": 0.0021389580000000003,
+          "median": 0.00216225
         },
         {
           "lang": "rustscript",
-          "mean": 0.0491332918,
-          "stddev": 0.0002420057276134876,
-          "min": 0.048716042,
-          "median": 0.0491372915
+          "mean": 0.048839283600000005,
+          "stddev": 0.0005273203389466406,
+          "min": 0.047922084,
+          "median": 0.049127417
         },
         {
           "lang": "node",
-          "mean": 0.05257205429999999,
-          "stddev": 0.001498669168686009,
-          "min": 0.0507695,
-          "median": 0.05233
+          "mean": 0.025986675400000003,
+          "stddev": 0.0007107971020652088,
+          "min": 0.024986459000000003,
+          "median": 0.025999834000000003
         },
         {
           "lang": "python",
-          "mean": 0.1169196667,
-          "stddev": 0.003201776460069666,
-          "min": 0.113241125,
-          "median": 0.115460125
+          "mean": 0.1210651166,
+          "stddev": 0.006341578238660101,
+          "min": 0.112729875,
+          "median": 0.120976875
         }
       ],
       "compute": [
         {
           "lang": "native",
-          "min": 0.000915208,
-          "median": 0.00091875
+          "min": 0.000914666,
+          "median": 0.000925625
         },
         {
           "lang": "rustscript",
-          "min": 0.044639333,
-          "median": 0.044826458
+          "min": 0.044131,
+          "median": 0.04473125
         },
         {
           "lang": "node",
-          "min": 0.001974666,
-          "median": 0.002881042
+          "min": 0.0018415,
+          "median": 0.001888041
         },
         {
           "lang": "python",
-          "min": 0.098376208,
-          "median": 0.100269917
+          "min": 0.097154625,
+          "median": 0.1064265
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 1441792
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 5865472
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 46104576
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 12353536
+        }
+      ]
+    },
+    {
+      "name": "mandelbrot",
+      "kind": "compute",
+      "tier": "big",
+      "wall": [
+        {
+          "lang": "native",
+          "mean": 0.010531861000000002,
+          "stddev": 0.0004291133499624542,
+          "min": 0.010191167,
+          "median": 0.010390625
+        },
+        {
+          "lang": "rustscript",
+          "mean": 0.4460953053333334,
+          "stddev": 0.002138995719534111,
+          "min": 0.4437465,
+          "median": 0.446608166
+        },
+        {
+          "lang": "node",
+          "mean": 0.034782652666666664,
+          "stddev": 0.0013133046021674988,
+          "min": 0.033578917,
+          "median": 0.034585750000000005
+        },
+        {
+          "lang": "python",
+          "mean": 1.0462103053333334,
+          "stddev": 0.04635175836335202,
+          "min": 0.997742916,
+          "median": 1.050780083
+        }
+      ],
+      "compute": [
+        {
+          "lang": "native",
+          "min": 0.008854833,
+          "median": 0.00900575
+        },
+        {
+          "lang": "rustscript",
+          "min": 0.440892666,
+          "median": 0.443305917
+        },
+        {
+          "lang": "node",
+          "min": 0.011167959,
+          "median": 0.011265209
+        },
+        {
+          "lang": "python",
+          "min": 1.011724375,
+          "median": 1.024079875
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 1441792
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 5865472
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 46366720
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 12320768
         }
       ]
     },
     {
       "name": "collatz",
       "kind": "compute",
+      "tier": "base",
       "wall": [
         {
           "lang": "native",
-          "mean": 0.00187415,
-          "stddev": 0.00015748771335638288,
-          "min": 0.0017651670000000002,
-          "median": 0.001827125
+          "mean": 0.0017300584000000002,
+          "stddev": 0.00003729756877197227,
+          "min": 0.001684792,
+          "median": 0.001731208
         },
         {
           "lang": "rustscript",
-          "mean": 0.028822095700000005,
-          "stddev": 0.0002962430701303127,
-          "min": 0.028518292,
-          "median": 0.0287737915
+          "mean": 0.029362158400000005,
+          "stddev": 0.0005084379041842769,
+          "min": 0.028720042,
+          "median": 0.029263084
         },
         {
           "lang": "node",
-          "mean": 0.0506034749,
-          "stddev": 0.0009344707849938324,
-          "min": 0.049234166,
-          "median": 0.0504153125
+          "mean": 0.02542385840000001,
+          "stddev": 0.001513051736976234,
+          "min": 0.024156375,
+          "median": 0.024582333
         },
         {
           "lang": "python",
-          "mean": 0.0477035333,
-          "stddev": 0.00038343574120750065,
-          "min": 0.047189333,
-          "median": 0.0477163335
+          "mean": 0.0484129168,
+          "stddev": 0.0006897358440415425,
+          "min": 0.047805625,
+          "median": 0.048222459
         }
       ],
       "compute": [
         {
           "lang": "native",
-          "min": 0.000600792,
-          "median": 0.000603333
+          "min": 0.000601417,
+          "median": 0.000605125
         },
         {
           "lang": "rustscript",
-          "min": 0.024486375,
-          "median": 0.024746333
+          "min": 0.024418708,
+          "median": 0.02455875
         },
         {
           "lang": "node",
-          "min": 0.001769375,
-          "median": 0.001803667
+          "min": 0.001771917,
+          "median": 0.001820166
         },
         {
           "lang": "python",
-          "min": 0.033715333,
-          "median": 0.034308666
+          "min": 0.033735834,
+          "median": 0.033933
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 1409024
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 5718016
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 44400640
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 12288000
+        }
+      ]
+    },
+    {
+      "name": "collatz",
+      "kind": "compute",
+      "tier": "big",
+      "wall": [
+        {
+          "lang": "native",
+          "mean": 0.008825638666666668,
+          "stddev": 0.00009287215094598236,
+          "min": 0.008749208000000001,
+          "median": 0.008798708
+        },
+        {
+          "lang": "rustscript",
+          "mean": 0.3210315556666667,
+          "stddev": 0.0007290338824844413,
+          "min": 0.320251292,
+          "median": 0.321148042
+        },
+        {
+          "lang": "node",
+          "mean": 0.03549862533333333,
+          "stddev": 0.0008585738873838008,
+          "min": 0.034688042,
+          "median": 0.035409584
+        },
+        {
+          "lang": "python",
+          "mean": 0.44401798633333334,
+          "stddev": 0.002842641445983167,
+          "min": 0.440765125,
+          "median": 0.445263917
+        }
+      ],
+      "compute": [
+        {
+          "lang": "native",
+          "min": 0.007548541,
+          "median": 0.007565708
+        },
+        {
+          "lang": "rustscript",
+          "min": 0.315821583,
+          "median": 0.316099666
+        },
+        {
+          "lang": "node",
+          "min": 0.012602541,
+          "median": 0.012718958
+        },
+        {
+          "lang": "python",
+          "min": 0.430040291,
+          "median": 0.430656375
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 1441792
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 5783552
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 44384256
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 11927552
+        }
+      ]
+    },
+    {
+      "name": "binary_trees",
+      "kind": "compute",
+      "tier": "base",
+      "wall": [
+        {
+          "lang": "native",
+          "mean": 0.0020883252000000003,
+          "stddev": 0.0002467893103412301,
+          "min": 0.001874459,
+          "median": 0.002049375
+        },
+        {
+          "lang": "rustscript",
+          "mean": 0.020128291800000003,
+          "stddev": 0.0005162466997407339,
+          "min": 0.019641708,
+          "median": 0.020013709
+        },
+        {
+          "lang": "node",
+          "mean": 0.0230757,
+          "stddev": 0.0009000361670202479,
+          "min": 0.021944958,
+          "median": 0.022874750000000003
+        },
+        {
+          "lang": "python",
+          "mean": 0.01714565,
+          "stddev": 0.0006824652462917071,
+          "min": 0.016472875,
+          "median": 0.016869083
+        }
+      ],
+      "compute": [
+        {
+          "lang": "native",
+          "min": 0.000683458,
+          "median": 0.000710542
+        },
+        {
+          "lang": "rustscript",
+          "min": 0.015280333,
+          "median": 0.015593041
+        },
+        {
+          "lang": "node",
+          "min": 0.000729,
+          "median": 0.000749291
+        },
+        {
+          "lang": "python",
+          "min": 0.002895,
+          "median": 0.002964083
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 1458176
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 6422528
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 45875200
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 12337152
+        }
+      ]
+    },
+    {
+      "name": "binary_trees",
+      "kind": "compute",
+      "tier": "big",
+      "wall": [
+        {
+          "lang": "native",
+          "mean": 0.011393014000000002,
+          "stddev": 0.00029898238863351127,
+          "min": 0.011052125,
+          "median": 0.011516167
+        },
+        {
+          "lang": "rustscript",
+          "mean": 0.19655866633333333,
+          "stddev": 0.0012895298460905578,
+          "min": 0.195489333,
+          "median": 0.196195958
+        },
+        {
+          "lang": "node",
+          "mean": 0.028197610666666668,
+          "stddev": 0.000908202909148244,
+          "min": 0.027154416,
+          "median": 0.02862625
+        },
+        {
+          "lang": "python",
+          "mean": 0.05303755566666667,
+          "stddev": 0.00037331327935975306,
+          "min": 0.05269275,
+          "median": 0.052985917
+        }
+      ],
+      "compute": [
+        {
+          "lang": "native",
+          "min": 0.009059583,
+          "median": 0.009328708
+        },
+        {
+          "lang": "rustscript",
+          "min": 0.189580917,
+          "median": 0.18972975
+        },
+        {
+          "lang": "node",
+          "min": 0.004149709,
+          "median": 0.004350334
+        },
+        {
+          "lang": "python",
+          "min": 0.0390915,
+          "median": 0.039097917
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 1949696
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 14303232
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 47529984
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 12910592
+        }
+      ]
+    },
+    {
+      "name": "string_builder",
+      "kind": "compute",
+      "tier": "base",
+      "wall": [
+        {
+          "lang": "native",
+          "mean": 0.006298141600000001,
+          "stddev": 0.0004188875421163777,
+          "min": 0.006007125,
+          "median": 0.006090708
+        },
+        {
+          "lang": "rustscript",
+          "mean": 0.0231293416,
+          "stddev": 0.00038726118272723814,
+          "min": 0.022817042000000003,
+          "median": 0.022950083000000003
+        },
+        {
+          "lang": "node",
+          "mean": 0.044512567,
+          "stddev": 0.00122184475119141,
+          "min": 0.043273834,
+          "median": 0.04428725
+        },
+        {
+          "lang": "python",
+          "mean": 0.0418898248,
+          "stddev": 0.000586037836528667,
+          "min": 0.041265083,
+          "median": 0.041652458
+        }
+      ],
+      "compute": [
+        {
+          "lang": "native",
+          "min": 0.004639083,
+          "median": 0.004821
+        },
+        {
+          "lang": "rustscript",
+          "min": 0.018184125,
+          "median": 0.018547833
+        },
+        {
+          "lang": "node",
+          "min": 0.018363834,
+          "median": 0.019071333
+        },
+        {
+          "lang": "python",
+          "min": 0.023911458,
+          "median": 0.024293708
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 5783552
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 21348352
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 81690624
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 33488896
+        }
+      ]
+    },
+    {
+      "name": "string_builder",
+      "kind": "compute",
+      "tier": "big",
+      "wall": [
+        {
+          "lang": "native",
+          "mean": 0.05114355533333333,
+          "stddev": 0.00191400789974763,
+          "min": 0.049670000000000006,
+          "median": 0.050453833
+        },
+        {
+          "lang": "rustscript",
+          "mean": 0.19269448600000005,
+          "stddev": 0.002736291946501873,
+          "min": 0.189957292,
+          "median": 0.192696291
+        },
+        {
+          "lang": "node",
+          "mean": 0.2490852776666667,
+          "stddev": 0.002851678385056132,
+          "min": 0.2458615,
+          "median": 0.250116208
+        },
+        {
+          "lang": "python",
+          "mean": 0.2760673886666667,
+          "stddev": 0.009906175786241688,
+          "min": 0.2647415,
+          "median": 0.280342708
+        }
+      ],
+      "compute": [
+        {
+          "lang": "native",
+          "min": 0.0470605,
+          "median": 0.048181667
+        },
+        {
+          "lang": "rustscript",
+          "min": 0.182299125,
+          "median": 0.183978
+        },
+        {
+          "lang": "node",
+          "min": 0.216628166,
+          "median": 0.216676417
+        },
+        {
+          "lang": "python",
+          "min": 0.234229125,
+          "median": 0.240825458
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 57573376
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 129384448
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 409206784
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 249348096
+        }
+      ]
+    },
+    {
+      "name": "higher_order",
+      "kind": "compute",
+      "tier": "base",
+      "wall": [
+        {
+          "lang": "native",
+          "mean": 0.0016193748,
+          "stddev": 0.00007332617493569398,
+          "min": 0.0015706670000000002,
+          "median": 0.001589708
+        },
+        {
+          "lang": "rustscript",
+          "mean": 0.027963333200000003,
+          "stddev": 0.0003260258663798006,
+          "min": 0.027528208,
+          "median": 0.028063708000000003
+        },
+        {
+          "lang": "node",
+          "mean": 0.034177191600000004,
+          "stddev": 0.0007667687081622474,
+          "min": 0.033379417,
+          "median": 0.033841500000000004
+        },
+        {
+          "lang": "python",
+          "mean": 0.0320326834,
+          "stddev": 0.0007874233856498684,
+          "min": 0.030654209,
+          "median": 0.032462250000000005
+        }
+      ],
+      "compute": [
+        {
+          "lang": "native",
+          "min": 0.000361375,
+          "median": 0.000365792
+        },
+        {
+          "lang": "rustscript",
+          "min": 0.021824209,
+          "median": 0.022200042
+        },
+        {
+          "lang": "node",
+          "min": 0.010288375,
+          "median": 0.010439958
+        },
+        {
+          "lang": "python",
+          "min": 0.016077584,
+          "median": 0.01647175
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 2326528
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 54378496
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 54165504
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 15548416
+        }
+      ]
+    },
+    {
+      "name": "higher_order",
+      "kind": "compute",
+      "tier": "big",
+      "wall": [
+        {
+          "lang": "native",
+          "mean": 0.004943333333333334,
+          "stddev": 0.000019371077030803927,
+          "min": 0.004928666,
+          "median": 0.004936042000000001
+        },
+        {
+          "lang": "rustscript",
+          "mean": 0.24651973566666663,
+          "stddev": 0.006054371243287473,
+          "min": 0.241322041,
+          "median": 0.245069708
+        },
+        {
+          "lang": "node",
+          "mean": 0.12517954166666667,
+          "stddev": 0.0020006701057326544,
+          "min": 0.123152958,
+          "median": 0.125232417
+        },
+        {
+          "lang": "python",
+          "mean": 0.18548441666666668,
+          "stddev": 0.001434144999284353,
+          "min": 0.184219125,
+          "median": 0.185191833
+        }
+      ],
+      "compute": [
+        {
+          "lang": "native",
+          "min": 0.003574792,
+          "median": 0.003581541
+        },
+        {
+          "lang": "rustscript",
+          "min": 0.224038375,
+          "median": 0.224113167
+        },
+        {
+          "lang": "node",
+          "min": 0.09862225,
+          "median": 0.09940575
+        },
+        {
+          "lang": "python",
+          "min": 0.163028125,
+          "median": 0.163301625
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 9535488
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 440041472
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 137838592
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 55410688
+        }
+      ]
+    },
+    {
+      "name": "sort",
+      "kind": "compute",
+      "tier": "base",
+      "wall": [
+        {
+          "lang": "native",
+          "mean": 0.002284483600000001,
+          "stddev": 0.000032130742207424995,
+          "min": 0.002238709,
+          "median": 0.002287084
+        },
+        {
+          "lang": "rustscript",
+          "mean": 0.0767717416,
+          "stddev": 0.0005620796754934309,
+          "min": 0.07607512500000001,
+          "median": 0.076601375
+        },
+        {
+          "lang": "node",
+          "mean": 0.056281083200000005,
+          "stddev": 0.0007077193797294958,
+          "min": 0.055461916,
+          "median": 0.056034125
+        },
+        {
+          "lang": "python",
+          "mean": 0.035062792,
+          "stddev": 0.00020906409055239288,
+          "min": 0.034837084000000004,
+          "median": 0.035105042
+        }
+      ],
+      "compute": [
+        {
+          "lang": "native",
+          "min": 0.001045541,
+          "median": 0.001055667
+        },
+        {
+          "lang": "rustscript",
+          "min": 0.0708825,
+          "median": 0.07156225
+        },
+        {
+          "lang": "node",
+          "min": 0.032129333,
+          "median": 0.032559875
+        },
+        {
+          "lang": "python",
+          "min": 0.020215834,
+          "median": 0.020444666
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 2359296
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 17973248
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 48201728
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 19726336
+        }
+      ]
+    },
+    {
+      "name": "sort",
+      "kind": "compute",
+      "tier": "big",
+      "wall": [
+        {
+          "lang": "native",
+          "mean": 0.013125694333333332,
+          "stddev": 0.00016279248538041678,
+          "min": 0.012989208,
+          "median": 0.013082000000000002
+        },
+        {
+          "lang": "rustscript",
+          "mean": 0.8525159303333334,
+          "stddev": 0.0015440987877883062,
+          "min": 0.8507460410000001,
+          "median": 0.8532141670000001
+        },
+        {
+          "lang": "node",
+          "mean": 0.4154315693333333,
+          "stddev": 0.0031199865153851676,
+          "min": 0.412973458,
+          "median": 0.414379708
+        },
+        {
+          "lang": "python",
+          "mean": 0.327839625,
+          "stddev": 0.001942251843200829,
+          "min": 0.325646792,
+          "median": 0.328528666
+        }
+      ],
+      "compute": [
+        {
+          "lang": "native",
+          "min": 0.011616292,
+          "median": 0.01177075
+        },
+        {
+          "lang": "rustscript",
+          "min": 0.845291333,
+          "median": 0.847438542
+        },
+        {
+          "lang": "node",
+          "min": 0.38932375,
+          "median": 0.392618125
+        },
+        {
+          "lang": "python",
+          "min": 0.298892042,
+          "median": 0.303090083
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 9568256
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 90669056
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 84639744
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 90243072
+        }
+      ]
+    },
+    {
+      "name": "hashmap_int",
+      "kind": "compute",
+      "tier": "base",
+      "wall": [
+        {
+          "lang": "native",
+          "mean": 0.0050231168000000005,
+          "stddev": 0.00010553093630163608,
+          "min": 0.0048474170000000006,
+          "median": 0.005050625
+        },
+        {
+          "lang": "rustscript",
+          "mean": 0.024573658600000003,
+          "stddev": 0.00014319149956369635,
+          "min": 0.024329209,
+          "median": 0.02460075
+        },
+        {
+          "lang": "node",
+          "mean": 0.0370989998,
+          "stddev": 0.0007272175683154941,
+          "min": 0.035885458,
+          "median": 0.037379583
+        },
+        {
+          "lang": "python",
+          "mean": 0.049328899999999995,
+          "stddev": 0.001622797983640756,
+          "min": 0.047157084,
+          "median": 0.049753375
+        }
+      ],
+      "compute": [
+        {
+          "lang": "native",
+          "min": 0.003522625,
+          "median": 0.003649125
+        },
+        {
+          "lang": "rustscript",
+          "min": 0.019940458,
+          "median": 0.020347459
+        },
+        {
+          "lang": "node",
+          "min": 0.013995416,
+          "median": 0.014191333
+        },
+        {
+          "lang": "python",
+          "min": 0.032450125,
+          "median": 0.034020208
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 6111232
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 20185088
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 49250304
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 19283968
+        }
+      ]
+    },
+    {
+      "name": "hashmap_int",
+      "kind": "compute",
+      "tier": "big",
+      "wall": [
+        {
+          "lang": "native",
+          "mean": 0.020066527666666667,
+          "stddev": 0.00008992099505862554,
+          "min": 0.019972958,
+          "median": 0.020074334000000003
+        },
+        {
+          "lang": "rustscript",
+          "mean": 0.13334872233333334,
+          "stddev": 0.0007986080541700881,
+          "min": 0.132536667,
+          "median": 0.133376333
+        },
+        {
+          "lang": "node",
+          "mean": 0.14017205533333335,
+          "stddev": 0.0005101493849347705,
+          "min": 0.13965654200000002,
+          "median": 0.140182958
+        },
+        {
+          "lang": "python",
+          "mean": 0.27615845833333336,
+          "stddev": 0.0018981978350091464,
+          "min": 0.273975625,
+          "median": 0.27707787500000003
+        }
+      ],
+      "compute": [
+        {
+          "lang": "native",
+          "min": 0.0184085,
+          "median": 0.018479208
+        },
+        {
+          "lang": "rustscript",
+          "min": 0.127889666,
+          "median": 0.127991583
+        },
+        {
+          "lang": "node",
+          "min": 0.115645125,
+          "median": 0.115940833
+        },
+        {
+          "lang": "python",
+          "min": 0.263793833,
+          "median": 0.265446542
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 6062080
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 20709376
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 49217536
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 19070976
+        }
+      ]
+    },
+    {
+      "name": "nbody",
+      "kind": "compute",
+      "tier": "base",
+      "wall": [
+        {
+          "lang": "native",
+          "mean": 0.0013647748,
+          "stddev": 0.000023295921471364917,
+          "min": 0.001341416,
+          "median": 0.0013516670000000002
+        },
+        {
+          "lang": "rustscript",
+          "mean": 0.0513916664,
+          "stddev": 0.0006448858606158929,
+          "min": 0.050743208000000005,
+          "median": 0.051061083
+        },
+        {
+          "lang": "node",
+          "mean": 0.0254894166,
+          "stddev": 0.0006454370644937428,
+          "min": 0.024740167,
+          "median": 0.025756958
+        },
+        {
+          "lang": "python",
+          "mean": 0.091056675,
+          "stddev": 0.00228387862826355,
+          "min": 0.08836075,
+          "median": 0.091257792
+        }
+      ],
+      "compute": [
+        {
+          "lang": "native",
+          "min": 0.000147834,
+          "median": 0.000148333
+        },
+        {
+          "lang": "rustscript",
+          "min": 0.046231625,
+          "median": 0.046930208
+        },
+        {
+          "lang": "node",
+          "min": 0.002203417,
+          "median": 0.002220167
+        },
+        {
+          "lang": "python",
+          "min": 0.073640083,
+          "median": 0.075475125
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 1441792
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 6160384
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 47628288
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 12255232
+        }
+      ]
+    },
+    {
+      "name": "nbody",
+      "kind": "compute",
+      "tier": "big",
+      "wall": [
+        {
+          "lang": "native",
+          "mean": 0.0028098056666666666,
+          "stddev": 0.00012014640018466348,
+          "min": 0.0027071670000000003,
+          "median": 0.0027802910000000003
+        },
+        {
+          "lang": "rustscript",
+          "mean": 0.476488153,
+          "stddev": 0.003056607381925439,
+          "min": 0.474075833,
+          "median": 0.475463084
+        },
+        {
+          "lang": "node",
+          "mean": 0.029476972000000004,
+          "stddev": 0.001209533174653758,
+          "min": 0.028577458000000003,
+          "median": 0.029001458
+        },
+        {
+          "lang": "python",
+          "mean": 0.7562435696666667,
+          "stddev": 0.005620307474645889,
+          "min": 0.750695125,
+          "median": 0.7561025
+        }
+      ],
+      "compute": [
+        {
+          "lang": "native",
+          "min": 0.00148075,
+          "median": 0.00148575
+        },
+        {
+          "lang": "rustscript",
+          "min": 0.466795292,
+          "median": 0.467256958
+        },
+        {
+          "lang": "node",
+          "min": 0.00583075,
+          "median": 0.005841625
+        },
+        {
+          "lang": "python",
+          "min": 0.747070333,
+          "median": 0.778960834
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 1441792
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 6193152
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 47218688
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 12255232
+        }
+      ]
+    },
+    {
+      "name": "json_serialize",
+      "kind": "compute",
+      "tier": "base",
+      "wall": [
+        {
+          "lang": "native",
+          "mean": 0.00809805,
+          "stddev": 0.00020322389057760945,
+          "min": 0.007843042,
+          "median": 0.008137708
+        },
+        {
+          "lang": "rustscript",
+          "mean": 0.04148649980000001,
+          "stddev": 0.0005546022373500675,
+          "min": 0.041045833,
+          "median": 0.041433458
+        },
+        {
+          "lang": "node",
+          "mean": 0.0424697,
+          "stddev": 0.0009692453348340133,
+          "min": 0.041509791,
+          "median": 0.042088208
+        },
+        {
+          "lang": "python",
+          "mean": 0.068687275,
+          "stddev": 0.0007772226586271777,
+          "min": 0.067773542,
+          "median": 0.068514875
+        }
+      ],
+      "compute": [
+        {
+          "lang": "native",
+          "min": 0.005747875,
+          "median": 0.0057855
+        },
+        {
+          "lang": "rustscript",
+          "min": 0.033876167,
+          "median": 0.0340835
+        },
+        {
+          "lang": "node",
+          "min": 0.016878375,
+          "median": 0.01713275
+        },
+        {
+          "lang": "python",
+          "min": 0.046827042,
+          "median": 0.04750675
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 11206656
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 100696064
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 77725696
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 46694400
+        }
+      ]
+    },
+    {
+      "name": "json_serialize",
+      "kind": "compute",
+      "tier": "big",
+      "wall": [
+        {
+          "lang": "native",
+          "mean": 0.07123208333333335,
+          "stddev": 0.000598860613663429,
+          "min": 0.07077675,
+          "median": 0.07100904200000001
+        },
+        {
+          "lang": "rustscript",
+          "mean": 0.373400472,
+          "stddev": 0.002104714629875736,
+          "min": 0.3712567080000001,
+          "median": 0.3734808750000001
+        },
+        {
+          "lang": "node",
+          "mean": 0.21407399966666665,
+          "stddev": 0.010210887106221495,
+          "min": 0.202299167,
+          "median": 0.219434916
+        },
+        {
+          "lang": "python",
+          "mean": 0.5971839303333334,
+          "stddev": 0.004063906406609901,
+          "min": 0.5927981250000001,
+          "median": 0.597931541
+        }
+      ],
+      "compute": [
+        {
+          "lang": "native",
+          "min": 0.061354959,
+          "median": 0.061467542
+        },
+        {
+          "lang": "rustscript",
+          "min": 0.342805917,
+          "median": 0.344464708
+        },
+        {
+          "lang": "node",
+          "min": 0.1678585,
+          "median": 0.1686135
+        },
+        {
+          "lang": "python",
+          "min": 0.512488167,
+          "median": 0.513778916
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 103694336
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 980959232
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 354336768
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 366166016
+        }
+      ]
+    },
+    {
+      "name": "stdout_lines",
+      "kind": "compute",
+      "tier": "base",
+      "wall": [
+        {
+          "lang": "native",
+          "mean": 0.0066785496,
+          "stddev": 0.000028130126595875754,
+          "min": 0.0066360410000000005,
+          "median": 0.006687125
+        },
+        {
+          "lang": "rustscript",
+          "mean": 0.012393108600000004,
+          "stddev": 0.00020813437679249435,
+          "min": 0.0121855,
+          "median": 0.012349542000000002
+        },
+        {
+          "lang": "node",
+          "mean": 0.04046545,
+          "stddev": 0.000615764984164008,
+          "min": 0.039687542,
+          "median": 0.040236416
+        },
+        {
+          "lang": "python",
+          "mean": 0.0180747,
+          "stddev": 0.00032097731844867223,
+          "min": 0.017830250000000002,
+          "median": 0.017946125
+        }
+      ],
+      "compute": [
+        {
+          "lang": "native",
+          "min": 0.008080833,
+          "median": 0.008372667
+        },
+        {
+          "lang": "rustscript",
+          "min": 0.009287625,
+          "median": 0.009456208
+        },
+        {
+          "lang": "node",
+          "min": 0.021235583,
+          "median": 0.02172625
+        },
+        {
+          "lang": "python",
+          "min": 0.004509292,
+          "median": 0.004588833
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 1458176
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 5718016
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 55246848
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 12189696
+        }
+      ]
+    },
+    {
+      "name": "stdout_lines",
+      "kind": "compute",
+      "tier": "big",
+      "wall": [
+        {
+          "lang": "native",
+          "mean": 0.056749027333333334,
+          "stddev": 0.00016448040783124685,
+          "min": 0.056611041,
+          "median": 0.056705000000000005
+        },
+        {
+          "lang": "rustscript",
+          "mean": 0.09050943033333336,
+          "stddev": 0.0005456117704690119,
+          "min": 0.08990795800000001,
+          "median": 0.090647792
+        },
+        {
+          "lang": "node",
+          "mean": 0.16711931933333335,
+          "stddev": 0.00030588879813476307,
+          "min": 0.166864167,
+          "median": 0.167035375
+        },
+        {
+          "lang": "python",
+          "mean": 0.061311972666666666,
+          "stddev": 0.00043771755653198744,
+          "min": 0.060983792,
+          "median": 0.061143167000000005
+        }
+      ],
+      "compute": [
+        {
+          "lang": "native",
+          "min": 0.078522292,
+          "median": 0.0820265
+        },
+        {
+          "lang": "rustscript",
+          "min": 0.1053035,
+          "median": 0.110887125
+        },
+        {
+          "lang": "node",
+          "min": 0.183742375,
+          "median": 0.186435833
+        },
+        {
+          "lang": "python",
+          "min": 0.044900916,
+          "median": 0.045975167
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 1425408
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 5701632
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 74203136
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 12238848
         }
       ]
     },
     {
       "name": "word_count",
       "kind": "compute",
+      "tier": "base",
       "wall": [
         {
           "lang": "native",
-          "mean": 0.0088269668,
-          "stddev": 0.00028421389905210486,
-          "min": 0.008283333,
-          "median": 0.008878562999999999
+          "mean": 0.0090771498,
+          "stddev": 0.0002198321579733049,
+          "min": 0.00877575,
+          "median": 0.009103208
         },
         {
           "lang": "rustscript",
-          "mean": 0.0260459459,
-          "stddev": 0.000341344967945414,
-          "min": 0.0252805,
-          "median": 0.0260547505
+          "mean": 0.02744140840000001,
+          "stddev": 0.0012230558008109447,
+          "min": 0.026368917,
+          "median": 0.0271205
         },
         {
           "lang": "node",
-          "mean": 0.07246333750000002,
-          "stddev": 0.0016578598173812504,
-          "min": 0.069468375,
-          "median": 0.0722726045
+          "mean": 0.0475536002,
+          "stddev": 0.0010069506683575418,
+          "min": 0.046284667,
+          "median": 0.0472855
         },
         {
           "lang": "python",
-          "mean": 0.0355975501,
-          "stddev": 0.0004421362274162544,
-          "min": 0.034881292,
-          "median": 0.03557525
+          "mean": 0.0359889164,
+          "stddev": 0.000657849411693361,
+          "min": 0.035302958,
+          "median": 0.035670833
         }
       ],
       "compute": [
         {
           "lang": "native",
-          "min": 0.006846208,
-          "median": 0.007111042
+          "min": 0.006995125,
+          "median": 0.007271084
         },
         {
           "lang": "rustscript",
-          "min": 0.019074958,
-          "median": 0.019904625
+          "min": 0.019835041,
+          "median": 0.020314333
         },
         {
           "lang": "node",
-          "min": 0.019739542,
-          "median": 0.020188375
+          "min": 0.020143209,
+          "median": 0.020352625
         },
         {
           "lang": "python",
-          "min": 0.020424291,
-          "median": 0.02122475
+          "min": 0.020956709,
+          "median": 0.021766084
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 3080192
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 51691520
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 78577664
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 29016064
+        }
+      ]
+    },
+    {
+      "name": "word_count",
+      "kind": "compute",
+      "tier": "big",
+      "wall": [
+        {
+          "lang": "native",
+          "mean": 0.07647681933333335,
+          "stddev": 0.0009323464147227272,
+          "min": 0.07548787500000001,
+          "median": 0.07660283300000001
+        },
+        {
+          "lang": "rustscript",
+          "mean": 0.237535014,
+          "stddev": 0.003890751155301109,
+          "min": 0.234007417,
+          "median": 0.236889458
+        },
+        {
+          "lang": "node",
+          "mean": 0.2458633056666667,
+          "stddev": 0.00246975716276851,
+          "min": 0.244413375,
+          "median": 0.244461542
+        },
+        {
+          "lang": "python",
+          "mean": 0.236499889,
+          "stddev": 0.013897144514755207,
+          "min": 0.22601145900000005,
+          "median": 0.23122625
+        }
+      ],
+      "compute": [
+        {
+          "lang": "native",
+          "min": 0.070954708,
+          "median": 0.07353975
+        },
+        {
+          "lang": "rustscript",
+          "min": 0.210722541,
+          "median": 0.210924916
+        },
+        {
+          "lang": "node",
+          "min": 0.206064041,
+          "median": 0.210960875
+        },
+        {
+          "lang": "python",
+          "min": 0.211960583,
+          "median": 0.212411584
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 16564224
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 567099392
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 342441984
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 182337536
         }
       ]
     },
     {
       "name": "json",
       "kind": "compute",
+      "tier": "base",
       "wall": [
         {
           "lang": "native",
-          "mean": 0.0081126459,
-          "stddev": 0.00010281955069003178,
-          "min": 0.007968291,
-          "median": 0.008093625
+          "mean": 0.0506929752,
+          "stddev": 0.0009335847767172532,
+          "min": 0.049874792,
+          "median": 0.050677959
         },
         {
           "lang": "rustscript",
-          "mean": 0.0316461001,
-          "stddev": 0.0004425537039143643,
-          "min": 0.031161583000000003,
-          "median": 0.0315774585
+          "mean": 0.0659004832,
+          "stddev": 0.002353777128489164,
+          "min": 0.06357262500000001,
+          "median": 0.065317333
         },
         {
           "lang": "node",
-          "mean": 0.07154093750000001,
-          "stddev": 0.0018432484106939064,
-          "min": 0.06907775000000001,
-          "median": 0.071517729
+          "mean": 0.046061666400000006,
+          "stddev": 0.0009074540528504996,
+          "min": 0.044871625000000005,
+          "median": 0.046092125000000005
         },
         {
           "lang": "python",
-          "mean": 0.0806163959,
-          "stddev": 0.0018080691198576965,
-          "min": 0.07798250000000001,
-          "median": 0.080410479
+          "mean": 0.08083321639999999,
+          "stddev": 0.0008402860395045836,
+          "min": 0.079929541,
+          "median": 0.08052654100000001
         }
       ],
       "compute": [
         {
           "lang": "native",
-          "min": 0.006111917,
-          "median": 0.0062555
+          "min": 0.028493125,
+          "median": 0.028934
         },
         {
           "lang": "rustscript",
-          "min": 0.023747333,
-          "median": 0.023940584
+          "min": 0.054429459,
+          "median": 0.055364791
         },
         {
           "lang": "node",
-          "min": 0.01818725,
-          "median": 0.01885025
+          "min": 0.018484542,
+          "median": 0.018617083
         },
         {
           "lang": "python",
-          "min": 0.052038166,
-          "median": 0.053852167
+          "min": 0.053116667,
+          "median": 0.053841417
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 149635072
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 116817920
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 95911936
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 72531968
+        }
+      ]
+    },
+    {
+      "name": "json",
+      "kind": "compute",
+      "tier": "big",
+      "wall": [
+        {
+          "lang": "native",
+          "mean": 0.5086910696666667,
+          "stddev": 0.004159712257400288,
+          "min": 0.5061644590000001,
+          "median": 0.506416666
+        },
+        {
+          "lang": "rustscript",
+          "mean": 0.6127142223333334,
+          "stddev": 0.004512412159482614,
+          "min": 0.609526542,
+          "median": 0.6107386250000001
+        },
+        {
+          "lang": "node",
+          "mean": 0.23426434733333337,
+          "stddev": 0.0006588646980301257,
+          "min": 0.233685917,
+          "median": 0.23412558300000005
+        },
+        {
+          "lang": "python",
+          "mean": 0.7007058613333333,
+          "stddev": 0.0032044051294367296,
+          "min": 0.69727275,
+          "median": 0.701227209
+        }
+      ],
+      "compute": [
+        {
+          "lang": "native",
+          "min": 0.292220083,
+          "median": 0.293583917
+        },
+        {
+          "lang": "rustscript",
+          "min": 0.551294875,
+          "median": 0.555806875
+        },
+        {
+          "lang": "node",
+          "min": 0.181865459,
+          "median": 0.182168375
+        },
+        {
+          "lang": "python",
+          "min": 0.55054725,
+          "median": 0.55704125
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 1517518848
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 1118601216
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 489062400
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 639795200
+        }
+      ]
+    },
+    {
+      "name": "regex",
+      "kind": "compute",
+      "tier": "base",
+      "wall": [
+        {
+          "lang": "native",
+          "mean": 0.016234041600000002,
+          "stddev": 0.0002870736696247144,
+          "min": 0.015852500000000002,
+          "median": 0.016336791
+        },
+        {
+          "lang": "rustscript",
+          "mean": 0.091295125,
+          "stddev": 0.0009739297435056624,
+          "min": 0.0902985,
+          "median": 0.090967458
+        },
+        {
+          "lang": "node",
+          "mean": 0.04155501660000001,
+          "stddev": 0.0010085914827931092,
+          "min": 0.040729208,
+          "median": 0.041139084
+        },
+        {
+          "lang": "python",
+          "mean": 0.06249524160000001,
+          "stddev": 0.0004134540662030078,
+          "min": 0.06207233300000001,
+          "median": 0.062437708
+        }
+      ],
+      "compute": [
+        {
+          "lang": "native",
+          "min": 0.014475542,
+          "median": 0.014912084
+        },
+        {
+          "lang": "rustscript",
+          "min": 0.073195459,
+          "median": 0.073600792
+        },
+        {
+          "lang": "node",
+          "min": 0.014394875,
+          "median": 0.014574291
+        },
+        {
+          "lang": "python",
+          "min": 0.047772542,
+          "median": 0.048492375
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 5636096
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 250839040
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 70139904
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 26705920
+        }
+      ]
+    },
+    {
+      "name": "regex",
+      "kind": "compute",
+      "tier": "big",
+      "wall": [
+        {
+          "lang": "native",
+          "mean": 0.14957687533333333,
+          "stddev": 0.0015392757033658193,
+          "min": 0.1479685,
+          "median": 0.149725917
+        },
+        {
+          "lang": "rustscript",
+          "mean": 0.8852488333333334,
+          "stddev": 0.029890846529012867,
+          "min": 0.866158041,
+          "median": 0.869892042
+        },
+        {
+          "lang": "node",
+          "mean": 0.21000531933333333,
+          "stddev": 0.01750608119096179,
+          "min": 0.198383625,
+          "median": 0.201492583
+        },
+        {
+          "lang": "python",
+          "mean": 0.504794403,
+          "stddev": 0.007415710747998249,
+          "min": 0.498373875,
+          "median": 0.503098
+        }
+      ],
+      "compute": [
+        {
+          "lang": "native",
+          "min": 0.145568209,
+          "median": 0.146916167
+        },
+        {
+          "lang": "rustscript",
+          "min": 0.733745209,
+          "median": 0.733910375
+        },
+        {
+          "lang": "node",
+          "min": 0.16322975,
+          "median": 0.163993667
+        },
+        {
+          "lang": "python",
+          "min": 0.492028875,
+          "median": 0.504439375
+        }
+      ],
+      "mem": [
+        {
+          "lang": "native",
+          "rss_bytes": 29294592
+        },
+        {
+          "lang": "rustscript",
+          "rss_bytes": 2435842048
+        },
+        {
+          "lang": "node",
+          "rss_bytes": 297943040
+        },
+        {
+          "lang": "python",
+          "rss_bytes": 155992064
         }
       ]
     }

@@ -1,8 +1,9 @@
 import sys
 import time
 
-w = 140
-h = 140
+size = int(sys.argv[1]) if len(sys.argv) > 1 else 140
+w = size
+h = size
 max_iter = 140
 t = time.perf_counter_ns()
 count = 0

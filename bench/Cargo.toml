@@ -9,6 +9,7 @@ anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 plotters = { workspace = true }
+regex = { workspace = true }
 
 [[bin]]
 name = "bench"
@@ -52,3 +53,43 @@ path = "cases/word_count/case.rs"
 [[example]]
 name = "json"
 path = "cases/json/case.rs"
+
+[[example]]
+name = "binary_trees"
+path = "cases/binary_trees/case.rs"
+
+[[example]]
+name = "string_builder"
+path = "cases/string_builder/case.rs"
+
+[[example]]
+name = "higher_order"
+path = "cases/higher_order/case.rs"
+
+[[example]]
+name = "sort"
+path = "cases/sort/case.rs"
+
+[[example]]
+name = "hashmap_int"
+path = "cases/hashmap_int/case.rs"
+
+[[example]]
+name = "nbody"
+path = "cases/nbody/case.rs"
+
+[[example]]
+name = "regex"
+path = "cases/regex/case.rs"
+
+[[example]]
+name = "json_serialize"
+path = "cases/json_serialize/case.rs"
+
+[[example]]
+name = "stdout_lines"
+path = "cases/stdout_lines/case.rs"
+
+[[example]]
+name = "big_script"
+path = "cases/big_script/case.rs"
