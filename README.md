@@ -99,6 +99,9 @@ is not enforced at runtime, `cargo check` is the authority as always.
 Not supported: `#[path]` on a mod declaration, and glob imports of script
 modules like `use util::*`, both stop with a clear error.
 
+See [docs/multifile.md](docs/multifile.md) for a proper guide, a worked
+example, and the common mistakes.
+
 ## What works
 
 - functions, recursion, `let` and `mut`, arithmetic, comparison, logical and

@@ -264,6 +264,11 @@ pub(super) fn vec_method(v: &Rc<RefCell<Vec<Value>>>, method: &MethodName, args:
                 v.borrow_mut().clear();
                 Value::Unit
             }
+            "truncate" => {
+                let n = int_arg(args, 0)? as usize;
+                v.borrow_mut().truncate(n);
+                Value::Unit
+            }
             "extend" | "append" => {
                 if let Some(Value::Vec(other)) = args.first() {
                     v.borrow_mut().extend(other.borrow().iter().cloned());
