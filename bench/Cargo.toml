@@ -1,0 +1,54 @@
+[package]
+name = "rustscript-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+plotters = { workspace = true }
+
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"
+
+[[bin]]
+name = "chart"
+path = "src/bin/chart.rs"
+
+[[bin]]
+name = "gendata"
+path = "src/bin/gendata.rs"
+
+# The Rust side of every case is also a real compiled cargo example, built with
+# the real toolchain. The same file runs under the interpreter, so one source
+# feeds both the native bar and the rustscript bar.
+[[example]]
+name = "hello"
+path = "cases/hello/case.rs"
+
+[[example]]
+name = "fib"
+path = "cases/fib/case.rs"
+
+[[example]]
+name = "sieve"
+path = "cases/sieve/case.rs"
+
+[[example]]
+name = "mandelbrot"
+path = "cases/mandelbrot/case.rs"
+
+[[example]]
+name = "collatz"
+path = "cases/collatz/case.rs"
+
+[[example]]
+name = "word_count"
+path = "cases/word_count/case.rs"
+
+[[example]]
+name = "json"
+path = "cases/json/case.rs"
