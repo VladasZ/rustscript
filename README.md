@@ -28,9 +28,11 @@ chmod +x notes.rs
 A script is a normal single file Rust program with `fn main`. Two layers share
 that same source.
 
-- An interpreter parses the file with [`syn`](https://github.com/dtolnay/syn)
-  and walks the tree. Ownership and borrow rules carry no meaning at runtime, so
-  there is no borrow checker cost and startup is fast.
+- An interpreter parses the file with [`syn`](https://github.com/dtolnay/syn),
+  compiles it once to bytecode, and runs it on a register machine. Locals are
+  numbered slots, so a variable read is an array index, not a name lookup.
+  Ownership and borrow rules carry no meaning at runtime, so there is no borrow
+  checker cost and startup is fast.
 - Before running, `rustscript` builds a small cargo project around the file and
   runs `cargo check` on it. This proves the file is valid Rust. The check is
   cached by source hash, so an unchanged script skips it.
@@ -179,8 +181,9 @@ The `bench` crate compares rustscript against native Rust, Bun, and Python 3 on
 the same programs, each written three times with byte identical output. It
 measures wall-clock time with [hyperfine](https://github.com/sharkdp/hyperfine)
 and a self timed compute track, then draws one PNG per case. rustscript starts
-almost as fast as native and far faster than Bun or Python, and is much slower at
-raw compute, the cost of walking the tree. See `bench/README.md`.
+almost as fast as native and far faster than Bun or Python. On raw compute it
+matches or beats Python on tight numeric loops, and trails on allocation heavy
+work like maps and json parsing. See `bench/README.md`.
 
 ```
 cargo run --release --bin bench

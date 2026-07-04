@@ -35,6 +35,9 @@ pub enum Native {
     /// A lazy line iterator, so `for line in reader.lines()` streams instead of
     /// buffering the whole input first.
     Lines(Box<dyn Iterator<Item = std::io::Result<String>>>),
+    /// A handle that has been force dropped, used to close a child's stdin pipe
+    /// even while another register still holds a reference to it.
+    Closed,
 }
 
 impl Native {
@@ -56,6 +59,7 @@ impl Native {
             Native::TempDir(_) => "TempDir",
             Native::Agent(_) => "Agent",
             Native::Lines(_) => "Lines",
+            Native::Closed => "Closed",
         }
     }
 }
@@ -111,7 +115,7 @@ fn append_string(target: &Value, text: &str) {
 fn append_bytes(target: &Value, bytes: &[u8]) {
     if let Value::Vec(v) = target {
         v.borrow_mut()
-            .extend(bytes.iter().map(|b| Value::Int(*b as i128)));
+            .extend(bytes.iter().map(|b| Value::Int(*b as i64)));
     }
 }
 
@@ -135,7 +139,7 @@ pub fn native_method(
             let mut buf = String::new();
             return Ok(Some(io_err(r.read_line(&mut buf), |n| {
                 append_string(&target, &buf);
-                Value::Int(n as i128)
+                Value::Int(n as i64)
             })));
         }
         "read_to_string" => {
@@ -147,7 +151,7 @@ pub fn native_method(
             let mut buf = String::new();
             return Ok(Some(io_err(r.read_to_string(&mut buf), |n| {
                 append_string(&target, &buf);
-                Value::Int(n as i128)
+                Value::Int(n as i64)
             })));
         }
         "read_to_end" => {
@@ -159,7 +163,7 @@ pub fn native_method(
             let mut buf = Vec::new();
             return Ok(Some(io_err(r.read_to_end(&mut buf), |n| {
                 append_bytes(&target, &buf);
-                Value::Int(n as i128)
+                Value::Int(n as i64)
             })));
         }
         "lines" => {
@@ -196,7 +200,7 @@ pub fn native_method(
             let is_write = method == "write";
             return Ok(Some(io_err(r, |()| {
                 if is_write {
-                    Value::Int(n as i128)
+                    Value::Int(n as i64)
                 } else {
                     Value::Unit
                 }
@@ -212,7 +216,7 @@ pub fn native_method(
             let pos = seek_from(args.first());
             let mut h = handle.borrow_mut();
             if let Native::File(r) = &mut *h {
-                return Ok(Some(io_err(r.seek(pos), |n| Value::Int(n as i128))));
+                return Ok(Some(io_err(r.seek(pos), |n| Value::Int(n as i64))));
             }
             bail!("seek on non-file {}", h.type_name());
         }
@@ -271,7 +275,7 @@ pub fn native_method(
         "id" => {
             let h = handle.borrow();
             if let Native::Child(c) = &*h {
-                return Ok(Some(Value::Int(c.id() as i128)));
+                return Ok(Some(Value::Int(c.id() as i64)));
             }
         }
         "wait_with_output" => {
@@ -445,7 +449,7 @@ fn value_to_bytes(v: Option<&Value>) -> Vec<u8> {
     }
 }
 
-fn as_int(v: Option<&Value>) -> Option<i128> {
+fn as_int(v: Option<&Value>) -> Option<i64> {
     match v {
         Some(Value::Int(i)) => Some(*i),
         _ => None,
