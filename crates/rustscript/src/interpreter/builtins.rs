@@ -30,6 +30,12 @@ impl Interp {
             if let Some(v) = self.unit_variant(None, name) {
                 return Ok(v);
             }
+            // A unit struct used as a value, `struct Marker;` then `Marker`.
+            if let Some(def) = self.structs().get(name.as_str())
+                && matches!(def.ast.fields, syn::Fields::Unit)
+            {
+                return Ok(Value::structure(StructShape::new(name.as_str(), Vec::new()), Vec::new()));
+            }
             bail!("unknown variable `{name}`");
         }
 
@@ -72,9 +78,11 @@ impl Interp {
     }
 
     fn unit_variant(&self, enum_name: Option<&str>, variant: &str) -> Option<Value> {
-        for (name, def) in &self.enums {
+        for (name, def) in self.enums() {
+            // The wanted enum may be a canonical key or a bare source name.
             if let Some(want) = enum_name
-                && want != name
+                && want != &**name
+                && want != super::resolver::bare(name)
             {
                 continue;
             }
@@ -82,7 +90,7 @@ impl Interp {
                 v.ident == variant && matches!(v.fields, syn::Fields::Unit)
             }) {
                 return Some(Value::Enum {
-                    enum_name: name.as_str().into(),
+                    enum_name: name.clone(),
                     variant: variant.into(),
                     data: Value::empty_data(),
                 });
@@ -105,7 +113,7 @@ impl Interp {
             if let Some(chunk) = self.user_function(name) {
                 return self.run_chunk(&chunk, &args, &[]);
             }
-            if self.structs().contains_key(name) {
+            if self.structs().contains_key(name.as_str()) {
                 return self.make_tuple_struct(name, args);
             }
             if let Some(v) = self.make_tuple_variant(None, name, &args) {
@@ -171,15 +179,16 @@ impl Interp {
         variant: &str,
         args: &[Value],
     ) -> Option<Result<Value>> {
-        for (name, def) in &self.enums {
+        for (name, def) in self.enums() {
             if let Some(want) = enum_name
-                && want != name
+                && want != &**name
+                && want != super::resolver::bare(name)
             {
                 continue;
             }
             if def.variants.iter().any(|v| v.ident == variant) {
                 return Some(Ok(Value::Enum {
-                    enum_name: name.as_str().into(),
+                    enum_name: name.clone(),
                     variant: variant.into(),
                     data: args.iter().cloned().collect(),
                 }));

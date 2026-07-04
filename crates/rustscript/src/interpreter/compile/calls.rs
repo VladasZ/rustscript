@@ -58,16 +58,45 @@ impl Compiler<'_> {
                 self.emit(Op::CallValue { dst, callee: reg, base, argc });
                 return Ok(());
             }
-            // A known top level function, called directly.
-            if let Some(&idx) = self.ctx.fn_index.get(&name) {
+        }
+        let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let resolved = match self.resolve_path_res(&segs) {
+            Ok(r) => r,
+            Err(_) => Res::External(segs.clone()),
+        };
+        let path_segs = match resolved {
+            // A known function, called directly by id.
+            Res::Fn(idx) => {
                 let base = self.compile_args(c.args.iter())?;
                 self.emit(Op::CallFn { dst, func: idx, base, argc });
                 return Ok(());
             }
-        }
-        // Everything else, resolved by the VM through the bridge dispatch.
-        let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
-        let p = self.add_path(segs, coerce);
+            // A tuple struct constructor.
+            Res::Struct(canon) => vec![canon.to_string()],
+            // An associated function, UFCS method, or tuple enum variant.
+            Res::TypeMember(canon, rest) => {
+                let mut segs = vec![canon.to_string()];
+                segs.extend(rest);
+                segs
+            }
+            // A tuple struct built through a type alias, `type P = Point; P(..)`.
+            Res::Alias(m, target) => {
+                let aliased = match &*target {
+                    syn::Type::Path(p) => self.ctx.resolver.resolve_struct_key(m, &p.path),
+                    _ => None,
+                };
+                match aliased {
+                    Some(canon) => vec![canon.to_string()],
+                    None => bail!("cannot call `{}`", segs.join("::")),
+                }
+            }
+            Res::Enum(_) | Res::Module | Res::Const(_) => {
+                bail!("cannot call `{}`", segs.join("::"))
+            }
+            // Everything else, resolved by the VM through the bridge dispatch.
+            Res::External(segs) => segs,
+        };
+        let p = self.add_path(path_segs, coerce);
         let base = self.compile_args(c.args.iter())?;
         self.emit(Op::CallPath { dst, path: p, base, argc });
         Ok(())
@@ -129,7 +158,9 @@ impl Compiler<'_> {
         self.emit(Op::Ret { src: ret });
         let child = self.frames.pop().unwrap();
         let caps: Vec<CapSource> = child.upvalues.iter().map(|(_, s)| *s).collect();
-        let chunk = Rc::new(child.into_chunk());
+        let mut chunk = child.into_chunk();
+        chunk.module = self.ctx.module as u16;
+        let chunk = Rc::new(chunk);
         let parent = self.cur();
         let child_idx = parent.children.len() as u16;
         parent.children.push(chunk);
@@ -219,7 +250,19 @@ impl Compiler<'_> {
     }
 
     pub(super) fn compile_struct_literal(&mut self, dst: Reg, s: &syn::ExprStruct) -> Result<()> {
-        let name = s.path.segments.last().map(|seg| seg.ident.to_string()).unwrap_or_default();
+        // A user struct resolves to its canonical name, which keys shapes,
+        // methods, and coercions. Anything else, an enum struct variant for
+        // example, keeps the bare last segment.
+        let (name, def) = match self.ctx.resolver.resolve_struct_key(self.ctx.module, &s.path) {
+            Some(canon) => {
+                let def = self.ctx.resolver.structs.get(&canon).map(|d| d.ast.clone());
+                (canon.to_string(), def)
+            }
+            None => {
+                let bare = s.path.segments.last().map(|seg| seg.ident.to_string()).unwrap_or_default();
+                (bare, None)
+            }
+        };
         // Written fields keyed by name.
         let mut written: Vec<(String, &Expr)> = Vec::new();
         for f in &s.fields {
@@ -232,7 +275,7 @@ impl Compiler<'_> {
         // Field order follows the declaration when the struct is known.
         // Written fields in declaration order, then any extras. A trailing
         // `..rest` fills whatever was not written.
-        let order: Vec<String> = match self.ctx.structs.get(&name) {
+        let order: Vec<String> = match def {
             Some(def) => {
                 let mut ordered: Vec<String> = def
                     .fields

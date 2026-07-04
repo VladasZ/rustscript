@@ -1180,6 +1180,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustscript-conformance"
+version = "0.1.0"
+
+[[package]]
 name = "rustscript-examples"
 version = "0.1.0"
 dependencies = [

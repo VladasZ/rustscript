@@ -179,7 +179,13 @@ pub(super) struct StructPlan {
 impl Interp {
     /// Lower a turbofish type into a parse plan. `building` guards against
     /// recursive struct definitions, which fall back to dynamic parsing.
-    pub(super) fn json_plan(&self, ty: &syn::Type, building: &mut Vec<String>) -> JsonPlan {
+    /// `module` is where the type expression was written.
+    pub(super) fn json_plan(
+        &self,
+        ty: &syn::Type,
+        building: &mut Vec<String>,
+        module: usize,
+    ) -> JsonPlan {
         let syn::Type::Path(p) = ty else {
             return JsonPlan::Dynamic;
         };
@@ -200,35 +206,41 @@ impl Interp {
         };
         match name.as_str() {
             "Vec" | "VecDeque" => match generic(0) {
-                Some(inner) => JsonPlan::Vec(Box::new(self.json_plan(inner, building))),
+                Some(inner) => JsonPlan::Vec(Box::new(self.json_plan(inner, building, module))),
                 None => JsonPlan::Dynamic,
             },
             "Option" | "Box" | "Rc" | "Arc" => match generic(0) {
-                Some(inner) => self.json_plan(inner, building),
+                Some(inner) => self.json_plan(inner, building, module),
                 None => JsonPlan::Dynamic,
             },
             "HashMap" | "BTreeMap" => match generic(1) {
-                Some(inner) => JsonPlan::Map(Box::new(self.json_plan(inner, building))),
+                Some(inner) => JsonPlan::Map(Box::new(self.json_plan(inner, building, module))),
                 None => JsonPlan::Dynamic,
             },
             _ => {
-                if building.iter().any(|b| b == &name) {
+                let Some(canon) = self.resolver().resolve_struct_key(module, &p.path) else {
+                    return JsonPlan::Dynamic;
+                };
+                if building.iter().any(|b| b.as_str() == &*canon) {
                     return JsonPlan::Dynamic;
                 }
-                let Some(shape) = self.struct_shape(&name) else {
+                let Some(shape) = self.struct_shape(&canon) else {
                     return JsonPlan::Dynamic;
                 };
-                let Some(def) = self.structs().get(&name).cloned() else {
+                let Some(def) = self.structs().get(&canon) else {
                     return JsonPlan::Dynamic;
                 };
-                building.push(name);
+                let def_module = def.module;
+                let def = def.ast.clone();
+                building.push(canon.to_string());
                 let mut fields = Vec::with_capacity(shape.runtime.fields.len());
                 if let syn::Fields::Named(named) = &def.fields {
                     for f in &named.named {
                         if f.ident.is_none() {
                             continue;
                         }
-                        fields.push(self.json_plan(&f.ty, building));
+                        // Field types resolve where the struct is declared.
+                        fields.push(self.json_plan(&f.ty, building, def_module));
                     }
                 }
                 building.pop();
@@ -239,7 +251,7 @@ impl Interp {
 
     /// `serde_json::from_str::<T>` with a known target type. Parses straight
     /// into typed values, so no coercion pass runs afterwards.
-    pub(super) fn typed_from_str(&self, args: &[Value], ty: &syn::Type) -> Result<Value> {
+    pub(super) fn typed_from_str(&self, args: &[Value], ty: &syn::Type, module: usize) -> Result<Value> {
         let owned;
         let text: &str = match args.first() {
             Some(Value::Str(s)) => s,
@@ -249,7 +261,7 @@ impl Interp {
             }
             None => bail!("from_str needs a string"),
         };
-        let plan = self.json_plan(ty, &mut Vec::new());
+        let plan = self.json_plan(ty, &mut Vec::new(), module);
         Ok(match parse_json_planned(text, &plan) {
             Ok(v) => Value::ok(v),
             Err(e) => Value::err(Value::str(e.to_string())),

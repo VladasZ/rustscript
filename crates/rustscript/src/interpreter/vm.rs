@@ -154,6 +154,10 @@ impl Interp {
                 Op::LoadInt { dst, v } => stack[base + *dst as usize] = Value::Int(*v),
                 Op::LoadBool { dst, v } => stack[base + *dst as usize] = Value::Bool(*v),
                 Op::LoadUnit { dst } => stack[base + *dst as usize] = Value::Unit,
+                Op::LoadGlobal { dst, idx } => {
+                    let v = self.global(*idx as usize)?;
+                    set_reg(&mut stack[base + *dst as usize], v);
+                }
                 Op::LoadUpvalue { dst, idx } => {
                     let upvals: &[Value] = match &cur_clo {
                         Some(c) => &c.captured,
@@ -244,7 +248,7 @@ impl Interp {
                                 && canon[canon.len() - 2] == "serde_json"
                                 && canon[canon.len() - 1] == "from_str"
                             {
-                                let v = self.typed_from_str(&args, ty)?;
+                                let v = self.typed_from_str(&args, ty, cur.module as usize)?;
                                 set_reg(&mut stack[base + dst as usize], v);
                                 ip += 1;
                                 continue;
@@ -252,7 +256,7 @@ impl Interp {
                         }
                         let mut v = self.dispatch_call(segs, args)?;
                         if let Some(ty) = coerce {
-                            v = self.coerce_result(v, ty);
+                            v = self.coerce_result(v, ty, cur.module as usize);
                         }
                         set_reg(&mut stack[base + dst as usize], v);
                     }
@@ -607,8 +611,11 @@ impl Interp {
                     set_reg(&mut stack[base + *dst as usize], v);
                 }
                 Op::Coerce { dst, src, ty } => {
-                    let v = self
-                        .coerce_value(stack[base + *src as usize].clone(), &cur.casts[*ty as usize]);
+                    let v = self.coerce_value(
+                        stack[base + *src as usize].clone(),
+                        &cur.casts[*ty as usize],
+                        cur.module as usize,
+                    );
                     set_reg(&mut stack[base + *dst as usize], v);
                 }
 

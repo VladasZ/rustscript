@@ -292,6 +292,8 @@ pub enum Op {
     LoadBool { dst: Reg, v: bool },
     LoadUnit { dst: Reg },
     LoadUpvalue { dst: Reg, idx: u16 },
+    /// Read a module level const or static, evaluated lazily on first use.
+    LoadGlobal { dst: Reg, idx: u32 },
     Move { dst: Reg, src: Reg },
 
     Bin { dst: Reg, a: Reg, b: Reg, op: BinKind },
@@ -364,6 +366,8 @@ pub struct Chunk {
     pub num_regs: usize,
     pub num_params: usize,
     pub name: String,
+    /// Module this body was written in, for runtime type resolution.
+    pub module: u16,
 
     // Side tables referenced by instruction operands.
     pub consts: Vec<Value>,
@@ -388,6 +392,7 @@ impl Chunk {
             num_regs: 0,
             num_params: 0,
             name: name.into(),
+            module: 0,
             consts: Vec::new(),
             members: Vec::new(),
             pats: Vec::new(),

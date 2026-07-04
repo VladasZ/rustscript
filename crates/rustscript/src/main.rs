@@ -1,5 +1,6 @@
 mod checker;
 mod interpreter;
+mod loader;
 
 use std::path::Path;
 
@@ -29,7 +30,8 @@ fn real_main() -> Result<()> {
         "check" => {
             let file = all.get(1).ok_or_else(err_usage)?;
             let source = std::fs::read_to_string(file)?;
-            checker::check(Path::new(file), &source)?;
+            let program = loader::load(Path::new(file), &source)?;
+            checker::check(Path::new(file), &program.files)?;
             println!("ok");
             Ok(())
         }
@@ -50,8 +52,9 @@ fn run(file: &str, check_first: bool, script_args: &[String]) -> Result<()> {
     let source = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("cannot read {file}: {e}"))?;
 
+    let program = loader::load(path, &source)?;
     if check_first {
-        checker::check(path, &source)?;
+        checker::check(path, &program.files)?;
     }
 
     // A real binary sees its own path as argv[0], then the caller's arguments.
@@ -59,9 +62,7 @@ fn run(file: &str, check_first: bool, script_args: &[String]) -> Result<()> {
     args.extend(script_args.iter().cloned());
     interpreter::set_script_args(args);
 
-    let ast = syn::parse_file(&source)
-        .map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
-    let interp = interpreter::Interp::load(&ast)?;
+    let interp = interpreter::Interp::load(&program.modules)?;
     interp.run_main()
 }
 
