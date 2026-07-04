@@ -1,6 +1,6 @@
 import { readFileSync } from "fs";
 
-const path = Bun.argv[2];
+const path = process.argv[2];
 const text = readFileSync(path, "utf8");
 const t = performance.now();
 const counts = new Map<string, number>();

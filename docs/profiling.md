@@ -65,7 +65,7 @@ and take the best:
 ./target/release/rust bench/cases/fib/case.rs 2>&1 >/dev/null | grep COMPUTE_NS
 ```
 
-The full comparison against native Rust, Bun, and Python lives in `bench/`,
+The full comparison against native Rust, Node, and Python lives in `bench/`,
 see `bench/README.md`. Quick run from `bench/`:
 
 ```sh

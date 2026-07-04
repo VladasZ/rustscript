@@ -1,6 +1,6 @@
 # bench
 
-Compares rustscript against native Rust, Bun, and Python 3 on the same programs.
+Compares rustscript against native Rust, Node, and Python 3 on the same programs.
 Every case is one algorithm written three times, in Rust, TypeScript, and Python,
 all printing byte identical stdout. The Rust file is both a real compiled cargo
 example and a rustscript script, so one source feeds two of the four bars.
@@ -18,7 +18,7 @@ Two tracks, because they answer different questions.
 rustscript is always measured warm, with the `cargo check` gate skipped through
 `RUSTSCRIPT_SKIP_CHECK=1`. The gate is a one-time cost paid on the first run of a
 new script, not a per-run cost, so it does not belong in a speed comparison
-against Bun and Python. It is left out of the charts. For reference it runs a full
+against Node and Python. It is left out of the charts. For reference it runs a full
 `cargo check`, around 5 seconds the first time a script changes, then every run is
 warm at a few milliseconds. The bench still records `cold_mean` and `warm_mean` in
 `results.json`.
@@ -47,7 +47,7 @@ cargo run --release --bin chart       renders results/benchmark.png
 Flags: `--quick` uses fewer samples, `--no-gate` reuses the previous gate number
 so a rerun skips the slow cold rebuild.
 
-Needs `hyperfine`, `bun`, and `python3` on PATH, and the `rust` binary installed
+Needs `hyperfine`, `node`, and `python3` on PATH, and the `rust` binary installed
 from `crates/rustscript`.
 
 ## The pictures

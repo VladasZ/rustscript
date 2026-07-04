@@ -42,7 +42,7 @@ fn main() -> Result<()> {
     std::fs::create_dir_all(&results_dir)?;
 
     ensure_tool("hyperfine")?;
-    ensure_tool("bun")?;
+    ensure_tool("node")?;
     ensure_tool("python3")?;
 
     println!("building native example binaries ...");
@@ -140,10 +140,10 @@ fn invocation(root: &Path, c: &Case, lang: &str) -> Invocation {
             args.extend(arg);
             Invocation { lang: lang.into(), program: "rust".into(), args, skip_check: true }
         }
-        "bun" => {
-            let mut args = vec!["run".to_string(), case_dir.join("case.ts").to_string_lossy().into_owned()];
+        "node" => {
+            let mut args = vec![case_dir.join("case.ts").to_string_lossy().into_owned()];
             args.extend(arg);
-            Invocation { lang: lang.into(), program: "bun".into(), args, skip_check: false }
+            Invocation { lang: lang.into(), program: "node".into(), args, skip_check: false }
         }
         "python" => {
             let mut args = vec![case_dir.join("case.py").to_string_lossy().into_owned()];
@@ -257,8 +257,9 @@ fn compute_track(iv: &Invocation, samples: u32) -> Result<CompStat> {
         let ns = stderr
             .lines()
             .find_map(|l| {
-                // Bun colors `console.error` even when piped, so the marker can
-                // arrive wrapped in ANSI escapes. Take the digits after it.
+                // Some runtimes color `console.error` even when piped, so the
+                // marker can arrive wrapped in ANSI escapes. Take the digits
+                // after it.
                 let start = l.find("COMPUTE_NS")? + "COMPUTE_NS".len();
                 let digits: String = l[start..]
                     .chars()

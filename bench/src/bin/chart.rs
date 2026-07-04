@@ -17,13 +17,20 @@ const INK: RGBColor = RGBColor(40, 40, 44);
 const MUTED: RGBColor = RGBColor(130, 130, 138);
 const GRID: RGBColor = RGBColor(224, 224, 228);
 
-const LANG_ORDER: [&str; 4] = ["native", "rustscript", "bun", "python"];
+const LANG_ORDER: [&str; 4] = ["native", "rustscript", "node", "python"];
+
+fn display_name(lang: &str) -> &str {
+    match lang {
+        "native" => "native rust",
+        other => other,
+    }
+}
 
 fn color_for(lang: &str) -> RGBColor {
     match lang {
         "native" => RGBColor(64, 110, 180),
         "rustscript" => RGBColor(224, 116, 38),
-        "bun" => RGBColor(196, 88, 152),
+        "node" => RGBColor(38, 166, 154),
         "python" => RGBColor(56, 150, 96),
         _ => MUTED,
     }
@@ -52,13 +59,13 @@ fn render_case(out: &Path, c: &CaseResult) -> Result<()> {
     let mut panels: Vec<(String, Vec<(String, f64, RGBColor)>)> = Vec::new();
     let wall: Vec<_> = LANG_ORDER
         .iter()
-        .filter_map(|l| c.wall_of(l).map(|w| (l.to_string(), w.median, color_for(l))))
+        .filter_map(|l| c.wall_of(l).map(|w| (display_name(l).to_string(), w.median, color_for(l))))
         .collect();
     panels.push(("wall-clock   startup plus run".to_string(), wall));
     if c.kind != "startup" {
         let comp: Vec<_> = LANG_ORDER
             .iter()
-            .filter_map(|l| c.compute_of(l).map(|w| (l.to_string(), w.min, color_for(l))))
+            .filter_map(|l| c.compute_of(l).map(|w| (display_name(l).to_string(), w.min, color_for(l))))
             .collect();
         panels.push(("compute-only   self timed".to_string(), comp));
     }
@@ -79,20 +86,27 @@ fn render_case(out: &Path, c: &CaseResult) -> Result<()> {
     let mut lx = (w as i32) - 470;
     for lang in LANG_ORDER {
         head.draw(&Rectangle::new([(lx, 20), (lx + 18, 36)], color_for(lang).filled()))?;
-        head.draw(&Text::new(lang, (lx + 24, 22), ("sans-serif", 14).into_font().color(&INK)))?;
+        head.draw(&Text::new(display_name(lang), (lx + 24, 22), ("sans-serif", 14).into_font().color(&INK)))?;
         lx += 118;
     }
 
+    // Both panels share one axis so bar heights compare directly across them.
+    let vmax = panels
+        .iter()
+        .flat_map(|(_, bars)| bars.iter().map(|b| b.1))
+        .fold(0f64, f64::max);
+    let axis_hi = if vmax > 0.0 { vmax * 1.18 } else { 1.0 };
+
     let cols = body.split_evenly((1, panels.len()));
     for (cell, (title, bars)) in cols.iter().zip(panels.iter()) {
-        panel(cell, title, bars)?;
+        panel(cell, title, bars, axis_hi)?;
     }
     area.present()?;
     Ok(())
 }
 
 /// Draw one bar panel on a linear scale. Values are seconds.
-fn panel<DB>(area: &DrawingArea<DB, Shift>, title: &str, bars: &[(String, f64, RGBColor)]) -> Result<()>
+fn panel<DB>(area: &DrawingArea<DB, Shift>, title: &str, bars: &[(String, f64, RGBColor)], axis_hi: f64) -> Result<()>
 where
     DB: DrawingBackend,
     <DB as DrawingBackend>::ErrorType: 'static,
@@ -117,9 +131,6 @@ where
     if bars.is_empty() {
         return Ok(());
     }
-    let vmax = bars.iter().map(|b| b.1).fold(0f64, f64::max);
-    let axis_hi = if vmax > 0.0 { vmax * 1.18 } else { 1.0 };
-
     let n = bars.len() as i32;
     let slot = plot_w / n;
     let bw = (slot as f64 * 0.5) as i32;
