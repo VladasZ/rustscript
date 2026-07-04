@@ -9,6 +9,7 @@ use super::native::Native;
 use super::value::{StructData, Value};
 
 use super::json_bridge::*;
+use super::jwt_bridge::*;
 use super::std_bridge::*;
 
 
@@ -78,6 +79,8 @@ pub(super) fn crate_bridge(module: &str, func: &str, args: &[Value]) -> Result<O
         ("rand", "random") => Value::Float(rand::random::<f64>()),
         // chrono -----------------------------------------------------------
         ("Utc", "now") | ("Local", "now") => now_datetime(module == "Local"),
+        // jsonwebtoken -------------------------------------------------------
+        ("jsonwebtoken", "encode") => jwt_encode(args)?,
         // tempfile ---------------------------------------------------------
         ("tempfile", "tempdir") => match tempfile::tempdir() {
             Ok(d) => Value::ok(Native::TempDir(d).wrap()),

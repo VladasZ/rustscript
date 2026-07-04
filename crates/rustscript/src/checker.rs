@@ -106,6 +106,7 @@ base64 = "0.22"
 hex = "0.4"
 ctrlc = "3"
 tempfile = "3"
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 
 [workspace]
 "#;

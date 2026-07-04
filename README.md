@@ -166,6 +166,9 @@ a native bridge for it. These are bridged today.
   [`hex`](https://github.com/KokaKiwi/rust-hex) for encoding
 - [`ctrlc`](https://github.com/Detegr/rust-ctrlc) for a Ctrl-C handler
 - [`tempfile`](https://github.com/Stebalien/tempfile) for temp dirs and files
+- [`jsonwebtoken`](https://github.com/Keats/jsonwebtoken) for signing JWTs,
+  `Header`, `EncodingKey::from_ec_pem` and `from_secret`, and `encode`, so
+  ES256 and HS256 tokens work
 
 A crate without a bridge still passes `cargo check` but stops the interpreter
 with `unsupported crate` when its code runs.

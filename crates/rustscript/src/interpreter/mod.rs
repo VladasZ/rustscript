@@ -7,6 +7,7 @@ mod format;
 mod higher_order;
 mod http;
 mod json_bridge;
+mod jwt_bridge;
 mod methods;
 mod native;
 mod ops;
