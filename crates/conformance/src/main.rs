@@ -1,3 +1,5 @@
+#!/usr/bin/env rust
+
 //! Conformance program for multifile scripts. Compiled by cargo and run by
 //! the rustscript interpreter, the test asserts both print identical output.
 //! It exercises a nested module tree, every import style, re-export chains,
