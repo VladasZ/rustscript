@@ -16,16 +16,29 @@ impl Compiler<'_> {
     pub(super) fn compile_macro(&mut self, mac: &syn::Macro, dst: Reg) -> Result<()> {
         let name = mac.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
         match name.as_str() {
-            "println" | "print" | "eprintln" | "eprint" | "panic" | "anyhow" | "bail" => {
-                let spec = self.build_fmt_spec(mac)?;
+            "println" | "print" | "eprintln" | "eprint" | "panic" | "anyhow" | "bail"
+            | "unreachable" | "todo" | "unimplemented" => {
+                // These three abort like panic; give a default message when the
+                // macro is called with no arguments, matching real Rust.
+                let spec = match name.as_str() {
+                    "unreachable" | "todo" | "unimplemented" if mac.tokens.is_empty() => {
+                        let msg = match name.as_str() {
+                            "todo" => "not yet implemented",
+                            "unimplemented" => "not implemented",
+                            _ => "internal error: entered unreachable code",
+                        };
+                        self.literal_fmt_spec(msg)
+                    }
+                    _ => self.build_fmt_spec(mac)?,
+                };
                 let kind = match name.as_str() {
                     "println" => MacroKind::Println,
                     "print" => MacroKind::Print,
                     "eprintln" => MacroKind::Eprintln,
                     "eprint" => MacroKind::Eprint,
-                    "panic" => MacroKind::Panic,
                     "anyhow" => MacroKind::Anyhow,
-                    _ => MacroKind::Bail,
+                    "bail" => MacroKind::Bail,
+                    _ => MacroKind::Panic,
                 };
                 self.emit(Op::MacroCall { kind, dst, spec });
             }
@@ -125,6 +138,14 @@ impl Compiler<'_> {
 
     /// Parse a format macro body and compile its arguments, resolving inline
     /// `{name}` holes to variables in scope.
+    /// A format spec that is a fixed string with no interpolation, for the
+    /// no-argument forms of `unreachable!`, `todo!`, and `unimplemented!`.
+    pub(super) fn literal_fmt_spec(&mut self, text: &str) -> u16 {
+        let f = self.cur();
+        f.fmts.push(FmtSpec { template: text.to_string(), positional: Vec::new(), named: Vec::new() });
+        (f.fmts.len() - 1) as u16
+    }
+
     pub(super) fn build_fmt_spec(&mut self, mac: &syn::Macro) -> Result<u16> {
         let args = mac.parse_body_with(Punctuated::<Expr, syn::Token![,]>::parse_terminated)?;
         let mut iter = args.iter();

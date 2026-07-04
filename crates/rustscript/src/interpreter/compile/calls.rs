@@ -29,6 +29,32 @@ impl Compiler<'_> {
         Ok(base)
     }
 
+    /// Record the turbofish type args on a call path, e.g. the `AppList` in
+    /// `get_json::<AppList>(..)`, returning an index into the current chunk's
+    /// `call_type_args` table, or `u32::MAX` when there are none.
+    fn record_call_type_args(&mut self, path: &syn::Path) -> u32 {
+        let Some(seg) = path.segments.last() else {
+            return u32::MAX;
+        };
+        let syn::PathArguments::AngleBracketed(ab) = &seg.arguments else {
+            return u32::MAX;
+        };
+        let types: Vec<Rc<syn::Type>> = ab
+            .args
+            .iter()
+            .filter_map(|a| match a {
+                syn::GenericArgument::Type(t) => Some(Rc::new(t.clone())),
+                _ => None,
+            })
+            .collect();
+        if types.is_empty() {
+            return u32::MAX;
+        }
+        let table = &mut self.cur().call_type_args;
+        table.push(Rc::from(types.into_boxed_slice()));
+        (table.len() - 1) as u32
+    }
+
     pub(super) fn compile_call(&mut self, dst: Reg, c: &syn::ExprCall) -> Result<()> {
         let path = match &*c.func {
             Expr::Path(p) => &p.path,
@@ -65,10 +91,12 @@ impl Compiler<'_> {
             Err(_) => Res::External(segs.clone()),
         };
         let path_segs = match resolved {
-            // A known function, called directly by id.
+            // A known function, called directly by id. Turbofish type args are
+            // recorded so the callee can bind them to its generic parameters.
             Res::Fn(idx) => {
+                let targ = self.record_call_type_args(path);
                 let base = self.compile_args(c.args.iter())?;
-                self.emit(Op::CallFn { dst, func: idx, base, argc });
+                self.emit(Op::CallFn { dst, func: idx, base, argc, targ });
                 return Ok(());
             }
             // A tuple struct constructor.

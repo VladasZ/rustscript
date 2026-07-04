@@ -310,7 +310,9 @@ pub enum Op {
     CmpJumpImm { a: Reg, imm: i64, op: BinKind, to: u32 },
 
     /// Direct call of a known top level function, by global index.
-    CallFn { dst: Reg, func: u32, base: Reg, argc: u16 },
+    /// `targ` indexes the caller chunk's `call_type_args`, or `u32::MAX` when
+    /// the call had no turbofish type arguments.
+    CallFn { dst: Reg, func: u32, base: Reg, argc: u16, targ: u32 },
     /// Call a closure value held in a register.
     CallValue { dst: Reg, callee: Reg, base: Reg, argc: u16 },
     /// Any other call, `Type::assoc`, a bridge, a constructor, resolved by path.
@@ -383,6 +385,11 @@ pub struct Chunk {
     pub children: Vec<Rc<Chunk>>,
     /// For each child, where to copy its upvalues from.
     pub child_caps: Vec<Vec<CapSource>>,
+    /// Generic parameter names of this function, in order, e.g. `["T"]`. Used
+    /// to bind a caller's turbofish type args when the body resolves them.
+    pub generics: Vec<Rc<str>>,
+    /// Turbofish type args recorded at `CallFn` sites, referenced by `targ`.
+    pub call_type_args: Vec<Rc<[Rc<syn::Type>]>>,
 }
 
 impl Chunk {
@@ -403,6 +410,8 @@ impl Chunk {
             names: Vec::new(),
             children: Vec::new(),
             child_caps: Vec::new(),
+            generics: Vec::new(),
+            call_type_args: Vec::new(),
         }
     }
 }

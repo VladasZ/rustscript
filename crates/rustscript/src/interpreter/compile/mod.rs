@@ -43,6 +43,8 @@ struct FnState {
     max_reg: Reg,
     num_params: usize,
     name: String,
+    generics: Vec<Rc<str>>,
+    call_type_args: Vec<Rc<[Rc<syn::Type>]>>,
 }
 
 impl FnState {
@@ -65,6 +67,8 @@ impl FnState {
             max_reg: 0,
             num_params: 0,
             name,
+            generics: Vec::new(),
+            call_type_args: Vec::new(),
         }
     }
 
@@ -93,6 +97,8 @@ impl FnState {
             names: self.names,
             children: self.children,
             child_caps: self.child_caps,
+            generics: self.generics,
+            call_type_args: self.call_type_args,
         }
     }
 }
@@ -139,6 +145,11 @@ impl<'a> Compiler<'a> {
     /// Compile a top level function or a method body into a chunk.
     pub fn compile_fn(&mut self, sig: &syn::Signature, block: &Block) -> Result<Chunk> {
         self.frames.push(FnState::new(sig.ident.to_string()));
+        // Record generic parameter names so a caller's turbofish type args can
+        // be bound to them when the body resolves a type, e.g. `from_str::<T>`.
+        let generics: Vec<Rc<str>> =
+            sig.generics.type_params().map(|p| Rc::from(p.ident.to_string().as_str())).collect();
+        self.cur().generics = generics;
         // Parameters occupy the first registers, self first if present.
         let mut params: Vec<Option<&Pat>> = Vec::new();
         for input in &sig.inputs {

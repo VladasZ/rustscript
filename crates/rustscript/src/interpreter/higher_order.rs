@@ -365,6 +365,20 @@ impl Interp {
                     Value::err(self.call_closure(&*clo(0)?, &[])?)
                 }
             }
+            "or_else" => {
+                if is_some {
+                    Value::some(inner())
+                } else {
+                    self.call_closure(&*clo(0)?, &[])?
+                }
+            }
+            "or" => {
+                if is_some {
+                    Value::some(inner())
+                } else {
+                    args.first().cloned().unwrap_or_else(Value::none)
+                }
+            }
             _ => return Ok(None),
         };
         Ok(Some(out))

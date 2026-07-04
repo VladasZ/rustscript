@@ -118,6 +118,8 @@ pub(super) fn str_method_slow(s: &Rc<RStr>, name: &str, args: &[Value]) -> Resul
         // and expect on a string are identity to keep that pattern working.
         "as_str" | "as_string" | "unwrap" | "expect" => Value::Str(s.clone()),
         "as_bytes" | "into_bytes" => bytes_to_vec(s.as_bytes()),
+        // A byte iterator is an eager Vec of the utf-8 bytes as ints here.
+        "bytes" => bytes_to_vec(s.as_bytes()),
         "strip_prefix" => match s.strip_prefix(&arg_str(0)) {
             Some(rest) => Value::some(Value::str(rest.to_string())),
             None => Value::none(),
@@ -325,11 +327,30 @@ pub(super) fn vec_method(v: &Rc<RefCell<Vec<Value>>>, method: &MethodName, args:
                 v.borrow_mut().truncate(n);
                 Value::Unit
             }
-            "extend" | "append" => {
+            "extend" | "append" | "extend_from_slice" => {
                 if let Some(Value::Vec(other)) = args.first() {
                     v.borrow_mut().extend(other.borrow().iter().cloned());
                 }
                 Value::Unit
+            }
+            // Flattens one level: nested vectors spill their items, and Ok/Some
+            // yield their inner value while Err/None drop out.
+            "flatten" => {
+                let items = v.borrow();
+                let mut out: Vec<Value> = Vec::new();
+                for item in items.iter() {
+                    match item {
+                        Value::Vec(inner) => out.extend(inner.borrow().iter().cloned()),
+                        Value::Enum { variant, data, .. } if matches!(&**variant, "Some" | "Ok") => {
+                            if let Some(inner) = data.first() {
+                                out.push(inner.clone());
+                            }
+                        }
+                        Value::Enum { variant, .. } if matches!(&**variant, "None" | "Err") => {}
+                        other => out.push(other.clone()),
+                    }
+                }
+                Value::vec(out)
             }
             // Iterators are eager vectors here, so `next` is the first item.
             // The check gate keeps it off real vectors, where it won't compile.
@@ -440,6 +461,9 @@ pub(super) fn num_method(recv: &Value, name: &str, args: &[Value]) -> Result<Val
         (Value::Float(f), "round") => Value::Float(f.round()),
         (Value::Int(a), "min") => Value::Int((*a).min(int_arg(args, 0)?)),
         (Value::Int(a), "max") => Value::Int((*a).max(int_arg(args, 0)?)),
+        (Value::Int(a), "saturating_sub") => Value::Int(a.saturating_sub(int_arg(args, 0)?)),
+        (Value::Int(a), "saturating_add") => Value::Int(a.saturating_add(int_arg(args, 0)?)),
+        (Value::Int(a), "saturating_mul") => Value::Int(a.saturating_mul(int_arg(args, 0)?)),
         (Value::Int(a), "cmp") => make_ordering(a.cmp(&int_arg(args, 0)?)),
         (_, "partial_cmp") => Value::some(make_ordering(
             as_f()
@@ -518,6 +542,9 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
             } else {
                 args.first().cloned().unwrap_or(Value::Unit)
             }
+        }
+        "unwrap_or_default" => {
+            if is_ok { inner.unwrap_or(Value::Unit) } else { Value::Unit }
         }
         "ok" => {
             if is_ok {

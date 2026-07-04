@@ -127,7 +127,15 @@ pub(super) fn native_call(module: &str, func: &str, args: &[Value]) -> Result<Op
                 Err(e) => Value::err(Value::str(e.to_string())),
             },
             ("fs", "hard_link") => wrap_unit(std::fs::hard_link(s(0)?, s(1)?)),
-            ("fs", "symlink") => wrap_unit(make_symlink(&s(0)?, &s(1)?)),
+            // The platform specific names are aliased to one cross-platform
+            // helper, so the cfg gated `use` a script needs to type-check on
+            // each os all dispatch here at runtime.
+            ("fs", "symlink") | ("fs", "symlink_file") | ("fs", "symlink_dir") => {
+                wrap_unit(make_symlink(&s(0)?, &s(1)?))
+            }
+            ("fs", "set_permissions") => {
+                wrap_unit(set_permissions_impl(&s(0)?, args.get(1).and_then(perm_mode)))
+            }
             // -- thread ---------------------------------------------------
             ("thread", "sleep") => {
                 if let Some(d) = args.first().and_then(duration_from_value) {
@@ -154,6 +162,29 @@ pub(super) fn make_symlink(src: &str, dst: &str) -> std::io::Result<()> {
         } else {
             std::os::windows::fs::symlink_file(src, dst)
         }
+    }
+}
+
+fn perm_mode(v: &Value) -> Option<u32> {
+    if let Value::Struct(st) = v
+        && &**st.name() == "Permissions"
+    {
+        return st.get("mode").and_then(|m| as_i64(&m)).map(|m| m as u32);
+    }
+    None
+}
+
+fn set_permissions_impl(path: &str, mode: Option<u32>) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode.unwrap_or(0o644)))
+    }
+    #[cfg(windows)]
+    {
+        // Windows carries no unix mode bits, so a mode set is a no-op there.
+        let _ = (path, mode);
+        Ok(())
     }
 }
 
@@ -390,9 +421,44 @@ pub(super) fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Va
         return jwt_assoc(ty, func, args);
     }
     Ok(Some(match (ty, func) {
+        ("Permissions", "from_mode") => {
+            let mode = args.first().and_then(as_i64).unwrap_or(0o644);
+            Value::struct_of("Permissions", vec![("mode".into(), Value::Int(mode))])
+        }
         ("String", "new") | ("String", "with_capacity") => Value::str(""),
         ("String", "from") => Value::str(args.first().map(|v| v.display()).unwrap_or_default()),
         ("String", "from_utf8_lossy") => Value::str(bytes_to_string(args.first())),
+        ("char", "from_u32") => match args.first().and_then(as_i64) {
+            Some(n) if (0..=0x10FFFF).contains(&n) => match char::from_u32(n as u32) {
+                Some(c) => Value::some(Value::Char(c)),
+                None => Value::none(),
+            },
+            _ => Value::none(),
+        },
+        ("char", "from_digit") => {
+            let n = args.first().and_then(as_i64).unwrap_or(-1);
+            let radix = args.get(1).and_then(as_i64).unwrap_or(10);
+            match (u32::try_from(n), u32::try_from(radix)) {
+                (Ok(n), Ok(radix)) => match char::from_digit(n, radix) {
+                    Some(c) => Value::some(Value::Char(c)),
+                    None => Value::none(),
+                },
+                _ => Value::none(),
+            }
+        }
+        // Every integer type parses the same way here, values are untyped ints.
+        (
+            "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64"
+            | "u128" | "usize",
+            "from_str_radix",
+        ) => {
+            let text = args.first().map(|v| v.display()).unwrap_or_default();
+            let radix = args.get(1).and_then(as_i64).unwrap_or(10) as u32;
+            match i64::from_str_radix(text.trim(), radix) {
+                Ok(n) => Value::ok(Value::Int(n)),
+                Err(e) => Value::err(Value::str(e.to_string())),
+            }
+        }
         ("String", "from_utf8") => Value::ok(Value::str(bytes_to_string(args.first()))),
         // The shape carries every field a later builder call can set, since a
         // shape cannot grow after the instance exists.

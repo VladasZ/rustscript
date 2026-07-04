@@ -325,3 +325,64 @@ fn main() {
 "#);
     assert!(!err.is_empty());
 }
+
+#[test]
+fn let_else_diverges_on_no_match() {
+    let out = run(r#"
+fn first_word(s: &str) -> String {
+    let Some(w) = s.split_whitespace().next() else {
+        return "empty".to_string();
+    };
+    w.to_string()
+}
+fn main() {
+    println!("{}", first_word("hello there"));
+    println!("{}", first_word("   "));
+}
+"#);
+    assert_eq!(out, "hello\nempty\n");
+}
+
+#[test]
+fn let_else_binds_and_continues_on_match() {
+    let out = run(r#"
+fn main() {
+    let pairs = [("a", 1), ("b", 2)];
+    for p in &pairs {
+        let (name, n) = *p;
+        let Some(doubled) = Some(n * 2) else { continue };
+        println!("{name}={doubled}");
+    }
+}
+"#);
+    assert_eq!(out, "a=2\nb=4\n");
+}
+
+#[test]
+fn option_or_else_and_or() {
+    let out = run(r#"
+fn main() {
+    let a: Option<i64> = None;
+    let b = a.or_else(|| Some(7));
+    println!("{}", b.unwrap());
+    let c: Option<i64> = Some(3);
+    println!("{}", c.or(Some(9)).unwrap());
+    let d: Option<i64> = None;
+    println!("{}", d.or(Some(9)).unwrap());
+}
+"#);
+    assert_eq!(out, "7\n3\n9\n");
+}
+
+#[test]
+fn integer_limits() {
+    let out = run(r#"
+fn main() {
+    println!("{}", 5usize.min(usize::MAX));
+    println!("{}", u8::MAX);
+    println!("{}", i32::MIN);
+    println!("{}", 3i64.saturating_sub(10));
+}
+"#);
+    assert_eq!(out, "5\n255\n-2147483648\n-7\n");
+}
