@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 /// The four contestants, in a fixed order used everywhere for stable colors.
-pub const LANGS: [&str; 4] = ["native", "rustscript", "bun", "python"];
+pub const LANGS: [&str; 4] = ["native", "rustscript", "node", "python"];
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct WallStat {

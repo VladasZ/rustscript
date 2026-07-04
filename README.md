@@ -177,11 +177,11 @@ strongest guarantee that the interpreter behaves like the real compiler.
 
 ## Benchmarks
 
-The `bench` crate compares rustscript against native Rust, Bun, and Python 3 on
+The `bench` crate compares rustscript against native Rust, Node, and Python 3 on
 the same programs, each written three times with byte identical output. It
 measures wall-clock time with [hyperfine](https://github.com/sharkdp/hyperfine)
 and a self timed compute track, then draws one PNG per case. rustscript starts
-almost as fast as native and far faster than Bun or Python. On wall clock it
+almost as fast as native and far faster than Node or Python. On wall clock it
 beats Python on every case. On raw compute it beats Python on numeric loops,
 ties it on json parsing, sits close behind on function calls, and still
 trails on hashmap churn like word counting. See `bench/README.md`,
