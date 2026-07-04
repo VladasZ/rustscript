@@ -19,6 +19,15 @@ use super::Interp;
 /// native stack. Depth, not registers, so deep-but-narrow recursion still works.
 const MAX_CALL_DEPTH: usize = 100_000;
 
+/// A binding of a generic parameter name to the concrete type a caller passed
+/// by turbofish, plus the module that type was named in, so the callee can
+/// resolve `from_str::<T>` to the real struct. Empty for a non-generic call.
+pub(super) type TypeEnv = Rc<[(Rc<str>, Rc<syn::Type>, u16)]>;
+
+fn empty_type_env() -> TypeEnv {
+    Rc::from(Vec::new())
+}
+
 /// A suspended caller, restored when the callee returns.
 struct Frame {
     chunk: Rc<Chunk>,
@@ -26,6 +35,7 @@ struct Frame {
     ip: usize,
     base: usize,
     dst: u16,
+    type_env: TypeEnv,
 }
 
 thread_local! {
@@ -78,6 +88,7 @@ impl Interp {
         let mut frames: Vec<Frame> = Vec::new();
         let mut cur = entry.clone();
         let mut cur_clo: Option<Rc<ClosureData>> = None;
+        let mut cur_tenv: TypeEnv = empty_type_env();
         let mut base = 0usize;
         let mut ip = 0usize;
 
@@ -91,6 +102,7 @@ impl Interp {
                     Some(f) => {
                         cur = f.chunk;
                         cur_clo = f.closure;
+                        cur_tenv = f.type_env;
                         ip = f.ip;
                         base = f.base;
                         set_reg(&mut stack[base + f.dst as usize], v);
@@ -103,7 +115,10 @@ impl Interp {
         // Enter `$chunk` with `$argc` args taken from the caller window at
         // `$abase`, storing the result into caller register `$dst` on return.
         macro_rules! call {
-            ($chunk:expr, $clo:expr, $dst:expr, $abase:expr, $argc:expr) => {{
+            ($chunk:expr, $clo:expr, $dst:expr, $abase:expr, $argc:expr) => {
+                call!($chunk, $clo, $dst, $abase, $argc, empty_type_env())
+            };
+            ($chunk:expr, $clo:expr, $dst:expr, $abase:expr, $argc:expr, $tenv:expr) => {{
                 let callee: Rc<Chunk> = $chunk;
                 if $argc != callee.num_params {
                     bail!(
@@ -133,6 +148,7 @@ impl Interp {
                 frames.push(Frame {
                     chunk: replace(&mut cur, callee),
                     closure: replace(&mut cur_clo, $clo),
+                    type_env: replace(&mut cur_tenv, $tenv),
                     ip: ip + 1,
                     base,
                     dst: $dst,
@@ -216,11 +232,25 @@ impl Interp {
                     }
                 }
 
-                Op::CallFn { dst, func, base: abase, argc } => {
+                Op::CallFn { dst, func, base: abase, argc, targ } => {
                     let (dst, func) = (*dst, *func as usize);
                     let (abase, argc) = (*abase as usize, *argc as usize);
                     let callee = self.functions[func].clone();
-                    call!(callee, None, dst, abase, argc);
+                    // Bind the call's turbofish type args to the callee's
+                    // generic parameters, resolved in this (caller) module.
+                    let tenv: TypeEnv = if *targ != u32::MAX {
+                        let targs = &cur.call_type_args[*targ as usize];
+                        let module = cur.module;
+                        callee
+                            .generics
+                            .iter()
+                            .zip(targs.iter())
+                            .map(|(name, ty)| (name.clone(), ty.clone(), module))
+                            .collect()
+                    } else {
+                        empty_type_env()
+                    };
+                    call!(callee, None, dst, abase, argc, tenv);
                 }
                 Op::CallValue { dst, callee, base: abase, argc } => {
                     let (dst, callee) = (*dst, *callee as usize);
@@ -248,7 +278,7 @@ impl Interp {
                                 && canon[canon.len() - 2] == "serde_json"
                                 && canon[canon.len() - 1] == "from_str"
                             {
-                                let v = self.typed_from_str(&args, ty, cur.module as usize)?;
+                                let v = self.typed_from_str(&args, ty, cur.module as usize, &cur_tenv)?;
                                 set_reg(&mut stack[base + dst as usize], v);
                                 ip += 1;
                                 continue;

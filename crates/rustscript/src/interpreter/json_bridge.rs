@@ -222,10 +222,20 @@ impl Interp {
         ty: &syn::Type,
         building: &mut Vec<String>,
         module: usize,
+        tenv: &[(Rc<str>, Rc<syn::Type>, u16)],
     ) -> JsonPlan {
         let syn::Type::Path(p) = ty else {
             return JsonPlan::Dynamic;
         };
+        // A bare generic parameter the caller bound by turbofish resolves to
+        // its concrete type, planned in the module that type was named in.
+        if p.qself.is_none()
+            && p.path.segments.len() == 1
+            && let Some((_, bound, bmod)) =
+                tenv.iter().find(|(n, _, _)| p.path.segments[0].ident == &**n)
+        {
+            return self.json_plan(bound, building, *bmod as usize, tenv);
+        }
         let Some(seg) = p.path.segments.last() else {
             return JsonPlan::Dynamic;
         };
@@ -243,15 +253,15 @@ impl Interp {
         };
         match name.as_str() {
             "Vec" | "VecDeque" => match generic(0) {
-                Some(inner) => JsonPlan::Vec(Box::new(self.json_plan(inner, building, module))),
+                Some(inner) => JsonPlan::Vec(Box::new(self.json_plan(inner, building, module, tenv))),
                 None => JsonPlan::Dynamic,
             },
             "Option" | "Box" | "Rc" | "Arc" => match generic(0) {
-                Some(inner) => self.json_plan(inner, building, module),
+                Some(inner) => self.json_plan(inner, building, module, tenv),
                 None => JsonPlan::Dynamic,
             },
             "HashMap" | "BTreeMap" => match generic(1) {
-                Some(inner) => JsonPlan::Map(Box::new(self.json_plan(inner, building, module))),
+                Some(inner) => JsonPlan::Map(Box::new(self.json_plan(inner, building, module, tenv))),
                 None => JsonPlan::Dynamic,
             },
             _ => {
@@ -279,8 +289,9 @@ impl Interp {
                         let Some(ident) = &f.ident else {
                             continue;
                         };
-                        // Field types resolve where the struct is declared.
-                        fields.push(self.json_plan(&f.ty, building, def_module));
+                        // Field types resolve where the struct is declared and
+                        // are concrete, so no caller type env applies here.
+                        fields.push(self.json_plan(&f.ty, building, def_module, &[]));
                         optional.push(is_option(&f.ty));
                         let key = serde_rename(f).unwrap_or_else(|| ident.to_string());
                         key_map.insert(key, slot);
@@ -300,7 +311,13 @@ impl Interp {
 
     /// `serde_json::from_str::<T>` with a known target type. Parses straight
     /// into typed values, so no coercion pass runs afterwards.
-    pub(super) fn typed_from_str(&self, args: &[Value], ty: &syn::Type, module: usize) -> Result<Value> {
+    pub(super) fn typed_from_str(
+        &self,
+        args: &[Value],
+        ty: &syn::Type,
+        module: usize,
+        tenv: &[(Rc<str>, Rc<syn::Type>, u16)],
+    ) -> Result<Value> {
         let owned;
         let text: &str = match args.first() {
             Some(Value::Str(s)) => s,
@@ -310,7 +327,7 @@ impl Interp {
             }
             None => bail!("from_str needs a string"),
         };
-        let plan = self.json_plan(ty, &mut Vec::new(), module);
+        let plan = self.json_plan(ty, &mut Vec::new(), module, tenv);
         Ok(match parse_json_planned(text, &plan) {
             Ok(v) => Value::ok(v),
             Err(e) => Value::err(Value::str(e.to_string())),

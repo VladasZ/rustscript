@@ -63,6 +63,9 @@ impl Interp {
                 _ => {}
             }
         }
+        if let Some(v) = int_limit(ty, last) {
+            return Ok(v);
+        }
         if let Some(v) = base64_engine(last) {
             return Ok(v);
         }
@@ -272,6 +275,28 @@ pub(super) fn zero_arg_call_closure(segs: Vec<String>) -> Value {
     chunk.code.push(Op::CallPath { dst: 0, path: 0, base: 0, argc: 0 });
     chunk.code.push(Op::Ret { src: 0 });
     Value::Closure(Rc::new(ClosureData { chunk: Rc::new(chunk), captured: Vec::new() }))
+}
+
+// `usize::MAX`, `i32::MIN` and friends. The 64 bit and wider limits are
+// clamped to what an i64 value can hold, which is enough for sentinels and
+// bounds. Returns None for anything that is not an integer limit path.
+fn int_limit(ty: &str, name: &str) -> Option<Value> {
+    let (min, max): (i64, i64) = match ty {
+        "i8" => (i8::MIN as i64, i8::MAX as i64),
+        "i16" => (i16::MIN as i64, i16::MAX as i64),
+        "i32" => (i32::MIN as i64, i32::MAX as i64),
+        "i64" | "i128" | "isize" => (i64::MIN, i64::MAX),
+        "u8" => (0, u8::MAX as i64),
+        "u16" => (0, u16::MAX as i64),
+        "u32" => (0, u32::MAX as i64),
+        "u64" | "u128" | "usize" => (0, i64::MAX),
+        _ => return None,
+    };
+    match name {
+        "MAX" => Some(Value::Int(max)),
+        "MIN" => Some(Value::Int(min)),
+        _ => None,
+    }
 }
 
 pub(super) fn make_ordering(o: std::cmp::Ordering) -> Value {

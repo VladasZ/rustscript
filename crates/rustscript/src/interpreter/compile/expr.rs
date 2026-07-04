@@ -13,6 +13,25 @@ use crate::interpreter::value::Value;
 
 use super::*;
 
+/// Flatten a left-nested `&&` chain into its terms, in source order. A cond
+/// that is not an `&&` is returned as a single term. Used to compile let-chains
+/// in `if let A = x && cond && let B = y`.
+fn flatten_and(cond: &Expr) -> Vec<&Expr> {
+    fn walk<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+        if let Expr::Binary(b) = e
+            && matches!(b.op, BinOp::And(_))
+        {
+            walk(&b.left, out);
+            walk(&b.right, out);
+        } else {
+            out.push(e);
+        }
+    }
+    let mut out = Vec::new();
+    walk(cond, &mut out);
+    out
+}
+
 /// The `from_str` call at the root of a `let` init chain, looking through
 /// `?`, `unwrap`, and `expect`. Only a call without its own turbofish counts.
 fn from_str_root(e: &Expr) -> Option<&syn::ExprCall> {
@@ -52,6 +71,29 @@ impl Compiler<'_> {
         for (i, stmt) in block.stmts.iter().enumerate() {
             let is_last = i == last;
             match stmt {
+                Stmt::Local(local)
+                    if local.init.as_ref().and_then(|i| i.diverge.as_ref()).is_some() =>
+                {
+                    // `let PAT = EXPR else { .. }`. Test the refutable pattern,
+                    // and run the diverging else block when it does not match.
+                    // Bindings land in the current scope, visible afterwards.
+                    let init = local.init.as_ref().unwrap();
+                    let else_expr = &init.diverge.as_ref().unwrap().1;
+                    let val = self.alloc();
+                    self.compile_into(val, &init.expr)?;
+                    let matched = self.alloc();
+                    let pidx = self.pattern_info(&local.pat)?;
+                    self.emit(Op::TestBind { val, pat: pidx, dst: matched });
+                    let jmp_ok = self.here();
+                    self.emit(Op::JumpIfTrue { cond: matched, to: 0 });
+                    let else_dst = self.alloc();
+                    self.compile_into(else_dst, else_expr)?;
+                    let ok_at = self.here() as u32;
+                    self.patch_jump(jmp_ok, ok_at);
+                    if is_last {
+                        self.emit(Op::LoadUnit { dst });
+                    }
+                }
                 Stmt::Local(local) => {
                     let val = self.alloc();
                     // An annotated `let` whose init chain roots in a
@@ -416,21 +458,37 @@ impl Compiler<'_> {
     // -- control flow ------------------------------------------------------
 
     pub(super) fn compile_if(&mut self, dst: Reg, if_expr: &syn::ExprIf) -> Result<()> {
-        if let Expr::Let(let_expr) = &*if_expr.cond {
-            // `if let PAT = EXPR { .. } else { .. }`.
-            let scrut = self.compile_expr(&let_expr.expr)?;
+        // `if let PAT = EXPR { .. }` and let-chains like
+        // `if let Some(x) = a && x > 0 && let Ok(y) = b { .. }`. The chain is a
+        // left-nested `&&` whose terms may each be a `let` binding or a plain
+        // condition. All terms must pass, and earlier bindings are in scope for
+        // later terms and the body.
+        let terms = flatten_and(&if_expr.cond);
+        if terms.iter().any(|t| matches!(t, Expr::Let(_))) {
             self.push_scope();
-            let matched = self.alloc();
-            let pat = self.pattern_info(&let_expr.pat)?;
-            self.emit(Op::TestBind { val: scrut, pat, dst: matched });
-            let jmp_else = self.here();
-            self.emit(Op::JumpIfFalse { cond: matched, to: 0 });
+            let mut else_jumps = Vec::new();
+            for term in &terms {
+                if let Expr::Let(let_expr) = term {
+                    let scrut = self.compile_expr(&let_expr.expr)?;
+                    let matched = self.alloc();
+                    let pat = self.pattern_info(&let_expr.pat)?;
+                    self.emit(Op::TestBind { val: scrut, pat, dst: matched });
+                    else_jumps.push(self.here());
+                    self.emit(Op::JumpIfFalse { cond: matched, to: 0 });
+                } else {
+                    let cond = self.compile_expr(term)?;
+                    else_jumps.push(self.here());
+                    self.emit(Op::JumpIfFalse { cond, to: 0 });
+                }
+            }
             self.compile_block_inner(&if_expr.then_branch, dst)?;
             self.pop_scope();
             let jmp_end = self.here();
             self.emit(Op::Jump { to: 0 });
             let else_at = self.here() as u32;
-            self.patch_jump(jmp_else, else_at);
+            for j in else_jumps {
+                self.patch_jump(j, else_at);
+            }
             match &if_expr.else_branch {
                 Some((_, e)) => self.compile_into(dst, e)?,
                 None => self.emit(Op::LoadUnit { dst }),
