@@ -1,0 +1,16 @@
+[package]
+name = "rustscript-examples"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Sample programs in the rustscript language. Each file under `examples/` is
+# both a runnable rustscript script and a real cargo example, so `cargo build
+# --examples` compiles them with the same crates a script may use.
+
+[dev-dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ureq = { workspace = true }
+regex = { workspace = true }
