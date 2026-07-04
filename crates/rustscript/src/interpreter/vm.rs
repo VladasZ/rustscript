@@ -6,14 +6,12 @@
 //! the existing dispatch on `Interp` with already evaluated values.
 
 use std::cell::RefCell;
-use std::cmp::Ordering;
 use std::mem::{replace, take};
 use std::rc::Rc;
 
-use anyhow::{Result, anyhow, bail};
-use syn::{Lit, Pat};
+use anyhow::{Result, bail};
 
-use super::bytecode::{BinKind, CapSource, Chunk, MacroKind, Op, UnKind};
+use super::bytecode::{BuiltinId, CapSource, Chunk, MacroKind, Op};
 use super::value::{ClosureData, Value, fields_with_capacity};
 use super::Interp;
 
@@ -95,7 +93,7 @@ impl Interp {
                         cur_clo = f.closure;
                         ip = f.ip;
                         base = f.base;
-                        stack[base + f.dst as usize] = v;
+                        set_reg(&mut stack[base + f.dst as usize], v);
                         continue;
                     }
                 }
@@ -124,12 +122,13 @@ impl Interp {
                     stack.resize(need, Value::Unit);
                 }
                 for i in 0..$argc {
-                    stack[nbase + i] = take(&mut stack[base + $abase + i]);
+                    let v = take(&mut stack[base + $abase + i]);
+                    set_reg(&mut stack[nbase + i], v);
                 }
                 // Frames are not truncated on return, so clear whatever the
                 // previous occupant left in the non-argument slots.
                 for slot in &mut stack[nbase + $argc..need] {
-                    *slot = Value::Unit;
+                    set_reg(slot, Value::Unit);
                 }
                 frames.push(Frame {
                     chunk: replace(&mut cur, callee),
@@ -150,7 +149,7 @@ impl Interp {
             }
             match &cur.code[ip] {
                 Op::LoadConst { dst, k } => {
-                    stack[base + *dst as usize] = cur.consts[*k as usize].clone();
+                    set_reg(&mut stack[base + *dst as usize], cur.consts[*k as usize].clone());
                 }
                 Op::LoadInt { dst, v } => stack[base + *dst as usize] = Value::Int(*v),
                 Op::LoadBool { dst, v } => stack[base + *dst as usize] = Value::Bool(*v),
@@ -160,23 +159,24 @@ impl Interp {
                         Some(c) => &c.captured,
                         None => entry_upvalues,
                     };
-                    stack[base + *dst as usize] = upvals[*idx as usize].clone();
+                    set_reg(&mut stack[base + *dst as usize], upvals[*idx as usize].clone());
                 }
                 Op::Move { dst, src } => {
-                    stack[base + *dst as usize] = stack[base + *src as usize].clone();
+                    let v = stack[base + *src as usize].clone();
+                    set_reg(&mut stack[base + *dst as usize], v);
                 }
 
                 Op::Bin { dst, a, b, op } => {
                     let v = apply_bin(*op, &stack[base + *a as usize], &stack[base + *b as usize])?;
-                    stack[base + *dst as usize] = v;
+                    set_reg(&mut stack[base + *dst as usize], v);
                 }
                 Op::BinImm { dst, a, imm, op } => {
                     let v = apply_bin_imm(*op, &stack[base + *a as usize], *imm)?;
-                    stack[base + *dst as usize] = v;
+                    set_reg(&mut stack[base + *dst as usize], v);
                 }
                 Op::Un { dst, a, op } => {
                     let v = apply_un(*op, &stack[base + *a as usize])?;
-                    stack[base + *dst as usize] = v;
+                    set_reg(&mut stack[base + *dst as usize], v);
                 }
 
                 Op::Jump { to } => {
@@ -233,30 +233,163 @@ impl Interp {
                     let (abase, argc) = (*abase as usize, *argc as usize);
                     let (segs, coerce) = &cur.paths[path];
                     if let Some(v) = self.internal_path(segs, &stack[base..], abase, argc)? {
-                        stack[base + dst as usize] = v;
+                        set_reg(&mut stack[base + dst as usize], v);
                     } else {
                         let args = take_range(stack, base + abase, argc);
                         let mut v = self.dispatch_call(segs, args)?;
                         if let Some(ty) = coerce {
                             v = self.coerce_result(v, ty);
                         }
-                        stack[base + dst as usize] = v;
+                        set_reg(&mut stack[base + dst as usize], v);
                     }
                 }
                 Op::PathValue { dst, path } => {
                     let (segs, _) = &cur.paths[*path as usize];
-                    stack[base + *dst as usize] = self.eval_path_value(segs)?;
+                    set_reg(&mut stack[base + *dst as usize], self.eval_path_value(segs)?);
                 }
                 Op::Method { dst, recv, name, base: abase, argc } => {
                     let (dst, recv) = (*dst, *recv as usize);
                     let (abase, argc) = (*abase as usize, *argc as usize);
-                    let recv_v = stack[base + recv].clone();
                     let name = &cur.names[*name as usize];
                     let s = base + abase;
+                    // Strings are copy on write, so push must edit the Rc in
+                    // the receiver register itself. Going through the normal
+                    // path would edit a copy and drop the change.
+                    if matches!(name.id, BuiltinId::Push | BuiltinId::PushStr)
+                        && matches!(stack[base + recv], Value::Str(_))
+                    {
+                        let Value::Str(mut buf) = take(&mut stack[base + recv]) else {
+                            unreachable!()
+                        };
+                        {
+                            let out = Value::str_make_mut(&mut buf);
+                            match (&name.id, stack[s..s + argc].first()) {
+                                (BuiltinId::Push, Some(Value::Char(c))) => out.push(*c),
+                                (BuiltinId::PushStr, Some(arg)) => out.push_str(&arg.display()),
+                                _ => {}
+                            }
+                        }
+                        set_reg(&mut stack[base + recv], Value::Str(buf));
+                        set_reg(&mut stack[base + dst as usize], Value::Unit);
+                        ip += 1;
+                        continue;
+                    }
+                    // Option and Result accessors dominate counting loops, so
+                    // their success paths run right here, skipping the whole
+                    // dispatch chain. Failure paths fall through and get their
+                    // errors from the slow path. Skipped when the script
+                    // defines methods, which could shadow these on an enum.
+                    if self.methods.is_empty()
+                        && matches!(
+                            name.id,
+                            BuiltinId::Copied | BuiltinId::Unwrap | BuiltinId::UnwrapOr
+                        )
+                    {
+                        // 0 none, 1 clone receiver, 2 clone payload, 3 default
+                        let choice = match &stack[base + recv] {
+                            Value::Enum { enum_name, variant, .. } => {
+                                if matches!(name.id, BuiltinId::Copied) {
+                                    if &**enum_name == "Option" { 1 } else { 0 }
+                                } else if !matches!(&**enum_name, "Option" | "Result") {
+                                    0
+                                } else if matches!(&**variant, "Some" | "Ok") {
+                                    2
+                                } else if matches!(name.id, BuiltinId::UnwrapOr) {
+                                    3
+                                } else {
+                                    0
+                                }
+                            }
+                            _ => 0,
+                        };
+                        if choice != 0 {
+                            let v = match choice {
+                                1 => stack[base + recv].clone(),
+                                2 => match &stack[base + recv] {
+                                    Value::Enum { data, .. } => {
+                                        data.first().cloned().unwrap_or(Value::Unit)
+                                    }
+                                    _ => unreachable!(),
+                                },
+                                _ => {
+                                    if argc > 0 {
+                                        take(&mut stack[s])
+                                    } else {
+                                        Value::Unit
+                                    }
+                                }
+                            };
+                            set_reg(&mut stack[base + dst as usize], v);
+                            ip += 1;
+                            continue;
+                        }
+                    }
+                    // to_string and clone on a string are a refcount bump,
+                    // not worth the dispatch walk.
+                    if matches!(name.id, BuiltinId::ToString | BuiltinId::Clone)
+                        && let Value::Str(v) = &stack[base + recv]
+                    {
+                        let v = Value::Str(v.clone());
+                        set_reg(&mut stack[base + dst as usize], v);
+                        ip += 1;
+                        continue;
+                    }
+                    // Map get and insert run inline for the same reason as
+                    // the Option accessors above. User methods cannot exist
+                    // on a HashMap, so no gate is needed.
+                    if matches!(
+                        name.id,
+                        BuiltinId::Get | BuiltinId::Insert | BuiltinId::ContainsKey
+                    ) && matches!(stack[base + recv], Value::Map(_))
+                        && argc >= 1
+                        && base + recv < s
+                    {
+                        let (lo, hi) = stack.split_at_mut(s);
+                        let Value::Map(m) = &lo[base + recv] else { unreachable!() };
+                        let v = match name.id {
+                            BuiltinId::Insert => {
+                                let k = take(&mut hi[0]).into_key();
+                                let Some(k) = k else {
+                                    bail!("invalid map key")
+                                };
+                                let val = if argc > 1 { take(&mut hi[1]) } else { Value::Unit };
+                                match m.borrow_mut().insert(k, val) {
+                                    Some(old) => Value::some(old),
+                                    None => Value::none(),
+                                }
+                            }
+                            _ => {
+                                let Some(k) = hi[0].key_ref() else {
+                                    bail!("invalid map key")
+                                };
+                                if matches!(name.id, BuiltinId::ContainsKey) {
+                                    Value::Bool(m.borrow().get(&k).is_some())
+                                } else {
+                                    match m.borrow().get(&k).cloned() {
+                                        Some(v) => Value::some(v),
+                                        None => Value::none(),
+                                    }
+                                }
+                            }
+                        };
+                        set_reg(&mut stack[base + dst as usize], v);
+                        ip += 1;
+                        continue;
+                    }
                     // The arg window holds dead temporaries, so methods may
-                    // consume them in place without cloning.
-                    let v = self.eval_method(recv_v, name, &mut stack[s..s + argc])?;
-                    stack[base + dst as usize] = v;
+                    // consume them in place without cloning. The window sits
+                    // above the receiver register, so the split hands out the
+                    // receiver by reference and the args mutably at once.
+                    let v = if argc == 0 {
+                        self.eval_method(&stack[base + recv], name, &mut [])?
+                    } else if base + recv < s {
+                        let (lo, hi) = stack.split_at_mut(s);
+                        self.eval_method(&lo[base + recv], name, &mut hi[..argc])?
+                    } else {
+                        let recv_v = stack[base + recv].clone();
+                        self.eval_method(&recv_v, name, &mut stack[s..s + argc])?
+                    };
+                    set_reg(&mut stack[base + dst as usize], v);
                 }
                 Op::Ret { src } => {
                     let v = take(&mut stack[base + *src as usize]);
@@ -266,12 +399,12 @@ impl Interp {
                 Op::MakeVec { dst, base: wbase, count } => {
                     let (dst, wbase, count) = (*dst, *wbase as usize, *count as usize);
                     let items = take_range(stack, base + wbase, count);
-                    stack[base + dst as usize] = Value::vec(items);
+                    set_reg(&mut stack[base + dst as usize], Value::vec(items));
                 }
                 Op::MakeTuple { dst, base: wbase, count } => {
                     let (dst, wbase, count) = (*dst, *wbase as usize, *count as usize);
                     let items = take_range(stack, base + wbase, count);
-                    stack[base + dst as usize] = Value::Tuple(Rc::new(RefCell::new(items)));
+                    set_reg(&mut stack[base + dst as usize], Value::Tuple(Rc::new(RefCell::new(items))));
                 }
                 Op::MakeArrayRepeat { dst, val, count } => {
                     let n = match &stack[base + *count as usize] {
@@ -279,13 +412,15 @@ impl Interp {
                         _ => bail!("array repeat length must be an integer"),
                     };
                     let v = stack[base + *val as usize].clone();
-                    stack[base + *dst as usize] = Value::vec(std::iter::repeat_n(v, n).collect());
+                    set_reg(&mut stack[base + *dst as usize], Value::vec(std::iter::repeat_n(v, n).collect()));
                 }
                 Op::MakeRange { dst, start, end, inclusive } => {
                     let s = int_of(&stack[base + *start as usize], "range bound")?;
                     let e = int_of(&stack[base + *end as usize], "range bound")?;
-                    stack[base + *dst as usize] =
-                        Value::Range { start: s, end: e, inclusive: *inclusive };
+                    set_reg(
+                        &mut stack[base + *dst as usize],
+                        Value::Range { start: s, end: e, inclusive: *inclusive },
+                    );
                 }
                 Op::IterInit { dst, src } => {
                     let src_v = stack[base + *src as usize].clone();
@@ -295,7 +430,7 @@ impl Interp {
                         Value::Range { .. } => src_v,
                         other => Value::vec(self.into_iter_items(other)?),
                     };
-                    stack[base + *dst as usize] = it;
+                    set_reg(&mut stack[base + *dst as usize], it);
                 }
                 Op::ForNext { iter, idx, val, to } => {
                     let i = match &stack[base + *idx as usize] {
@@ -313,9 +448,9 @@ impl Interp {
                     };
                     match item {
                         Some(v) => {
-                            stack[base + *val as usize] = v;
+                            set_reg(&mut stack[base + *val as usize], v);
                             self.run_pending_ctrlc()?;
-                            stack[base + *idx as usize] = Value::Int(i + 1);
+                            set_reg(&mut stack[base + *idx as usize], Value::Int(i + 1));
                         }
                         None => {
                             ip = *to as usize;
@@ -340,10 +475,10 @@ impl Interp {
                             }
                         }
                     }
-                    stack[base + dst as usize] = Value::Struct {
-                        name: lit.name.clone(),
-                        fields: Rc::new(RefCell::new(fields)),
-                    };
+                    set_reg(
+                        &mut stack[base + dst as usize],
+                        Value::Struct { name: lit.name.clone(), fields: Rc::new(RefCell::new(fields)) },
+                    );
                 }
                 Op::MakeClosure { dst, child } => {
                     let child_chunk = cur.children[*child as usize].clone();
@@ -359,13 +494,15 @@ impl Interp {
                             CapSource::Upvalue(idx) => upvals[*idx as usize].clone(),
                         })
                         .collect();
-                    stack[base + *dst as usize] =
-                        Value::Closure(Rc::new(ClosureData { chunk: child_chunk, captured }));
+                    set_reg(
+                        &mut stack[base + *dst as usize],
+                        Value::Closure(Rc::new(ClosureData { chunk: child_chunk, captured })),
+                    );
                 }
 
                 Op::Index { dst, base: b, key } => {
                     let v = self.index(&stack[base + *b as usize], &stack[base + *key as usize])?;
-                    stack[base + *dst as usize] = v;
+                    set_reg(&mut stack[base + *dst as usize], v);
                 }
                 Op::SetIndex { base: b, key, val } => {
                     self.set_index(
@@ -377,7 +514,7 @@ impl Interp {
                 Op::GetField { dst, base: b, member } => {
                     let v =
                         self.get_field(&stack[base + *b as usize], &cur.members[*member as usize])?;
-                    stack[base + *dst as usize] = v;
+                    set_reg(&mut stack[base + *dst as usize], v);
                 }
                 Op::SetField { base: b, member, val } => {
                     self.set_field(
@@ -396,12 +533,12 @@ impl Interp {
                 Op::Cast { dst, src, ty } => {
                     let v = self
                         .eval_cast(stack[base + *src as usize].clone(), &cur.casts[*ty as usize])?;
-                    stack[base + *dst as usize] = v;
+                    set_reg(&mut stack[base + *dst as usize], v);
                 }
                 Op::Coerce { dst, src, ty } => {
                     let v = self
                         .coerce_value(stack[base + *src as usize].clone(), &cur.casts[*ty as usize]);
-                    stack[base + *dst as usize] = v;
+                    set_reg(&mut stack[base + *dst as usize], v);
                 }
 
                 Op::TestBind { val, pat, dst } => {
@@ -411,17 +548,17 @@ impl Interp {
                     let matched = {
                         let mut define = |name: &str, v: Value| {
                             if let Some((_, reg)) = binds.iter().find(|(n, _)| n == name) {
-                                stack[base + *reg as usize] = v;
+                                set_reg(&mut stack[base + *reg as usize], v);
                             }
                         };
                         try_bind(&info.pat, &value, &mut define)
                     };
-                    stack[base + *dst as usize] = Value::Bool(matched);
+                    set_reg(&mut stack[base + *dst as usize], Value::Bool(matched));
                 }
 
                 Op::Fmt { dst, spec } => {
                     let text = self.render_fmt(&cur, *spec, &stack[base..])?;
-                    stack[base + *dst as usize] = Value::str(text);
+                    set_reg(&mut stack[base + *dst as usize], Value::str(text));
                 }
                 Op::MacroCall { kind, dst, spec } => {
                     let text = self.render_fmt(&cur, *spec, &stack[base..])?;
@@ -432,14 +569,14 @@ impl Interp {
                         MacroKind::Eprint => eprint!("{text}"),
                         MacroKind::Panic => bail!("panicked: {text}"),
                         MacroKind::Anyhow => {
-                            stack[base + *dst as usize] = Value::err(Value::str(text));
+                            set_reg(&mut stack[base + *dst as usize], Value::err(Value::str(text)));
                         }
                         MacroKind::Bail => {
                             ret!(Value::err(Value::str(text)));
                         }
                     }
                     if !matches!(kind, MacroKind::Anyhow) {
-                        stack[base + *dst as usize] = Value::Unit;
+                        set_reg(&mut stack[base + *dst as usize], Value::Unit);
                     }
                 }
                 Op::Dbg { dst, base: wbase, argc } => {
@@ -449,7 +586,7 @@ impl Interp {
                         last = stack[base + wbase + i].clone();
                         eprintln!("[dbg] {}", last.debug());
                     }
-                    stack[base + dst as usize] = last;
+                    set_reg(&mut stack[base + dst as usize], last);
                 }
             }
             ip += 1;
@@ -506,6 +643,27 @@ fn take_range(stack: &mut [Value], s: usize, count: usize) -> Vec<Value> {
     (0..count).map(|i| take(&mut stack[s + i])).collect()
 }
 
+/// Write a register. A plain old value has no drop glue, but the compiler
+/// still emits an out of line `drop_in_place` call for the write, and that
+/// call is one of the hottest lines in profiles. Check the old value inline
+/// and forget it when dropping would do nothing anyway.
+#[inline(always)]
+pub(super) fn set_reg(slot: &mut Value, v: Value) {
+    if matches!(
+        slot,
+        Value::Unit
+            | Value::Bool(_)
+            | Value::Int(_)
+            | Value::Float(_)
+            | Value::Char(_)
+            | Value::Range { .. }
+    ) {
+        std::mem::forget(replace(slot, v));
+    } else {
+        *slot = v;
+    }
+}
+
 fn int_of(v: &Value, what: &str) -> Result<i64> {
     match v {
         Value::Int(i) => Ok(*i),
@@ -513,300 +671,5 @@ fn int_of(v: &Value, what: &str) -> Result<i64> {
     }
 }
 
-// -- operators -------------------------------------------------------------
 
-pub(super) fn apply_bin(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
-    use BinKind::*;
-    Ok(match op {
-        Add | Sub | Mul | Div | Rem => return arith(op, l, r),
-        Eq => Value::Bool(l.eq_value(r)),
-        Ne => Value::Bool(!l.eq_value(r)),
-        Lt => Value::Bool(compare(l, r)? == Ordering::Less),
-        Le => Value::Bool(compare(l, r)? != Ordering::Greater),
-        Gt => Value::Bool(compare(l, r)? == Ordering::Greater),
-        Ge => Value::Bool(compare(l, r)? != Ordering::Less),
-        BitAnd => int_bin(l, r, |a, b| a & b)?,
-        BitOr => int_bin(l, r, |a, b| a | b)?,
-        BitXor => int_bin(l, r, |a, b| a ^ b)?,
-        Shl => int_bin(l, r, |a, b| a << b)?,
-        Shr => int_bin(l, r, |a, b| a >> b)?,
-    })
-}
-
-/// `apply_bin` with an integer literal right operand, with a fast integer path
-/// that skips building a `Value` for the literal.
-fn apply_bin_imm(op: BinKind, l: &Value, imm: i64) -> Result<Value> {
-    use BinKind::*;
-    if let Value::Int(a) = l {
-        let a = *a;
-        return Ok(match op {
-            Add => Value::Int(a.wrapping_add(imm)),
-            Sub => Value::Int(a.wrapping_sub(imm)),
-            Mul => Value::Int(a.wrapping_mul(imm)),
-            Div => {
-                if imm == 0 {
-                    bail!("divide by zero");
-                }
-                Value::Int(a.wrapping_div(imm))
-            }
-            Rem => {
-                if imm == 0 {
-                    bail!("remainder by zero");
-                }
-                Value::Int(a.wrapping_rem(imm))
-            }
-            Eq => Value::Bool(a == imm),
-            Ne => Value::Bool(a != imm),
-            Lt => Value::Bool(a < imm),
-            Le => Value::Bool(a <= imm),
-            Gt => Value::Bool(a > imm),
-            Ge => Value::Bool(a >= imm),
-            BitAnd => Value::Int(a & imm),
-            BitOr => Value::Int(a | imm),
-            BitXor => Value::Int(a ^ imm),
-            Shl => Value::Int(a << imm),
-            Shr => Value::Int(a >> imm),
-        });
-    }
-    apply_bin(op, l, &Value::Int(imm))
-}
-
-/// Comparison result for the fused compare-and-branch ops.
-fn cmp_test(op: BinKind, l: &Value, r: &Value) -> Result<bool> {
-    use BinKind::*;
-    Ok(match op {
-        Eq => l.eq_value(r),
-        Ne => !l.eq_value(r),
-        Lt => compare(l, r)? == Ordering::Less,
-        Le => compare(l, r)? != Ordering::Greater,
-        Gt => compare(l, r)? == Ordering::Greater,
-        Ge => compare(l, r)? != Ordering::Less,
-        _ => unreachable!("compare jump carries a non-comparison operator"),
-    })
-}
-
-fn cmp_test_imm(op: BinKind, l: &Value, imm: i64) -> Result<bool> {
-    use BinKind::*;
-    if let Value::Int(a) = l {
-        let a = *a;
-        return Ok(match op {
-            Eq => a == imm,
-            Ne => a != imm,
-            Lt => a < imm,
-            Le => a <= imm,
-            Gt => a > imm,
-            Ge => a >= imm,
-            _ => unreachable!("compare jump carries a non-comparison operator"),
-        });
-    }
-    cmp_test(op, l, &Value::Int(imm))
-}
-
-fn arith(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
-    use BinKind::*;
-    if let (Add, Value::Str(a), Value::Str(b)) = (op, l, r) {
-        return Ok(Value::str(format!("{}{}", a.borrow(), b.borrow())));
-    }
-    match (l, r) {
-        (Value::Int(a), Value::Int(b)) => {
-            let (a, b) = (*a, *b);
-            Ok(Value::Int(match op {
-                Add => a.wrapping_add(b),
-                Sub => a.wrapping_sub(b),
-                Mul => a.wrapping_mul(b),
-                Div => {
-                    if b == 0 {
-                        bail!("divide by zero");
-                    }
-                    a.wrapping_div(b)
-                }
-                Rem => {
-                    if b == 0 {
-                        bail!("remainder by zero");
-                    }
-                    a.wrapping_rem(b)
-                }
-                _ => unreachable!(),
-            }))
-        }
-        (a, b) => {
-            let (x, y) = (to_float(a)?, to_float(b)?);
-            Ok(Value::Float(match op {
-                Add => x + y,
-                Sub => x - y,
-                Mul => x * y,
-                Div => x / y,
-                Rem => x % y,
-                _ => unreachable!(),
-            }))
-        }
-    }
-}
-
-fn int_bin(l: &Value, r: &Value, f: impl Fn(i64, i64) -> i64) -> Result<Value> {
-    match (l, r) {
-        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(f(*a, *b))),
-        (Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(f(*a as i64, *b as i64) != 0)),
-        _ => bail!("bitwise operators need integers"),
-    }
-}
-
-fn compare(l: &Value, r: &Value) -> Result<Ordering> {
-    Ok(match (l, r) {
-        (Value::Int(a), Value::Int(b)) => a.cmp(b),
-        (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).ok_or_else(|| anyhow!("cannot order NaN"))?,
-        (Value::Int(a), Value::Float(b)) => {
-            (*a as f64).partial_cmp(b).ok_or_else(|| anyhow!("cannot order NaN"))?
-        }
-        (Value::Float(a), Value::Int(b)) => {
-            a.partial_cmp(&(*b as f64)).ok_or_else(|| anyhow!("cannot order NaN"))?
-        }
-        (Value::Str(a), Value::Str(b)) => a.borrow().cmp(&b.borrow()),
-        (Value::Char(a), Value::Char(b)) => a.cmp(b),
-        (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
-        (a, b) => bail!("cannot compare {} and {}", a.type_name(), b.type_name()),
-    })
-}
-
-fn to_float(v: &Value) -> Result<f64> {
-    match v {
-        Value::Int(i) => Ok(*i as f64),
-        Value::Float(f) => Ok(*f),
-        other => bail!("expected a number, got {}", other.type_name()),
-    }
-}
-
-fn apply_un(op: UnKind, v: &Value) -> Result<Value> {
-    Ok(match (op, v) {
-        (UnKind::Neg, Value::Int(i)) => Value::Int(-*i),
-        (UnKind::Neg, Value::Float(f)) => Value::Float(-*f),
-        (UnKind::Not, Value::Bool(b)) => Value::Bool(!*b),
-        (UnKind::Not, Value::Int(i)) => Value::Int(!*i),
-        (op, v) => bail!("cannot apply {:?} to {}", op, v.type_name()),
-    })
-}
-
-// -- patterns --------------------------------------------------------------
-
-/// Match `pat` against `val`, calling `define` for each bound name. Returns
-/// false without fully binding when the pattern does not match.
-pub(super) fn try_bind(pat: &Pat, val: &Value, define: &mut dyn FnMut(&str, Value)) -> bool {
-    match pat {
-        Pat::Wild(_) | Pat::Rest(_) => true,
-        Pat::Ident(id) => {
-            if let Some(sub) = &id.subpat
-                && !try_bind(&sub.1, val, define)
-            {
-                return false;
-            }
-            define(&id.ident.to_string(), val.clone());
-            true
-        }
-        Pat::Lit(lit) => match lit_value(&lit.lit) {
-            Some(expected) => expected.eq_value(val),
-            None => false,
-        },
-        Pat::Paren(p) => try_bind(&p.pat, val, define),
-        Pat::Reference(r) => try_bind(&r.pat, val, define),
-        Pat::Type(t) => try_bind(&t.pat, val, define),
-        Pat::Tuple(t) => match val {
-            Value::Tuple(items) => bind_seq(t.elems.iter(), &items.borrow(), define),
-            _ => false,
-        },
-        Pat::TupleStruct(ts) => {
-            let name = ts.path.segments.last().map(|s| s.ident.to_string());
-            match val {
-                Value::Enum { variant, data, .. } => {
-                    name.as_deref() == Some(&**variant)
-                        && bind_seq(ts.elems.iter(), data, define)
-                }
-                Value::Struct { fields, .. } => {
-                    let vals: Vec<Value> = fields.borrow().values().cloned().collect();
-                    bind_seq(ts.elems.iter(), &vals, define)
-                }
-                _ => false,
-            }
-        }
-        Pat::Path(p) => {
-            let name = p.path.segments.last().map(|s| s.ident.to_string());
-            match val {
-                Value::Enum { variant, .. } => name.as_deref() == Some(&**variant),
-                _ => false,
-            }
-        }
-        Pat::Struct(s) => {
-            let name = s.path.segments.last().map(|s| s.ident.to_string());
-            let fields = match val {
-                Value::Struct { name: n, fields } => {
-                    if let Some(pn) = &name
-                        && pn.as_str() != &**n
-                    {
-                        return false;
-                    }
-                    fields.borrow()
-                }
-                _ => return false,
-            };
-            for f in &s.fields {
-                let key = match &f.member {
-                    syn::Member::Named(n) => n.to_string(),
-                    syn::Member::Unnamed(i) => i.index.to_string(),
-                };
-                match fields.get(key.as_str()) {
-                    Some(v) => {
-                        if !try_bind(&f.pat, v, define) {
-                            return false;
-                        }
-                    }
-                    None => return false,
-                }
-            }
-            true
-        }
-        Pat::Or(or) => or.cases.iter().any(|c| try_bind(c, val, define)),
-        Pat::Slice(s) => match val {
-            Value::Vec(items) => bind_seq(s.elems.iter(), &items.borrow(), define),
-            _ => false,
-        },
-        _ => false,
-    }
-}
-
-fn bind_seq<'a>(
-    pats: impl Iterator<Item = &'a Pat>,
-    vals: &[Value],
-    define: &mut dyn FnMut(&str, Value),
-) -> bool {
-    let pats: Vec<&Pat> = pats.collect();
-    if pats.iter().any(|p| matches!(p, Pat::Rest(_))) {
-        let head_len = pats.iter().take_while(|p| !matches!(p, Pat::Rest(_))).count();
-        for (p, v) in pats.iter().take(head_len).zip(vals.iter()) {
-            if !try_bind(p, v, define) {
-                return false;
-            }
-        }
-        let tail: Vec<&&Pat> = pats.iter().skip(head_len + 1).collect();
-        for (p, v) in tail.iter().zip(vals.iter().rev()) {
-            if !try_bind(p, v, define) {
-                return false;
-            }
-        }
-        return true;
-    }
-    if pats.len() != vals.len() {
-        return false;
-    }
-    pats.iter().zip(vals.iter()).all(|(p, v)| try_bind(p, v, define))
-}
-
-pub(super) fn lit_value(lit: &Lit) -> Option<Value> {
-    Some(match lit {
-        Lit::Int(i) => Value::Int(i.base10_parse::<i64>().ok()?),
-        Lit::Float(f) => Value::Float(f.base10_parse::<f64>().ok()?),
-        Lit::Bool(b) => Value::Bool(b.value),
-        Lit::Str(s) => Value::str(s.value()),
-        Lit::Char(c) => Value::Char(c.value()),
-        Lit::Byte(b) => Value::Int(b.value() as i64),
-        _ => return None,
-    })
-}
+use super::ops::{apply_bin, apply_bin_imm, apply_un, cmp_test, cmp_test_imm, try_bind};

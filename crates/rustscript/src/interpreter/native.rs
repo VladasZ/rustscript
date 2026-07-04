@@ -106,9 +106,12 @@ fn as_read(h: &mut Native) -> Option<&mut dyn BufRead> {
     }
 }
 
-fn append_string(target: &Value, text: &str) {
+/// The buffer arrives as a copy of the script variable, so the vm moves the
+/// updated value back into the variable register after the call, see the
+/// mut-reference handling in `compile_method`.
+fn append_string(target: &mut Value, text: &str) {
     if let Value::Str(s) = target {
-        s.borrow_mut().push_str(text);
+        Value::str_make_mut(s).push_str(text);
     }
 }
 
@@ -124,45 +127,48 @@ fn append_bytes(target: &Value, bytes: &[u8]) {
 pub fn native_method(
     handle: &Rc<RefCell<Native>>,
     method: &str,
-    args: &[Value],
+    args: &mut [Value],
 ) -> Result<Option<Value>> {
     // Handles that consume self or hand out sub-handles need to move out of the
     // RefCell, so they are matched first with a dedicated borrow.
     match method {
         // Reader side ------------------------------------------------------
         "read_line" => {
-            let target = args.first().cloned().unwrap_or(Value::Unit);
             let mut h = handle.borrow_mut();
             let Some(r) = as_read(&mut h) else {
                 bail!("read_line on non-reader {}", h.type_name());
             };
             let mut buf = String::new();
             return Ok(Some(io_err(r.read_line(&mut buf), |n| {
-                append_string(&target, &buf);
+                if let Some(t) = args.first_mut() {
+                    append_string(t, &buf);
+                }
                 Value::Int(n as i64)
             })));
         }
         "read_to_string" => {
-            let target = args.first().cloned().unwrap_or(Value::Unit);
             let mut h = handle.borrow_mut();
             let Some(r) = as_read(&mut h) else {
                 bail!("read_to_string on non-reader {}", h.type_name());
             };
             let mut buf = String::new();
             return Ok(Some(io_err(r.read_to_string(&mut buf), |n| {
-                append_string(&target, &buf);
+                if let Some(t) = args.first_mut() {
+                    append_string(t, &buf);
+                }
                 Value::Int(n as i64)
             })));
         }
         "read_to_end" => {
-            let target = args.first().cloned().unwrap_or(Value::Unit);
             let mut h = handle.borrow_mut();
             let Some(r) = as_read(&mut h) else {
                 bail!("read_to_end on non-reader {}", h.type_name());
             };
             let mut buf = Vec::new();
             return Ok(Some(io_err(r.read_to_end(&mut buf), |n| {
-                append_bytes(&target, &buf);
+                if let Some(t) = args.first() {
+                    append_bytes(t, &buf);
+                }
                 Value::Int(n as i64)
             })));
         }
@@ -239,7 +245,7 @@ pub fn native_method(
             let h = handle.borrow();
             if let Native::File(r) = &*h {
                 return Ok(Some(io_err(r.get_ref().metadata(), |m| {
-                    super::builtins::make_metadata(&m)
+                    super::std_bridge::make_metadata(&m)
                 })));
             }
             bail!("metadata on non-file {}", h.type_name());
@@ -249,7 +255,7 @@ pub fn native_method(
             let mut h = handle.borrow_mut();
             if let Native::Child(c) = &mut *h {
                 return Ok(Some(io_err(c.wait(), |s| {
-                    super::builtins::make_exit_status(s)
+                    super::process::make_exit_status(s)
                 })));
             }
             bail!("wait on non-child {}", h.type_name());
@@ -258,7 +264,7 @@ pub fn native_method(
             let mut h = handle.borrow_mut();
             if let Native::Child(c) = &mut *h {
                 return Ok(Some(match c.try_wait() {
-                    Ok(Some(s)) => Value::ok(Value::some(super::builtins::make_exit_status(s))),
+                    Ok(Some(s)) => Value::ok(Value::some(super::process::make_exit_status(s))),
                     Ok(None) => Value::ok(Value::none()),
                     Err(e) => Value::err(Value::str(e.to_string())),
                 }));
@@ -282,7 +288,7 @@ pub fn native_method(
             let taken = std::mem::replace(&mut *handle.borrow_mut(), Native::Lines(Box::new(std::iter::empty())));
             if let Native::Child(c) = taken {
                 return Ok(Some(match c.wait_with_output() {
-                    Ok(o) => Value::ok(super::builtins::make_output(o)),
+                    Ok(o) => Value::ok(super::process::make_output(o)),
                     Err(e) => Value::err(Value::str(e.to_string())),
                 }));
             }
@@ -348,11 +354,11 @@ pub fn native_method(
             let h = handle.borrow();
             match &*h {
                 Native::Instant(t) => {
-                    return Ok(Some(super::builtins::make_duration(t.elapsed())));
+                    return Ok(Some(super::std_bridge::make_duration(t.elapsed())));
                 }
                 Native::SystemTime(t) => {
                     return Ok(Some(match t.elapsed() {
-                        Ok(d) => Value::ok(super::builtins::make_duration(d)),
+                        Ok(d) => Value::ok(super::std_bridge::make_duration(d)),
                         Err(e) => Value::err(Value::str(e.to_string())),
                     }));
                 }
@@ -364,13 +370,13 @@ pub fn native_method(
             match (&*h, args.first()) {
                 (Native::Instant(t), Some(Value::Native(other))) => {
                     if let Native::Instant(o) = &*other.borrow() {
-                        return Ok(Some(super::builtins::make_duration(t.duration_since(*o))));
+                        return Ok(Some(super::std_bridge::make_duration(t.duration_since(*o))));
                     }
                 }
                 (Native::SystemTime(t), Some(Value::Native(other))) => {
                     if let Native::SystemTime(o) = &*other.borrow() {
                         return Ok(Some(match t.duration_since(*o) {
-                            Ok(d) => Value::ok(super::builtins::make_duration(d)),
+                            Ok(d) => Value::ok(super::std_bridge::make_duration(d)),
                             Err(e) => Value::err(Value::str(e.to_string())),
                         }));
                     }
@@ -383,7 +389,7 @@ pub fn native_method(
         "path" => {
             let h = handle.borrow();
             if let Native::TempDir(d) = &*h {
-                return Ok(Some(super::builtins::make_path(d.path().display().to_string())));
+                return Ok(Some(super::std_bridge::make_path(d.path().display().to_string())));
             }
         }
         "close" => {
@@ -398,7 +404,7 @@ pub fn native_method(
             if matches!(&*handle.borrow(), Native::Agent(_)) {
                 let verb = method.to_ascii_uppercase();
                 let agent = Value::Native(handle.clone());
-                return Ok(Some(super::builtins::build_http_request(
+                return Ok(Some(super::http::build_http_request(
                     &verb,
                     args.first(),
                     Some(agent),
@@ -435,7 +441,7 @@ fn flush_writer(h: &mut Native) -> std::io::Result<()> {
 
 fn value_to_bytes(v: Option<&Value>) -> Vec<u8> {
     match v {
-        Some(Value::Str(s)) => s.borrow().clone().into_bytes(),
+        Some(Value::Str(s)) => s.as_bytes().to_vec(),
         Some(Value::Vec(items)) => items
             .borrow()
             .iter()

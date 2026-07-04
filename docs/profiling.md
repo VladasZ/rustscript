@@ -40,6 +40,21 @@ samples that landed in each. Patterns that have come up so far:
 - `sip..Hasher` means something fell back to the default SipHash hasher
   instead of the `FxBuildHasher` aliases in `value.rs`.
 
+## Before timing anything
+
+Check that the machine is quiet first, or the numbers are garbage. A game, a
+video call, or one busy app can make every case read 3-4x slower with huge
+run-to-run variance, which looks exactly like a code regression.
+
+```sh
+uptime                                     # load average should be well under
+                                           # the core count
+ps aux | sort -k3 -rn | head -5            # nothing unexpected above ~20% cpu
+```
+
+If something heavy is running, ask to close it and wait. Do not benchmark
+around it and do not trust best-of-N under load.
+
 ## Timing
 
 Do not take wall-clock numbers from the profiler. Every bench case prints
@@ -64,7 +79,10 @@ stale binary.
 ## After a change
 
 Run the test suite. The equivalence test compares interpreter output byte for
-byte against the compiled examples, which must be built first:
+byte against the compiled examples, which must be built first. Rebuild them
+after every bench run too, because the bench builds its native cases into the
+same `target/release/examples/` directory and overwrites same named binaries
+like `fib`:
 
 ```sh
 cargo build --release -p rustscript-examples --examples

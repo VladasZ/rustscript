@@ -163,7 +163,7 @@ impl Interp {
                 .iter()
                 .map(|(k, v)| Value::Tuple(Rc::new(RefCell::new(vec![k.to_value(), v.clone()]))))
                 .collect(),
-            Value::Str(s) => s.borrow().chars().map(Value::Char).collect(),
+            Value::Str(s) => s.chars().map(Value::Char).collect(),
             Value::Native(h) if matches!(&*h.borrow(), super::native::Native::Lines(_)) => {
                 super::native::drain_lines(&h)
             }
@@ -234,8 +234,7 @@ impl Interp {
             }
             Value::Str(s) => {
                 let i = as_index(key)?;
-                s.borrow()
-                    .chars()
+                s.chars()
                     .nth(i)
                     .map(Value::Char)
                     .ok_or_else(|| anyhow!("index {i} out of bounds"))?
@@ -244,13 +243,14 @@ impl Interp {
                 let i = as_index(key)?;
                 items.borrow().get(i).cloned().ok_or_else(|| anyhow!("index {i} out of bounds"))?
             }
-            Value::Map(map) => key
-                .with_key(|k| {
-                    let k = k.ok_or_else(|| anyhow!("{} is not a valid map key", key.type_name()))?;
-                    map.borrow().get(&k).cloned().ok_or_else(|| anyhow!("key not found"))
-                })?,
+            Value::Map(map) => {
+                let k = key
+                    .key_ref()
+                    .ok_or_else(|| anyhow!("{} is not a valid map key", key.type_name()))?;
+                map.borrow().get(&k).cloned().ok_or_else(|| anyhow!("key not found"))?
+            }
             Value::Struct { name, fields } if &**name == "Captures" => {
-                super::builtins::capture_index(fields, key)?
+                super::regex_bridge::capture_index(fields, key)?
             }
             other => bail!("cannot index {}", other.type_name()),
         })

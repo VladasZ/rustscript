@@ -3,6 +3,7 @@ resolver = "3"
 members = ["crates/rustscript", "crates/examples", "bench"]
 
 [workspace.dependencies]
+compact_str = "0.9"
 plotters = { version = "0.3", default-features = false, features = ["bitmap_backend", "bitmap_encoder", "ttf", "all_series"] }
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
