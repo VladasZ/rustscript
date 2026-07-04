@@ -1,12 +1,12 @@
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::mem::take;
 use std::rc::Rc;
 
 use anyhow::{Result, anyhow, bail};
 
-use super::bytecode::{Chunk, Op};
+use super::bytecode::{BuiltinId, Chunk, MethodName, Op};
 use super::native::{self, Native};
-use super::value::{ClosureData, Fields, MapKey, Value};
+use super::value::{ClosureData, Fields, KeyRef, Map, MapKey, Value, map_with_capacity};
 use super::Interp;
 
 impl Interp {
@@ -76,9 +76,9 @@ impl Interp {
                 v.ident == variant && matches!(v.fields, syn::Fields::Unit)
             }) {
                 return Some(Value::Enum {
-                    enum_name: name.clone(),
-                    variant: variant.to_string(),
-                    data: Rc::new(RefCell::new(vec![])),
+                    enum_name: name.as_str().into(),
+                    variant: variant.into(),
+                    data: Value::empty_data(),
                 });
             }
         }
@@ -124,7 +124,7 @@ impl Interp {
         if ns == "thread" && last == "spawn" {
             let clo = as_closure(args.first())?;
             let result = self.call_closure(&clo, &[])?;
-            let mut f = Fields::new();
+            let mut f = Fields::default();
             f.insert("result".into(), result);
             return Ok(Value::Struct {
                 name: "JoinHandle".into(),
@@ -160,12 +160,12 @@ impl Interp {
     }
 
     fn make_tuple_struct(&self, name: &str, args: Vec<Value>) -> Result<Value> {
-        let mut fields = Fields::new();
+        let mut fields = Fields::default();
         for (i, v) in args.into_iter().enumerate() {
-            fields.insert(i.to_string(), v);
+            fields.insert(i.to_string().into(), v);
         }
         Ok(Value::Struct {
-            name: name.to_string(),
+            name: name.into(),
             fields: Rc::new(RefCell::new(fields)),
         })
     }
@@ -184,37 +184,43 @@ impl Interp {
             }
             if def.variants.iter().any(|v| v.ident == variant) {
                 return Some(Ok(Value::Enum {
-                    enum_name: name.clone(),
-                    variant: variant.to_string(),
-                    data: Rc::new(RefCell::new(args.to_vec())),
+                    enum_name: name.as_str().into(),
+                    variant: variant.into(),
+                    data: args.iter().cloned().collect(),
                 }));
             }
         }
         None
     }
 
-    pub(super) fn eval_method(&self, recv: Value, name: &str, args: Vec<Value>) -> Result<Value> {
+    pub(super) fn eval_method(&self, recv: Value, name: &MethodName, args: &mut [Value]) -> Result<Value> {
         // A method on a range acts on it as an iterator, so expand it to a Vec.
         let recv = if matches!(recv, Value::Range { .. }) {
             Value::vec(self.into_iter_items(recv)?)
         } else {
             recv
         };
-        let type_name = match &recv {
-            Value::Struct { name, .. } => Some(name.clone()),
-            Value::Enum { enum_name, .. } => Some(enum_name.clone()),
-            _ => None,
-        };
-        if let Some(tn) = &type_name
-            && let Some(chunk) = self.user_method(tn, name)
-        {
-            // The receiver is param 0, followed by the call arguments.
-            let mut full = Vec::with_capacity(args.len() + 1);
-            full.push(recv);
-            full.extend(args);
-            return self.run_chunk(&chunk, &full, &[]);
+        // User methods only exist on structs and enums, and only when the
+        // script defined any at all, so skip the keyed lookup otherwise.
+        if !self.methods.is_empty() {
+            let type_name = match &recv {
+                Value::Struct { name, .. } => Some(name.clone()),
+                Value::Enum { enum_name, .. } => Some(enum_name.clone()),
+                _ => None,
+            };
+            if let Some(tn) = &type_name
+                && let Some(chunk) = self.user_method(tn, &name.text)
+            {
+                // The receiver is param 0, followed by the call arguments.
+                let mut full = Vec::with_capacity(args.len() + 1);
+                full.push(recv);
+                full.extend_from_slice(args);
+                return self.run_chunk(&chunk, &full, &[]);
+            }
         }
-        if let Some(v) = self.higher_order(&recv, name, &args)? {
+        if name.id.is_higher_order()
+            && let Some(v) = self.higher_order(&recv, &name.text, &*args)?
+        {
             return Ok(v);
         }
         builtin_method(recv, name, args)
@@ -225,13 +231,13 @@ impl Interp {
     fn higher_order(&self, recv: &Value, name: &str, args: &[Value]) -> Result<Option<Value>> {
         match recv {
             Value::Vec(items) => self.vec_higher_order(items, name, args),
-            Value::Enum { enum_name, variant, data } if enum_name == "Option" => {
+            Value::Enum { enum_name, variant, data } if &**enum_name == "Option" => {
                 self.option_higher_order(variant, data, name, args)
             }
-            Value::Enum { enum_name, variant, data } if enum_name == "Result" => {
+            Value::Enum { enum_name, variant, data } if &**enum_name == "Result" => {
                 self.result_higher_order(variant, data, name, args)
             }
-            Value::Struct { name: n, fields } if n == "Entry" => {
+            Value::Struct { name: n, fields } if &**n == "Entry" => {
                 self.entry_higher_order(fields, name, args)
             }
             _ => Ok(None),
@@ -526,12 +532,12 @@ impl Interp {
     fn option_higher_order(
         &self,
         variant: &str,
-        data: &Rc<RefCell<Vec<Value>>>,
+        data: &Rc<[Value]>,
         name: &str,
         args: &[Value],
     ) -> Result<Option<Value>> {
         let is_some = variant == "Some";
-        let inner = || data.borrow().first().cloned().unwrap_or(Value::Unit);
+        let inner = || data.first().cloned().unwrap_or(Value::Unit);
         let clo = |i: usize| as_closure(args.get(i));
         let out = match name {
             "map" => {
@@ -585,12 +591,12 @@ impl Interp {
     fn result_higher_order(
         &self,
         variant: &str,
-        data: &Rc<RefCell<Vec<Value>>>,
+        data: &Rc<[Value]>,
         name: &str,
         args: &[Value],
     ) -> Result<Option<Value>> {
         let is_ok = variant == "Ok";
-        let inner = || data.borrow().first().cloned().unwrap_or(Value::Unit);
+        let inner = || data.first().cloned().unwrap_or(Value::Unit);
         let clo = |i: usize| as_closure(args.get(i));
         let out = match name {
             "map" => {
@@ -644,8 +650,8 @@ fn as_closure(v: Option<&Value>) -> Result<Rc<super::value::ClosureData>> {
 
 fn option_inner(v: &Value) -> Option<Value> {
     match v {
-        Value::Enum { enum_name, variant, data } if enum_name == "Option" && variant == "Some" => {
-            Some(data.borrow().first().cloned().unwrap_or(Value::Unit))
+        Value::Enum { enum_name, variant, data } if &**enum_name == "Option" && &**variant == "Some" => {
+            Some(data.first().cloned().unwrap_or(Value::Unit))
         }
         _ => None,
     }
@@ -672,14 +678,14 @@ fn make_ordering(o: std::cmp::Ordering) -> Value {
     Value::Enum {
         enum_name: "Ordering".into(),
         variant: variant.into(),
-        data: Rc::new(RefCell::new(vec![])),
+        data: Value::empty_data(),
     }
 }
 
 fn ordering_from_value(v: &Value) -> Option<std::cmp::Ordering> {
     use std::cmp::Ordering::*;
     match v {
-        Value::Enum { enum_name, variant, .. } if enum_name == "Ordering" => match variant.as_str() {
+        Value::Enum { enum_name, variant, .. } if &**enum_name == "Ordering" => match &**variant {
             "Less" => Some(Less),
             "Equal" => Some(Equal),
             "Greater" => Some(Greater),
@@ -841,7 +847,7 @@ fn as_i64(v: &Value) -> Option<i64> {
 pub(super) fn path_like(v: &Value) -> String {
     match v {
         Value::Str(s) => s.borrow().clone(),
-        Value::Struct { name, fields } if name == "Path" || name == "PathBuf" => fields
+        Value::Struct { name, fields } if &**name == "Path" || &**name == "PathBuf" => fields
             .borrow()
             .get("s")
             .map(|s| s.display())
@@ -853,7 +859,7 @@ pub(super) fn path_like(v: &Value) -> String {
 /// Wrap a std stream handle so `is_terminal` can name its stream while reads
 /// and writes delegate to the inner native handle.
 fn make_std_stream(kind: &str, inner: Native) -> Value {
-    let mut f = Fields::new();
+    let mut f = Fields::default();
     f.insert("kind".into(), Value::str(kind));
     f.insert("inner".into(), inner.wrap());
     Value::Struct {
@@ -892,7 +898,7 @@ fn std_stream_method(fields: &Rc<RefCell<Fields>>, name: &str, args: &[Value]) -
 /// Turn a script `Duration` value into a real `std::time::Duration`.
 pub(super) fn duration_from_value(v: &Value) -> Option<std::time::Duration> {
     if let Value::Struct { name, fields } = v
-        && name == "Duration"
+        && &**name == "Duration"
     {
         let f = fields.borrow();
         let secs = field_int(&f, "secs") as u64;
@@ -935,7 +941,7 @@ fn run_command(fields: &Rc<RefCell<Fields>>) -> Value {
 /// inherit so a spawned child shares the terminal like a shell command.
 fn stdio_for(f: &Fields, key: &str) -> std::process::Stdio {
     match f.get(key) {
-        Some(Value::Struct { name, fields }) if name == "Stdio" => {
+        Some(Value::Struct { name, fields }) if &**name == "Stdio" => {
             match fields.borrow().get("kind").map(|v| v.display()).as_deref() {
                 Some("piped") => std::process::Stdio::piped(),
                 Some("null") => std::process::Stdio::null(),
@@ -976,7 +982,7 @@ fn spawn_command(fields: &Rc<RefCell<Fields>>) -> Value {
         .map(|r| Native::Reader(std::io::BufReader::new(Box::new(r) as Box<dyn std::io::Read>)).wrap())
         .map(Value::some)
         .unwrap_or_else(Value::none);
-    let mut cf = Fields::new();
+    let mut cf = Fields::default();
     cf.insert("handle".into(), Native::Child(child).wrap());
     cf.insert("stdin".into(), stdin);
     cf.insert("stdout".into(), stdout);
@@ -989,7 +995,7 @@ fn spawn_command(fields: &Rc<RefCell<Fields>>) -> Value {
 
 /// Build an `ExitStatus` value with `code` and `success`.
 pub(super) fn make_exit_status(status: std::process::ExitStatus) -> Value {
-    let mut st = Fields::new();
+    let mut st = Fields::default();
     st.insert("code".into(), Value::Int(status.code().unwrap_or(-1) as i64));
     st.insert("success".into(), Value::Bool(status.success()));
     Value::Struct {
@@ -1000,7 +1006,7 @@ pub(super) fn make_exit_status(status: std::process::ExitStatus) -> Value {
 
 /// Build an `Output` value with `stdout`, `stderr`, and `status`.
 pub(super) fn make_output(out: std::process::Output) -> Value {
-    let mut o = Fields::new();
+    let mut o = Fields::default();
     o.insert(
         "stdout".into(),
         Value::str(String::from_utf8_lossy(&out.stdout).into_owned()),
@@ -1018,7 +1024,7 @@ pub(super) fn make_output(out: std::process::Output) -> Value {
 
 /// Build a `Duration` value carrying whole and sub-second parts.
 pub(super) fn make_duration(d: std::time::Duration) -> Value {
-    let mut f = Fields::new();
+    let mut f = Fields::default();
     f.insert("secs".into(), Value::Int(d.as_secs() as i64));
     f.insert("nanos".into(), Value::Int(d.subsec_nanos() as i64));
     Value::Struct {
@@ -1031,7 +1037,7 @@ pub(super) fn make_duration(d: std::time::Duration) -> Value {
 /// The Unix `MetadataExt` fields are gated so the interpreter still builds on
 /// Windows, where a script would use different accessors.
 pub(super) fn make_metadata(m: &std::fs::Metadata) -> Value {
-    let mut f = Fields::new();
+    let mut f = Fields::default();
     f.insert("len".into(), Value::Int(m.len() as i64));
     f.insert("is_dir".into(), Value::Bool(m.is_dir()));
     f.insert("is_file".into(), Value::Bool(m.is_file()));
@@ -1084,7 +1090,7 @@ fn http_verb(func: &str) -> Option<&'static str> {
 /// Build an `HttpRequest`, optionally bound to an agent so its cookie jar and
 /// config carry through the call.
 pub(super) fn build_http_request(method: &str, url: Option<&Value>, agent: Option<Value>) -> Value {
-    let mut fields = Fields::new();
+    let mut fields = Fields::default();
     fields.insert("method".into(), Value::str(method));
     fields.insert(
         "url".into(),
@@ -1173,7 +1179,7 @@ fn request_method(
         "timeout" | "timeout_global" | "timeout_connect" => {
             // The argument may be a bare Duration or an Option<Duration>.
             let dur = match args.first() {
-                Some(Value::Enum { data, .. }) => data.borrow().first().cloned(),
+                Some(Value::Enum { data, .. }) => data.first().cloned(),
                 other => other.cloned(),
             };
             if let Some(d) = dur {
@@ -1243,7 +1249,7 @@ fn run_request(fields: &Rc<RefCell<Fields>>, body: Option<String>) -> Value {
     }
     match do_http(&verb, &url, &headers, body, timeout, agent.as_ref()) {
         Ok((status, text)) => {
-            let mut rf = Fields::new();
+            let mut rf = Fields::default();
             rf.insert("status".into(), Value::Int(status as i64));
             rf.insert("body".into(), Value::str(text));
             Value::ok(Value::Struct {
@@ -1311,7 +1317,7 @@ fn response_method(fields: &Rc<RefCell<Fields>>, method: &str) -> Value {
     let f = fields.borrow();
     match method {
         "status" => {
-            let mut sf = Fields::new();
+            let mut sf = Fields::default();
             sf.insert("code".into(), f.get("status").cloned().unwrap_or(Value::Int(0)));
             Value::Struct {
                 name: "StatusCode".into(),
@@ -1319,7 +1325,7 @@ fn response_method(fields: &Rc<RefCell<Fields>>, method: &str) -> Value {
             }
         }
         "body_mut" | "body" | "into_body" => {
-            let mut bf = Fields::new();
+            let mut bf = Fields::default();
             bf.insert("text".into(), f.get("body").cloned().unwrap_or_else(|| Value::str("")));
             Value::Struct {
                 name: "HttpBody".into(),
@@ -1335,8 +1341,8 @@ fn body_method(fields: &Rc<RefCell<Fields>>, method: &str) -> Result<Value> {
     let text = fields.borrow().get("text").map(|v| v.display()).unwrap_or_default();
     Ok(match method {
         "read_to_string" => Value::ok(Value::str(text)),
-        "read_json" => match serde_json::from_str::<serde_json::Value>(&text) {
-            Ok(j) => Value::ok(json_to_value(&j)),
+        "read_json" => match parse_json(&text) {
+            Ok(v) => Value::ok(v),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
         _ => bail!("unknown method `{method}` on a body"),
@@ -1360,7 +1366,7 @@ fn status_method(fields: &Rc<RefCell<Fields>>, method: &str) -> Value {
 // -- path, directory entry, and file type ----------------------------------
 
 pub(super) fn make_path(s: impl Into<String>) -> Value {
-    let mut f = Fields::new();
+    let mut f = Fields::default();
     f.insert("s".into(), Value::str(s.into()));
     Value::Struct {
         name: "Path".into(),
@@ -1369,7 +1375,7 @@ pub(super) fn make_path(s: impl Into<String>) -> Value {
 }
 
 fn make_dir_entry(entry: &std::fs::DirEntry) -> Value {
-    let mut f = Fields::new();
+    let mut f = Fields::default();
     f.insert("path".into(), Value::str(entry.path().display().to_string()));
     f.insert(
         "name".into(),
@@ -1382,7 +1388,7 @@ fn make_dir_entry(entry: &std::fs::DirEntry) -> Value {
 }
 
 fn make_file_type(path: &std::path::Path) -> Value {
-    let mut f = Fields::new();
+    let mut f = Fields::default();
     f.insert("is_dir".into(), Value::Bool(path.is_dir()));
     f.insert("is_file".into(), Value::Bool(path.is_file()));
     f.insert(
@@ -1463,7 +1469,7 @@ fn file_type_method(fields: &Rc<RefCell<Fields>>, method: &str) -> Result<Value>
 // -- regex bridge ----------------------------------------------------------
 
 fn make_regex(pattern: String) -> Value {
-    let mut f = Fields::new();
+    let mut f = Fields::default();
     f.insert("pattern".into(), Value::str(pattern));
     Value::Struct {
         name: "Regex".into(),
@@ -1472,7 +1478,7 @@ fn make_regex(pattern: String) -> Value {
 }
 
 fn make_match(m: &regex::Match) -> Value {
-    let mut f = Fields::new();
+    let mut f = Fields::default();
     f.insert("text".into(), Value::str(m.as_str().to_string()));
     f.insert("start".into(), Value::Int(m.start() as i64));
     f.insert("end".into(), Value::Int(m.end() as i64));
@@ -1489,13 +1495,13 @@ fn make_captures(re: &regex::Regex, caps: &regex::Captures) -> Value {
             None => Value::none(),
         })
         .collect();
-    let mut names = BTreeMap::new();
+    let mut names = Map::default();
     for (i, name) in re.capture_names().enumerate() {
         if let Some(n) = name {
             names.insert(MapKey::Str(n.to_string()), Value::Int(i as i64));
         }
     }
-    let mut f = Fields::new();
+    let mut f = Fields::default();
     f.insert("groups".into(), Value::vec(groups));
     f.insert("names".into(), Value::Map(Rc::new(RefCell::new(names))));
     Value::Struct {
@@ -1587,7 +1593,7 @@ fn capture_group(fields: &Rc<RefCell<Fields>>, i: usize) -> Value {
 
 fn capture_name_index(fields: &Rc<RefCell<Fields>>, name: &str) -> Option<usize> {
     if let Some(Value::Map(names)) = fields.borrow().get("names")
-        && let Some(Value::Int(i)) = names.borrow().get(&MapKey::Str(name.to_string()))
+        && let Some(Value::Int(i)) = names.borrow().get(&KeyRef::Str(name))
     {
         return Some(*i as usize);
     }
@@ -1607,8 +1613,8 @@ pub(super) fn capture_index(
         _ => bail!("invalid capture index"),
     };
     match capture_group(fields, idx) {
-        Value::Enum { variant, data, .. } if variant == "Some" => {
-            let m = data.borrow().first().cloned().unwrap_or(Value::Unit);
+        Value::Enum { variant, data, .. } if &*variant == "Some" => {
+            let m = data.first().cloned().unwrap_or(Value::Unit);
             if let Value::Struct { fields: mf, .. } = m {
                 return Ok(mf.borrow().get("text").cloned().unwrap_or_else(|| Value::str("")));
             }
@@ -1653,7 +1659,7 @@ fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
         ("String", "from_utf8_lossy") => Value::str(bytes_to_string(args.first())),
         ("String", "from_utf8") => Value::ok(Value::str(bytes_to_string(args.first()))),
         ("Command", "new") => {
-            let mut fields = Fields::new();
+            let mut fields = Fields::default();
             fields.insert(
                 "program".into(),
                 args.first().cloned().unwrap_or_else(|| Value::str("")),
@@ -1672,7 +1678,7 @@ fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
         },
         ("HashMap", "new") | ("BTreeMap", "new") | ("HashMap", "with_capacity")
         | ("HashSet", "new") | ("BTreeSet", "new") => {
-            Value::Map(Rc::new(RefCell::new(BTreeMap::new())))
+            Value::Map(Rc::new(RefCell::new(Map::default())))
         }
         ("Box" | "Rc" | "Arc" | "RefCell" | "Cell", "new") => {
             args.first().cloned().unwrap_or(Value::Unit)
@@ -1723,7 +1729,7 @@ fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
             std::fs::OpenOptions::new().write(true).create_new(true),
         ),
         ("OpenOptions", "new") => {
-            let mut f = Fields::new();
+            let mut f = Fields::default();
             for k in ["read", "write", "append", "create", "create_new", "truncate"] {
                 f.insert(k.into(), Value::Bool(false));
             }
@@ -1762,12 +1768,12 @@ fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
         },
         ("SeekFrom", "Start" | "End" | "Current") => Value::Enum {
             enum_name: "SeekFrom".into(),
-            variant: func.to_string(),
-            data: Rc::new(RefCell::new(vec![args.first().cloned().unwrap_or(Value::Int(0))])),
+            variant: func.into(),
+            data: Value::one_data(args.first().cloned().unwrap_or(Value::Int(0))),
         },
         ("Agent", "new_with_defaults") => Native::Agent(ureq::agent()).wrap(),
         ("Stdio", "piped") | ("Stdio", "inherit") | ("Stdio", "null") => {
-            let mut f = Fields::new();
+            let mut f = Fields::default();
             f.insert("kind".into(), Value::str(func));
             Value::Struct {
                 name: "Stdio".into(),
@@ -1838,7 +1844,7 @@ fn crate_bridge(module: &str, func: &str, args: &[Value]) -> Result<Option<Value
         },
         // toml -------------------------------------------------------------
         ("toml", "from_str") => match toml::from_str::<serde_json::Value>(&s0()) {
-            Ok(j) => Value::ok(json_to_value(&j)),
+            Ok(j) => Value::ok(json_to_value(j)),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
         ("toml", "to_string") | ("toml", "to_string_pretty") => {
@@ -1849,7 +1855,7 @@ fn crate_bridge(module: &str, func: &str, args: &[Value]) -> Result<Option<Value
         }
         // serde_yaml -------------------------------------------------------
         ("serde_yaml", "from_str") => match serde_yaml::from_str::<serde_json::Value>(&s0()) {
-            Ok(j) => Value::ok(json_to_value(&j)),
+            Ok(j) => Value::ok(json_to_value(j)),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
         ("serde_yaml", "to_string") => {
@@ -1861,7 +1867,7 @@ fn crate_bridge(module: &str, func: &str, args: &[Value]) -> Result<Option<Value
         // rand -------------------------------------------------------------
         ("rand", "rng") | ("rand", "thread_rng") => Value::Struct {
             name: "Rng".into(),
-            fields: Rc::new(RefCell::new(Fields::new())),
+            fields: Rc::new(RefCell::new(Fields::default())),
         },
         ("rand", "random") => Value::Float(rand::random::<f64>()),
         // chrono -----------------------------------------------------------
@@ -1889,7 +1895,7 @@ fn base64_engine(name: &str) -> Option<Value> {
         "URL_SAFE_NO_PAD" | "BASE64_URL_SAFE_NO_PAD" => "url_safe_no_pad",
         _ => return None,
     };
-    let mut f = Fields::new();
+    let mut f = Fields::default();
     f.insert("kind".into(), Value::str(kind));
     Some(Value::Struct {
         name: "Base64Engine".into(),
@@ -1932,7 +1938,7 @@ fn now_datetime(local: bool) -> Value {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
-    let mut f = Fields::new();
+    let mut f = Fields::default();
     f.insert("secs".into(), Value::Int(now.as_secs() as i64));
     f.insert("nanos".into(), Value::Int(now.subsec_nanos() as i64));
     f.insert("local".into(), Value::Bool(local));
@@ -2037,6 +2043,92 @@ fn bytes_to_vec(b: &[u8]) -> Value {
 
 // -- serde_json bridge -----------------------------------------------------
 
+/// Parse json text straight into a script value, skipping the intermediate
+/// `serde_json::Value` tree that would otherwise be built and dropped.
+fn parse_json(text: &str) -> std::result::Result<Value, serde_json::Error> {
+    use serde::de::DeserializeSeed;
+    let mut de = serde_json::Deserializer::from_str(text);
+    let v = JsonSeed.deserialize(&mut de)?;
+    de.end()?;
+    Ok(v)
+}
+
+struct JsonSeed;
+
+impl<'de> serde::de::DeserializeSeed<'de> for JsonSeed {
+    type Value = Value;
+
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        d: D,
+    ) -> std::result::Result<Value, D::Error> {
+        d.deserialize_any(JsonVisitor)
+    }
+}
+
+struct JsonVisitor;
+
+impl<'de> serde::de::Visitor<'de> for JsonVisitor {
+    type Value = Value;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a json value")
+    }
+
+    fn visit_bool<E>(self, b: bool) -> std::result::Result<Value, E> {
+        Ok(Value::Bool(b))
+    }
+
+    fn visit_i64<E>(self, i: i64) -> std::result::Result<Value, E> {
+        Ok(Value::Int(i))
+    }
+
+    fn visit_u64<E>(self, u: u64) -> std::result::Result<Value, E> {
+        Ok(match i64::try_from(u) {
+            Ok(i) => Value::Int(i),
+            Err(_) => Value::Float(u as f64),
+        })
+    }
+
+    fn visit_f64<E>(self, f: f64) -> std::result::Result<Value, E> {
+        Ok(Value::Float(f))
+    }
+
+    fn visit_str<E>(self, s: &str) -> std::result::Result<Value, E> {
+        Ok(Value::str(s))
+    }
+
+    fn visit_string<E>(self, s: String) -> std::result::Result<Value, E> {
+        Ok(Value::str(s))
+    }
+
+    fn visit_unit<E>(self) -> std::result::Result<Value, E> {
+        Ok(Value::none())
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(
+        self,
+        mut seq: A,
+    ) -> std::result::Result<Value, A::Error> {
+        let mut items = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+        while let Some(v) = seq.next_element_seed(JsonSeed)? {
+            items.push(v);
+        }
+        Ok(Value::vec(items))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(
+        self,
+        mut access: A,
+    ) -> std::result::Result<Value, A::Error> {
+        let mut map = map_with_capacity(access.size_hint().unwrap_or(0));
+        while let Some(k) = access.next_key::<String>()? {
+            map.insert(MapKey::Str(k), access.next_value_seed(JsonSeed)?);
+        }
+        Ok(Value::Map(Rc::new(RefCell::new(map))))
+    }
+}
+
 fn bridge_serde_json(func: &str, args: &[Value]) -> Result<Value> {
     match func {
         "from_str" => {
@@ -2045,8 +2137,8 @@ fn bridge_serde_json(func: &str, args: &[Value]) -> Result<Value> {
                 Some(other) => other.display(),
                 None => bail!("from_str needs a string"),
             };
-            match serde_json::from_str::<serde_json::Value>(&s) {
-                Ok(j) => Ok(Value::ok(json_to_value(&j))),
+            match parse_json(&s) {
+                Ok(v) => Ok(Value::ok(v)),
                 Err(e) => Ok(Value::err(Value::str(e.to_string()))),
             }
         }
@@ -2064,23 +2156,24 @@ fn bridge_serde_json(func: &str, args: &[Value]) -> Result<Value> {
     }
 }
 
-fn json_to_value(j: &serde_json::Value) -> Value {
+/// Consumes the parsed tree so strings move into values instead of cloning.
+fn json_to_value(j: serde_json::Value) -> Value {
     match j {
         serde_json::Value::Null => Value::none(),
-        serde_json::Value::Bool(b) => Value::Bool(*b),
+        serde_json::Value::Bool(b) => Value::Bool(b),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Value::Int(i as i64)
+                Value::Int(i)
             } else {
                 Value::Float(n.as_f64().unwrap_or(0.0))
             }
         }
-        serde_json::Value::String(s) => Value::str(s.clone()),
-        serde_json::Value::Array(a) => Value::vec(a.iter().map(json_to_value).collect()),
+        serde_json::Value::String(s) => Value::str(s),
+        serde_json::Value::Array(a) => Value::vec(a.into_iter().map(json_to_value).collect()),
         serde_json::Value::Object(o) => {
-            let mut map = BTreeMap::new();
+            let mut map = map_with_capacity(o.len());
             for (k, v) in o {
-                map.insert(MapKey::Str(k.clone()), json_to_value(v));
+                map.insert(MapKey::Str(k), json_to_value(v));
             }
             Value::Map(Rc::new(RefCell::new(map)))
         }
@@ -2102,16 +2195,16 @@ fn value_to_json(v: &Value) -> Result<serde_json::Value> {
             J::Array(items.borrow().iter().map(value_to_json).collect::<Result<_>>()?)
         }
         Value::Map(map) => {
-            let mut obj = serde_json::Map::new();
+            let mut obj = serde_json::Map::default();
             for (k, val) in map.borrow().iter() {
                 obj.insert(k.to_value().display(), value_to_json(val)?);
             }
             J::Object(obj)
         }
         Value::Struct { fields, .. } => {
-            let mut obj = serde_json::Map::new();
+            let mut obj = serde_json::Map::default();
             for (k, val) in fields.borrow().iter() {
-                obj.insert(k.clone(), value_to_json(val)?);
+                obj.insert(k.to_string(), value_to_json(val)?);
             }
             J::Object(obj)
         }
@@ -2120,19 +2213,19 @@ fn value_to_json(v: &Value) -> Result<serde_json::Value> {
             variant,
             data,
         } => {
-            if enum_name == "Option" {
-                match variant.as_str() {
-                    "Some" => value_to_json(&data.borrow()[0])?,
+            if &**enum_name == "Option" {
+                match &**variant {
+                    "Some" => value_to_json(&data[0])?,
                     _ => J::Null,
                 }
             } else {
-                let data = data.borrow();
+                
                 if data.is_empty() {
-                    J::String(variant.clone())
+                    J::String(variant.to_string())
                 } else {
-                    let mut obj = serde_json::Map::new();
+                    let mut obj = serde_json::Map::default();
                     obj.insert(
-                        variant.clone(),
+                        variant.to_string(),
                         J::Array(data.iter().map(value_to_json).collect::<Result<_>>()?),
                     );
                     J::Object(obj)
@@ -2147,74 +2240,68 @@ fn value_to_json(v: &Value) -> Result<serde_json::Value> {
 
 // -- builtin methods -------------------------------------------------------
 
-fn builtin_method(recv: Value, name: &str, args: Vec<Value>) -> Result<Value> {
+fn builtin_method(recv: Value, method: &MethodName, args: &mut [Value]) -> Result<Value> {
+    // The hot receivers dispatch on the precompiled id, no string compares.
     match &recv {
-        Value::Native(h) => match super::native::native_method(h, name, &args)? {
+        Value::Str(s) => return str_method(s, method, &*args),
+        Value::Vec(v) => return vec_method(v, method, args),
+        Value::Map(m) => return map_method(m, method, args),
+        _ => {}
+    }
+    let args = &*args;
+    let name = method.text.as_str();
+    match &recv {
+        Value::Native(h) => match super::native::native_method(h, name, args)? {
             Some(v) => Ok(v),
-            None => generic_method(&recv, name, &args),
+            None => generic_method(&recv, name, args),
         },
-        Value::Struct { name: n, fields } if n == "Duration" => duration_method(fields, name),
-        Value::Struct { name: n, fields } if n == "Metadata" => {
-            metadata_method(fields, name, &args)
+        Value::Int(_) | Value::Float(_) => num_method(&recv, name, args),
+        Value::Enum { enum_name, .. } if &**enum_name == "Option" => {
+            opt_method(&recv, method, args)
         }
-        Value::Struct { name: n, fields } if n == "Permissions" => {
-            let f = fields.borrow();
-            match name {
-                "mode" => Ok(f.get("mode").cloned().unwrap_or(Value::Int(0))),
-                "readonly" => Ok(f.get("readonly").cloned().unwrap_or(Value::Bool(false))),
-                "set_readonly" => Ok(Value::Unit),
-                _ => bail!("unknown method `{name}` on Permissions"),
+        Value::Enum { enum_name, .. } if &**enum_name == "Result" => {
+            res_method(&recv, method, args)
+        }
+        Value::Struct { name: n, fields } => match &**n {
+            "Duration" => duration_method(fields, name),
+            "Metadata" => metadata_method(fields, name, args),
+            "Permissions" => {
+                let f = fields.borrow();
+                match name {
+                    "mode" => Ok(f.get("mode").cloned().unwrap_or(Value::Int(0))),
+                    "readonly" => Ok(f.get("readonly").cloned().unwrap_or(Value::Bool(false))),
+                    "set_readonly" => Ok(Value::Unit),
+                    _ => bail!("unknown method `{name}` on Permissions"),
+                }
             }
-        }
-        Value::Str(s) => str_method(s, name, &args),
-        Value::Vec(v) => vec_method(v, name, &args),
-        Value::Map(m) => map_method(m, name, &args),
-        Value::Int(_) | Value::Float(_) => num_method(&recv, name, &args),
-        Value::Enum { enum_name, .. } if enum_name == "Option" => opt_method(&recv, name, &args),
-        Value::Enum { enum_name, .. } if enum_name == "Result" => res_method(&recv, name, &args),
-        Value::Struct { name: n, fields } if n == "Command" => {
-            command_method(fields, name, &args)
-        }
-        Value::Struct { name: n, fields } if n == "ExitStatus" => {
-            exitstatus_method(fields, name)
-        }
-        Value::Struct { name: n, fields }
-            if matches!(
-                n.as_str(),
-                "HttpRequest" | "HttpResponse" | "HttpBody" | "StatusCode"
-            ) =>
-        {
-            http_method(n, fields, name, &args)
-        }
-        Value::Struct { name: n, fields } if n == "StdStream" => {
-            std_stream_method(fields, name, &args)
-        }
-        Value::Struct { name: n, .. } if n == "Rng" => rng_method(name, &args),
-        Value::Struct { name: n, fields } if n == "DateTime" => {
-            datetime_method(fields, name, &args)
-        }
-        Value::Struct { name: n, fields } if n == "Base64Engine" => {
-            base64_method(fields, name, &args)
-        }
-        Value::Struct { name: n, fields } if n == "Entry" => entry_method(fields, name, &args),
-        Value::Struct { name: n, fields } if n == "JoinHandle" => {
-            let f = fields.borrow();
-            match name {
-                "join" => Ok(Value::ok(f.get("result").cloned().unwrap_or(Value::Unit))),
-                "is_finished" => Ok(Value::Bool(true)),
-                _ => bail!("unknown method `{name}` on JoinHandle"),
+            "Command" => command_method(fields, name, args),
+            "ExitStatus" => exitstatus_method(fields, name),
+            "HttpRequest" | "HttpResponse" | "HttpBody" | "StatusCode" => {
+                http_method(n, fields, name, args)
             }
-        }
-        Value::Struct { name: n, fields } if n == "Child" => child_method(fields, name, &args),
-        Value::Struct { name: n, fields } if n == "Path" => path_method(fields, name, &args),
-        Value::Struct { name: n, fields } if n == "DirEntry" => dir_entry_method(fields, name),
-        Value::Struct { name: n, fields } if n == "FileType" => file_type_method(fields, name),
-        Value::Struct { name: n, fields } if n == "Regex" => regex_method(fields, name, &args),
-        Value::Struct { name: n, fields } if n == "Match" => match_method(fields, name),
-        Value::Struct { name: n, fields } if n == "Captures" => {
-            captures_method(fields, name, &args)
-        }
-        _ => generic_method(&recv, name, &args),
+            "StdStream" => std_stream_method(fields, name, args),
+            "Rng" => rng_method(name, args),
+            "DateTime" => datetime_method(fields, name, args),
+            "Base64Engine" => base64_method(fields, name, args),
+            "Entry" => entry_method(fields, name, args),
+            "JoinHandle" => {
+                let f = fields.borrow();
+                match name {
+                    "join" => Ok(Value::ok(f.get("result").cloned().unwrap_or(Value::Unit))),
+                    "is_finished" => Ok(Value::Bool(true)),
+                    _ => bail!("unknown method `{name}` on JoinHandle"),
+                }
+            }
+            "Child" => child_method(fields, name, args),
+            "Path" => path_method(fields, name, args),
+            "DirEntry" => dir_entry_method(fields, name),
+            "FileType" => file_type_method(fields, name),
+            "Regex" => regex_method(fields, name, args),
+            "Match" => match_method(fields, name),
+            "Captures" => captures_method(fields, name, args),
+            _ => generic_method(&recv, name, args),
+        },
+        _ => generic_method(&recv, name, args),
     }
 }
 
@@ -2255,7 +2342,7 @@ fn command_method(
             let val = args.get(1).cloned().unwrap_or(Value::Unit);
             let entry = f
                 .entry("envs".into())
-                .or_insert_with(|| Value::Map(Rc::new(RefCell::new(BTreeMap::new()))));
+                .or_insert_with(|| Value::Map(Rc::new(RefCell::new(Map::default()))));
             if let Value::Map(m) = entry {
                 m.borrow_mut().insert(MapKey::Str(key), val);
             }
@@ -2272,7 +2359,7 @@ fn command_method(
         "output" => run_command(fields),
         "status" => match run_command(fields) {
             Value::Enum { data, .. } => {
-                let out = data.borrow().first().cloned().unwrap_or(Value::Unit);
+                let out = data.first().cloned().unwrap_or(Value::Unit);
                 match out {
                     Value::Struct { fields: of, .. } => {
                         Value::ok(of.borrow().get("status").cloned().unwrap_or(Value::Unit))
@@ -2294,9 +2381,9 @@ fn close_child_stdin(v: &Value) {
     match v {
         Value::Native(rc) => *rc.borrow_mut() = Native::Closed,
         Value::Enum { enum_name, variant, data }
-            if enum_name == "Option" && variant == "Some" =>
+            if &**enum_name == "Option" && &**variant == "Some" =>
         {
-            if let Some(inner) = data.borrow().first() {
+            if let Some(inner) = data.first() {
                 close_child_stdin(inner);
             }
         }
@@ -2335,7 +2422,7 @@ fn child_method(fields: &Rc<RefCell<Fields>>, name: &str, args: &[Value]) -> Res
                 bail!("child handle missing");
             }
         };
-        let mut o = Fields::new();
+        let mut o = Fields::default();
         o.insert("stdout".into(), Value::str(out));
         o.insert("stderr".into(), Value::str(err));
         o.insert("status".into(), make_exit_status(status));
@@ -2361,7 +2448,7 @@ fn child_handle(fields: &Rc<RefCell<Fields>>) -> Result<Rc<RefCell<Native>>> {
 /// Read a child's piped stdout/stderr field to the end as a string.
 fn drain_child_pipe(fields: &Rc<RefCell<Fields>>, key: &str) -> String {
     let handle = match fields.borrow().get(key) {
-        Some(Value::Enum { data, .. }) => match data.borrow().first() {
+        Some(Value::Enum { data, .. }) => match data.first() {
             Some(Value::Native(h)) => h.clone(),
             _ => return String::new(),
         },
@@ -2451,7 +2538,7 @@ fn metadata_method(fields: &Rc<RefCell<Fields>>, name: &str, _args: &[Value]) ->
         },
         "mode" | "dev" | "ino" | "uid" | "gid" | "mtime" => get(name),
         "permissions" => {
-            let mut p = Fields::new();
+            let mut p = Fields::default();
             p.insert("mode".into(), get("mode"));
             p.insert("readonly".into(), get("readonly"));
             Value::Struct {
@@ -2499,53 +2586,40 @@ fn generic_method(recv: &Value, name: &str, _args: &[Value]) -> Result<Value> {
     }
 }
 
-fn str_method(s: &Rc<RefCell<String>>, name: &str, args: &[Value]) -> Result<Value> {
+fn str_method(s: &Rc<RefCell<String>>, method: &MethodName, args: &[Value]) -> Result<Value> {
+    use BuiltinId as B;
     let arg_str = |i: usize| -> String {
         args.get(i).map(|v| v.display()).unwrap_or_default()
     };
-    Ok(match name {
-        "len" => Value::Int(s.borrow().len() as i64),
-        "is_empty" => Value::Bool(s.borrow().is_empty()),
-        "clone" | "to_string" | "to_owned" | "trim_string" => Value::str(s.borrow().clone()),
-        "to_uppercase" | "to_ascii_uppercase" => Value::str(s.borrow().to_uppercase()),
-        "to_lowercase" | "to_ascii_lowercase" => Value::str(s.borrow().to_lowercase()),
-        "trim" => Value::str(s.borrow().trim().to_string()),
-        "trim_start" => Value::str(s.borrow().trim_start().to_string()),
-        "trim_end" => Value::str(s.borrow().trim_end().to_string()),
-        "push" => {
+    Ok(match method.id {
+        B::Len => Value::Int(s.borrow().len() as i64),
+        B::IsEmpty => Value::Bool(s.borrow().is_empty()),
+        B::Clone | B::ToString => Value::str(s.borrow().clone()),
+        B::Trim => Value::str(s.borrow().trim().to_string()),
+        B::Push => {
             if let Some(Value::Char(c)) = args.first() {
                 s.borrow_mut().push(*c);
             }
             Value::Unit
         }
-        "push_str" => {
+        B::PushStr => {
             s.borrow_mut().push_str(&arg_str(0));
             Value::Unit
         }
-        "contains" => Value::Bool(s.borrow().contains(&arg_str(0))),
-        "starts_with" => Value::Bool(s.borrow().starts_with(&arg_str(0))),
-        "ends_with" => Value::Bool(s.borrow().ends_with(&arg_str(0))),
-        "replace" => Value::str(s.borrow().replace(&arg_str(0), &arg_str(1))),
-        "repeat" => {
-            let n = match args.first() {
-                Some(Value::Int(n)) => *n as usize,
-                _ => 0,
-            };
-            Value::str(s.borrow().repeat(n))
-        }
-        "chars" => Value::vec(s.borrow().chars().map(Value::Char).collect()),
-        "lines" => Value::vec(s.borrow().lines().map(Value::str).collect()),
-        "split" => {
+        B::Contains => Value::Bool(s.borrow().contains(&arg_str(0))),
+        B::StartsWith => Value::Bool(s.borrow().starts_with(&arg_str(0))),
+        B::EndsWith => Value::Bool(s.borrow().ends_with(&arg_str(0))),
+        B::Chars => Value::vec(s.borrow().chars().map(Value::Char).collect()),
+        B::Lines => Value::vec(s.borrow().lines().map(Value::str).collect()),
+        B::Split => {
             let sep = arg_str(0);
             Value::vec(s.borrow().split(&sep).map(Value::str).collect())
         }
-        "split_whitespace" => {
+        B::SplitWhitespace => {
             Value::vec(s.borrow().split_whitespace().map(Value::str).collect())
         }
-        "count" => Value::Int(s.borrow().chars().count() as i64),
-        "as_str" | "as_string" => Value::some(Value::str(s.borrow().clone())),
-        "cmp" => make_ordering(s.borrow().as_str().cmp(arg_str(0).as_str())),
-        "parse" => {
+        B::Count => Value::Int(s.borrow().chars().count() as i64),
+        B::Parse => {
             let text = s.borrow();
             let t = text.trim();
             if let Ok(i) = t.parse::<i64>() {
@@ -2558,6 +2632,30 @@ fn str_method(s: &Rc<RefCell<String>>, name: &str, args: &[Value]) -> Result<Val
                 Value::err(Value::str(format!("cannot parse `{t}`")))
             }
         }
+        _ => return str_method_slow(s, &method.text, args),
+    })
+}
+
+fn str_method_slow(s: &Rc<RefCell<String>>, name: &str, args: &[Value]) -> Result<Value> {
+    let arg_str = |i: usize| -> String {
+        args.get(i).map(|v| v.display()).unwrap_or_default()
+    };
+    Ok(match name {
+        "to_owned" | "trim_string" => Value::str(s.borrow().clone()),
+        "to_uppercase" | "to_ascii_uppercase" => Value::str(s.borrow().to_uppercase()),
+        "to_lowercase" | "to_ascii_lowercase" => Value::str(s.borrow().to_lowercase()),
+        "trim_start" => Value::str(s.borrow().trim_start().to_string()),
+        "trim_end" => Value::str(s.borrow().trim_end().to_string()),
+        "replace" => Value::str(s.borrow().replace(&arg_str(0), &arg_str(1))),
+        "repeat" => {
+            let n = match args.first() {
+                Some(Value::Int(n)) => *n as usize,
+                _ => 0,
+            };
+            Value::str(s.borrow().repeat(n))
+        }
+        "as_str" | "as_string" => Value::some(Value::str(s.borrow().clone())),
+        "cmp" => make_ordering(s.borrow().as_str().cmp(arg_str(0).as_str())),
         _ => {
             if let Some(colored) = color_method(&s.borrow(), name) {
                 colored
@@ -2601,66 +2699,48 @@ fn color_method(s: &str, name: &str) -> Option<Value> {
     Some(Value::str(out.to_string()))
 }
 
-fn vec_method(v: &Rc<RefCell<Vec<Value>>>, name: &str, args: &[Value]) -> Result<Value> {
-    Ok(match name {
-        "len" => Value::Int(v.borrow().len() as i64),
-        "is_empty" => Value::Bool(v.borrow().is_empty()),
-        "clone" => Value::vec(v.borrow().clone()),
-        "push" => {
-            v.borrow_mut().push(args.first().cloned().unwrap_or(Value::Unit));
+fn vec_method(v: &Rc<RefCell<Vec<Value>>>, method: &MethodName, args: &mut [Value]) -> Result<Value> {
+    use BuiltinId as B;
+    Ok(match method.id {
+        B::Len | B::Count => Value::Int(v.borrow().len() as i64),
+        B::IsEmpty => Value::Bool(v.borrow().is_empty()),
+        B::Clone | B::Iter => Value::vec(v.borrow().clone()),
+        B::Push => {
+            v.borrow_mut().push(args.first_mut().map(take).unwrap_or(Value::Unit));
             Value::Unit
         }
-        "pop" => match v.borrow_mut().pop() {
+        B::Pop => match v.borrow_mut().pop() {
             Some(x) => Value::some(x),
             None => Value::none(),
         },
-        "insert" => {
+        B::Insert => {
             let i = int_arg(args, 0)? as usize;
             v.borrow_mut().insert(i, args.get(1).cloned().unwrap_or(Value::Unit));
             Value::Unit
         }
-        "remove" => {
+        B::Remove => {
             let i = int_arg(args, 0)? as usize;
             v.borrow_mut().remove(i)
         }
-        "get" => {
+        B::Get => {
             let i = int_arg(args, 0)? as usize;
             match v.borrow().get(i) {
                 Some(x) => Value::some(x.clone()),
                 None => Value::none(),
             }
         }
-        "first" => v.borrow().first().cloned().map(Value::some).unwrap_or_else(Value::none),
-        "last" => v.borrow().last().cloned().map(Value::some).unwrap_or_else(Value::none),
-        "contains" => {
+        B::First => v.borrow().first().cloned().map(Value::some).unwrap_or_else(Value::none),
+        B::Last => v.borrow().last().cloned().map(Value::some).unwrap_or_else(Value::none),
+        B::Contains => {
             let needle = args.first().cloned().unwrap_or(Value::Unit);
             Value::Bool(v.borrow().iter().any(|x| x.eq_value(&needle)))
         }
-        "reverse" => {
-            v.borrow_mut().reverse();
-            Value::Unit
-        }
-        "sort" => {
+        B::Sort => {
             let mut items = v.borrow_mut();
             items.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
             Value::Unit
         }
-        "dedup" => {
-            let mut items = v.borrow_mut();
-            items.dedup_by(|a, b| a.eq_value(b));
-            Value::Unit
-        }
-        "clear" => {
-            v.borrow_mut().clear();
-            Value::Unit
-        }
-        "extend" | "append" => {
-            if let Some(Value::Vec(other)) = args.first() {
-                v.borrow_mut().extend(other.borrow().iter().cloned());
-            }
-            Value::Unit
-        }
-        "join" => {
+        B::Join => {
             let sep = args.first().map(|v| v.display()).unwrap_or_default();
             let joined = v
                 .borrow()
@@ -2670,7 +2750,7 @@ fn vec_method(v: &Rc<RefCell<Vec<Value>>>, name: &str, args: &[Value]) -> Result
                 .join(&sep);
             Value::str(joined)
         }
-        "sum" => {
+        B::Sum => {
             let mut acc_i = 0i64;
             let mut acc_f = 0f64;
             let mut is_float = false;
@@ -2690,14 +2770,12 @@ fn vec_method(v: &Rc<RefCell<Vec<Value>>>, name: &str, args: &[Value]) -> Result
                 Value::Int(acc_i)
             }
         }
-        "iter" | "into_iter" | "to_vec" | "collect" | "cloned" => Value::vec(v.borrow().clone()),
-        "count" => Value::Int(v.borrow().len() as i64),
-        "rev" => {
+        B::Rev => {
             let mut items = v.borrow().clone();
             items.reverse();
             Value::vec(items)
         }
-        "enumerate" => Value::vec(
+        B::Enumerate => Value::vec(
             v.borrow()
                 .iter()
                 .enumerate()
@@ -2706,51 +2784,83 @@ fn vec_method(v: &Rc<RefCell<Vec<Value>>>, name: &str, args: &[Value]) -> Result
                 })
                 .collect(),
         ),
-        "take" => {
+        B::Take => {
             let n = int_arg(args, 0)? as usize;
             Value::vec(v.borrow().iter().take(n).cloned().collect())
         }
-        "skip" => {
+        B::Skip => {
             let n = int_arg(args, 0)? as usize;
             Value::vec(v.borrow().iter().skip(n).cloned().collect())
         }
-        _ => bail!("unknown method `{name}` on Vec"),
+        _ => match method.text.as_str() {
+            "to_vec" | "collect" | "cloned" => Value::vec(v.borrow().clone()),
+            "reverse" => {
+                v.borrow_mut().reverse();
+                Value::Unit
+            }
+            "dedup" => {
+                let mut items = v.borrow_mut();
+                items.dedup_by(|a, b| a.eq_value(b));
+                Value::Unit
+            }
+            "clear" => {
+                v.borrow_mut().clear();
+                Value::Unit
+            }
+            "extend" | "append" => {
+                if let Some(Value::Vec(other)) = args.first() {
+                    v.borrow_mut().extend(other.borrow().iter().cloned());
+                }
+                Value::Unit
+            }
+            name => bail!("unknown method `{name}` on Vec"),
+        },
     })
 }
 
-fn map_method(m: &Rc<RefCell<BTreeMap<MapKey, Value>>>, name: &str, args: &[Value]) -> Result<Value> {
-    let key = |i: usize| -> Result<MapKey> {
-        args.get(i)
-            .and_then(|v| v.as_key())
-            .ok_or_else(|| anyhow!("invalid map key"))
+fn map_method(m: &Rc<RefCell<Map>>, method: &MethodName, args: &mut [Value]) -> Result<Value> {
+    use BuiltinId as B;
+    // Read-only lookups borrow the key instead of cloning it.
+    let lookup = |i: usize, f: &dyn Fn(Option<&Value>) -> Value| -> Result<Value> {
+        let arg = args.get(i).ok_or_else(|| anyhow!("invalid map key"))?;
+        arg.with_key(|k| {
+            let k = k.ok_or_else(|| anyhow!("invalid map key"))?;
+            Ok(f(m.borrow().get(&k)))
+        })
     };
-    Ok(match name {
-        "len" => Value::Int(m.borrow().len() as i64),
-        "is_empty" => Value::Bool(m.borrow().is_empty()),
-        "clone" => Value::Map(Rc::new(RefCell::new(m.borrow().clone()))),
-        "insert" => {
-            let k = key(0)?;
-            let old = m
-                .borrow_mut()
-                .insert(k, args.get(1).cloned().unwrap_or(Value::Unit));
+    Ok(match method.id {
+        B::Len | B::Count => Value::Int(m.borrow().len() as i64),
+        B::IsEmpty => Value::Bool(m.borrow().is_empty()),
+        B::Clone => Value::Map(Rc::new(RefCell::new(m.borrow().clone()))),
+        B::Insert => {
+            let k = take(&mut args[0]).into_key().ok_or_else(|| anyhow!("invalid map key"))?;
+            let val = args.get_mut(1).map(take).unwrap_or(Value::Unit);
+            let old = m.borrow_mut().insert(k, val);
             match old {
                 Some(v) => Value::some(v),
                 None => Value::none(),
             }
         }
-        "get" => match m.borrow().get(&key(0)?) {
+        B::Get => lookup(0, &|v| match v {
             Some(v) => Value::some(v.clone()),
             None => Value::none(),
-        },
-        "contains_key" => Value::Bool(m.borrow().contains_key(&key(0)?)),
-        "remove" => match m.borrow_mut().remove(&key(0)?) {
-            Some(v) => Value::some(v),
-            None => Value::none(),
-        },
-        "keys" => Value::vec(m.borrow().keys().map(|k| k.to_value()).collect()),
-        "values" | "values_mut" => Value::vec(m.borrow().values().cloned().collect()),
-        "entry" => {
-            let mut f = Fields::new();
+        })?,
+        B::ContainsKey => lookup(0, &|v| Value::Bool(v.is_some()))?,
+        B::Remove => {
+            let arg = args.first().ok_or_else(|| anyhow!("invalid map key"))?;
+            let removed = arg.with_key(|k| -> Result<Option<Value>> {
+                let k = k.ok_or_else(|| anyhow!("invalid map key"))?;
+                Ok(m.borrow_mut().shift_remove(&k))
+            })?;
+            match removed {
+                Some(v) => Value::some(v),
+                None => Value::none(),
+            }
+        }
+        B::Keys => Value::vec(m.borrow().keys().map(|k| k.to_value()).collect()),
+        B::Values => Value::vec(m.borrow().values().cloned().collect()),
+        B::Entry => {
+            let mut f = Fields::default();
             f.insert("map".into(), Value::Map(m.clone()));
             f.insert("key".into(), args.first().cloned().unwrap_or(Value::Unit));
             Value::Struct {
@@ -2758,16 +2868,22 @@ fn map_method(m: &Rc<RefCell<BTreeMap<MapKey, Value>>>, name: &str, args: &[Valu
                 fields: Rc::new(RefCell::new(f)),
             }
         }
-        "iter" | "into_iter" | "drain" => Value::vec(
-            m.borrow()
-                .iter()
-                .map(|(k, v)| {
-                    Value::Tuple(Rc::new(RefCell::new(vec![k.to_value(), v.clone()])))
-                })
-                .collect(),
-        ),
-        _ => bail!("unknown method `{name}` on HashMap"),
+        B::Iter => map_pairs(m),
+        _ => match method.text.as_str() {
+            "values_mut" => Value::vec(m.borrow().values().cloned().collect()),
+            "drain" => map_pairs(m),
+            name => bail!("unknown method `{name}` on HashMap"),
+        },
     })
+}
+
+fn map_pairs(m: &Rc<RefCell<Map>>) -> Value {
+    Value::vec(
+        m.borrow()
+            .iter()
+            .map(|(k, v)| Value::Tuple(Rc::new(RefCell::new(vec![k.to_value(), v.clone()]))))
+            .collect(),
+    )
 }
 
 fn num_method(recv: &Value, name: &str, args: &[Value]) -> Result<Value> {
@@ -2802,20 +2918,29 @@ fn num_method(recv: &Value, name: &str, args: &[Value]) -> Result<Value> {
     })
 }
 
-fn opt_method(recv: &Value, name: &str, args: &[Value]) -> Result<Value> {
-    let (variant, inner) = match recv {
-        Value::Enum { variant, data, .. } => (variant.clone(), data.borrow().first().cloned()),
+fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> Result<Value> {
+    use BuiltinId as B;
+    let (is_some, inner) = match recv {
+        Value::Enum { variant, data, .. } => {
+            (&**variant == "Some", data.first().cloned())
+        }
         _ => unreachable!(),
     };
-    let is_some = variant == "Some";
+    // The hot accessors dispatch on the id, the rest on the name.
+    match method.id {
+        B::Unwrap => return inner.ok_or_else(|| anyhow!("called unwrap on a None value")),
+        B::UnwrapOr => {
+            return Ok(inner.unwrap_or_else(|| args.first().cloned().unwrap_or(Value::Unit)));
+        }
+        B::Clone => return Ok(recv.clone()),
+        _ => {}
+    }
+    let name = method.text.as_str();
     Ok(match name {
         "is_some" => Value::Bool(is_some),
         "is_none" => Value::Bool(!is_some),
-        "clone" => recv.clone(),
-        "unwrap" => inner.ok_or_else(|| anyhow!("called unwrap on a None value"))?,
         "expect" => inner
             .ok_or_else(|| anyhow!("{}", args.first().map(|v| v.display()).unwrap_or_default()))?,
-        "unwrap_or" => inner.unwrap_or_else(|| args.first().cloned().unwrap_or(Value::Unit)),
         "unwrap_or_default" => inner.unwrap_or(Value::Unit),
         "cloned" | "copied" | "as_ref" | "as_deref" | "take" | "as_mut" => recv.clone(),
         "ok_or" => match inner {
@@ -2826,12 +2951,14 @@ fn opt_method(recv: &Value, name: &str, args: &[Value]) -> Result<Value> {
     })
 }
 
-fn res_method(recv: &Value, name: &str, args: &[Value]) -> Result<Value> {
-    let (variant, inner) = match recv {
-        Value::Enum { variant, data, .. } => (variant.clone(), data.borrow().first().cloned()),
+fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> Result<Value> {
+    let (is_ok, inner) = match recv {
+        Value::Enum { variant, data, .. } => {
+            (&**variant == "Ok", data.first().cloned())
+        }
         _ => unreachable!(),
     };
-    let is_ok = variant == "Ok";
+    let name = method.text.as_str();
     Ok(match name {
         "is_ok" => Value::Bool(is_ok),
         "is_err" => Value::Bool(!is_ok),

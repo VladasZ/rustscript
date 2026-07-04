@@ -182,8 +182,9 @@ the same programs, each written three times with byte identical output. It
 measures wall-clock time with [hyperfine](https://github.com/sharkdp/hyperfine)
 and a self timed compute track, then draws one PNG per case. rustscript starts
 almost as fast as native and far faster than Bun or Python. On raw compute it
-matches or beats Python on tight numeric loops, and trails on allocation heavy
-work like maps and json parsing. See `bench/README.md`.
+beats Python on numeric loops, function calls, and json parsing, and still
+trails on string plus hashmap churn like word counting. See `bench/README.md`,
+and `docs/profiling.md` for how to find interpreter hot spots.
 
 ```
 cargo run --release --bin bench

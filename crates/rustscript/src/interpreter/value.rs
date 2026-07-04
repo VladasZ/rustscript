@@ -1,15 +1,21 @@
 use std::cell::RefCell;
-use std::collections::BTreeMap;
 use std::fmt::Write;
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
-use indexmap::IndexMap;
+use indexmap::{Equivalent, IndexMap};
+use rustc_hash::FxBuildHasher;
 
 use super::native::Native;
 
 /// Struct fields keep their declaration order so serialization and debug output
-/// match the real compiler.
-pub type Fields = IndexMap<String, Value>;
+/// match the real compiler. Keys are shared `Rc<str>` so building many
+/// instances of one struct clones pointers, not strings.
+pub type Fields = IndexMap<Rc<str>, Value, FxBuildHasher>;
+
+/// Script HashMap storage. Hashed lookups, insertion ordered iteration.
+/// Lookups by a borrowed key go through `KeyRef` so they never clone the key.
+pub type Map = IndexMap<MapKey, Value, FxBuildHasher>;
 
 /// A runtime value. Containers use `Rc<RefCell<..>>` so that `&mut` aliasing and
 /// shared mutation behave, since the interpreter ignores ownership entirely.
@@ -22,18 +28,19 @@ pub enum Value {
     Char(char),
     Str(Rc<RefCell<String>>),
     Vec(Rc<RefCell<Vec<Value>>>),
-    Map(Rc<RefCell<BTreeMap<MapKey, Value>>>),
+    Map(Rc<RefCell<Map>>),
     Tuple(Rc<RefCell<Vec<Value>>>),
     /// Struct instance. Named fields, or positional for tuple structs.
     Struct {
-        name: String,
+        name: Rc<str>,
         fields: Rc<RefCell<Fields>>,
     },
-    /// Enum value, including the builtin Option and Result.
+    /// Enum value, including the builtin Option and Result. The payload is
+    /// immutable once built, so it is a plain shared slice, not a RefCell.
     Enum {
-        enum_name: String,
-        variant: String,
-        data: Rc<RefCell<Vec<Value>>>,
+        enum_name: Rc<str>,
+        variant: Rc<str>,
+        data: Rc<[Value]>,
     },
     Range {
         start: i64,
@@ -54,13 +61,85 @@ pub struct ClosureData {
     pub captured: Vec<Value>,
 }
 
-/// Hashable/orderable key for maps. Only a subset of values can be keys.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+/// Hashable key for maps. Only a subset of values can be keys.
+#[derive(Clone, PartialEq, Eq)]
 pub enum MapKey {
     Bool(bool),
     Int(i64),
     Char(char),
     Str(String),
+}
+
+/// Hashes must not include the variant tag so a borrowed `KeyRef` lookup and a
+/// stored `MapKey` land in the same bucket. Cross-variant collisions are fine,
+/// equality still separates them.
+impl Hash for MapKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            MapKey::Bool(b) => b.hash(state),
+            MapKey::Int(i) => i.hash(state),
+            MapKey::Char(c) => c.hash(state),
+            MapKey::Str(s) => s.hash(state),
+        }
+    }
+}
+
+/// Borrowed view of a value used as a map key, so `get` and `contains_key` do
+/// not clone the key string.
+pub enum KeyRef<'a> {
+    Bool(bool),
+    Int(i64),
+    Char(char),
+    Str(&'a str),
+}
+
+impl Hash for KeyRef<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            KeyRef::Bool(b) => b.hash(state),
+            KeyRef::Int(i) => i.hash(state),
+            KeyRef::Char(c) => c.hash(state),
+            KeyRef::Str(s) => s.hash(state),
+        }
+    }
+}
+
+impl Equivalent<MapKey> for KeyRef<'_> {
+    fn equivalent(&self, key: &MapKey) -> bool {
+        match (self, key) {
+            (KeyRef::Bool(a), MapKey::Bool(b)) => a == b,
+            (KeyRef::Int(a), MapKey::Int(b)) => a == b,
+            (KeyRef::Char(a), MapKey::Char(b)) => a == b,
+            (KeyRef::Str(a), MapKey::Str(b)) => *a == b.as_str(),
+            _ => false,
+        }
+    }
+}
+
+thread_local! {
+    /// Shared empty payload so `None` and unit variants allocate nothing.
+    static EMPTY_DATA: Rc<[Value]> = Rc::from(Vec::new());
+    static OPTION_NAME: Rc<str> = Rc::from("Option");
+    static SOME_NAME: Rc<str> = Rc::from("Some");
+    static NONE_NAME: Rc<str> = Rc::from("None");
+    static RESULT_NAME: Rc<str> = Rc::from("Result");
+    static OK_NAME: Rc<str> = Rc::from("Ok");
+    static ERR_NAME: Rc<str> = Rc::from("Err");
+}
+
+pub fn fields_with_capacity(n: usize) -> Fields {
+    Fields::with_capacity_and_hasher(n, FxBuildHasher)
+}
+
+pub fn map_with_capacity(n: usize) -> Map {
+    Map::with_capacity_and_hasher(n, FxBuildHasher)
+}
+
+/// `Unit` default so registers can be moved out with `mem::take`.
+impl Default for Value {
+    fn default() -> Value {
+        Value::Unit
+    }
 }
 
 impl Value {
@@ -72,35 +151,44 @@ impl Value {
         Value::Vec(Rc::new(RefCell::new(items)))
     }
 
+    pub fn empty_data() -> Rc<[Value]> {
+        EMPTY_DATA.with(Rc::clone)
+    }
+
+    /// Single element enum payload, one allocation.
+    pub fn one_data(v: Value) -> Rc<[Value]> {
+        std::iter::once(v).collect()
+    }
+
     pub fn some(v: Value) -> Value {
         Value::Enum {
-            enum_name: "Option".into(),
-            variant: "Some".into(),
-            data: Rc::new(RefCell::new(vec![v])),
+            enum_name: OPTION_NAME.with(Rc::clone),
+            variant: SOME_NAME.with(Rc::clone),
+            data: Value::one_data(v),
         }
     }
 
     pub fn none() -> Value {
         Value::Enum {
-            enum_name: "Option".into(),
-            variant: "None".into(),
-            data: Rc::new(RefCell::new(vec![])),
+            enum_name: OPTION_NAME.with(Rc::clone),
+            variant: NONE_NAME.with(Rc::clone),
+            data: Value::empty_data(),
         }
     }
 
     pub fn ok(v: Value) -> Value {
         Value::Enum {
-            enum_name: "Result".into(),
-            variant: "Ok".into(),
-            data: Rc::new(RefCell::new(vec![v])),
+            enum_name: RESULT_NAME.with(Rc::clone),
+            variant: OK_NAME.with(Rc::clone),
+            data: Value::one_data(v),
         }
     }
 
     pub fn err(v: Value) -> Value {
         Value::Enum {
-            enum_name: "Result".into(),
-            variant: "Err".into(),
-            data: Rc::new(RefCell::new(vec![v])),
+            enum_name: RESULT_NAME.with(Rc::clone),
+            variant: ERR_NAME.with(Rc::clone),
+            data: Value::one_data(v),
         }
     }
 
@@ -137,6 +225,36 @@ impl Value {
         })
     }
 
+    /// Turn an owned value into a map key. A uniquely held string moves its
+    /// buffer into the key instead of cloning it.
+    pub fn into_key(self) -> Option<MapKey> {
+        Some(match self {
+            Value::Bool(b) => MapKey::Bool(b),
+            Value::Int(i) => MapKey::Int(i),
+            Value::Char(c) => MapKey::Char(c),
+            Value::Str(s) => match Rc::try_unwrap(s) {
+                Ok(cell) => MapKey::Str(cell.into_inner()),
+                Err(rc) => MapKey::Str(rc.borrow().clone()),
+            },
+            _ => return None,
+        })
+    }
+
+    /// Run `f` with a borrowed key view of this value, avoiding the string
+    /// clone `as_key` pays. None when the value cannot be a key.
+    pub fn with_key<R>(&self, f: impl FnOnce(Option<KeyRef>) -> R) -> R {
+        match self {
+            Value::Bool(b) => f(Some(KeyRef::Bool(*b))),
+            Value::Int(i) => f(Some(KeyRef::Int(*i))),
+            Value::Char(c) => f(Some(KeyRef::Char(*c))),
+            Value::Str(s) => {
+                let s = s.borrow();
+                f(Some(KeyRef::Str(&s)))
+            }
+            _ => f(None),
+        }
+    }
+
     /// Value equality used by `==`, `match`, and map lookups.
     pub fn eq_value(&self, other: &Value) -> bool {
         match (self, other) {
@@ -163,10 +281,10 @@ impl Value {
                     data: db,
                 },
             ) => {
-                ea == eb && va == vb && {
-                    let (da, db) = (da.borrow(), db.borrow());
-                    da.len() == db.len() && da.iter().zip(db.iter()).all(|(x, y)| x.eq_value(y))
-                }
+                ea == eb
+                    && va == vb
+                    && da.len() == db.len()
+                    && da.iter().zip(db.iter()).all(|(x, y)| x.eq_value(y))
             }
             (
                 Value::Struct {
@@ -284,7 +402,6 @@ impl Value {
                 variant, data, ..
             } => {
                 write!(out, "{variant}").unwrap();
-                let data = data.borrow();
                 if !data.is_empty() {
                     out.push('(');
                     for (i, v) in data.iter().enumerate() {

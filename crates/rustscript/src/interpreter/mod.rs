@@ -61,16 +61,18 @@ pub struct Interp {
     enums: HashMap<String, Rc<syn::ItemEnum>>,
     uses: HashMap<String, Vec<String>>,
     main_index: Option<u32>,
+    /// Lazily built field layouts for user structs, shared across coercions.
+    shapes: RefCell<HashMap<String, Rc<eval::Shape>>>,
 }
 
 impl Interp {
     pub fn load(file: &File) -> Result<Self> {
         let mut pending_fns: Vec<Rc<syn::ItemFn>> = Vec::new();
-        let mut fn_index: HashMap<String, u32> = HashMap::new();
+        let mut fn_index: HashMap<String, u32> = HashMap::default();
         let mut pending_methods: Vec<(String, String, Rc<syn::ImplItemFn>)> = Vec::new();
-        let mut structs: HashMap<String, Rc<syn::ItemStruct>> = HashMap::new();
-        let mut enums: HashMap<String, Rc<syn::ItemEnum>> = HashMap::new();
-        let mut uses: HashMap<String, Vec<String>> = HashMap::new();
+        let mut structs: HashMap<String, Rc<syn::ItemStruct>> = HashMap::default();
+        let mut enums: HashMap<String, Rc<syn::ItemEnum>> = HashMap::default();
+        let mut uses: HashMap<String, Vec<String>> = HashMap::default();
 
         for item in &file.items {
             match item {
@@ -115,18 +117,31 @@ impl Interp {
             let mut c = Compiler::new(&ctx);
             functions.push(Rc::new(c.compile_fn(&f.sig, &f.block)?));
         }
-        let mut methods = HashMap::new();
+        let mut methods = HashMap::default();
         for (ty, name, m) in &pending_methods {
             let mut c = Compiler::new(&ctx);
             methods.insert((ty.clone(), name.clone()), Rc::new(c.compile_fn(&m.sig, &m.block)?));
         }
 
         let main_index = fn_index.get("main").copied();
-        Ok(Interp { functions, fn_index, methods, structs, enums, uses, main_index })
+        Ok(Interp {
+            functions,
+            fn_index,
+            methods,
+            structs,
+            enums,
+            uses,
+            main_index,
+            shapes: RefCell::new(HashMap::default()),
+        })
     }
 
     /// If a Ctrl-C arrived, run the script's registered handler closure.
     pub(super) fn run_pending_ctrlc(&self) -> Result<()> {
+        // Cheap relaxed load first, this runs on every loop iteration.
+        if !CTRLC_HIT.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         if !CTRLC_HIT.swap(false, Ordering::SeqCst) {
             return Ok(());
         }
@@ -143,10 +158,10 @@ impl Interp {
         let chunk = self.functions[idx as usize].clone();
         let ret = self.run_chunk(&chunk, &[], &[])?;
         if let Value::Enum { enum_name, variant, data } = &ret
-            && enum_name == "Result"
-            && variant == "Err"
+            && &**enum_name == "Result"
+            && &**variant == "Err"
         {
-            let msg = data.borrow().first().map(|v| v.display()).unwrap_or_default();
+            let msg = data.first().map(|v| v.display()).unwrap_or_default();
             bail!("Error: {msg}");
         }
         Ok(())

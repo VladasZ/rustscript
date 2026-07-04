@@ -460,11 +460,11 @@ fn seek_from(v: Option<&Value>) -> SeekFrom {
     // A script passes SeekFrom::Start(n) etc., which the interpreter models as
     // an enum value carrying the offset.
     if let Some(Value::Enum { variant, data, .. }) = v {
-        let n = data.borrow().first().and_then(|x| match x {
+        let n = data.first().and_then(|x| match x {
             Value::Int(i) => Some(*i),
             _ => None,
         });
-        match (variant.as_str(), n) {
+        match (&**variant, n) {
             ("Start", Some(n)) => return SeekFrom::Start(n as u64),
             ("End", Some(n)) => return SeekFrom::End(n as i64),
             ("Current", Some(n)) => return SeekFrom::Current(n as i64),

@@ -27,3 +27,6 @@ base64 = { workspace = true }
 hex = { workspace = true }
 ctrlc = { workspace = true }
 tempfile = { workspace = true }
+rustc-hash = { workspace = true }
+serde = { workspace = true }
+mimalloc = { workspace = true }

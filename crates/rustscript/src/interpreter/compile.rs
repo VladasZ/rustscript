@@ -11,7 +11,8 @@ use syn::punctuated::Punctuated;
 use syn::{BinOp, Block, Expr, FnArg, Lit, Pat, Stmt, UnOp};
 
 use super::bytecode::{
-    BinKind, CapSource, Chunk, FmtSpec, MacroKind, Member, Op, PatInfo, Reg, StructLit, UnKind,
+    BinKind, BuiltinId, CapSource, Chunk, FmtSpec, MacroKind, Member, MethodName, Op, PatInfo, Reg,
+    StructLit, UnKind,
 };
 use super::value::Value;
 
@@ -31,7 +32,7 @@ struct FnState {
     struct_lits: Vec<StructLit>,
     casts: Vec<Rc<syn::Type>>,
     paths: Vec<(Vec<String>, Option<Rc<syn::Type>>)>,
-    names: Vec<String>,
+    names: Vec<MethodName>,
     children: Vec<Rc<Chunk>>,
     child_caps: Vec<Vec<CapSource>>,
     upvalues: Vec<(String, CapSource)>,
@@ -57,7 +58,7 @@ impl FnState {
             children: Vec::new(),
             child_caps: Vec::new(),
             upvalues: Vec::new(),
-            scopes: vec![HashMap::new()],
+            scopes: vec![HashMap::default()],
             reg_top: 0,
             max_reg: 0,
             num_params: 0,
@@ -176,7 +177,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn push_scope(&mut self) {
-        self.cur().scopes.push(HashMap::new());
+        self.cur().scopes.push(HashMap::default());
     }
 
     fn pop_scope(&mut self) {
@@ -207,7 +208,7 @@ impl<'a> Compiler<'a> {
 
     fn add_name(&mut self, name: String) -> u16 {
         let f = self.cur();
-        f.names.push(name);
+        f.names.push(MethodName { id: BuiltinId::resolve(&name), text: name });
         (f.names.len() - 1) as u16
     }
 
@@ -536,9 +537,42 @@ impl<'a> Compiler<'a> {
         }
         let op = bin_kind(&b.op).ok_or_else(|| anyhow!("unsupported operator {:?}", b.op))?;
         let a = self.compile_expr(&b.left)?;
+        if let Some(imm) = int_literal(&b.right) {
+            self.emit(Op::BinImm { dst, a, imm, op });
+            return Ok(());
+        }
         let c = self.compile_expr(&b.right)?;
         self.emit(Op::Bin { dst, a, b: c, op });
         Ok(())
+    }
+
+    /// Compile a branch condition and emit the jump taken when it is false,
+    /// returning the jump's index for patching. A plain comparison becomes a
+    /// fused compare-and-branch instead of a Bin plus JumpIfFalse pair.
+    fn emit_cond_jump(&mut self, cond: &Expr) -> Result<usize> {
+        if let Expr::Binary(b) = cond
+            && let Some(op) = bin_kind(&b.op)
+            && !is_assign_op(&b.op)
+            && matches!(
+                op,
+                BinKind::Eq | BinKind::Ne | BinKind::Lt | BinKind::Le | BinKind::Gt | BinKind::Ge
+            )
+        {
+            let a = self.compile_expr(&b.left)?;
+            if let Some(imm) = int_literal(&b.right) {
+                let at = self.here();
+                self.emit(Op::CmpJumpImm { a, imm, op, to: 0 });
+                return Ok(at);
+            }
+            let c = self.compile_expr(&b.right)?;
+            let at = self.here();
+            self.emit(Op::CmpJump { a, b: c, op, to: 0 });
+            return Ok(at);
+        }
+        let c = self.compile_expr(cond)?;
+        let at = self.here();
+        self.emit(Op::JumpIfFalse { cond: c, to: 0 });
+        Ok(at)
     }
 
     fn compile_range(&mut self, dst: Reg, r: &syn::ExprRange) -> Result<()> {
@@ -585,9 +619,7 @@ impl<'a> Compiler<'a> {
             self.patch_jump(jmp_end, end);
             return Ok(());
         }
-        let cond = self.compile_expr(&if_expr.cond)?;
-        let jmp_else = self.here();
-        self.emit(Op::JumpIfFalse { cond, to: 0 });
+        let jmp_else = self.emit_cond_jump(&if_expr.cond)?;
         self.compile_block(&if_expr.then_branch, dst)?;
         let jmp_end = self.here();
         self.emit(Op::Jump { to: 0 });
@@ -626,9 +658,7 @@ impl<'a> Compiler<'a> {
             self.emit(Op::LoadUnit { dst });
             return Ok(());
         }
-        let cond = self.compile_expr(&w.cond)?;
-        let exit = self.here();
-        self.emit(Op::JumpIfFalse { cond, to: 0 });
+        let exit = self.emit_cond_jump(&w.cond)?;
         self.loops.push(LoopCtx { breaks: vec![exit], continue_to: head, result: dst });
         let body = self.alloc();
         self.compile_block(&w.body, body)?;
@@ -866,6 +896,10 @@ impl<'a> Compiler<'a> {
                     NameLoc::Local(reg) => reg,
                     _ => bail!("assignment to unknown or captured variable `{name}`"),
                 };
+                if let Some(imm) = int_literal(rhs) {
+                    self.emit(Op::BinImm { dst: reg, a: reg, imm, op });
+                    return Ok(());
+                }
                 let b = self.compile_expr(rhs)?;
                 self.emit(Op::Bin { dst: reg, a: reg, b, op });
             }
@@ -896,7 +930,7 @@ impl<'a> Compiler<'a> {
 
     fn member_of(&mut self, member: &syn::Member) -> u16 {
         match member {
-            syn::Member::Named(n) => self.add_member(Member::Named(n.to_string())),
+            syn::Member::Named(n) => self.add_member(Member::Named(n.to_string().into())),
             syn::Member::Unnamed(i) => self.add_member(Member::Indexed(i.index as usize)),
         }
     }
@@ -952,7 +986,11 @@ impl<'a> Compiler<'a> {
         }
         let info = {
             let f = self.cur();
-            f.struct_lits.push(StructLit { name, fields: order, has_rest });
+            f.struct_lits.push(StructLit {
+                name: name.into(),
+                fields: order.into_iter().map(Into::into).collect(),
+                has_rest,
+            });
             (f.struct_lits.len() - 1) as u16
         };
         self.emit(Op::MakeStruct { dst, info, base });
@@ -1157,6 +1195,8 @@ impl<'a> Compiler<'a> {
             Op::Jump { to: t }
             | Op::JumpIfFalse { to: t, .. }
             | Op::JumpIfTrue { to: t, .. }
+            | Op::CmpJump { to: t, .. }
+            | Op::CmpJumpImm { to: t, .. }
             | Op::ForNext { to: t, .. } => *t = to,
             _ => panic!("patch target is not a jump"),
         }
@@ -1203,6 +1243,28 @@ fn bin_kind(op: &BinOp) -> Option<BinKind> {
         Shr(_) | ShrAssign(_) => BinKind::Shr,
         _ => return None,
     })
+}
+
+/// A plain integer literal usable as an instruction immediate, including a
+/// negated one, seen through parens.
+fn int_literal(e: &Expr) -> Option<i64> {
+    match e {
+        Expr::Lit(l) => match &l.lit {
+            Lit::Int(i) => i.base10_parse::<i64>().ok(),
+            Lit::Byte(b) => Some(b.value() as i64),
+            _ => None,
+        },
+        Expr::Unary(u) if matches!(u.op, UnOp::Neg(_)) => match &*u.expr {
+            Expr::Lit(l) => match &l.lit {
+                Lit::Int(i) => i.base10_parse::<i64>().ok().map(|v| -v),
+                _ => None,
+            },
+            _ => None,
+        },
+        Expr::Paren(p) => int_literal(&p.expr),
+        Expr::Group(g) => int_literal(&g.expr),
+        _ => None,
+    }
 }
 
 /// The first concrete generic type argument of a path segment.
