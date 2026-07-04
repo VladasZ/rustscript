@@ -126,6 +126,48 @@ pub(super) fn str_method_slow(s: &Rc<RStr>, name: &str, args: &[Value]) -> Resul
             Some(rest) => Value::some(Value::str(rest.to_string())),
             None => Value::none(),
         },
+        // Byte offsets, same as the real std, and the slicing here is
+        // byte-based too, so `&s[..s.find(x).unwrap()]` behaves right.
+        "find" => match s.find(&arg_str(0)) {
+            Some(i) => Value::some(Value::Int(i as i64)),
+            None => Value::none(),
+        },
+        "rfind" => match s.rfind(&arg_str(0)) {
+            Some(i) => Value::some(Value::Int(i as i64)),
+            None => Value::none(),
+        },
+        "split_once" => match s.split_once(&arg_str(0)) {
+            Some((a, b)) => Value::some(Value::Tuple(Rc::new(RefCell::new(vec![
+                Value::str(a.to_string()),
+                Value::str(b.to_string()),
+            ])))),
+            None => Value::none(),
+        },
+        "rsplit_once" => match s.rsplit_once(&arg_str(0)) {
+            Some((a, b)) => Value::some(Value::Tuple(Rc::new(RefCell::new(vec![
+                Value::str(a.to_string()),
+                Value::str(b.to_string()),
+            ])))),
+            None => Value::none(),
+        },
+        "splitn" => {
+            let n = int_arg(args, 0)? as usize;
+            Value::vec(s.splitn(n, &arg_str(1)).map(Value::str).collect())
+        }
+        "rsplitn" => {
+            let n = int_arg(args, 0)? as usize;
+            Value::vec(s.rsplitn(n, &arg_str(1)).map(Value::str).collect())
+        }
+        "trim_matches" | "trim_start_matches" | "trim_end_matches" => {
+            let pat = arg_str(0);
+            let out = match name {
+                "trim_start_matches" => s.trim_start_matches(&pat),
+                "trim_end_matches" => s.trim_end_matches(&pat),
+                // trim_matches only takes chars in real Rust
+                _ => s.trim_matches(pat.chars().next().unwrap_or(' ')),
+            };
+            Value::str(out.to_string())
+        }
         "cmp" => make_ordering((***s).cmp(arg_str(0).as_str())),
         _ => {
             if let Some(colored) = color_method(s, name) {

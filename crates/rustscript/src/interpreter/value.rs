@@ -337,6 +337,13 @@ impl Value {
         }
     }
 
+    /// True for `Option::None`, used to keep a null json value as None rather
+    /// than wrapping it in Some when filling an Option struct field.
+    pub fn is_none_value(&self) -> bool {
+        matches!(self, Value::Enum { enum_name, variant, .. }
+            if &**enum_name == "Option" && &**variant == "None")
+    }
+
     pub fn ok(v: Value) -> Value {
         Value::Enum {
             enum_name: RESULT_NAME.with(Rc::clone),

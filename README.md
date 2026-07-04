@@ -150,7 +150,8 @@ a native bridge for it. These are bridged today.
 
 - [`serde`](https://serde.rs) and
   [`serde_json`](https://github.com/serde-rs/json), including typed
-  `from_str::<T>` into your own structs
+  `from_str::<T>` into your own structs, with `#[serde(rename = "..")]` and
+  `Option<T>` fields honored, so camelCase APIs map onto snake_case fields
 - [`anyhow`](https://github.com/dtolnay/anyhow) for `Result`, `?`, `bail!`,
   `ensure!`, and `context`
 - [`ureq`](https://github.com/algesten/ureq) for HTTP and HTTPS over rustls,
@@ -254,5 +255,6 @@ cargo run --release --bin chart
 ## Status
 
 Early but usable. Script arguments, `std::io::stdin`, process spawning, files,
-sockets, and time all work now. Known refinements still open are serde field
-attributes like `rename_all` and `default`.
+sockets, and time all work now. Typed deserialization honors
+`#[serde(rename = "..")]` and `Option<T>` fields. Known refinements still open
+are container-level `#[serde(rename_all = "..")]` and `#[serde(default)]`.

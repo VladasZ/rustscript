@@ -119,6 +119,9 @@ impl Interp {
                 "Some" => return Ok(Value::some(one(args)?)),
                 "Ok" => return Ok(Value::ok(one(args)?)),
                 "Err" => return Ok(Value::err(one(args)?)),
+                // Values die with their register and file writes are
+                // unbuffered, so discarding is enough.
+                "drop" => return Ok(Value::Unit),
                 _ => {}
             }
             if let Some(chunk) = self.user_function(name) {

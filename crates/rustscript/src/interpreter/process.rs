@@ -38,8 +38,28 @@ pub(super) fn build_command(s: &StructData) -> std::process::Command {
 
 /// Run a `Command` value once it has been fully built, returning an `Output`.
 pub(super) fn run_command(s: &StructData) -> Value {
-    match build_command(s).output() {
+    // output() pipes by default but explicit stdio settings win, so an
+    // interactive child can keep the terminal while stdout is captured,
+    // matching the real std behavior.
+    let mut cmd = build_command(s);
+    cmd.stdin(stdio_or(s, "stdin", std::process::Stdio::null()));
+    cmd.stdout(stdio_or(s, "stdout", std::process::Stdio::piped()));
+    cmd.stderr(stdio_or(s, "stderr", std::process::Stdio::piped()));
+    match cmd.output() {
         Ok(out) => Value::ok(make_output(out)),
+        Err(e) => Value::err(Value::str(e.to_string())),
+    }
+}
+
+/// Run a `Command` value with `.status()`, which inherits the terminal by
+/// default just like real Rust, and return `Ok(ExitStatus)`.
+pub(super) fn status_command(s: &StructData) -> Value {
+    let mut cmd = build_command(s);
+    cmd.stdin(stdio_for(s, "stdin"));
+    cmd.stdout(stdio_for(s, "stdout"));
+    cmd.stderr(stdio_for(s, "stderr"));
+    match cmd.status() {
+        Ok(status) => Value::ok(make_exit_status(status)),
         Err(e) => Value::err(Value::str(e.to_string())),
     }
 }
@@ -47,6 +67,10 @@ pub(super) fn run_command(s: &StructData) -> Value {
 /// Map a stored `Stdio` marker to a real `std::process::Stdio`, defaulting to
 /// inherit so a spawned child shares the terminal like a shell command.
 pub(super) fn stdio_for(s: &StructData, key: &str) -> std::process::Stdio {
+    stdio_or(s, key, std::process::Stdio::inherit())
+}
+
+fn stdio_or(s: &StructData, key: &str, default: std::process::Stdio) -> std::process::Stdio {
     match s.get(key) {
         Some(Value::Struct(m)) if &**m.name() == "Stdio" => {
             match m.get("kind").map(|v| v.display()).as_deref() {
@@ -55,7 +79,7 @@ pub(super) fn stdio_for(s: &StructData, key: &str) -> std::process::Stdio {
                 _ => std::process::Stdio::inherit(),
             }
         }
-        _ => std::process::Stdio::inherit(),
+        _ => default,
     }
 }
 
@@ -168,18 +192,7 @@ pub(super) fn command_method(
         }
         "spawn" => return Ok(spawn_command(s)),
         "output" => run_command(s),
-        "status" => match run_command(s) {
-            Value::Enum { data, .. } => {
-                let out = data.first().cloned().unwrap_or(Value::Unit);
-                match out {
-                    Value::Struct(of) => {
-                        Value::ok(of.get("status").unwrap_or(Value::Unit))
-                    }
-                    other => Value::ok(other),
-                }
-            }
-            other => other,
-        },
+        "status" => status_command(s),
         _ => bail!("unknown method `{name}` on Command"),
     })
 }

@@ -159,6 +159,28 @@ pub fn native_method(
                 Value::Int(n as i64)
             })));
         }
+        "read" => {
+            let mut h = handle.borrow_mut();
+            let Some(r) = as_read(&mut h) else {
+                bail!("read on non-reader {}", h.type_name());
+            };
+            // Fill up to the script buffer's length, then copy back into it,
+            // since the buffer arg arrives as a shared Vec value.
+            let len = match args.first() {
+                Some(Value::Vec(v)) => v.borrow().len(),
+                _ => 0,
+            };
+            let mut buf = vec![0u8; len];
+            return Ok(Some(io_err(r.read(&mut buf), |n| {
+                if let Some(Value::Vec(v)) = args.first() {
+                    let mut items = v.borrow_mut();
+                    for (i, byte) in buf.iter().take(n).enumerate() {
+                        items[i] = Value::Int(*byte as i64);
+                    }
+                }
+                Value::Int(n as i64)
+            })));
+        }
         "read_to_end" => {
             let mut h = handle.borrow_mut();
             let Some(r) = as_read(&mut h) else {
