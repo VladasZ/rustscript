@@ -1,12 +1,89 @@
-use std::cell::RefCell;
-use std::fmt::Write;
+use std::cell::{Cell, RefCell};
+use std::fmt::{self, Write};
 use std::hash::{Hash, Hasher};
+use std::ops::Deref;
+use std::ptr;
 use std::rc::Rc;
 
+use compact_str::CompactString;
 use indexmap::{Equivalent, IndexMap};
-use rustc_hash::FxBuildHasher;
+use rustc_hash::{FxBuildHasher, FxHasher};
 
 use super::native::Native;
+
+/// Interpreter string. The buffer is immutable while the `Rc` is shared, so
+/// clones and `to_string` are refcount bumps. Mutation goes through
+/// `Value::str_make_mut`, which copies first when another handle exists. That
+/// matches real `String` semantics, where a clone never sees later edits to
+/// the original. The hash of the bytes is cached after the first map use,
+/// the same trick CPython uses for str objects.
+pub struct RStr {
+    /// Cached key hash of the bytes. 0 means not computed yet.
+    hash: Cell<u64>,
+    /// Inline storage up to 24 bytes, so short strings cost one allocation
+    /// for the `Rc` and none for the bytes.
+    s: CompactString,
+}
+
+impl RStr {
+    pub fn new(s: impl Into<CompactString>) -> Rc<RStr> {
+        Rc::new(RStr {
+            hash: Cell::new(0),
+            s: s.into(),
+        })
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.s
+    }
+
+    /// The cached key hash, computed on first use.
+    pub fn key_hash(&self) -> u64 {
+        let h = self.hash.get();
+        if h != 0 {
+            return h;
+        }
+        let h = str_hash(&self.s);
+        self.hash.set(h);
+        h
+    }
+}
+
+/// Hash used for string map keys. Reserves 0 as the "not cached" sentinel.
+fn str_hash(s: &str) -> u64 {
+    let mut h = FxHasher::default();
+    s.hash(&mut h);
+    let v = h.finish();
+    if v == 0 { 1 } else { v }
+}
+
+impl Deref for RStr {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.s
+    }
+}
+
+impl PartialEq for RStr {
+    fn eq(&self, other: &RStr) -> bool {
+        self.s == other.s
+    }
+}
+
+impl Eq for RStr {}
+
+impl fmt::Display for RStr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.s)
+    }
+}
+
+impl fmt::Debug for RStr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self.s)
+    }
+}
 
 /// Struct fields keep their declaration order so serialization and debug output
 /// match the real compiler. Keys are shared `Rc<str>` so building many
@@ -26,7 +103,7 @@ pub enum Value {
     Int(i64),
     Float(f64),
     Char(char),
-    Str(Rc<RefCell<String>>),
+    Str(Rc<RStr>),
     Vec(Rc<RefCell<Vec<Value>>>),
     Map(Rc<RefCell<Map>>),
     Tuple(Rc<RefCell<Vec<Value>>>),
@@ -61,36 +138,55 @@ pub struct ClosureData {
     pub captured: Vec<Value>,
 }
 
-/// Hashable key for maps. Only a subset of values can be keys.
-#[derive(Clone, PartialEq, Eq)]
+/// Hashable key for maps. Only a subset of values can be keys. String keys
+/// share the value's buffer, so building a key from a string never copies.
+#[derive(Clone)]
 pub enum MapKey {
     Bool(bool),
     Int(i64),
     Char(char),
-    Str(String),
+    Str(Rc<RStr>),
 }
+
+impl PartialEq for MapKey {
+    fn eq(&self, other: &MapKey) -> bool {
+        match (self, other) {
+            (MapKey::Bool(a), MapKey::Bool(b)) => a == b,
+            (MapKey::Int(a), MapKey::Int(b)) => a == b,
+            (MapKey::Char(a), MapKey::Char(b)) => a == b,
+            (MapKey::Str(a), MapKey::Str(b)) => Rc::ptr_eq(a, b) || a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for MapKey {}
 
 /// Hashes must not include the variant tag so a borrowed `KeyRef` lookup and a
 /// stored `MapKey` land in the same bucket. Cross-variant collisions are fine,
-/// equality still separates them.
+/// equality still separates them. String keys feed the cached `key_hash` into
+/// the state, and every other string-key hasher below must do the same, or
+/// lookups miss.
 impl Hash for MapKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self {
             MapKey::Bool(b) => b.hash(state),
             MapKey::Int(i) => i.hash(state),
             MapKey::Char(c) => c.hash(state),
-            MapKey::Str(s) => s.hash(state),
+            MapKey::Str(s) => state.write_u64(s.key_hash()),
         }
     }
 }
 
 /// Borrowed view of a value used as a map key, so `get` and `contains_key` do
-/// not clone the key string.
+/// not clone the key string. `Interned` reuses the cached hash of the value's
+/// buffer, `Str` is for plain `&str` callers and hashes the bytes.
 pub enum KeyRef<'a> {
     Bool(bool),
     Int(i64),
     Char(char),
     Str(&'a str),
+    Interned(&'a RStr),
 }
 
 impl Hash for KeyRef<'_> {
@@ -99,7 +195,8 @@ impl Hash for KeyRef<'_> {
             KeyRef::Bool(b) => b.hash(state),
             KeyRef::Int(i) => i.hash(state),
             KeyRef::Char(c) => c.hash(state),
-            KeyRef::Str(s) => s.hash(state),
+            KeyRef::Str(s) => state.write_u64(str_hash(s)),
+            KeyRef::Interned(s) => state.write_u64(s.key_hash()),
         }
     }
 }
@@ -110,7 +207,10 @@ impl Equivalent<MapKey> for KeyRef<'_> {
             (KeyRef::Bool(a), MapKey::Bool(b)) => a == b,
             (KeyRef::Int(a), MapKey::Int(b)) => a == b,
             (KeyRef::Char(a), MapKey::Char(b)) => a == b,
-            (KeyRef::Str(a), MapKey::Str(b)) => *a == b.as_str(),
+            (KeyRef::Str(a), MapKey::Str(b)) => *a == &***b,
+            (KeyRef::Interned(a), MapKey::Str(b)) => {
+                ptr::eq(*a, Rc::as_ptr(b)) || *a == &**b
+            }
             _ => false,
         }
     }
@@ -143,8 +243,20 @@ impl Default for Value {
 }
 
 impl Value {
-    pub fn str(s: impl Into<String>) -> Value {
-        Value::Str(Rc::new(RefCell::new(s.into())))
+    pub fn str(s: impl Into<CompactString>) -> Value {
+        Value::Str(RStr::new(s))
+    }
+
+    /// Mutable access to a string buffer. Copies first when the handle is
+    /// shared, so other holders keep the old contents, exactly like editing
+    /// one `String` clone in real Rust. Resets the cached hash.
+    pub fn str_make_mut(rc: &mut Rc<RStr>) -> &mut CompactString {
+        if Rc::get_mut(rc).is_none() {
+            *rc = RStr::new(rc.s.clone());
+        }
+        let inner = Rc::get_mut(rc).unwrap();
+        inner.hash.set(0);
+        &mut inner.s
     }
 
     pub fn vec(items: Vec<Value>) -> Value {
@@ -220,39 +332,33 @@ impl Value {
             Value::Bool(b) => MapKey::Bool(*b),
             Value::Int(i) => MapKey::Int(*i),
             Value::Char(c) => MapKey::Char(*c),
-            Value::Str(s) => MapKey::Str(s.borrow().clone()),
+            Value::Str(s) => MapKey::Str(s.clone()),
             _ => return None,
         })
     }
 
-    /// Turn an owned value into a map key. A uniquely held string moves its
-    /// buffer into the key instead of cloning it.
+    /// Turn an owned value into a map key. Strings hand over their buffer,
+    /// no copy in any case.
     pub fn into_key(self) -> Option<MapKey> {
         Some(match self {
             Value::Bool(b) => MapKey::Bool(b),
             Value::Int(i) => MapKey::Int(i),
             Value::Char(c) => MapKey::Char(c),
-            Value::Str(s) => match Rc::try_unwrap(s) {
-                Ok(cell) => MapKey::Str(cell.into_inner()),
-                Err(rc) => MapKey::Str(rc.borrow().clone()),
-            },
+            Value::Str(s) => MapKey::Str(s),
             _ => return None,
         })
     }
 
-    /// Run `f` with a borrowed key view of this value, avoiding the string
-    /// clone `as_key` pays. None when the value cannot be a key.
-    pub fn with_key<R>(&self, f: impl FnOnce(Option<KeyRef>) -> R) -> R {
-        match self {
-            Value::Bool(b) => f(Some(KeyRef::Bool(*b))),
-            Value::Int(i) => f(Some(KeyRef::Int(*i))),
-            Value::Char(c) => f(Some(KeyRef::Char(*c))),
-            Value::Str(s) => {
-                let s = s.borrow();
-                f(Some(KeyRef::Str(&s)))
-            }
-            _ => f(None),
-        }
+    /// Borrowed key view of this value for lookups that must not clone.
+    /// None when the value cannot be a key.
+    pub fn key_ref(&self) -> Option<KeyRef<'_>> {
+        Some(match self {
+            Value::Bool(b) => KeyRef::Bool(*b),
+            Value::Int(i) => KeyRef::Int(*i),
+            Value::Char(c) => KeyRef::Char(*c),
+            Value::Str(s) => KeyRef::Interned(s),
+            _ => return None,
+        })
     }
 
     /// Value equality used by `==`, `match`, and map lookups.
@@ -264,7 +370,7 @@ impl Value {
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => *a as f64 == *b,
             (Value::Char(a), Value::Char(b)) => a == b,
-            (Value::Str(a), Value::Str(b)) => *a.borrow() == *b.borrow(),
+            (Value::Str(a), Value::Str(b)) => Rc::ptr_eq(a, b) || a == b,
             (Value::Vec(a), Value::Vec(b)) | (Value::Tuple(a), Value::Tuple(b)) => {
                 let (a, b) = (a.borrow(), b.borrow());
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.eq_value(y))
@@ -317,7 +423,7 @@ impl Value {
             Value::Int(i) => i.to_string(),
             Value::Float(f) => format_float(*f),
             Value::Char(c) => c.to_string(),
-            Value::Str(s) => s.borrow().clone(),
+            Value::Str(s) => s.s.as_str().to_string(),
             other => other.debug(),
         }
     }
@@ -336,7 +442,7 @@ impl Value {
             Value::Int(i) => write!(out, "{i}").unwrap(),
             Value::Float(f) => out.push_str(&format_float(*f)),
             Value::Char(c) => write!(out, "{c:?}").unwrap(),
-            Value::Str(s) => write!(out, "{:?}", s.borrow()).unwrap(),
+            Value::Str(s) => write!(out, "{:?}", &**s).unwrap(),
             Value::Range {
                 start,
                 end,
@@ -423,7 +529,7 @@ impl MapKey {
             MapKey::Bool(b) => write!(out, "{b}").unwrap(),
             MapKey::Int(i) => write!(out, "{i}").unwrap(),
             MapKey::Char(c) => write!(out, "{c:?}").unwrap(),
-            MapKey::Str(s) => write!(out, "{s:?}").unwrap(),
+            MapKey::Str(s) => write!(out, "{:?}", &***s).unwrap(),
         }
     }
 
@@ -432,7 +538,7 @@ impl MapKey {
             MapKey::Bool(b) => Value::Bool(*b),
             MapKey::Int(i) => Value::Int(*i),
             MapKey::Char(c) => Value::Char(*c),
-            MapKey::Str(s) => Value::str(s.clone()),
+            MapKey::Str(s) => Value::Str(s.clone()),
         }
     }
 }

@@ -30,3 +30,4 @@ tempfile = { workspace = true }
 rustc-hash = { workspace = true }
 serde = { workspace = true }
 mimalloc = { workspace = true }
+compact_str = { workspace = true }

@@ -1,9 +1,18 @@
 mod builtins;
 mod bytecode;
 mod compile;
+mod crates_bridge;
 mod eval;
 mod format;
+mod higher_order;
+mod http;
+mod json_bridge;
+mod methods;
 mod native;
+mod ops;
+mod process;
+mod regex_bridge;
+mod std_bridge;
 mod value;
 mod vm;
 

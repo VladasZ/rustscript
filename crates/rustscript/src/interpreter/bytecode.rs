@@ -112,6 +112,7 @@ pub enum BuiltinId {
     Parse,
     Unwrap,
     UnwrapOr,
+    Copied,
     // Higher-order methods, dispatched before the plain builtins.
     Map,
     Filter,
@@ -184,6 +185,7 @@ impl BuiltinId {
             "parse" => Parse,
             "unwrap" => Unwrap,
             "unwrap_or" => UnwrapOr,
+            "copied" | "cloned" => Copied,
             "map" => Map,
             "filter" => Filter,
             "filter_map" => FilterMap,
