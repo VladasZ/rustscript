@@ -1,4 +1,4 @@
-#!/usr/bin/env rustscript
+#!/usr/bin/env rust
 
 fn main() {
     println!("{:>6} {:>8}", "C", "F");

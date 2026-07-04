@@ -5,7 +5,7 @@ scripts in real Rust and run them like Python or a shell script, without waiting
 for a full compile.
 
 ```rust
-#!/usr/bin/env rustscript
+#!/usr/bin/env rust
 
 use std::fs;
 
@@ -45,17 +45,19 @@ and optimistic.
 cargo install --path crates/rustscript
 ```
 
+This installs a binary named `rust`.
+
 ## Usage
 
 ```
-rustscript run FILE.rs     check then interpret
-rustscript FILE.rs         same as run
-rustscript check FILE.rs   validate with cargo check only
-rustscript clean           clear the check cache
+rust run FILE.rs     check then interpret
+rust FILE.rs         same as run
+rust check FILE.rs   validate with cargo check only
+rust clean           clear the check cache
 ```
 
-A `#!/usr/bin/env rustscript` first line lets a `.rs` file run on its own. A
-shebang is legal Rust, so the file still passes `cargo check`.
+A `#!/usr/bin/env rust` first line lets a `.rs` file run on its own. A shebang
+is legal Rust, so the file still passes `cargo check`.
 
 ## What works
 
@@ -110,13 +112,6 @@ Check results and the prebuilt dependencies live in `~/.cache/rustscript`, keyed
 by source hash. The first run of a new or changed script pays the `cargo check`
 gate once, later runs skip it. `rustscript clean` clears the cache.
 
-## Project layout
-
-```
-crates/rustscript      the interpreter and the CLI
-crates/examples        sample scripts, both cargo examples and rustscript scripts
-```
-
 ## Examples
 
 The scripts in `crates/examples/examples` cover the common ground people use to
@@ -127,7 +122,7 @@ shell command, json config, typed json, an http fetch, and regex extraction.
 Run one with the interpreter.
 
 ```
-rustscript run crates/examples/examples/word_count.rs
+rust run crates/examples/examples/word_count.rs
 ```
 
 Compile all of them with the real toolchain as a second check.
@@ -139,9 +134,15 @@ cargo build --examples -p rustscript-examples
 ## Tests
 
 ```
-cargo test                              interpreter behavior and every example
+cargo test                              all suites, see below
+cargo test --test run                   interpreter behavior
+cargo test --test equivalence           compiled example vs interpreted, byte identical
 cargo test --test check -- --ignored    the cargo check gate, valid and invalid
 ```
+
+The equivalence suite runs every example both as a compiled cargo binary and
+through the interpreter, then checks the output matches byte for byte. It is the
+strongest guarantee that the interpreter behaves like the real compiler.
 
 ## Status
 

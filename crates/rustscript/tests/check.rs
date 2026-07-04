@@ -13,7 +13,7 @@ fn temp_script(src: &str, tag: &str) -> std::path::PathBuf {
 
 fn check(src: &str, tag: &str) -> std::process::Output {
     let path = temp_script(src, tag);
-    let out = Command::new(env!("CARGO_BIN_EXE_rustscript"))
+    let out = Command::new(env!("CARGO_BIN_EXE_rust"))
         .arg("check")
         .arg(&path)
         .output()

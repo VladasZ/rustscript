@@ -1,4 +1,4 @@
-#!/usr/bin/env rustscript
+#!/usr/bin/env rust
 
 fn hanoi(n: i64, from: &str, to: &str, via: &str) {
     if n == 0 {

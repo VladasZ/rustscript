@@ -5,7 +5,7 @@ use std::rc::Rc;
 use anyhow::{Result, anyhow, bail};
 use syn::{Expr, ExprCall};
 
-use super::value::{MapKey, Value};
+use super::value::{Fields, MapKey, Value};
 use super::{Flow, Frame, Interp, flow};
 
 impl Interp {
@@ -153,7 +153,7 @@ impl Interp {
     }
 
     fn make_tuple_struct(&self, name: &str, args: Vec<Value>) -> Result<Value> {
-        let mut fields = BTreeMap::new();
+        let mut fields = Fields::new();
         for (i, v) in args.into_iter().enumerate() {
             fields.insert(i.to_string(), v);
         }
@@ -687,7 +687,7 @@ fn native_call(module: &str, func: &str, args: &[Value]) -> Result<Option<Value>
     }
 
 /// Run a `Command` value once it has been fully built, returning an `Output`.
-fn run_command(fields: &Rc<RefCell<BTreeMap<String, Value>>>) -> Value {
+fn run_command(fields: &Rc<RefCell<Fields>>) -> Value {
     let f = fields.borrow();
     let program = f.get("program").map(|v| v.display()).unwrap_or_default();
     let mut cmd = std::process::Command::new(&program);
@@ -701,7 +701,7 @@ fn run_command(fields: &Rc<RefCell<BTreeMap<String, Value>>>) -> Value {
     }
     match cmd.output() {
         Ok(out) => {
-            let mut o = BTreeMap::new();
+            let mut o = Fields::new();
             o.insert(
                 "stdout".into(),
                 Value::str(String::from_utf8_lossy(&out.stdout).into_owned()),
@@ -710,7 +710,7 @@ fn run_command(fields: &Rc<RefCell<BTreeMap<String, Value>>>) -> Value {
                 "stderr".into(),
                 Value::str(String::from_utf8_lossy(&out.stderr).into_owned()),
             );
-            let mut st = BTreeMap::new();
+            let mut st = Fields::new();
             st.insert("code".into(), Value::Int(out.status.code().unwrap_or(-1) as i128));
             st.insert("success".into(), Value::Bool(out.status.success()));
             o.insert(
@@ -743,7 +743,7 @@ fn make_request(func: &str, args: &[Value]) -> Option<Value> {
         _ => return None,
     };
     let url = args.first().map(|v| v.display()).unwrap_or_default();
-    let mut fields = BTreeMap::new();
+    let mut fields = Fields::new();
     fields.insert("method".into(), Value::str(method));
     fields.insert("url".into(), Value::str(url));
     fields.insert("headers".into(), Value::vec(vec![]));
@@ -755,7 +755,7 @@ fn make_request(func: &str, args: &[Value]) -> Option<Value> {
 
 fn http_method(
     struct_name: &str,
-    fields: &Rc<RefCell<BTreeMap<String, Value>>>,
+    fields: &Rc<RefCell<Fields>>,
     method: &str,
     args: &[Value],
 ) -> Result<Value> {
@@ -769,7 +769,7 @@ fn http_method(
 }
 
 fn request_method(
-    fields: &Rc<RefCell<BTreeMap<String, Value>>>,
+    fields: &Rc<RefCell<Fields>>,
     method: &str,
     args: &[Value],
 ) -> Result<Value> {
@@ -812,7 +812,7 @@ fn request_method(
     }
 }
 
-fn run_request(fields: &Rc<RefCell<BTreeMap<String, Value>>>, body: Option<String>) -> Value {
+fn run_request(fields: &Rc<RefCell<Fields>>, body: Option<String>) -> Value {
     let f = fields.borrow();
     let verb = f.get("method").map(|v| v.display()).unwrap_or_else(|| "GET".into());
     let url = f.get("url").map(|v| v.display()).unwrap_or_default();
@@ -827,7 +827,7 @@ fn run_request(fields: &Rc<RefCell<BTreeMap<String, Value>>>, body: Option<Strin
     }
     match do_http(&verb, &url, &headers, body) {
         Ok((status, text)) => {
-            let mut rf = BTreeMap::new();
+            let mut rf = Fields::new();
             rf.insert("status".into(), Value::Int(status as i128));
             rf.insert("body".into(), Value::str(text));
             Value::ok(Value::Struct {
@@ -870,11 +870,11 @@ fn do_http(
     }
 }
 
-fn response_method(fields: &Rc<RefCell<BTreeMap<String, Value>>>, method: &str) -> Value {
+fn response_method(fields: &Rc<RefCell<Fields>>, method: &str) -> Value {
     let f = fields.borrow();
     match method {
         "status" => {
-            let mut sf = BTreeMap::new();
+            let mut sf = Fields::new();
             sf.insert("code".into(), f.get("status").cloned().unwrap_or(Value::Int(0)));
             Value::Struct {
                 name: "StatusCode".into(),
@@ -882,7 +882,7 @@ fn response_method(fields: &Rc<RefCell<BTreeMap<String, Value>>>, method: &str) 
             }
         }
         "body_mut" | "body" | "into_body" => {
-            let mut bf = BTreeMap::new();
+            let mut bf = Fields::new();
             bf.insert("text".into(), f.get("body").cloned().unwrap_or_else(|| Value::str("")));
             Value::Struct {
                 name: "HttpBody".into(),
@@ -894,7 +894,7 @@ fn response_method(fields: &Rc<RefCell<BTreeMap<String, Value>>>, method: &str) 
     }
 }
 
-fn body_method(fields: &Rc<RefCell<BTreeMap<String, Value>>>, method: &str) -> Result<Value> {
+fn body_method(fields: &Rc<RefCell<Fields>>, method: &str) -> Result<Value> {
     let text = fields.borrow().get("text").map(|v| v.display()).unwrap_or_default();
     Ok(match method {
         "read_to_string" => Value::ok(Value::str(text)),
@@ -906,7 +906,7 @@ fn body_method(fields: &Rc<RefCell<BTreeMap<String, Value>>>, method: &str) -> R
     })
 }
 
-fn status_method(fields: &Rc<RefCell<BTreeMap<String, Value>>>, method: &str) -> Value {
+fn status_method(fields: &Rc<RefCell<Fields>>, method: &str) -> Value {
     let code = match fields.borrow().get("code") {
         Some(Value::Int(c)) => *c,
         _ => 0,
@@ -923,7 +923,7 @@ fn status_method(fields: &Rc<RefCell<BTreeMap<String, Value>>>, method: &str) ->
 // -- path, directory entry, and file type ----------------------------------
 
 fn make_path(s: impl Into<String>) -> Value {
-    let mut f = BTreeMap::new();
+    let mut f = Fields::new();
     f.insert("s".into(), Value::str(s.into()));
     Value::Struct {
         name: "Path".into(),
@@ -932,7 +932,7 @@ fn make_path(s: impl Into<String>) -> Value {
 }
 
 fn make_dir_entry(entry: &std::fs::DirEntry) -> Value {
-    let mut f = BTreeMap::new();
+    let mut f = Fields::new();
     f.insert("path".into(), Value::str(entry.path().display().to_string()));
     f.insert(
         "name".into(),
@@ -945,7 +945,7 @@ fn make_dir_entry(entry: &std::fs::DirEntry) -> Value {
 }
 
 fn make_file_type(path: &std::path::Path) -> Value {
-    let mut f = BTreeMap::new();
+    let mut f = Fields::new();
     f.insert("is_dir".into(), Value::Bool(path.is_dir()));
     f.insert("is_file".into(), Value::Bool(path.is_file()));
     f.insert(
@@ -958,12 +958,12 @@ fn make_file_type(path: &std::path::Path) -> Value {
     }
 }
 
-fn path_string(fields: &Rc<RefCell<BTreeMap<String, Value>>>, key: &str) -> String {
+fn path_string(fields: &Rc<RefCell<Fields>>, key: &str) -> String {
     fields.borrow().get(key).map(|v| v.display()).unwrap_or_default()
 }
 
 fn path_method(
-    fields: &Rc<RefCell<BTreeMap<String, Value>>>,
+    fields: &Rc<RefCell<Fields>>,
     method: &str,
     args: &[Value],
 ) -> Result<Value> {
@@ -1001,7 +1001,7 @@ fn path_method(
 }
 
 fn dir_entry_method(
-    fields: &Rc<RefCell<BTreeMap<String, Value>>>,
+    fields: &Rc<RefCell<Fields>>,
     method: &str,
 ) -> Result<Value> {
     let path = path_string(fields, "path");
@@ -1013,7 +1013,7 @@ fn dir_entry_method(
     })
 }
 
-fn file_type_method(fields: &Rc<RefCell<BTreeMap<String, Value>>>, method: &str) -> Result<Value> {
+fn file_type_method(fields: &Rc<RefCell<Fields>>, method: &str) -> Result<Value> {
     let get = |k: &str| fields.borrow().get(k).cloned().unwrap_or(Value::Bool(false));
     Ok(match method {
         "is_dir" => get("is_dir"),
@@ -1026,7 +1026,7 @@ fn file_type_method(fields: &Rc<RefCell<BTreeMap<String, Value>>>, method: &str)
 // -- regex bridge ----------------------------------------------------------
 
 fn make_regex(pattern: String) -> Value {
-    let mut f = BTreeMap::new();
+    let mut f = Fields::new();
     f.insert("pattern".into(), Value::str(pattern));
     Value::Struct {
         name: "Regex".into(),
@@ -1035,7 +1035,7 @@ fn make_regex(pattern: String) -> Value {
 }
 
 fn make_match(m: &regex::Match) -> Value {
-    let mut f = BTreeMap::new();
+    let mut f = Fields::new();
     f.insert("text".into(), Value::str(m.as_str().to_string()));
     f.insert("start".into(), Value::Int(m.start() as i128));
     f.insert("end".into(), Value::Int(m.end() as i128));
@@ -1058,7 +1058,7 @@ fn make_captures(re: &regex::Regex, caps: &regex::Captures) -> Value {
             names.insert(MapKey::Str(n.to_string()), Value::Int(i as i128));
         }
     }
-    let mut f = BTreeMap::new();
+    let mut f = Fields::new();
     f.insert("groups".into(), Value::vec(groups));
     f.insert("names".into(), Value::Map(Rc::new(RefCell::new(names))));
     Value::Struct {
@@ -1068,7 +1068,7 @@ fn make_captures(re: &regex::Regex, caps: &regex::Captures) -> Value {
 }
 
 fn regex_method(
-    fields: &Rc<RefCell<BTreeMap<String, Value>>>,
+    fields: &Rc<RefCell<Fields>>,
     method: &str,
     args: &[Value],
 ) -> Result<Value> {
@@ -1100,7 +1100,7 @@ fn regex_method(
     })
 }
 
-fn match_method(fields: &Rc<RefCell<BTreeMap<String, Value>>>, method: &str) -> Result<Value> {
+fn match_method(fields: &Rc<RefCell<Fields>>, method: &str) -> Result<Value> {
     let f = fields.borrow();
     Ok(match method {
         "as_str" => f.get("text").cloned().unwrap_or_else(|| Value::str("")),
@@ -1111,7 +1111,7 @@ fn match_method(fields: &Rc<RefCell<BTreeMap<String, Value>>>, method: &str) -> 
 }
 
 fn captures_method(
-    fields: &Rc<RefCell<BTreeMap<String, Value>>>,
+    fields: &Rc<RefCell<Fields>>,
     method: &str,
     args: &[Value],
 ) -> Result<Value> {
@@ -1141,14 +1141,14 @@ fn captures_method(
     }
 }
 
-fn capture_group(fields: &Rc<RefCell<BTreeMap<String, Value>>>, i: usize) -> Value {
+fn capture_group(fields: &Rc<RefCell<Fields>>, i: usize) -> Value {
     match fields.borrow().get("groups") {
         Some(Value::Vec(g)) => g.borrow().get(i).cloned().unwrap_or_else(Value::none),
         _ => Value::none(),
     }
 }
 
-fn capture_name_index(fields: &Rc<RefCell<BTreeMap<String, Value>>>, name: &str) -> Option<usize> {
+fn capture_name_index(fields: &Rc<RefCell<Fields>>, name: &str) -> Option<usize> {
     if let Some(Value::Map(names)) = fields.borrow().get("names")
         && let Some(Value::Int(i)) = names.borrow().get(&MapKey::Str(name.to_string()))
     {
@@ -1160,7 +1160,7 @@ fn capture_name_index(fields: &Rc<RefCell<BTreeMap<String, Value>>>, name: &str)
 /// Resolve `caps[i]` or `caps["name"]` to the matched substring, panicking like
 /// the real `Captures` index does when the group did not participate.
 pub(super) fn capture_index(
-    fields: &Rc<RefCell<BTreeMap<String, Value>>>,
+    fields: &Rc<RefCell<Fields>>,
     key: &Value,
 ) -> Result<Value> {
     let idx = match key {
@@ -1216,7 +1216,7 @@ fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
         ("String", "from_utf8_lossy") => Value::str(bytes_to_string(args.first())),
         ("String", "from_utf8") => Value::ok(Value::str(bytes_to_string(args.first()))),
         ("Command", "new") => {
-            let mut fields = BTreeMap::new();
+            let mut fields = Fields::new();
             fields.insert(
                 "program".into(),
                 args.first().cloned().unwrap_or_else(|| Value::str("")),
@@ -1406,7 +1406,7 @@ fn builtin_method(recv: Value, name: &str, args: Vec<Value>) -> Result<Value> {
 }
 
 fn command_method(
-    fields: &Rc<RefCell<BTreeMap<String, Value>>>,
+    fields: &Rc<RefCell<Fields>>,
     name: &str,
     args: &[Value],
 ) -> Result<Value> {
@@ -1455,7 +1455,7 @@ fn command_method(
     })
 }
 
-fn exitstatus_method(fields: &Rc<RefCell<BTreeMap<String, Value>>>, name: &str) -> Result<Value> {
+fn exitstatus_method(fields: &Rc<RefCell<Fields>>, name: &str) -> Result<Value> {
     let f = fields.borrow();
     Ok(match name {
         "success" => f.get("success").cloned().unwrap_or(Value::Bool(false)),
@@ -1853,8 +1853,12 @@ fn sort_key(v: &Value) -> SortKey {
     match v {
         Value::Int(i) => SortKey::Int(*i),
         Value::Float(f) => SortKey::Float(*f),
+        Value::Bool(b) => SortKey::Int(*b as i128),
         Value::Str(s) => SortKey::Str(s.borrow().clone()),
         Value::Char(c) => SortKey::Str(c.to_string()),
+        Value::Tuple(items) | Value::Vec(items) => {
+            SortKey::List(items.borrow().iter().map(sort_key).collect())
+        }
         other => SortKey::Str(other.display()),
     }
 }
@@ -1864,6 +1868,7 @@ enum SortKey {
     Int(i128),
     Float(f64),
     Str(String),
+    List(Vec<SortKey>),
 }
 
 impl Eq for SortKey {}
@@ -1889,8 +1894,11 @@ impl Ord for SortKey {
                 a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal)
             }
             (SortKey::Str(a), SortKey::Str(b)) => a.cmp(b),
-            (SortKey::Int(_) | SortKey::Float(_), SortKey::Str(_)) => Ordering::Less,
-            (SortKey::Str(_), _) => Ordering::Greater,
+            (SortKey::List(a), SortKey::List(b)) => a.cmp(b),
+            (SortKey::Int(_) | SortKey::Float(_), _) => Ordering::Less,
+            (_, SortKey::Int(_) | SortKey::Float(_)) => Ordering::Greater,
+            (SortKey::Str(_), SortKey::List(_)) => Ordering::Less,
+            (SortKey::List(_), SortKey::Str(_)) => Ordering::Greater,
         }
     }
 }
