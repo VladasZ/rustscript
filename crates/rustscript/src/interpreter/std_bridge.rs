@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow, bail};
 
 use super::native::{self, Native};
 
-use super::value::{Fields, Map, Value};
+use super::value::{Map, StructData, Value};
 
 use super::crates_bridge::*;
 use super::http::*;
@@ -168,11 +168,9 @@ pub(super) fn as_i64(v: &Value) -> Option<i64> {
 pub(super) fn path_like(v: &Value) -> String {
     match v {
         Value::Str(s) => s.to_string(),
-        Value::Struct { name, fields } if &**name == "Path" || &**name == "PathBuf" => fields
-            .borrow()
-            .get("s")
-            .map(|s| s.display())
-            .unwrap_or_default(),
+        Value::Struct(st) if &**st.name() == "Path" || &**st.name() == "PathBuf" => {
+            st.get("s").map(|s| s.display()).unwrap_or_default()
+        }
         other => other.display(),
     }
 }
@@ -180,19 +178,16 @@ pub(super) fn path_like(v: &Value) -> String {
 /// Wrap a std stream handle so `is_terminal` can name its stream while reads
 /// and writes delegate to the inner native handle.
 pub(super) fn make_std_stream(kind: &str, inner: Native) -> Value {
-    let mut f = Fields::default();
-    f.insert("kind".into(), Value::str(kind));
-    f.insert("inner".into(), inner.wrap());
-    Value::Struct {
-        name: "StdStream".into(),
-        fields: Rc::new(RefCell::new(f)),
-    }
+    Value::struct_of(
+        "StdStream",
+        [("kind".into(), Value::str(kind)), ("inner".into(), inner.wrap())],
+    )
 }
 
-pub(super) fn std_stream_method(fields: &Rc<RefCell<Fields>>, name: &str, args: &mut [Value]) -> Result<Value> {
+pub(super) fn std_stream_method(s: &Rc<StructData>, name: &str, args: &mut [Value]) -> Result<Value> {
     use std::io::IsTerminal;
     if name == "is_terminal" {
-        let kind = fields.borrow().get("kind").map(|v| v.display()).unwrap_or_default();
+        let kind = s.get("kind").map(|v| v.display()).unwrap_or_default();
         let tty = match kind.as_str() {
             "stdin" => std::io::stdin().is_terminal(),
             "stderr" => std::io::stderr().is_terminal(),
@@ -201,12 +196,9 @@ pub(super) fn std_stream_method(fields: &Rc<RefCell<Fields>>, name: &str, args: 
         return Ok(Value::Bool(tty));
     }
     if matches!(name, "lock" | "by_ref") {
-        return Ok(Value::Struct {
-            name: "StdStream".into(),
-            fields: fields.clone(),
-        });
+        return Ok(Value::Struct(s.clone()));
     }
-    let inner = match fields.borrow().get("inner") {
+    let inner = match s.get("inner") {
         Some(Value::Native(h)) => h.clone(),
         _ => bail!("std stream lost its handle"),
     };
@@ -218,12 +210,11 @@ pub(super) fn std_stream_method(fields: &Rc<RefCell<Fields>>, name: &str, args: 
 
 /// Turn a script `Duration` value into a real `std::time::Duration`.
 pub(super) fn duration_from_value(v: &Value) -> Option<std::time::Duration> {
-    if let Value::Struct { name, fields } = v
-        && &**name == "Duration"
+    if let Value::Struct(s) = v
+        && &**s.name() == "Duration"
     {
-        let f = fields.borrow();
-        let secs = field_int(&f, "secs") as u64;
-        let nanos = field_int(&f, "nanos") as u32;
+        let secs = field_int(s, "secs") as u64;
+        let nanos = field_int(s, "nanos") as u32;
         return Some(std::time::Duration::new(secs, nanos));
     }
     None
@@ -231,92 +222,84 @@ pub(super) fn duration_from_value(v: &Value) -> Option<std::time::Duration> {
 
 /// Build a `Duration` value carrying whole and sub-second parts.
 pub(super) fn make_duration(d: std::time::Duration) -> Value {
-    let mut f = Fields::default();
-    f.insert("secs".into(), Value::Int(d.as_secs() as i64));
-    f.insert("nanos".into(), Value::Int(d.subsec_nanos() as i64));
-    Value::Struct {
-        name: "Duration".into(),
-        fields: Rc::new(RefCell::new(f)),
-    }
+    Value::struct_of(
+        "Duration",
+        [
+            ("secs".into(), Value::Int(d.as_secs() as i64)),
+            ("nanos".into(), Value::Int(d.subsec_nanos() as i64)),
+        ],
+    )
 }
 
 /// Build a `Metadata` value with the common accessors materialized as fields.
 /// The Unix `MetadataExt` fields are gated so the interpreter still builds on
 /// Windows, where a script would use different accessors.
 pub(super) fn make_metadata(m: &std::fs::Metadata) -> Value {
-    let mut f = Fields::default();
-    f.insert("len".into(), Value::Int(m.len() as i64));
-    f.insert("is_dir".into(), Value::Bool(m.is_dir()));
-    f.insert("is_file".into(), Value::Bool(m.is_file()));
-    f.insert("is_symlink".into(), Value::Bool(m.is_symlink()));
-    f.insert("readonly".into(), Value::Bool(m.permissions().readonly()));
+    let mut f: Vec<(Rc<str>, Value)> = vec![
+        ("len".into(), Value::Int(m.len() as i64)),
+        ("is_dir".into(), Value::Bool(m.is_dir())),
+        ("is_file".into(), Value::Bool(m.is_file())),
+        ("is_symlink".into(), Value::Bool(m.is_symlink())),
+        ("readonly".into(), Value::Bool(m.permissions().readonly())),
+    ];
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         use std::os::unix::fs::PermissionsExt;
-        f.insert("mode".into(), Value::Int(m.permissions().mode() as i64));
-        f.insert("dev".into(), Value::Int(m.dev() as i64));
-        f.insert("ino".into(), Value::Int(m.ino() as i64));
-        f.insert("uid".into(), Value::Int(m.uid() as i64));
-        f.insert("gid".into(), Value::Int(m.gid() as i64));
-        f.insert("mtime".into(), Value::Int(m.mtime() as i64));
+        f.push(("mode".into(), Value::Int(m.permissions().mode() as i64)));
+        f.push(("dev".into(), Value::Int(m.dev() as i64)));
+        f.push(("ino".into(), Value::Int(m.ino() as i64)));
+        f.push(("uid".into(), Value::Int(m.uid() as i64)));
+        f.push(("gid".into(), Value::Int(m.gid() as i64)));
+        f.push(("mtime".into(), Value::Int(m.mtime() as i64)));
     }
     if let Ok(t) = m.modified() {
-        f.insert("modified".into(), super::native::Native::SystemTime(t).wrap());
+        f.push(("modified".into(), super::native::Native::SystemTime(t).wrap()));
     }
-    Value::Struct {
-        name: "Metadata".into(),
-        fields: Rc::new(RefCell::new(f)),
-    }
+    Value::struct_of("Metadata", f)
 }
 // -- path, directory entry, and file type ----------------------------------
 
 pub(super) fn make_path(s: impl Into<String>) -> Value {
-    let mut f = Fields::default();
-    f.insert("s".into(), Value::str(s.into()));
-    Value::Struct {
-        name: "Path".into(),
-        fields: Rc::new(RefCell::new(f)),
-    }
+    Value::struct_of("Path", [("s".into(), Value::str(s.into()))])
 }
 
 pub(super) fn make_dir_entry(entry: &std::fs::DirEntry) -> Value {
-    let mut f = Fields::default();
-    f.insert("path".into(), Value::str(entry.path().display().to_string()));
-    f.insert(
-        "name".into(),
-        Value::str(entry.file_name().to_string_lossy().into_owned()),
-    );
-    Value::Struct {
-        name: "DirEntry".into(),
-        fields: Rc::new(RefCell::new(f)),
-    }
+    Value::struct_of(
+        "DirEntry",
+        [
+            ("path".into(), Value::str(entry.path().display().to_string())),
+            ("name".into(), Value::str(entry.file_name().to_string_lossy().into_owned())),
+        ],
+    )
 }
 
 pub(super) fn make_file_type(path: &std::path::Path) -> Value {
-    let mut f = Fields::default();
-    f.insert("is_dir".into(), Value::Bool(path.is_dir()));
-    f.insert("is_file".into(), Value::Bool(path.is_file()));
-    f.insert(
-        "is_symlink".into(),
-        Value::Bool(path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false)),
-    );
-    Value::Struct {
-        name: "FileType".into(),
-        fields: Rc::new(RefCell::new(f)),
-    }
+    Value::struct_of(
+        "FileType",
+        [
+            ("is_dir".into(), Value::Bool(path.is_dir())),
+            ("is_file".into(), Value::Bool(path.is_file())),
+            (
+                "is_symlink".into(),
+                Value::Bool(
+                    path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false),
+                ),
+            ),
+        ],
+    )
 }
 
-pub(super) fn path_string(fields: &Rc<RefCell<Fields>>, key: &str) -> String {
-    fields.borrow().get(key).map(|v| v.display()).unwrap_or_default()
+pub(super) fn path_string(s: &StructData, key: &str) -> String {
+    s.get(key).map(|v| v.display()).unwrap_or_default()
 }
 
 pub(super) fn path_method(
-    fields: &Rc<RefCell<Fields>>,
+    st: &StructData,
     method: &str,
     args: &[Value],
 ) -> Result<Value> {
-    let s = path_string(fields, "s");
+    let s = path_string(st, "s");
     let p = std::path::Path::new(&s);
     let opt_str = |o: Option<&std::ffi::OsStr>| match o {
         Some(v) => Value::some(Value::str(v.to_string_lossy().into_owned())),
@@ -350,20 +333,20 @@ pub(super) fn path_method(
 }
 
 pub(super) fn dir_entry_method(
-    fields: &Rc<RefCell<Fields>>,
+    s: &StructData,
     method: &str,
 ) -> Result<Value> {
-    let path = path_string(fields, "path");
+    let path = path_string(s, "path");
     Ok(match method {
         "path" => make_path(path),
-        "file_name" => make_path(path_string(fields, "name")),
+        "file_name" => make_path(path_string(s, "name")),
         "file_type" => Value::ok(make_file_type(std::path::Path::new(&path))),
         _ => bail!("unknown method `{method}` on DirEntry"),
     })
 }
 
-pub(super) fn file_type_method(fields: &Rc<RefCell<Fields>>, method: &str) -> Result<Value> {
-    let get = |k: &str| fields.borrow().get(k).cloned().unwrap_or(Value::Bool(false));
+pub(super) fn file_type_method(s: &StructData, method: &str) -> Result<Value> {
+    let get = |k: &str| s.get(k).unwrap_or(Value::Bool(false));
     Ok(match method {
         "is_dir" => get("is_dir"),
         "is_file" => get("is_file"),
@@ -406,18 +389,20 @@ pub(super) fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Va
         ("String", "from") => Value::str(args.first().map(|v| v.display()).unwrap_or_default()),
         ("String", "from_utf8_lossy") => Value::str(bytes_to_string(args.first())),
         ("String", "from_utf8") => Value::ok(Value::str(bytes_to_string(args.first()))),
-        ("Command", "new") => {
-            let mut fields = Fields::default();
-            fields.insert(
-                "program".into(),
-                args.first().cloned().unwrap_or_else(|| Value::str("")),
-            );
-            fields.insert("args".into(), Value::vec(vec![]));
-            Value::Struct {
-                name: "Command".into(),
-                fields: Rc::new(RefCell::new(fields)),
-            }
-        }
+        // The shape carries every field a later builder call can set, since a
+        // shape cannot grow after the instance exists.
+        ("Command", "new") => Value::struct_of(
+            "Command",
+            [
+                ("program".into(), args.first().cloned().unwrap_or_else(|| Value::str(""))),
+                ("args".into(), Value::vec(vec![])),
+                ("cwd".into(), Value::Unit),
+                ("envs".into(), Value::Unit),
+                ("stdin".into(), Value::Unit),
+                ("stdout".into(), Value::Unit),
+                ("stderr".into(), Value::Unit),
+            ],
+        ),
         ("Vec", "new") | ("Vec", "with_capacity") => Value::vec(vec![]),
         ("Vec", "from") => match args.first() {
             Some(Value::Vec(v)) => Value::vec(v.borrow().clone()),
@@ -476,16 +461,12 @@ pub(super) fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Va
             &arg_str(args, 0),
             std::fs::OpenOptions::new().write(true).create_new(true),
         ),
-        ("OpenOptions", "new") => {
-            let mut f = Fields::default();
-            for k in ["read", "write", "append", "create", "create_new", "truncate"] {
-                f.insert(k.into(), Value::Bool(false));
-            }
-            Value::Struct {
-                name: "OpenOptions".into(),
-                fields: Rc::new(RefCell::new(f)),
-            }
-        }
+        ("OpenOptions", "new") => Value::struct_of(
+            "OpenOptions",
+            ["read", "write", "append", "create", "create_new", "truncate"]
+                .into_iter()
+                .map(|k| (k.into(), Value::Bool(false))),
+        ),
         // -- time ------------------------------------------------------
         ("Instant", "now") => Native::Instant(std::time::Instant::now()).wrap(),
         ("SystemTime", "now") => Native::SystemTime(std::time::SystemTime::now()).wrap(),
@@ -521,12 +502,7 @@ pub(super) fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Va
         },
         ("Agent", "new_with_defaults") => Native::Agent(ureq::agent()).wrap(),
         ("Stdio", "piped") | ("Stdio", "inherit") | ("Stdio", "null") => {
-            let mut f = Fields::default();
-            f.insert("kind".into(), Value::str(func));
-            Value::Struct {
-                name: "Stdio".into(),
-                fields: Rc::new(RefCell::new(f)),
-            }
+            Value::struct_of("Stdio", [("kind".into(), Value::str(func))])
         }
         _ => return Ok(None),
     }))
@@ -577,10 +553,9 @@ pub(super) fn bytes_arg(v: Option<&Value>) -> Vec<u8> {
 pub(super) fn bytes_to_vec(b: &[u8]) -> Value {
     Value::vec(b.iter().map(|x| Value::Int(*x as i64)).collect())
 }
-pub(super) fn duration_method(fields: &Rc<RefCell<Fields>>, name: &str) -> Result<Value> {
-    let f = fields.borrow();
-    let secs = field_int(&f, "secs") as u64;
-    let nanos = field_int(&f, "nanos") as u32;
+pub(super) fn duration_method(s: &StructData, name: &str) -> Result<Value> {
+    let secs = field_int(s, "secs") as u64;
+    let nanos = field_int(s, "nanos") as u32;
     let total_nanos = secs as u128 * 1_000_000_000 + nanos as u128;
     Ok(match name {
         "as_secs" => Value::Int(secs as i64),
@@ -596,35 +571,29 @@ pub(super) fn duration_method(fields: &Rc<RefCell<Fields>>, name: &str) -> Resul
     })
 }
 
-pub(super) fn metadata_method(fields: &Rc<RefCell<Fields>>, name: &str, _args: &[Value]) -> Result<Value> {
-    let f = fields.borrow();
-    let get = |k: &str| f.get(k).cloned().unwrap_or(Value::Unit);
+pub(super) fn metadata_method(s: &StructData, name: &str, _args: &[Value]) -> Result<Value> {
+    let get = |k: &str| s.get(k).unwrap_or(Value::Unit);
     Ok(match name {
         "len" => get("len"),
         "is_dir" => get("is_dir"),
         "is_file" => get("is_file"),
         "is_symlink" => get("is_symlink"),
-        "modified" | "created" | "accessed" => match f.get("modified") {
-            Some(v) => Value::ok(v.clone()),
+        "modified" | "created" | "accessed" => match s.get("modified") {
+            Some(v) => Value::ok(v),
             None => Value::err(Value::str("timestamp not available".to_string())),
         },
         "mode" | "dev" | "ino" | "uid" | "gid" | "mtime" => get(name),
-        "permissions" => {
-            let mut p = Fields::default();
-            p.insert("mode".into(), get("mode"));
-            p.insert("readonly".into(), get("readonly"));
-            Value::Struct {
-                name: "Permissions".into(),
-                fields: Rc::new(RefCell::new(p)),
-            }
-        }
+        "permissions" => Value::struct_of(
+            "Permissions",
+            [("mode".into(), get("mode")), ("readonly".into(), get("readonly"))],
+        ),
         _ => bail!("unknown method `{name}` on Metadata"),
     })
 }
 
-pub(super) fn field_int(f: &Fields, k: &str) -> i64 {
-    match f.get(k) {
-        Some(Value::Int(i)) => *i,
+pub(super) fn field_int(s: &StructData, k: &str) -> i64 {
+    match s.get(k) {
+        Some(Value::Int(i)) => i,
         _ => 0,
     }
 }

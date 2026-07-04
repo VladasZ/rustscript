@@ -85,10 +85,53 @@ impl fmt::Debug for RStr {
     }
 }
 
-/// Struct fields keep their declaration order so serialization and debug output
-/// match the real compiler. Keys are shared `Rc<str>` so building many
-/// instances of one struct clones pointers, not strings.
-pub type Fields = IndexMap<Rc<str>, Value, FxBuildHasher>;
+/// Field layout of a struct, shared by every instance built from the same
+/// site. Instances then carry a plain `Vec<Value>` in this order, so a field
+/// read is a short name scan plus an index, not a hash probe, and building an
+/// instance allocates no map.
+pub struct StructShape {
+    pub name: Rc<str>,
+    pub fields: Vec<Rc<str>>,
+}
+
+impl StructShape {
+    pub fn new(name: impl Into<Rc<str>>, fields: Vec<Rc<str>>) -> Rc<StructShape> {
+        Rc::new(StructShape { name: name.into(), fields })
+    }
+
+    /// Slot index of a field. Structs have a handful of fields, so a linear
+    /// scan beats hashing.
+    pub fn slot(&self, field: &str) -> Option<usize> {
+        self.fields.iter().position(|f| &**f == field)
+    }
+}
+
+/// A struct instance: its shape plus one value per field, in shape order.
+pub struct StructData {
+    pub shape: Rc<StructShape>,
+    pub values: RefCell<Vec<Value>>,
+}
+
+impl StructData {
+    pub fn name(&self) -> &Rc<str> {
+        &self.shape.name
+    }
+
+    pub fn get(&self, field: &str) -> Option<Value> {
+        self.shape.slot(field).map(|i| self.values.borrow()[i].clone())
+    }
+
+    /// Write a field that exists in the shape. False when it does not.
+    pub fn set(&self, field: &str, v: Value) -> bool {
+        match self.shape.slot(field) {
+            Some(i) => {
+                self.values.borrow_mut()[i] = v;
+                true
+            }
+            None => false,
+        }
+    }
+}
 
 /// Script HashMap storage. Hashed lookups, insertion ordered iteration.
 /// Lookups by a borrowed key go through `KeyRef` so they never clone the key.
@@ -108,10 +151,7 @@ pub enum Value {
     Map(Rc<RefCell<Map>>),
     Tuple(Rc<RefCell<Vec<Value>>>),
     /// Struct instance. Named fields, or positional for tuple structs.
-    Struct {
-        name: Rc<str>,
-        fields: Rc<RefCell<Fields>>,
-    },
+    Struct(Rc<StructData>),
     /// Enum value, including the builtin Option and Result. The payload is
     /// immutable once built, so it is a plain shared slice, not a RefCell.
     Enum {
@@ -227,10 +267,6 @@ thread_local! {
     static ERR_NAME: Rc<str> = Rc::from("Err");
 }
 
-pub fn fields_with_capacity(n: usize) -> Fields {
-    Fields::with_capacity_and_hasher(n, FxBuildHasher)
-}
-
 pub fn map_with_capacity(n: usize) -> Map {
     Map::with_capacity_and_hasher(n, FxBuildHasher)
 }
@@ -261,6 +297,19 @@ impl Value {
 
     pub fn vec(items: Vec<Value>) -> Value {
         Value::Vec(Rc::new(RefCell::new(items)))
+    }
+
+    pub fn structure(shape: Rc<StructShape>, values: Vec<Value>) -> Value {
+        Value::Struct(Rc::new(StructData { shape, values: RefCell::new(values) }))
+    }
+
+    /// One-off struct built by a bridge, shape and instance in one go.
+    pub fn struct_of(
+        name: impl Into<Rc<str>>,
+        pairs: impl IntoIterator<Item = (Rc<str>, Value)>,
+    ) -> Value {
+        let (fields, values) = pairs.into_iter().unzip();
+        Value::structure(StructShape::new(name, fields), values)
     }
 
     pub fn empty_data() -> Rc<[Value]> {
@@ -319,7 +368,7 @@ impl Value {
             Value::Vec(_) => "Vec",
             Value::Map(_) => "HashMap",
             Value::Tuple(_) => "tuple",
-            Value::Struct { .. } => "struct",
+            Value::Struct(_) => "struct",
             Value::Enum { .. } => "enum",
             Value::Range { .. } => "range",
             Value::Closure(_) => "closure",
@@ -392,22 +441,13 @@ impl Value {
                     && da.len() == db.len()
                     && da.iter().zip(db.iter()).all(|(x, y)| x.eq_value(y))
             }
-            (
-                Value::Struct {
-                    name: na,
-                    fields: fa,
-                },
-                Value::Struct {
-                    name: nb,
-                    fields: fb,
-                },
-            ) => {
-                na == nb && {
-                    let (fa, fb) = (fa.borrow(), fb.borrow());
-                    fa.len() == fb.len()
-                        && fa
-                            .iter()
-                            .all(|(k, v)| fb.get(k).map(|o| v.eq_value(o)).unwrap_or(false))
+            (Value::Struct(a), Value::Struct(b)) => {
+                a.name() == b.name() && {
+                    let (va, vb) = (a.values.borrow(), b.values.borrow());
+                    va.len() == vb.len()
+                        && a.shape.fields.iter().zip(va.iter()).all(|(k, v)| {
+                            b.get(k).map(|o| v.eq_value(&o)).unwrap_or(false)
+                        })
                 }
             }
             (Value::Native(a), Value::Native(b)) => Rc::ptr_eq(a, b),
@@ -487,12 +527,12 @@ impl Value {
                 }
                 out.push('}');
             }
-            Value::Struct { name, fields } => {
-                write!(out, "{name}").unwrap();
-                let fields = fields.borrow();
-                if !fields.is_empty() {
+            Value::Struct(s) => {
+                write!(out, "{}", s.name()).unwrap();
+                let values = s.values.borrow();
+                if !values.is_empty() {
                     out.push_str(" { ");
-                    for (i, (k, v)) in fields.iter().enumerate() {
+                    for (i, (k, v)) in s.shape.fields.iter().zip(values.iter()).enumerate() {
                         if i > 0 {
                             out.push_str(", ");
                         }

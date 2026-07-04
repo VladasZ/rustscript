@@ -7,7 +7,7 @@ use std::rc::Rc;
 use anyhow::{Result, anyhow, bail};
 
 
-use super::value::{Fields, Value};
+use super::value::{StructData, Value};
 use super::Interp;
 
 use super::builtins::*;
@@ -26,8 +26,8 @@ impl Interp {
             Value::Enum { enum_name, variant, data } if &**enum_name == "Result" => {
                 self.result_higher_order(variant, data, name, args)
             }
-            Value::Struct { name: n, fields } if &**n == "Entry" => {
-                self.entry_higher_order(fields, name, args)
+            Value::Struct(s) if &**s.name() == "Entry" => {
+                self.entry_higher_order(s, name, args)
             }
             _ => Ok(None),
         }
@@ -37,20 +37,16 @@ impl Interp {
     /// and `and_modify`. Non-closure forms fall through to `entry_method`.
     pub(super) fn entry_higher_order(
         &self,
-        fields: &Rc<RefCell<Fields>>,
+        entry: &Rc<StructData>,
         name: &str,
         args: &[Value],
     ) -> Result<Option<Value>> {
-        let (map, key) = {
-            let f = fields.borrow();
-            let key = f
-                .get("key")
-                .and_then(|k| k.as_key())
-                .ok_or_else(|| anyhow!("invalid entry key"))?;
-            let Some(Value::Map(m)) = f.get("map") else {
-                bail!("entry lost its map");
-            };
-            (m.clone(), key)
+        let key = entry
+            .get("key")
+            .and_then(|k| k.as_key())
+            .ok_or_else(|| anyhow!("invalid entry key"))?;
+        let Some(Value::Map(map)) = entry.get("map") else {
+            bail!("entry lost its map");
         };
         match name {
             "or_insert_with" | "or_insert_with_key" => {
@@ -79,10 +75,7 @@ impl Interp {
                     }
                 }
                 // Return the Entry so further chaining (or_insert) still works.
-                Ok(Some(Value::Struct {
-                    name: "Entry".into(),
-                    fields: fields.clone(),
-                }))
+                Ok(Some(Value::Struct(entry.clone())))
             }
             _ => Ok(None),
         }

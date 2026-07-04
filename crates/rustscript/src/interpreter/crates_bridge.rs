@@ -1,14 +1,12 @@
 //! Bridges for the extra crates a script may use: base64, chrono,
 //! rand and friends. Split from `builtins.rs`.
 
-use std::cell::RefCell;
-use std::rc::Rc;
 
 use anyhow::{Result, bail};
 
 use super::native::Native;
 
-use super::value::{Fields, Value};
+use super::value::{StructData, Value};
 
 use super::json_bridge::*;
 use super::std_bridge::*;
@@ -76,10 +74,7 @@ pub(super) fn crate_bridge(module: &str, func: &str, args: &[Value]) -> Result<O
             }
         }
         // rand -------------------------------------------------------------
-        ("rand", "rng") | ("rand", "thread_rng") => Value::Struct {
-            name: "Rng".into(),
-            fields: Rc::new(RefCell::new(Fields::default())),
-        },
+        ("rand", "rng") | ("rand", "thread_rng") => Value::struct_of("Rng", []),
         ("rand", "random") => Value::Float(rand::random::<f64>()),
         // chrono -----------------------------------------------------------
         ("Utc", "now") | ("Local", "now") => now_datetime(module == "Local"),
@@ -106,20 +101,15 @@ pub(super) fn base64_engine(name: &str) -> Option<Value> {
         "URL_SAFE_NO_PAD" | "BASE64_URL_SAFE_NO_PAD" => "url_safe_no_pad",
         _ => return None,
     };
-    let mut f = Fields::default();
-    f.insert("kind".into(), Value::str(kind));
-    Some(Value::Struct {
-        name: "Base64Engine".into(),
-        fields: Rc::new(RefCell::new(f)),
-    })
+    Some(Value::struct_of("Base64Engine", [("kind".into(), Value::str(kind))]))
 }
 
-pub(super) fn base64_method(fields: &Rc<RefCell<Fields>>, method: &str, args: &[Value]) -> Result<Value> {
+pub(super) fn base64_method(s: &StructData, method: &str, args: &[Value]) -> Result<Value> {
     use base64::Engine;
     use base64::engine::general_purpose::{
         STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD,
     };
-    let kind = fields.borrow().get("kind").map(|v| v.display()).unwrap_or_default();
+    let kind = s.get("kind").map(|v| v.display()).unwrap_or_default();
     macro_rules! pick {
         ($m:ident, $($a:tt)*) => {
             match kind.as_str() {
@@ -149,22 +139,21 @@ pub(super) fn now_datetime(local: bool) -> Value {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
-    let mut f = Fields::default();
-    f.insert("secs".into(), Value::Int(now.as_secs() as i64));
-    f.insert("nanos".into(), Value::Int(now.subsec_nanos() as i64));
-    f.insert("local".into(), Value::Bool(local));
-    Value::Struct {
-        name: "DateTime".into(),
-        fields: Rc::new(RefCell::new(f)),
-    }
+    Value::struct_of(
+        "DateTime",
+        [
+            ("secs".into(), Value::Int(now.as_secs() as i64)),
+            ("nanos".into(), Value::Int(now.subsec_nanos() as i64)),
+            ("local".into(), Value::Bool(local)),
+        ],
+    )
 }
 
-pub(super) fn datetime_method(fields: &Rc<RefCell<Fields>>, name: &str, args: &[Value]) -> Result<Value> {
+pub(super) fn datetime_method(s: &StructData, name: &str, args: &[Value]) -> Result<Value> {
     use chrono::{DateTime, Local, Utc};
-    let f = fields.borrow();
-    let secs = field_int(&f, "secs") as i64;
-    let nanos = field_int(&f, "nanos") as u32;
-    let local = matches!(f.get("local"), Some(Value::Bool(true)));
+    let secs = field_int(s, "secs");
+    let nanos = field_int(s, "nanos") as u32;
+    let local = matches!(s.get("local"), Some(Value::Bool(true)));
     let utc: DateTime<Utc> = DateTime::from_timestamp(secs, nanos).unwrap_or_default();
     Ok(match name {
         "timestamp" => Value::Int(secs as i64),

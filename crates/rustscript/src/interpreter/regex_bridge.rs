@@ -6,30 +6,25 @@ use std::rc::Rc;
 use anyhow::{Result, anyhow, bail};
 
 
-use super::value::{Fields, KeyRef, Map, MapKey, RStr, Value};
+use super::value::{KeyRef, Map, MapKey, RStr, StructData, Value};
 
 
 
 // -- regex bridge ----------------------------------------------------------
 
 pub(super) fn make_regex(pattern: String) -> Value {
-    let mut f = Fields::default();
-    f.insert("pattern".into(), Value::str(pattern));
-    Value::Struct {
-        name: "Regex".into(),
-        fields: Rc::new(RefCell::new(f)),
-    }
+    Value::struct_of("Regex", [("pattern".into(), Value::str(pattern))])
 }
 
 pub(super) fn make_match(m: &regex::Match) -> Value {
-    let mut f = Fields::default();
-    f.insert("text".into(), Value::str(m.as_str().to_string()));
-    f.insert("start".into(), Value::Int(m.start() as i64));
-    f.insert("end".into(), Value::Int(m.end() as i64));
-    Value::Struct {
-        name: "Match".into(),
-        fields: Rc::new(RefCell::new(f)),
-    }
+    Value::struct_of(
+        "Match",
+        [
+            ("text".into(), Value::str(m.as_str().to_string())),
+            ("start".into(), Value::Int(m.start() as i64)),
+            ("end".into(), Value::Int(m.end() as i64)),
+        ],
+    )
 }
 
 pub(super) fn make_captures(re: &regex::Regex, caps: &regex::Captures) -> Value {
@@ -45,21 +40,21 @@ pub(super) fn make_captures(re: &regex::Regex, caps: &regex::Captures) -> Value 
             names.insert(MapKey::Str(RStr::new(n.to_string())), Value::Int(i as i64));
         }
     }
-    let mut f = Fields::default();
-    f.insert("groups".into(), Value::vec(groups));
-    f.insert("names".into(), Value::Map(Rc::new(RefCell::new(names))));
-    Value::Struct {
-        name: "Captures".into(),
-        fields: Rc::new(RefCell::new(f)),
-    }
+    Value::struct_of(
+        "Captures",
+        [
+            ("groups".into(), Value::vec(groups)),
+            ("names".into(), Value::Map(Rc::new(RefCell::new(names)))),
+        ],
+    )
 }
 
 pub(super) fn regex_method(
-    fields: &Rc<RefCell<Fields>>,
+    s: &StructData,
     method: &str,
     args: &[Value],
 ) -> Result<Value> {
-    let pattern = fields.borrow().get("pattern").map(|v| v.display()).unwrap_or_default();
+    let pattern = s.get("pattern").map(|v| v.display()).unwrap_or_default();
     let re = regex::Regex::new(&pattern)?;
     let text = args.first().map(|v| v.display()).unwrap_or_default();
     let rep = args.get(1).map(|v| v.display()).unwrap_or_default();
@@ -87,18 +82,17 @@ pub(super) fn regex_method(
     })
 }
 
-pub(super) fn match_method(fields: &Rc<RefCell<Fields>>, method: &str) -> Result<Value> {
-    let f = fields.borrow();
+pub(super) fn match_method(s: &StructData, method: &str) -> Result<Value> {
     Ok(match method {
-        "as_str" => f.get("text").cloned().unwrap_or_else(|| Value::str("")),
-        "start" => f.get("start").cloned().unwrap_or(Value::Int(0)),
-        "end" => f.get("end").cloned().unwrap_or(Value::Int(0)),
+        "as_str" => s.get("text").unwrap_or_else(|| Value::str("")),
+        "start" => s.get("start").unwrap_or(Value::Int(0)),
+        "end" => s.get("end").unwrap_or(Value::Int(0)),
         _ => bail!("unknown method `{method}` on Match"),
     })
 }
 
 pub(super) fn captures_method(
-    fields: &Rc<RefCell<Fields>>,
+    s: &StructData,
     method: &str,
     args: &[Value],
 ) -> Result<Value> {
@@ -108,17 +102,17 @@ pub(super) fn captures_method(
                 Some(Value::Int(n)) => *n as usize,
                 _ => bail!("captures get needs an index"),
             };
-            Ok(capture_group(fields, i))
+            Ok(capture_group(s, i))
         }
         "name" => {
             let name = args.first().map(|v| v.display()).unwrap_or_default();
-            match capture_name_index(fields, &name) {
-                Some(i) => Ok(capture_group(fields, i)),
+            match capture_name_index(s, &name) {
+                Some(i) => Ok(capture_group(s, i)),
                 None => Ok(Value::none()),
             }
         }
         "len" => {
-            if let Some(Value::Vec(g)) = fields.borrow().get("groups") {
+            if let Some(Value::Vec(g)) = s.get("groups") {
                 Ok(Value::Int(g.borrow().len() as i64))
             } else {
                 Ok(Value::Int(0))
@@ -128,15 +122,15 @@ pub(super) fn captures_method(
     }
 }
 
-pub(super) fn capture_group(fields: &Rc<RefCell<Fields>>, i: usize) -> Value {
-    match fields.borrow().get("groups") {
+pub(super) fn capture_group(s: &StructData, i: usize) -> Value {
+    match s.get("groups") {
         Some(Value::Vec(g)) => g.borrow().get(i).cloned().unwrap_or_else(Value::none),
         _ => Value::none(),
     }
 }
 
-pub(super) fn capture_name_index(fields: &Rc<RefCell<Fields>>, name: &str) -> Option<usize> {
-    if let Some(Value::Map(names)) = fields.borrow().get("names")
+pub(super) fn capture_name_index(s: &StructData, name: &str) -> Option<usize> {
+    if let Some(Value::Map(names)) = s.get("names")
         && let Some(Value::Int(i)) = names.borrow().get(&KeyRef::Str(name))
     {
         return Some(*i as usize);
@@ -147,20 +141,20 @@ pub(super) fn capture_name_index(fields: &Rc<RefCell<Fields>>, name: &str) -> Op
 /// Resolve `caps[i]` or `caps["name"]` to the matched substring, panicking like
 /// the real `Captures` index does when the group did not participate.
 pub(super) fn capture_index(
-    fields: &Rc<RefCell<Fields>>,
+    s: &StructData,
     key: &Value,
 ) -> Result<Value> {
     let idx = match key {
         Value::Int(i) if *i >= 0 => *i as usize,
-        Value::Str(s) => capture_name_index(fields, s)
-            .ok_or_else(|| anyhow!("no capture group named `{s}`"))?,
+        Value::Str(k) => capture_name_index(s, k)
+            .ok_or_else(|| anyhow!("no capture group named `{k}`"))?,
         _ => bail!("invalid capture index"),
     };
-    match capture_group(fields, idx) {
+    match capture_group(s, idx) {
         Value::Enum { variant, data, .. } if &*variant == "Some" => {
             let m = data.first().cloned().unwrap_or(Value::Unit);
-            if let Value::Struct { fields: mf, .. } = m {
-                return Ok(mf.borrow().get("text").cloned().unwrap_or_else(|| Value::str("")));
+            if let Value::Struct(mf) = m {
+                return Ok(mf.get("text").unwrap_or_else(|| Value::str("")));
             }
             bail!("bad capture group")
         }

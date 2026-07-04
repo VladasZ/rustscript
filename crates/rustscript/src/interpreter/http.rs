@@ -7,7 +7,7 @@ use anyhow::{Result, bail};
 
 use super::native::Native;
 
-use super::value::{Fields, Value};
+use super::value::{StructData, Value};
 
 use super::json_bridge::*;
 use super::std_bridge::*;
@@ -38,48 +38,42 @@ pub(super) fn http_verb(func: &str) -> Option<&'static str> {
 }
 
 /// Build an `HttpRequest`, optionally bound to an agent so its cookie jar and
-/// config carry through the call.
+/// config carry through the call. Fields a builder call can set later hold
+/// Unit placeholders, since a shape cannot grow after the instance exists.
 pub(super) fn build_http_request(method: &str, url: Option<&Value>, agent: Option<Value>) -> Value {
-    let mut fields = Fields::default();
-    fields.insert("method".into(), Value::str(method));
-    fields.insert(
-        "url".into(),
-        Value::str(url.map(|v| v.display()).unwrap_or_default()),
-    );
-    fields.insert("headers".into(), Value::vec(vec![]));
-    if let Some(a) = agent {
-        fields.insert("agent".into(), a);
-    }
-    Value::Struct {
-        name: "HttpRequest".into(),
-        fields: Rc::new(RefCell::new(fields)),
-    }
+    Value::struct_of(
+        "HttpRequest",
+        [
+            ("method".into(), Value::str(method)),
+            ("url".into(), Value::str(url.map(|v| v.display()).unwrap_or_default())),
+            ("headers".into(), Value::vec(vec![])),
+            ("agent".into(), agent.unwrap_or(Value::Unit)),
+            ("query".into(), Value::Unit),
+            ("timeout".into(), Value::Unit),
+        ],
+    )
 }
 
 pub(super) fn http_method(
-    struct_name: &str,
-    fields: &Rc<RefCell<Fields>>,
+    s: &Rc<StructData>,
     method: &str,
     args: &[Value],
 ) -> Result<Value> {
-    match struct_name {
-        "HttpRequest" => request_method(fields, method, args),
-        "HttpResponse" => Ok(response_method(fields, method)),
-        "HttpBody" => body_method(fields, method),
-        "StatusCode" => Ok(status_method(fields, method)),
+    match &**s.name() {
+        "HttpRequest" => request_method(s, method, args),
+        "HttpResponse" => Ok(response_method(s, method)),
+        "HttpBody" => body_method(s, method),
+        "StatusCode" => Ok(status_method(s, method)),
         _ => bail!("unknown http method `{method}`"),
     }
 }
 
 pub(super) fn request_method(
-    fields: &Rc<RefCell<Fields>>,
+    s: &Rc<StructData>,
     method: &str,
     args: &[Value],
 ) -> Result<Value> {
-    let this = || Value::Struct {
-        name: "HttpRequest".into(),
-        fields: fields.clone(),
-    };
+    let this = || Value::Struct(s.clone());
     match method {
         "header" | "set" | "content_type" => {
             let pair = if method == "content_type" {
@@ -90,37 +84,40 @@ pub(super) fn request_method(
                     args.get(1).cloned().unwrap_or(Value::Unit),
                 ]
             };
-            if let Some(Value::Vec(h)) = fields.borrow().get("headers") {
+            if let Some(Value::Vec(h)) = s.get("headers") {
                 h.borrow_mut().push(Value::Tuple(Rc::new(RefCell::new(pair))));
             }
             Ok(this())
         }
-        "call" => Ok(run_request(fields, None)),
+        "call" => Ok(run_request(s, None)),
         "send" | "send_string" => {
             let body = args.first().map(|v| v.display()).unwrap_or_default();
-            Ok(run_request(fields, Some(body)))
+            Ok(run_request(s, Some(body)))
         }
         "send_json" => {
             let json = value_to_json(args.first().unwrap_or(&Value::Unit))?;
-            if let Some(Value::Vec(h)) = fields.borrow().get("headers") {
+            if let Some(Value::Vec(h)) = s.get("headers") {
                 h.borrow_mut().push(Value::Tuple(Rc::new(RefCell::new(vec![
                     Value::str("Content-Type"),
                     Value::str("application/json"),
                 ]))));
             }
-            Ok(run_request(fields, Some(serde_json::to_string(&json)?)))
+            Ok(run_request(s, Some(serde_json::to_string(&json)?)))
         }
         "query" => {
             let pair = vec![
                 args.first().cloned().unwrap_or(Value::Unit),
                 args.get(1).cloned().unwrap_or(Value::Unit),
             ];
-            let mut f = fields.borrow_mut();
-            let entry = f.entry("query".into()).or_insert_with(|| Value::vec(vec![]));
-            if let Value::Vec(q) = entry {
-                q.borrow_mut().push(Value::Tuple(Rc::new(RefCell::new(pair))));
-            }
-            drop(f);
+            let q = match s.get("query") {
+                Some(Value::Vec(q)) => q,
+                _ => {
+                    let q = Rc::new(RefCell::new(vec![]));
+                    s.set("query", Value::Vec(q.clone()));
+                    q
+                }
+            };
+            q.borrow_mut().push(Value::Tuple(Rc::new(RefCell::new(pair))));
             Ok(this())
         }
         // ureq 3 sets timeouts through `.config().timeout_global(Some(d)).build()`.
@@ -133,7 +130,7 @@ pub(super) fn request_method(
                 other => other.cloned(),
             };
             if let Some(d) = dur {
-                fields.borrow_mut().insert("timeout".into(), d);
+                s.set("timeout", d);
             }
             Ok(this())
         }
@@ -155,12 +152,11 @@ pub(super) fn encode_query(s: &str) -> String {
     out
 }
 
-pub(super) fn run_request(fields: &Rc<RefCell<Fields>>, body: Option<String>) -> Value {
-    let f = fields.borrow();
-    let verb = f.get("method").map(|v| v.display()).unwrap_or_else(|| "GET".into());
-    let mut url = f.get("url").map(|v| v.display()).unwrap_or_default();
+pub(super) fn run_request(s: &StructData, body: Option<String>) -> Value {
+    let verb = s.get("method").map(|v| v.display()).unwrap_or_else(|| "GET".into());
+    let mut url = s.get("url").map(|v| v.display()).unwrap_or_default();
     // Append any query parameters onto the URL.
-    if let Some(Value::Vec(q)) = f.get("query") {
+    if let Some(Value::Vec(q)) = s.get("query") {
         let q = q.borrow();
         if !q.is_empty() {
             let sep = if url.contains('?') { '&' } else { '?' };
@@ -183,13 +179,13 @@ pub(super) fn run_request(fields: &Rc<RefCell<Fields>>, body: Option<String>) ->
             url.push_str(&parts.join("&"));
         }
     }
-    let timeout = f.get("timeout").and_then(duration_from_value);
-    let agent = match f.get("agent") {
-        Some(Value::Native(h)) => Some(h.clone()),
+    let timeout = s.get("timeout").and_then(|v| duration_from_value(&v));
+    let agent = match s.get("agent") {
+        Some(Value::Native(h)) => Some(h),
         _ => None,
     };
     let mut headers = Vec::new();
-    if let Some(Value::Vec(h)) = f.get("headers") {
+    if let Some(Value::Vec(h)) = s.get("headers") {
         for item in h.borrow().iter() {
             if let Value::Tuple(pair) = item {
                 let pair = pair.borrow();
@@ -198,15 +194,13 @@ pub(super) fn run_request(fields: &Rc<RefCell<Fields>>, body: Option<String>) ->
         }
     }
     match do_http(&verb, &url, &headers, body, timeout, agent.as_ref()) {
-        Ok((status, text)) => {
-            let mut rf = Fields::default();
-            rf.insert("status".into(), Value::Int(status as i64));
-            rf.insert("body".into(), Value::str(text));
-            Value::ok(Value::Struct {
-                name: "HttpResponse".into(),
-                fields: Rc::new(RefCell::new(rf)),
-            })
-        }
+        Ok((status, text)) => Value::ok(Value::struct_of(
+            "HttpResponse",
+            [
+                ("status".into(), Value::Int(status as i64)),
+                ("body".into(), Value::str(text)),
+            ],
+        )),
         Err(e) => Value::err(Value::str(e.to_string())),
     }
 }
@@ -263,32 +257,23 @@ pub(super) fn do_http(
     }
 }
 
-pub(super) fn response_method(fields: &Rc<RefCell<Fields>>, method: &str) -> Value {
-    let f = fields.borrow();
+pub(super) fn response_method(s: &StructData, method: &str) -> Value {
     match method {
-        "status" => {
-            let mut sf = Fields::default();
-            sf.insert("code".into(), f.get("status").cloned().unwrap_or(Value::Int(0)));
-            Value::Struct {
-                name: "StatusCode".into(),
-                fields: Rc::new(RefCell::new(sf)),
-            }
-        }
-        "body_mut" | "body" | "into_body" => {
-            let mut bf = Fields::default();
-            bf.insert("text".into(), f.get("body").cloned().unwrap_or_else(|| Value::str("")));
-            Value::Struct {
-                name: "HttpBody".into(),
-                fields: Rc::new(RefCell::new(bf)),
-            }
-        }
-        "into_string" => Value::ok(f.get("body").cloned().unwrap_or_else(|| Value::str(""))),
+        "status" => Value::struct_of(
+            "StatusCode",
+            [("code".into(), s.get("status").unwrap_or(Value::Int(0)))],
+        ),
+        "body_mut" | "body" | "into_body" => Value::struct_of(
+            "HttpBody",
+            [("text".into(), s.get("body").unwrap_or_else(|| Value::str("")))],
+        ),
+        "into_string" => Value::ok(s.get("body").unwrap_or_else(|| Value::str(""))),
         _ => Value::Unit,
     }
 }
 
-pub(super) fn body_method(fields: &Rc<RefCell<Fields>>, method: &str) -> Result<Value> {
-    let text = fields.borrow().get("text").map(|v| v.display()).unwrap_or_default();
+pub(super) fn body_method(s: &StructData, method: &str) -> Result<Value> {
+    let text = s.get("text").map(|v| v.display()).unwrap_or_default();
     Ok(match method {
         "read_to_string" => Value::ok(Value::str(text)),
         "read_json" => match parse_json(&text) {
@@ -299,9 +284,9 @@ pub(super) fn body_method(fields: &Rc<RefCell<Fields>>, method: &str) -> Result<
     })
 }
 
-pub(super) fn status_method(fields: &Rc<RefCell<Fields>>, method: &str) -> Value {
-    let code = match fields.borrow().get("code") {
-        Some(Value::Int(c)) => *c,
+pub(super) fn status_method(s: &StructData, method: &str) -> Value {
+    let code = match s.get("code") {
+        Some(Value::Int(c)) => c,
         _ => 0,
     };
     match method {
@@ -312,4 +297,3 @@ pub(super) fn status_method(fields: &Rc<RefCell<Fields>>, method: &str) -> Value
         _ => Value::Unit,
     }
 }
-

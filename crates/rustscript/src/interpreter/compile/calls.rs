@@ -6,9 +6,10 @@ use anyhow::{Result, bail};
 use syn::{Expr, Pat, UnOp};
 
 use crate::interpreter::bytecode::{
-    BinKind, CapSource, Member, Op, PatInfo, Reg,
+    BinKind, CapSource, DISCARD, Member, Op, PatInfo, Reg,
     StructLit,
 };
+use crate::interpreter::value::StructShape;
 
 use super::*;
 
@@ -34,6 +35,19 @@ impl Compiler<'_> {
             _ => bail!("cannot call this kind of expression"),
         };
         let coerce = path.segments.last().and_then(first_generic_type).map(|t| Rc::new(t.clone()));
+        // A pending `let` annotation attaches to exactly this call, see
+        // `Compiler::json_let`.
+        let coerce = match coerce {
+            Some(ty) => Some(ty),
+            None => match &self.json_let {
+                Some((ptr, ty)) if std::ptr::eq(*ptr, c) => {
+                    let ty = ty.clone();
+                    self.json_let = None;
+                    Some(ty)
+                }
+                _ => None,
+            },
+        };
         let argc = c.args.len() as u16;
 
         if path.segments.len() == 1 {
@@ -60,6 +74,24 @@ impl Compiler<'_> {
     }
 
     pub(super) fn compile_method(&mut self, dst: Reg, m: &syn::ExprMethodCall) -> Result<()> {
+        // Fuse `x.get(k).copied().unwrap_or(d)` into one op. The chain builds
+        // and tears down an Option per call, which dominates counting loops.
+        if dst != DISCARD
+            && m.method == "unwrap_or"
+            && m.args.len() == 1
+            && let Expr::MethodCall(c) = &*m.receiver
+            && (c.method == "copied" || c.method == "cloned")
+            && c.args.is_empty()
+            && let Expr::MethodCall(g) = &*c.receiver
+            && g.method == "get"
+            && g.args.len() == 1
+        {
+            let recv = self.compile_expr(&g.receiver)?;
+            let key = self.compile_expr(&g.args[0])?;
+            let default = self.compile_expr(&m.args[0])?;
+            self.emit(Op::GetOrDefault { dst, recv, key, default });
+            return Ok(());
+        }
         let recv = self.compile_expr(&m.receiver)?;
         let base = self.compile_args(m.args.iter())?;
         let name = self.add_name(m.method.to_string());
@@ -236,12 +268,12 @@ impl Compiler<'_> {
             self.compile_into(base + order.len() as Reg, rest)?;
         }
         let info = {
+            let shape = StructShape::new(
+                name,
+                order.into_iter().map(Into::into).collect(),
+            );
             let f = self.cur();
-            f.struct_lits.push(StructLit {
-                name: name.into(),
-                fields: order.into_iter().map(Into::into).collect(),
-                has_rest,
-            });
+            f.struct_lits.push(StructLit { shape, has_rest });
             (f.struct_lits.len() - 1) as u16
         };
         self.emit(Op::MakeStruct { dst, info, base });
