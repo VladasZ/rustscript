@@ -25,16 +25,16 @@ chmod +x notes.rs
 
 ## The idea
 
-A script is a normal single file Rust program with `fn main`. Two layers share
-that same source.
+A script is a normal Rust program with `fn main`, one file or a module tree.
+Two layers share the same source.
 
-- An interpreter parses the file with [`syn`](https://github.com/dtolnay/syn),
-  compiles it once to bytecode, and runs it on a register machine. Locals are
-  numbered slots, so a variable read is an array index, not a name lookup.
+- An interpreter parses the files with [`syn`](https://github.com/dtolnay/syn),
+  compiles them once to bytecode, and runs them on a register machine. Locals
+  are numbered slots, so a variable read is an array index, not a name lookup.
   Ownership and borrow rules carry no meaning at runtime, so there is no borrow
   checker cost and startup is fast.
-- Before running, `rustscript` builds a small cargo project around the file and
-  runs `cargo check` on it. This proves the file is valid Rust. The check is
+- Before running, `rustscript` builds a small cargo project around the files and
+  runs `cargo check` on it. This proves the script is valid Rust. The check is
   cached by source hash, so an unchanged script skips it.
 
 The interpreter needs no type checker of its own. The real Rust compiler stays
@@ -61,13 +61,54 @@ rust clean           clear the check cache
 A `#!/usr/bin/env rust` first line lets a `.rs` file run on its own. A shebang
 is legal Rust, so the file still passes `cargo check`.
 
+## Modules
+
+A script can span multiple files with normal Rust module syntax. `mod name;`
+loads `name.rs` or `name/mod.rs` next to the declaring file, following the same
+directory rules as rustc, and inline `mod name { .. }` blocks work too. Modules
+nest to any depth.
+
+```rust
+// tool.rs
+mod util;
+use util::math::add;
+
+fn main() {
+    println!("{}", add(2, 3));
+}
+```
+
+```rust
+// util.rs
+pub mod math;
+```
+
+```rust
+// util/math.rs
+pub fn add(a: i64, b: i64) -> i64 { a + b }
+```
+
+Paths resolve like real Rust: `crate::`, `self::`, `super::`, plain, renamed,
+and grouped imports, `use x::{self}`, and `pub use` re-export chains. Imported
+structs, enums, functions, consts, statics, and type aliases all work across
+files, including struct literals and tuple struct constructors through an
+alias. Two modules can each define a type with the same name. The `cargo check`
+gate covers the whole file tree, and editing any module re-checks. Visibility
+is not enforced at runtime, `cargo check` is the authority as always.
+
+Not supported: `#[path]` on a mod declaration, and glob imports of script
+modules like `use util::*`, both stop with a clear error.
+
 ## What works
 
 - functions, recursion, `let` and `mut`, arithmetic, comparison, logical and
   bitwise operators, casts
 - `if`, `if let`, `while`, `loop`, `for` over ranges, vectors, maps, and chars,
   `match` with guards and patterns
-- `struct`, `enum`, tuple structs, `impl` methods and associated functions
+- `struct`, `enum`, tuple structs, unit structs, `impl` methods and associated
+  functions
+- modules across files and inline, every import style, re-exports, module
+  level `const` and `static`, and type aliases
 - closures and the common iterator methods, `map`, `filter`, `fold`, `find`,
   `any`, `all`, `sort_by`, `sort_by_key`, and more
 - `Vec`, `String`, `HashMap`, `Option`, `Result`, the `?` operator
@@ -132,7 +173,8 @@ with `unsupported crate` when its code runs.
 serially, so `thread::spawn` returns a handle whose value is already computed and
 there is no real parallelism. `unsafe` blocks run their body, since edition 2024
 needs `unsafe` around calls like `env::set_var`. Lifetimes and generics parse and
-run, they just carry no meaning at runtime.
+run, they just carry no meaning at runtime. `static mut` is rejected, plain
+`static` behaves like a const.
 
 ## Caching
 
@@ -168,12 +210,16 @@ cargo build --examples -p rustscript-examples
 cargo test                              all suites, see below
 cargo test --test run                   interpreter behavior
 cargo test --test equivalence           compiled example vs interpreted, byte identical
+cargo test --test multifile             module loading, imports, and conformance
 cargo test --test check -- --ignored    the cargo check gate, valid and invalid
 ```
 
 The equivalence suite runs every example both as a compiled cargo binary and
 through the interpreter, then checks the output matches byte for byte. It is the
-strongest guarantee that the interpreter behaves like the real compiler.
+strongest guarantee that the interpreter behaves like the real compiler. The
+multifile suite does the same for the `crates/conformance` crate, a deep module
+tree that exercises every import style, re-export chains, and cross module
+types, consts, and aliases.
 
 ## Benchmarks
 

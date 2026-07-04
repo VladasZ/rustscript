@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use anyhow::{Result, anyhow, bail};
 
+use super::resolver::Res;
 use super::value::{KeyRef, Map, StructShape, Value};
 use super::Interp;
 
@@ -18,12 +19,15 @@ pub(super) struct Shape {
     /// Per field, its type when coercion can change the value. None means
     /// the type is a primitive and coercion is a no-op, skipped per instance.
     pub coerce: Vec<Option<syn::Type>>,
+    /// Module the struct is declared in. Field types resolve against it.
+    pub module: usize,
 }
 
 impl Interp {
     /// Turn a dynamic value into `ty` when `ty` names a known struct, walking
-    /// `Vec<T>`, `Option<T>`, and smart pointers. Anything else is unchanged.
-    pub(super) fn coerce_value(&self, value: Value, ty: &syn::Type) -> Value {
+    /// `Vec<T>`, `Option<T>`, smart pointers, and type aliases. `module` is
+    /// where the type annotation was written. Anything else is unchanged.
+    pub(super) fn coerce_value(&self, value: Value, ty: &syn::Type, module: usize) -> Value {
         let syn::Type::Path(p) = ty else {
             return value;
         };
@@ -40,8 +44,7 @@ impl Interp {
                         && let Some(iseg) = ip.path.segments.last()
                         && !matches!(iseg.arguments, syn::PathArguments::AngleBracketed(_))
                     {
-                        let iname = iseg.ident.to_string();
-                        return match self.struct_shape(&iname) {
+                        return match self.shape_for(module, &ip.path) {
                             Some(shape) => Value::vec(
                                 items
                                     .borrow()
@@ -60,7 +63,7 @@ impl Interp {
                     let out = items
                         .borrow()
                         .iter()
-                        .map(|v| self.coerce_value(v.clone(), inner))
+                        .map(|v| self.coerce_value(v.clone(), inner, module))
                         .collect();
                     return Value::vec(out);
                 }
@@ -72,21 +75,24 @@ impl Interp {
                     && &**enum_name == "Option"
                     && &**variant == "Some"
                 {
-                    let coerced =
-                        self.coerce_value(data.first().cloned().unwrap_or(Value::Unit), inner);
+                    let coerced = self
+                        .coerce_value(data.first().cloned().unwrap_or(Value::Unit), inner, module);
                     return Value::some(coerced);
                 }
                 value
             }
             "Box" | "Rc" | "Arc" => match first_generic_type(seg) {
-                Some(inner) => self.coerce_value(value, inner),
+                Some(inner) => self.coerce_value(value, inner, module),
                 None => value,
             },
             _ => {
-                if let Some(shape) = self.struct_shape(&name)
+                if let Some(shape) = self.shape_for(module, &p.path)
                     && let Value::Map(map) = &value
                 {
                     return self.struct_from_map(&shape, &map.borrow());
+                }
+                if let Some((am, target)) = self.follow_alias(module, &p.path) {
+                    return self.coerce_value(value, &target, am);
                 }
                 value
             }
@@ -94,48 +100,71 @@ impl Interp {
     }
 
     /// If `value` is `Ok(x)` coerce `x`, otherwise coerce `value` directly.
-    pub(super) fn coerce_result(&self, value: Value, ty: &syn::Type) -> Value {
+    pub(super) fn coerce_result(&self, value: Value, ty: &syn::Type, module: usize) -> Value {
         if let Value::Enum { enum_name, variant, data } = &value
             && &**enum_name == "Result"
             && &**variant == "Ok"
         {
             let inner = data.first().cloned().unwrap_or(Value::Unit);
-            return Value::ok(self.coerce_value(inner, ty));
+            return Value::ok(self.coerce_value(inner, ty, module));
         }
-        self.coerce_value(value, ty)
+        self.coerce_value(value, ty, module)
     }
 
-    /// Cached field layout for a known struct, built on first use.
-    pub(super) fn struct_shape(&self, name: &str) -> Option<Rc<Shape>> {
-        if let Some(shape) = self.shapes.borrow().get(name) {
+    /// Field layout of the struct a type path names in `module`, if any.
+    pub(super) fn shape_for(&self, module: usize, path: &syn::Path) -> Option<Rc<Shape>> {
+        let canon = self.resolver().resolve_struct_key(module, path)?;
+        self.struct_shape(&canon)
+    }
+
+    /// A type alias hit by this path, with the module its target resolves in.
+    fn follow_alias(&self, module: usize, path: &syn::Path) -> Option<(usize, Rc<syn::Type>)> {
+        let segs: Vec<String> =
+            path.segments.iter().map(|s| s.ident.to_string()).collect();
+        match self.resolver().resolve(module, &segs) {
+            Ok(Res::Alias(m, target)) => Some((m, target)),
+            _ => None,
+        }
+    }
+
+    /// Cached field layout for a known struct, by canonical name.
+    pub(super) fn struct_shape(&self, canon: &Rc<str>) -> Option<Rc<Shape>> {
+        if let Some(shape) = self.shapes.borrow().get(canon) {
             return Some(shape.clone());
         }
-        let def = self.structs().get(name)?.clone();
+        let def = self.structs().get(canon)?;
+        let module = def.module;
+        let def = def.ast.clone();
         let mut fields: Vec<Rc<str>> = Vec::new();
         let mut coerce = Vec::new();
         if let syn::Fields::Named(named) = &def.fields {
             for f in &named.named {
                 let Some(ident) = &f.ident else { continue };
                 fields.push(ident.to_string().into());
-                coerce.push(self.field_needs_coerce(&f.ty).then(|| f.ty.clone()));
+                coerce.push(self.field_needs_coerce(&f.ty, module).then(|| f.ty.clone()));
             }
         }
-        let shape = Rc::new(Shape { runtime: StructShape::new(name, fields), coerce });
-        self.shapes.borrow_mut().insert(name.to_string(), shape.clone());
+        let shape = Rc::new(Shape {
+            runtime: StructShape::new(canon.clone(), fields),
+            coerce,
+            module,
+        });
+        self.shapes.borrow_mut().insert(canon.clone(), shape.clone());
         Some(shape)
     }
 
-    /// Whether coercing a value into `ty` can do anything. Containers and
-    /// known struct names can, primitives cannot.
-    fn field_needs_coerce(&self, ty: &syn::Type) -> bool {
+    /// Whether coercing a value into `ty` can do anything. Containers, known
+    /// struct names, and aliases to them can, primitives cannot.
+    fn field_needs_coerce(&self, ty: &syn::Type, module: usize) -> bool {
         let syn::Type::Path(p) = ty else { return false };
         let Some(seg) = p.path.segments.last() else { return false };
         let name = seg.ident.to_string();
         matches!(name.as_str(), "Vec" | "VecDeque" | "Option" | "Box" | "Rc" | "Arc")
-            || self.structs().contains_key(&name)
+            || self.resolver().resolve_struct_key(module, &p.path).is_some()
+            || self.follow_alias(module, &p.path).is_some()
     }
 
-    fn struct_from_map(&self, shape: &Shape, map: &Map) -> Value {
+    pub(super) fn struct_from_map(&self, shape: &Shape, map: &Map) -> Value {
         let mut values = Vec::with_capacity(shape.coerce.len());
         for (fname, ty) in shape.runtime.fields.iter().zip(&shape.coerce) {
             let raw = map
@@ -143,7 +172,7 @@ impl Interp {
                 .cloned()
                 .unwrap_or_else(Value::none);
             let coerced = match ty {
-                Some(t) => self.coerce_value(raw, t),
+                Some(t) => self.coerce_value(raw, t, shape.module),
                 None => raw,
             };
             values.push(coerced);

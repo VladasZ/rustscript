@@ -528,19 +528,34 @@ impl Value {
                 out.push('}');
             }
             Value::Struct(s) => {
-                write!(out, "{}", s.name()).unwrap();
+                // Canonical names print bare, like the compiler's Debug derive.
+                write!(out, "{}", super::resolver::bare(s.name())).unwrap();
                 let values = s.values.borrow();
-                if !values.is_empty() {
-                    out.push_str(" { ");
-                    for (i, (k, v)) in s.shape.fields.iter().zip(values.iter()).enumerate() {
+                if values.is_empty() {
+                    return;
+                }
+                // Tuple structs carry positional field names and print in
+                // paren form, matching the derived Debug output.
+                if s.shape.fields.iter().enumerate().all(|(i, f)| &**f == i.to_string()) {
+                    out.push('(');
+                    for (i, v) in values.iter().enumerate() {
                         if i > 0 {
                             out.push_str(", ");
                         }
-                        write!(out, "{k}: ").unwrap();
                         v.write_debug(out);
                     }
-                    out.push_str(" }");
+                    out.push(')');
+                    return;
                 }
+                out.push_str(" { ");
+                for (i, (k, v)) in s.shape.fields.iter().zip(values.iter()).enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    write!(out, "{k}: ").unwrap();
+                    v.write_debug(out);
+                }
+                out.push_str(" }");
             }
             Value::Closure(_) => out.push_str("<closure>"),
             Value::Native(n) => write!(out, "<{}>", n.borrow().type_name()).unwrap(),

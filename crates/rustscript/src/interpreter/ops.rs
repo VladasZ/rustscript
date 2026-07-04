@@ -245,8 +245,11 @@ pub(super) fn try_bind(pat: &Pat, val: &Value, define: &mut dyn FnMut(&str, Valu
             let name = s.path.segments.last().map(|s| s.ident.to_string());
             let st = match val {
                 Value::Struct(st) => {
+                    // Struct values carry canonical names like `foo::Point`,
+                    // patterns compare on the bare type name. The scrutinee
+                    // type is already proven by cargo check.
                     if let Some(pn) = &name
-                        && pn.as_str() != &**st.name()
+                        && pn.as_str() != super::resolver::bare(st.name())
                     {
                         return false;
                     }

@@ -29,12 +29,15 @@ pub fn clean() -> Result<()> {
     Ok(())
 }
 
-pub fn check(script_path: &Path, source: &str) -> Result<()> {
+/// `files` are the script's sources: path relative to the script directory
+/// and content, the root script first as `main.rs`. The layout is mirrored
+/// into the cache project so `mod` declarations resolve the same way.
+pub fn check(script_path: &Path, files: &[(PathBuf, String)]) -> Result<()> {
     // Tests and fast iteration can skip the compile gate.
     if std::env::var_os("RUSTSCRIPT_SKIP_CHECK").is_some() {
         return Ok(());
     }
-    let hash = hash_source(source);
+    let hash = hash_files(files);
     let project = cache_root().join(format!("{hash:016x}"));
     let stamp = project.join(".checked");
     if stamp.exists() {
@@ -43,7 +46,13 @@ pub fn check(script_path: &Path, source: &str) -> Result<()> {
 
     std::fs::create_dir_all(&project)?;
     std::fs::write(&project.join("Cargo.toml"), MANIFEST)?;
-    std::fs::write(&project.join("main.rs"), source)?;
+    for (rel, source) in files {
+        let dst = project.join(rel);
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&dst, source)?;
+    }
 
     let output = Command::new("cargo")
         .args(["check", "--quiet"])
@@ -101,8 +110,11 @@ tempfile = "3"
 [workspace]
 "#;
 
-fn hash_source(source: &str) -> u64 {
+fn hash_files(files: &[(PathBuf, String)]) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    source.hash(&mut hasher);
+    for (rel, source) in files {
+        rel.hash(&mut hasher);
+        source.hash(&mut hasher);
+    }
     hasher.finish()
 }

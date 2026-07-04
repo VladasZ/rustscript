@@ -125,6 +125,23 @@ impl Compiler<'_> {
     /// Emit a coercion of `reg` into the annotated type when it names a struct,
     /// `Vec<T>`, or `Option<T>`. Falls back to a no-op path the VM understands.
     pub(super) fn emit_coerce(&mut self, reg: Reg, ty: &syn::Type) {
+        // A plain type that is not a user struct or alias, `f64` or `usize`,
+        // can never coerce. Skipping the op here keeps annotated lets in hot
+        // loops free of runtime type resolution.
+        let syn::Type::Path(p) = ty else {
+            // Coercion only ever acts on path types.
+            return;
+        };
+        if let Some(seg) = p.path.segments.last()
+            && !matches!(seg.arguments, syn::PathArguments::AngleBracketed(_))
+            && self.ctx.resolver.resolve_struct_key(self.ctx.module, &p.path).is_none()
+        {
+            let segs: Vec<String> =
+                p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+            if !matches!(self.resolve_path_res(&segs), Ok(Res::Alias(..))) {
+                return;
+            }
+        }
         let idx = self.add_cast(ty.clone());
         self.emit(Op::Coerce { dst: reg, src: reg, ty: idx });
     }
@@ -260,11 +277,9 @@ impl Compiler<'_> {
             let name = path.segments[0].ident.to_string();
             return self.load_name(&name, dst);
         }
-        // A multi segment path used as a value, resolved by the VM.
-        let segs = path.segments.iter().map(|s| s.ident.to_string()).collect();
-        let p = self.add_path(segs, None);
-        self.emit(Op::PathValue { dst, path: p });
-        Ok(())
+        // A multi segment path used as a value, resolved against the module.
+        let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        self.compile_resolved_value(dst, &segs)
     }
 
     pub(super) fn compile_unary(&mut self, dst: Reg, u: &syn::ExprUnary) -> Result<()> {

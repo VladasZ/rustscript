@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use syn::punctuated::Punctuated;
 use syn::{BinOp, Block, Expr, FnArg, Lit, Pat, UnOp};
 
@@ -14,12 +14,14 @@ use super::bytecode::{
     BinKind, BuiltinId, CapSource, Chunk, FmtSpec, Member, MethodName, Op, PatInfo, Reg,
     StructLit,
 };
+use super::resolver::{Res, Resolver};
 use super::value::Value;
 
 /// Program level facts the compiler needs, filled before any body is compiled.
-pub struct Ctx {
-    pub fn_index: HashMap<String, u32>,
-    pub structs: HashMap<String, Rc<syn::ItemStruct>>,
+pub struct Ctx<'r> {
+    pub resolver: &'r Resolver,
+    /// The module whose source is being compiled. Paths resolve against it.
+    pub module: usize,
 }
 
 /// Per function compilation state. A stack of these supports nested closures.
@@ -80,6 +82,7 @@ impl FnState {
             num_regs: self.max_reg as usize,
             num_params: self.num_params,
             name: self.name,
+            module: 0,
             consts: self.consts,
             members: self.members,
             pats: self.pats,
@@ -105,7 +108,7 @@ struct LoopCtx {
 }
 
 pub struct Compiler<'a> {
-    ctx: &'a Ctx,
+    ctx: &'a Ctx<'a>,
     frames: Vec<FnState>,
     loops: Vec<LoopCtx>,
     /// A `let x: T = from_str(..)...` annotation waiting to attach to that
@@ -124,8 +127,13 @@ enum NameLoc {
 }
 
 impl<'a> Compiler<'a> {
-    pub fn new(ctx: &'a Ctx) -> Compiler<'a> {
+    pub fn new(ctx: &'a Ctx<'a>) -> Compiler<'a> {
         Compiler { ctx, frames: Vec::new(), loops: Vec::new(), json_let: None }
+    }
+
+    /// Resolve a path against the module being compiled.
+    pub(super) fn resolve_path_res(&self, segs: &[String]) -> Result<Res> {
+        self.ctx.resolver.resolve(self.ctx.module, segs)
     }
 
     /// Compile a top level function or a method body into a chunk.
@@ -154,7 +162,22 @@ impl<'a> Compiler<'a> {
         let ret = self.alloc();
         self.compile_block(block, ret)?;
         self.emit(Op::Ret { src: ret });
-        Ok(self.frames.pop().unwrap().into_chunk())
+        Ok(self.finish_chunk())
+    }
+
+    /// Compile a const or static initializer expression into a chunk.
+    pub fn compile_const(&mut self, expr: &Expr) -> Result<Chunk> {
+        self.frames.push(FnState::new("<const>".to_string()));
+        let ret = self.alloc();
+        self.compile_into(ret, expr)?;
+        self.emit(Op::Ret { src: ret });
+        Ok(self.finish_chunk())
+    }
+
+    fn finish_chunk(&mut self) -> Chunk {
+        let mut chunk = self.frames.pop().unwrap().into_chunk();
+        chunk.module = self.ctx.module as u16;
+        chunk
     }
 
     // -- frame helpers -----------------------------------------------------
@@ -277,12 +300,48 @@ impl<'a> Compiler<'a> {
                 Ok(())
             }
             NameLoc::None => {
-                // A path value: None, a unit enum variant, or a bare constructor.
-                let path = self.add_path(vec![name.to_string()], None);
-                self.emit(Op::PathValue { dst, path });
-                Ok(())
+                self.compile_resolved_value(dst, &[name.to_string()])
             }
         }
+    }
+
+    /// A path used as a value. Resolves consts, imported variants, and unit
+    /// structs at compile time, and leaves the rest for the VM.
+    pub(super) fn compile_resolved_value(&mut self, dst: Reg, segs: &[String]) -> Result<()> {
+        let resolved = match self.resolve_path_res(segs) {
+            Ok(r) => r,
+            // A name unknown inside a user module still errors at run time,
+            // matching the old single file behavior for things like `None`.
+            Err(_) => Res::External(segs.to_vec()),
+        };
+        let path_segs = match resolved {
+            Res::Const(idx) => {
+                self.emit(Op::LoadGlobal { dst, idx });
+                return Ok(());
+            }
+            Res::Struct(c) => vec![c.to_string()],
+            Res::Enum(c) => vec![c.to_string()],
+            Res::TypeMember(c, rest) => {
+                let mut segs = vec![c.to_string()];
+                segs.extend(rest);
+                segs
+            }
+            Res::Alias(m, target) => {
+                let path = match &*target {
+                    syn::Type::Path(p) => p.path.clone(),
+                    _ => bail!("`{}` does not name a value", segs.join("::")),
+                };
+                match self.ctx.resolver.resolve_struct_key(m, &path) {
+                    Some(c) => vec![c.to_string()],
+                    None => bail!("`{}` does not name a value", segs.join("::")),
+                }
+            }
+            Res::Module => bail!("`{}` is a module, not a value", segs.join("::")),
+            Res::Fn(_) | Res::External(_) => segs.to_vec(),
+        };
+        let path = self.add_path(path_segs, None);
+        self.emit(Op::PathValue { dst, path });
+        Ok(())
     }
 
     // -- blocks and statements --------------------------------------------

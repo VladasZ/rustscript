@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/rustscript", "crates/examples", "bench"]
+members = ["crates/rustscript", "crates/examples", "crates/conformance", "bench"]
 
 [workspace.dependencies]
 compact_str = "0.9"
