@@ -3,6 +3,12 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::rc::Rc;
 
+use indexmap::IndexMap;
+
+/// Struct fields keep their declaration order so serialization and debug output
+/// match the real compiler.
+pub type Fields = IndexMap<String, Value>;
+
 /// A runtime value. Containers use `Rc<RefCell<..>>` so that `&mut` aliasing and
 /// shared mutation behave, since the interpreter ignores ownership entirely.
 #[derive(Clone)]
@@ -19,7 +25,7 @@ pub enum Value {
     /// Struct instance. Named fields, or positional for tuple structs.
     Struct {
         name: String,
-        fields: Rc<RefCell<BTreeMap<String, Value>>>,
+        fields: Rc<RefCell<Fields>>,
     },
     /// Enum value, including the builtin Option and Result.
     Enum {

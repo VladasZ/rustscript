@@ -10,3 +10,4 @@ syn = { version = "2.0", features = ["full", "extra-traits"] }
 proc-macro2 = "1.0"
 ureq = "3.3"
 regex = "1.12"
+indexmap = "2"

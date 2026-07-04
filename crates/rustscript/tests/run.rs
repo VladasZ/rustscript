@@ -18,7 +18,7 @@ fn temp_script(src: &str) -> std::path::PathBuf {
 /// Run a script that is expected to succeed and return its stdout.
 fn run(src: &str) -> String {
     let path = temp_script(src);
-    let out = Command::new(env!("CARGO_BIN_EXE_rustscript"))
+    let out = Command::new(env!("CARGO_BIN_EXE_rust"))
         .arg("run")
         .arg(&path)
         .env("RUSTSCRIPT_SKIP_CHECK", "1")
@@ -36,7 +36,7 @@ fn run(src: &str) -> String {
 /// Run a script that is expected to fail and return its stderr.
 fn run_fail(src: &str) -> String {
     let path = temp_script(src);
-    let out = Command::new(env!("CARGO_BIN_EXE_rustscript"))
+    let out = Command::new(env!("CARGO_BIN_EXE_rust"))
         .arg("run")
         .arg(&path)
         .env("RUSTSCRIPT_SKIP_CHECK", "1")
@@ -300,7 +300,7 @@ fn main() -> anyhow::Result<()> {
 #[test]
 fn shebang_is_ignored() {
     let out = run(
-        "#!/usr/bin/env rustscript\nfn main() { println!(\"ok\"); }\n",
+        "#!/usr/bin/env rust\nfn main() { println!(\"ok\"); }\n",
     );
     assert_eq!(out, "ok\n");
 }

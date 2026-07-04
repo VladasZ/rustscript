@@ -1,4 +1,4 @@
-#!/usr/bin/env rustscript
+#!/usr/bin/env rust
 
 fn fib(n: u64) -> u64 {
     if n < 2 {

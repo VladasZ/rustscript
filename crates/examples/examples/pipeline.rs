@@ -1,4 +1,4 @@
-#!/usr/bin/env rustscript
+#!/usr/bin/env rust
 
 fn main() {
     let nums: Vec<i64> = (1..=10).collect();

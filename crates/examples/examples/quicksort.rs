@@ -1,4 +1,4 @@
-#!/usr/bin/env rustscript
+#!/usr/bin/env rust
 
 fn quicksort(list: Vec<i64>) -> Vec<i64> {
     if list.len() <= 1 {

@@ -27,7 +27,7 @@ fn every_example_runs() {
         {
             continue;
         }
-        let out = Command::new(env!("CARGO_BIN_EXE_rustscript"))
+        let out = Command::new(env!("CARGO_BIN_EXE_rust"))
             .arg("run")
             .arg(&path)
             .env("RUSTSCRIPT_SKIP_CHECK", "1")

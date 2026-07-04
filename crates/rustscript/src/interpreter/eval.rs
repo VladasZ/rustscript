@@ -7,7 +7,7 @@ use syn::{BinOp, Block, Expr, FnArg, Lit, Pat, Stmt, UnOp};
 
 use std::collections::BTreeMap;
 
-use super::value::{ClosureData, MapKey, Value};
+use super::value::{ClosureData, Fields, MapKey, Value};
 use super::{Flow, Frame, Interp, flow};
 
 impl Interp {
@@ -114,7 +114,7 @@ impl Interp {
         def: &syn::ItemStruct,
         map: &BTreeMap<MapKey, Value>,
     ) -> Value {
-        let mut fields = BTreeMap::new();
+        let mut fields = Fields::new();
         if let syn::Fields::Named(named) = &def.fields {
             for f in &named.named {
                 let Some(ident) = &f.ident else { continue };
@@ -849,23 +849,43 @@ impl Interp {
             // Fall through to struct handling below for now.
         }
 
-        let mut fields = std::collections::BTreeMap::new();
+        let mut written = Fields::new();
         for f in &s.fields {
             let key = match &f.member {
                 syn::Member::Named(n) => n.to_string(),
                 syn::Member::Unnamed(i) => i.index.to_string(),
             };
             let v = flow_value(self.eval_expr(&f.expr, frame)?)?;
-            fields.insert(key, v);
+            written.insert(key, v);
         }
         if let Some(rest) = &s.rest {
             let base = flow_value(self.eval_expr(rest, frame)?)?;
             if let Value::Struct { fields: bf, .. } = base {
                 for (k, v) in bf.borrow().iter() {
-                    fields.entry(k.clone()).or_insert_with(|| v.clone());
+                    written.entry(k.clone()).or_insert_with(|| v.clone());
                 }
             }
         }
+
+        // Emit fields in declaration order so serialization matches the compiler.
+        let fields = match self.structs.get(&name) {
+            Some(def) => {
+                let mut ordered = Fields::new();
+                for f in def.fields.iter() {
+                    if let Some(ident) = &f.ident {
+                        let key = ident.to_string();
+                        if let Some(v) = written.shift_remove(&key) {
+                            ordered.insert(key, v);
+                        }
+                    }
+                }
+                // Any remaining go last, keeping their written order.
+                ordered.extend(written);
+                ordered
+            }
+            None => written,
+        };
+
         Ok(Value::Struct {
             name,
             fields: Rc::new(RefCell::new(fields)),

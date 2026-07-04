@@ -1,4 +1,4 @@
-#!/usr/bin/env rustscript
+#!/usr/bin/env rust
 
 fn to_roman(mut n: i64) -> String {
     let table = vec![

@@ -1,4 +1,4 @@
-#!/usr/bin/env rustscript
+#!/usr/bin/env rust
 
 use anyhow::Result;
 use serde::Serialize;
