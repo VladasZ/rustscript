@@ -9,6 +9,7 @@ use super::Interp;
 
 use super::crates_bridge::*;
 use super::http::*;
+use super::jwt_bridge::*;
 use super::methods::*;
 use super::process::*;
 use super::regex_bridge::*;
@@ -67,6 +68,9 @@ impl Interp {
             }));
         }
         if let Some(v) = self.unit_variant(Some(ty), last) {
+            return Ok(v);
+        }
+        if let Some(v) = jwt_algorithm(ty, last) {
             return Ok(v);
         }
         // A bare constructor path used as a value, e.g. `Vec::new` handed to

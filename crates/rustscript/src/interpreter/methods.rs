@@ -12,6 +12,7 @@ use super::bytecode::{BuiltinId, MethodName};
 use super::value::{Map, RStr, StructData, Value};
 
 use super::builtins::*;
+use super::std_bridge::bytes_to_vec;
 
 
 /// `map.entry(k).or_insert_with(Vec::new).push(x)` accumulates in place.
@@ -112,6 +113,7 @@ pub(super) fn str_method_slow(s: &Rc<RStr>, name: &str, args: &[Value]) -> Resul
             Value::str(s.repeat(n))
         }
         "as_str" | "as_string" => Value::some(Value::Str(s.clone())),
+        "as_bytes" | "into_bytes" => bytes_to_vec(s.as_bytes()),
         "cmp" => make_ordering((***s).cmp(arg_str(0).as_str())),
         _ => {
             if let Some(colored) = color_method(s, name) {

@@ -31,3 +31,4 @@ rustc-hash = { workspace = true }
 serde = { workspace = true }
 mimalloc = { workspace = true }
 compact_str = { workspace = true }
+jsonwebtoken = { workspace = true }

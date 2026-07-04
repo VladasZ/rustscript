@@ -13,6 +13,7 @@ use super::value::{Map, StructData, Value};
 use super::crates_bridge::*;
 use super::http::*;
 use super::json_bridge::*;
+use super::jwt_bridge::*;
 use super::regex_bridge::*;
 
 
@@ -384,6 +385,9 @@ pub(super) fn one(args: Vec<Value>) -> Result<Value> {
 
 /// Associated functions like `String::new`, `Vec::new`, `HashMap::new`.
 pub(super) fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
+    if matches!(ty, "Header" | "EncodingKey") {
+        return jwt_assoc(ty, func, args);
+    }
     Ok(Some(match (ty, func) {
         ("String", "new") | ("String", "with_capacity") => Value::str(""),
         ("String", "from") => Value::str(args.first().map(|v| v.display()).unwrap_or_default()),

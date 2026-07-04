@@ -27,3 +27,4 @@ base64 = "0.22"
 hex = "0.4"
 ctrlc = "3.5"
 tempfile = "3.27"
+jsonwebtoken = { version = "10.4", features = ["rust_crypto"] }
