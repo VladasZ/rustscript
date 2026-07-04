@@ -4,6 +4,12 @@ mod interpreter;
 use std::path::Path;
 
 use anyhow::{Result, bail};
+use mimalloc::MiMalloc;
+
+/// Value churn makes the interpreter allocation bound, and mimalloc handles
+/// that pattern far better than the system allocator.
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 fn main() {
     if let Err(e) = real_main() {

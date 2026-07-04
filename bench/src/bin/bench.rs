@@ -256,8 +256,17 @@ fn compute_track(iv: &Invocation, samples: u32) -> Result<CompStat> {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let ns = stderr
             .lines()
-            .find_map(|l| l.strip_prefix("COMPUTE_NS "))
-            .and_then(|v| v.trim().parse::<f64>().ok())
+            .find_map(|l| {
+                // Bun colors `console.error` even when piped, so the marker can
+                // arrive wrapped in ANSI escapes. Take the digits after it.
+                let start = l.find("COMPUTE_NS")? + "COMPUTE_NS".len();
+                let digits: String = l[start..]
+                    .chars()
+                    .skip_while(|c| !c.is_ascii_digit())
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
+                digits.parse::<f64>().ok()
+            })
             .with_context(|| format!("no COMPUTE_NS from {}", iv.lang))?;
         secs.push(ns / 1e9);
     }

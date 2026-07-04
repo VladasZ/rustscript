@@ -57,8 +57,9 @@ panels, wall-clock and compute only. The startup case has just the wall-clock
 panel. Bars carry a fixed color per language on a linear scale, with the exact
 time printed on each bar.
 
-Sizes are tuned so warm rustscript lands near a second on each compute case, then
-frozen. At those sizes native Rust finishes in well under a millisecond, so its
-bar is a thin sliver next to rustscript. That is the honest picture, native
+Sizes were tuned once so warm rustscript takes a noticeable fraction of a second
+on each compute case, then frozen, so runs stay comparable as the interpreter
+gets faster. At those sizes native Rust finishes in well under a millisecond, so
+its bar is a thin sliver next to rustscript. That is the honest picture, native
 compute is effectively free at this scale, and the printed labels give the small
 numbers the bars cannot show.

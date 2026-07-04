@@ -3,13 +3,21 @@
 //! carry no control flow, the VM drives that.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use anyhow::{Result, anyhow, bail};
 
-use super::value::{Fields, MapKey, Value};
+use super::value::{KeyRef, Map, Value, fields_with_capacity};
 use super::Interp;
+
+/// Field layout of a user struct, built once per struct and reused for every
+/// coerced instance so field names are shared instead of re-allocated.
+pub(super) struct Shape {
+    pub name: Rc<str>,
+    /// Field name plus its type when coercion can change the value. None means
+    /// the type is a primitive and coercion is a no-op, skipped per instance.
+    pub fields: Vec<(Rc<str>, Option<syn::Type>)>,
+}
 
 impl Interp {
     /// Turn a dynamic value into `ty` when `ty` names a known struct, walking
@@ -25,6 +33,29 @@ impl Interp {
         match name.as_str() {
             "Vec" | "VecDeque" => {
                 if let (Value::Vec(items), Some(inner)) = (&value, first_generic_type(seg)) {
+                    // A struct element type resolves once for the whole vector,
+                    // and a primitive element type needs no work at all.
+                    if let syn::Type::Path(ip) = inner
+                        && let Some(iseg) = ip.path.segments.last()
+                        && !matches!(iseg.arguments, syn::PathArguments::AngleBracketed(_))
+                    {
+                        let iname = iseg.ident.to_string();
+                        return match self.struct_shape(&iname) {
+                            Some(shape) => Value::vec(
+                                items
+                                    .borrow()
+                                    .iter()
+                                    .map(|v| match v {
+                                        Value::Map(m) => {
+                                            self.struct_from_map(&shape, &m.borrow())
+                                        }
+                                        other => other.clone(),
+                                    })
+                                    .collect(),
+                            ),
+                            None => value,
+                        };
+                    }
                     let out = items
                         .borrow()
                         .iter()
@@ -37,11 +68,11 @@ impl Interp {
             "Option" => {
                 if let (Value::Enum { enum_name, variant, data }, Some(inner)) =
                     (&value, first_generic_type(seg))
-                    && enum_name == "Option"
-                    && variant == "Some"
+                    && &**enum_name == "Option"
+                    && &**variant == "Some"
                 {
                     let coerced =
-                        self.coerce_value(data.borrow().first().cloned().unwrap_or(Value::Unit), inner);
+                        self.coerce_value(data.first().cloned().unwrap_or(Value::Unit), inner);
                     return Value::some(coerced);
                 }
                 value
@@ -51,10 +82,10 @@ impl Interp {
                 None => value,
             },
             _ => {
-                if let Some(def) = self.structs().get(&name).cloned()
+                if let Some(shape) = self.struct_shape(&name)
                     && let Value::Map(map) = &value
                 {
-                    return self.struct_from_map(&name, &def, &map.borrow());
+                    return self.struct_from_map(&shape, &map.borrow());
                 }
                 value
             }
@@ -64,34 +95,58 @@ impl Interp {
     /// If `value` is `Ok(x)` coerce `x`, otherwise coerce `value` directly.
     pub(super) fn coerce_result(&self, value: Value, ty: &syn::Type) -> Value {
         if let Value::Enum { enum_name, variant, data } = &value
-            && enum_name == "Result"
-            && variant == "Ok"
+            && &**enum_name == "Result"
+            && &**variant == "Ok"
         {
-            let inner = data.borrow().first().cloned().unwrap_or(Value::Unit);
+            let inner = data.first().cloned().unwrap_or(Value::Unit);
             return Value::ok(self.coerce_value(inner, ty));
         }
         self.coerce_value(value, ty)
     }
 
-    fn struct_from_map(
-        &self,
-        name: &str,
-        def: &syn::ItemStruct,
-        map: &BTreeMap<MapKey, Value>,
-    ) -> Value {
-        let mut fields = Fields::new();
+    /// Cached field layout for a known struct, built on first use.
+    fn struct_shape(&self, name: &str) -> Option<Rc<Shape>> {
+        if let Some(shape) = self.shapes.borrow().get(name) {
+            return Some(shape.clone());
+        }
+        let def = self.structs().get(name)?.clone();
+        let mut fields = Vec::new();
         if let syn::Fields::Named(named) = &def.fields {
             for f in &named.named {
                 let Some(ident) = &f.ident else { continue };
-                let fname = ident.to_string();
-                let raw = map
-                    .get(&MapKey::Str(fname.clone()))
-                    .cloned()
-                    .unwrap_or_else(Value::none);
-                fields.insert(fname, self.coerce_value(raw, &f.ty));
+                let ty = self.field_needs_coerce(&f.ty).then(|| f.ty.clone());
+                fields.push((ident.to_string().into(), ty));
             }
         }
-        Value::Struct { name: name.to_string(), fields: Rc::new(RefCell::new(fields)) }
+        let shape = Rc::new(Shape { name: name.into(), fields });
+        self.shapes.borrow_mut().insert(name.to_string(), shape.clone());
+        Some(shape)
+    }
+
+    /// Whether coercing a value into `ty` can do anything. Containers and
+    /// known struct names can, primitives cannot.
+    fn field_needs_coerce(&self, ty: &syn::Type) -> bool {
+        let syn::Type::Path(p) = ty else { return false };
+        let Some(seg) = p.path.segments.last() else { return false };
+        let name = seg.ident.to_string();
+        matches!(name.as_str(), "Vec" | "VecDeque" | "Option" | "Box" | "Rc" | "Arc")
+            || self.structs().contains_key(&name)
+    }
+
+    fn struct_from_map(&self, shape: &Shape, map: &Map) -> Value {
+        let mut fields = fields_with_capacity(shape.fields.len());
+        for (fname, ty) in &shape.fields {
+            let raw = map
+                .get(&KeyRef::Str(fname))
+                .cloned()
+                .unwrap_or_else(Value::none);
+            let coerced = match ty {
+                Some(t) => self.coerce_value(raw, t),
+                None => raw,
+            };
+            fields.insert(fname.clone(), coerced);
+        }
+        Value::Struct { name: shape.name.clone(), fields: Rc::new(RefCell::new(fields)) }
     }
 
     /// Expand any iterable into a concrete list of items.
@@ -118,17 +173,17 @@ impl Interp {
 
     pub(super) fn eval_try(&self, v: Value) -> Result<std::result::Result<Value, Value>> {
         match v {
-            Value::Enum { enum_name, variant, data } if enum_name == "Result" => {
-                let inner = data.borrow().first().cloned().unwrap_or(Value::Unit);
-                if variant == "Ok" {
+            Value::Enum { enum_name, variant, data } if &*enum_name == "Result" => {
+                let inner = data.first().cloned().unwrap_or(Value::Unit);
+                if &*variant == "Ok" {
                     Ok(Ok(inner))
                 } else {
                     Ok(Err(Value::err(inner)))
                 }
             }
-            Value::Enum { enum_name, variant, data } if enum_name == "Option" => {
-                let inner = data.borrow().first().cloned().unwrap_or(Value::Unit);
-                if variant == "Some" {
+            Value::Enum { enum_name, variant, data } if &*enum_name == "Option" => {
+                let inner = data.first().cloned().unwrap_or(Value::Unit);
+                if &*variant == "Some" {
                     Ok(Ok(inner))
                 } else {
                     Ok(Err(Value::none()))
@@ -189,11 +244,12 @@ impl Interp {
                 let i = as_index(key)?;
                 items.borrow().get(i).cloned().ok_or_else(|| anyhow!("index {i} out of bounds"))?
             }
-            Value::Map(map) => {
-                let k = key.as_key().ok_or_else(|| anyhow!("{} is not a valid map key", key.type_name()))?;
-                map.borrow().get(&k).cloned().ok_or_else(|| anyhow!("key not found"))?
-            }
-            Value::Struct { name, fields } if name == "Captures" => {
+            Value::Map(map) => key
+                .with_key(|k| {
+                    let k = k.ok_or_else(|| anyhow!("{} is not a valid map key", key.type_name()))?;
+                    map.borrow().get(&k).cloned().ok_or_else(|| anyhow!("key not found"))
+                })?,
+            Value::Struct { name, fields } if &**name == "Captures" => {
                 super::builtins::capture_index(fields, key)?
             }
             other => bail!("cannot index {}", other.type_name()),
@@ -234,7 +290,7 @@ impl Interp {
                 .ok_or_else(|| anyhow!("no field `{i}`")),
             (Value::Struct { fields, .. }, Member::Indexed(i)) => fields
                 .borrow()
-                .get(&i.to_string())
+                .get(i.to_string().as_str())
                 .cloned()
                 .ok_or_else(|| anyhow!("no field `{i}`")),
             (b, _) => bail!("cannot access field of {}", b.type_name()),
@@ -248,7 +304,7 @@ impl Interp {
                 fields.borrow_mut().insert(name.clone(), val);
             }
             (Value::Struct { fields, .. }, Member::Indexed(i)) => {
-                fields.borrow_mut().insert(i.to_string(), val);
+                fields.borrow_mut().insert(i.to_string().into(), val);
             }
             (Value::Tuple(items), Member::Indexed(i)) => {
                 items.borrow_mut()[*i] = val;

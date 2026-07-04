@@ -40,7 +40,7 @@ pub enum UnKind {
 /// A field being read or written, named for structs, positional for tuples.
 #[derive(Clone)]
 pub enum Member {
-    Named(String),
+    Named(Rc<str>),
     Indexed(usize),
 }
 
@@ -54,13 +54,204 @@ pub enum CapSource {
 }
 
 /// A struct literal, fields already ordered to match the declaration so
-/// serialization matches the compiler.
+/// serialization matches the compiler. Names are shared `Rc<str>` so building
+/// an instance clones a pointer, not a string.
 pub struct StructLit {
-    pub name: String,
+    pub name: Rc<str>,
     /// Field names in the register order `base..base+fields.len()`.
-    pub fields: Vec<String>,
+    pub fields: Vec<Rc<str>>,
     /// Whether a trailing `..rest` value sits in the register after the fields.
     pub has_rest: bool,
+}
+
+/// A method name with its builtin id resolved once at compile time, so hot
+/// dispatch matches an enum instead of comparing strings.
+pub struct MethodName {
+    pub text: String,
+    pub id: BuiltinId,
+}
+
+/// Ids for the builtin and higher-order methods the dispatcher special-cases.
+/// `Other` falls back to name-string dispatch, so an unlisted method still
+/// works, it just pays the string compares.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BuiltinId {
+    Len,
+    IsEmpty,
+    Clone,
+    ToString,
+    Get,
+    Insert,
+    ContainsKey,
+    Remove,
+    Entry,
+    Keys,
+    Values,
+    Iter,
+    Push,
+    Pop,
+    First,
+    Last,
+    Contains,
+    Sort,
+    Join,
+    Sum,
+    Enumerate,
+    Rev,
+    Count,
+    Take,
+    Skip,
+    PushStr,
+    SplitWhitespace,
+    Split,
+    Chars,
+    Lines,
+    Trim,
+    StartsWith,
+    EndsWith,
+    Parse,
+    Unwrap,
+    UnwrapOr,
+    // Higher-order methods, dispatched before the plain builtins.
+    Map,
+    Filter,
+    FilterMap,
+    FlatMap,
+    ForEach,
+    Find,
+    Position,
+    Any,
+    All,
+    Fold,
+    Reduce,
+    Retain,
+    SortByKey,
+    SortBy,
+    MaxByKey,
+    MinByKey,
+    TakeWhile,
+    SkipWhile,
+    Partition,
+    AndThen,
+    MapErr,
+    MapOr,
+    UnwrapOrElse,
+    OkOrElse,
+    WithContext,
+    OrInsertWith,
+    OrInsertWithKey,
+    AndModify,
+    Other,
+}
+
+impl BuiltinId {
+    pub fn resolve(name: &str) -> BuiltinId {
+        use BuiltinId::*;
+        match name {
+            "len" => Len,
+            "is_empty" => IsEmpty,
+            "clone" => Clone,
+            "to_string" => ToString,
+            "get" => Get,
+            "insert" => Insert,
+            "contains_key" => ContainsKey,
+            "remove" => Remove,
+            "entry" => Entry,
+            "keys" => Keys,
+            "values" => Values,
+            "iter" | "into_iter" => Iter,
+            "push" => Push,
+            "pop" => Pop,
+            "first" => First,
+            "last" => Last,
+            "contains" => Contains,
+            "sort" => Sort,
+            "join" => Join,
+            "sum" => Sum,
+            "enumerate" => Enumerate,
+            "rev" => Rev,
+            "count" => Count,
+            "take" => Take,
+            "skip" => Skip,
+            "push_str" => PushStr,
+            "split_whitespace" => SplitWhitespace,
+            "split" => Split,
+            "chars" => Chars,
+            "lines" => Lines,
+            "trim" => Trim,
+            "starts_with" => StartsWith,
+            "ends_with" => EndsWith,
+            "parse" => Parse,
+            "unwrap" => Unwrap,
+            "unwrap_or" => UnwrapOr,
+            "map" => Map,
+            "filter" => Filter,
+            "filter_map" => FilterMap,
+            "flat_map" => FlatMap,
+            "for_each" => ForEach,
+            "find" => Find,
+            "position" => Position,
+            "any" => Any,
+            "all" => All,
+            "fold" => Fold,
+            "reduce" => Reduce,
+            "retain" => Retain,
+            "sort_by_key" => SortByKey,
+            "sort_by" => SortBy,
+            "max_by_key" => MaxByKey,
+            "min_by_key" => MinByKey,
+            "take_while" => TakeWhile,
+            "skip_while" => SkipWhile,
+            "partition" => Partition,
+            "and_then" => AndThen,
+            "map_err" => MapErr,
+            "map_or" => MapOr,
+            "unwrap_or_else" => UnwrapOrElse,
+            "ok_or_else" => OkOrElse,
+            "with_context" => WithContext,
+            "or_insert_with" => OrInsertWith,
+            "or_insert_with_key" => OrInsertWithKey,
+            "and_modify" => AndModify,
+            _ => Other,
+        }
+    }
+
+    /// Whether this method takes a closure and must run through the
+    /// interpreter's higher-order dispatch.
+    pub fn is_higher_order(self) -> bool {
+        use BuiltinId::*;
+        matches!(
+            self,
+            Map | Filter
+                | FilterMap
+                | FlatMap
+                | ForEach
+                | Find
+                | Position
+                | Any
+                | All
+                | Fold
+                | Reduce
+                | Retain
+                | SortByKey
+                | SortBy
+                | MaxByKey
+                | MinByKey
+                | TakeWhile
+                | SkipWhile
+                | Partition
+                | AndThen
+                | MapErr
+                | MapOr
+                | UnwrapOrElse
+                | OkOrElse
+                | WithContext
+                | OrInsertWith
+                | OrInsertWithKey
+                | AndModify
+                | Other
+        )
+    }
 }
 
 /// A precompiled format template plus where each argument lives.
@@ -98,11 +289,17 @@ pub enum Op {
     Move { dst: Reg, src: Reg },
 
     Bin { dst: Reg, a: Reg, b: Reg, op: BinKind },
+    /// Binary op with an integer literal right operand, `n - 1`, `i < len`.
+    BinImm { dst: Reg, a: Reg, imm: i64, op: BinKind },
     Un { dst: Reg, a: Reg, op: UnKind },
 
     Jump { to: u32 },
     JumpIfFalse { cond: Reg, to: u32 },
     JumpIfTrue { cond: Reg, to: u32 },
+    /// Fused compare and branch: jump to `to` when `a op b` is false.
+    CmpJump { a: Reg, b: Reg, op: BinKind, to: u32 },
+    /// Fused compare and branch against an integer literal.
+    CmpJumpImm { a: Reg, imm: i64, op: BinKind, to: u32 },
 
     /// Direct call of a known top level function, by global index.
     CallFn { dst: Reg, func: u32, base: Reg, argc: u16 },
@@ -167,7 +364,7 @@ pub struct Chunk {
     pub casts: Vec<Rc<syn::Type>>,
     /// Path calls, the segments plus an optional turbofish coercion type.
     pub paths: Vec<(Vec<String>, Option<Rc<syn::Type>>)>,
-    pub names: Vec<String>,
+    pub names: Vec<MethodName>,
     /// Nested closure bodies, referenced by `MakeClosure`.
     pub children: Vec<Rc<Chunk>>,
     /// For each child, where to copy its upvalues from.
