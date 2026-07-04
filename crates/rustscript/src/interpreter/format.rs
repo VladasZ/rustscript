@@ -1,51 +1,13 @@
-use std::collections::HashMap;
+use anyhow::{Result, anyhow};
 
-use anyhow::{Result, anyhow, bail};
-use syn::punctuated::Punctuated;
-use syn::{Expr, Lit};
-
-use super::eval::flow_value;
 use super::value::Value;
-use super::{Frame, Interp};
 
-/// Render a `println!`/`format!` style macro to a string.
-impl Interp {
-    pub(super) fn expand_format(&self, mac: &syn::Macro, frame: &mut Frame) -> Result<String> {
-        let args = mac.parse_body_with(Punctuated::<Expr, syn::Token![,]>::parse_terminated)?;
-        let mut iter = args.iter();
-
-        let template = match iter.next() {
-            Some(Expr::Lit(lit)) => match &lit.lit {
-                Lit::Str(s) => s.value(),
-                other => bail!("format template must be a string literal, got {:?}", other),
-            },
-            Some(_) => bail!("format template must be a string literal"),
-            None => return Ok(String::new()),
-        };
-
-        let mut positional = Vec::new();
-        let mut named: HashMap<String, Value> = HashMap::new();
-        for arg in iter {
-            if let Expr::Assign(a) = arg
-                && let Expr::Path(p) = &*a.left
-                && let Some(name) = p.path.get_ident()
-            {
-                let v = flow_value(self.eval_expr(&a.right, frame)?)?;
-                named.insert(name.to_string(), v);
-                continue;
-            }
-            positional.push(flow_value(self.eval_expr(arg, frame)?)?);
-        }
-
-        render(&template, &positional, &named, frame)
-    }
-}
-
-fn render(
+/// Render a format template. Positional and named arguments, including inline
+/// `{name}` holes, are already evaluated by the compiler.
+pub(super) fn render_values(
     template: &str,
     positional: &[Value],
-    named: &HashMap<String, Value>,
-    frame: &Frame,
+    named: &[(String, Value)],
 ) -> Result<String> {
     let mut out = String::new();
     let mut chars = template.chars().peekable();
@@ -70,7 +32,7 @@ fn render(
                     Some((a, s)) => (a.trim(), s),
                     None => (inner.trim(), ""),
                 };
-                let value = resolve_arg(arg_ref, &mut next_positional, positional, named, frame)?;
+                let value = resolve_arg(arg_ref, &mut next_positional, positional, named)?;
                 out.push_str(&format_value(&value, spec)?);
             }
             '}' => {
@@ -89,8 +51,7 @@ fn resolve_arg(
     arg_ref: &str,
     next_positional: &mut usize,
     positional: &[Value],
-    named: &HashMap<String, Value>,
-    frame: &Frame,
+    named: &[(String, Value)],
 ) -> Result<Value> {
     if arg_ref.is_empty() {
         let idx = *next_positional;
@@ -106,12 +67,10 @@ fn resolve_arg(
             .cloned()
             .ok_or_else(|| anyhow!("format argument {idx} out of range"));
     }
-    if let Some(v) = named.get(arg_ref) {
-        return Ok(v.clone());
-    }
-    // Inline captured identifier, `{name}`.
-    frame
-        .get(arg_ref)
+    named
+        .iter()
+        .find(|(n, _)| n == arg_ref)
+        .map(|(_, v)| v.clone())
         .ok_or_else(|| anyhow!("`{arg_ref}` not found for format string"))
 }
 

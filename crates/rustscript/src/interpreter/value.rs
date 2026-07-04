@@ -17,7 +17,7 @@ pub type Fields = IndexMap<String, Value>;
 pub enum Value {
     Unit,
     Bool(bool),
-    Int(i128),
+    Int(i64),
     Float(f64),
     Char(char),
     Str(Rc<RefCell<String>>),
@@ -36,8 +36,8 @@ pub enum Value {
         data: Rc<RefCell<Vec<Value>>>,
     },
     Range {
-        start: i128,
-        end: i128,
+        start: i64,
+        end: i64,
         inclusive: bool,
     },
     Closure(Rc<ClosureData>),
@@ -46,19 +46,19 @@ pub enum Value {
     Native(Rc<RefCell<Native>>),
 }
 
-/// A closure captures the variables visible where it was written, by value.
-/// Container captures share their `Rc`, so mutation through them is visible.
+/// A closure is a compiled body plus the upvalues it captured by value when it
+/// was built. Container captures share their `Rc`, so mutation through them is
+/// visible, matching a by-value capture of the handle.
 pub struct ClosureData {
-    pub params: Vec<syn::Pat>,
-    pub body: syn::Expr,
-    pub captured: std::collections::HashMap<String, Value>,
+    pub chunk: Rc<super::bytecode::Chunk>,
+    pub captured: Vec<Value>,
 }
 
 /// Hashable/orderable key for maps. Only a subset of values can be keys.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MapKey {
     Bool(bool),
-    Int(i128),
+    Int(i64),
     Char(char),
     Str(String),
 }

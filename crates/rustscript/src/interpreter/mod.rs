@@ -1,8 +1,11 @@
 mod builtins;
+mod bytecode;
+mod compile;
 mod eval;
 mod format;
 mod native;
 mod value;
+mod vm;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -13,20 +16,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Result, anyhow, bail};
 use syn::{File, Item};
 
+use bytecode::Chunk;
+use compile::{Compiler, Ctx};
 pub use value::Value;
 
 /// Set by the real Ctrl-C handler, which must stay `Send`, and drained by the
-/// interpreter between statements so it can run the script's own handler.
+/// interpreter between loop iterations so it can run the script's own handler.
 static CTRLC_HIT: AtomicBool = AtomicBool::new(false);
 static CTRLC_INSTALLED: OnceLock<bool> = OnceLock::new();
 
 thread_local! {
-    /// The script closure passed to `ctrlc::set_handler`, run on the interpreter
-    /// thread when a Ctrl-C is noticed.
     static CTRLC_HANDLER: RefCell<Option<Value>> = const { RefCell::new(None) };
 }
 
-/// Register the script's Ctrl-C closure and install the OS handler once.
 pub(crate) fn set_ctrlc_handler(closure: Value) -> Result<()> {
     CTRLC_HANDLER.with(|h| *h.borrow_mut() = Some(closure));
     if CTRLC_INSTALLED.set(true).is_ok() {
@@ -36,164 +38,94 @@ pub(crate) fn set_ctrlc_handler(closure: Value) -> Result<()> {
     Ok(())
 }
 
-/// The arguments a script sees through `std::env::args()`. Set once from
-/// `main` before the script runs. Index 0 is the script path, matching a real
-/// compiled binary, then the arguments typed after the filename.
+/// The arguments a script sees through `std::env::args()`. Index 0 is the
+/// script path, matching a real compiled binary.
 static SCRIPT_ARGS: OnceLock<Vec<String>> = OnceLock::new();
 
 pub fn set_script_args(args: Vec<String>) {
-    SCRIPT_ARGS
-        .set(args)
-        .expect("script args are set exactly once");
+    SCRIPT_ARGS.set(args).expect("script args are set exactly once");
 }
 
 pub(crate) fn script_args() -> Vec<String> {
     SCRIPT_ARGS.get().cloned().unwrap_or_default()
 }
 
-/// Control flow result of evaluating a statement or expression.
-pub enum Flow {
-    Value(Value),
-    Return(Value),
-    Break(Value),
-    Continue,
-}
-
-/// Unwrap a `Flow` to its value, bubbling any control signal up to the caller.
-macro_rules! flow {
-    ($e:expr) => {
-        match $e? {
-            $crate::interpreter::Flow::Value(v) => v,
-            other => return Ok(other),
-        }
-    };
-}
-pub(crate) use flow;
-
-/// A single call frame. A stack of lexical scopes, innermost last.
-pub struct Frame {
-    scopes: Vec<HashMap<String, Value>>,
-}
-
-impl Frame {
-    fn new() -> Self {
-        Frame {
-            scopes: vec![HashMap::new()],
-        }
-    }
-
-    fn push(&mut self) {
-        self.scopes.push(HashMap::new());
-    }
-
-    fn pop(&mut self) {
-        self.scopes.pop();
-    }
-
-    fn define(&mut self, name: &str, val: Value) {
-        self.scopes.last_mut().unwrap().insert(name.to_string(), val);
-    }
-
-    fn get(&self, name: &str) -> Option<Value> {
-        self.scopes
-            .iter()
-            .rev()
-            .find_map(|s| s.get(name))
-            .cloned()
-    }
-
-    /// Flatten all visible bindings, inner scopes shadowing outer, for a
-    /// closure to capture.
-    fn snapshot(&self) -> HashMap<String, Value> {
-        let mut out = HashMap::new();
-        for scope in &self.scopes {
-            for (k, v) in scope {
-                out.insert(k.clone(), v.clone());
-            }
-        }
-        out
-    }
-
-    fn set(&mut self, name: &str, val: Value) -> bool {
-        for scope in self.scopes.iter_mut().rev() {
-            if let Some(slot) = scope.get_mut(name) {
-                *slot = val;
-                return true;
-            }
-        }
-        false
-    }
-}
-
-/// The whole program, with its items indexed for lookup during evaluation.
+/// The whole program, compiled to bytecode and ready to run.
 pub struct Interp {
-    functions: HashMap<String, Rc<syn::ItemFn>>,
+    /// Top level functions, indexed by id. Direct calls use the id.
+    functions: Vec<Rc<Chunk>>,
+    fn_index: HashMap<String, u32>,
+    /// Inherent and trait methods, keyed by (type name, method name).
+    methods: HashMap<(String, String), Rc<Chunk>>,
     structs: HashMap<String, Rc<syn::ItemStruct>>,
     enums: HashMap<String, Rc<syn::ItemEnum>>,
-    /// Inherent and trait methods, keyed by (type name, method name).
-    methods: HashMap<(String, String), Rc<syn::ImplItemFn>>,
-    /// Imported names mapped to their full path, so `fs::read` can be resolved
-    /// back to `scriptstd::fs::read` for native bridge dispatch.
     uses: HashMap<String, Vec<String>>,
+    main_index: Option<u32>,
 }
 
 impl Interp {
     pub fn load(file: &File) -> Result<Self> {
-        let mut interp = Interp {
-            functions: HashMap::new(),
-            structs: HashMap::new(),
-            enums: HashMap::new(),
-            methods: HashMap::new(),
-            uses: HashMap::new(),
-        };
-        for item in &file.items {
-            interp.collect_item(item)?;
-        }
-        Ok(interp)
-    }
+        let mut pending_fns: Vec<Rc<syn::ItemFn>> = Vec::new();
+        let mut fn_index: HashMap<String, u32> = HashMap::new();
+        let mut pending_methods: Vec<(String, String, Rc<syn::ImplItemFn>)> = Vec::new();
+        let mut structs: HashMap<String, Rc<syn::ItemStruct>> = HashMap::new();
+        let mut enums: HashMap<String, Rc<syn::ItemEnum>> = HashMap::new();
+        let mut uses: HashMap<String, Vec<String>> = HashMap::new();
 
-    fn collect_item(&mut self, item: &Item) -> Result<()> {
-        match item {
-            Item::Fn(f) => {
-                self.functions
-                    .insert(f.sig.ident.to_string(), Rc::new(f.clone()));
-            }
-            Item::Struct(s) => {
-                self.structs
-                    .insert(s.ident.to_string(), Rc::new(s.clone()));
-            }
-            Item::Enum(e) => {
-                self.enums.insert(e.ident.to_string(), Rc::new(e.clone()));
-            }
-            Item::Impl(imp) => {
-                let type_name = type_path_name(&imp.self_ty)
-                    .ok_or_else(|| anyhow!("unsupported impl target"))?;
-                for it in &imp.items {
-                    if let syn::ImplItem::Fn(m) = it {
-                        self.methods.insert(
-                            (type_name.clone(), m.sig.ident.to_string()),
-                            Rc::new(m.clone()),
-                        );
+        for item in &file.items {
+            match item {
+                Item::Fn(f) => {
+                    let name = f.sig.ident.to_string();
+                    fn_index.insert(name, pending_fns.len() as u32);
+                    pending_fns.push(Rc::new(f.clone()));
+                }
+                Item::Struct(s) => {
+                    structs.insert(s.ident.to_string(), Rc::new(s.clone()));
+                }
+                Item::Enum(e) => {
+                    enums.insert(e.ident.to_string(), Rc::new(e.clone()));
+                }
+                Item::Impl(imp) => {
+                    let type_name =
+                        type_path_name(&imp.self_ty).ok_or_else(|| anyhow!("unsupported impl target"))?;
+                    for it in &imp.items {
+                        if let syn::ImplItem::Fn(m) = it {
+                            pending_methods.push((
+                                type_name.clone(),
+                                m.sig.ident.to_string(),
+                                Rc::new(m.clone()),
+                            ));
+                        }
                     }
                 }
+                Item::Use(u) => {
+                    let mut prefix = Vec::new();
+                    collect_use_tree(&u.tree, &mut prefix, &mut uses);
+                }
+                Item::Const(_) | Item::Static(_) | Item::Trait(_) => {}
+                Item::Mod(_) => bail!("unsupported feature: nested modules are not run yet"),
+                other => bail!("unsupported item: {}", quote_kind(other)),
             }
-            Item::Use(u) => {
-                let mut prefix = Vec::new();
-                collect_use_tree(&u.tree, &mut prefix, &mut self.uses);
-            }
-            Item::Const(_) | Item::Static(_) => {}
-            Item::Mod(_) => bail!("unsupported feature: nested modules are not run yet"),
-            Item::Trait(_) => {}
-            other => bail!(
-                "unsupported item: {}",
-                quote_kind(other)
-            ),
         }
-        Ok(())
+
+        let ctx = Ctx { fn_index: fn_index.clone(), structs: structs.clone() };
+
+        let mut functions = Vec::with_capacity(pending_fns.len());
+        for f in &pending_fns {
+            let mut c = Compiler::new(&ctx);
+            functions.push(Rc::new(c.compile_fn(&f.sig, &f.block)?));
+        }
+        let mut methods = HashMap::new();
+        for (ty, name, m) in &pending_methods {
+            let mut c = Compiler::new(&ctx);
+            methods.insert((ty.clone(), name.clone()), Rc::new(c.compile_fn(&m.sig, &m.block)?));
+        }
+
+        let main_index = fn_index.get("main").copied();
+        Ok(Interp { functions, fn_index, methods, structs, enums, uses, main_index })
     }
 
-    /// If a Ctrl-C arrived, run the script's registered handler closure. Called
-    /// between statements so the handler runs on the interpreter thread.
+    /// If a Ctrl-C arrived, run the script's registered handler closure.
     pub(super) fn run_pending_ctrlc(&self) -> Result<()> {
         if !CTRLC_HIT.swap(false, Ordering::SeqCst) {
             return Ok(());
@@ -207,18 +139,10 @@ impl Interp {
 
     /// Run `fn main`. Its returned `Result::Err` is reported like anyhow does.
     pub fn run_main(&self) -> Result<()> {
-        let main = self
-            .functions
-            .get("main")
-            .ok_or_else(|| anyhow!("no `main` function found"))?
-            .clone();
-        let mut frame = Frame::new();
-        let ret = self.call_fn_body(&main.block, &main.sig, &[], &mut frame)?;
-        if let Value::Enum {
-            enum_name,
-            variant,
-            data,
-        } = &ret
+        let idx = self.main_index.ok_or_else(|| anyhow!("no `main` function found"))?;
+        let chunk = self.functions[idx as usize].clone();
+        let ret = self.run_chunk(&chunk, &[], &[])?;
+        if let Value::Enum { enum_name, variant, data } = &ret
             && enum_name == "Result"
             && variant == "Err"
         {
@@ -227,10 +151,22 @@ impl Interp {
         }
         Ok(())
     }
+
+    // -- lookups used by the bridge dispatch -------------------------------
+
+    pub(super) fn user_function(&self, name: &str) -> Option<Rc<Chunk>> {
+        self.fn_index.get(name).map(|&i| self.functions[i as usize].clone())
+    }
+
+    pub(super) fn user_method(&self, ty: &str, name: &str) -> Option<Rc<Chunk>> {
+        self.methods.get(&(ty.to_string(), name.to_string())).cloned()
+    }
+
+    pub(super) fn structs(&self) -> &HashMap<String, Rc<syn::ItemStruct>> {
+        &self.structs
+    }
 }
 
-/// Flatten a `use` tree into `name -> full path` entries. `use a::b::c;`
-/// records `c -> [a, b, c]`. Groups and globs are walked. Renames use the alias.
 fn collect_use_tree(
     tree: &syn::UseTree,
     prefix: &mut Vec<String>,

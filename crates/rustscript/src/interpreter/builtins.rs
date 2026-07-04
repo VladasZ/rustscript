@@ -3,21 +3,18 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use anyhow::{Result, anyhow, bail};
-use syn::{Expr, ExprCall};
 
+use super::bytecode::{Chunk, Op};
 use super::native::{self, Native};
-use super::value::{Fields, MapKey, Value};
-use super::{Flow, Frame, Interp, flow};
+use super::value::{ClosureData, Fields, MapKey, Value};
+use super::Interp;
 
 impl Interp {
-    /// Resolve a path used as a value: a variable, `None`, or a unit enum variant.
-    pub(super) fn eval_path(&self, path: &syn::Path, frame: &Frame) -> Result<Value> {
-        let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+    /// Resolve a path used as a value: `None`, a unit enum variant, a constant,
+    /// or a bare constructor wrapped as a closure.
+    pub(super) fn eval_path_value(&self, segs: &[String]) -> Result<Value> {
         if segs.len() == 1 {
             let name = &segs[0];
-            if let Some(v) = frame.get(name) {
-                return Ok(v);
-            }
             if name == "None" {
                 return Ok(Value::none());
             }
@@ -63,14 +60,7 @@ impl Interp {
         // A bare constructor path used as a value, e.g. `Vec::new` handed to
         // `or_insert_with`. Wrap it in a zero-argument closure that calls it.
         if matches!(last.as_str(), "new" | "default") {
-            let call = format!("{}()", segs.join("::"));
-            if let Ok(expr) = syn::parse_str::<Expr>(&call) {
-                return Ok(Value::Closure(Rc::new(super::value::ClosureData {
-                    params: vec![],
-                    body: expr,
-                    captured: std::collections::HashMap::new(),
-                })));
-            }
+            return Ok(zero_arg_call_closure(segs.to_vec()));
         }
         bail!("unsupported path `{}`", segs.join("::"));
     }
@@ -95,26 +85,7 @@ impl Interp {
         None
     }
 
-    pub(super) fn eval_call(&self, c: &ExprCall, frame: &mut Frame) -> Result<Flow> {
-        let mut args = Vec::new();
-        for a in &c.args {
-            args.push(flow!(self.eval_expr(a, frame)));
-        }
-        let path = match &*c.func {
-            Expr::Path(p) => &p.path,
-            _ => bail!("cannot call this kind of expression"),
-        };
-        let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
-        let value = self.dispatch_call(&segs, args)?;
-        // `serde_json::from_str::<T>(..)` and similar coerce the result into T.
-        let value = match path.segments.last().and_then(super::eval::first_generic_type) {
-            Some(ty) => self.coerce_result(value, ty),
-            None => value,
-        };
-        Ok(Flow::Value(value))
-    }
-
-    fn dispatch_call(&self, segs: &[String], args: Vec<Value>) -> Result<Value> {
+    pub(super) fn dispatch_call(&self, segs: &[String], args: Vec<Value>) -> Result<Value> {
         let canon = self.canonical(segs);
 
         if canon.len() == 1 {
@@ -125,12 +96,10 @@ impl Interp {
                 "Err" => return Ok(Value::err(one(args)?)),
                 _ => {}
             }
-            if let Some(f) = self.functions.get(name) {
-                let f = f.clone();
-                let mut frame = Frame::new();
-                return self.call_fn_body(&f.block, &f.sig, &args, &mut frame);
+            if let Some(chunk) = self.user_function(name) {
+                return self.run_chunk(&chunk, &args, &[]);
             }
-            if self.structs.contains_key(name) {
+            if self.structs().contains_key(name) {
                 return self.make_tuple_struct(name, args);
             }
             if let Some(v) = self.make_tuple_variant(None, name, &args) {
@@ -166,20 +135,9 @@ impl Interp {
             return Ok(v);
         }
         // A method on a user type, `Type::assoc(..)` or UFCS `Type::method(recv, ..)`.
-        if let Some(m) = self.methods.get(&(ns.clone(), last.clone())) {
-            let m = m.clone();
-            let mut frame = Frame::new();
-            let has_receiver = matches!(m.sig.inputs.first(), Some(syn::FnArg::Receiver(_)));
-            if has_receiver {
-                let mut it = args.into_iter();
-                let self_val = it
-                    .next()
-                    .ok_or_else(|| anyhow!("method `{ns}::{last}` needs a receiver"))?;
-                frame.define("self", self_val);
-                let rest: Vec<Value> = it.collect();
-                return self.call_fn_body(&m.block, &m.sig, &rest, &mut frame);
-            }
-            return self.call_fn_body(&m.block, &m.sig, &args, &mut frame);
+        // The receiver, if any, is simply the first argument, matching param 0.
+        if let Some(chunk) = self.user_method(ns, last) {
+            return self.run_chunk(&chunk, &args, &[]);
         }
         if let Some(v) = assoc_fn(ns, last, &args)? {
             return Ok(v);
@@ -235,13 +193,7 @@ impl Interp {
         None
     }
 
-    pub(super) fn eval_method(
-        &self,
-        recv: Value,
-        name: &str,
-        args: Vec<Value>,
-        _frame: &mut Frame,
-    ) -> Result<Value> {
+    pub(super) fn eval_method(&self, recv: Value, name: &str, args: Vec<Value>) -> Result<Value> {
         // A method on a range acts on it as an iterator, so expand it to a Vec.
         let recv = if matches!(recv, Value::Range { .. }) {
             Value::vec(self.into_iter_items(recv)?)
@@ -254,12 +206,13 @@ impl Interp {
             _ => None,
         };
         if let Some(tn) = &type_name
-            && let Some(m) = self.methods.get(&(tn.clone(), name.to_string()))
+            && let Some(chunk) = self.user_method(tn, name)
         {
-            let m = m.clone();
-            let mut frame = Frame::new();
-            frame.define("self", recv);
-            return self.call_fn_body(&m.block, &m.sig, &args, &mut frame);
+            // The receiver is param 0, followed by the call arguments.
+            let mut full = Vec::with_capacity(args.len() + 1);
+            full.push(recv);
+            full.extend(args);
+            return self.run_chunk(&chunk, &full, &[]);
         }
         if let Some(v) = self.higher_order(&recv, name, &args)? {
             return Ok(v);
@@ -408,7 +361,7 @@ impl Interp {
                 let mut found = Value::none();
                 for (i, x) in list.into_iter().enumerate() {
                     if self.call_closure(&f, &[x])?.is_truthy() {
-                        found = Value::some(Value::Int(i as i128));
+                        found = Value::some(Value::Int(i as i64));
                         break;
                     }
                 }
@@ -698,6 +651,17 @@ fn option_inner(v: &Value) -> Option<Value> {
     }
 }
 
+/// A zero-argument closure that runs a constructor path like `Vec::new`, for
+/// use as a value handed to `or_insert_with`.
+fn zero_arg_call_closure(segs: Vec<String>) -> Value {
+    let mut chunk = Chunk::empty("<ctor>");
+    chunk.num_regs = 1;
+    chunk.paths.push((segs, None));
+    chunk.code.push(Op::CallPath { dst: 0, path: 0, base: 0, argc: 0 });
+    chunk.code.push(Op::Ret { src: 0 });
+    Value::Closure(Rc::new(ClosureData { chunk: Rc::new(chunk), captured: Vec::new() }))
+}
+
 fn make_ordering(o: std::cmp::Ordering) -> Value {
     use std::cmp::Ordering::*;
     let variant = match o {
@@ -753,7 +717,7 @@ fn native_call(module: &str, func: &str, args: &[Value]) -> Result<Option<Value>
             ("fs", "remove_dir_all") => wrap_unit(std::fs::remove_dir_all(s(0)?)),
             ("fs", "remove_dir") => wrap_unit(std::fs::remove_dir(s(0)?)),
             ("fs", "copy") => match std::fs::copy(s(0)?, s(1)?) {
-                Ok(n) => Value::ok(Value::Int(n as i128)),
+                Ok(n) => Value::ok(Value::Int(n as i64)),
                 Err(e) => Value::err(Value::str(e.to_string())),
             },
             ("fs", "rename") => wrap_unit(std::fs::rename(s(0)?, s(1)?)),
@@ -806,7 +770,7 @@ fn native_call(module: &str, func: &str, args: &[Value]) -> Result<Option<Value>
             ("env", "set_current_dir") => wrap_unit(std::env::set_current_dir(s(0)?)),
             ("env", "temp_dir") => make_path(std::env::temp_dir().display().to_string()),
             ("process", "exit") => {
-                let code = args.first().and_then(as_i128).unwrap_or(0) as i32;
+                let code = args.first().and_then(as_i64).unwrap_or(0) as i32;
                 std::process::exit(code);
             }
             ("process", "abort") => std::process::abort(),
@@ -865,7 +829,7 @@ fn make_symlink(src: &str, dst: &str) -> std::io::Result<()> {
     }
 }
 
-fn as_i128(v: &Value) -> Option<i128> {
+fn as_i64(v: &Value) -> Option<i64> {
     match v {
         Value::Int(i) => Some(*i),
         _ => None,
@@ -1026,7 +990,7 @@ fn spawn_command(fields: &Rc<RefCell<Fields>>) -> Value {
 /// Build an `ExitStatus` value with `code` and `success`.
 pub(super) fn make_exit_status(status: std::process::ExitStatus) -> Value {
     let mut st = Fields::new();
-    st.insert("code".into(), Value::Int(status.code().unwrap_or(-1) as i128));
+    st.insert("code".into(), Value::Int(status.code().unwrap_or(-1) as i64));
     st.insert("success".into(), Value::Bool(status.success()));
     Value::Struct {
         name: "ExitStatus".into(),
@@ -1055,8 +1019,8 @@ pub(super) fn make_output(out: std::process::Output) -> Value {
 /// Build a `Duration` value carrying whole and sub-second parts.
 pub(super) fn make_duration(d: std::time::Duration) -> Value {
     let mut f = Fields::new();
-    f.insert("secs".into(), Value::Int(d.as_secs() as i128));
-    f.insert("nanos".into(), Value::Int(d.subsec_nanos() as i128));
+    f.insert("secs".into(), Value::Int(d.as_secs() as i64));
+    f.insert("nanos".into(), Value::Int(d.subsec_nanos() as i64));
     Value::Struct {
         name: "Duration".into(),
         fields: Rc::new(RefCell::new(f)),
@@ -1068,7 +1032,7 @@ pub(super) fn make_duration(d: std::time::Duration) -> Value {
 /// Windows, where a script would use different accessors.
 pub(super) fn make_metadata(m: &std::fs::Metadata) -> Value {
     let mut f = Fields::new();
-    f.insert("len".into(), Value::Int(m.len() as i128));
+    f.insert("len".into(), Value::Int(m.len() as i64));
     f.insert("is_dir".into(), Value::Bool(m.is_dir()));
     f.insert("is_file".into(), Value::Bool(m.is_file()));
     f.insert("is_symlink".into(), Value::Bool(m.is_symlink()));
@@ -1077,12 +1041,12 @@ pub(super) fn make_metadata(m: &std::fs::Metadata) -> Value {
     {
         use std::os::unix::fs::MetadataExt;
         use std::os::unix::fs::PermissionsExt;
-        f.insert("mode".into(), Value::Int(m.permissions().mode() as i128));
-        f.insert("dev".into(), Value::Int(m.dev() as i128));
-        f.insert("ino".into(), Value::Int(m.ino() as i128));
-        f.insert("uid".into(), Value::Int(m.uid() as i128));
-        f.insert("gid".into(), Value::Int(m.gid() as i128));
-        f.insert("mtime".into(), Value::Int(m.mtime() as i128));
+        f.insert("mode".into(), Value::Int(m.permissions().mode() as i64));
+        f.insert("dev".into(), Value::Int(m.dev() as i64));
+        f.insert("ino".into(), Value::Int(m.ino() as i64));
+        f.insert("uid".into(), Value::Int(m.uid() as i64));
+        f.insert("gid".into(), Value::Int(m.gid() as i64));
+        f.insert("mtime".into(), Value::Int(m.mtime() as i64));
     }
     if let Ok(t) = m.modified() {
         f.insert("modified".into(), super::native::Native::SystemTime(t).wrap());
@@ -1280,7 +1244,7 @@ fn run_request(fields: &Rc<RefCell<Fields>>, body: Option<String>) -> Value {
     match do_http(&verb, &url, &headers, body, timeout, agent.as_ref()) {
         Ok((status, text)) => {
             let mut rf = Fields::new();
-            rf.insert("status".into(), Value::Int(status as i128));
+            rf.insert("status".into(), Value::Int(status as i64));
             rf.insert("body".into(), Value::str(text));
             Value::ok(Value::Struct {
                 name: "HttpResponse".into(),
@@ -1510,8 +1474,8 @@ fn make_regex(pattern: String) -> Value {
 fn make_match(m: &regex::Match) -> Value {
     let mut f = Fields::new();
     f.insert("text".into(), Value::str(m.as_str().to_string()));
-    f.insert("start".into(), Value::Int(m.start() as i128));
-    f.insert("end".into(), Value::Int(m.end() as i128));
+    f.insert("start".into(), Value::Int(m.start() as i64));
+    f.insert("end".into(), Value::Int(m.end() as i64));
     Value::Struct {
         name: "Match".into(),
         fields: Rc::new(RefCell::new(f)),
@@ -1528,7 +1492,7 @@ fn make_captures(re: &regex::Regex, caps: &regex::Captures) -> Value {
     let mut names = BTreeMap::new();
     for (i, name) in re.capture_names().enumerate() {
         if let Some(n) = name {
-            names.insert(MapKey::Str(n.to_string()), Value::Int(i as i128));
+            names.insert(MapKey::Str(n.to_string()), Value::Int(i as i64));
         }
     }
     let mut f = Fields::new();
@@ -1605,7 +1569,7 @@ fn captures_method(
         }
         "len" => {
             if let Some(Value::Vec(g)) = fields.borrow().get("groups") {
-                Ok(Value::Int(g.borrow().len() as i128))
+                Ok(Value::Int(g.borrow().len() as i64))
             } else {
                 Ok(Value::Int(0))
             }
@@ -1663,7 +1627,7 @@ fn wrap_io(r: std::io::Result<String>) -> Value {
 
 fn wrap_bytes(r: std::io::Result<Vec<u8>>) -> Value {
     match r {
-        Ok(bytes) => Value::ok(Value::vec(bytes.into_iter().map(|b| Value::Int(b as i128)).collect())),
+        Ok(bytes) => Value::ok(Value::vec(bytes.into_iter().map(|b| Value::Int(b as i64)).collect())),
         Err(e) => Value::err(Value::str(e.to_string())),
     }
 }
@@ -1818,7 +1782,7 @@ fn arg_str(args: &[Value], i: usize) -> String {
     args.get(i).map(path_like).unwrap_or_default()
 }
 
-fn arg_int(args: &[Value], i: usize) -> i128 {
+fn arg_int(args: &[Value], i: usize) -> i64 {
     match args.get(i) {
         Some(Value::Int(n)) => *n,
         _ => 0,
@@ -1969,8 +1933,8 @@ fn now_datetime(local: bool) -> Value {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     let mut f = Fields::new();
-    f.insert("secs".into(), Value::Int(now.as_secs() as i128));
-    f.insert("nanos".into(), Value::Int(now.subsec_nanos() as i128));
+    f.insert("secs".into(), Value::Int(now.as_secs() as i64));
+    f.insert("nanos".into(), Value::Int(now.subsec_nanos() as i64));
     f.insert("local".into(), Value::Bool(local));
     Value::Struct {
         name: "DateTime".into(),
@@ -1986,8 +1950,8 @@ fn datetime_method(fields: &Rc<RefCell<Fields>>, name: &str, args: &[Value]) -> 
     let local = matches!(f.get("local"), Some(Value::Bool(true)));
     let utc: DateTime<Utc> = DateTime::from_timestamp(secs, nanos).unwrap_or_default();
     Ok(match name {
-        "timestamp" => Value::Int(secs as i128),
-        "timestamp_millis" => Value::Int(secs as i128 * 1000 + (nanos / 1_000_000) as i128),
+        "timestamp" => Value::Int(secs as i64),
+        "timestamp_millis" => Value::Int(secs as i64 * 1000 + (nanos / 1_000_000) as i64),
         "to_rfc3339" => Value::str(utc.to_rfc3339()),
         "format" => {
             let fmt = args.first().map(|v| v.display()).unwrap_or_default();
@@ -1997,12 +1961,12 @@ fn datetime_method(fields: &Rc<RefCell<Fields>>, name: &str, args: &[Value]) -> 
                 Value::str(utc.format(&fmt).to_string())
             }
         }
-        "year" => Value::Int(chrono::Datelike::year(&utc) as i128),
-        "month" => Value::Int(chrono::Datelike::month(&utc) as i128),
-        "day" => Value::Int(chrono::Datelike::day(&utc) as i128),
-        "hour" => Value::Int(chrono::Timelike::hour(&utc) as i128),
-        "minute" => Value::Int(chrono::Timelike::minute(&utc) as i128),
-        "second" => Value::Int(chrono::Timelike::second(&utc) as i128),
+        "year" => Value::Int(chrono::Datelike::year(&utc) as i64),
+        "month" => Value::Int(chrono::Datelike::month(&utc) as i64),
+        "day" => Value::Int(chrono::Datelike::day(&utc) as i64),
+        "hour" => Value::Int(chrono::Timelike::hour(&utc) as i64),
+        "minute" => Value::Int(chrono::Timelike::minute(&utc) as i64),
+        "second" => Value::Int(chrono::Timelike::second(&utc) as i64),
         _ => bail!("unknown method `{name}` on DateTime"),
     })
 }
@@ -2035,7 +1999,7 @@ fn rng_method(name: &str, args: &[Value]) -> Result<Value> {
             if let Some(Value::Vec(v)) = args.first() {
                 let mut buf = v.borrow_mut();
                 for slot in buf.iter_mut() {
-                    *slot = Value::Int(rng.random::<u8>() as i128);
+                    *slot = Value::Int(rng.random::<u8>() as i64);
                 }
             }
             Value::Unit
@@ -2068,7 +2032,7 @@ fn bytes_arg(v: Option<&Value>) -> Vec<u8> {
 }
 
 fn bytes_to_vec(b: &[u8]) -> Value {
-    Value::vec(b.iter().map(|x| Value::Int(*x as i128)).collect())
+    Value::vec(b.iter().map(|x| Value::Int(*x as i64)).collect())
 }
 
 // -- serde_json bridge -----------------------------------------------------
@@ -2106,7 +2070,7 @@ fn json_to_value(j: &serde_json::Value) -> Value {
         serde_json::Value::Bool(b) => Value::Bool(*b),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Value::Int(i as i128)
+                Value::Int(i as i64)
             } else {
                 Value::Float(n.as_f64().unwrap_or(0.0))
             }
@@ -2324,11 +2288,34 @@ fn command_method(
 
 /// Methods on a spawned `Child`. Lifecycle calls delegate to the real child
 /// handle; `wait_with_output` reads any piped stdout/stderr to the end first.
+/// Drop the real `ChildStdin` inside a shared handle, closing the pipe. Walks a
+/// `Some(Native)` wrapper from `child.stdin.take()`.
+fn close_child_stdin(v: &Value) {
+    match v {
+        Value::Native(rc) => *rc.borrow_mut() = Native::Closed,
+        Value::Enum { enum_name, variant, data }
+            if enum_name == "Option" && variant == "Some" =>
+        {
+            if let Some(inner) = data.borrow().first() {
+                close_child_stdin(inner);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn child_method(fields: &Rc<RefCell<Fields>>, name: &str, args: &[Value]) -> Result<Value> {
     // Waiting on a child that was fed piped stdin must first close that pipe,
     // or the child blocks forever on EOF. Real Rust closes it when the taken
-    // `ChildStdin` drops; here we drop the handle we still hold in the field.
+    // `ChildStdin` drops. The VM keeps every value alive in a register for the
+    // whole call, so a `let w = cat.stdin.take()` clone stays live and the
+    // writer never drops on its own. Close it through the shared handle instead,
+    // which drops the real `ChildStdin` no matter how many clones exist.
     if matches!(name, "wait" | "wait_with_output") {
+        let stdin_val = fields.borrow().get("stdin").cloned();
+        if let Some(v) = stdin_val {
+            close_child_stdin(&v);
+        }
         if let Some(slot) = fields.borrow_mut().get_mut("stdin") {
             *slot = Value::none();
         }
@@ -2437,13 +2424,13 @@ fn duration_method(fields: &Rc<RefCell<Fields>>, name: &str) -> Result<Value> {
     let nanos = field_int(&f, "nanos") as u32;
     let total_nanos = secs as u128 * 1_000_000_000 + nanos as u128;
     Ok(match name {
-        "as_secs" => Value::Int(secs as i128),
-        "as_millis" => Value::Int((total_nanos / 1_000_000) as i128),
-        "as_micros" => Value::Int((total_nanos / 1_000) as i128),
-        "as_nanos" => Value::Int(total_nanos as i128),
-        "subsec_nanos" => Value::Int(nanos as i128),
-        "subsec_millis" => Value::Int((nanos / 1_000_000) as i128),
-        "subsec_micros" => Value::Int((nanos / 1_000) as i128),
+        "as_secs" => Value::Int(secs as i64),
+        "as_millis" => Value::Int((total_nanos / 1_000_000) as i64),
+        "as_micros" => Value::Int((total_nanos / 1_000) as i64),
+        "as_nanos" => Value::Int(total_nanos as i64),
+        "subsec_nanos" => Value::Int(nanos as i64),
+        "subsec_millis" => Value::Int((nanos / 1_000_000) as i64),
+        "subsec_micros" => Value::Int((nanos / 1_000) as i64),
         "as_secs_f64" => Value::Float(secs as f64 + nanos as f64 / 1e9),
         "is_zero" => Value::Bool(total_nanos == 0),
         _ => bail!("unknown method `{name}` on Duration"),
@@ -2476,7 +2463,7 @@ fn metadata_method(fields: &Rc<RefCell<Fields>>, name: &str, _args: &[Value]) ->
     })
 }
 
-fn field_int(f: &Fields, k: &str) -> i128 {
+fn field_int(f: &Fields, k: &str) -> i64 {
     match f.get(k) {
         Some(Value::Int(i)) => *i,
         _ => 0,
@@ -2517,7 +2504,7 @@ fn str_method(s: &Rc<RefCell<String>>, name: &str, args: &[Value]) -> Result<Val
         args.get(i).map(|v| v.display()).unwrap_or_default()
     };
     Ok(match name {
-        "len" => Value::Int(s.borrow().len() as i128),
+        "len" => Value::Int(s.borrow().len() as i64),
         "is_empty" => Value::Bool(s.borrow().is_empty()),
         "clone" | "to_string" | "to_owned" | "trim_string" => Value::str(s.borrow().clone()),
         "to_uppercase" | "to_ascii_uppercase" => Value::str(s.borrow().to_uppercase()),
@@ -2555,13 +2542,13 @@ fn str_method(s: &Rc<RefCell<String>>, name: &str, args: &[Value]) -> Result<Val
         "split_whitespace" => {
             Value::vec(s.borrow().split_whitespace().map(Value::str).collect())
         }
-        "count" => Value::Int(s.borrow().chars().count() as i128),
+        "count" => Value::Int(s.borrow().chars().count() as i64),
         "as_str" | "as_string" => Value::some(Value::str(s.borrow().clone())),
         "cmp" => make_ordering(s.borrow().as_str().cmp(arg_str(0).as_str())),
         "parse" => {
             let text = s.borrow();
             let t = text.trim();
-            if let Ok(i) = t.parse::<i128>() {
+            if let Ok(i) = t.parse::<i64>() {
                 Value::ok(Value::Int(i))
             } else if let Ok(f) = t.parse::<f64>() {
                 Value::ok(Value::Float(f))
@@ -2616,7 +2603,7 @@ fn color_method(s: &str, name: &str) -> Option<Value> {
 
 fn vec_method(v: &Rc<RefCell<Vec<Value>>>, name: &str, args: &[Value]) -> Result<Value> {
     Ok(match name {
-        "len" => Value::Int(v.borrow().len() as i128),
+        "len" => Value::Int(v.borrow().len() as i64),
         "is_empty" => Value::Bool(v.borrow().is_empty()),
         "clone" => Value::vec(v.borrow().clone()),
         "push" => {
@@ -2684,7 +2671,7 @@ fn vec_method(v: &Rc<RefCell<Vec<Value>>>, name: &str, args: &[Value]) -> Result
             Value::str(joined)
         }
         "sum" => {
-            let mut acc_i = 0i128;
+            let mut acc_i = 0i64;
             let mut acc_f = 0f64;
             let mut is_float = false;
             for x in v.borrow().iter() {
@@ -2704,7 +2691,7 @@ fn vec_method(v: &Rc<RefCell<Vec<Value>>>, name: &str, args: &[Value]) -> Result
             }
         }
         "iter" | "into_iter" | "to_vec" | "collect" | "cloned" => Value::vec(v.borrow().clone()),
-        "count" => Value::Int(v.borrow().len() as i128),
+        "count" => Value::Int(v.borrow().len() as i64),
         "rev" => {
             let mut items = v.borrow().clone();
             items.reverse();
@@ -2715,7 +2702,7 @@ fn vec_method(v: &Rc<RefCell<Vec<Value>>>, name: &str, args: &[Value]) -> Result
                 .iter()
                 .enumerate()
                 .map(|(i, x)| {
-                    Value::Tuple(Rc::new(RefCell::new(vec![Value::Int(i as i128), x.clone()])))
+                    Value::Tuple(Rc::new(RefCell::new(vec![Value::Int(i as i64), x.clone()])))
                 })
                 .collect(),
         ),
@@ -2738,7 +2725,7 @@ fn map_method(m: &Rc<RefCell<BTreeMap<MapKey, Value>>>, name: &str, args: &[Valu
             .ok_or_else(|| anyhow!("invalid map key"))
     };
     Ok(match name {
-        "len" => Value::Int(m.borrow().len() as i128),
+        "len" => Value::Int(m.borrow().len() as i64),
         "is_empty" => Value::Bool(m.borrow().is_empty()),
         "clone" => Value::Map(Rc::new(RefCell::new(m.borrow().clone()))),
         "insert" => {
@@ -2897,7 +2884,7 @@ fn res_method(recv: &Value, name: &str, args: &[Value]) -> Result<Value> {
     })
 }
 
-fn int_arg(args: &[Value], i: usize) -> Result<i128> {
+fn int_arg(args: &[Value], i: usize) -> Result<i64> {
     match args.get(i) {
         Some(Value::Int(n)) => Ok(*n),
         _ => bail!("expected an integer argument"),
@@ -2917,7 +2904,7 @@ fn sort_key(v: &Value) -> SortKey {
     match v {
         Value::Int(i) => SortKey::Int(*i),
         Value::Float(f) => SortKey::Float(*f),
-        Value::Bool(b) => SortKey::Int(*b as i128),
+        Value::Bool(b) => SortKey::Int(*b as i64),
         Value::Str(s) => SortKey::Str(s.borrow().clone()),
         Value::Char(c) => SortKey::Str(c.to_string()),
         Value::Tuple(items) | Value::Vec(items) => {
@@ -2929,7 +2916,7 @@ fn sort_key(v: &Value) -> SortKey {
 
 #[derive(PartialEq)]
 enum SortKey {
-    Int(i128),
+    Int(i64),
     Float(f64),
     Str(String),
     List(Vec<SortKey>),
