@@ -1,4 +1,4 @@
-const n = 250000;
+const n = process.argv[2] ? parseInt(process.argv[2], 10) : 250000;
 const t = performance.now();
 const isPrime = new Uint8Array(n + 1).fill(1);
 isPrime[0] = 0;

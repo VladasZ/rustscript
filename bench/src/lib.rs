@@ -1,5 +1,5 @@
 //! Shared types for the benchmark report, written by `bench` and read by
-//! `chart`. All times are in seconds.
+//! `chart`. All times are in seconds, memory in bytes.
 
 use serde::{Deserialize, Serialize};
 
@@ -22,13 +22,30 @@ pub struct CompStat {
     pub median: f64,
 }
 
+/// Peak resident set size of one run, the max over samples.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct MemStat {
+    pub lang: String,
+    pub rss_bytes: u64,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct CaseResult {
     pub name: String,
-    /// "startup" for hello, "compute" for the rest.
+    /// "startup" for hello and big_script, "compute" for the rest.
     pub kind: String,
+    /// "base" or "big". The big tier runs the same case at 10x size, where
+    /// startup and JIT warmup stop dominating.
+    #[serde(default = "default_tier")]
+    pub tier: String,
     pub wall: Vec<WallStat>,
     pub compute: Vec<CompStat>,
+    #[serde(default)]
+    pub mem: Vec<MemStat>,
+}
+
+fn default_tier() -> String {
+    "base".to_string()
 }
 
 impl CaseResult {
@@ -37,6 +54,9 @@ impl CaseResult {
     }
     pub fn compute_of(&self, lang: &str) -> Option<&CompStat> {
         self.compute.iter().find(|c| c.lang == lang)
+    }
+    pub fn mem_of(&self, lang: &str) -> Option<&MemStat> {
+        self.mem.iter().find(|m| m.lang == lang)
     }
 }
 
@@ -48,8 +68,22 @@ pub struct Gate {
     pub warm_mean: f64,
 }
 
+/// What produced the numbers, so old and new runs stay comparable.
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct Meta {
+    pub date_unix: u64,
+    pub rustc: String,
+    pub node: String,
+    pub python: String,
+    pub os: String,
+    pub arch: String,
+    pub cpu: String,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Report {
+    #[serde(default)]
+    pub meta: Meta,
     pub cases: Vec<CaseResult>,
     pub gate: Gate,
 }

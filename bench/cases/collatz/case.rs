@@ -15,7 +15,8 @@ fn steps(start: u64) -> u64 {
 }
 
 fn main() {
-    let limit: u64 = 10_000;
+    let args: Vec<String> = std::env::args().collect();
+    let limit: u64 = if args.len() > 1 { args[1].parse().unwrap() } else { 10_000 };
     let t = Instant::now();
     let mut total: u64 = 0;
     for i in 1..=limit {

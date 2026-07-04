@@ -1174,6 +1174,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "plotters",
+ "regex",
  "serde",
  "serde_json",
 ]

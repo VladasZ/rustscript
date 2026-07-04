@@ -6,10 +6,12 @@ normal release binary works.
 
 ## Getting a useful sample
 
-The bench cases in `bench/cases/` finish in 30-150 ms, which is too short for
-`sample` to catch anything but process startup. Make a temporary variant of
-the case that repeats the work about 10 times in a loop, or raise the input
-size until the run takes 1-2 seconds. Keep these variants out of the repo.
+The bench cases in `bench/cases/` finish in 30-150 ms at their default sizes,
+which is too short for `sample` to catch anything but process startup. Every
+sized case takes the size as its single argument, so pass one big enough that
+the run takes 1-2 seconds, for example `sort/case.rs 2000000`. For the file
+driven cases pass the gitignored `data_big.*` input, regenerate it with
+`cargo run --bin gendata -- --big` from `bench/`.
 
 ```sh
 cargo build --release -p rustscript

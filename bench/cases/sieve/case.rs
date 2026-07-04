@@ -1,7 +1,8 @@
 use std::time::Instant;
 
 fn main() {
-    let n: usize = 250_000;
+    let args: Vec<String> = std::env::args().collect();
+    let n: usize = if args.len() > 1 { args[1].parse().unwrap() } else { 250_000 };
     let t = Instant::now();
     let mut is_prime = vec![true; n + 1];
     is_prime[0] = false;

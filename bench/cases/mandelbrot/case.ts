@@ -1,5 +1,6 @@
-const w = 140;
-const h = 140;
+const size = process.argv[2] ? parseInt(process.argv[2], 10) : 140;
+const w = size;
+const h = size;
 const maxIter = 140;
 const t = performance.now();
 let count = 0;
