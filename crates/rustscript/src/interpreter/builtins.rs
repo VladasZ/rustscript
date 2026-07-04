@@ -1,11 +1,10 @@
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use anyhow::{Result, bail};
 
 use super::bytecode::{Chunk, MethodName, Op};
 
-use super::value::{ClosureData, Fields, Value};
+use super::value::{ClosureData, StructShape, Value};
 use super::Interp;
 
 use super::crates_bridge::*;
@@ -131,12 +130,7 @@ impl Interp {
         if ns == "thread" && last == "spawn" {
             let clo = as_closure(args.first())?;
             let result = self.call_closure(&clo, &[])?;
-            let mut f = Fields::default();
-            f.insert("result".into(), result);
-            return Ok(Value::Struct {
-                name: "JoinHandle".into(),
-                fields: Rc::new(RefCell::new(f)),
-            });
+            return Ok(Value::struct_of("JoinHandle", [("result".into(), result)]));
         }
         if let Some(v) = native_call(ns, last, &args)? {
             return Ok(v);
@@ -156,7 +150,7 @@ impl Interp {
     }
 
     /// Expand the first path segment through the `use` table.
-    fn canonical(&self, segs: &[String]) -> Vec<String> {
+    pub(super) fn canonical(&self, segs: &[String]) -> Vec<String> {
         if let Some(full) = self.uses.get(&segs[0]) {
             let mut out = full.clone();
             out.extend_from_slice(&segs[1..]);
@@ -167,14 +161,8 @@ impl Interp {
     }
 
     fn make_tuple_struct(&self, name: &str, args: Vec<Value>) -> Result<Value> {
-        let mut fields = Fields::default();
-        for (i, v) in args.into_iter().enumerate() {
-            fields.insert(i.to_string().into(), v);
-        }
-        Ok(Value::Struct {
-            name: name.into(),
-            fields: Rc::new(RefCell::new(fields)),
-        })
+        let fields = (0..args.len()).map(|i| i.to_string().into()).collect();
+        Ok(Value::structure(StructShape::new(name, fields), args))
     }
 
     fn make_tuple_variant(
@@ -213,7 +201,7 @@ impl Interp {
         // script defined any at all, so skip the keyed lookup otherwise.
         if !self.methods.is_empty() {
             let type_name = match recv {
-                Value::Struct { name, .. } => Some(name.clone()),
+                Value::Struct(s) => Some(s.name().clone()),
                 Value::Enum { enum_name, .. } => Some(enum_name.clone()),
                 _ => None,
             };
@@ -314,43 +302,37 @@ pub(super) fn builtin_method(recv: &Value, method: &MethodName, args: &mut [Valu
         Value::Enum { enum_name, .. } if &**enum_name == "Result" => {
             res_method(recv, method, &*args)
         }
-        Value::Struct { name: n, fields } => match &**n {
-            "Duration" => duration_method(fields, name),
-            "Metadata" => metadata_method(fields, name, &*args),
-            "Permissions" => {
-                let f = fields.borrow();
-                match name {
-                    "mode" => Ok(f.get("mode").cloned().unwrap_or(Value::Int(0))),
-                    "readonly" => Ok(f.get("readonly").cloned().unwrap_or(Value::Bool(false))),
-                    "set_readonly" => Ok(Value::Unit),
-                    _ => bail!("unknown method `{name}` on Permissions"),
-                }
-            }
-            "Command" => command_method(fields, name, &*args),
-            "ExitStatus" => exitstatus_method(fields, name),
+        Value::Struct(s) => match &**s.name() {
+            "Duration" => duration_method(s, name),
+            "Metadata" => metadata_method(s, name, &*args),
+            "Permissions" => match name {
+                "mode" => Ok(s.get("mode").unwrap_or(Value::Int(0))),
+                "readonly" => Ok(s.get("readonly").unwrap_or(Value::Bool(false))),
+                "set_readonly" => Ok(Value::Unit),
+                _ => bail!("unknown method `{name}` on Permissions"),
+            },
+            "Command" => command_method(s, name, &*args),
+            "ExitStatus" => exitstatus_method(s, name),
             "HttpRequest" | "HttpResponse" | "HttpBody" | "StatusCode" => {
-                http_method(n, fields, name, &*args)
+                http_method(s, name, &*args)
             }
-            "StdStream" => std_stream_method(fields, name, args),
+            "StdStream" => std_stream_method(s, name, args),
             "Rng" => rng_method(name, &*args),
-            "DateTime" => datetime_method(fields, name, &*args),
-            "Base64Engine" => base64_method(fields, name, &*args),
-            "Entry" => entry_method(fields, name, &*args),
-            "JoinHandle" => {
-                let f = fields.borrow();
-                match name {
-                    "join" => Ok(Value::ok(f.get("result").cloned().unwrap_or(Value::Unit))),
-                    "is_finished" => Ok(Value::Bool(true)),
-                    _ => bail!("unknown method `{name}` on JoinHandle"),
-                }
-            }
-            "Child" => child_method(fields, name, args),
-            "Path" => path_method(fields, name, &*args),
-            "DirEntry" => dir_entry_method(fields, name),
-            "FileType" => file_type_method(fields, name),
-            "Regex" => regex_method(fields, name, &*args),
-            "Match" => match_method(fields, name),
-            "Captures" => captures_method(fields, name, &*args),
+            "DateTime" => datetime_method(s, name, &*args),
+            "Base64Engine" => base64_method(s, name, &*args),
+            "Entry" => entry_method(s, name, &*args),
+            "JoinHandle" => match name {
+                "join" => Ok(Value::ok(s.get("result").unwrap_or(Value::Unit))),
+                "is_finished" => Ok(Value::Bool(true)),
+                _ => bail!("unknown method `{name}` on JoinHandle"),
+            },
+            "Child" => child_method(s, name, args),
+            "Path" => path_method(s, name, &*args),
+            "DirEntry" => dir_entry_method(s, name),
+            "FileType" => file_type_method(s, name),
+            "Regex" => regex_method(s, name, &*args),
+            "Match" => match_method(s, name),
+            "Captures" => captures_method(s, name, &*args),
             _ => generic_method(recv, name, &*args),
         },
         _ => generic_method(recv, name, &*args),

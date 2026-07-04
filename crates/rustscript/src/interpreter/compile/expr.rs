@@ -4,12 +4,36 @@
 use anyhow::{Result, anyhow, bail};
 use syn::{BinOp, Block, Expr, Lit, Pat, Stmt, UnOp};
 
+use std::rc::Rc;
+
 use crate::interpreter::bytecode::{
-    BinKind, Op, Reg, UnKind,
+    BinKind, DISCARD, Op, Reg, UnKind,
 };
 use crate::interpreter::value::Value;
 
 use super::*;
+
+/// The `from_str` call at the root of a `let` init chain, looking through
+/// `?`, `unwrap`, and `expect`. Only a call without its own turbofish counts.
+fn from_str_root(e: &Expr) -> Option<&syn::ExprCall> {
+    match e {
+        Expr::Call(c) => {
+            let Expr::Path(p) = &*c.func else { return None };
+            let seg = p.path.segments.last()?;
+            if seg.ident != "from_str" || first_generic_type(seg).is_some() {
+                return None;
+            }
+            Some(c)
+        }
+        Expr::Try(t) => from_str_root(&t.expr),
+        Expr::Paren(p) => from_str_root(&p.expr),
+        Expr::Group(g) => from_str_root(&g.expr),
+        Expr::MethodCall(m) if m.method == "unwrap" || m.method == "expect" => {
+            from_str_root(&m.receiver)
+        }
+        _ => None,
+    }
+}
 
 impl Compiler<'_> {
     pub(super) fn compile_block(&mut self, block: &Block, dst: Reg) -> Result<()> {
@@ -30,13 +54,29 @@ impl Compiler<'_> {
             match stmt {
                 Stmt::Local(local) => {
                     let val = self.alloc();
+                    // An annotated `let` whose init chain roots in a
+                    // `from_str` call hands its type to that call, so the
+                    // parse is typed at the source and no coerce op is
+                    // needed afterwards.
+                    let mut offered = false;
+                    if let Pat::Type(t) = &local.pat
+                        && let Some(init) = &local.init
+                        && let Some(call) = from_str_root(&init.expr)
+                    {
+                        self.json_let = Some((call as *const _, Rc::new((*t.ty).clone())));
+                        offered = true;
+                    }
                     match &local.init {
                         Some(init) => self.compile_into(val, &init.expr)?,
                         None => self.emit(Op::LoadUnit { dst: val }),
                     }
+                    let consumed = offered && self.json_let.is_none();
+                    self.json_let = None;
                     // A type annotation coerces a dynamic value into that type.
                     if let Pat::Type(t) = &local.pat {
-                        self.emit_coerce(val, &t.ty);
+                        if !consumed {
+                            self.emit_coerce(val, &t.ty);
+                        }
                         self.bind_pattern_irrefutable(&t.pat, val)?;
                     } else {
                         self.bind_pattern_irrefutable(&local.pat, val)?;
@@ -49,8 +89,14 @@ impl Compiler<'_> {
                     if is_last && semi.is_none() {
                         self.compile_into(dst, expr)?;
                     } else {
-                        let tmp = self.alloc();
-                        self.compile_into(tmp, expr)?;
+                        // A statement position method call discards its result,
+                        // so the VM can skip building it.
+                        if let Expr::MethodCall(m) = expr {
+                            self.compile_method(DISCARD, m)?;
+                        } else {
+                            let tmp = self.alloc();
+                            self.compile_into(tmp, expr)?;
+                        }
                         if is_last {
                             self.emit(Op::LoadUnit { dst });
                         }

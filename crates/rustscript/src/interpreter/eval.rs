@@ -7,16 +7,17 @@ use std::rc::Rc;
 
 use anyhow::{Result, anyhow, bail};
 
-use super::value::{KeyRef, Map, Value, fields_with_capacity};
+use super::value::{KeyRef, Map, StructShape, Value};
 use super::Interp;
 
 /// Field layout of a user struct, built once per struct and reused for every
 /// coerced instance so field names are shared instead of re-allocated.
 pub(super) struct Shape {
-    pub name: Rc<str>,
-    /// Field name plus its type when coercion can change the value. None means
+    /// Runtime layout shared by every instance built from this shape.
+    pub runtime: Rc<StructShape>,
+    /// Per field, its type when coercion can change the value. None means
     /// the type is a primitive and coercion is a no-op, skipped per instance.
-    pub fields: Vec<(Rc<str>, Option<syn::Type>)>,
+    pub coerce: Vec<Option<syn::Type>>,
 }
 
 impl Interp {
@@ -105,20 +106,21 @@ impl Interp {
     }
 
     /// Cached field layout for a known struct, built on first use.
-    fn struct_shape(&self, name: &str) -> Option<Rc<Shape>> {
+    pub(super) fn struct_shape(&self, name: &str) -> Option<Rc<Shape>> {
         if let Some(shape) = self.shapes.borrow().get(name) {
             return Some(shape.clone());
         }
         let def = self.structs().get(name)?.clone();
-        let mut fields = Vec::new();
+        let mut fields: Vec<Rc<str>> = Vec::new();
+        let mut coerce = Vec::new();
         if let syn::Fields::Named(named) = &def.fields {
             for f in &named.named {
                 let Some(ident) = &f.ident else { continue };
-                let ty = self.field_needs_coerce(&f.ty).then(|| f.ty.clone());
-                fields.push((ident.to_string().into(), ty));
+                fields.push(ident.to_string().into());
+                coerce.push(self.field_needs_coerce(&f.ty).then(|| f.ty.clone()));
             }
         }
-        let shape = Rc::new(Shape { name: name.into(), fields });
+        let shape = Rc::new(Shape { runtime: StructShape::new(name, fields), coerce });
         self.shapes.borrow_mut().insert(name.to_string(), shape.clone());
         Some(shape)
     }
@@ -134,8 +136,8 @@ impl Interp {
     }
 
     fn struct_from_map(&self, shape: &Shape, map: &Map) -> Value {
-        let mut fields = fields_with_capacity(shape.fields.len());
-        for (fname, ty) in &shape.fields {
+        let mut values = Vec::with_capacity(shape.coerce.len());
+        for (fname, ty) in shape.runtime.fields.iter().zip(&shape.coerce) {
             let raw = map
                 .get(&KeyRef::Str(fname))
                 .cloned()
@@ -144,9 +146,9 @@ impl Interp {
                 Some(t) => self.coerce_value(raw, t),
                 None => raw,
             };
-            fields.insert(fname.clone(), coerced);
+            values.push(coerced);
         }
-        Value::Struct { name: shape.name.clone(), fields: Rc::new(RefCell::new(fields)) }
+        Value::structure(shape.runtime.clone(), values)
     }
 
     /// Expand any iterable into a concrete list of items.
@@ -249,8 +251,8 @@ impl Interp {
                     .ok_or_else(|| anyhow!("{} is not a valid map key", key.type_name()))?;
                 map.borrow().get(&k).cloned().ok_or_else(|| anyhow!("key not found"))?
             }
-            Value::Struct { name, fields } if &**name == "Captures" => {
-                super::regex_bridge::capture_index(fields, key)?
+            Value::Struct(s) if &**s.name() == "Captures" => {
+                super::regex_bridge::capture_index(s, key)?
             }
             other => bail!("cannot index {}", other.type_name()),
         })
@@ -278,19 +280,18 @@ impl Interp {
     pub(super) fn get_field(&self, base: &Value, member: &super::bytecode::Member) -> Result<Value> {
         use super::bytecode::Member;
         match (base, member) {
-            (Value::Struct { fields, .. }, Member::Named(name)) => fields
-                .borrow()
-                .get(name)
-                .cloned()
-                .ok_or_else(|| anyhow!("no field `{name}`")),
+            (Value::Struct(s), Member::Named(name)) => {
+                s.get(name).ok_or_else(|| anyhow!("no field `{name}`"))
+            }
             (Value::Tuple(items), Member::Indexed(i)) => items
                 .borrow()
                 .get(*i)
                 .cloned()
                 .ok_or_else(|| anyhow!("no field `{i}`")),
-            (Value::Struct { fields, .. }, Member::Indexed(i)) => fields
+            (Value::Struct(s), Member::Indexed(i)) => s
+                .values
                 .borrow()
-                .get(i.to_string().as_str())
+                .get(*i)
                 .cloned()
                 .ok_or_else(|| anyhow!("no field `{i}`")),
             (b, _) => bail!("cannot access field of {}", b.type_name()),
@@ -300,11 +301,17 @@ impl Interp {
     pub(super) fn set_field(&self, base: &Value, member: &super::bytecode::Member, val: Value) -> Result<()> {
         use super::bytecode::Member;
         match (base, member) {
-            (Value::Struct { fields, .. }, Member::Named(name)) => {
-                fields.borrow_mut().insert(name.clone(), val);
+            (Value::Struct(s), Member::Named(name)) => {
+                if !s.set(name, val) {
+                    bail!("no field `{name}`");
+                }
             }
-            (Value::Struct { fields, .. }, Member::Indexed(i)) => {
-                fields.borrow_mut().insert(i.to_string().into(), val);
+            (Value::Struct(s), Member::Indexed(i)) => {
+                let mut values = s.values.borrow_mut();
+                match values.get_mut(*i) {
+                    Some(slot) => *slot = val,
+                    None => bail!("no field `{i}`"),
+                }
             }
             (Value::Tuple(items), Member::Indexed(i)) => {
                 items.borrow_mut()[*i] = val;

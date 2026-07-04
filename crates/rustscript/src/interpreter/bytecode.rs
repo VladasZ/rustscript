@@ -9,6 +9,11 @@ use super::value::Value;
 
 pub type Reg = u16;
 
+/// Sentinel destination for a method call whose result a statement discards.
+/// The VM skips building and writing the return value, which lets hot ops
+/// like map insert avoid allocating a `Some(old)` nobody reads.
+pub const DISCARD: Reg = Reg::MAX;
+
 /// Binary operators, kept separate from `syn` so the hot loop carries no parse
 /// tree types.
 #[derive(Clone, Copy, Debug)]
@@ -54,12 +59,11 @@ pub enum CapSource {
 }
 
 /// A struct literal, fields already ordered to match the declaration so
-/// serialization matches the compiler. Names are shared `Rc<str>` so building
-/// an instance clones a pointer, not a string.
+/// serialization matches the compiler. The shape is built once at compile
+/// time and shared by every instance the literal creates.
 pub struct StructLit {
-    pub name: Rc<str>,
     /// Field names in the register order `base..base+fields.len()`.
-    pub fields: Vec<Rc<str>>,
+    pub shape: Rc<super::value::StructShape>,
     /// Whether a trailing `..rest` value sits in the register after the fields.
     pub has_rest: bool,
 }
@@ -313,6 +317,10 @@ pub enum Op {
     PathValue { dst: Reg, path: u16 },
     /// `recv.method(args)`.
     Method { dst: Reg, recv: Reg, name: u16, base: Reg, argc: u16 },
+    /// Fused `recv.get(key).copied().unwrap_or(default)`. One probe, no
+    /// intermediate Option built. Falls back to the three real methods for
+    /// receivers that are not a map or a vector.
+    GetOrDefault { dst: Reg, recv: Reg, key: Reg, default: Reg },
     Ret { src: Reg },
 
     MakeVec { dst: Reg, base: Reg, count: u16 },

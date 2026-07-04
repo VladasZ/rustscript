@@ -108,6 +108,11 @@ pub struct Compiler<'a> {
     ctx: &'a Ctx,
     frames: Vec<FnState>,
     loops: Vec<LoopCtx>,
+    /// A `let x: T = from_str(..)...` annotation waiting to attach to that
+    /// exact `from_str` call, keyed by the call's address so a nested call
+    /// inside its arguments cannot steal it. Lets the typed json path run
+    /// without a turbofish.
+    pub(super) json_let: Option<(*const syn::ExprCall, Rc<syn::Type>)>,
 }
 
 /// Where a referenced name lives.
@@ -120,7 +125,7 @@ enum NameLoc {
 
 impl<'a> Compiler<'a> {
     pub fn new(ctx: &'a Ctx) -> Compiler<'a> {
-        Compiler { ctx, frames: Vec::new(), loops: Vec::new() }
+        Compiler { ctx, frames: Vec::new(), loops: Vec::new(), json_let: None }
     }
 
     /// Compile a top level function or a method body into a chunk.

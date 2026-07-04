@@ -227,8 +227,8 @@ pub(super) fn try_bind(pat: &Pat, val: &Value, define: &mut dyn FnMut(&str, Valu
                     name.as_deref() == Some(&**variant)
                         && bind_seq(ts.elems.iter(), data, define)
                 }
-                Value::Struct { fields, .. } => {
-                    let vals: Vec<Value> = fields.borrow().values().cloned().collect();
+                Value::Struct(st) => {
+                    let vals: Vec<Value> = st.values.borrow().clone();
                     bind_seq(ts.elems.iter(), &vals, define)
                 }
                 _ => false,
@@ -243,14 +243,14 @@ pub(super) fn try_bind(pat: &Pat, val: &Value, define: &mut dyn FnMut(&str, Valu
         }
         Pat::Struct(s) => {
             let name = s.path.segments.last().map(|s| s.ident.to_string());
-            let fields = match val {
-                Value::Struct { name: n, fields } => {
+            let st = match val {
+                Value::Struct(st) => {
                     if let Some(pn) = &name
-                        && pn.as_str() != &**n
+                        && pn.as_str() != &**st.name()
                     {
                         return false;
                     }
-                    fields.borrow()
+                    st
                 }
                 _ => return false,
             };
@@ -259,9 +259,9 @@ pub(super) fn try_bind(pat: &Pat, val: &Value, define: &mut dyn FnMut(&str, Valu
                     syn::Member::Named(n) => n.to_string(),
                     syn::Member::Unnamed(i) => i.index.to_string(),
                 };
-                match fields.get(key.as_str()) {
+                match st.get(&key) {
                     Some(v) => {
-                        if !try_bind(&f.pat, v, define) {
+                        if !try_bind(&f.pat, &v, define) {
                             return false;
                         }
                     }

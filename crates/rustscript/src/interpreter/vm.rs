@@ -11,8 +11,8 @@ use std::rc::Rc;
 
 use anyhow::{Result, bail};
 
-use super::bytecode::{BuiltinId, CapSource, Chunk, MacroKind, Op};
-use super::value::{ClosureData, Value, fields_with_capacity};
+use super::bytecode::{BuiltinId, CapSource, Chunk, DISCARD, MacroKind, MethodName, Op};
+use super::value::{ClosureData, StructShape, Value};
 use super::Interp;
 
 /// Guard against runaway recursion, since script calls no longer consume the
@@ -236,6 +236,20 @@ impl Interp {
                         set_reg(&mut stack[base + dst as usize], v);
                     } else {
                         let args = take_range(stack, base + abase, argc);
+                        // Typed json parses straight into the target structs,
+                        // no generic tree and no coercion pass afterwards.
+                        if let Some(ty) = coerce {
+                            let canon = self.canonical(segs);
+                            if canon.len() >= 2
+                                && canon[canon.len() - 2] == "serde_json"
+                                && canon[canon.len() - 1] == "from_str"
+                            {
+                                let v = self.typed_from_str(&args, ty)?;
+                                set_reg(&mut stack[base + dst as usize], v);
+                                ip += 1;
+                                continue;
+                            }
+                        }
                         let mut v = self.dispatch_call(segs, args)?;
                         if let Some(ty) = coerce {
                             v = self.coerce_result(v, ty);
@@ -270,7 +284,9 @@ impl Interp {
                             }
                         }
                         set_reg(&mut stack[base + recv], Value::Str(buf));
-                        set_reg(&mut stack[base + dst as usize], Value::Unit);
+                        if dst != DISCARD {
+                            set_reg(&mut stack[base + dst as usize], Value::Unit);
+                        }
                         ip += 1;
                         continue;
                     }
@@ -319,7 +335,9 @@ impl Interp {
                                     }
                                 }
                             };
-                            set_reg(&mut stack[base + dst as usize], v);
+                            if dst != DISCARD {
+                                set_reg(&mut stack[base + dst as usize], v);
+                            }
                             ip += 1;
                             continue;
                         }
@@ -329,8 +347,10 @@ impl Interp {
                     if matches!(name.id, BuiltinId::ToString | BuiltinId::Clone)
                         && let Value::Str(v) = &stack[base + recv]
                     {
-                        let v = Value::Str(v.clone());
-                        set_reg(&mut stack[base + dst as usize], v);
+                        if dst != DISCARD {
+                            let v = Value::Str(v.clone());
+                            set_reg(&mut stack[base + dst as usize], v);
+                        }
                         ip += 1;
                         continue;
                     }
@@ -353,9 +373,14 @@ impl Interp {
                                     bail!("invalid map key")
                                 };
                                 let val = if argc > 1 { take(&mut hi[1]) } else { Value::Unit };
-                                match m.borrow_mut().insert(k, val) {
-                                    Some(old) => Value::some(old),
-                                    None => Value::none(),
+                                let old = m.borrow_mut().insert(k, val);
+                                if dst == DISCARD {
+                                    Value::Unit
+                                } else {
+                                    match old {
+                                        Some(old) => Value::some(old),
+                                        None => Value::none(),
+                                    }
                                 }
                             }
                             _ => {
@@ -372,7 +397,9 @@ impl Interp {
                                 }
                             }
                         };
-                        set_reg(&mut stack[base + dst as usize], v);
+                        if dst != DISCARD {
+                            set_reg(&mut stack[base + dst as usize], v);
+                        }
                         ip += 1;
                         continue;
                     }
@@ -389,7 +416,45 @@ impl Interp {
                         let recv_v = stack[base + recv].clone();
                         self.eval_method(&recv_v, name, &mut stack[s..s + argc])?
                     };
-                    set_reg(&mut stack[base + dst as usize], v);
+                    if dst != DISCARD {
+                        set_reg(&mut stack[base + dst as usize], v);
+                    }
+                }
+                Op::GetOrDefault { dst, recv, key, default } => {
+                    let (r, k) = (base + *recv as usize, base + *key as usize);
+                    let df = base + *default as usize;
+                    // Key and default may live in variable registers, so they
+                    // are cloned, never taken.
+                    let v = match &stack[r] {
+                        Value::Map(m) => {
+                            let Some(kr) = stack[k].key_ref() else {
+                                bail!("invalid map key")
+                            };
+                            m.borrow().get(&kr).cloned()
+                        }
+                        Value::Vec(items) => match &stack[k] {
+                            Value::Int(i) => {
+                                usize::try_from(*i).ok().and_then(|i| items.borrow().get(i).cloned())
+                            }
+                            other => bail!("cannot index a vector with {}", other.type_name()),
+                        },
+                        _ => {
+                            let recv_v = stack[r].clone();
+                            let get = MethodName { text: "get".into(), id: BuiltinId::Get };
+                            let opt = self.eval_method(&recv_v, &get, &mut [stack[k].clone()])?;
+                            let copied =
+                                MethodName { text: "copied".into(), id: BuiltinId::Copied };
+                            let opt = self.eval_method(&opt, &copied, &mut [])?;
+                            let uo =
+                                MethodName { text: "unwrap_or".into(), id: BuiltinId::UnwrapOr };
+                            Some(self.eval_method(&opt, &uo, &mut [stack[df].clone()])?)
+                        }
+                    };
+                    let v = match v {
+                        Some(v) => v,
+                        None => stack[df].clone(),
+                    };
+                    set_reg(&mut stack[base + *dst as usize], v);
                 }
                 Op::Ret { src } => {
                     let v = take(&mut stack[base + *src as usize]);
@@ -461,24 +526,30 @@ impl Interp {
                 Op::MakeStruct { dst, info, base: wbase } => {
                     let (dst, wbase) = (*dst, *wbase as usize);
                     let lit = &cur.struct_lits[*info as usize];
-                    let mut fields = fields_with_capacity(lit.fields.len());
-                    for (k, name) in lit.fields.iter().enumerate() {
-                        fields.insert(name.clone(), take(&mut stack[base + wbase + k]));
-                    }
-                    if lit.has_rest {
-                        let rest = &stack[base + wbase + lit.fields.len()];
-                        if let Value::Struct { fields: bf, .. } = rest {
-                            for (k, v) in bf.borrow().iter() {
-                                if !fields.contains_key(k) {
-                                    fields.insert(k.clone(), v.clone());
+                    let written = lit.shape.fields.len();
+                    let mut values: Vec<Value> = (0..written)
+                        .map(|k| take(&mut stack[base + wbase + k]))
+                        .collect();
+                    // The shape is prebuilt at compile time and shared by every
+                    // instance from this literal. A `..rest` adds fields the
+                    // literal did not write, so that case builds a merged shape.
+                    let v = if lit.has_rest {
+                        let rest = &stack[base + wbase + written];
+                        let mut fields = lit.shape.fields.clone();
+                        if let Value::Struct(r) = rest {
+                            let rvals = r.values.borrow();
+                            for (k, v) in r.shape.fields.iter().zip(rvals.iter()) {
+                                if lit.shape.slot(k).is_none() {
+                                    fields.push(k.clone());
+                                    values.push(v.clone());
                                 }
                             }
                         }
-                    }
-                    set_reg(
-                        &mut stack[base + dst as usize],
-                        Value::Struct { name: lit.name.clone(), fields: Rc::new(RefCell::new(fields)) },
-                    );
+                        Value::structure(StructShape::new(lit.shape.name.clone(), fields), values)
+                    } else {
+                        Value::structure(lit.shape.clone(), values)
+                    };
+                    set_reg(&mut stack[base + dst as usize], v);
                 }
                 Op::MakeClosure { dst, child } => {
                     let child_chunk = cur.children[*child as usize].clone();

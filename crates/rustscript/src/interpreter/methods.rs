@@ -9,19 +9,18 @@ use anyhow::{Result, anyhow, bail};
 
 use super::bytecode::{BuiltinId, MethodName};
 
-use super::value::{Fields, Map, RStr, Value};
+use super::value::{Map, RStr, StructData, Value};
 
 use super::builtins::*;
 
 
 /// `map.entry(k).or_insert_with(Vec::new).push(x)` accumulates in place.
-pub(super) fn entry_method(fields: &Rc<RefCell<Fields>>, name: &str, args: &[Value]) -> Result<Value> {
-    let f = fields.borrow();
-    let key = f
+pub(super) fn entry_method(s: &StructData, name: &str, args: &[Value]) -> Result<Value> {
+    let key = s
         .get("key")
         .and_then(|k| k.as_key())
         .ok_or_else(|| anyhow!("invalid entry key"))?;
-    let Some(Value::Map(m)) = f.get("map") else {
+    let Some(Value::Map(m)) = s.get("map") else {
         bail!("entry lost its map");
     };
     Ok(match name {
@@ -313,15 +312,13 @@ pub(super) fn map_method(m: &Rc<RefCell<Map>>, method: &MethodName, args: &mut [
         }
         B::Keys => Value::vec(m.borrow().keys().map(|k| k.to_value()).collect()),
         B::Values => Value::vec(m.borrow().values().cloned().collect()),
-        B::Entry => {
-            let mut f = Fields::default();
-            f.insert("map".into(), Value::Map(m.clone()));
-            f.insert("key".into(), args.first().cloned().unwrap_or(Value::Unit));
-            Value::Struct {
-                name: "Entry".into(),
-                fields: Rc::new(RefCell::new(f)),
-            }
-        }
+        B::Entry => Value::struct_of(
+            "Entry",
+            [
+                ("map".into(), Value::Map(m.clone())),
+                ("key".into(), args.first().cloned().unwrap_or(Value::Unit)),
+            ],
+        ),
         B::Iter => map_pairs(m),
         _ => match method.text.as_str() {
             "values_mut" => Value::vec(m.borrow().values().cloned().collect()),
