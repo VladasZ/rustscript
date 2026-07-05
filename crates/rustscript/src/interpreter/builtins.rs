@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use anyhow::{Result, bail};
 
-use super::bytecode::{Chunk, MethodName, Op};
+use super::bytecode::{BuiltinId, Chunk, MethodName, Op};
 
 use super::value::{ClosureData, StructShape, Value};
 use super::Interp;
@@ -83,12 +83,15 @@ impl Interp {
         if let Some(v) = jwt_algorithm(ty, last) {
             return Ok(v);
         }
-        // A bare constructor path used as a value, e.g. `Vec::new` handed to
-        // `or_insert_with`. Wrap it in a zero-argument closure that calls it.
+        // A path used as a function value. A zero-arg constructor like
+        // `Vec::new` handed to `or_insert_with` becomes a nullary closure.
+        // Anything else, a method reference like `str::trim` or a one-arg
+        // constructor like `PathBuf::from`, becomes a one-arg closure that
+        // forwards its argument to the path call.
         if matches!(last.as_str(), "new" | "default") {
-            return Ok(zero_arg_call_closure(segs.to_vec()));
+            return Ok(path_call_closure(segs.to_vec(), 0));
         }
-        bail!("unsupported path `{}`", segs.join("::"));
+        Ok(path_call_closure(segs.to_vec(), 1))
     }
 
     fn unit_variant(&self, enum_name: Option<&str>, variant: &str) -> Option<Value> {
@@ -170,6 +173,16 @@ impl Interp {
         }
         if let Some(v) = self.make_tuple_variant(Some(ns), last, &args) {
             return v;
+        }
+        // UFCS fallback: `Type::method(recv, ..)` dispatches `method` on the
+        // receiver. This is what makes a method reference used as a value, like
+        // `str::trim` handed to `map`, callable, since the path call forwards
+        // its argument here.
+        if let Some((recv, rest)) = args.split_first() {
+            let recv = recv.clone();
+            let mut rest = rest.to_vec();
+            let name = MethodName { id: BuiltinId::resolve(last), text: last.clone() };
+            return self.eval_method(&recv, &name, &mut rest);
         }
         bail!("unsupported call `{}`", canon.join("::"));
     }
@@ -268,12 +281,18 @@ pub(super) fn option_inner(v: &Value) -> Option<Value> {
 
 /// A zero-argument closure that runs a constructor path like `Vec::new`, for
 /// use as a value handed to `or_insert_with`.
-pub(super) fn zero_arg_call_closure(segs: Vec<String>) -> Value {
-    let mut chunk = Chunk::empty("<ctor>");
-    chunk.num_regs = 1;
+// A path used as a function value, wrapped in a closure that forwards its
+// `num_params` arguments to the path call. `num_params` is 0 for a constructor
+// like `Vec::new` and 1 for a method reference or one-arg constructor.
+pub(super) fn path_call_closure(segs: Vec<String>, num_params: usize) -> Value {
+    let dst = num_params as u16;
+    let mut chunk = Chunk::empty("<pathfn>");
+    chunk.num_params = num_params;
+    chunk.num_regs = num_params + 1;
     chunk.paths.push((segs, None));
-    chunk.code.push(Op::CallPath { dst: 0, path: 0, base: 0, argc: 0 });
-    chunk.code.push(Op::Ret { src: 0 });
+    // Arguments land in registers 0..num_params, the result goes just past them.
+    chunk.code.push(Op::CallPath { dst, path: 0, base: 0, argc: num_params as u16 });
+    chunk.code.push(Op::Ret { src: dst });
     Value::Closure(Rc::new(ClosureData { chunk: Rc::new(chunk), captured: Vec::new() }))
 }
 

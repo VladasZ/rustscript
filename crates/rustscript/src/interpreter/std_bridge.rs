@@ -459,6 +459,35 @@ pub(super) fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Va
                 Err(e) => Value::err(Value::str(e.to_string())),
             }
         }
+        // Numeric `T::from(x)`. Every integer is an i64 here, so a widening
+        // conversion just carries the value. `from` on a bool gives 0 or 1, the
+        // same as `usize::from(cond)` and the like.
+        (
+            "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64"
+            | "u128" | "usize",
+            "from",
+        ) => Value::Int(int_from_arg(ty, args.first())?),
+        ("f32" | "f64", "from") => match args.first() {
+            Some(Value::Float(f)) => Value::Float(*f),
+            Some(Value::Int(n)) => Value::Float(*n as f64),
+            Some(Value::Bool(b)) => Value::Float(if *b { 1.0 } else { 0.0 }),
+            _ => bail!("`{ty}::from` needs a number"),
+        },
+        // Fallible `T::try_from(x)`. The value fits when it lands inside the
+        // target range, so a narrowing conversion reports overflow with the
+        // same message as the real `TryFromIntError`.
+        (
+            "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64"
+            | "u128" | "usize",
+            "try_from",
+        ) => {
+            let n = int_from_arg(ty, args.first())?;
+            if int_fits(ty, n) {
+                Value::ok(Value::Int(n))
+            } else {
+                Value::err(Value::str("out of range integral type conversion attempted"))
+            }
+        }
         ("String", "from_utf8") => Value::ok(Value::str(bytes_to_string(args.first()))),
         // The shape carries every field a later builder call can set, since a
         // shape cannot grow after the instance exists.
@@ -577,6 +606,31 @@ pub(super) fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Va
         }
         _ => return Ok(None),
     }))
+}
+
+/// Pull an integer out of a `from`/`try_from` argument. Ints carry through,
+/// a bool becomes 0 or 1, and a char becomes its scalar value.
+fn int_from_arg(ty: &str, v: Option<&Value>) -> Result<i64> {
+    match v {
+        Some(Value::Int(n)) => Ok(*n),
+        Some(Value::Bool(b)) => Ok(i64::from(*b)),
+        Some(Value::Char(c)) => Ok(*c as i64),
+        _ => bail!("`{ty}` conversion needs an integer"),
+    }
+}
+
+/// Whether `n` lands inside the target integer type range.
+fn int_fits(ty: &str, n: i64) -> bool {
+    match ty {
+        "i8" => i8::try_from(n).is_ok(),
+        "i16" => i16::try_from(n).is_ok(),
+        "i32" => i32::try_from(n).is_ok(),
+        "u8" => u8::try_from(n).is_ok(),
+        "u16" => u16::try_from(n).is_ok(),
+        "u32" => u32::try_from(n).is_ok(),
+        "u64" | "u128" | "usize" => n >= 0,
+        _ => true,
+    }
 }
 
 pub(super) fn arg_str(args: &[Value], i: usize) -> String {

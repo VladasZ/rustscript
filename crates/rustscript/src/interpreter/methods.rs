@@ -308,7 +308,7 @@ pub(super) fn vec_method(v: &Rc<RefCell<Vec<Value>>>, method: &MethodName, args:
             Value::vec(v.borrow().iter().skip(n).cloned().collect())
         }
         _ => match method.text.as_str() {
-            "to_vec" | "collect" | "cloned" => Value::vec(v.borrow().clone()),
+            "to_vec" | "collect" | "cloned" | "copied" => Value::vec(v.borrow().clone()),
             "reverse" => {
                 v.borrow_mut().reverse();
                 Value::Unit

@@ -386,3 +386,21 @@ fn main() {
 "#);
     assert_eq!(out, "5\n255\n-2147483648\n-7\n");
 }
+
+#[test]
+fn method_path_function_values() {
+    // A method reference like `str::trim` or a constructor like `String::from`
+    // used as a function value, the form clippy suggests over a closure.
+    let out = run(r#"
+fn main() {
+    let v = vec![" a ", "b "];
+    let trimmed: Vec<&str> = v.iter().copied().map(str::trim).collect();
+    let owned: Vec<String> = v.iter().map(ToString::to_string).collect();
+    let from: Vec<String> = v.iter().copied().map(String::from).collect();
+    println!("{trimmed:?}");
+    println!("{}", owned.len());
+    println!("{}", from.len());
+}
+"#);
+    assert_eq!(out, "[\"a\", \"b\"]\n2\n2\n");
+}
