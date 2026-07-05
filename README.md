@@ -33,13 +33,15 @@ Two layers share the same source.
   are numbered slots, so a variable read is an array index, not a name lookup.
   Ownership and borrow rules carry no meaning at runtime, so there is no borrow
   checker cost and startup is fast.
-- Before running, `rustscript` builds a small cargo project around the files and
-  runs `cargo check` on it. This proves the script is valid Rust. The check is
-  cached by source hash, so an unchanged script skips it.
+- `rust check` builds a small cargo project around the files and runs
+  `cargo check` on it. This proves the script is valid Rust. It is a separate
+  opt-in step, not part of running, and its result is cached by source hash.
 
-The interpreter needs no type checker of its own. The real Rust compiler stays
-the authority on whether a script is valid, so the interpreter can stay small
-and optimistic.
+Running never waits on a check, so a script starts at once, like Python. The
+interpreter needs no type checker of its own. When you want proof that a script
+is valid Rust, `rust check` makes the real compiler the authority. The
+interpreter stays small and optimistic, and a bad path surfaces as a runtime
+error when it is reached.
 
 ## Install
 
@@ -52,9 +54,9 @@ This installs a binary named `rust`.
 ## Usage
 
 ```
-rust run FILE.rs     check then interpret
+rust run FILE.rs     interpret the script
 rust FILE.rs         same as run
-rust check FILE.rs   validate with cargo check only
+rust check FILE.rs   validate with cargo check, does not run
 rust clean           clear the check cache
 ```
 
@@ -94,9 +96,10 @@ Paths resolve like real Rust: `crate::`, `self::`, `super::`, plain, renamed,
 and grouped imports, `use x::{self}`, and `pub use` re-export chains. Imported
 structs, enums, functions, consts, statics, and type aliases all work across
 files, including struct literals and tuple struct constructors through an
-alias. Two modules can each define a type with the same name. The `cargo check`
-gate covers the whole file tree, and editing any module re-checks. Visibility
-is not enforced at runtime, `cargo check` is the authority as always.
+alias. Two modules can each define a type with the same name. When you run
+`rust check` it covers the whole file tree, and a change to any module rechecks.
+Visibility is not enforced at runtime, `rust check` is the authority when you
+want it.
 
 Not supported: `#[path]` on a mod declaration, and glob imports of script
 modules like `use util::*`, both stop with a clear error.
@@ -195,9 +198,11 @@ run, they just carry no meaning at runtime. `static mut` is rejected, plain
 
 ## Caching
 
-Check results and the prebuilt dependencies live in `~/.cache/rustscript`, keyed
-by source hash. The first run of a new or changed script pays the `cargo check`
-gate once, later runs skip it. `rustscript clean` clears the cache.
+Check results and the prebuilt dependencies live in `~/.cache/rustscript`.
+Running a script never touches this cache. When you run `rust check`, the fixed
+dependency set compiles once into a shared target, and each script's result is
+cached by source hash so an unchanged script rechecks instantly. `rust clean`
+clears the cache.
 
 ## Examples
 

@@ -1,6 +1,7 @@
 //! Validate that a script is real, valid Rust by building a small cargo
-//! project around it and running `cargo check`. Results cache by source hash,
-//! so an unchanged script skips the check and starts fast.
+//! project around it and running `cargo check`. This runs only for the
+//! `rust check` command, never when a script runs. Results cache by source
+//! hash, so an unchanged script rechecks instantly.
 
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -58,8 +59,12 @@ pub fn check(script_path: &Path, files: &[(PathBuf, String)], crate_deps: &[Crat
         std::fs::write(&dst, source)?;
     }
 
+    // One shared target dir across all cache projects. Without it every source
+    // hash gets its own target and recompiles the whole fixed dep set from
+    // scratch, which is slow and piles up gigabytes of duplicate builds.
     let output = Command::new("cargo")
         .args(["check", "--quiet"])
+        .env("CARGO_TARGET_DIR", cache_root().join("target"))
         .current_dir(&project)
         .output();
 

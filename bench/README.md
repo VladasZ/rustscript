@@ -32,13 +32,13 @@ questions: "run a small script once" versus "chew through real work".
 
 ## Caching, both sides
 
-rustscript is always measured warm, with the `cargo check` gate skipped through
-`RUSTSCRIPT_SKIP_CHECK=1`. The gate is a one-time cost paid on the first run of a
-new script, not a per-run cost, so it does not belong in a speed comparison
-against Node and Python. For reference it runs a full `cargo check`, around 5
-seconds the first time a script changes, then every run is warm at a few
-milliseconds. The bench still records `cold_mean` and `warm_mean` in
-`results.json`.
+rustscript never runs the `cargo check` gate when it runs a script, so every run
+is warm by construction. Validation is a separate `rust check` step. For
+reference that step runs a full `cargo check`, around 5 seconds the first time
+the dependency set is built, then an unchanged script rechecks at a few
+milliseconds. It is a one-time cost, not a per-run cost, so it does not belong in
+a speed comparison against Node and Python. The bench still records `cold_mean`
+and `warm_mean` in `results.json`.
 
 For symmetry Node gets `NODE_COMPILE_CACHE`, its own on-disk V8 compile cache,
 so it also does not pay type stripping and compilation on every measured run.
