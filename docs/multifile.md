@@ -168,16 +168,17 @@ Two modules can each define a type with the same name. `a::Config` and
 
 ## Visibility
 
-Write `pub` where real Rust needs it, because `cargo check` enforces it and a
-missing `pub` fails the gate. The interpreter itself does not check
-visibility at runtime, the compiler stays the authority.
+Write `pub` where real Rust needs it, because `rust check` enforces it and a
+missing `pub` fails that check. The interpreter itself does not check
+visibility at runtime, the compiler stays the authority when you ask for it.
 
 ## The check gate and caching
 
-The `cargo check` gate covers the whole file tree. The cache key hashes every
-file reachable through `mod` declarations, so editing any module triggers one
-re-check on the next run, then runs are warm again. An unchanged tree skips
-the gate entirely.
+The `cargo check` gate runs when you invoke `rust check`, not when a script
+runs. It covers the whole file tree. The cache key hashes every file reachable
+through `mod` declarations, so editing any module means the next `rust check`
+rechecks, while an unchanged tree returns from cache at once. Running a script
+never waits on the gate.
 
 ## Local crate dependencies
 
