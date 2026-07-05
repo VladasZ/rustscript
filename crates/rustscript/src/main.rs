@@ -31,7 +31,7 @@ fn real_main() -> Result<()> {
             let file = all.get(1).ok_or_else(err_usage)?;
             let source = std::fs::read_to_string(file)?;
             let program = loader::load(Path::new(file), &source)?;
-            checker::check(Path::new(file), &program.files)?;
+            checker::check(Path::new(file), &program.files, &program.crate_deps)?;
             println!("ok");
             Ok(())
         }
@@ -59,7 +59,7 @@ fn run(file: &str, check_first: bool, script_args: &[String]) -> Result<()> {
 
     let program = loader::load(&path, &source)?;
     if check_first {
-        checker::check(&path, &program.files)?;
+        checker::check(&path, &program.files, &program.crate_deps)?;
     }
 
     // A real binary sees its own path as argv[0], then the caller's arguments.

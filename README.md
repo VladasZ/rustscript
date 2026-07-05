@@ -101,13 +101,18 @@ is not enforced at runtime, `cargo check` is the authority as always.
 Not supported: `#[path]` on a mod declaration, and glob imports of script
 modules like `use util::*`, both stop with a clear error.
 
+A script inside a cargo crate can also `use` a local library crate declared as a
+`path` dependency in the nearest `Cargo.toml`. The interpreter grafts that crate
+in from source, and the `cargo check` gate treats it as a real path dependency,
+so a set of scripts can share one helper crate.
+
 See [docs/multifile.md](docs/multifile.md) for a proper guide, a worked
 example, and the common mistakes.
 
 ## What works
 
 - functions, recursion, `let` and `mut`, arithmetic, comparison, logical and
-  bitwise operators, casts
+  bitwise operators, casts, and `T::from` / `T::try_from` numeric conversions
 - `if`, `if let`, `while`, `loop`, `for` over ranges, vectors, maps, and chars,
   `match` with guards and patterns
 - `struct`, `enum`, tuple structs, unit structs, `impl` methods and associated
@@ -115,7 +120,8 @@ example, and the common mistakes.
 - modules across files and inline, every import style, re-exports, module
   level `const` and `static`, and type aliases
 - closures and the common iterator methods, `map`, `filter`, `fold`, `find`,
-  `any`, `all`, `sort_by`, `sort_by_key`, and more
+  `any`, `all`, `sort_by`, `sort_by_key`, `copied`, `cloned`, and more,
+  including method paths like `ToString::to_string` passed as a function value
 - `Vec`, `String`, `HashMap`, `Option`, `Result`, the `?` operator
 - slicing with ranges, `&v[1..3]`, `&s[..n]`, and open ends like `v[1..]` in
   index position

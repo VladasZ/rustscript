@@ -8,6 +8,8 @@ use std::process::Command;
 
 use anyhow::{Result, bail};
 
+use crate::loader::CrateDep;
+
 fn cache_root() -> PathBuf {
     if let Some(dir) = std::env::var_os("XDG_CACHE_HOME") {
         PathBuf::from(dir).join("rustscript")
@@ -32,12 +34,14 @@ pub fn clean() -> Result<()> {
 /// `files` are the script's sources: path relative to the script directory
 /// and content, the root script first as `main.rs`. The layout is mirrored
 /// into the cache project so `mod` declarations resolve the same way.
-pub fn check(script_path: &Path, files: &[(PathBuf, String)]) -> Result<()> {
+/// `crate_deps` are local `path` crates the script uses; they join the cargo
+/// project as path dependencies so `use crate_name::..` resolves.
+pub fn check(script_path: &Path, files: &[(PathBuf, String)], crate_deps: &[CrateDep]) -> Result<()> {
     // Tests and fast iteration can skip the compile gate.
     if std::env::var_os("RUSTSCRIPT_SKIP_CHECK").is_some() {
         return Ok(());
     }
-    let hash = hash_files(files);
+    let hash = hash_files(files, crate_deps);
     let project = cache_root().join(format!("{hash:016x}"));
     let stamp = project.join(".checked");
     if stamp.exists() {
@@ -45,7 +49,7 @@ pub fn check(script_path: &Path, files: &[(PathBuf, String)]) -> Result<()> {
     }
 
     std::fs::create_dir_all(&project)?;
-    std::fs::write(&project.join("Cargo.toml"), MANIFEST)?;
+    std::fs::write(&project.join("Cargo.toml"), manifest(crate_deps))?;
     for (rel, source) in files {
         let dst = project.join(rel);
         if let Some(parent) = dst.parent() {
@@ -107,15 +111,34 @@ hex = "0.4"
 ctrlc = "3"
 tempfile = "3"
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
-
-[workspace]
 "#;
 
-fn hash_files(files: &[(PathBuf, String)]) -> u64 {
+/// The cargo project manifest, the fixed dependency set plus one `path` entry
+/// per local crate the script grafts in. The empty `[workspace]` detaches the
+/// project from any workspace above the cache directory.
+fn manifest(crate_deps: &[CrateDep]) -> String {
+    let mut out = String::from(MANIFEST);
+    for dep in crate_deps {
+        let dir = dep.dir.to_string_lossy();
+        out.push_str(&format!("{} = {{ path = {dir:?} }}\n", dep.name));
+    }
+    out.push_str("\n[workspace]\n");
+    out
+}
+
+fn hash_files(files: &[(PathBuf, String)], crate_deps: &[CrateDep]) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     for (rel, source) in files {
         rel.hash(&mut hasher);
         source.hash(&mut hasher);
+    }
+    // A change in any grafted crate must re-trigger the check for its users.
+    for dep in crate_deps {
+        dep.name.hash(&mut hasher);
+        for (rel, source) in &dep.files {
+            rel.hash(&mut hasher);
+            source.hash(&mut hasher);
+        }
     }
     hasher.finish()
 }

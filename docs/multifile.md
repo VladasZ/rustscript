@@ -179,6 +179,37 @@ file reachable through `mod` declarations, so editing any module triggers one
 re-check on the next run, then runs are warm again. An unchanged tree skips
 the gate entirely.
 
+## Local crate dependencies
+
+A script that lives inside a cargo crate can also pull in a local library crate
+through a normal `path` dependency, not just its own `mod` files. This is how a
+set of scripts shares one helper crate instead of copying modules around.
+
+The interpreter reads the nearest `Cargo.toml` at or above the script, finds each
+`[dependencies]` entry that points at a local `path`, and grafts that crate in.
+Its `src/lib.rs` and the module tree below it load as a top level module named
+after the crate, so `use shared::run::capture` resolves at runtime. The
+`cargo check` gate adds the same crate as a real path dependency, so the editor
+and clippy resolve it too. The dependency directory is pinned to an absolute path,
+so the gate finds it no matter where it runs from.
+
+For example, a `shared` crate next to the scripts:
+
+```
+tools/
+  Cargo.toml         # dependencies: shared = { path = "shared" }
+  shared/
+    Cargo.toml       # package name = "shared"
+    src/lib.rs       # pub mod run;  pub mod walk;
+  src/bin/
+    st.rs            # use shared::run::capture;
+```
+
+The grafted crate can have its own multi-file module tree, loaded by the same
+rules as a script's own modules. A change to any of its files re-triggers the
+check for every script that uses it, since the cache key hashes the crate's
+sources too.
+
 ## Not supported
 
 - `#[path = "..."]` on a mod declaration.
