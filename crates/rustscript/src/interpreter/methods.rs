@@ -500,7 +500,11 @@ pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
         "is_none" => Value::Bool(!is_some),
         "expect" => inner
             .ok_or_else(|| anyhow!("{}", args.first().map(|v| v.display()).unwrap_or_default()))?,
-        "unwrap_or_default" => inner.unwrap_or(Value::Unit),
+        // There is no runtime type here, so the Ok type's Default cannot be
+        // built. Scripts use this almost only on string results such as
+        // read_to_string and env::var, so an empty string is the practical
+        // default. For another type use unwrap_or with an explicit value.
+        "unwrap_or_default" => inner.unwrap_or_else(|| Value::str(String::new())),
         "as_ref" | "as_deref" | "take" | "as_mut" => recv.clone(),
         "ok_or" => match inner {
             Some(v) => Value::ok(v),
@@ -522,6 +526,8 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
         "is_ok" => Value::Bool(is_ok),
         "is_err" => Value::Bool(!is_ok),
         "clone" => recv.clone(),
+        // The interpreter holds no references, so a reference view is the value.
+        "as_ref" | "as_mut" | "as_deref" | "as_deref_mut" => recv.clone(),
         "unwrap" => {
             if is_ok {
                 inner.unwrap_or(Value::Unit)
@@ -543,8 +549,9 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
                 args.first().cloned().unwrap_or(Value::Unit)
             }
         }
+        // Same string-default reasoning as Option::unwrap_or_default above.
         "unwrap_or_default" => {
-            if is_ok { inner.unwrap_or(Value::Unit) } else { Value::Unit }
+            if is_ok { inner.unwrap_or_else(|| Value::str(String::new())) } else { Value::str(String::new()) }
         }
         "ok" => {
             if is_ok {

@@ -7,30 +7,33 @@ use std::rc::Rc;
 use anyhow::{Result, bail};
 
 use super::native::{self, Native};
-
+use super::std_bridge::path_like;
 use super::value::{Map, MapKey, RStr, StructData, Value};
 
 
 
-/// Build a real `Command` from a script `Command` value's fields.
+/// Build a real `Command` from a script `Command` value's fields. Every field
+/// that becomes an OS string goes through `path_like`, so a `Path` or `PathBuf`
+/// value contributes its path, not its struct debug form. current_dir was the
+/// sharp edge, a debug string there made every spawn fail with ENOENT.
 pub(super) fn build_command(s: &StructData) -> std::process::Command {
-    let program = s.get("program").map(|v| v.display()).unwrap_or_default();
+    let program = s.get("program").map(|v| path_like(&v)).unwrap_or_default();
     let mut cmd = std::process::Command::new(&program);
     if let Some(Value::Vec(a)) = s.get("args") {
         for item in a.borrow().iter() {
-            cmd.arg(item.display());
+            cmd.arg(path_like(item));
         }
     }
     // Unset builder fields hold Unit placeholders, see `Command::new`.
     match s.get("cwd") {
         Some(Value::Unit) | None => {}
         Some(cwd) => {
-            cmd.current_dir(cwd.display());
+            cmd.current_dir(path_like(&cwd));
         }
     }
     if let Some(Value::Map(envs)) = s.get("envs") {
         for (k, v) in envs.borrow().iter() {
-            cmd.env(k.to_value().display(), v.display());
+            cmd.env(path_like(&k.to_value()), path_like(v));
         }
     }
     cmd
