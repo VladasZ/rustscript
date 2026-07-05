@@ -136,16 +136,18 @@ impl Interp {
         let module = def.module;
         let def = def.ast.clone();
         let mut fields: Vec<Rc<str>> = Vec::new();
+        let mut renames: Vec<Option<Rc<str>>> = Vec::new();
         let mut coerce = Vec::new();
         if let syn::Fields::Named(named) = &def.fields {
             for f in &named.named {
                 let Some(ident) = &f.ident else { continue };
                 fields.push(ident.to_string().into());
+                renames.push(super::json_bridge::serde_rename(f).map(Rc::from));
                 coerce.push(self.field_needs_coerce(&f.ty, module).then(|| f.ty.clone()));
             }
         }
         let shape = Rc::new(Shape {
-            runtime: StructShape::new(canon.clone(), fields),
+            runtime: StructShape::with_renames(canon.clone(), fields, renames),
             coerce,
             module,
         });

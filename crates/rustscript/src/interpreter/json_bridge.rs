@@ -183,7 +183,7 @@ pub(super) struct StructPlan {
 }
 
 /// Read a field's `#[serde(rename = "..")]` value, if present.
-fn serde_rename(field: &syn::Field) -> Option<String> {
+pub(super) fn serde_rename(field: &syn::Field) -> Option<String> {
     let mut renamed = None;
     for attr in &field.attrs {
         if !attr.path().is_ident("serde") {
@@ -526,6 +526,10 @@ pub(super) fn bridge_serde_json(func: &str, args: &[Value]) -> Result<Value> {
             };
             Ok(Value::ok(Value::str(s)))
         }
+        "to_value" => {
+            let v = args.first().cloned().unwrap_or(Value::Unit);
+            Ok(Value::ok(json_to_value(value_to_json(&v)?)))
+        }
         other => bail!("unsupported serde_json function `{other}`"),
     }
 }
@@ -578,8 +582,9 @@ pub(super) fn value_to_json(v: &Value) -> Result<serde_json::Value> {
         Value::Struct(s) => {
             let mut obj = serde_json::Map::default();
             let values = s.values.borrow();
-            for (k, val) in s.shape.fields.iter().zip(values.iter()) {
-                obj.insert(k.to_string(), value_to_json(val)?);
+            for (slot, (field, val)) in s.shape.fields.iter().zip(values.iter()).enumerate() {
+                let key = s.shape.renames.get(slot).and_then(Option::as_ref).unwrap_or(field);
+                obj.insert(key.to_string(), value_to_json(val)?);
             }
             J::Object(obj)
         }

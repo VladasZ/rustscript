@@ -570,16 +570,23 @@ impl Interp {
                     let v = if lit.has_rest {
                         let rest = &stack[base + wbase + written];
                         let mut fields = lit.shape.fields.clone();
+                        let mut renames = lit.shape.renames.clone();
                         if let Value::Struct(r) = rest {
                             let rvals = r.values.borrow();
-                            for (k, v) in r.shape.fields.iter().zip(rvals.iter()) {
+                            for (slot, (k, v)) in r.shape.fields.iter().zip(rvals.iter()).enumerate() {
                                 if lit.shape.slot(k).is_none() {
                                     fields.push(k.clone());
                                     values.push(v.clone());
+                                    if !renames.is_empty() {
+                                        renames.push(r.shape.renames.get(slot).cloned().flatten());
+                                    }
                                 }
                             }
                         }
-                        Value::structure(StructShape::new(lit.shape.name.clone(), fields), values)
+                        Value::structure(
+                            StructShape::with_renames(lit.shape.name.clone(), fields, renames),
+                            values,
+                        )
                     } else {
                         Value::structure(lit.shape.clone(), values)
                     };

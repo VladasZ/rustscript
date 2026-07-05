@@ -92,11 +92,23 @@ impl fmt::Debug for RStr {
 pub struct StructShape {
     pub name: Rc<str>,
     pub fields: Vec<Rc<str>>,
+    /// One entry per field, its `#[serde(rename = "..")]` name if any. Empty
+    /// when the struct has no renamed fields. Read when serializing to json so
+    /// the output key matches serde, the same names deserialize already honors.
+    pub renames: Vec<Option<Rc<str>>>,
 }
 
 impl StructShape {
     pub fn new(name: impl Into<Rc<str>>, fields: Vec<Rc<str>>) -> Rc<StructShape> {
-        Rc::new(StructShape { name: name.into(), fields })
+        Rc::new(StructShape { name: name.into(), fields, renames: Vec::new() })
+    }
+
+    pub fn with_renames(
+        name: impl Into<Rc<str>>,
+        fields: Vec<Rc<str>>,
+        renames: Vec<Option<Rc<str>>>,
+    ) -> Rc<StructShape> {
+        Rc::new(StructShape { name: name.into(), fields, renames })
     }
 
     /// Slot index of a field. Structs have a handful of fields, so a linear

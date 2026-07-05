@@ -259,6 +259,32 @@ fn main() -> anyhow::Result<()> {
 }
 
 #[test]
+fn serde_rename_on_serialize_and_to_value() {
+    let out = run(r##"
+use serde::Serialize;
+#[derive(Serialize)]
+struct StatusLine {
+    #[serde(rename = "type")]
+    kind: String,
+    command: String,
+}
+fn main() -> anyhow::Result<()> {
+    let line = StatusLine { kind: "command".to_string(), command: "bun x.ts".to_string() };
+    let flat = serde_json::to_string(&line)?;
+    println!("{flat}");
+    let mut data = serde_json::from_str::<serde_json::Value>(r#"{"theme":"light"}"#)?;
+    data["statusLine"] = serde_json::to_value(line)?;
+    let pretty = serde_json::to_string_pretty(&data)?;
+    println!("{pretty}");
+    Ok(())
+}
+"##);
+    assert!(out.contains(r#""type":"command""#), "serialize missing rename: {out}");
+    assert!(out.contains(r#""type": "command""#), "to_value missing rename: {out}");
+    assert!(!out.contains("kind"), "raw field name leaked: {out}");
+}
+
+#[test]
 fn read_dir_iteration() {
     let out = run(r#"
 use std::fs;

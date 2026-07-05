@@ -9,6 +9,7 @@ use crate::interpreter::bytecode::{
     BinKind, CapSource, DISCARD, Member, Op, PatInfo, Reg,
     StructLit,
 };
+use crate::interpreter::json_bridge::serde_rename;
 use crate::interpreter::value::StructShape;
 
 use super::*;
@@ -303,7 +304,7 @@ impl Compiler<'_> {
         // Field order follows the declaration when the struct is known.
         // Written fields in declaration order, then any extras. A trailing
         // `..rest` fills whatever was not written.
-        let order: Vec<String> = match def {
+        let (order, renames): (Vec<String>, Vec<Option<Rc<str>>>) = match def {
             Some(def) => {
                 let mut ordered: Vec<String> = def
                     .fields
@@ -316,9 +317,21 @@ impl Compiler<'_> {
                         ordered.push(k.clone());
                     }
                 }
-                ordered
+                // One rename slot per ordered field, read from the struct def so
+                // a serialized literal uses the same json keys as deserialize.
+                let renames = ordered
+                    .iter()
+                    .map(|k| {
+                        def.fields
+                            .iter()
+                            .find(|f| f.ident.as_ref().is_some_and(|i| i == k))
+                            .and_then(serde_rename)
+                            .map(|s| Rc::<str>::from(s))
+                    })
+                    .collect();
+                (ordered, renames)
             }
-            None => written.iter().map(|(k, _)| k.clone()).collect(),
+            None => (written.iter().map(|(k, _)| k.clone()).collect(), Vec::new()),
         };
         // Reserve a packed window, then fill it, so field temporaries do not
         // break the packing.
@@ -339,9 +352,10 @@ impl Compiler<'_> {
             self.compile_into(base + order.len() as Reg, rest)?;
         }
         let info = {
-            let shape = StructShape::new(
+            let shape = StructShape::with_renames(
                 name,
                 order.into_iter().map(Into::into).collect(),
+                renames,
             );
             let f = self.cur();
             f.struct_lits.push(StructLit { shape, has_rest });
