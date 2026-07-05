@@ -78,14 +78,25 @@ impl Resolver {
         self.resolve_at(m, segs, 0)
     }
 
-    /// Resolve a `use` target written in module `m`. Uniform paths: unless it
-    /// starts with `self` or `super`, the first segment resolves from the
-    /// crate root or an external crate.
+    /// Resolve a `use` target written in module `m`. A `self` or `super` start
+    /// pins the current module. Otherwise the first segment can still name one
+    /// of the current module's own children, like `use ctx::Ctx` written beside
+    /// `mod ctx`, which rustc resolves locally, so a submodule tries itself
+    /// first and falls back to the crate root and the external prelude.
     fn resolve_use(&self, m: usize, segs: &[String], depth: usize) -> Result<Res> {
-        match segs.first().map(String::as_str) {
-            Some("self" | "super") => self.resolve_at(m, segs, depth),
-            _ => self.resolve_at(0, segs, depth),
+        if let Some("self" | "super") = segs.first().map(String::as_str) {
+            return self.resolve_at(m, segs, depth);
         }
+        // Only submodules need the local-first try. At the crate root the two
+        // resolutions are the same walk, so the retry would just repeat the
+        // whole use-alias expansion and blow up.
+        if m != 0
+            && let Ok(res) = self.resolve_at(m, segs, depth)
+            && !matches!(res, Res::External(_))
+        {
+            return Ok(res);
+        }
+        self.resolve_at(0, segs, depth)
     }
 
     fn resolve_at(&self, mut m: usize, segs: &[String], depth: usize) -> Result<Res> {

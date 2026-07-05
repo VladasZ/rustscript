@@ -218,6 +218,9 @@ pub(super) fn try_bind(pat: &Pat, val: &Value, define: &mut dyn FnMut(&str, Valu
         Pat::Type(t) => try_bind(&t.pat, val, define),
         Pat::Tuple(t) => match val {
             Value::Tuple(items) => bind_seq(t.elems.iter(), &items.borrow(), define),
+            // The unit pattern `()` is an empty tuple pattern. It matches the
+            // unit value, so `Ok(())` matches a `Result<(), _>` that is Ok.
+            Value::Unit if t.elems.is_empty() => true,
             _ => false,
         },
         Pat::TupleStruct(ts) => {
