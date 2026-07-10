@@ -152,6 +152,10 @@ pub(super) fn str_method_slow(s: &Rc<RStr>, name: &str, args: &[Value]) -> Resul
             ])))),
             None => Value::none(),
         },
+        "rsplit" => {
+            let sep = arg_str(0);
+            Value::vec(s.rsplit(&sep).map(Value::str).collect())
+        }
         "splitn" => {
             let n = int_arg(args, 0)? as usize;
             Value::vec(s.splitn(n, &arg_str(1)).map(Value::str).collect())
