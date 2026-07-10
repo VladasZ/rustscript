@@ -193,6 +193,19 @@ fn main() {
 }
 
 #[test]
+fn string_rsplit() {
+    let out = run(r#"
+fn main() {
+    let name = "python3Packages.python-lsp-server";
+    println!("{}", name.rsplit('.').next().unwrap_or(name));
+    let parts: Vec<String> = "a.b.c".rsplit('.').collect();
+    println!("{}", parts.join(","));
+}
+"#);
+    assert_eq!(out, "python-lsp-server\nc,b,a\n");
+}
+
+#[test]
 fn fs_roundtrip() {
     let out = run(r#"
 use std::fs;
