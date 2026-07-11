@@ -146,8 +146,8 @@ impl Interp {
         // two segments so `use` shortenings and full paths behave the same.
         let last = &canon[canon.len() - 1];
         let ns = &canon[canon.len() - 2];
-        // Threads run serially: spawn runs the closure now and hands back a
-        // handle whose value is ready. Needs the interpreter to call it.
+        // The Ctrl-C handler must reach back into the interpreter to run the
+        // script's own closure, so it cannot go through the plain native call.
         if ns == "ctrlc" && last == "set_handler" {
             let closure = args.first().cloned().unwrap_or(Value::Unit);
             return Ok(match super::set_ctrlc_handler(closure) {
@@ -155,10 +155,14 @@ impl Interp {
                 Err(e) => Value::err(Value::str(e.to_string())),
             });
         }
-        if ns == "thread" && last == "spawn" {
-            let clo = as_closure(args.first())?;
-            let result = self.call_closure(&clo, &[])?;
-            return Ok(Value::struct_of("JoinHandle", [("result".into(), result)]));
+        if ns == "thread" {
+            bail!("std::thread is not supported, use #[tokio::main] with tokio::spawn");
+        }
+        // reqwest paths need the whole canonical path, since a blocking call
+        // has three or four segments, so route them before the two-segment
+        // native dispatch.
+        if canon.first().map(String::as_str) == Some("reqwest") {
+            return super::http::reqwest_call(&canon, &args);
         }
         if let Some(v) = native_call(ns, last, &args)? {
             return Ok(v);
@@ -380,18 +384,13 @@ pub(super) fn builtin_method(recv: &Value, method: &MethodName, args: &mut [Valu
             },
             "Command" => command_method(s, name, &*args),
             "ExitStatus" => exitstatus_method(s, name),
-            "HttpRequest" | "HttpResponse" | "HttpBody" | "StatusCode" | "HeaderMap"
-            | "HeaderValue" => http_method(s, name, &*args),
+            "ReqwestClientBuilder" | "ReqwestRequest" | "ReqwestResponse" | "StatusCode"
+            | "HeaderMap" | "HeaderValue" => http_method(s, name, &*args),
             "StdStream" => std_stream_method(s, name, args),
             "Rng" => rng_method(name, &*args),
             "DateTime" => datetime_method(s, name, &*args),
             "Base64Engine" => base64_method(s, name, &*args),
             "Entry" => entry_method(s, name, &*args),
-            "JoinHandle" => match name {
-                "join" => Ok(Value::ok(s.get("result").unwrap_or(Value::Unit))),
-                "is_finished" => Ok(Value::Bool(true)),
-                _ => bail!("unknown method `{name}` on JoinHandle"),
-            },
             "Child" => child_method(s, name, args),
             "Path" => path_method(s, name, &*args),
             "DirEntry" => dir_entry_method(s, name),

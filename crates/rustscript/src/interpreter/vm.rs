@@ -165,7 +165,8 @@ impl Interp {
             }
             match &cur.code[ip] {
                 Op::LoadConst { dst, k } => {
-                    set_reg(&mut stack[base + *dst as usize], cur.consts[*k as usize].clone());
+                    let v = Value::from_const(&cur.consts[*k as usize]);
+                    set_reg(&mut stack[base + *dst as usize], v);
                 }
                 Op::LoadInt { dst, v } => stack[base + *dst as usize] = Value::Int(*v),
                 Op::LoadBool { dst, v } => stack[base + *dst as usize] = Value::Bool(*v),
@@ -693,6 +694,9 @@ impl Interp {
                     if !matches!(kind, MacroKind::Anyhow) {
                         set_reg(&mut stack[base + *dst as usize], Value::Unit);
                     }
+                }
+                Op::Spawn { .. } | Op::Await { .. } => {
+                    bail!("async is only available under #[tokio::main]")
                 }
                 Op::Dbg { dst, base: wbase, argc } => {
                     let (dst, wbase, argc) = (*dst, *wbase as usize, *argc as usize);

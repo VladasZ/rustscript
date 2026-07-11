@@ -56,9 +56,30 @@ This installs a binary named `rust`.
 ```
 rust run FILE.rs     interpret the script
 rust FILE.rs         same as run
+rust FILE.rs cmp     compile and run, `cmp` first arg is reserved
+rust build FILE.rs   compile to a native binary, cache it, then run
 rust check FILE.rs   validate with cargo check, does not run
-rust clean           clear the check cache
+rust clean           clear the cache
 ```
+
+`rust build` compiles the script with cargo instead of interpreting it, then
+runs the resulting binary and exits with its status. The binary is cached by
+source hash under the cache dir, so an unchanged script runs again instantly
+with no cargo call. The first build of a new or edited script is a real cargo
+build, so it is slow, later runs are not. A successful build also proves the
+script is valid Rust, so it doubles as a check. Use it for CPU heavy scripts
+where native speed pays back the build cost. The one shared cargo target dir is
+kept so an edit rebuilds only the script crate, but only the final binaries are
+cached, never per script target dirs.
+
+The word `cmp` as the first argument to a script is reserved. When you run
+`FILE.rs cmp ...`, the interpreter compiles and runs the script the same way
+`rust build` does, then passes the rest of the arguments on. This is what makes
+a plain launcher give both modes for free. A command named `foo` interprets,
+and `foo cmp` runs the compiled build, since the launcher forwards the words
+unchanged. Because `cmp` is intercepted, a script must not use `cmp` as its own
+first positional argument, it would never reach the script. Later arguments are
+free, only the very first is reserved.
 
 A `#!/usr/bin/env rust` first line lets a `.rs` file run on its own. A shebang
 is legal Rust, so the file still passes `cargo check`. A symlink to a script
@@ -144,7 +165,6 @@ Scripts use plain `std`. The interpreter bridges the common parts.
 - `std::process::Command`, `output`, `status`, and `spawn` with `Stdio` piping
   and a `Child` you can stream, feed, and `wait` on
 - `std::net`, blocking `TcpListener` and `TcpStream`
-- `std::thread`, `spawn` and `sleep`, run serially with no real parallelism
 - `std::time`, `Instant`, `SystemTime`, and `Duration`
 - `std::env`, real script args, `vars`, `var`, `set_var`, `remove_var`,
   `current_dir`, `set_current_dir`, `temp_dir`, and `consts::OS` / `ARCH`
@@ -163,8 +183,10 @@ a native bridge for it. These are bridged today.
   `Option<T>` fields honored, so camelCase APIs map onto snake_case fields
 - [`anyhow`](https://github.com/dtolnay/anyhow) for `Result`, `?`, `bail!`,
   `ensure!`, and `context`
-- [`ureq`](https://github.com/algesten/ureq) for HTTP and HTTPS over rustls,
-  including query params, a global timeout, and a cookie-keeping `agent`
+- [`reqwest`](https://github.com/seanmonstar/reqwest) for HTTP and HTTPS over
+  rustls, the blocking API in a plain script and the async API under
+  `#[tokio::main]`, with headers, query params, json bodies, a timeout, and
+  cookies
 - [`regex`](https://github.com/rust-lang/regex) for matching, capture groups,
   and replace
 - [`which`](https://github.com/harshadgavali/which-rs) to find a program on PATH
@@ -187,22 +209,33 @@ a native bridge for it. These are bridged today.
 A crate without a bridge still passes `cargo check` but stops the interpreter
 with `unsupported crate` when its code runs.
 
+## Async and parallelism
+
+A script whose `main` is `#[tokio::main]` runs on a second engine built for real
+multi-core work. It uses a multi-thread tokio runtime, so `tokio::spawn` tasks
+run on many threads at once, `.await` and `tokio::join!` work, `tokio::time::sleep`
+is real, and the async `reqwest` client sends requests concurrently. A plain
+script with no `#[tokio::main]` keeps the fast single-thread engine untouched, so
+it pays nothing for this. The `current_thread` flavor is rejected, only the
+multi-thread runtime is offered.
+
 ## Not supported
 
-`async` is not run, and reaching it is a clean runtime error. Threads run
-serially, so `thread::spawn` returns a handle whose value is already computed and
-there is no real parallelism. `unsafe` blocks run their body, since edition 2024
-needs `unsafe` around calls like `env::set_var`. Lifetimes and generics parse and
-run, they just carry no meaning at runtime. `static mut` is rejected, plain
-`static` behaves like a const.
+`std::thread` is rejected, use `tokio::spawn` under `#[tokio::main]` for real
+parallelism. `unsafe` blocks run their body, since edition 2024 needs `unsafe`
+around calls like `env::set_var`. Lifetimes and generics parse and run, they
+just carry no meaning at runtime. `static mut` is rejected, plain `static`
+behaves like a const.
 
 ## Caching
 
-Check results and the prebuilt dependencies live in `~/.cache/rustscript`.
-Running a script never touches this cache. When you run `rust check`, the fixed
-dependency set compiles once into a shared target, and each script's result is
-cached by source hash so an unchanged script rechecks instantly. `rust clean`
-clears the cache.
+Check results, compiled binaries, and the prebuilt dependencies live in
+`~/.cache/rustscript`. Interpreting a script never touches this cache. When you
+run `rust check`, the fixed dependency set compiles once into a shared target,
+and each script's result is cached by source hash so an unchanged script
+rechecks instantly. `rust build` shares that target and adds the finished
+binary to a `bin` folder keyed by the same hash, so a rerun of an unchanged
+script skips cargo. `rust clean` clears the cache.
 
 ## Examples
 

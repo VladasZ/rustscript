@@ -4,6 +4,11 @@
 
 use std::fs;
 
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
+#[cfg(windows)]
+use std::os::windows::fs::symlink_file as symlink;
+
 fn main() -> anyhow::Result<()> {
     let dir = std::env::temp_dir();
     let target = dir.join("rustscript_link_target.txt");
@@ -15,7 +20,7 @@ fn main() -> anyhow::Result<()> {
     if std::path::Path::new(&link).exists() {
         fs::remove_file(&link)?;
     }
-    std::os::unix::fs::symlink(&target, &link)?;
+    symlink(&target, &link)?;
 
     let pointed = fs::read_link(&link)?;
     println!("link resolves to target: {}", pointed.to_string_lossy() == target);

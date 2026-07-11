@@ -1,14 +1,15 @@
 //! Macro lowering and format specs. Split from the compiler.
 
 
+use std::sync::Arc;
+
 use anyhow::{Result, anyhow, bail};
 use syn::punctuated::Punctuated;
 use syn::{Expr, Lit};
 
 use crate::interpreter::bytecode::{
-    BinKind, FmtSpec, MacroKind, Op, Reg,
+    BinKind, Const, FmtSpec, MacroKind, Op, Reg,
 };
-use crate::interpreter::value::Value;
 
 use super::*;
 
@@ -103,7 +104,7 @@ impl Compiler<'_> {
                 if let Some(m) = args.get(1) {
                     self.compile_into(msg, m)?;
                 } else {
-                    let k = self.add_const(Value::str("condition failed"));
+                    let k = self.add_const(Const::Str(Arc::from("condition failed")));
                     self.emit(Op::LoadConst { dst: msg, k });
                 }
                 let p = self.add_path(vec!["::ensure_fail".to_string()], None);
@@ -117,6 +118,24 @@ impl Compiler<'_> {
                 let args = parse_exprs(mac)?;
                 let base = self.compile_args(args.iter())?;
                 self.emit(Op::Dbg { dst, base, argc: args.len() as u16 });
+            }
+            "join" => {
+                if !self.ctx.async_mode {
+                    bail!("`join!` is only available under #[tokio::main]");
+                }
+                let args = parse_exprs(mac)?;
+                // Evaluate every argument first, so all spawned tasks are running
+                // before we await any of them, which is what makes join overlap.
+                let handles: Vec<Reg> =
+                    args.iter().map(|a| self.compile_expr(a)).collect::<Result<_>>()?;
+                let base = self.cur().reg_top;
+                for _ in &handles {
+                    self.alloc();
+                }
+                for (i, h) in handles.iter().enumerate() {
+                    self.emit(Op::Await { dst: base + i as Reg, src: *h });
+                }
+                self.emit(Op::MakeTuple { dst, base, count: handles.len() as u16 });
             }
             other => bail!("unsupported macro: {other}!"),
         }

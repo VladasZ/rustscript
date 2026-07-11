@@ -12,7 +12,9 @@ anyhow = { workspace = true }
 syn = { workspace = true }
 proc-macro2 = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order"] }
-ureq = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+parking_lot = { workspace = true }
 regex = { workspace = true }
 indexmap = { workspace = true }
 which = { workspace = true }

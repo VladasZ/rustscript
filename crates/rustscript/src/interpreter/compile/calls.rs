@@ -61,6 +61,16 @@ impl Compiler<'_> {
             Expr::Path(p) => &p.path,
             _ => bail!("cannot call this kind of expression"),
         };
+        // tokio::spawn(async { .. }) lowers to a Spawn op carrying the async
+        // block as a child chunk, so the task runs on its own worker thread.
+        if self.ctx.async_mode && is_tokio_spawn(path) {
+            match c.args.first() {
+                Some(Expr::Async(block)) if c.args.len() == 1 => {
+                    return self.compile_spawn(dst, &block.block);
+                }
+                _ => bail!("tokio::spawn needs an async block in this interpreter"),
+            }
+        }
         let coerce = path.segments.last().and_then(first_generic_type).map(|t| Rc::new(t.clone()));
         // A pending `let` annotation attaches to exactly this call, see
         // `Compiler::json_let`.
@@ -168,6 +178,26 @@ impl Compiler<'_> {
                 self.emit(Op::Move { dst: reg, src: base + i as u16 });
             }
         }
+        Ok(())
+    }
+
+    /// Compile an `async { .. }` block from `tokio::spawn` into a zero argument
+    /// child chunk and emit a Spawn op. Captures work like a closure's.
+    fn compile_spawn(&mut self, dst: Reg, block: &syn::Block) -> Result<()> {
+        self.frames.push(FnState::new("<task>".to_string()));
+        self.cur().num_params = 0;
+        let ret = self.alloc();
+        self.compile_block(block, ret)?;
+        self.emit(Op::Ret { src: ret });
+        let child = self.frames.pop().unwrap();
+        let caps: Vec<CapSource> = child.upvalues.iter().map(|(_, s)| *s).collect();
+        let mut chunk = child.into_chunk();
+        chunk.module = self.ctx.module as u16;
+        let parent = self.cur();
+        let child_idx = parent.children.len() as u16;
+        parent.children.push(Rc::new(chunk));
+        parent.child_caps.push(caps);
+        self.emit(Op::Spawn { dst, child: child_idx });
         Ok(())
     }
 
@@ -406,4 +436,11 @@ impl Compiler<'_> {
 
     // -- macros ------------------------------------------------------------
 
+}
+
+/// Whether a call path names tokio's `spawn`, either `tokio::spawn` or
+/// `tokio::task::spawn`.
+fn is_tokio_spawn(path: &syn::Path) -> bool {
+    let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+    segs.last().map(String::as_str) == Some("spawn") && segs.iter().any(|s| s == "tokio")
 }

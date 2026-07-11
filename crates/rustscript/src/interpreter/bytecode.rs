@@ -4,10 +4,24 @@
 //! frame, so variable access is an array read, not a name lookup.
 
 use std::rc::Rc;
-
-use super::value::Value;
+use std::sync::Arc;
 
 pub type Reg = u16;
+
+/// A literal constant baked into a chunk, value model neutral so both the fast
+/// `Rc` engine and the parallel `Arc` engine share the same compiler output.
+/// Each engine materializes a `Const` into its own value type when a
+/// `LoadConst` runs.
+/// Only literals that need a side table land here. Integers, booleans, and unit
+/// are emitted as their own inline load ops, so they are not `Const` variants.
+#[derive(Clone)]
+pub enum Const {
+    Float(f64),
+    Char(char),
+    Str(Arc<str>),
+    /// A byte string literal `b"..."`, materialized into a vec of integers.
+    Bytes(Arc<[u8]>),
+}
 
 /// Sentinel destination for a method call whose result a statement discards.
 /// The VM skips building and writing the return value, which lets hot ops
@@ -70,6 +84,7 @@ pub struct StructLit {
 
 /// A method name with its builtin id resolved once at compile time, so hot
 /// dispatch matches an enum instead of comparing strings.
+#[derive(Clone)]
 pub struct MethodName {
     pub text: String,
     pub id: BuiltinId,
@@ -261,6 +276,7 @@ impl BuiltinId {
 }
 
 /// A precompiled format template plus where each argument lives.
+#[derive(Clone)]
 pub struct FmtSpec {
     pub template: String,
     /// Positional argument registers, in order.
@@ -286,6 +302,7 @@ pub enum MacroKind {
     Bail,
 }
 
+#[derive(Clone)]
 pub enum Op {
     LoadConst { dst: Reg, k: u16 },
     LoadInt { dst: Reg, v: i64 },
@@ -360,6 +377,13 @@ pub enum Op {
     MacroCall { kind: MacroKind, dst: Reg, spec: u16 },
     /// `dbg!` takes plain registers, not a template.
     Dbg { dst: Reg, base: Reg, argc: u16 },
+
+    /// Spawn child closure `child` as a tokio task, writing a JoinHandle into
+    /// `dst`. Emitted only for `#[tokio::main]` scripts, run by the parallel VM.
+    Spawn { dst: Reg, child: u16 },
+    /// Await the future or JoinHandle in `src`, writing its result into `dst`.
+    /// Parallel VM only.
+    Await { dst: Reg, src: Reg },
 }
 
 /// One compiled function, method, or closure body.
@@ -372,7 +396,7 @@ pub struct Chunk {
     pub module: u16,
 
     // Side tables referenced by instruction operands.
-    pub consts: Vec<Value>,
+    pub consts: Vec<Const>,
     pub members: Vec<Member>,
     pub pats: Vec<PatInfo>,
     pub fmts: Vec<FmtSpec>,

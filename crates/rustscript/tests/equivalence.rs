@@ -59,6 +59,12 @@ fn interpreter_matches_compiler() {
         if SKIP.contains(&name.as_str()) {
             continue;
         }
+        // Creating a symlink on Windows needs privileges unix grants freely, so
+        // run the comparison only where it is reliable. The build above still
+        // covers that the example compiles cross-platform.
+        if !cfg!(unix) && name == "symlink_demo" {
+            continue;
+        }
 
         let (compiled_ok, compiled_out) = run(&mut Command::new(bin_dir.join(&name)));
         let (script_ok, script_out) = run(Command::new(interp)

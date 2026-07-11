@@ -3,6 +3,7 @@ mod interpreter;
 mod loader;
 
 use std::path::Path;
+use std::process::Command;
 
 use anyhow::{Result, bail};
 use mimalloc::MiMalloc;
@@ -35,6 +36,10 @@ fn real_main() -> Result<()> {
             println!("ok");
             Ok(())
         }
+        "build" => {
+            let file = all.get(1).ok_or_else(err_usage)?;
+            build_run(file, &all[2..])
+        }
         "clean" => checker::clean(),
         "-h" | "--help" | "help" | "" => {
             print_usage();
@@ -51,6 +56,14 @@ fn real_main() -> Result<()> {
 }
 
 fn run(file: &str, script_args: &[String]) -> Result<()> {
+    // `NAME cmp ...` runs the script compiled instead of interpreted. Launchers
+    // pass the caller's words straight through, so a plain `gh-clone cmp` lands
+    // here with `cmp` as the first script argument. That word is reserved, a
+    // script must not treat its own first positional argument as `cmp`.
+    if script_args.first().is_some_and(|a| a == "cmp") {
+        return build_run(file, &script_args[1..]);
+    }
+
     // A launcher symlink must resolve to the real script so module files are
     // found next to the source, not next to the link.
     let path = Path::new(file).canonicalize().unwrap_or_else(|_| Path::new(file).to_path_buf());
@@ -64,8 +77,31 @@ fn run(file: &str, script_args: &[String]) -> Result<()> {
     args.extend(script_args.iter().cloned());
     interpreter::set_script_args(args);
 
-    let interp = interpreter::Interp::load(&program.modules)?;
+    // `#[tokio::main]` routes to the parallel engine. Everything else runs the
+    // single threaded fast engine, unchanged.
+    if program.tokio_main {
+        return interpreter::run_parallel(&program.modules);
+    }
+
+    let interp = interpreter::Interp::load(&program.modules, false)?;
     interp.run_main()
+}
+
+/// Compile the script to a native binary, cached by source hash, then run it
+/// with the caller's arguments and exit with its status. Unlike `run`, this
+/// path never touches the interpreter.
+fn build_run(file: &str, script_args: &[String]) -> Result<()> {
+    let path = Path::new(file).canonicalize().unwrap_or_else(|_| Path::new(file).to_path_buf());
+    let source = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("cannot read {file}: {e}"))?;
+    let program = loader::load(&path, &source)?;
+
+    let bin = checker::build(&path, &program.files, &program.crate_deps)?;
+    let status = Command::new(&bin)
+        .args(script_args)
+        .status()
+        .map_err(|e| anyhow::anyhow!("cannot run compiled binary {}: {e}", bin.display()))?;
+    std::process::exit(status.code().unwrap_or(1));
 }
 
 fn err_usage() -> anyhow::Error {
@@ -79,8 +115,10 @@ fn print_usage() {
 usage:
   rust run FILE.rs     interpret the script
   rust FILE.rs         same as run
+  rust FILE.rs cmp     compile and run, `cmp` first arg is reserved
+  rust build FILE.rs   compile to a native binary, cache it, then run
   rust check FILE.rs   validate with cargo check, does not run
-  rust clean           clear the check cache
+  rust clean           clear the cache
   rust help            show this help"
     );
 }
