@@ -31,7 +31,7 @@ pub enum Native {
     Instant(Instant),
     SystemTime(SystemTime),
     TempDir(tempfile::TempDir),
-    Agent(ureq::Agent),
+    HttpClient(reqwest::blocking::Client),
     /// A lazy line iterator, so `for line in reader.lines()` streams instead of
     /// buffering the whole input first.
     Lines(Box<dyn Iterator<Item = std::io::Result<String>>>),
@@ -57,7 +57,7 @@ impl Native {
             Native::Instant(_) => "Instant",
             Native::SystemTime(_) => "SystemTime",
             Native::TempDir(_) => "TempDir",
-            Native::Agent(_) => "Agent",
+            Native::HttpClient(_) => "HttpClient",
             Native::Lines(_) => "Lines",
             Native::Closed => "Closed",
         }
@@ -421,15 +421,15 @@ pub fn native_method(
             }
             bail!("close on non-tempdir");
         }
-        // Agent request builders ------------------------------------------
+        // Client request builders -----------------------------------------
         "get" | "post" | "put" | "delete" | "patch" | "head" => {
-            if matches!(&*handle.borrow(), Native::Agent(_)) {
+            if matches!(&*handle.borrow(), Native::HttpClient(_)) {
                 let verb = method.to_ascii_uppercase();
-                let agent = Value::Native(handle.clone());
-                return Ok(Some(super::http::build_http_request(
+                let client = Value::Native(handle.clone());
+                return Ok(Some(super::http::build_reqwest_request(
                     &verb,
                     args.first(),
-                    Some(agent),
+                    client,
                 )));
             }
         }

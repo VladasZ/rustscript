@@ -27,6 +27,11 @@ fn every_example_runs() {
         {
             continue;
         }
+        // Creating a symlink on Windows needs privileges unix grants freely.
+        let stem = path.file_stem().and_then(|n| n.to_str());
+        if !cfg!(unix) && stem == Some("symlink_demo") {
+            continue;
+        }
         let out = Command::new(env!("CARGO_BIN_EXE_rust"))
             .arg("run")
             .arg(&path)

@@ -11,7 +11,6 @@ use super::native::{self, Native};
 use super::value::{Map, StructData, Value};
 
 use super::crates_bridge::*;
-use super::http::*;
 use super::json_bridge::*;
 use super::jwt_bridge::*;
 use super::regex_bridge::*;
@@ -25,9 +24,6 @@ use super::regex_bridge::*;
 pub(super) fn native_call(module: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
     if module == "serde_json" {
         return bridge_serde_json(func, args).map(Some);
-    }
-    if module == "ureq" {
-        return Ok(make_request(func, args));
     }
     let s = |i: usize| -> Result<String> {
         match args.get(i) {
@@ -135,13 +131,6 @@ pub(super) fn native_call(module: &str, func: &str, args: &[Value]) -> Result<Op
             }
             ("fs", "set_permissions") => {
                 wrap_unit(set_permissions_impl(&s(0)?, args.get(1).and_then(perm_mode)))
-            }
-            // -- thread ---------------------------------------------------
-            ("thread", "sleep") => {
-                if let Some(d) = args.first().and_then(duration_from_value) {
-                    std::thread::sleep(d);
-                }
-                Value::Unit
             }
             _ => return crate_bridge(module, func, args),
         }))
@@ -600,7 +589,6 @@ pub(super) fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Va
             variant: func.into(),
             data: Value::one_data(args.first().cloned().unwrap_or(Value::Int(0))),
         },
-        ("Agent", "new_with_defaults") => Native::Agent(ureq::agent()).wrap(),
         ("Stdio", "piped") | ("Stdio", "inherit") | ("Stdio", "null") => {
             Value::struct_of("Stdio", [("kind".into(), Value::str(func))])
         }

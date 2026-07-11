@@ -7,7 +7,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 
 use crate::loader::CrateDep;
 
@@ -19,6 +19,12 @@ fn cache_root() -> PathBuf {
     } else {
         std::env::temp_dir().join("rustscript")
     }
+}
+
+/// Compiled script binaries, one per source hash. Kept so an unchanged script
+/// runs instantly with no cargo invocation.
+fn bin_cache() -> PathBuf {
+    cache_root().join("bin")
 }
 
 pub fn clean() -> Result<()> {
@@ -49,15 +55,7 @@ pub fn check(script_path: &Path, files: &[(PathBuf, String)], crate_deps: &[Crat
         return Ok(());
     }
 
-    std::fs::create_dir_all(&project)?;
-    std::fs::write(&project.join("Cargo.toml"), manifest(crate_deps))?;
-    for (rel, source) in files {
-        let dst = project.join(rel);
-        if let Some(parent) = dst.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&dst, source)?;
-    }
+    write_project(&project, files, crate_deps)?;
 
     // One shared target dir across all cache projects. Without it every source
     // hash gets its own target and recompiles the whole fixed dep set from
@@ -86,6 +84,75 @@ pub fn check(script_path: &Path, files: &[(PathBuf, String)], crate_deps: &[Crat
     Ok(())
 }
 
+/// Mirror the script and its module tree into a throwaway cargo project under
+/// the cache dir, so `mod` declarations resolve the same way real Rust sees
+/// them. Shared by the check gate and the compiled build.
+fn write_project(project: &Path, files: &[(PathBuf, String)], crate_deps: &[CrateDep]) -> Result<()> {
+    std::fs::create_dir_all(project)?;
+    std::fs::write(project.join("Cargo.toml"), manifest(crate_deps))?;
+    for (rel, source) in files {
+        let dst = project.join(rel);
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&dst, source)?;
+    }
+    Ok(())
+}
+
+/// Compile the script to a native binary and return its cached path. A
+/// successful build proves the script is valid Rust, so it also stands in for
+/// the check gate. The final binary is cached by source hash for instant
+/// re-runs. The one shared target dir is kept so an edit rebuilds only the
+/// script crate, but no per-hash target dirs are ever created.
+pub fn build(script_path: &Path, files: &[(PathBuf, String)], crate_deps: &[CrateDep]) -> Result<PathBuf> {
+    let hash = hash_files(files, crate_deps);
+    let bin = bin_cache().join(format!("{hash:016x}{}", std::env::consts::EXE_SUFFIX));
+    if bin.exists() {
+        return Ok(bin);
+    }
+
+    let project = cache_root().join(format!("{hash:016x}"));
+    write_project(&project, files, crate_deps)?;
+
+    let target = cache_root().join("target");
+    eprintln!("rust: compiling {}", script_path.display());
+    let status = Command::new("cargo")
+        .args(["build"])
+        .env("CARGO_TARGET_DIR", &target)
+        .current_dir(&project)
+        .status();
+    let status = match status {
+        Ok(s) => s,
+        Err(e) => bail!("could not run cargo build: {e}"),
+    };
+    if !status.success() {
+        bail!("{} failed to compile", script_path.display());
+    }
+
+    let built = target.join("debug").join(format!("script{}", std::env::consts::EXE_SUFFIX));
+    std::fs::create_dir_all(bin_cache())?;
+    // Copy to a per-process temp path then rename, so a concurrent run never
+    // execs a half-written binary. copy carries the executable bit over.
+    let tmp = bin_cache().join(format!(".{hash:016x}.{}", std::process::id()));
+    std::fs::copy(&built, &tmp)
+        .map_err(|e| anyhow!("cannot copy built binary {}: {e}", built.display()))?;
+    match std::fs::rename(&tmp, &bin) {
+        Ok(()) => {}
+        Err(e) => {
+            // A concurrent build may have placed the same binary first. If it
+            // did, its bytes are identical, so reuse it and drop our temp.
+            if let Err(rm) = std::fs::remove_file(&tmp) {
+                eprintln!("rust: could not remove temp binary {}: {rm}", tmp.display());
+            }
+            if !bin.exists() {
+                return Err(anyhow!("cannot place binary {}: {e}", bin.display()));
+            }
+        }
+    }
+    Ok(bin)
+}
+
 /// Scripts use plain `std`. A few common crates are always available so a
 /// script can `use` them without declaring anything.
 const MANIFEST: &str = r#"[package]
@@ -101,7 +168,6 @@ path = "main.rs"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
-ureq = { version = "3", features = ["cookies"] }
 regex = "1"
 which = "8"
 rand = "0.10"
@@ -116,6 +182,8 @@ hex = "0.4"
 ctrlc = "3"
 tempfile = "3"
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking", "cookies"], default-features = false }
 "#;
 
 /// The cargo project manifest, the fixed dependency set plus one `path` entry

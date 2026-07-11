@@ -11,23 +11,25 @@ use syn::punctuated::Punctuated;
 use syn::{BinOp, Block, Expr, FnArg, Lit, Pat, UnOp};
 
 use super::bytecode::{
-    BinKind, BuiltinId, CapSource, Chunk, FmtSpec, Member, MethodName, Op, PatInfo, Reg,
+    BinKind, BuiltinId, CapSource, Chunk, Const, FmtSpec, Member, MethodName, Op, PatInfo, Reg,
     StructLit,
 };
 use super::resolver::{Res, Resolver};
-use super::value::Value;
 
 /// Program level facts the compiler needs, filled before any body is compiled.
 pub struct Ctx<'r> {
     pub resolver: &'r Resolver,
     /// The module whose source is being compiled. Paths resolve against it.
     pub module: usize,
+    /// True when compiling a `#[tokio::main]` program, which lets `.await`,
+    /// `tokio::spawn`, and `join!` compile instead of being rejected.
+    pub async_mode: bool,
 }
 
 /// Per function compilation state. A stack of these supports nested closures.
 struct FnState {
     code: Vec<Op>,
-    consts: Vec<Value>,
+    consts: Vec<Const>,
     members: Vec<Member>,
     pats: Vec<PatInfo>,
     fmts: Vec<FmtSpec>,
@@ -227,9 +229,9 @@ impl<'a> Compiler<'a> {
         self.cur().scopes.last_mut().unwrap().insert(name.to_string(), reg);
     }
 
-    fn add_const(&mut self, v: Value) -> u16 {
+    fn add_const(&mut self, c: Const) -> u16 {
         let f = self.cur();
-        f.consts.push(v);
+        f.consts.push(c);
         (f.consts.len() - 1) as u16
     }
 

@@ -443,3 +443,175 @@ fn main() {
 "#);
     assert_eq!(out, "[\"a\", \"b\"]\n2\n2\n");
 }
+
+#[test]
+fn tokio_hello_runs_on_parallel_engine() {
+    let out = run(r#"
+#[tokio::main]
+async fn main() {
+    println!("hello from tokio");
+}
+"#);
+    assert_eq!(out, "hello from tokio\n");
+}
+
+#[test]
+fn tokio_spawn_join_returns_values() {
+    let out = run(r#"
+#[tokio::main]
+async fn main() {
+    let a = tokio::spawn(async { 2 + 3 });
+    let b = tokio::spawn(async { 10 * 4 });
+    let (x, y) = tokio::join!(a, b);
+    println!("sum={x} prod={y}");
+}
+"#);
+    assert_eq!(out, "sum=5 prod=40\n");
+}
+
+#[test]
+fn tokio_parallel_tasks_capture_and_await() {
+    let out = run(r#"
+#[tokio::main]
+async fn main() {
+    let mut handles = Vec::new();
+    for i in 0..5 {
+        handles.push(tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            i
+        }));
+    }
+    let mut total = 0;
+    for h in handles {
+        total += h.await;
+    }
+    println!("total={total}");
+}
+"#);
+    assert_eq!(out, "total=10\n");
+}
+
+#[test]
+fn tokio_parallel_subprocesses() {
+    let out = run(r#"
+#[tokio::main]
+async fn main() {
+    let a = tokio::spawn(async {
+        let o = std::process::Command::new("echo").arg("A").output().unwrap();
+        o.status().success()
+    });
+    let b = tokio::spawn(async {
+        let o = std::process::Command::new("echo").arg("B").output().unwrap();
+        o.status().success()
+    });
+    let (x, y) = tokio::join!(a, b);
+    println!("{x} {y}");
+}
+"#);
+    assert_eq!(out, "true true\n");
+}
+
+#[test]
+fn tokio_current_thread_flavor_is_rejected() {
+    // Only the multi thread runtime is offered, so an explicit current_thread
+    // flavor is rejected at load time.
+    let err = run_fail(r#"
+#[tokio::main(flavor = "current_thread")]
+async fn main() {}
+"#);
+    assert!(err.contains("multi_thread"), "stderr was: {err}");
+}
+
+#[test]
+fn reqwest_bridge_builds_and_errors_gracefully() {
+    // No network: a refused local port must surface as an Err through the whole
+    // Client, request builder, and send path, not panic.
+    let out = run(r#"
+fn main() {
+    let client = reqwest::blocking::Client::new();
+    let r = client
+        .get("http://127.0.0.1:9/")
+        .header("X-Test", "1")
+        .send();
+    println!("{}", r.is_err());
+}
+"#);
+    assert_eq!(out, "true\n");
+}
+
+#[test]
+fn tokio_as_casts() {
+    let out = run(r#"
+#[tokio::main]
+async fn main() {
+    let n = 5;
+    let f = n as f64 / 2.0;
+    let back = f as i64;
+    let ch = 65 as char;
+    println!("{f} {back} {ch}");
+}
+"#);
+    assert_eq!(out, "2.5 2 A\n");
+}
+
+#[test]
+fn tokio_user_methods_and_associated_fns() {
+    let out = run(r#"
+struct P { x: i64, y: i64 }
+impl P {
+    fn new(x: i64, y: i64) -> P { P { x, y } }
+    fn sum(&self) -> i64 { self.x + self.y }
+}
+fn triple(n: i64) -> i64 { n * 3 }
+#[tokio::main]
+async fn main() {
+    let p = P::new(3, 4);
+    println!("{} {}", p.sum(), triple(5));
+}
+"#);
+    assert_eq!(out, "7 15\n");
+}
+
+#[test]
+fn tokio_module_consts() {
+    let out = run(r#"
+const LIMIT: i64 = 42;
+static NAME: &str = "rustscript";
+#[tokio::main]
+async fn main() {
+    println!("{LIMIT} {NAME}");
+}
+"#);
+    assert_eq!(out, "42 rustscript\n");
+}
+
+#[test]
+fn tokio_async_reqwest_errors_gracefully() {
+    // No network: a refused local port must surface as an Err through the async
+    // Client, request builder, and `.send().await` path, not panic.
+    let out = run(r#"
+#[tokio::main]
+async fn main() {
+    let client = reqwest::Client::new();
+    let r = client
+        .get("http://127.0.0.1:9/")
+        .header("X-Test", "1")
+        .send()
+        .await;
+    println!("{}", r.is_err());
+}
+"#);
+    assert_eq!(out, "true\n");
+}
+
+#[test]
+fn std_thread_is_rejected() {
+    let err = run_fail(r#"
+use std::thread;
+fn main() {
+    let h = thread::spawn(|| 1);
+    println!("{}", h.join().unwrap());
+}
+"#);
+    assert!(err.contains("std::thread is not supported"), "stderr was: {err}");
+}

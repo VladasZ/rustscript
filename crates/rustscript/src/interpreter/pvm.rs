@@ -1,0 +1,640 @@
+//! The parallel register machine. It mirrors `vm.rs` but runs `PChunk` over
+//! `PValue`, so a task can run on any worker thread. The hot inline fast paths
+//! of the fast VM are dropped here for clarity; the parallel engine optimizes
+//! for correctness and real concurrency, not single thread microspeed.
+
+use std::collections::HashMap;
+use std::mem::take;
+use std::sync::Arc;
+
+use anyhow::{Result, bail};
+use parking_lot::Mutex;
+use tokio::runtime::Handle;
+
+use super::bytecode::{CapSource, MacroKind, MethodName, Op};
+use super::pchunk::{PChunk, PMember};
+use super::pnative::PNative;
+use super::pops::{apply_bin, apply_bin_imm, apply_un, cmp_test, cmp_test_imm, try_bind};
+use super::pvalue::{PClosure, PStructShape, PValue};
+
+const MAX_CALL_DEPTH: usize = 100_000;
+
+/// A module level const or static: converted once, evaluated on first read.
+/// Each slot has its own lock so tasks on different threads can read globals.
+pub enum PGlobalSlot {
+    Todo(Arc<PChunk>),
+    Busy,
+    Ready(PValue),
+}
+
+/// The compiled program plus the runtime handle, shared across worker threads.
+pub struct PInterp {
+    pub functions: Vec<Arc<PChunk>>,
+    pub fn_index: HashMap<String, u32>,
+    pub methods: HashMap<(String, String), Arc<PChunk>>,
+    pub globals: Vec<Mutex<PGlobalSlot>>,
+    pub rt: Handle,
+}
+
+struct Frame {
+    chunk: Arc<PChunk>,
+    closure: Option<Arc<PClosure>>,
+    ip: usize,
+    base: usize,
+    dst: u16,
+}
+
+impl PInterp {
+    pub fn run_chunk(
+        self: &Arc<Self>,
+        chunk: &Arc<PChunk>,
+        args: &[PValue],
+        upvalues: &[PValue],
+    ) -> Result<PValue> {
+        if args.len() != chunk.num_params {
+            bail!("`{}` expects {} args but got {}", chunk.name, chunk.num_params, args.len());
+        }
+        let mut stack = vec![PValue::Unit; chunk.num_regs.max(chunk.num_params)];
+        for (i, a) in args.iter().enumerate() {
+            stack[i] = a.clone();
+        }
+        self.exec(chunk, &mut stack, upvalues)
+    }
+
+    fn exec(
+        self: &Arc<Self>,
+        entry: &Arc<PChunk>,
+        stack: &mut Vec<PValue>,
+        entry_upvalues: &[PValue],
+    ) -> Result<PValue> {
+        let mut frames: Vec<Frame> = Vec::new();
+        let mut cur = entry.clone();
+        let mut cur_clo: Option<Arc<PClosure>> = None;
+        let mut base = 0usize;
+        let mut ip = 0usize;
+
+        macro_rules! ret {
+            ($v:expr) => {{
+                let v = $v;
+                match frames.pop() {
+                    None => return Ok(v),
+                    Some(f) => {
+                        cur = f.chunk;
+                        cur_clo = f.closure;
+                        ip = f.ip;
+                        base = f.base;
+                        stack[base + f.dst as usize] = v;
+                        continue;
+                    }
+                }
+            }};
+        }
+
+        macro_rules! call {
+            ($chunk:expr, $clo:expr, $dst:expr, $abase:expr, $argc:expr) => {{
+                let callee: Arc<PChunk> = $chunk;
+                if $argc != callee.num_params {
+                    bail!("`{}` expects {} args but got {}", callee.name, callee.num_params, $argc);
+                }
+                if frames.len() >= MAX_CALL_DEPTH {
+                    bail!("stack overflow: call depth exceeded {MAX_CALL_DEPTH}");
+                }
+                let nbase = base + cur.num_regs;
+                let need = nbase + callee.num_regs.max(callee.num_params);
+                if stack.len() < need {
+                    stack.resize(need, PValue::Unit);
+                }
+                for i in 0..$argc {
+                    stack[nbase + i] = take(&mut stack[base + $abase + i]);
+                }
+                for slot in &mut stack[nbase + $argc..need] {
+                    *slot = PValue::Unit;
+                }
+                frames.push(Frame {
+                    chunk: std::mem::replace(&mut cur, callee),
+                    closure: std::mem::replace(&mut cur_clo, $clo),
+                    ip: ip + 1,
+                    base,
+                    dst: $dst,
+                });
+                base = nbase;
+                ip = 0;
+                continue;
+            }};
+        }
+
+        loop {
+            if ip >= cur.code.len() {
+                ret!(PValue::Unit);
+            }
+            match &cur.code[ip] {
+                Op::LoadConst { dst, k } => {
+                    stack[base + *dst as usize] = PValue::from_const(&cur.consts[*k as usize]);
+                }
+                Op::LoadInt { dst, v } => stack[base + *dst as usize] = PValue::Int(*v),
+                Op::LoadBool { dst, v } => stack[base + *dst as usize] = PValue::Bool(*v),
+                Op::LoadUnit { dst } => stack[base + *dst as usize] = PValue::Unit,
+                Op::LoadGlobal { dst, idx } => {
+                    let v = self.global(*idx as usize)?;
+                    stack[base + *dst as usize] = v;
+                }
+                Op::LoadUpvalue { dst, idx } => {
+                    let upvals: &[PValue] = match &cur_clo {
+                        Some(c) => &c.captured,
+                        None => entry_upvalues,
+                    };
+                    stack[base + *dst as usize] = upvals[*idx as usize].clone();
+                }
+                Op::Move { dst, src } => {
+                    stack[base + *dst as usize] = stack[base + *src as usize].clone();
+                }
+                Op::Bin { dst, a, b, op } => {
+                    let v = apply_bin(*op, &stack[base + *a as usize], &stack[base + *b as usize])?;
+                    stack[base + *dst as usize] = v;
+                }
+                Op::BinImm { dst, a, imm, op } => {
+                    let v = apply_bin_imm(*op, &stack[base + *a as usize], *imm)?;
+                    stack[base + *dst as usize] = v;
+                }
+                Op::Un { dst, a, op } => {
+                    let v = apply_un(*op, &stack[base + *a as usize])?;
+                    stack[base + *dst as usize] = v;
+                }
+                Op::Jump { to } => {
+                    ip = *to as usize;
+                    continue;
+                }
+                Op::JumpIfFalse { cond, to } => {
+                    if !stack[base + *cond as usize].is_truthy() {
+                        ip = *to as usize;
+                        continue;
+                    }
+                }
+                Op::JumpIfTrue { cond, to } => {
+                    if stack[base + *cond as usize].is_truthy() {
+                        ip = *to as usize;
+                        continue;
+                    }
+                }
+                Op::CmpJump { a, b, op, to } => {
+                    if !cmp_test(*op, &stack[base + *a as usize], &stack[base + *b as usize])? {
+                        ip = *to as usize;
+                        continue;
+                    }
+                }
+                Op::CmpJumpImm { a, imm, op, to } => {
+                    if !cmp_test_imm(*op, &stack[base + *a as usize], *imm)? {
+                        ip = *to as usize;
+                        continue;
+                    }
+                }
+                Op::CallFn { dst, func, base: abase, argc, .. } => {
+                    let (dst, func, abase, argc) =
+                        (*dst, *func as usize, *abase as usize, *argc as usize);
+                    let callee = self.functions[func].clone();
+                    call!(callee, None, dst, abase, argc);
+                }
+                Op::CallValue { dst, callee, base: abase, argc } => {
+                    let (dst, callee_reg, abase, argc) =
+                        (*dst, *callee as usize, *abase as usize, *argc as usize);
+                    let clo = match &stack[base + callee_reg] {
+                        PValue::Closure(clo) => clo.clone(),
+                        other => bail!("cannot call {}", other.type_name()),
+                    };
+                    let chunk = clo.chunk.clone();
+                    call!(chunk, Some(clo), dst, abase, argc);
+                }
+                Op::CallPath { dst, path, base: abase, argc } => {
+                    let (abase, argc) = (*abase as usize, *argc as usize);
+                    let segs = &cur.paths[*path as usize];
+                    let args = take_range(stack, base + abase, argc);
+                    let v = self.dispatch_call(segs, args)?;
+                    stack[base + *dst as usize] = v;
+                }
+                Op::PathValue { dst, path } => {
+                    let segs = &cur.paths[*path as usize];
+                    stack[base + *dst as usize] = self.eval_path_value(segs)?;
+                }
+                Op::Method { dst, recv, name, base: abase, argc } => {
+                    let (recv, abase, argc) = (*recv as usize, *abase as usize, *argc as usize);
+                    let name = &cur.names[*name as usize];
+                    let recv_v = stack[base + recv].clone();
+                    let mut margs = take_range(stack, base + abase, argc);
+                    let v = self.eval_method(&recv_v, name, &mut margs)?;
+                    if *dst != u16::MAX {
+                        stack[base + *dst as usize] = v;
+                    }
+                }
+                Op::GetOrDefault { dst, recv, key, default } => {
+                    let recv_v = stack[base + *recv as usize].clone();
+                    let key_v = stack[base + *key as usize].clone();
+                    let get = MethodName { text: "get".into(), id: super::bytecode::BuiltinId::Get };
+                    let opt = self.eval_method(&recv_v, &get, &mut [key_v])?;
+                    let v = match opt {
+                        PValue::Enum { variant, data, .. } if &*variant == "Some" => {
+                            data.first().cloned().unwrap_or(PValue::Unit)
+                        }
+                        _ => stack[base + *default as usize].clone(),
+                    };
+                    stack[base + *dst as usize] = v;
+                }
+                Op::Ret { src } => {
+                    let v = take(&mut stack[base + *src as usize]);
+                    ret!(v);
+                }
+                Op::MakeVec { dst, base: wbase, count } => {
+                    let items = take_range(stack, base + *wbase as usize, *count as usize);
+                    stack[base + *dst as usize] = PValue::vec(items);
+                }
+                Op::MakeTuple { dst, base: wbase, count } => {
+                    let items = take_range(stack, base + *wbase as usize, *count as usize);
+                    stack[base + *dst as usize] = PValue::tuple(items);
+                }
+                Op::MakeArrayRepeat { dst, val, count } => {
+                    let n = match &stack[base + *count as usize] {
+                        PValue::Int(n) => *n as usize,
+                        _ => bail!("array repeat length must be an integer"),
+                    };
+                    let v = stack[base + *val as usize].clone();
+                    stack[base + *dst as usize] = PValue::vec(std::iter::repeat_n(v, n).collect());
+                }
+                Op::MakeRange { dst, start, end, inclusive } => {
+                    let s = int_of(&stack[base + *start as usize])?;
+                    let e = int_of(&stack[base + *end as usize])?;
+                    stack[base + *dst as usize] =
+                        PValue::Range { start: s, end: e, inclusive: *inclusive };
+                }
+                Op::IterInit { dst, src } => {
+                    let src_v = stack[base + *src as usize].clone();
+                    let it = match src_v {
+                        PValue::Range { .. } => src_v,
+                        other => PValue::vec(self.into_iter_items(other)?),
+                    };
+                    stack[base + *dst as usize] = it;
+                }
+                Op::ForNext { iter, idx, val, to } => {
+                    let i = match &stack[base + *idx as usize] {
+                        PValue::Int(i) => *i,
+                        _ => unreachable!("for index is an integer"),
+                    };
+                    let item = match &stack[base + *iter as usize] {
+                        PValue::Vec(items) => items.lock().get(i as usize).cloned(),
+                        PValue::Range { start, end, inclusive } => {
+                            let n = start + i;
+                            let done = if *inclusive { n > *end } else { n >= *end };
+                            if done { None } else { Some(PValue::Int(n)) }
+                        }
+                        _ => None,
+                    };
+                    match item {
+                        Some(v) => {
+                            stack[base + *val as usize] = v;
+                            stack[base + *idx as usize] = PValue::Int(i + 1);
+                        }
+                        None => {
+                            ip = *to as usize;
+                            continue;
+                        }
+                    }
+                }
+                Op::MakeStruct { dst, info, base: wbase } => {
+                    let wbase = *wbase as usize;
+                    let lit = &cur.struct_lits[*info as usize];
+                    let written = lit.shape.fields.len();
+                    let mut values: Vec<PValue> =
+                        (0..written).map(|k| take(&mut stack[base + wbase + k])).collect();
+                    let v = if lit.has_rest {
+                        let rest = stack[base + wbase + written].clone();
+                        let mut fields = lit.shape.fields.clone();
+                        let mut renames = lit.shape.renames.clone();
+                        if let PValue::Struct(r) = rest {
+                            let rvals = r.values.lock();
+                            for (slot, (k, v)) in r.shape.fields.iter().zip(rvals.iter()).enumerate() {
+                                if lit.shape.slot(k).is_none() {
+                                    fields.push(k.clone());
+                                    values.push(v.clone());
+                                    if !renames.is_empty() {
+                                        renames.push(r.shape.renames.get(slot).cloned().flatten());
+                                    }
+                                }
+                            }
+                        }
+                        let shape = Arc::new(PStructShape {
+                            name: lit.shape.name.clone(),
+                            fields,
+                            renames,
+                        });
+                        PValue::structure(shape, values)
+                    } else {
+                        PValue::structure(lit.shape.clone(), values)
+                    };
+                    stack[base + *dst as usize] = v;
+                }
+                Op::MakeClosure { dst, child } => {
+                    let clo = self.make_closure(&cur, *child, stack, base, &cur_clo, entry_upvalues);
+                    stack[base + *dst as usize] = PValue::Closure(clo);
+                }
+                Op::Index { dst, base: b, key } => {
+                    let v = self.index(&stack[base + *b as usize], &stack[base + *key as usize])?;
+                    stack[base + *dst as usize] = v;
+                }
+                Op::SetIndex { base: b, key, val } => {
+                    self.set_index(
+                        &stack[base + *b as usize],
+                        &stack[base + *key as usize],
+                        stack[base + *val as usize].clone(),
+                    )?;
+                }
+                Op::GetField { dst, base: b, member } => {
+                    let v = self.get_field(&stack[base + *b as usize], &cur.members[*member as usize])?;
+                    stack[base + *dst as usize] = v;
+                }
+                Op::SetField { base: b, member, val } => {
+                    self.set_field(
+                        &stack[base + *b as usize],
+                        &cur.members[*member as usize],
+                        stack[base + *val as usize].clone(),
+                    )?;
+                }
+                Op::Try { dst, src } => match self.eval_try(stack[base + *src as usize].clone())? {
+                    Ok(v) => stack[base + *dst as usize] = v,
+                    Err(early) => ret!(early),
+                },
+                Op::Cast { dst, src, ty } => {
+                    let v = eval_cast(&cur.casts[*ty as usize], stack[base + *src as usize].clone())?;
+                    stack[base + *dst as usize] = v;
+                }
+                Op::Coerce { dst, src, .. } => {
+                    stack[base + *dst as usize] = stack[base + *src as usize].clone();
+                }
+                Op::TestBind { val, pat, dst } => {
+                    let info = &cur.pats[*pat as usize];
+                    let value = stack[base + *val as usize].clone();
+                    let binds = &info.binds;
+                    let mut writes: Vec<(u16, PValue)> = Vec::new();
+                    let matched = {
+                        let mut define = |name: &str, v: PValue| {
+                            if let Some((_, reg)) = binds.iter().find(|(n, _)| n == name) {
+                                writes.push((*reg, v));
+                            }
+                        };
+                        try_bind(&info.pat, &value, &mut define)
+                    };
+                    for (reg, v) in writes {
+                        stack[base + reg as usize] = v;
+                    }
+                    stack[base + *dst as usize] = PValue::Bool(matched);
+                }
+                Op::Fmt { dst, spec } => {
+                    let text = self.render_fmt(&cur, *spec, &stack[base..])?;
+                    stack[base + *dst as usize] = PValue::str(text);
+                }
+                Op::MacroCall { kind, dst, spec } => {
+                    let text = self.render_fmt(&cur, *spec, &stack[base..])?;
+                    match kind {
+                        MacroKind::Println => println!("{text}"),
+                        MacroKind::Print => print!("{text}"),
+                        MacroKind::Eprintln => eprintln!("{text}"),
+                        MacroKind::Eprint => eprint!("{text}"),
+                        MacroKind::Panic => bail!("panicked: {text}"),
+                        MacroKind::Anyhow => {
+                            stack[base + *dst as usize] = PValue::err(PValue::str(text));
+                        }
+                        MacroKind::Bail => ret!(PValue::err(PValue::str(text))),
+                    }
+                    if !matches!(kind, MacroKind::Anyhow) {
+                        stack[base + *dst as usize] = PValue::Unit;
+                    }
+                }
+                Op::Dbg { dst, base: wbase, argc } => {
+                    let (wbase, argc) = (*wbase as usize, *argc as usize);
+                    let mut last = PValue::Unit;
+                    for i in 0..argc {
+                        last = stack[base + wbase + i].clone();
+                        eprintln!("[dbg] {}", last.debug());
+                    }
+                    stack[base + *dst as usize] = last;
+                }
+                Op::Spawn { dst, child } => {
+                    let clo = self.make_closure(&cur, *child, stack, base, &cur_clo, entry_upvalues);
+                    let interp = self.clone();
+                    let handle = self.rt.spawn_blocking(move || {
+                        interp
+                            .run_chunk(&clo.chunk, &[], &clo.captured)
+                            .unwrap_or_else(|e| PValue::err(PValue::str(e.to_string())))
+                    });
+                    stack[base + *dst as usize] = PNative::Task(handle).wrap();
+                }
+                Op::Await { dst, src } => {
+                    let v = take(&mut stack[base + *src as usize]);
+                    stack[base + *dst as usize] = self.await_value(v)?;
+                }
+            }
+            ip += 1;
+        }
+    }
+
+    fn make_closure(
+        self: &Arc<Self>,
+        cur: &Arc<PChunk>,
+        child: u16,
+        stack: &[PValue],
+        base: usize,
+        cur_clo: &Option<Arc<PClosure>>,
+        entry_upvalues: &[PValue],
+    ) -> Arc<PClosure> {
+        let child_chunk = cur.children[child as usize].clone();
+        let caps = &cur.child_caps[child as usize];
+        let upvals: &[PValue] = match cur_clo {
+            Some(c) => &c.captured,
+            None => entry_upvalues,
+        };
+        let captured: Vec<PValue> = caps
+            .iter()
+            .map(|c| match c {
+                CapSource::Local(reg) => stack[base + *reg as usize].clone(),
+                CapSource::Upvalue(idx) => upvals[*idx as usize].clone(),
+            })
+            .collect();
+        Arc::new(PClosure { chunk: child_chunk, captured })
+    }
+
+    /// Drive an awaited value to its result. A JoinHandle joins, a future is
+    /// run to completion, anything else is already a value.
+    fn await_value(&self, v: PValue) -> Result<PValue> {
+        let PValue::Native(n) = v else { return Ok(v) };
+        let taken = std::mem::replace(&mut *n.lock(), PNative::Taken);
+        match taken {
+            PNative::Task(h) => Ok(self
+                .rt
+                .block_on(h)
+                .unwrap_or_else(|e| PValue::err(PValue::str(e.to_string())))),
+            PNative::Future(f) => Ok(self.rt.block_on(f)),
+            PNative::HttpClient(c) => {
+                *n.lock() = PNative::HttpClient(c);
+                bail!("cannot await a client")
+            }
+            PNative::Taken => bail!("this value was already awaited"),
+        }
+    }
+
+    pub(super) fn user_function(&self, name: &str) -> Option<Arc<PChunk>> {
+        self.fn_index.get(name).map(|&i| self.functions[i as usize].clone())
+    }
+
+    pub(super) fn user_method(&self, ty: &str, name: &str) -> Option<Arc<PChunk>> {
+        self.methods.get(&(ty.to_string(), name.to_string())).cloned()
+    }
+
+    /// Value of a module const or static, evaluated on first read and cached.
+    fn global(self: &Arc<Self>, idx: usize) -> Result<PValue> {
+        {
+            match &*self.globals[idx].lock() {
+                PGlobalSlot::Ready(v) => return Ok(v.clone()),
+                PGlobalSlot::Busy => {
+                    bail!("constant initializers depend on each other in a cycle")
+                }
+                PGlobalSlot::Todo(_) => {}
+            }
+        }
+        let chunk = {
+            let mut slot = self.globals[idx].lock();
+            match std::mem::replace(&mut *slot, PGlobalSlot::Busy) {
+                PGlobalSlot::Todo(c) => c,
+                other => {
+                    *slot = other;
+                    bail!("constant initializers depend on each other in a cycle");
+                }
+            }
+        };
+        let v = self.run_chunk(&chunk, &[], &[])?;
+        *self.globals[idx].lock() = PGlobalSlot::Ready(v.clone());
+        Ok(v)
+    }
+}
+
+fn take_range(stack: &mut [PValue], s: usize, count: usize) -> Vec<PValue> {
+    (0..count).map(|i| take(&mut stack[s + i])).collect()
+}
+
+fn int_of(v: &PValue) -> Result<i64> {
+    match v {
+        PValue::Int(i) => Ok(*i),
+        _ => bail!("range bound must be an integer"),
+    }
+}
+
+/// Apply an `as` cast to a value, keyed by the target type name.
+fn eval_cast(target: &str, v: PValue) -> Result<PValue> {
+    Ok(match target {
+        "f64" | "f32" => PValue::Float(match v {
+            PValue::Int(i) => i as f64,
+            PValue::Float(f) => f,
+            other => bail!("cannot cast {} to float", other.type_name()),
+        }),
+        "usize" | "u8" | "u16" | "u32" | "u64" | "u128" | "isize" | "i8" | "i16" | "i32" | "i64"
+        | "i128" => PValue::Int(match v {
+            PValue::Int(i) => i,
+            PValue::Float(f) => f as i64,
+            PValue::Char(c) => c as i64,
+            PValue::Bool(b) => b as i64,
+            other => bail!("cannot cast {} to integer", other.type_name()),
+        }),
+        "char" => match v {
+            PValue::Int(i) => PValue::Char(
+                char::from_u32(i as u32).ok_or_else(|| anyhow::anyhow!("invalid char code {i}"))?,
+            ),
+            PValue::Char(c) => PValue::Char(c),
+            other => bail!("cannot cast {} to char", other.type_name()),
+        },
+        other => bail!("unsupported cast target: {other}"),
+    })
+}
+
+/// A field access on a struct or tuple, the parallel twin of `get_field`.
+impl PInterp {
+    pub(super) fn get_field(&self, recv: &PValue, member: &PMember) -> Result<PValue> {
+        match (recv, member) {
+            (PValue::Struct(s), PMember::Named(n)) => {
+                s.get(n).ok_or_else(|| anyhow::anyhow!("no field `{n}`"))
+            }
+            (PValue::Tuple(t), PMember::Indexed(i)) => {
+                t.lock().get(*i).cloned().ok_or_else(|| anyhow::anyhow!("no tuple index {i}"))
+            }
+            (PValue::Struct(s), PMember::Indexed(i)) => {
+                s.values.lock().get(*i).cloned().ok_or_else(|| anyhow::anyhow!("no field {i}"))
+            }
+            _ => bail!("cannot read a field of {}", recv.type_name()),
+        }
+    }
+
+    pub(super) fn set_field(&self, recv: &PValue, member: &PMember, v: PValue) -> Result<()> {
+        match (recv, member) {
+            (PValue::Struct(s), PMember::Named(n)) => {
+                if !s.set(n, v) {
+                    bail!("no field `{n}`");
+                }
+            }
+            (PValue::Tuple(t), PMember::Indexed(i)) => {
+                let mut t = t.lock();
+                if *i >= t.len() {
+                    bail!("no tuple index {i}");
+                }
+                t[*i] = v;
+            }
+            _ => bail!("cannot set a field of {}", recv.type_name()),
+        }
+        Ok(())
+    }
+
+    pub(super) fn index(&self, recv: &PValue, key: &PValue) -> Result<PValue> {
+        match recv {
+            PValue::Vec(items) => {
+                let i = int_of(key)? as usize;
+                items.lock().get(i).cloned().ok_or_else(|| anyhow::anyhow!("index {i} out of bounds"))
+            }
+            PValue::Map(m) => {
+                let k = key.as_key().ok_or_else(|| anyhow::anyhow!("invalid map key"))?;
+                m.lock().get(&k).cloned().ok_or_else(|| anyhow::anyhow!("key not found"))
+            }
+            PValue::Str(s) => {
+                let i = int_of(key)? as usize;
+                s.chars().nth(i).map(PValue::Char).ok_or_else(|| anyhow::anyhow!("index out of bounds"))
+            }
+            _ => bail!("cannot index {}", recv.type_name()),
+        }
+    }
+
+    pub(super) fn set_index(&self, recv: &PValue, key: &PValue, v: PValue) -> Result<()> {
+        match recv {
+            PValue::Vec(items) => {
+                let i = int_of(key)? as usize;
+                let mut items = items.lock();
+                if i >= items.len() {
+                    bail!("index {i} out of bounds");
+                }
+                items[i] = v;
+            }
+            PValue::Map(m) => {
+                let k = key.as_key().ok_or_else(|| anyhow::anyhow!("invalid map key"))?;
+                m.lock().insert(k, v);
+            }
+            _ => bail!("cannot index {}", recv.type_name()),
+        }
+        Ok(())
+    }
+
+    pub(super) fn eval_try(&self, v: PValue) -> Result<std::result::Result<PValue, PValue>> {
+        match v {
+            PValue::Enum { enum_name, variant, data } => match (&*enum_name, &*variant) {
+                ("Result", "Ok") | ("Option", "Some") => {
+                    Ok(Ok(data.first().cloned().unwrap_or(PValue::Unit)))
+                }
+                ("Result", "Err") => Ok(Err(PValue::err(data.first().cloned().unwrap_or(PValue::Unit)))),
+                ("Option", "None") => Ok(Err(PValue::none())),
+                _ => bail!("`?` on a non Result/Option value"),
+            },
+            _ => bail!("`?` on a {}", v.type_name()),
+        }
+    }
+}

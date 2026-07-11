@@ -9,6 +9,7 @@ use compact_str::CompactString;
 use indexmap::{Equivalent, IndexMap};
 use rustc_hash::{FxBuildHasher, FxHasher};
 
+use super::bytecode::Const;
 use super::native::Native;
 
 /// Interpreter string. The buffer is immutable while the `Rc` is shared, so
@@ -293,6 +294,18 @@ impl Default for Value {
 impl Value {
     pub fn str(s: impl Into<CompactString>) -> Value {
         Value::Str(RStr::new(s))
+    }
+
+    /// Materialize a chunk's literal constant into a runtime value.
+    pub fn from_const(c: &Const) -> Value {
+        match c {
+            Const::Float(f) => Value::Float(*f),
+            Const::Char(ch) => Value::Char(*ch),
+            Const::Str(s) => Value::str(&**s),
+            Const::Bytes(bytes) => {
+                Value::vec(bytes.iter().map(|&b| Value::Int(b as i64)).collect())
+            }
+        }
     }
 
     /// Mutable access to a string buffer. Copies first when the handle is

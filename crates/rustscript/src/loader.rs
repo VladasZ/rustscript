@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow, bail};
-use syn::Item;
+use syn::{Item, LitStr};
 
 /// One module of the script, file backed or inline.
 pub struct ModuleSrc {
@@ -41,6 +41,9 @@ pub struct Program {
     pub files: Vec<(PathBuf, String)>,
     /// Local crates the script pulls in through a `path` dependency.
     pub crate_deps: Vec<CrateDep>,
+    /// True when `fn main` carries `#[tokio::main]`, routing the script to the
+    /// parallel engine instead of the single threaded fast engine.
+    pub tokio_main: bool,
 }
 
 pub fn load(script_path: &Path, root_source: &str) -> Result<Program> {
@@ -51,8 +54,45 @@ pub fn load(script_path: &Path, root_source: &str) -> Result<Program> {
     let mut files: Vec<(PathBuf, String)> = vec![(PathBuf::from("main.rs"), root_source.to_string())];
     let root = collect(&mut modules, &mut files, &dir, &dir, Vec::new(), ast.items)?;
     modules.insert(0, root);
+    let tokio_main = detect_tokio_main(&modules[0].items)?;
     let crate_deps = graft_crate_deps(&mut modules, script_path)?;
-    Ok(Program { modules, files, crate_deps })
+    Ok(Program { modules, files, crate_deps, tokio_main })
+}
+
+/// Look for `#[tokio::main]` on `fn main`. Only the multi thread runtime is
+/// offered, so a `current_thread` flavor is rejected with a clear error, as is
+/// any other explicit flavor. A missing flavor means the multi thread default.
+fn detect_tokio_main(items: &[Item]) -> Result<bool> {
+    for item in items {
+        let Item::Fn(f) = item else { continue };
+        if f.sig.ident != "main" {
+            continue;
+        }
+        for attr in &f.attrs {
+            let segs: Vec<String> =
+                attr.path().segments.iter().map(|s| s.ident.to_string()).collect();
+            if segs.last().map(String::as_str) != Some("main")
+                || !segs.iter().any(|s| s == "tokio")
+            {
+                continue;
+            }
+            if matches!(attr.meta, syn::Meta::List(_)) {
+                attr.parse_nested_meta(|meta| {
+                    if meta.path.is_ident("flavor") {
+                        let flavor: LitStr = meta.value()?.parse()?;
+                        if flavor.value() != "multi_thread" {
+                            return Err(meta.error(
+                                "only #[tokio::main] with the multi_thread flavor is supported",
+                            ));
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Walk one module's items, loading `mod name;` files and expanding inline

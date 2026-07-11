@@ -11,7 +11,14 @@ mod jwt_bridge;
 mod methods;
 mod native;
 mod ops;
+mod pbridge;
+mod pchunk;
+mod phttp;
+mod pnative;
+mod pops;
 mod process;
+mod pvalue;
+mod pvm;
 mod regex_bridge;
 mod resolver;
 mod std_bridge;
@@ -64,6 +71,14 @@ pub(crate) fn script_args() -> Vec<String> {
     SCRIPT_ARGS.get().cloned().unwrap_or_default()
 }
 
+/// Entry point for `#[tokio::main]` scripts. These run on the parallel engine
+/// with a real multi thread tokio runtime, values backed by `Arc` so tasks move
+/// across threads.
+pub fn run_parallel(modules: &[ModuleSrc]) -> Result<()> {
+    let interp = Interp::load(modules, true)?;
+    interp.run_parallel()
+}
+
 /// A module level const or static: compiled once, evaluated on first read.
 enum GlobalSlot {
     Todo(Rc<Chunk>),
@@ -91,7 +106,7 @@ pub struct Interp {
 }
 
 impl Interp {
-    pub fn load(modules: &[ModuleSrc]) -> Result<Self> {
+    pub fn load(modules: &[ModuleSrc], async_mode: bool) -> Result<Self> {
         let mut resolver = build_module_tree(modules);
         let mut pending_fns: Vec<(usize, Rc<syn::ItemFn>)> = Vec::new();
         let mut pending_impls: Vec<(usize, Rc<syn::ItemImpl>)> = Vec::new();
@@ -123,19 +138,19 @@ impl Interp {
 
         let mut functions = Vec::with_capacity(pending_fns.len());
         for (m, f) in &pending_fns {
-            let ctx = Ctx { resolver: &resolver, module: *m };
+            let ctx = Ctx { resolver: &resolver, module: *m, async_mode };
             let mut c = Compiler::new(&ctx);
             functions.push(Rc::new(c.compile_fn(&f.sig, &f.block)?));
         }
         let mut methods = HashMap::default();
         for (ty, name, m, f) in &pending_methods {
-            let ctx = Ctx { resolver: &resolver, module: *m };
+            let ctx = Ctx { resolver: &resolver, module: *m, async_mode };
             let mut c = Compiler::new(&ctx);
             methods.insert((ty.clone(), name.clone()), Rc::new(c.compile_fn(&f.sig, &f.block)?));
         }
         let mut globals = Vec::with_capacity(pending_consts.len());
         for (m, expr) in &pending_consts {
-            let ctx = Ctx { resolver: &resolver, module: *m };
+            let ctx = Ctx { resolver: &resolver, module: *m, async_mode };
             let mut c = Compiler::new(&ctx);
             globals.push(GlobalSlot::Todo(Rc::new(c.compile_const(expr)?)));
         }
@@ -184,6 +199,59 @@ impl Interp {
         let chunk = self.functions[idx as usize].clone();
         let ret = self.run_chunk(&chunk, &[], &[])?;
         if let Value::Enum { enum_name, variant, data } = &ret
+            && &**enum_name == "Result"
+            && &**variant == "Err"
+        {
+            let msg = data.first().map(|v| v.display()).unwrap_or_default();
+            bail!("Error: {msg}");
+        }
+        Ok(())
+    }
+
+    /// Run a `#[tokio::main]` program on the parallel engine. Compiles once to
+    /// the fast bytecode, converts it to `Arc` based `PChunk`, then runs `main`
+    /// as a blocking task on a multi thread tokio runtime so awaited futures can
+    /// be driven with `block_on` from a worker.
+    fn run_parallel(&self) -> Result<()> {
+        use std::sync::Arc;
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| anyhow!("cannot start tokio runtime: {e}"))?;
+        let functions: Vec<Arc<pchunk::PChunk>> =
+            self.functions.iter().map(|c| pchunk::convert(c)).collect();
+        let methods = self
+            .methods
+            .iter()
+            .map(|(k, c)| (k.clone(), pchunk::convert(c)))
+            .collect();
+        let globals: Vec<parking_lot::Mutex<pvm::PGlobalSlot>> = self
+            .globals
+            .borrow()
+            .iter()
+            .map(|slot| {
+                let g = match slot {
+                    GlobalSlot::Todo(c) => pvm::PGlobalSlot::Todo(pchunk::convert(c)),
+                    _ => pvm::PGlobalSlot::Busy,
+                };
+                parking_lot::Mutex::new(g)
+            })
+            .collect();
+        let pinterp = Arc::new(pvm::PInterp {
+            functions,
+            fn_index: self.fn_index.clone(),
+            methods,
+            globals,
+            rt: rt.handle().clone(),
+        });
+        let idx = self.main_index.ok_or_else(|| anyhow!("no `main` function found"))? as usize;
+        let main_chunk = pinterp.functions[idx].clone();
+        let runner = pinterp.clone();
+        let joined = rt.block_on(async move {
+            tokio::task::spawn_blocking(move || runner.run_chunk(&main_chunk, &[], &[])).await
+        });
+        let ret = joined.map_err(|e| anyhow!("main task panicked: {e}"))??;
+        if let pvalue::PValue::Enum { enum_name, variant, data } = &ret
             && &**enum_name == "Result"
             && &**variant == "Err"
         {

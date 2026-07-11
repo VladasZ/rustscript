@@ -5,11 +5,11 @@ use anyhow::{Result, anyhow, bail};
 use syn::{BinOp, Block, Expr, Lit, Pat, Stmt, UnOp};
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::interpreter::bytecode::{
-    BinKind, DISCARD, Op, Reg, UnKind,
+    BinKind, Const, DISCARD, Op, Reg, UnKind,
 };
-use crate::interpreter::value::Value;
 
 use super::*;
 
@@ -287,7 +287,16 @@ impl Compiler<'_> {
                 self.emit(Op::Cast { dst, src, ty });
             }
             Expr::Closure(c) => self.compile_closure(dst, c)?,
-            Expr::Async(_) | Expr::Await(_) => bail!("unsupported feature: async is not supported"),
+            Expr::Await(a) => {
+                if !self.ctx.async_mode {
+                    bail!("`.await` is only available under #[tokio::main]");
+                }
+                let src = self.compile_expr(&a.base)?;
+                self.emit(Op::Await { dst, src });
+            }
+            Expr::Async(_) => {
+                bail!("an async block is only supported directly inside tokio::spawn")
+            }
             other => bail!("unsupported expression: {}", expr_kind(other)),
         }
         Ok(())
@@ -301,21 +310,20 @@ impl Compiler<'_> {
             }
             Lit::Bool(b) => self.emit(Op::LoadBool { dst, v: b.value }),
             Lit::Float(f) => {
-                let k = self.add_const(Value::Float(f.base10_parse::<f64>()?));
+                let k = self.add_const(Const::Float(f.base10_parse::<f64>()?));
                 self.emit(Op::LoadConst { dst, k });
             }
             Lit::Str(s) => {
-                let k = self.add_const(Value::str(s.value()));
+                let k = self.add_const(Const::Str(Arc::from(s.value().as_str())));
                 self.emit(Op::LoadConst { dst, k });
             }
             Lit::Char(c) => {
-                let k = self.add_const(Value::Char(c.value()));
+                let k = self.add_const(Const::Char(c.value()));
                 self.emit(Op::LoadConst { dst, k });
             }
             Lit::Byte(b) => self.emit(Op::LoadInt { dst, v: b.value() as i64 }),
             Lit::ByteStr(bs) => {
-                let items = bs.value().into_iter().map(|b| Value::Int(b as i64)).collect();
-                let k = self.add_const(Value::vec(items));
+                let k = self.add_const(Const::Bytes(Arc::from(bs.value().as_slice())));
                 self.emit(Op::LoadConst { dst, k });
             }
             other => bail!("unsupported literal: {other:?}"),
