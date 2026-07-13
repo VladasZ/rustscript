@@ -1,5 +1,6 @@
 import sys
 import time
+from functools import cmp_to_key
 
 n = int(sys.argv[1]) if len(sys.argv) > 1 else 50000
 t = time.perf_counter_ns()
@@ -9,8 +10,13 @@ v = []
 for _ in range(n):
     x = x * 48271 % 2147483647
     v.append(x % 1000000)
-# Sort through a per element callback, bucket first, value second.
-v.sort(key=lambda a: (a % 1000, a))
+# Sort through a comparison callback, bucket first, value second.
+def compare(a, b):
+    bucket = (a % 1000) - (b % 1000)
+    return bucket if bucket else a - b
+
+
+v.sort(key=cmp_to_key(compare))
 length = len(v)
 probe = 0
 i = 0

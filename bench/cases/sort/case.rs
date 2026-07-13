@@ -15,7 +15,7 @@ fn main() {
         x = x * 48271 % 2147483647;
         v.push(x % 1_000_000);
     }
-    // Sort through a per element callback, bucket first, value second.
+    // Sort through a comparison callback, bucket first, value second.
     v.sort_by(|a, b| {
         if a % 1000 == b % 1000 {
             a.cmp(b)

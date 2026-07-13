@@ -246,14 +246,52 @@ impl Interp {
         name: &MethodName,
         args: &mut [Value],
     ) -> Result<Value> {
-        // A method on a range acts on it as an iterator, so expand it to a Vec.
+        if let Value::Range {
+            start,
+            end,
+            inclusive,
+        } = recv
+        {
+            match name.id {
+                BuiltinId::Clone => return Ok(recv.clone()),
+                BuiltinId::Contains => {
+                    let Some(Value::Int(value)) = args.first() else {
+                        bail!("range contains needs an integer");
+                    };
+                    return Ok(Value::Bool(if *inclusive {
+                        *value >= *start && *value <= *end
+                    } else {
+                        *value >= *start && *value < *end
+                    }));
+                }
+                BuiltinId::Len | BuiltinId::Count => {
+                    let extra = i64::from(*inclusive && end >= start);
+                    return Ok(Value::Int(end.saturating_sub(*start) + extra));
+                }
+                BuiltinId::IsEmpty => {
+                    return Ok(Value::Bool(if *inclusive {
+                        start > end
+                    } else {
+                        start >= end
+                    }));
+                }
+                _ => {}
+            }
+        }
+        // A method on a range acts on its iterator value.
         let expanded;
         let recv = if matches!(recv, Value::Range { .. }) {
-            expanded = Value::vec(self.iter_items(recv.clone())?);
+            expanded = self.iterator_value(recv.clone())?;
             &expanded
         } else {
             recv
         };
+        if let Value::Native(iterator) = recv
+            && matches!(&*iterator.borrow(), super::native::Native::Iterator(_))
+            && let Some(value) = self.iterator_method(iterator, name, args)?
+        {
+            return Ok(value);
+        }
         // User methods only exist on structs and enums, and only when the
         // script defined any at all, so skip the keyed lookup otherwise.
         if !self.methods.is_empty() {
@@ -350,14 +388,25 @@ fn int_limit(ty: &str, name: &str) -> Option<Value> {
 
 pub(super) fn make_ordering(o: std::cmp::Ordering) -> Value {
     use std::cmp::Ordering::*;
-    let variant = match o {
-        Less => "Less",
-        Equal => "Equal",
-        Greater => "Greater",
+    thread_local! {
+        static VALUES: [Value; 3] = [
+            ordering_value("Less"),
+            ordering_value("Equal"),
+            ordering_value("Greater"),
+        ];
+    }
+    let index = match o {
+        Less => 0,
+        Equal => 1,
+        Greater => 2,
     };
+    VALUES.with(|values| values[index].clone())
+}
+
+fn ordering_value(variant: &str) -> Value {
     Value::Enum {
-        enum_name: "Ordering".into(),
-        variant: variant.into(),
+        enum_name: Rc::from("Ordering"),
+        variant: Rc::from(variant),
         data: Value::empty_data(),
     }
 }
@@ -393,10 +442,15 @@ pub(super) fn builtin_method(
     }
     let name = method.text.as_str();
     match recv {
-        Value::Native(h) => match super::native::native_method(h, name, args)? {
-            Some(v) => Ok(v),
-            None => generic_method(recv, name, &*args),
-        },
+        Value::Native(h) => {
+            if let Some(v) = regex_native_method(h, name, &*args)? {
+                return Ok(v);
+            }
+            match super::native::native_method(h, name, args)? {
+                Some(v) => Ok(v),
+                None => generic_method(recv, name, &*args),
+            }
+        }
         Value::Int(_) | Value::Float(_) => num_method(recv, name, &*args),
         Value::Enum { enum_name, .. } if &**enum_name == "Option" => {
             opt_method(recv, method, &*args)
@@ -430,9 +484,6 @@ pub(super) fn builtin_method(
             "Path" => path_method(s, name, &*args),
             "DirEntry" => dir_entry_method(s, name),
             "FileType" => file_type_method(s, name),
-            "Regex" => regex_method(s, name, &*args),
-            "Match" => match_method(s, name),
-            "Captures" => captures_method(s, name, &*args),
             _ => generic_method(recv, name, &*args),
         },
         _ => generic_method(recv, name, &*args),

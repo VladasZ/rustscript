@@ -24,6 +24,11 @@ impl Interp {
     ) -> Result<Option<Value>> {
         match recv {
             Value::Vec(items) => self.vec_higher_order(items, name, args),
+            Value::Native(iterator)
+                if matches!(&*iterator.borrow(), super::native::Native::Iterator(_)) =>
+            {
+                self.iterator_higher_order(iterator, name, args)
+            }
             Value::Enum {
                 enum_name,
                 variant,
@@ -217,11 +222,12 @@ impl Interp {
                 *items.borrow_mut() = kept;
                 Value::Unit
             }
-            "sort_by_key" => {
+            "sort_by_key" | "sort_by_cached_key" => {
                 let f = clo(0)?;
+                let mut runner = self.closure_runner(f);
                 let mut keyed = Vec::new();
                 for x in list {
-                    let k = self.call_closure(&f, from_ref(&x))?;
+                    let k = runner.call_refs(&[&x])?;
                     keyed.push((sort_key(&k), x));
                 }
                 keyed.sort_by(|a, b| a.0.cmp(&b.0));
@@ -230,13 +236,14 @@ impl Interp {
             }
             "sort_by" => {
                 let f = clo(0)?;
+                let mut runner = self.closure_runner(f);
                 let mut sorted = list;
                 let mut err = None;
                 sorted.sort_by(|a, b| {
                     if err.is_some() {
                         return std::cmp::Ordering::Equal;
                     }
-                    match self.call_closure(&f, &[a.clone(), b.clone()]) {
+                    match runner.call_refs(&[a, b]) {
                         Ok(v) => ordering_from_value(&v).unwrap_or(std::cmp::Ordering::Equal),
                         Err(e) => {
                             err = Some(e);

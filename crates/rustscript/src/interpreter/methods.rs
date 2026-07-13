@@ -71,13 +71,13 @@ pub(super) fn str_method(s: &Rc<RStr>, method: &MethodName, args: &[Value]) -> R
         B::Contains => Value::Bool(s.contains(&arg_str(0))),
         B::StartsWith => Value::Bool(s.starts_with(&arg_str(0))),
         B::EndsWith => Value::Bool(s.ends_with(&arg_str(0))),
-        B::Chars => Value::vec(s.chars().map(Value::Char).collect()),
-        B::Lines => Value::vec(s.lines().map(Value::str).collect()),
+        B::Chars => super::iterator::chars(s.clone()),
+        B::Lines => super::iterator::lines(s.clone()),
         B::Split => {
             let sep = arg_str(0);
             Value::vec(s.split(&sep).map(Value::str).collect())
         }
-        B::SplitWhitespace => Value::vec(s.split_whitespace().map(Value::str).collect()),
+        B::SplitWhitespace => super::iterator::split_whitespace(s.clone()),
         B::Count => Value::Int(s.chars().count() as i64),
         B::Parse => {
             let t = s.trim();
@@ -116,8 +116,7 @@ pub(super) fn str_method_slow(s: &Rc<RStr>, name: &str, args: &[Value]) -> Resul
         // and expect on a string are identity to keep that pattern working.
         "as_str" | "as_string" | "unwrap" | "expect" => Value::Str(s.clone()),
         "as_bytes" | "into_bytes" => bytes_to_vec(s.as_bytes()),
-        // A byte iterator is an eager Vec of the utf-8 bytes as ints here.
-        "bytes" => bytes_to_vec(s.as_bytes()),
+        "bytes" => super::iterator::bytes(s.clone()),
         // The utf-16 code units as an eager Vec of ints, mirroring how `bytes`
         // gives the utf-8 bytes. std hands back an iterator of u16, we collect.
         "encode_utf16" => Value::vec(s.encode_utf16().map(|u| Value::Int(i64::from(u))).collect()),
@@ -228,7 +227,8 @@ pub(super) fn vec_method(
     Ok(match method.id {
         B::Len | B::Count => Value::Int(v.borrow().len() as i64),
         B::IsEmpty => Value::Bool(v.borrow().is_empty()),
-        B::Clone | B::Iter => Value::vec(v.borrow().clone()),
+        B::Clone => Value::vec(v.borrow().clone()),
+        B::Iter => super::iterator::value_iter(v.clone()),
         B::Push => {
             v.borrow_mut()
                 .push(args.first_mut().map(take).unwrap_or(Value::Unit));

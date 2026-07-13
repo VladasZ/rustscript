@@ -17,6 +17,10 @@ use std::time::{Instant, SystemTime};
 use anyhow::{Result, bail};
 
 use super::value::Value;
+use super::{
+    iterator::IteratorState,
+    regex_bridge::{CapturesValue, MatchValue, RegexValue},
+};
 
 /// A boxed reader for stdin, a child's stdout/stderr, or a socket. Files keep
 /// their own variant so they can also write and seek.
@@ -32,6 +36,10 @@ pub enum Native {
     SystemTime(SystemTime),
     TempDir(tempfile::TempDir),
     HttpClient(reqwest::blocking::Client),
+    Regex(RegexValue),
+    RegexMatch(MatchValue),
+    RegexCaptures(CapturesValue),
+    Iterator(IteratorState),
     /// A lazy line iterator, so `for line in reader.lines()` streams instead of
     /// buffering the whole input first.
     Lines(Box<dyn Iterator<Item = std::io::Result<String>>>),
@@ -58,6 +66,10 @@ impl Native {
             Native::SystemTime(_) => "SystemTime",
             Native::TempDir(_) => "TempDir",
             Native::HttpClient(_) => "HttpClient",
+            Native::Regex(_) => "Regex",
+            Native::RegexMatch(_) => "Match",
+            Native::RegexCaptures(_) => "Captures",
+            Native::Iterator(_) => "Iterator",
             Native::Lines(_) => "Lines",
             Native::Closed => "Closed",
         }
