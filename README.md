@@ -213,11 +213,12 @@ with `unsupported crate` when its code runs.
 
 A script whose `main` is `#[tokio::main]` runs on a second engine built for real
 multi-core work. It uses a multi-thread tokio runtime, so `tokio::spawn` tasks
-run on many threads at once, `.await` and `tokio::join!` work, `tokio::time::sleep`
-is real, and the async `reqwest` client sends requests concurrently. A plain
-script with no `#[tokio::main]` keeps the fast single-thread engine untouched, so
-it pays nothing for this. The `current_thread` flavor is rejected, only the
-multi-thread runtime is offered.
+run on many threads at once, `.await`, `tokio::join!`, and
+`tokio::task::yield_now` work, `tokio::time::sleep` is real, and the async
+`reqwest` client sends requests concurrently. A plain script with no
+`#[tokio::main]` keeps the fast single-thread engine untouched, so it pays
+nothing for this. The `current_thread` flavor is rejected, only the multi-thread
+runtime is offered.
 
 ## Not supported
 
@@ -279,17 +280,11 @@ types, consts, and aliases.
 ## Benchmarks
 
 The `bench` crate compares rustscript against native Rust, Node, and Python 3 on
-the same programs, each written three times with byte identical output. It
-measures wall-clock time with [hyperfine](https://github.com/sharkdp/hyperfine),
-a self timed compute track, and peak memory, at two sizes per case, then draws
-one PNG per case and tier. rustscript starts almost as fast as native and far
-faster than Node or Python, so it wins many small script wall clocks. On raw
-compute the picture is mixed and honest: it beats Python on the classic numeric
-loops, sieve, mandelbrot, collatz, and on hashmaps and string building, while
-Python is ahead on allocation heavy and callback heavy work like binary trees
-and sorting, and a warmed up Node wins most pure compute. See `bench/README.md`
-for the fairness rules, and `docs/profiling.md` for how to find interpreter hot
-spots.
+equivalent idiomatic tasks with byte-identical output. It records interleaved
+wall-clock, self-timed compute, and peak-memory samples at two sizes, retains the
+raw data and provenance, and draws one PNG per case and tier. See
+`bench/README.md` for the methodology, current scope limits, and result format,
+and `docs/profiling.md` for how to find interpreter hot spots.
 
 ```
 cargo run --release --bin bench

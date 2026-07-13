@@ -6,12 +6,15 @@ normal release binary works.
 
 ## Getting a useful sample
 
-The bench cases in `bench/cases/` finish in 30-150 ms at their default sizes,
-which is too short for `sample` to catch anything but process startup. Every
-sized case takes the size as its single argument, so pass one big enough that
-the run takes 1-2 seconds, for example `sort/case.rs 2000000`. For the file
-driven cases pass the gitignored `data_big.*` input, regenerate it with
-`cargo run --bin gendata -- --big` from `bench/`.
+The bench cases in `bench/cases/` finish quickly at their default sizes, which
+is too short for `sample` to catch anything but process startup. Most sized
+cases take the size as their single argument, so pass one big enough that the
+run takes 1-2 seconds, for example `sort/case.rs 2000000`. Generate the large
+file fixtures into a temporary directory when profiling file-driven cases.
+
+```sh
+cargo run --release -p rustscript-bench --bin gendata -- /tmp/rustscript-bench-fixtures
+```
 
 ```sh
 cargo build --release -p rustscript
@@ -68,25 +71,20 @@ and take the best:
 ```
 
 The full comparison against native Rust, Node, and Python lives in `bench/`,
-see `bench/README.md`. Quick run from `bench/`:
+see `bench/README.md`. Quick run from the workspace root:
 
 ```sh
-cargo run --release --bin bench -- --quick --no-gate
+cargo run --release -p rustscript-bench --bin bench -- --quick
 ```
 
-The bench invokes the `rust` binary from PATH, so install the current build
-first with `cargo install --path crates/rustscript`, or the run measures a
-stale binary.
+The harness builds and invokes the workspace's `target/release/rust` directly.
 
 ## After a change
 
 Run the test suite. The equivalence test compares interpreter output byte for
-byte against the compiled examples, which must be built first. Rebuild them
-after every bench run too, because the bench builds its native cases into the
-same `target/release/examples/` directory and overwrites same named binaries
-like `fib`:
+byte against the compiled examples. Benchmark workloads are separate Cargo
+binary targets, so they do not share the examples output directory.
 
 ```sh
-cargo build --release -p rustscript-examples --examples
-cargo test -p rustscript --release
+cargo test --workspace
 ```

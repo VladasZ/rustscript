@@ -3,14 +3,18 @@
 use std::collections::HashMap;
 
 fn first_char(s: &str) -> char {
-    for c in s.chars() {
-        return c;
-    }
-    ' '
+    s.chars().next().unwrap_or(' ')
 }
 
 fn main() {
-    let words = vec!["apple", "banana", "cherry", "avocado", "blueberry", "citron"];
+    let words = vec![
+        "apple",
+        "banana",
+        "cherry",
+        "avocado",
+        "blueberry",
+        "citron",
+    ];
     let mut groups: HashMap<char, Vec<String>> = HashMap::new();
     for w in words {
         let key = first_char(w);

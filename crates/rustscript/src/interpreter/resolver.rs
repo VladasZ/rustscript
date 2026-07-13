@@ -240,7 +240,13 @@ fn module_name(syms: &ModuleSyms) -> String {
 /// The plain segments of a path type, `a::b::C` without generics on the way.
 fn type_path_segs(ty: &syn::Type) -> Option<Vec<String>> {
     if let syn::Type::Path(p) = ty {
-        Some(p.path.segments.iter().map(|s| s.ident.to_string()).collect())
+        Some(
+            p.path
+                .segments
+                .iter()
+                .map(|s| s.ident.to_string())
+                .collect(),
+        )
     } else {
         None
     }

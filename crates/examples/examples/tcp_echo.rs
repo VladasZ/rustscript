@@ -10,7 +10,7 @@ fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let addr = listener.local_addr()?;
 
-    let mut client = TcpStream::connect(&addr)?;
+    let mut client = TcpStream::connect(addr)?;
     client.write_all(b"ping\n")?;
     client.flush()?;
 

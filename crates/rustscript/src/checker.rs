@@ -43,7 +43,11 @@ pub fn clean() -> Result<()> {
 /// into the cache project so `mod` declarations resolve the same way.
 /// `crate_deps` are local `path` crates the script uses; they join the cargo
 /// project as path dependencies so `use crate_name::..` resolves.
-pub fn check(script_path: &Path, files: &[(PathBuf, String)], crate_deps: &[CrateDep]) -> Result<()> {
+pub fn check(
+    script_path: &Path,
+    files: &[(PathBuf, String)],
+    crate_deps: &[CrateDep],
+) -> Result<()> {
     // Tests and fast iteration can skip the compile gate.
     if std::env::var_os("RUSTSCRIPT_SKIP_CHECK").is_some() {
         return Ok(());
@@ -87,7 +91,11 @@ pub fn check(script_path: &Path, files: &[(PathBuf, String)], crate_deps: &[Crat
 /// Mirror the script and its module tree into a throwaway cargo project under
 /// the cache dir, so `mod` declarations resolve the same way real Rust sees
 /// them. Shared by the check gate and the compiled build.
-fn write_project(project: &Path, files: &[(PathBuf, String)], crate_deps: &[CrateDep]) -> Result<()> {
+fn write_project(
+    project: &Path,
+    files: &[(PathBuf, String)],
+    crate_deps: &[CrateDep],
+) -> Result<()> {
     std::fs::create_dir_all(project)?;
     std::fs::write(project.join("Cargo.toml"), manifest(crate_deps))?;
     for (rel, source) in files {
@@ -105,7 +113,11 @@ fn write_project(project: &Path, files: &[(PathBuf, String)], crate_deps: &[Crat
 /// the check gate. The final binary is cached by source hash for instant
 /// re-runs. The one shared target dir is kept so an edit rebuilds only the
 /// script crate, but no per-hash target dirs are ever created.
-pub fn build(script_path: &Path, files: &[(PathBuf, String)], crate_deps: &[CrateDep]) -> Result<PathBuf> {
+pub fn build(
+    script_path: &Path,
+    files: &[(PathBuf, String)],
+    crate_deps: &[CrateDep],
+) -> Result<PathBuf> {
     let hash = hash_files(files, crate_deps);
     let bin = bin_cache().join(format!("{hash:016x}{}", std::env::consts::EXE_SUFFIX));
     if bin.exists() {
@@ -130,7 +142,9 @@ pub fn build(script_path: &Path, files: &[(PathBuf, String)], crate_deps: &[Crat
         bail!("{} failed to compile", script_path.display());
     }
 
-    let built = target.join("debug").join(format!("script{}", std::env::consts::EXE_SUFFIX));
+    let built = target
+        .join("debug")
+        .join(format!("script{}", std::env::consts::EXE_SUFFIX));
     std::fs::create_dir_all(bin_cache())?;
     // Copy to a per-process temp path then rename, so a concurrent run never
     // execs a half-written binary. copy carries the executable bit over.

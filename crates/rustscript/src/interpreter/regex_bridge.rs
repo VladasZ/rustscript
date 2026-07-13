@@ -5,10 +5,7 @@ use std::rc::Rc;
 
 use anyhow::{Result, anyhow, bail};
 
-
 use super::value::{KeyRef, Map, MapKey, RStr, StructData, Value};
-
-
 
 // -- regex bridge ----------------------------------------------------------
 
@@ -49,11 +46,7 @@ pub(super) fn make_captures(re: &regex::Regex, caps: &regex::Captures) -> Value 
     )
 }
 
-pub(super) fn regex_method(
-    s: &StructData,
-    method: &str,
-    args: &[Value],
-) -> Result<Value> {
+pub(super) fn regex_method(s: &StructData, method: &str, args: &[Value]) -> Result<Value> {
     let pattern = s.get("pattern").map(|v| v.display()).unwrap_or_default();
     let re = regex::Regex::new(&pattern)?;
     let text = args.first().map(|v| v.display()).unwrap_or_default();
@@ -91,11 +84,7 @@ pub(super) fn match_method(s: &StructData, method: &str) -> Result<Value> {
     })
 }
 
-pub(super) fn captures_method(
-    s: &StructData,
-    method: &str,
-    args: &[Value],
-) -> Result<Value> {
+pub(super) fn captures_method(s: &StructData, method: &str, args: &[Value]) -> Result<Value> {
     match method {
         "get" => {
             let i = match args.first() {
@@ -140,14 +129,12 @@ pub(super) fn capture_name_index(s: &StructData, name: &str) -> Option<usize> {
 
 /// Resolve `caps[i]` or `caps["name"]` to the matched substring, panicking like
 /// the real `Captures` index does when the group did not participate.
-pub(super) fn capture_index(
-    s: &StructData,
-    key: &Value,
-) -> Result<Value> {
+pub(super) fn capture_index(s: &StructData, key: &Value) -> Result<Value> {
     let idx = match key {
         Value::Int(i) if *i >= 0 => *i as usize,
-        Value::Str(k) => capture_name_index(s, k)
-            .ok_or_else(|| anyhow!("no capture group named `{k}`"))?,
+        Value::Str(k) => {
+            capture_name_index(s, k).ok_or_else(|| anyhow!("no capture group named `{k}`"))?
+        }
         _ => bail!("invalid capture index"),
     };
     match capture_group(s, idx) {

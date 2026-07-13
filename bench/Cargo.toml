@@ -6,10 +6,14 @@ publish = false
 
 [dependencies]
 anyhow = { workspace = true }
+hex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 plotters = { workspace = true }
 regex = { workspace = true }
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
 
 [[bin]]
 name = "bench"
@@ -23,73 +27,105 @@ path = "src/bin/chart.rs"
 name = "gendata"
 path = "src/bin/gendata.rs"
 
-# The Rust side of every case is also a real compiled cargo example, built with
+[[bin]]
+name = "bench-child"
+path = "src/bin/bench_child.rs"
+
+[[bin]]
+name = "bench-server"
+path = "src/bin/bench_server.rs"
+
+# The Rust side of every case is also a real compiled cargo binary, built with
 # the real toolchain. The same file runs under the interpreter, so one source
 # feeds both the native bar and the rustscript bar.
-[[example]]
+[[bin]]
 name = "hello"
 path = "cases/hello/case.rs"
 
-[[example]]
+[[bin]]
 name = "fib"
 path = "cases/fib/case.rs"
 
-[[example]]
+[[bin]]
 name = "sieve"
 path = "cases/sieve/case.rs"
 
-[[example]]
+[[bin]]
 name = "mandelbrot"
 path = "cases/mandelbrot/case.rs"
 
-[[example]]
+[[bin]]
 name = "collatz"
 path = "cases/collatz/case.rs"
 
-[[example]]
+[[bin]]
 name = "word_count"
 path = "cases/word_count/case.rs"
 
-[[example]]
+[[bin]]
 name = "json"
 path = "cases/json/case.rs"
 
-[[example]]
+[[bin]]
 name = "binary_trees"
 path = "cases/binary_trees/case.rs"
 
-[[example]]
+[[bin]]
 name = "string_builder"
 path = "cases/string_builder/case.rs"
 
-[[example]]
+[[bin]]
 name = "higher_order"
 path = "cases/higher_order/case.rs"
 
-[[example]]
+[[bin]]
 name = "sort"
 path = "cases/sort/case.rs"
 
-[[example]]
+[[bin]]
 name = "hashmap_int"
 path = "cases/hashmap_int/case.rs"
 
-[[example]]
+[[bin]]
 name = "nbody"
 path = "cases/nbody/case.rs"
 
-[[example]]
+[[bin]]
 name = "regex"
 path = "cases/regex/case.rs"
 
-[[example]]
+[[bin]]
 name = "json_serialize"
 path = "cases/json_serialize/case.rs"
 
-[[example]]
+[[bin]]
 name = "stdout_lines"
 path = "cases/stdout_lines/case.rs"
 
-[[example]]
+[[bin]]
 name = "big_script"
 path = "cases/big_script/case.rs"
+
+[[bin]]
+name = "multifile_startup"
+path = "cases/multifile_startup/case.rs"
+
+[[bin]]
+name = "file_transform"
+path = "cases/file_transform/case.rs"
+
+[[bin]]
+name = "process_spawn"
+path = "cases/process_spawn/case.rs"
+
+[[bin]]
+name = "async_tasks"
+path = "cases/async_tasks/case.rs"
+
+[[bin]]
+name = "http_local"
+path = "cases/http_local/case.rs"
+
+[[bin]]
+name = "automation"
+path = "cases/automation/case.rs"

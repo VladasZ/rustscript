@@ -5,13 +5,14 @@
 //!
 //! Usage: cargo run --release --bin chart
 
+use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use plotters::coord::Shift;
 use plotters::prelude::*;
 use plotters::style::text_anchor::{HPos, Pos, VPos};
-use rustscript_bench::{CaseResult, Report};
+use rustscript_bench::{CaseResult, Meta, Report};
 
 const BG: RGBColor = RGBColor(252, 252, 250);
 const INK: RGBColor = RGBColor(40, 40, 44);
@@ -46,37 +47,56 @@ struct Panel {
 }
 
 fn main() -> Result<()> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().context("no parent")?;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .context("no parent")?;
     let results = root.join("bench/results/results.json");
     let report: Report =
-        serde_json::from_str(&std::fs::read_to_string(&results).with_context(|| {
-            format!("read {}, run `cargo run --release --bin bench` first", results.display())
+        serde_json::from_str(&fs::read_to_string(&results).with_context(|| {
+            format!(
+                "read {}, run `cargo run --release --bin bench` first",
+                results.display()
+            )
         })?)?;
 
     let dir = root.join("bench/results");
     for c in &report.cases {
-        let file = if c.tier == "big" { format!("{}_big.png", c.name) } else { format!("{}.png", c.name) };
+        let file = if c.tier == "big" {
+            format!("{}_big.png", c.name)
+        } else {
+            format!("{}.png", c.name)
+        };
         let out = dir.join(file);
-        render_case(&out, c)?;
+        render_case(&out, c, &report.meta)?;
         println!("wrote {}", out.display());
     }
     Ok(())
 }
 
 /// One PNG for one case at one tier.
-fn render_case(out: &Path, c: &CaseResult) -> Result<()> {
+fn render_case(out: &Path, c: &CaseResult, meta: &Meta) -> Result<()> {
     let mut panels: Vec<Panel> = Vec::new();
 
     let wall: Vec<_> = LANG_ORDER
         .iter()
-        .filter_map(|l| c.wall_of(l).map(|w| (display_name(l).to_string(), w.median, color_for(l))))
+        .filter_map(|l| {
+            c.wall_of(l)
+                .map(|w| (display_name(l).to_string(), w.median, color_for(l)))
+        })
         .collect();
     let comp: Vec<_> = LANG_ORDER
         .iter()
-        .filter_map(|l| c.compute_of(l).map(|w| (display_name(l).to_string(), w.min, color_for(l))))
+        .filter_map(|l| {
+            c.compute_of(l)
+                .map(|w| (display_name(l).to_string(), w.median, color_for(l)))
+        })
         .collect();
     // The time panels share one axis so bar heights compare directly.
-    let tmax = wall.iter().chain(comp.iter()).map(|b| b.1).fold(0f64, f64::max);
+    let tmax = wall
+        .iter()
+        .chain(comp.iter())
+        .map(|b| b.1)
+        .fold(0f64, f64::max);
     let taxis = if tmax > 0.0 { tmax * 1.18 } else { 1.0 };
     panels.push(Panel {
         title: "wall-clock   startup plus run".to_string(),
@@ -96,7 +116,13 @@ fn render_case(out: &Path, c: &CaseResult) -> Result<()> {
     let mem: Vec<_> = LANG_ORDER
         .iter()
         .filter_map(|l| {
-            c.mem_of(l).map(|m| (display_name(l).to_string(), m.rss_bytes as f64, color_for(l)))
+            c.memory_of(l).map(|m| {
+                (
+                    display_name(l).to_string(),
+                    m.median_bytes as f64,
+                    color_for(l),
+                )
+            })
         })
         .collect();
     if !mem.is_empty() {
@@ -118,19 +144,40 @@ fn render_case(out: &Path, c: &CaseResult) -> Result<()> {
     let area = BitMapBackend::new(out, (w, h)).into_drawing_area();
     area.fill(&BG)?;
 
-    let title = if c.tier == "big" { format!("{}   10x size", c.name) } else { c.name.clone() };
+    let title = if c.tier == "big" {
+        format!("{}   10x size", c.name)
+    } else {
+        c.name.clone()
+    };
     let (head, body) = area.split_vertically(96);
-    head.draw(&Text::new(title, (28, 22), ("sans-serif", 30).into_font().color(&INK)))?;
     head.draw(&Text::new(
-        "same algorithm, byte identical output. lower is better.",
+        title,
+        (28, 22),
+        ("sans-serif", 30).into_font().color(&INK),
+    ))?;
+    let commit = meta.git_commit.get(..8).unwrap_or(&meta.git_commit);
+    let state = if meta.git_dirty {
+        format!("{commit} DIRTY TREE")
+    } else {
+        commit.to_string()
+    };
+    head.draw(&Text::new(
+        format!("same task, byte-identical output. medians. lower is better. {state}"),
         (30, 62),
         ("sans-serif", 15).into_font().color(&MUTED),
     ))?;
     // Legend, top right.
     let mut lx = (w as i32) - 470;
     for lang in LANG_ORDER {
-        head.draw(&Rectangle::new([(lx, 20), (lx + 18, 36)], color_for(lang).filled()))?;
-        head.draw(&Text::new(display_name(lang), (lx + 24, 22), ("sans-serif", 14).into_font().color(&INK)))?;
+        head.draw(&Rectangle::new(
+            [(lx, 20), (lx + 18, 36)],
+            color_for(lang).filled(),
+        ))?;
+        head.draw(&Text::new(
+            display_name(lang),
+            (lx + 24, 22),
+            ("sans-serif", 14).into_font().color(&INK),
+        ))?;
         lx += 118;
     }
 
@@ -160,10 +207,17 @@ where
     let plot_w = plot_r - plot_l;
     let plot_h = plot_b - plot_t;
 
-    area.draw(&Text::new(p.title.clone(), (left, 16), ("sans-serif", 16).into_font().color(&INK)))
-        .map_err(de)?;
-    area.draw(&PathElement::new(vec![(plot_l, plot_b), (plot_r, plot_b)], GRID.stroke_width(1)))
-        .map_err(de)?;
+    area.draw(&Text::new(
+        p.title.clone(),
+        (left, 16),
+        ("sans-serif", 16).into_font().color(&INK),
+    ))
+    .map_err(de)?;
+    area.draw(&PathElement::new(
+        vec![(plot_l, plot_b), (plot_r, plot_b)],
+        GRID.stroke_width(1),
+    ))
+    .map_err(de)?;
 
     if p.bars.is_empty() {
         return Ok(());
@@ -177,17 +231,24 @@ where
         let x0 = cx - bw / 2;
         let x1 = cx + bw / 2;
         let y0 = plot_b - bh.max(1);
-        area.draw(&Rectangle::new([(x0, y0), (x1, plot_b)], color.filled())).map_err(de)?;
+        area.draw(&Rectangle::new([(x0, y0), (x1, plot_b)], color.filled()))
+            .map_err(de)?;
         area.draw(&Text::new(
             (p.fmt)(*value),
             (cx, y0 - 16),
-            ("sans-serif", 14).into_font().color(&INK).pos(Pos::new(HPos::Center, VPos::Top)),
+            ("sans-serif", 14)
+                .into_font()
+                .color(&INK)
+                .pos(Pos::new(HPos::Center, VPos::Top)),
         ))
         .map_err(de)?;
         area.draw(&Text::new(
             label.clone(),
             (cx, plot_b + 8),
-            ("sans-serif", 14).into_font().color(&MUTED).pos(Pos::new(HPos::Center, VPos::Top)),
+            ("sans-serif", 14)
+                .into_font()
+                .color(&MUTED)
+                .pos(Pos::new(HPos::Center, VPos::Top)),
         ))
         .map_err(de)?;
     }

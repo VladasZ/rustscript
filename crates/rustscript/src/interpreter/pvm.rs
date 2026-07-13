@@ -4,7 +4,7 @@
 //! for correctness and real concurrency, not single thread microspeed.
 
 use std::collections::HashMap;
-use std::mem::take;
+use std::mem::{replace, take};
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
@@ -18,6 +18,13 @@ use super::pops::{apply_bin, apply_bin_imm, apply_un, cmp_test, cmp_test_imm, tr
 use super::pvalue::{PClosure, PStructShape, PValue};
 
 const MAX_CALL_DEPTH: usize = 100_000;
+
+fn swap_option<T>(current: &mut Option<T>, next: Option<T>) -> Option<T> {
+    match next {
+        Some(value) => current.replace(value),
+        None => current.take(),
+    }
+}
 
 /// A module level const or static: converted once, evaluated on first read.
 /// Each slot has its own lock so tasks on different threads can read globals.
@@ -52,7 +59,12 @@ impl PInterp {
         upvalues: &[PValue],
     ) -> Result<PValue> {
         if args.len() != chunk.num_params {
-            bail!("`{}` expects {} args but got {}", chunk.name, chunk.num_params, args.len());
+            bail!(
+                "`{}` expects {} args but got {}",
+                chunk.name,
+                chunk.num_params,
+                args.len()
+            );
         }
         let mut stack = vec![PValue::Unit; chunk.num_regs.max(chunk.num_params)];
         for (i, a) in args.iter().enumerate() {
@@ -94,7 +106,12 @@ impl PInterp {
             ($chunk:expr, $clo:expr, $dst:expr, $abase:expr, $argc:expr) => {{
                 let callee: Arc<PChunk> = $chunk;
                 if $argc != callee.num_params {
-                    bail!("`{}` expects {} args but got {}", callee.name, callee.num_params, $argc);
+                    bail!(
+                        "`{}` expects {} args but got {}",
+                        callee.name,
+                        callee.num_params,
+                        $argc
+                    );
                 }
                 if frames.len() >= MAX_CALL_DEPTH {
                     bail!("stack overflow: call depth exceeded {MAX_CALL_DEPTH}");
@@ -111,8 +128,8 @@ impl PInterp {
                     *slot = PValue::Unit;
                 }
                 frames.push(Frame {
-                    chunk: std::mem::replace(&mut cur, callee),
-                    closure: std::mem::replace(&mut cur_clo, $clo),
+                    chunk: replace(&mut cur, callee),
+                    closure: swap_option(&mut cur_clo, $clo),
                     ip: ip + 1,
                     base,
                     dst: $dst,
@@ -188,13 +205,24 @@ impl PInterp {
                         continue;
                     }
                 }
-                Op::CallFn { dst, func, base: abase, argc, .. } => {
+                Op::CallFn {
+                    dst,
+                    func,
+                    base: abase,
+                    argc,
+                    ..
+                } => {
                     let (dst, func, abase, argc) =
                         (*dst, *func as usize, *abase as usize, *argc as usize);
                     let callee = self.functions[func].clone();
                     call!(callee, None, dst, abase, argc);
                 }
-                Op::CallValue { dst, callee, base: abase, argc } => {
+                Op::CallValue {
+                    dst,
+                    callee,
+                    base: abase,
+                    argc,
+                } => {
                     let (dst, callee_reg, abase, argc) =
                         (*dst, *callee as usize, *abase as usize, *argc as usize);
                     let clo = match &stack[base + callee_reg] {
@@ -204,7 +232,12 @@ impl PInterp {
                     let chunk = clo.chunk.clone();
                     call!(chunk, Some(clo), dst, abase, argc);
                 }
-                Op::CallPath { dst, path, base: abase, argc } => {
+                Op::CallPath {
+                    dst,
+                    path,
+                    base: abase,
+                    argc,
+                } => {
                     let (abase, argc) = (*abase as usize, *argc as usize);
                     let segs = &cur.paths[*path as usize];
                     let args = take_range(stack, base + abase, argc);
@@ -215,7 +248,13 @@ impl PInterp {
                     let segs = &cur.paths[*path as usize];
                     stack[base + *dst as usize] = self.eval_path_value(segs)?;
                 }
-                Op::Method { dst, recv, name, base: abase, argc } => {
+                Op::Method {
+                    dst,
+                    recv,
+                    name,
+                    base: abase,
+                    argc,
+                } => {
                     let (recv, abase, argc) = (*recv as usize, *abase as usize, *argc as usize);
                     let name = &cur.names[*name as usize];
                     let recv_v = stack[base + recv].clone();
@@ -225,10 +264,18 @@ impl PInterp {
                         stack[base + *dst as usize] = v;
                     }
                 }
-                Op::GetOrDefault { dst, recv, key, default } => {
+                Op::GetOrDefault {
+                    dst,
+                    recv,
+                    key,
+                    default,
+                } => {
                     let recv_v = stack[base + *recv as usize].clone();
                     let key_v = stack[base + *key as usize].clone();
-                    let get = MethodName { text: "get".into(), id: super::bytecode::BuiltinId::Get };
+                    let get = MethodName {
+                        text: "get".into(),
+                        id: super::bytecode::BuiltinId::Get,
+                    };
                     let opt = self.eval_method(&recv_v, &get, &mut [key_v])?;
                     let v = match opt {
                         PValue::Enum { variant, data, .. } if &*variant == "Some" => {
@@ -242,11 +289,19 @@ impl PInterp {
                     let v = take(&mut stack[base + *src as usize]);
                     ret!(v);
                 }
-                Op::MakeVec { dst, base: wbase, count } => {
+                Op::MakeVec {
+                    dst,
+                    base: wbase,
+                    count,
+                } => {
                     let items = take_range(stack, base + *wbase as usize, *count as usize);
                     stack[base + *dst as usize] = PValue::vec(items);
                 }
-                Op::MakeTuple { dst, base: wbase, count } => {
+                Op::MakeTuple {
+                    dst,
+                    base: wbase,
+                    count,
+                } => {
                     let items = take_range(stack, base + *wbase as usize, *count as usize);
                     stack[base + *dst as usize] = PValue::tuple(items);
                 }
@@ -258,17 +313,25 @@ impl PInterp {
                     let v = stack[base + *val as usize].clone();
                     stack[base + *dst as usize] = PValue::vec(std::iter::repeat_n(v, n).collect());
                 }
-                Op::MakeRange { dst, start, end, inclusive } => {
+                Op::MakeRange {
+                    dst,
+                    start,
+                    end,
+                    inclusive,
+                } => {
                     let s = int_of(&stack[base + *start as usize])?;
                     let e = int_of(&stack[base + *end as usize])?;
-                    stack[base + *dst as usize] =
-                        PValue::Range { start: s, end: e, inclusive: *inclusive };
+                    stack[base + *dst as usize] = PValue::Range {
+                        start: s,
+                        end: e,
+                        inclusive: *inclusive,
+                    };
                 }
                 Op::IterInit { dst, src } => {
                     let src_v = stack[base + *src as usize].clone();
                     let it = match src_v {
                         PValue::Range { .. } => src_v,
-                        other => PValue::vec(self.into_iter_items(other)?),
+                        other => PValue::vec(self.iter_items(other)?),
                     };
                     stack[base + *dst as usize] = it;
                 }
@@ -279,7 +342,11 @@ impl PInterp {
                     };
                     let item = match &stack[base + *iter as usize] {
                         PValue::Vec(items) => items.lock().get(i as usize).cloned(),
-                        PValue::Range { start, end, inclusive } => {
+                        PValue::Range {
+                            start,
+                            end,
+                            inclusive,
+                        } => {
                             let n = start + i;
                             let done = if *inclusive { n > *end } else { n >= *end };
                             if done { None } else { Some(PValue::Int(n)) }
@@ -297,19 +364,26 @@ impl PInterp {
                         }
                     }
                 }
-                Op::MakeStruct { dst, info, base: wbase } => {
+                Op::MakeStruct {
+                    dst,
+                    info,
+                    base: wbase,
+                } => {
                     let wbase = *wbase as usize;
                     let lit = &cur.struct_lits[*info as usize];
                     let written = lit.shape.fields.len();
-                    let mut values: Vec<PValue> =
-                        (0..written).map(|k| take(&mut stack[base + wbase + k])).collect();
+                    let mut values: Vec<PValue> = (0..written)
+                        .map(|k| take(&mut stack[base + wbase + k]))
+                        .collect();
                     let v = if lit.has_rest {
                         let rest = stack[base + wbase + written].clone();
                         let mut fields = lit.shape.fields.clone();
                         let mut renames = lit.shape.renames.clone();
                         if let PValue::Struct(r) = rest {
                             let rvals = r.values.lock();
-                            for (slot, (k, v)) in r.shape.fields.iter().zip(rvals.iter()).enumerate() {
+                            for (slot, (k, v)) in
+                                r.shape.fields.iter().zip(rvals.iter()).enumerate()
+                            {
                                 if lit.shape.slot(k).is_none() {
                                     fields.push(k.clone());
                                     values.push(v.clone());
@@ -331,7 +405,8 @@ impl PInterp {
                     stack[base + *dst as usize] = v;
                 }
                 Op::MakeClosure { dst, child } => {
-                    let clo = self.make_closure(&cur, *child, stack, base, &cur_clo, entry_upvalues);
+                    let clo =
+                        self.make_closure(&cur, *child, stack, base, &cur_clo, entry_upvalues);
                     stack[base + *dst as usize] = PValue::Closure(clo);
                 }
                 Op::Index { dst, base: b, key } => {
@@ -345,11 +420,20 @@ impl PInterp {
                         stack[base + *val as usize].clone(),
                     )?;
                 }
-                Op::GetField { dst, base: b, member } => {
-                    let v = self.get_field(&stack[base + *b as usize], &cur.members[*member as usize])?;
+                Op::GetField {
+                    dst,
+                    base: b,
+                    member,
+                } => {
+                    let v =
+                        self.get_field(&stack[base + *b as usize], &cur.members[*member as usize])?;
                     stack[base + *dst as usize] = v;
                 }
-                Op::SetField { base: b, member, val } => {
+                Op::SetField {
+                    base: b,
+                    member,
+                    val,
+                } => {
                     self.set_field(
                         &stack[base + *b as usize],
                         &cur.members[*member as usize],
@@ -361,7 +445,10 @@ impl PInterp {
                     Err(early) => ret!(early),
                 },
                 Op::Cast { dst, src, ty } => {
-                    let v = eval_cast(&cur.casts[*ty as usize], stack[base + *src as usize].clone())?;
+                    let v = eval_cast(
+                        &cur.casts[*ty as usize],
+                        stack[base + *src as usize].clone(),
+                    )?;
                     stack[base + *dst as usize] = v;
                 }
                 Op::Coerce { dst, src, .. } => {
@@ -406,7 +493,11 @@ impl PInterp {
                         stack[base + *dst as usize] = PValue::Unit;
                     }
                 }
-                Op::Dbg { dst, base: wbase, argc } => {
+                Op::Dbg {
+                    dst,
+                    base: wbase,
+                    argc,
+                } => {
                     let (wbase, argc) = (*wbase as usize, *argc as usize);
                     let mut last = PValue::Unit;
                     for i in 0..argc {
@@ -416,7 +507,8 @@ impl PInterp {
                     stack[base + *dst as usize] = last;
                 }
                 Op::Spawn { dst, child } => {
-                    let clo = self.make_closure(&cur, *child, stack, base, &cur_clo, entry_upvalues);
+                    let clo =
+                        self.make_closure(&cur, *child, stack, base, &cur_clo, entry_upvalues);
                     let interp = self.clone();
                     let handle = self.rt.spawn_blocking(move || {
                         interp
@@ -456,14 +548,17 @@ impl PInterp {
                 CapSource::Upvalue(idx) => upvals[*idx as usize].clone(),
             })
             .collect();
-        Arc::new(PClosure { chunk: child_chunk, captured })
+        Arc::new(PClosure {
+            chunk: child_chunk,
+            captured,
+        })
     }
 
     /// Drive an awaited value to its result. A JoinHandle joins, a future is
     /// run to completion, anything else is already a value.
     fn await_value(&self, v: PValue) -> Result<PValue> {
         let PValue::Native(n) = v else { return Ok(v) };
-        let taken = std::mem::replace(&mut *n.lock(), PNative::Taken);
+        let taken = replace(&mut *n.lock(), PNative::Taken);
         match taken {
             PNative::Task(h) => Ok(self
                 .rt
@@ -474,16 +569,24 @@ impl PInterp {
                 *n.lock() = PNative::HttpClient(c);
                 bail!("cannot await a client")
             }
+            PNative::Instant(instant) => {
+                *n.lock() = PNative::Instant(instant);
+                bail!("cannot await an instant")
+            }
             PNative::Taken => bail!("this value was already awaited"),
         }
     }
 
     pub(super) fn user_function(&self, name: &str) -> Option<Arc<PChunk>> {
-        self.fn_index.get(name).map(|&i| self.functions[i as usize].clone())
+        self.fn_index
+            .get(name)
+            .map(|&i| self.functions[i as usize].clone())
     }
 
     pub(super) fn user_method(&self, ty: &str, name: &str) -> Option<Arc<PChunk>> {
-        self.methods.get(&(ty.to_string(), name.to_string())).cloned()
+        self.methods
+            .get(&(ty.to_string(), name.to_string()))
+            .cloned()
     }
 
     /// Value of a module const or static, evaluated on first read and cached.
@@ -499,7 +602,7 @@ impl PInterp {
         }
         let chunk = {
             let mut slot = self.globals[idx].lock();
-            match std::mem::replace(&mut *slot, PGlobalSlot::Busy) {
+            match replace(&mut *slot, PGlobalSlot::Busy) {
                 PGlobalSlot::Todo(c) => c,
                 other => {
                     *slot = other;
@@ -532,8 +635,8 @@ fn eval_cast(target: &str, v: PValue) -> Result<PValue> {
             PValue::Float(f) => f,
             other => bail!("cannot cast {} to float", other.type_name()),
         }),
-        "usize" | "u8" | "u16" | "u32" | "u64" | "u128" | "isize" | "i8" | "i16" | "i32" | "i64"
-        | "i128" => PValue::Int(match v {
+        "usize" | "u8" | "u16" | "u32" | "u64" | "u128" | "isize" | "i8" | "i16" | "i32"
+        | "i64" | "i128" => PValue::Int(match v {
             PValue::Int(i) => i,
             PValue::Float(f) => f as i64,
             PValue::Char(c) => c as i64,
@@ -558,12 +661,17 @@ impl PInterp {
             (PValue::Struct(s), PMember::Named(n)) => {
                 s.get(n).ok_or_else(|| anyhow::anyhow!("no field `{n}`"))
             }
-            (PValue::Tuple(t), PMember::Indexed(i)) => {
-                t.lock().get(*i).cloned().ok_or_else(|| anyhow::anyhow!("no tuple index {i}"))
-            }
-            (PValue::Struct(s), PMember::Indexed(i)) => {
-                s.values.lock().get(*i).cloned().ok_or_else(|| anyhow::anyhow!("no field {i}"))
-            }
+            (PValue::Tuple(t), PMember::Indexed(i)) => t
+                .lock()
+                .get(*i)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("no tuple index {i}")),
+            (PValue::Struct(s), PMember::Indexed(i)) => s
+                .values
+                .lock()
+                .get(*i)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("no field {i}")),
             _ => bail!("cannot read a field of {}", recv.type_name()),
         }
     }
@@ -591,15 +699,27 @@ impl PInterp {
         match recv {
             PValue::Vec(items) => {
                 let i = int_of(key)? as usize;
-                items.lock().get(i).cloned().ok_or_else(|| anyhow::anyhow!("index {i} out of bounds"))
+                items
+                    .lock()
+                    .get(i)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("index {i} out of bounds"))
             }
             PValue::Map(m) => {
-                let k = key.as_key().ok_or_else(|| anyhow::anyhow!("invalid map key"))?;
-                m.lock().get(&k).cloned().ok_or_else(|| anyhow::anyhow!("key not found"))
+                let k = key
+                    .as_key()
+                    .ok_or_else(|| anyhow::anyhow!("invalid map key"))?;
+                m.lock()
+                    .get(&k)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("key not found"))
             }
             PValue::Str(s) => {
                 let i = int_of(key)? as usize;
-                s.chars().nth(i).map(PValue::Char).ok_or_else(|| anyhow::anyhow!("index out of bounds"))
+                s.chars()
+                    .nth(i)
+                    .map(PValue::Char)
+                    .ok_or_else(|| anyhow::anyhow!("index out of bounds"))
             }
             _ => bail!("cannot index {}", recv.type_name()),
         }
@@ -616,7 +736,9 @@ impl PInterp {
                 items[i] = v;
             }
             PValue::Map(m) => {
-                let k = key.as_key().ok_or_else(|| anyhow::anyhow!("invalid map key"))?;
+                let k = key
+                    .as_key()
+                    .ok_or_else(|| anyhow::anyhow!("invalid map key"))?;
                 m.lock().insert(k, v);
             }
             _ => bail!("cannot index {}", recv.type_name()),
@@ -626,11 +748,17 @@ impl PInterp {
 
     pub(super) fn eval_try(&self, v: PValue) -> Result<std::result::Result<PValue, PValue>> {
         match v {
-            PValue::Enum { enum_name, variant, data } => match (&*enum_name, &*variant) {
+            PValue::Enum {
+                enum_name,
+                variant,
+                data,
+            } => match (&*enum_name, &*variant) {
                 ("Result", "Ok") | ("Option", "Some") => {
                     Ok(Ok(data.first().cloned().unwrap_or(PValue::Unit)))
                 }
-                ("Result", "Err") => Ok(Err(PValue::err(data.first().cloned().unwrap_or(PValue::Unit)))),
+                ("Result", "Err") => Ok(Err(PValue::err(
+                    data.first().cloned().unwrap_or(PValue::Unit),
+                ))),
                 ("Option", "None") => Ok(Err(PValue::none())),
                 _ => bail!("`?` on a non Result/Option value"),
             },

@@ -1,0 +1,44 @@
+function f00(x: number): number {
+  return (x + 97557) % 99991;
+}
+function f01(x: number): number {
+  return (x + 16685) % 99991;
+}
+function f02(x: number): number {
+  return (x + 59373) % 99991;
+}
+function f03(x: number): number {
+  return (x + 53691) % 99991;
+}
+function f04(x: number): number {
+  return (x + 93356) % 99991;
+}
+function f05(x: number): number {
+  return (x + 89092) % 99991;
+}
+function f06(x: number): number {
+  return (x + 65690) % 99991;
+}
+function f07(x: number): number {
+  return (x + 97668) % 99991;
+}
+function f08(x: number): number {
+  return (x + 93440) % 99991;
+}
+function f09(x: number): number {
+  return (x + 60187) % 99991;
+}
+
+export function apply(x: number): number {
+  x = f00(x);
+  x = f01(x);
+  x = f02(x);
+  x = f03(x);
+  x = f04(x);
+  x = f05(x);
+  x = f06(x);
+  x = f07(x);
+  x = f08(x);
+  x = f09(x);
+  return x;
+}

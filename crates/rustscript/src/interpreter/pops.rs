@@ -103,15 +103,15 @@ fn int_bin(l: &PValue, r: &PValue, f: impl Fn(i64, i64) -> i64) -> Result<PValue
 pub(super) fn compare_values(l: &PValue, r: &PValue) -> Result<Ordering> {
     Ok(match (l, r) {
         (PValue::Int(a), PValue::Int(b)) => a.cmp(b),
-        (PValue::Float(a), PValue::Float(b)) => {
-            a.partial_cmp(b).ok_or_else(|| anyhow!("cannot order NaN"))?
-        }
-        (PValue::Int(a), PValue::Float(b)) => {
-            (*a as f64).partial_cmp(b).ok_or_else(|| anyhow!("cannot order NaN"))?
-        }
-        (PValue::Float(a), PValue::Int(b)) => {
-            a.partial_cmp(&(*b as f64)).ok_or_else(|| anyhow!("cannot order NaN"))?
-        }
+        (PValue::Float(a), PValue::Float(b)) => a
+            .partial_cmp(b)
+            .ok_or_else(|| anyhow!("cannot order NaN"))?,
+        (PValue::Int(a), PValue::Float(b)) => (*a as f64)
+            .partial_cmp(b)
+            .ok_or_else(|| anyhow!("cannot order NaN"))?,
+        (PValue::Float(a), PValue::Int(b)) => a
+            .partial_cmp(&(*b as f64))
+            .ok_or_else(|| anyhow!("cannot order NaN"))?,
         (PValue::Str(a), PValue::Str(b)) => a.as_ref().cmp(b.as_ref()),
         (PValue::Char(a), PValue::Char(b)) => a.cmp(b),
         (PValue::Bool(a), PValue::Bool(b)) => a.cmp(b),
@@ -170,7 +170,9 @@ pub(super) fn try_bind(pat: &PPat, val: &PValue, define: &mut dyn FnMut(&str, PV
             _ => false,
         },
         PPat::Struct { name, fields } => {
-            let PValue::Struct(st) = val else { return false };
+            let PValue::Struct(st) = val else {
+                return false;
+            };
             if let Some(pn) = name
                 && pn.as_str() != super::resolver::bare(st.name())
             {
@@ -212,7 +214,11 @@ fn bind_seq(pats: &[PPat], vals: &[PValue], define: &mut dyn FnMut(&str, PValue)
         }
         return true;
     }
-    pats.len() == vals.len() && pats.iter().zip(vals.iter()).all(|(p, v)| try_bind(p, v, define))
+    pats.len() == vals.len()
+        && pats
+            .iter()
+            .zip(vals.iter())
+            .all(|(p, v)| try_bind(p, v, define))
 }
 
 fn plit_eq(l: &PLit, val: &PValue) -> bool {

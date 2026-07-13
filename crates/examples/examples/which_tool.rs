@@ -7,5 +7,8 @@ fn main() {
         Ok(_) => println!("cargo on path: true"),
         Err(_) => println!("cargo on path: false"),
     }
-    println!("missing tool found: {}", which::which("definitely-not-a-real-tool").is_ok());
+    println!(
+        "missing tool found: {}",
+        which::which("definitely-not-a-real-tool").is_ok()
+    );
 }

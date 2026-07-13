@@ -6,6 +6,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Instant;
 
 use parking_lot::Mutex;
 
@@ -22,6 +23,8 @@ pub enum PNative {
     Future(BoxFut),
     /// An async reqwest client, cheap to clone and shared across tasks.
     HttpClient(reqwest::Client),
+    /// A monotonic clock reading used by timed async scripts.
+    Instant(Instant),
     /// A consumed handle, left behind after a task or future is taken to await.
     Taken,
 }
@@ -32,6 +35,7 @@ impl PNative {
             PNative::Task(_) => "JoinHandle",
             PNative::Future(_) => "Future",
             PNative::HttpClient(_) => "Client",
+            PNative::Instant(_) => "Instant",
             PNative::Taken => "Taken",
         }
     }

@@ -118,14 +118,21 @@ fn client_method(
         _ => bail!("unknown method `{method}` on a client"),
     };
     let url = args.first().map(PValue::display).unwrap_or_default();
-    Ok(PValue::Struct(request_struct(verb, &url, PValue::Native(n.clone()))))
+    Ok(PValue::Struct(request_struct(
+        verb,
+        &url,
+        PValue::Native(n.clone()),
+    )))
 }
 
 fn builder_method(s: &Arc<PStructData>, method: &str, args: &[PValue]) -> Result<PValue> {
     let this = || PValue::Struct(s.clone());
     match method {
         "cookie_store" => {
-            s.set("cookie_store", args.first().cloned().unwrap_or(PValue::Bool(false)));
+            s.set(
+                "cookie_store",
+                args.first().cloned().unwrap_or(PValue::Bool(false)),
+            );
             Ok(this())
         }
         "timeout" => {
@@ -173,7 +180,9 @@ fn request_method(s: &Arc<PStructData>, method: &str, args: &[PValue]) -> Result
         "basic_auth" => {
             let user = args.first().map(PValue::display).unwrap_or_default();
             let pass = match args.get(1) {
-                Some(PValue::Enum { data, .. }) => data.first().map(PValue::display).unwrap_or_default(),
+                Some(PValue::Enum { data, .. }) => {
+                    data.first().map(PValue::display).unwrap_or_default()
+                }
                 Some(other) => other.display(),
                 None => String::new(),
             };
@@ -199,7 +208,10 @@ fn request_method(s: &Arc<PStructData>, method: &str, args: &[PValue]) -> Result
             Ok(this())
         }
         "body" => {
-            s.set("body", PValue::str(args.first().map(PValue::display).unwrap_or_default()));
+            s.set(
+                "body",
+                PValue::str(args.first().map(PValue::display).unwrap_or_default()),
+            );
             Ok(this())
         }
         "timeout" => {
@@ -213,7 +225,8 @@ fn request_method(s: &Arc<PStructData>, method: &str, args: &[PValue]) -> Result
 
 fn add_header(s: &PStructData, k: &str, v: &str) {
     if let Some(PValue::Vec(h)) = s.get("headers") {
-        h.lock().push(PValue::tuple(vec![PValue::str(k), PValue::str(v)]));
+        h.lock()
+            .push(PValue::tuple(vec![PValue::str(k), PValue::str(v)]));
     }
 }
 
@@ -231,7 +244,10 @@ struct Plan {
 }
 
 fn build_plan(s: &PStructData) -> Plan {
-    let method = s.get("method").map(|v| v.display()).unwrap_or_else(|| "GET".into());
+    let method = s
+        .get("method")
+        .map(|v| v.display())
+        .unwrap_or_else(|| "GET".into());
     let client = match s.get("client") {
         Some(PValue::Native(n)) => match &*n.lock() {
             PNative::HttpClient(c) => c.clone(),
@@ -302,7 +318,9 @@ fn pairs_field(s: &PStructData, field: &str) -> Vec<(String, String)> {
             .lock()
             .iter()
             .filter_map(|item| {
-                let PValue::Tuple(pair) = item else { return None };
+                let PValue::Tuple(pair) = item else {
+                    return None;
+                };
                 let pair = pair.lock();
                 Some((pair[0].display(), pair[1].display()))
             })
@@ -337,14 +355,18 @@ fn response_method(s: &Arc<PStructData>, method: &str) -> Result<PValue> {
     let this = || PValue::Struct(s.clone());
     let body = || s.get("body").map(|v| v.display()).unwrap_or_default();
     Ok(match method {
-        "status" => {
-            PValue::struct_of("StatusCode", [("code".into(), s.get("status").unwrap_or(PValue::Int(0)))])
-        }
+        "status" => PValue::struct_of(
+            "StatusCode",
+            [("code".into(), s.get("status").unwrap_or(PValue::Int(0)))],
+        ),
         "text" => text_future(body()),
         "json" => json_future(body()),
         "headers" => PValue::struct_of(
             "HeaderMap",
-            [("map".into(), s.get("headers").unwrap_or_else(|| PValue::vec(vec![])))],
+            [(
+                "map".into(),
+                s.get("headers").unwrap_or_else(|| PValue::vec(vec![])),
+            )],
         ),
         "error_for_status" => {
             let code = match s.get("status") {
@@ -378,7 +400,11 @@ fn json_future(body: String) -> PValue {
 fn header_map_method(s: &PStructData, method: &str, args: &[PValue]) -> PValue {
     match method {
         "get" => {
-            let name = args.first().map(PValue::display).unwrap_or_default().to_lowercase();
+            let name = args
+                .first()
+                .map(PValue::display)
+                .unwrap_or_default()
+                .to_lowercase();
             if let Some(PValue::Vec(h)) = s.get("map") {
                 for item in h.lock().iter() {
                     if let PValue::Tuple(pair) = item {
@@ -440,7 +466,10 @@ fn json_to_pvalue(v: serde_json::Value) -> PValue {
             if let PValue::Map(inner) = &m {
                 let mut inner = inner.lock();
                 for (k, v) in map {
-                    inner.insert(super::pvalue::PKey::Str(Arc::from(k.as_str())), json_to_pvalue(v));
+                    inner.insert(
+                        super::pvalue::PKey::Str(Arc::from(k.as_str())),
+                        json_to_pvalue(v),
+                    );
                 }
             }
             m

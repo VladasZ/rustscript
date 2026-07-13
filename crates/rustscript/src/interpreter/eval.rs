@@ -7,9 +7,9 @@ use std::rc::Rc;
 
 use anyhow::{Result, anyhow, bail};
 
+use super::Interp;
 use super::resolver::Res;
 use super::value::{KeyRef, Map, StructShape, Value};
-use super::Interp;
 
 /// Field layout of a user struct, built once per struct and reused for every
 /// coerced instance so field names are shared instead of re-allocated.
@@ -50,9 +50,7 @@ impl Interp {
                                     .borrow()
                                     .iter()
                                     .map(|v| match v {
-                                        Value::Map(m) => {
-                                            self.struct_from_map(&shape, &m.borrow())
-                                        }
+                                        Value::Map(m) => self.struct_from_map(&shape, &m.borrow()),
                                         other => other.clone(),
                                     })
                                     .collect(),
@@ -70,13 +68,22 @@ impl Interp {
                 value
             }
             "Option" => {
-                if let (Value::Enum { enum_name, variant, data }, Some(inner)) =
-                    (&value, first_generic_type(seg))
+                if let (
+                    Value::Enum {
+                        enum_name,
+                        variant,
+                        data,
+                    },
+                    Some(inner),
+                ) = (&value, first_generic_type(seg))
                     && &**enum_name == "Option"
                     && &**variant == "Some"
                 {
-                    let coerced = self
-                        .coerce_value(data.first().cloned().unwrap_or(Value::Unit), inner, module);
+                    let coerced = self.coerce_value(
+                        data.first().cloned().unwrap_or(Value::Unit),
+                        inner,
+                        module,
+                    );
                     return Value::some(coerced);
                 }
                 value
@@ -101,7 +108,11 @@ impl Interp {
 
     /// If `value` is `Ok(x)` coerce `x`, otherwise coerce `value` directly.
     pub(super) fn coerce_result(&self, value: Value, ty: &syn::Type, module: usize) -> Value {
-        if let Value::Enum { enum_name, variant, data } = &value
+        if let Value::Enum {
+            enum_name,
+            variant,
+            data,
+        } = &value
             && &**enum_name == "Result"
             && &**variant == "Ok"
         {
@@ -119,8 +130,7 @@ impl Interp {
 
     /// A type alias hit by this path, with the module its target resolves in.
     fn follow_alias(&self, module: usize, path: &syn::Path) -> Option<(usize, Rc<syn::Type>)> {
-        let segs: Vec<String> =
-            path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
         match self.resolver().resolve(module, &segs) {
             Ok(Res::Alias(m, target)) => Some((m, target)),
             _ => None,
@@ -151,7 +161,9 @@ impl Interp {
             coerce,
             module,
         });
-        self.shapes.borrow_mut().insert(canon.clone(), shape.clone());
+        self.shapes
+            .borrow_mut()
+            .insert(canon.clone(), shape.clone());
         Some(shape)
     }
 
@@ -159,10 +171,17 @@ impl Interp {
     /// struct names, and aliases to them can, primitives cannot.
     fn field_needs_coerce(&self, ty: &syn::Type, module: usize) -> bool {
         let syn::Type::Path(p) = ty else { return false };
-        let Some(seg) = p.path.segments.last() else { return false };
+        let Some(seg) = p.path.segments.last() else {
+            return false;
+        };
         let name = seg.ident.to_string();
-        matches!(name.as_str(), "Vec" | "VecDeque" | "Option" | "Box" | "Rc" | "Arc")
-            || self.resolver().resolve_struct_key(module, &p.path).is_some()
+        matches!(
+            name.as_str(),
+            "Vec" | "VecDeque" | "Option" | "Box" | "Rc" | "Arc"
+        ) || self
+            .resolver()
+            .resolve_struct_key(module, &p.path)
+            .is_some()
             || self.follow_alias(module, &p.path).is_some()
     }
 
@@ -183,11 +202,15 @@ impl Interp {
     }
 
     /// Expand any iterable into a concrete list of items.
-    pub(super) fn into_iter_items(&self, v: Value) -> Result<Vec<Value>> {
+    pub(super) fn iter_items(&self, v: Value) -> Result<Vec<Value>> {
         Ok(match v {
             Value::Vec(items) => items.borrow().clone(),
             Value::Tuple(items) => items.borrow().clone(),
-            Value::Range { start, end, inclusive } => {
+            Value::Range {
+                start,
+                end,
+                inclusive,
+            } => {
                 let end = if inclusive { end + 1 } else { end };
                 (start..end).map(Value::Int).collect()
             }
@@ -206,7 +229,11 @@ impl Interp {
 
     pub(super) fn eval_try(&self, v: Value) -> Result<std::result::Result<Value, Value>> {
         match v {
-            Value::Enum { enum_name, variant, data } if &*enum_name == "Result" => {
+            Value::Enum {
+                enum_name,
+                variant,
+                data,
+            } if &*enum_name == "Result" => {
                 let inner = data.first().cloned().unwrap_or(Value::Unit);
                 if &*variant == "Ok" {
                     Ok(Ok(inner))
@@ -214,7 +241,11 @@ impl Interp {
                     Ok(Err(Value::err(inner)))
                 }
             }
-            Value::Enum { enum_name, variant, data } if &*enum_name == "Option" => {
+            Value::Enum {
+                enum_name,
+                variant,
+                data,
+            } if &*enum_name == "Option" => {
                 let inner = data.first().cloned().unwrap_or(Value::Unit);
                 if &*variant == "Some" {
                     Ok(Ok(inner))
@@ -222,7 +253,10 @@ impl Interp {
                     Ok(Err(Value::none()))
                 }
             }
-            other => bail!("the `?` operator needs a Result or Option, got {}", other.type_name()),
+            other => bail!(
+                "the `?` operator needs a Result or Option, got {}",
+                other.type_name()
+            ),
         }
     }
 
@@ -260,13 +294,22 @@ impl Interp {
     // -- indexing and fields ----------------------------------------------
 
     pub(super) fn index(&self, base: &Value, key: &Value) -> Result<Value> {
-        if let Value::Range { start, end, inclusive } = key {
+        if let Value::Range {
+            start,
+            end,
+            inclusive,
+        } = key
+        {
             return slice_value(base, *start, *end, *inclusive);
         }
         Ok(match base {
             Value::Vec(items) => {
                 let i = as_index(key)?;
-                items.borrow().get(i).cloned().ok_or_else(|| anyhow!("index {i} out of bounds"))?
+                items
+                    .borrow()
+                    .get(i)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("index {i} out of bounds"))?
             }
             Value::Str(s) => {
                 let i = as_index(key)?;
@@ -277,13 +320,20 @@ impl Interp {
             }
             Value::Tuple(items) => {
                 let i = as_index(key)?;
-                items.borrow().get(i).cloned().ok_or_else(|| anyhow!("index {i} out of bounds"))?
+                items
+                    .borrow()
+                    .get(i)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("index {i} out of bounds"))?
             }
             Value::Map(map) => {
                 let k = key
                     .key_ref()
                     .ok_or_else(|| anyhow!("{} is not a valid map key", key.type_name()))?;
-                map.borrow().get(&k).cloned().ok_or_else(|| anyhow!("key not found"))?
+                map.borrow()
+                    .get(&k)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("key not found"))?
             }
             Value::Struct(s) if &**s.name() == "Captures" => {
                 super::regex_bridge::capture_index(s, key)?
@@ -303,7 +353,9 @@ impl Interp {
                 items[i] = val;
             }
             Value::Map(map) => {
-                let k = key.as_key().ok_or_else(|| anyhow!("{} is not a valid map key", key.type_name()))?;
+                let k = key
+                    .as_key()
+                    .ok_or_else(|| anyhow!("{} is not a valid map key", key.type_name()))?;
                 map.borrow_mut().insert(k, val);
             }
             other => bail!("cannot index-assign into {}", other.type_name()),
@@ -311,7 +363,11 @@ impl Interp {
         Ok(())
     }
 
-    pub(super) fn get_field(&self, base: &Value, member: &super::bytecode::Member) -> Result<Value> {
+    pub(super) fn get_field(
+        &self,
+        base: &Value,
+        member: &super::bytecode::Member,
+    ) -> Result<Value> {
         use super::bytecode::Member;
         match (base, member) {
             (Value::Struct(s), Member::Named(name)) => {
@@ -332,7 +388,12 @@ impl Interp {
         }
     }
 
-    pub(super) fn set_field(&self, base: &Value, member: &super::bytecode::Member, val: Value) -> Result<()> {
+    pub(super) fn set_field(
+        &self,
+        base: &Value,
+        member: &super::bytecode::Member,
+        val: Value,
+    ) -> Result<()> {
         use super::bytecode::Member;
         match (base, member) {
             (Value::Struct(s), Member::Named(name)) => {

@@ -12,7 +12,9 @@ use std::sync::Arc;
 
 use syn::{Lit, Pat, Type};
 
-use super::bytecode::{CapSource, Chunk, Const, FmtSpec, Member, MethodName, Op, PatInfo, StructLit};
+use super::bytecode::{
+    CapSource, Chunk, Const, FmtSpec, Member, MethodName, Op, PatInfo, StructLit,
+};
 use super::pvalue::PStructShape;
 
 /// A field access, the `Arc` twin of `bytecode::Member`.
@@ -47,12 +49,23 @@ pub enum PLit {
 pub enum PPat {
     Wild,
     Rest,
-    Ident { name: String, sub: Option<Box<PPat>> },
+    Ident {
+        name: String,
+        sub: Option<Box<PPat>>,
+    },
     Lit(PLit),
     Tuple(Vec<PPat>),
-    TupleStruct { name: Option<String>, elems: Vec<PPat> },
-    Path { name: Option<String> },
-    Struct { name: Option<String>, fields: Vec<(String, PPat)> },
+    TupleStruct {
+        name: Option<String>,
+        elems: Vec<PPat>,
+    },
+    Path {
+        name: Option<String>,
+    },
+    Struct {
+        name: Option<String>,
+        fields: Vec<(String, PPat)>,
+    },
     Or(Vec<PPat>),
     Slice(Vec<PPat>),
     /// A pattern the parallel engine does not lower yet; never matches.
@@ -111,14 +124,27 @@ fn convert_member(m: &Member) -> PMember {
 fn convert_lit(lit: &StructLit) -> PStructLit {
     let shape = &lit.shape;
     let fields: Vec<Arc<str>> = shape.fields.iter().map(|f| Arc::from(&**f)).collect();
-    let renames: Vec<Option<Arc<str>>> =
-        shape.renames.iter().map(|r| r.as_ref().map(|s| Arc::from(&**s))).collect();
-    let pshape = Arc::new(PStructShape { name: Arc::from(&*shape.name), fields, renames });
-    PStructLit { shape: pshape, has_rest: lit.has_rest }
+    let renames: Vec<Option<Arc<str>>> = shape
+        .renames
+        .iter()
+        .map(|r| r.as_ref().map(|s| Arc::from(&**s)))
+        .collect();
+    let pshape = Arc::new(PStructShape {
+        name: Arc::from(&*shape.name),
+        fields,
+        renames,
+    });
+    PStructLit {
+        shape: pshape,
+        has_rest: lit.has_rest,
+    }
 }
 
 fn convert_pat_info(info: &PatInfo) -> PPatInfo {
-    PPatInfo { pat: convert_pat(&info.pat), binds: info.binds.clone() }
+    PPatInfo {
+        pat: convert_pat(&info.pat),
+        binds: info.binds.clone(),
+    }
 }
 
 fn convert_pat(pat: &Pat) -> PPat {
@@ -138,7 +164,9 @@ fn convert_pat(pat: &Pat) -> PPat {
             name: ts.path.segments.last().map(|s| s.ident.to_string()),
             elems: ts.elems.iter().map(convert_pat).collect(),
         },
-        Pat::Path(p) => PPat::Path { name: p.path.segments.last().map(|s| s.ident.to_string()) },
+        Pat::Path(p) => PPat::Path {
+            name: p.path.segments.last().map(|s| s.ident.to_string()),
+        },
         Pat::Struct(s) => PPat::Struct {
             name: s.path.segments.last().map(|s| s.ident.to_string()),
             fields: s
@@ -162,17 +190,26 @@ fn convert_pat(pat: &Pat) -> PPat {
 /// Reduce a cast target type to its type name, the only part the VM needs.
 fn cast_target(ty: &Type) -> String {
     match ty {
-        Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default(),
+        Type::Path(p) => p
+            .path
+            .segments
+            .last()
+            .map(|s| s.ident.to_string())
+            .unwrap_or_default(),
         _ => String::new(),
     }
 }
 
 fn convert_lit_pat(lit: &Lit) -> PPat {
     match lit {
-        Lit::Int(i) => i.base10_parse::<i64>().map(|v| PPat::Lit(PLit::Int(v))).unwrap_or(PPat::Unsupported),
-        Lit::Float(f) => {
-            f.base10_parse::<f64>().map(|v| PPat::Lit(PLit::Float(v))).unwrap_or(PPat::Unsupported)
-        }
+        Lit::Int(i) => i
+            .base10_parse::<i64>()
+            .map(|v| PPat::Lit(PLit::Int(v)))
+            .unwrap_or(PPat::Unsupported),
+        Lit::Float(f) => f
+            .base10_parse::<f64>()
+            .map(|v| PPat::Lit(PLit::Float(v)))
+            .unwrap_or(PPat::Unsupported),
         Lit::Bool(b) => PPat::Lit(PLit::Bool(b.value)),
         Lit::Str(s) => PPat::Lit(PLit::Str(s.value())),
         Lit::Char(c) => PPat::Lit(PLit::Char(c.value())),

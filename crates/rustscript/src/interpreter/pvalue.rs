@@ -27,7 +27,11 @@ pub struct PStructShape {
 
 impl PStructShape {
     pub fn new(name: impl Into<Arc<str>>, fields: Vec<Arc<str>>) -> Arc<PStructShape> {
-        Arc::new(PStructShape { name: name.into(), fields, renames: Vec::new() })
+        Arc::new(PStructShape {
+            name: name.into(),
+            fields,
+            renames: Vec::new(),
+        })
     }
 
     pub fn slot(&self, field: &str) -> Option<usize> {
@@ -47,7 +51,9 @@ impl PStructData {
     }
 
     pub fn get(&self, field: &str) -> Option<PValue> {
-        self.shape.slot(field).map(|i| self.values.lock()[i].clone())
+        self.shape
+            .slot(field)
+            .map(|i| self.values.lock()[i].clone())
     }
 
     pub fn set(&self, field: &str, v: PValue) -> bool {
@@ -122,7 +128,10 @@ impl PValue {
     }
 
     pub fn structure(shape: Arc<PStructShape>, values: Vec<PValue>) -> PValue {
-        PValue::Struct(Arc::new(PStructData { shape, values: Mutex::new(values) }))
+        PValue::Struct(Arc::new(PStructData {
+            shape,
+            values: Mutex::new(values),
+        }))
     }
 
     pub fn struct_of(
@@ -225,8 +234,16 @@ impl PValue {
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.eq_value(y))
             }
             (
-                PValue::Enum { enum_name: ea, variant: va, data: da },
-                PValue::Enum { enum_name: eb, variant: vb, data: db },
+                PValue::Enum {
+                    enum_name: ea,
+                    variant: va,
+                    data: da,
+                },
+                PValue::Enum {
+                    enum_name: eb,
+                    variant: vb,
+                    data: db,
+                },
             ) => {
                 ea == eb
                     && va == vb
@@ -237,9 +254,11 @@ impl PValue {
                 a.name() == b.name() && {
                     let (va, vb) = (a.values.lock(), b.values.lock());
                     va.len() == vb.len()
-                        && a.shape.fields.iter().zip(va.iter()).all(|(k, v)| {
-                            b.get(k).map(|o| v.eq_value(&o)).unwrap_or(false)
-                        })
+                        && a.shape
+                            .fields
+                            .iter()
+                            .zip(va.iter())
+                            .all(|(k, v)| b.get(k).map(|o| v.eq_value(&o)).unwrap_or(false))
                 }
             }
             (PValue::Native(a), PValue::Native(b)) => Arc::ptr_eq(a, b),
@@ -275,7 +294,11 @@ impl PValue {
             PValue::Float(f) => out.push_str(&format_float(*f)),
             PValue::Char(c) => write!(out, "{c:?}").unwrap(),
             PValue::Str(s) => write!(out, "{:?}", &**s).unwrap(),
-            PValue::Range { start, end, inclusive } => {
+            PValue::Range {
+                start,
+                end,
+                inclusive,
+            } => {
                 let sep = if *inclusive { "..=" } else { ".." };
                 write!(out, "{start}{sep}{end}").unwrap();
             }
@@ -321,7 +344,12 @@ impl PValue {
                 if values.is_empty() {
                     return;
                 }
-                if s.shape.fields.iter().enumerate().all(|(i, f)| &**f == i.to_string()) {
+                if s.shape
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .all(|(i, f)| **f == i.to_string())
+                {
                     out.push('(');
                     for (i, v) in values.iter().enumerate() {
                         if i > 0 {

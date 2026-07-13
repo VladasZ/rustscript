@@ -77,7 +77,7 @@ fn resolve_arg(
 /// Apply a subset of the format spec: debug flag, precision, width, and fill.
 fn format_value(value: &Value, spec: &str) -> Result<String> {
     let debug = spec.contains('?');
-    let spec = spec.replace('#', "").replace('?', "");
+    let spec = spec.replace(['#', '?'], "");
 
     let mut base = if debug {
         value.debug()

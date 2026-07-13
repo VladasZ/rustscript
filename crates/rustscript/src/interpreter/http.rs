@@ -16,9 +16,15 @@ use super::value::{StructData, Value};
 use super::json_bridge::*;
 use super::std_bridge::*;
 
+type ResponseParts = (u16, String, Vec<(String, String)>);
+
 // -- client construction ---------------------------------------------------
 
-fn build_client(cookie_store: bool, timeout: Option<std::time::Duration>, ua: Option<String>) -> Result<Client> {
+fn build_client(
+    cookie_store: bool,
+    timeout: Option<std::time::Duration>,
+    ua: Option<String>,
+) -> Result<Client> {
     let mut b = Client::builder().cookie_store(cookie_store);
     if let Some(d) = timeout {
         b = b.timeout(d);
@@ -26,7 +32,8 @@ fn build_client(cookie_store: bool, timeout: Option<std::time::Duration>, ua: Op
     if let Some(ua) = ua {
         b = b.user_agent(ua);
     }
-    b.build().map_err(|e| anyhow!("http client build failed: {e}"))
+    b.build()
+        .map_err(|e| anyhow!("http client build failed: {e}"))
 }
 
 /// A shared client for the `reqwest::blocking::get` free function, so a script
@@ -37,7 +44,12 @@ fn default_client() -> Result<Client> {
         return Ok(c.clone());
     }
     let c = build_client(false, None, None)?;
-    let _ = C.set(c.clone());
+    if C.set(c.clone()).is_err() {
+        return C
+            .get()
+            .cloned()
+            .ok_or_else(|| anyhow!("shared HTTP client was not initialized"));
+    }
     Ok(c)
 }
 
@@ -66,7 +78,9 @@ pub(super) fn reqwest_call(canon: &[String], args: &[Value]) -> Result<Value> {
     if last == "get" {
         let url = args.first().map(Value::display).unwrap_or_default();
         let req = new_request("GET", &url, None);
-        let Value::Struct(s) = &req else { unreachable!() };
+        let Value::Struct(s) = &req else {
+            unreachable!()
+        };
         return Ok(run_request(s));
     }
     bail!("unsupported reqwest::blocking function `{last}`, build a Client for other verbs")
@@ -126,7 +140,10 @@ fn builder_method(s: &Rc<StructData>, method: &str, args: &[Value]) -> Result<Va
     let this = || Value::Struct(s.clone());
     match method {
         "cookie_store" => {
-            s.set("cookie_store", args.first().cloned().unwrap_or(Value::Bool(false)));
+            s.set(
+                "cookie_store",
+                args.first().cloned().unwrap_or(Value::Bool(false)),
+            );
             Ok(this())
         }
         "timeout" => {
@@ -171,7 +188,9 @@ pub(super) fn request_method(s: &Rc<StructData>, method: &str, args: &[Value]) -
             let user = args.first().map(Value::display).unwrap_or_default();
             // The password is an Option in reqwest, so unwrap a Some payload.
             let pass = match args.get(1) {
-                Some(Value::Enum { data, .. }) => data.first().map(Value::display).unwrap_or_default(),
+                Some(Value::Enum { data, .. }) => {
+                    data.first().map(Value::display).unwrap_or_default()
+                }
                 Some(other) => other.display(),
                 None => String::new(),
             };
@@ -197,7 +216,10 @@ pub(super) fn request_method(s: &Rc<StructData>, method: &str, args: &[Value]) -
             Ok(this())
         }
         "body" => {
-            s.set("body", Value::str(args.first().map(Value::display).unwrap_or_default()));
+            s.set(
+                "body",
+                Value::str(args.first().map(Value::display).unwrap_or_default()),
+            );
             Ok(this())
         }
         "timeout" => {
@@ -212,14 +234,22 @@ pub(super) fn request_method(s: &Rc<StructData>, method: &str, args: &[Value]) -
 }
 
 fn push_pair(s: &StructData, field: &str, k: Option<&Value>, v: Option<&Value>) {
-    let pair = vec![k.cloned().unwrap_or(Value::Unit), v.cloned().unwrap_or(Value::Unit)];
-    ensure_vec_field(s, field).borrow_mut().push(Value::Tuple(Rc::new(RefCell::new(pair))));
+    let pair = vec![
+        k.cloned().unwrap_or(Value::Unit),
+        v.cloned().unwrap_or(Value::Unit),
+    ];
+    ensure_vec_field(s, field)
+        .borrow_mut()
+        .push(Value::Tuple(Rc::new(RefCell::new(pair))));
 }
 
 fn add_header(s: &StructData, k: &str, v: &str) {
     ensure_vec_field(s, "headers")
         .borrow_mut()
-        .push(Value::Tuple(Rc::new(RefCell::new(vec![Value::str(k), Value::str(v)]))));
+        .push(Value::Tuple(Rc::new(RefCell::new(vec![
+            Value::str(k),
+            Value::str(v),
+        ]))));
 }
 
 fn ensure_vec_field(s: &StructData, field: &str) -> Rc<RefCell<Vec<Value>>> {
@@ -257,8 +287,11 @@ fn run_request(s: &StructData) -> Value {
     }
 }
 
-fn execute(s: &StructData) -> Result<(u16, String, Vec<(String, String)>)> {
-    let method = s.get("method").map(|v| v.display()).unwrap_or_else(|| "GET".into());
+fn execute(s: &StructData) -> Result<ResponseParts> {
+    let method = s
+        .get("method")
+        .map(|v| v.display())
+        .unwrap_or_else(|| "GET".into());
     let url = s.get("url").map(|v| v.display()).unwrap_or_default();
     let client = match s.get("client") {
         Some(Value::Native(h)) => match &*h.borrow() {
@@ -301,7 +334,9 @@ fn tuple_pairs(items: &[Value]) -> Vec<(String, String)> {
     items
         .iter()
         .filter_map(|item| {
-            let Value::Tuple(pair) = item else { return None };
+            let Value::Tuple(pair) = item else {
+                return None;
+            };
             let pair = pair.borrow();
             Some((pair[0].display(), pair[1].display()))
         })
@@ -334,7 +369,10 @@ pub(super) fn response_method(s: &Rc<StructData>, method: &str) -> Result<Value>
         },
         "headers" => Value::struct_of(
             "HeaderMap",
-            [("map".into(), s.get("headers").unwrap_or_else(|| Value::vec(vec![])))],
+            [(
+                "map".into(),
+                s.get("headers").unwrap_or_else(|| Value::vec(vec![])),
+            )],
         ),
         // Return the response itself on a 2xx, an Err carrying the status code
         // otherwise, matching reqwest's error_for_status.
@@ -358,7 +396,11 @@ pub(super) fn response_method(s: &Rc<StructData>, method: &str) -> Result<Value>
 fn header_map_method(s: &StructData, method: &str, args: &[Value]) -> Value {
     match method {
         "get" => {
-            let name = args.first().map(|v| v.display()).unwrap_or_default().to_lowercase();
+            let name = args
+                .first()
+                .map(|v| v.display())
+                .unwrap_or_default()
+                .to_lowercase();
             if let Some(Value::Vec(h)) = s.get("map") {
                 for item in h.borrow().iter() {
                     if let Value::Tuple(pair) = item {

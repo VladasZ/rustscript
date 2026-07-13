@@ -1,21 +1,23 @@
 //! Macro lowering and format specs. Split from the compiler.
 
-
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
 use syn::punctuated::Punctuated;
 use syn::{Expr, Lit};
 
-use crate::interpreter::bytecode::{
-    BinKind, Const, FmtSpec, MacroKind, Op, Reg,
-};
+use crate::interpreter::bytecode::{BinKind, Const, FmtSpec, MacroKind, Op, Reg};
 
 use super::*;
 
 impl Compiler<'_> {
     pub(super) fn compile_macro(&mut self, mac: &syn::Macro, dst: Reg) -> Result<()> {
-        let name = mac.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+        let name = mac
+            .path
+            .segments
+            .last()
+            .map(|s| s.ident.to_string())
+            .unwrap_or_default();
         match name.as_str() {
             "println" | "print" | "eprintln" | "eprint" | "panic" | "anyhow" | "bail"
             | "unreachable" | "todo" | "unimplemented" => {
@@ -50,22 +52,40 @@ impl Compiler<'_> {
             "vec" => self.compile_vec_macro(dst, mac)?,
             "assert" => {
                 let args = parse_exprs(mac)?;
-                let cond = args.first().ok_or_else(|| anyhow!("assert! needs a condition"))?;
+                let cond = args
+                    .first()
+                    .ok_or_else(|| anyhow!("assert! needs a condition"))?;
                 let c = self.compile_expr(cond)?;
                 let ok = self.here();
                 self.emit(Op::JumpIfTrue { cond: c, to: 0 });
                 let p = self.add_path(vec!["::assert_failed".to_string()], None);
-                self.emit(Op::CallPath { dst, path: p, base: dst, argc: 0 });
+                self.emit(Op::CallPath {
+                    dst,
+                    path: p,
+                    base: dst,
+                    argc: 0,
+                });
                 let end = self.here() as u32;
                 self.patch_jump(ok, end);
                 self.emit(Op::LoadUnit { dst });
             }
             "assert_eq" | "assert_ne" => {
                 let args = parse_exprs(mac)?;
-                let a = self.compile_expr(args.first().ok_or_else(|| anyhow!("assert needs two args"))?)?;
-                let b = self.compile_expr(args.get(1).ok_or_else(|| anyhow!("assert needs two args"))?)?;
+                let a = self.compile_expr(
+                    args.first()
+                        .ok_or_else(|| anyhow!("assert needs two args"))?,
+                )?;
+                let b = self.compile_expr(
+                    args.get(1)
+                        .ok_or_else(|| anyhow!("assert needs two args"))?,
+                )?;
                 let eqr = self.alloc();
-                self.emit(Op::Bin { dst: eqr, a, b, op: BinKind::Eq });
+                self.emit(Op::Bin {
+                    dst: eqr,
+                    a,
+                    b,
+                    op: BinKind::Eq,
+                });
                 let ok = self.here();
                 if name == "assert_eq" {
                     self.emit(Op::JumpIfTrue { cond: eqr, to: 0 });
@@ -73,7 +93,12 @@ impl Compiler<'_> {
                     self.emit(Op::JumpIfFalse { cond: eqr, to: 0 });
                 }
                 let p = self.add_path(vec!["::assert_failed".to_string()], None);
-                self.emit(Op::CallPath { dst, path: p, base: dst, argc: 0 });
+                self.emit(Op::CallPath {
+                    dst,
+                    path: p,
+                    base: dst,
+                    argc: 0,
+                });
                 let end = self.here() as u32;
                 self.patch_jump(ok, end);
                 self.emit(Op::LoadUnit { dst });
@@ -83,7 +108,11 @@ impl Compiler<'_> {
                 let scrut = self.compile_expr(&expr)?;
                 self.push_scope();
                 let pidx = self.pattern_info(&pat)?;
-                self.emit(Op::TestBind { val: scrut, pat: pidx, dst });
+                self.emit(Op::TestBind {
+                    val: scrut,
+                    pat: pidx,
+                    dst,
+                });
                 if let Some(g) = guard {
                     let skip = self.here();
                     self.emit(Op::JumpIfFalse { cond: dst, to: 0 });
@@ -95,7 +124,9 @@ impl Compiler<'_> {
             }
             "ensure" => {
                 let args = parse_exprs(mac)?;
-                let cond = args.first().ok_or_else(|| anyhow!("ensure! needs a condition"))?;
+                let cond = args
+                    .first()
+                    .ok_or_else(|| anyhow!("ensure! needs a condition"))?;
                 let c = self.compile_expr(cond)?;
                 let ok = self.here();
                 self.emit(Op::JumpIfTrue { cond: c, to: 0 });
@@ -108,7 +139,12 @@ impl Compiler<'_> {
                     self.emit(Op::LoadConst { dst: msg, k });
                 }
                 let p = self.add_path(vec!["::ensure_fail".to_string()], None);
-                self.emit(Op::CallPath { dst, path: p, base: msg, argc: 1 });
+                self.emit(Op::CallPath {
+                    dst,
+                    path: p,
+                    base: msg,
+                    argc: 1,
+                });
                 self.emit(Op::Ret { src: dst });
                 let end = self.here() as u32;
                 self.patch_jump(ok, end);
@@ -117,7 +153,11 @@ impl Compiler<'_> {
             "dbg" => {
                 let args = parse_exprs(mac)?;
                 let base = self.compile_args(args.iter())?;
-                self.emit(Op::Dbg { dst, base, argc: args.len() as u16 });
+                self.emit(Op::Dbg {
+                    dst,
+                    base,
+                    argc: args.len() as u16,
+                });
             }
             "join" => {
                 if !self.ctx.async_mode {
@@ -126,16 +166,25 @@ impl Compiler<'_> {
                 let args = parse_exprs(mac)?;
                 // Evaluate every argument first, so all spawned tasks are running
                 // before we await any of them, which is what makes join overlap.
-                let handles: Vec<Reg> =
-                    args.iter().map(|a| self.compile_expr(a)).collect::<Result<_>>()?;
+                let handles: Vec<Reg> = args
+                    .iter()
+                    .map(|a| self.compile_expr(a))
+                    .collect::<Result<_>>()?;
                 let base = self.cur().reg_top;
                 for _ in &handles {
                     self.alloc();
                 }
                 for (i, h) in handles.iter().enumerate() {
-                    self.emit(Op::Await { dst: base + i as Reg, src: *h });
+                    self.emit(Op::Await {
+                        dst: base + i as Reg,
+                        src: *h,
+                    });
                 }
-                self.emit(Op::MakeTuple { dst, base, count: handles.len() as u16 });
+                self.emit(Op::MakeTuple {
+                    dst,
+                    base,
+                    count: handles.len() as u16,
+                });
             }
             other => bail!("unsupported macro: {other}!"),
         }
@@ -151,7 +200,11 @@ impl Compiler<'_> {
         }
         let exprs = parse_exprs(mac)?;
         let base = self.compile_args(exprs.iter())?;
-        self.emit(Op::MakeVec { dst, base, count: exprs.len() as u16 });
+        self.emit(Op::MakeVec {
+            dst,
+            base,
+            count: exprs.len() as u16,
+        });
         Ok(())
     }
 
@@ -161,7 +214,11 @@ impl Compiler<'_> {
     /// no-argument forms of `unreachable!`, `todo!`, and `unimplemented!`.
     pub(super) fn literal_fmt_spec(&mut self, text: &str) -> u16 {
         let f = self.cur();
-        f.fmts.push(FmtSpec { template: text.to_string(), positional: Vec::new(), named: Vec::new() });
+        f.fmts.push(FmtSpec {
+            template: text.to_string(),
+            positional: Vec::new(),
+            named: Vec::new(),
+        });
         (f.fmts.len() - 1) as u16
     }
 
@@ -199,10 +256,13 @@ impl Compiler<'_> {
             }
         }
         let f = self.cur();
-        f.fmts.push(FmtSpec { template, positional, named });
+        f.fmts.push(FmtSpec {
+            template,
+            positional,
+            named,
+        });
         Ok((f.fmts.len() - 1) as u16)
     }
 
     // -- jump patching -----------------------------------------------------
-
 }

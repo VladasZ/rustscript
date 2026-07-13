@@ -19,7 +19,8 @@ fn workspace_root() -> PathBuf {
 /// A fresh temp directory populated with the given relative files.
 fn fixture(files: &[(&str, &str)]) -> PathBuf {
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("rustscript_multifile_{}_{id}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("rustscript_multifile_{}_{id}", std::process::id()));
     for (rel, content) in files {
         let path = dir.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -45,13 +46,21 @@ fn conformance_matches_compiler() {
         .current_dir(&root)
         .status()
         .expect("failed to build conformance crate");
-    assert!(build.success(), "cargo build -p rustscript-conformance failed");
+    assert!(
+        build.success(),
+        "cargo build -p rustscript-conformance failed"
+    );
 
     // target/<profile>/deps/<testbin> -> target/<profile>/conformance
     let exe = std::env::current_exe().expect("current exe");
     let compiled = exe.parent().unwrap().parent().unwrap().join("conformance");
-    let out = Command::new(&compiled).output().expect("failed to run compiled binary");
-    assert!(out.status.success(), "compiled conformance binary exited with error");
+    let out = Command::new(&compiled)
+        .output()
+        .expect("failed to run compiled binary");
+    assert!(
+        out.status.success(),
+        "compiled conformance binary exited with error"
+    );
 
     let script = root.join("crates/conformance/src/main.rs");
     let interp = run_script(&script);
@@ -112,7 +121,11 @@ pub struct Thing {
         ),
     ]);
     let out = run_script(&dir.join("main.rs"));
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
         "42 thing Thing { size: 38 }\n"
@@ -159,7 +172,11 @@ pub use crate::inner::{Widget, WIDGET_NAME};
         ),
     ]);
     let out = run_script(&dir.join("main.rs"));
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(String::from_utf8_lossy(&out.stdout), "widget 7\n");
 }
 
@@ -175,8 +192,14 @@ fn main() {}
     let out = run_script(&dir.join("main.rs"));
     assert!(!out.status.success(), "script unexpectedly succeeded");
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("cannot find module `nope`"), "unexpected error: {err}");
-    assert!(err.contains("nope.rs"), "error should list tried paths: {err}");
+    assert!(
+        err.contains("cannot find module `nope`"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        err.contains("nope.rs"),
+        "error should list tried paths: {err}"
+    );
 }
 
 #[test]

@@ -101,7 +101,11 @@ pub struct StructShape {
 
 impl StructShape {
     pub fn new(name: impl Into<Rc<str>>, fields: Vec<Rc<str>>) -> Rc<StructShape> {
-        Rc::new(StructShape { name: name.into(), fields, renames: Vec::new() })
+        Rc::new(StructShape {
+            name: name.into(),
+            fields,
+            renames: Vec::new(),
+        })
     }
 
     pub fn with_renames(
@@ -109,7 +113,11 @@ impl StructShape {
         fields: Vec<Rc<str>>,
         renames: Vec<Option<Rc<str>>>,
     ) -> Rc<StructShape> {
-        Rc::new(StructShape { name: name.into(), fields, renames })
+        Rc::new(StructShape {
+            name: name.into(),
+            fields,
+            renames,
+        })
     }
 
     /// Slot index of a field. Structs have a handful of fields, so a linear
@@ -131,7 +139,9 @@ impl StructData {
     }
 
     pub fn get(&self, field: &str) -> Option<Value> {
-        self.shape.slot(field).map(|i| self.values.borrow()[i].clone())
+        self.shape
+            .slot(field)
+            .map(|i| self.values.borrow()[i].clone())
     }
 
     /// Write a field that exists in the shape. False when it does not.
@@ -261,9 +271,7 @@ impl Equivalent<MapKey> for KeyRef<'_> {
             (KeyRef::Int(a), MapKey::Int(b)) => a == b,
             (KeyRef::Char(a), MapKey::Char(b)) => a == b,
             (KeyRef::Str(a), MapKey::Str(b)) => *a == &***b,
-            (KeyRef::Interned(a), MapKey::Str(b)) => {
-                ptr::eq(*a, Rc::as_ptr(b)) || *a == &**b
-            }
+            (KeyRef::Interned(a), MapKey::Str(b)) => ptr::eq(*a, Rc::as_ptr(b)) || *a == &**b,
             _ => false,
         }
     }
@@ -325,7 +333,10 @@ impl Value {
     }
 
     pub fn structure(shape: Rc<StructShape>, values: Vec<Value>) -> Value {
-        Value::Struct(Rc::new(StructData { shape, values: RefCell::new(values) }))
+        Value::Struct(Rc::new(StructData {
+            shape,
+            values: RefCell::new(values),
+        }))
     }
 
     /// One-off struct built by a bridge, shape and instance in one go.
@@ -477,9 +488,11 @@ impl Value {
                 a.name() == b.name() && {
                     let (va, vb) = (a.values.borrow(), b.values.borrow());
                     va.len() == vb.len()
-                        && a.shape.fields.iter().zip(va.iter()).all(|(k, v)| {
-                            b.get(k).map(|o| v.eq_value(&o)).unwrap_or(false)
-                        })
+                        && a.shape
+                            .fields
+                            .iter()
+                            .zip(va.iter())
+                            .all(|(k, v)| b.get(k).map(|o| v.eq_value(&o)).unwrap_or(false))
                 }
             }
             (Value::Native(a), Value::Native(b)) => Rc::ptr_eq(a, b),
@@ -568,7 +581,12 @@ impl Value {
                 }
                 // Tuple structs carry positional field names and print in
                 // paren form, matching the derived Debug output.
-                if s.shape.fields.iter().enumerate().all(|(i, f)| &**f == i.to_string()) {
+                if s.shape
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .all(|(i, f)| **f == i.to_string())
+                {
                     out.push('(');
                     for (i, v) in values.iter().enumerate() {
                         if i > 0 {
@@ -591,9 +609,7 @@ impl Value {
             }
             Value::Closure(_) => out.push_str("<closure>"),
             Value::Native(n) => write!(out, "<{}>", n.borrow().type_name()).unwrap(),
-            Value::Enum {
-                variant, data, ..
-            } => {
+            Value::Enum { variant, data, .. } => {
                 write!(out, "{variant}").unwrap();
                 if !data.is_empty() {
                     out.push('(');
