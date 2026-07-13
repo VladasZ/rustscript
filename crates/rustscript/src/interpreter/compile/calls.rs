@@ -3,10 +3,10 @@
 use std::rc::Rc;
 
 use anyhow::{Result, bail};
-use syn::{Expr, Pat, UnOp};
+use syn::{Expr, Lit, Pat, UnOp};
 
 use crate::interpreter::bytecode::{
-    BinKind, CapSource, DISCARD, Member, Op, PatInfo, Reg, StructLit,
+    BinKind, CapSource, DISCARD, Member, Op, PLit, PPat, PatInfo, Reg, StructLit,
 };
 use crate::interpreter::json_bridge::serde_rename;
 use crate::interpreter::value::StructShape;
@@ -128,6 +128,19 @@ impl Compiler<'_> {
             Res::Struct(canon) => vec![canon.to_string()],
             // An associated function, UFCS method, or tuple enum variant.
             Res::TypeMember(canon, rest) => {
+                if let Some(variant) = self.enum_variant(&canon, &rest, |fields| {
+                    matches!(fields, syn::Fields::Unnamed(fields) if fields.unnamed.len() == argc as usize)
+                }) {
+                    let base = self.compile_args(c.args.iter())?;
+                    let info = self.add_enum_variant(variant);
+                    self.emit(Op::MakeEnum {
+                        dst,
+                        info,
+                        base,
+                        count: argc,
+                    });
+                    return Ok(());
+                }
                 let mut segs = vec![canon.to_string()];
                 segs.extend(rest);
                 segs
@@ -147,7 +160,12 @@ impl Compiler<'_> {
                 bail!("cannot call `{}`", segs.join("::"))
             }
             // Everything else, resolved by the VM through the bridge dispatch.
-            Res::External(segs) => segs,
+            Res::External(segs) => {
+                if is_transparent_new(&segs) && c.args.len() == 1 {
+                    return self.compile_into(dst, &c.args[0]);
+                }
+                segs
+            }
         };
         let p = self.add_path(path_segs, coerce);
         let base = self.compile_args(c.args.iter())?;
@@ -508,7 +526,7 @@ impl Compiler<'_> {
         }
         let f = self.cur();
         f.pats.push(PatInfo {
-            pat: Rc::new(pat.clone()),
+            pat: lower_pattern(pat),
             binds,
         });
         Ok((f.pats.len() - 1) as u16)
@@ -541,6 +559,88 @@ impl Compiler<'_> {
     }
 
     // -- macros ------------------------------------------------------------
+}
+
+fn is_transparent_new(segments: &[String]) -> bool {
+    let Some((prefix, [receiver, method])) = segments.split_last_chunk::<2>() else {
+        return false;
+    };
+    (prefix.is_empty() || matches!(prefix.first().map(String::as_str), Some("std" | "alloc")))
+        && method == "new"
+        && matches!(receiver.as_str(), "Box" | "Rc" | "Arc" | "RefCell" | "Cell")
+}
+
+fn lower_pattern(pattern: &Pat) -> PPat {
+    match pattern {
+        Pat::Wild(_) => PPat::Wild,
+        Pat::Rest(_) => PPat::Rest,
+        Pat::Ident(ident) => PPat::Ident {
+            name: ident.ident.to_string(),
+            sub: ident
+                .subpat
+                .as_ref()
+                .map(|subpattern| Box::new(lower_pattern(&subpattern.1))),
+        },
+        Pat::Lit(literal) => lower_literal(&literal.lit),
+        Pat::Paren(paren) => lower_pattern(&paren.pat),
+        Pat::Reference(reference) => lower_pattern(&reference.pat),
+        Pat::Type(typed) => lower_pattern(&typed.pat),
+        Pat::Tuple(tuple) => PPat::Tuple(tuple.elems.iter().map(lower_pattern).collect()),
+        Pat::TupleStruct(tuple) => PPat::TupleStruct {
+            name: tuple
+                .path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string()),
+            elems: tuple.elems.iter().map(lower_pattern).collect(),
+        },
+        Pat::Path(path) => PPat::Path {
+            name: path
+                .path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string()),
+        },
+        Pat::Struct(structure) => PPat::Struct {
+            name: structure
+                .path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string()),
+            fields: structure
+                .fields
+                .iter()
+                .map(|field| {
+                    let name = match &field.member {
+                        syn::Member::Named(name) => name.to_string(),
+                        syn::Member::Unnamed(index) => index.index.to_string(),
+                    };
+                    (name, lower_pattern(&field.pat))
+                })
+                .collect(),
+        },
+        Pat::Or(or) => PPat::Or(or.cases.iter().map(lower_pattern).collect()),
+        Pat::Slice(slice) => PPat::Slice(slice.elems.iter().map(lower_pattern).collect()),
+        _ => PPat::Unsupported,
+    }
+}
+
+fn lower_literal(literal: &Lit) -> PPat {
+    match literal {
+        Lit::Int(value) => value
+            .base10_parse()
+            .map(|value| PPat::Lit(PLit::Int(value)))
+            .unwrap_or(PPat::Unsupported),
+        Lit::Float(value) => value
+            .base10_parse()
+            .map(|value| PPat::Lit(PLit::Float(value)))
+            .unwrap_or(PPat::Unsupported),
+        Lit::Bool(value) => PPat::Lit(PLit::Bool(value.value)),
+        Lit::Str(value) => PPat::Lit(PLit::Str(value.value())),
+        Lit::Char(value) => PPat::Lit(PLit::Char(value.value())),
+        Lit::Byte(value) => PPat::Lit(PLit::Int(i64::from(value.value()))),
+        _ => PPat::Unsupported,
+    }
 }
 
 /// Whether a call path names tokio's `spawn`, either `tokio::spawn` or

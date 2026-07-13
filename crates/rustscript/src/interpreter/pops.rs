@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 use anyhow::{Result, anyhow, bail};
 
 use super::bytecode::{BinKind, UnKind};
-use super::pchunk::{PLit, PPat};
+use super::bytecode::{PLit, PPat};
 use super::pvalue::PValue;
 
 pub(super) fn apply_bin(op: BinKind, l: &PValue, r: &PValue) -> Result<PValue> {

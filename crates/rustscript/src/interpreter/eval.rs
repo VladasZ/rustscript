@@ -2,7 +2,6 @@
 //! types, indexing, field access, the `?` operator, casts, and iteration. These
 //! carry no control flow, the VM drives that.
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use anyhow::{Result, anyhow, bail};
@@ -201,32 +200,6 @@ impl Interp {
         Value::structure(shape.runtime.clone(), values)
     }
 
-    /// Expand any iterable into a concrete list of items.
-    pub(super) fn iter_items(&self, v: Value) -> Result<Vec<Value>> {
-        Ok(match v {
-            Value::Vec(items) => items.borrow().clone(),
-            Value::Tuple(items) => items.borrow().clone(),
-            Value::Range {
-                start,
-                end,
-                inclusive,
-            } => {
-                let end = if inclusive { end + 1 } else { end };
-                (start..end).map(Value::Int).collect()
-            }
-            Value::Map(map) => map
-                .borrow()
-                .iter()
-                .map(|(k, v)| Value::Tuple(Rc::new(RefCell::new(vec![k.to_value(), v.clone()]))))
-                .collect(),
-            Value::Str(s) => s.chars().map(Value::Char).collect(),
-            Value::Native(h) if matches!(&*h.borrow(), super::native::Native::Lines(_)) => {
-                super::native::drain_lines(&h)
-            }
-            other => bail!("{} is not iterable", other.type_name()),
-        })
-    }
-
     pub(super) fn eval_try(&self, v: Value) -> Result<std::result::Result<Value, Value>> {
         match v {
             Value::Enum {
@@ -335,8 +308,10 @@ impl Interp {
                     .cloned()
                     .ok_or_else(|| anyhow!("key not found"))?
             }
-            Value::Struct(s) if &**s.name() == "Captures" => {
-                super::regex_bridge::capture_index(s, key)?
+            Value::Native(handle)
+                if matches!(&*handle.borrow(), super::native::Native::RegexCaptures(_)) =>
+            {
+                super::regex_bridge::capture_index(handle, key)?
             }
             other => bail!("cannot index {}", other.type_name()),
         })

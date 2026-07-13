@@ -343,6 +343,29 @@ fn main() -> anyhow::Result<()> {
 }
 
 #[test]
+fn lazy_iterator_chains() {
+    let out = run(r#"
+use regex::Regex;
+
+fn main() {
+    let lengths: Vec<usize> = "a bb ccc"
+        .split_whitespace()
+        .map(|word| word.len())
+        .filter(|length| *length > 1)
+        .collect();
+    let checksum: u64 = "abc".bytes().map(|byte| byte as u64).sum();
+    let starts: Vec<usize> = Regex::new(r"\d+")
+        .unwrap()
+        .find_iter("a1 bb22 c333")
+        .map(|found| found.start())
+        .collect();
+    println!("{:?} {checksum} {:?}", lengths, starts);
+}
+"#);
+    assert_eq!(out, "[2, 3] 294 [1, 5, 9]\n");
+}
+
+#[test]
 fn shebang_is_ignored() {
     let out = run("#!/usr/bin/env rust\nfn main() { println!(\"ok\"); }\n");
     assert_eq!(out, "ok\n");

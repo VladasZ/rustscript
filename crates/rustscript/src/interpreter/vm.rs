@@ -14,6 +14,7 @@ use anyhow::{Result, bail};
 use super::Interp;
 use super::bytecode::{BuiltinId, CapSource, Chunk, DISCARD, MacroKind, MethodName, Op};
 use super::value::{ClosureData, StructShape, Value};
+use super::vm_support::{int_of, set_reg, take_range};
 
 /// Guard against runaway recursion, since script calls no longer consume the
 /// native stack. Depth, not registers, so deep-but-narrow recursion still works.
@@ -45,55 +46,8 @@ struct Frame {
     type_env: TypeEnv,
 }
 
-thread_local! {
-    /// Recycled register stacks, so re-entering the VM from a bridge, for
-    /// example a closure passed to `map`, does not allocate a fresh `Vec`.
-    static STACK_POOL: RefCell<Vec<Vec<Value>>> = const { RefCell::new(Vec::new()) };
-}
-
-fn take_stack() -> Vec<Value> {
-    STACK_POOL
-        .with(|p| p.borrow_mut().pop())
-        .unwrap_or_default()
-}
-
-fn recycle_stack(mut s: Vec<Value>) {
-    s.clear();
-    STACK_POOL.with(|p| {
-        let mut p = p.borrow_mut();
-        if p.len() < 32 {
-            p.push(s);
-        }
-    });
-}
-
 impl Interp {
-    /// Run a compiled function or closure body with a checked argument count.
-    pub(super) fn run_chunk(
-        &self,
-        chunk: &Rc<Chunk>,
-        args: &[Value],
-        upvalues: &[Value],
-    ) -> Result<Value> {
-        if args.len() != chunk.num_params {
-            bail!(
-                "`{}` expects {} args but got {}",
-                chunk.name,
-                chunk.num_params,
-                args.len()
-            );
-        }
-        let mut stack = take_stack();
-        stack.resize(chunk.num_regs.max(chunk.num_params), Value::Unit);
-        for (i, a) in args.iter().enumerate() {
-            stack[i] = a.clone();
-        }
-        let result = self.exec(chunk, &mut stack, upvalues);
-        recycle_stack(stack);
-        result
-    }
-
-    fn exec(
+    pub(super) fn exec(
         &self,
         entry: &Rc<Chunk>,
         stack: &mut Vec<Value>,
@@ -608,12 +562,7 @@ impl Interp {
                 }
                 Op::IterInit { dst, src } => {
                     let src_v = stack[base + *src as usize].clone();
-                    let it = match src_v {
-                        // Ranges are stepped in place by ForNext, never
-                        // materialized into a Vec.
-                        Value::Range { .. } => src_v,
-                        other => Value::vec(self.iter_items(other)?),
-                    };
+                    let it = self.iterator_value(src_v)?;
                     set_reg(&mut stack[base + *dst as usize], it);
                 }
                 Op::ForNext { iter, idx, val, to } => {
@@ -621,18 +570,9 @@ impl Interp {
                         Value::Int(i) => *i,
                         _ => unreachable!("for index is an integer"),
                     };
-                    let item = match &stack[base + *iter as usize] {
-                        Value::Vec(items) => items.borrow().get(i as usize).cloned(),
-                        Value::Range {
-                            start,
-                            end,
-                            inclusive,
-                        } => {
-                            let n = start + i;
-                            let done = if *inclusive { n > *end } else { n >= *end };
-                            if done { None } else { Some(Value::Int(n)) }
-                        }
-                        _ => None,
+                    let item = match stack[base + *iter as usize].clone() {
+                        Value::Native(iterator) => self.iterator_next(&iterator)?,
+                        other => bail!("{} is not an iterator", other.type_name()),
                     };
                     match item {
                         Some(v) => {
@@ -686,6 +626,35 @@ impl Interp {
                         Value::structure(lit.shape.clone(), values)
                     };
                     set_reg(&mut stack[base + dst as usize], v);
+                }
+                Op::MakeEnum {
+                    dst,
+                    info,
+                    base: wbase,
+                    count,
+                } => {
+                    let variant = &cur.enum_variants[*info as usize];
+                    let data: Rc<[Value]> =
+                        take_range(stack, base + *wbase as usize, *count as usize).into();
+                    set_reg(
+                        &mut stack[base + *dst as usize],
+                        Value::Enum {
+                            enum_name: variant.enum_name.clone(),
+                            variant: variant.variant.clone(),
+                            data,
+                        },
+                    );
+                }
+                Op::LoadEnum { dst, info } => {
+                    let variant = &cur.enum_variants[*info as usize];
+                    set_reg(
+                        &mut stack[base + *dst as usize],
+                        Value::Enum {
+                            enum_name: variant.enum_name.clone(),
+                            variant: variant.variant.clone(),
+                            data: Value::empty_data(),
+                        },
+                    );
                 }
                 Op::MakeClosure { dst, child } => {
                     let child_chunk = cur.children[*child as usize].clone();
@@ -824,87 +793,6 @@ impl Interp {
             }
             ip += 1;
         }
-    }
-
-    /// Call a closure value with already evaluated arguments. Used by the
-    /// higher-order bridges and the Ctrl-C handler.
-    pub(super) fn call_closure(&self, clo: &ClosureData, args: &[Value]) -> Result<Value> {
-        self.run_chunk(&clo.chunk, args, &clo.captured)
-    }
-
-    /// Handle the compiler's internal marker paths. Returns None for a normal
-    /// path so the caller falls through to the bridge dispatch.
-    fn internal_path(
-        &self,
-        segs: &[String],
-        regs: &[Value],
-        base: usize,
-        argc: usize,
-    ) -> Result<Option<Value>> {
-        let head = segs.first().map(|s| s.as_str()).unwrap_or("");
-        match head {
-            "::unreachable_match" => bail!("no match arm matched the value"),
-            "::assert_failed" => bail!("assertion failed"),
-            "::ensure_fail" => {
-                let msg = if argc > 0 {
-                    regs[base].display()
-                } else {
-                    "condition failed".to_string()
-                };
-                Ok(Some(Value::err(Value::str(msg))))
-            }
-            _ => Ok(None),
-        }
-    }
-
-    fn render_fmt(&self, chunk: &Chunk, spec: u16, regs: &[Value]) -> Result<String> {
-        let f = &chunk.fmts[spec as usize];
-        let positional: Vec<Value> = f
-            .positional
-            .iter()
-            .map(|r| regs[*r as usize].clone())
-            .collect();
-        let named: Vec<(String, Value)> = f
-            .named
-            .iter()
-            .map(|(n, r)| (n.clone(), regs[*r as usize].clone()))
-            .collect();
-        super::format::render_values(&f.template, &positional, &named)
-    }
-}
-
-/// Move `count` registers out of the window at `s`, leaving `Unit` behind. The
-/// compiler only builds windows out of dead temporaries, so taking is safe and
-/// skips a clone plus the matching drop.
-fn take_range(stack: &mut [Value], s: usize, count: usize) -> Vec<Value> {
-    (0..count).map(|i| take(&mut stack[s + i])).collect()
-}
-
-/// Write a register. A plain old value has no drop glue, but the compiler
-/// still emits an out of line `drop_in_place` call for the write, and that
-/// call is one of the hottest lines in profiles. Check the old value inline
-/// and forget it when dropping would do nothing anyway.
-#[inline(always)]
-pub(super) fn set_reg(slot: &mut Value, v: Value) {
-    if matches!(
-        slot,
-        Value::Unit
-            | Value::Bool(_)
-            | Value::Int(_)
-            | Value::Float(_)
-            | Value::Char(_)
-            | Value::Range { .. }
-    ) {
-        std::mem::forget(replace(slot, v));
-    } else {
-        *slot = v;
-    }
-}
-
-fn int_of(v: &Value, what: &str) -> Result<i64> {
-    match v {
-        Value::Int(i) => Ok(*i),
-        _ => bail!("{what} must be an integer"),
     }
 }
 

@@ -1,150 +1,207 @@
-//! The regex crate bridge. Split from `builtins.rs`.
-
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use anyhow::{Result, anyhow, bail};
 
-use super::value::{KeyRef, Map, MapKey, RStr, StructData, Value};
+use super::iterator::{regex_captures, regex_find};
+use super::native::Native;
+use super::value::{RStr, Value};
 
-// -- regex bridge ----------------------------------------------------------
+type CaptureNames = Rc<Vec<(Rc<str>, usize)>>;
 
-pub(super) fn make_regex(pattern: String) -> Value {
-    Value::struct_of("Regex", [("pattern".into(), Value::str(pattern))])
+#[derive(Clone)]
+pub struct RegexValue {
+    pub compiled: Rc<regex::Regex>,
+    pattern: Rc<RStr>,
+    pub names: CaptureNames,
 }
 
-pub(super) fn make_match(m: &regex::Match) -> Value {
-    Value::struct_of(
-        "Match",
-        [
-            ("text".into(), Value::str(m.as_str().to_string())),
-            ("start".into(), Value::Int(m.start() as i64)),
-            ("end".into(), Value::Int(m.end() as i64)),
-        ],
-    )
+#[derive(Clone)]
+pub struct MatchValue {
+    pub source: Rc<RStr>,
+    pub start: usize,
+    pub end: usize,
 }
 
-pub(super) fn make_captures(re: &regex::Regex, caps: &regex::Captures) -> Value {
-    let groups: Vec<Value> = (0..caps.len())
-        .map(|i| match caps.get(i) {
-            Some(m) => Value::some(make_match(&m)),
-            None => Value::none(),
+#[derive(Clone)]
+pub struct CapturesValue {
+    pub source: Rc<RStr>,
+    pub groups: Vec<Option<(usize, usize)>>,
+    pub names: CaptureNames,
+}
+
+pub(super) fn make_regex(compiled: regex::Regex, pattern: String) -> Value {
+    let names = compiled
+        .capture_names()
+        .enumerate()
+        .filter_map(|(index, name)| name.map(|name| (Rc::from(name), index)))
+        .collect();
+    Native::Regex(RegexValue {
+        compiled: Rc::new(compiled),
+        pattern: RStr::new(pattern),
+        names: Rc::new(names),
+    })
+    .wrap()
+}
+
+fn text_arg(args: &[Value], index: usize) -> Rc<RStr> {
+    match args.get(index) {
+        Some(Value::Str(text)) => text.clone(),
+        Some(value) => RStr::new(value.display()),
+        None => RStr::new(""),
+    }
+}
+
+fn replacement_arg(args: &[Value]) -> String {
+    args.get(1).map(Value::display).unwrap_or_default()
+}
+
+fn match_value(source: Rc<RStr>, start: usize, end: usize) -> Value {
+    Native::RegexMatch(MatchValue { source, start, end }).wrap()
+}
+
+fn captures_value(regex: &RegexValue, source: Rc<RStr>, captures: &regex::Captures) -> Value {
+    let groups = (0..captures.len())
+        .map(|index| {
+            captures
+                .get(index)
+                .map(|found| (found.start(), found.end()))
         })
         .collect();
-    let mut names = Map::default();
-    for (i, name) in re.capture_names().enumerate() {
-        if let Some(n) = name {
-            names.insert(MapKey::Str(RStr::new(n.to_string())), Value::Int(i as i64));
-        }
-    }
-    Value::struct_of(
-        "Captures",
-        [
-            ("groups".into(), Value::vec(groups)),
-            ("names".into(), Value::Map(Rc::new(RefCell::new(names)))),
-        ],
-    )
+    Native::RegexCaptures(CapturesValue {
+        source,
+        groups,
+        names: regex.names.clone(),
+    })
+    .wrap()
 }
 
-pub(super) fn regex_method(s: &StructData, method: &str, args: &[Value]) -> Result<Value> {
-    let pattern = s.get("pattern").map(|v| v.display()).unwrap_or_default();
-    let re = regex::Regex::new(&pattern)?;
-    let text = args.first().map(|v| v.display()).unwrap_or_default();
-    let rep = args.get(1).map(|v| v.display()).unwrap_or_default();
+pub(super) fn regex_native_method(
+    handle: &Rc<RefCell<Native>>,
+    method: &str,
+    args: &[Value],
+) -> Result<Option<Value>> {
+    let kind = {
+        let native = handle.borrow();
+        match &*native {
+            Native::Regex(regex) => RegexKind::Regex(regex.clone()),
+            Native::RegexMatch(found) => RegexKind::Match(found.clone()),
+            Native::RegexCaptures(captures) => RegexKind::Captures(captures.clone()),
+            _ => return Ok(None),
+        }
+    };
+    let value = match kind {
+        RegexKind::Regex(regex) => regex_method(&regex, method, args)?,
+        RegexKind::Match(found) => match_method(&found, method)?,
+        RegexKind::Captures(captures) => captures_method(&captures, method, args)?,
+    };
+    Ok(Some(value))
+}
+
+enum RegexKind {
+    Regex(RegexValue),
+    Match(MatchValue),
+    Captures(CapturesValue),
+}
+
+fn regex_method(regex: &RegexValue, method: &str, args: &[Value]) -> Result<Value> {
+    let source = text_arg(args, 0);
     Ok(match method {
-        "is_match" => Value::Bool(re.is_match(&text)),
-        "find" => match re.find(&text) {
-            Some(m) => Value::some(make_match(&m)),
-            None => Value::none(),
-        },
-        "find_iter" => Value::vec(re.find_iter(&text).map(|m| make_match(&m)).collect()),
-        "captures" => match re.captures(&text) {
-            Some(c) => Value::some(make_captures(&re, &c)),
-            None => Value::none(),
-        },
-        "captures_iter" => Value::vec(
-            re.captures_iter(&text)
-                .map(|c| make_captures(&re, &c))
-                .collect(),
+        "is_match" => Value::Bool(regex.compiled.is_match(&source)),
+        "find" => regex
+            .compiled
+            .find(&source)
+            .map(|found| match_value(source.clone(), found.start(), found.end()))
+            .map(Value::some)
+            .unwrap_or_else(Value::none),
+        "find_iter" => regex_find(regex.clone(), source),
+        "captures" => regex
+            .compiled
+            .captures(&source)
+            .map(|captures| captures_value(regex, source.clone(), &captures))
+            .map(Value::some)
+            .unwrap_or_else(Value::none),
+        "captures_iter" => regex_captures(regex.clone(), source),
+        "replace" => Value::str(
+            regex
+                .compiled
+                .replacen(&source, 1, replacement_arg(args).as_str())
+                .into_owned(),
         ),
-        "replace" => Value::str(re.replacen(&text, 1, rep.as_str()).into_owned()),
-        "replace_all" => Value::str(re.replace_all(&text, rep.as_str()).into_owned()),
-        "split" => Value::vec(re.split(&text).map(Value::str).collect()),
-        "as_str" => Value::str(pattern),
+        "replace_all" => Value::str(
+            regex
+                .compiled
+                .replace_all(&source, replacement_arg(args).as_str())
+                .into_owned(),
+        ),
+        "split" => Value::vec(regex.compiled.split(&source).map(Value::str).collect()),
+        "as_str" => Value::Str(regex.pattern.clone()),
         _ => bail!("unknown method `{method}` on Regex"),
     })
 }
 
-pub(super) fn match_method(s: &StructData, method: &str) -> Result<Value> {
+fn match_method(found: &MatchValue, method: &str) -> Result<Value> {
     Ok(match method {
-        "as_str" => s.get("text").unwrap_or_else(|| Value::str("")),
-        "start" => s.get("start").unwrap_or(Value::Int(0)),
-        "end" => s.get("end").unwrap_or(Value::Int(0)),
+        "as_str" => Value::str(&found.source[found.start..found.end]),
+        "start" => Value::Int(found.start as i64),
+        "end" => Value::Int(found.end as i64),
         _ => bail!("unknown method `{method}` on Match"),
     })
 }
 
-pub(super) fn captures_method(s: &StructData, method: &str, args: &[Value]) -> Result<Value> {
-    match method {
+fn captures_method(captures: &CapturesValue, method: &str, args: &[Value]) -> Result<Value> {
+    Ok(match method {
         "get" => {
-            let i = match args.first() {
-                Some(Value::Int(n)) => *n as usize,
-                _ => bail!("captures get needs an index"),
+            let index = match args.first() {
+                Some(Value::Int(index)) if *index >= 0 => *index as usize,
+                _ => bail!("captures get needs a non-negative index"),
             };
-            Ok(capture_group(s, i))
+            capture_group(captures, index)
         }
         "name" => {
-            let name = args.first().map(|v| v.display()).unwrap_or_default();
-            match capture_name_index(s, &name) {
-                Some(i) => Ok(capture_group(s, i)),
-                None => Ok(Value::none()),
-            }
+            let name = args.first().map(Value::display).unwrap_or_default();
+            captures
+                .names
+                .iter()
+                .find_map(|(candidate, index)| (candidate.as_ref() == name).then_some(*index))
+                .map(|index| capture_group(captures, index))
+                .unwrap_or_else(Value::none)
         }
-        "len" => {
-            if let Some(Value::Vec(g)) = s.get("groups") {
-                Ok(Value::Int(g.borrow().len() as i64))
-            } else {
-                Ok(Value::Int(0))
-            }
-        }
+        "len" => Value::Int(captures.groups.len() as i64),
         _ => bail!("unknown method `{method}` on Captures"),
-    }
+    })
 }
 
-pub(super) fn capture_group(s: &StructData, i: usize) -> Value {
-    match s.get("groups") {
-        Some(Value::Vec(g)) => g.borrow().get(i).cloned().unwrap_or_else(Value::none),
-        _ => Value::none(),
-    }
+fn capture_group(captures: &CapturesValue, index: usize) -> Value {
+    captures
+        .groups
+        .get(index)
+        .copied()
+        .flatten()
+        .map(|(start, end)| match_value(captures.source.clone(), start, end))
+        .map(Value::some)
+        .unwrap_or_else(Value::none)
 }
 
-pub(super) fn capture_name_index(s: &StructData, name: &str) -> Option<usize> {
-    if let Some(Value::Map(names)) = s.get("names")
-        && let Some(Value::Int(i)) = names.borrow().get(&KeyRef::Str(name))
-    {
-        return Some(*i as usize);
-    }
-    None
-}
-
-/// Resolve `caps[i]` or `caps["name"]` to the matched substring, panicking like
-/// the real `Captures` index does when the group did not participate.
-pub(super) fn capture_index(s: &StructData, key: &Value) -> Result<Value> {
-    let idx = match key {
-        Value::Int(i) if *i >= 0 => *i as usize,
-        Value::Str(k) => {
-            capture_name_index(s, k).ok_or_else(|| anyhow!("no capture group named `{k}`"))?
-        }
+pub(super) fn capture_index(handle: &Rc<RefCell<Native>>, key: &Value) -> Result<Value> {
+    let captures = {
+        let native = handle.borrow();
+        let Native::RegexCaptures(captures) = &*native else {
+            bail!("cannot index {}", native.type_name());
+        };
+        captures.clone()
+    };
+    let index = match key {
+        Value::Int(index) if *index >= 0 => *index as usize,
+        Value::Str(name) => captures
+            .names
+            .iter()
+            .find_map(|(candidate, index)| (candidate.as_ref() == name.as_str()).then_some(*index))
+            .ok_or_else(|| anyhow!("no capture group named `{name}`"))?,
         _ => bail!("invalid capture index"),
     };
-    match capture_group(s, idx) {
-        Value::Enum { variant, data, .. } if &*variant == "Some" => {
-            let m = data.first().cloned().unwrap_or(Value::Unit);
-            if let Value::Struct(mf) = m {
-                return Ok(mf.get("text").unwrap_or_else(|| Value::str("")));
-            }
-            bail!("bad capture group")
-        }
-        _ => bail!("no match for capture group {idx}"),
-    }
+    let Some((start, end)) = captures.groups.get(index).copied().flatten() else {
+        bail!("no match for capture group {index}");
+    };
+    Ok(Value::str(&captures.source[start..end]))
 }

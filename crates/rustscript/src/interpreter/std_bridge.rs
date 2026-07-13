@@ -542,7 +542,7 @@ pub(super) fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Va
         ("Regex", "new") => {
             let pat = args.first().map(|v| v.display()).unwrap_or_default();
             match regex::Regex::new(&pat) {
-                Ok(_) => Value::ok(make_regex(pat)),
+                Ok(compiled) => Value::ok(make_regex(compiled, pat)),
                 Err(e) => Value::err(Value::str(e.to_string())),
             }
         }

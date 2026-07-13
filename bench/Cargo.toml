@@ -83,6 +83,10 @@ name = "sort"
 path = "cases/sort/case.rs"
 
 [[bin]]
+name = "sort_key"
+path = "cases/sort_key/case.rs"
+
+[[bin]]
 name = "hashmap_int"
 path = "cases/hashmap_int/case.rs"
 

@@ -41,11 +41,11 @@ measurement use an isolated temporary cache and never touch the user's
 ## Idiomatic tasks
 
 The cases implement the same task and output, not mechanically identical
-operations. Python uses `join` to build strings and a key function to sort.
-JavaScript uses its normal regex splitting and collection methods. Container
-representations and iterator allocation can differ between runtimes. This suite
-measures programs a competent user would write, not equal VM instruction
-streams.
+operations. Python uses `join` to build strings and its standard comparator or
+key adapters for the corresponding sort case. JavaScript uses its normal regex
+splitting and collection methods. Container representations and iterator
+allocation can differ between runtimes. This suite measures programs a
+competent user would write, not equal VM instruction streams.
 
 ## Cases
 
@@ -60,7 +60,8 @@ streams.
 - `binary_trees`: allocation and recursive traversal.
 - `string_builder`: string growth, search, and replacement.
 - `higher_order`: idiomatic map, filter, fold, and predicate operations.
-- `sort`: idiomatic custom ordering.
+- `sort`: custom comparator ordering.
+- `sort_key`: idiomatic cached or decorated key ordering.
 - `hashmap_int`: integer-keyed map insertion and lookup.
 - `nbody`: struct or record access and floating-point math.
 - `json_serialize`: record construction and JSON serialization.

@@ -107,6 +107,14 @@ const CASES: &[Case] = &[
         },
     },
     Case {
+        name: "sort_key",
+        kind: "compute",
+        input: Input::Size {
+            base: 50_000,
+            big: 500_000,
+        },
+    },
+    Case {
         name: "hashmap_int",
         kind: "compute",
         input: Input::Size {

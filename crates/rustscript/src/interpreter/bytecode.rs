@@ -82,6 +82,12 @@ pub struct StructLit {
     pub has_rest: bool,
 }
 
+#[derive(Clone)]
+pub struct EnumVariant {
+    pub enum_name: Rc<str>,
+    pub variant: Rc<str>,
+}
+
 /// A method name with its builtin id resolved once at compile time, so hot
 /// dispatch matches an enum instead of comparing strings.
 #[derive(Clone)]
@@ -146,6 +152,7 @@ pub enum BuiltinId {
     Reduce,
     Retain,
     SortByKey,
+    SortByCachedKey,
     SortBy,
     MaxByKey,
     MinByKey,
@@ -218,6 +225,7 @@ impl BuiltinId {
             "reduce" => Reduce,
             "retain" => Retain,
             "sort_by_key" => SortByKey,
+            "sort_by_cached_key" => SortByCachedKey,
             "sort_by" => SortBy,
             "max_by_key" => MaxByKey,
             "min_by_key" => MinByKey,
@@ -255,6 +263,7 @@ impl BuiltinId {
                 | Reduce
                 | Retain
                 | SortByKey
+                | SortByCachedKey
                 | SortBy
                 | MaxByKey
                 | MinByKey
@@ -287,8 +296,43 @@ pub struct FmtSpec {
 
 /// A pattern plus the register each name it binds writes into.
 pub struct PatInfo {
-    pub pat: Rc<syn::Pat>,
+    pub pat: PPat,
     pub binds: Vec<(String, Reg)>,
+}
+
+#[derive(Clone)]
+pub enum PLit {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Str(String),
+    Char(char),
+}
+
+#[derive(Clone)]
+pub enum PPat {
+    Wild,
+    Rest,
+    Ident {
+        name: String,
+        sub: Option<Box<PPat>>,
+    },
+    Lit(PLit),
+    Tuple(Vec<PPat>),
+    TupleStruct {
+        name: Option<String>,
+        elems: Vec<PPat>,
+    },
+    Path {
+        name: Option<String>,
+    },
+    Struct {
+        name: Option<String>,
+        fields: Vec<(String, PPat)>,
+    },
+    Or(Vec<PPat>),
+    Slice(Vec<PPat>),
+    Unsupported,
 }
 
 #[derive(Clone, Copy)]
@@ -467,6 +511,16 @@ pub enum Op {
         info: u16,
         base: Reg,
     },
+    MakeEnum {
+        dst: Reg,
+        info: u16,
+        base: Reg,
+        count: u16,
+    },
+    LoadEnum {
+        dst: Reg,
+        info: u16,
+    },
     MakeClosure {
         dst: Reg,
         child: u16,
@@ -565,6 +619,7 @@ pub struct Chunk {
     pub pats: Vec<PatInfo>,
     pub fmts: Vec<FmtSpec>,
     pub struct_lits: Vec<StructLit>,
+    pub enum_variants: Vec<EnumVariant>,
     pub casts: Vec<Rc<syn::Type>>,
     /// Path calls, the segments plus an optional turbofish coercion type.
     pub paths: Vec<(Vec<String>, Option<Rc<syn::Type>>)>,
@@ -593,6 +648,7 @@ impl Chunk {
             pats: Vec::new(),
             fmts: Vec::new(),
             struct_lits: Vec::new(),
+            enum_variants: Vec::new(),
             casts: Vec::new(),
             paths: Vec::new(),
             names: Vec::new(),

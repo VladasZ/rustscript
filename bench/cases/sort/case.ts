@@ -7,7 +7,7 @@ for (let i = 0; i < n; i++) {
   x = (x * 48271) % 2147483647;
   v.push(x % 1000000);
 }
-// Sort through a per element callback, bucket first, value second.
+// Sort through a comparison callback, bucket first, value second.
 v.sort((a, b) => (a % 1000) - (b % 1000) || a - b);
 const len = v.length;
 let probe = 0;

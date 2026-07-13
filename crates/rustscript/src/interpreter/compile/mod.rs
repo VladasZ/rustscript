@@ -11,8 +11,8 @@ use syn::punctuated::Punctuated;
 use syn::{BinOp, Block, Expr, FnArg, Lit, Pat, UnOp};
 
 use super::bytecode::{
-    BinKind, BuiltinId, CapSource, Chunk, Const, FmtSpec, Member, MethodName, Op, PatInfo, Reg,
-    StructLit,
+    BinKind, BuiltinId, CapSource, Chunk, Const, EnumVariant, FmtSpec, Member, MethodName, Op,
+    PatInfo, Reg, StructLit,
 };
 use super::resolver::{Res, Resolver};
 
@@ -34,6 +34,7 @@ struct FnState {
     pats: Vec<PatInfo>,
     fmts: Vec<FmtSpec>,
     struct_lits: Vec<StructLit>,
+    enum_variants: Vec<EnumVariant>,
     casts: Vec<Rc<syn::Type>>,
     paths: Vec<(Vec<String>, Option<Rc<syn::Type>>)>,
     names: Vec<MethodName>,
@@ -58,6 +59,7 @@ impl FnState {
             pats: Vec::new(),
             fmts: Vec::new(),
             struct_lits: Vec::new(),
+            enum_variants: Vec::new(),
             casts: Vec::new(),
             paths: Vec::new(),
             names: Vec::new(),
@@ -97,6 +99,7 @@ impl FnState {
             pats: self.pats,
             fmts: self.fmts,
             struct_lits: self.struct_lits,
+            enum_variants: self.enum_variants,
             casts: self.casts,
             paths: self.paths,
             names: self.names,
@@ -277,6 +280,35 @@ impl<'a> Compiler<'a> {
         (f.paths.len() - 1) as u16
     }
 
+    fn add_enum_variant(&mut self, variant: EnumVariant) -> u16 {
+        let variants = &mut self.cur().enum_variants;
+        if let Some(index) = variants.iter().position(|known| {
+            known.enum_name == variant.enum_name && known.variant == variant.variant
+        }) {
+            return index as u16;
+        }
+        variants.push(variant);
+        (variants.len() - 1) as u16
+    }
+
+    fn enum_variant(
+        &self,
+        enum_name: &Rc<str>,
+        rest: &[String],
+        fields: impl Fn(&syn::Fields) -> bool,
+    ) -> Option<EnumVariant> {
+        let variant_name = rest.first().filter(|_| rest.len() == 1)?;
+        let definition = self.ctx.resolver.enums.get(enum_name)?;
+        let variant = definition
+            .variants
+            .iter()
+            .find(|variant| variant.ident == variant_name && fields(&variant.fields))?;
+        Some(EnumVariant {
+            enum_name: enum_name.clone(),
+            variant: Rc::from(variant.ident.to_string()),
+        })
+    }
+
     // -- name resolution ---------------------------------------------------
 
     fn resolve(&mut self, name: &str) -> NameLoc {
@@ -351,6 +383,13 @@ impl<'a> Compiler<'a> {
             Res::Struct(c) => vec![c.to_string()],
             Res::Enum(c) => vec![c.to_string()],
             Res::TypeMember(c, rest) => {
+                if let Some(variant) =
+                    self.enum_variant(&c, &rest, |fields| matches!(fields, syn::Fields::Unit))
+                {
+                    let info = self.add_enum_variant(variant);
+                    self.emit(Op::LoadEnum { dst, info });
+                    return Ok(());
+                }
                 let mut segs = vec![c.to_string()];
                 segs.extend(rest);
                 segs

@@ -10,11 +10,9 @@
 
 use std::cmp::Ordering;
 
-use anyhow::{Result, anyhow, bail};
-use syn::{Lit, Pat};
-
-use super::bytecode::{BinKind, UnKind};
+use super::bytecode::{BinKind, PLit, PPat, UnKind};
 use super::value::Value;
+use anyhow::{Result, anyhow, bail};
 
 // -- operators -------------------------------------------------------------
 
@@ -198,133 +196,95 @@ pub(super) fn apply_un(op: UnKind, v: &Value) -> Result<Value> {
 
 /// Match `pat` against `val`, calling `define` for each bound name. Returns
 /// false without fully binding when the pattern does not match.
-pub(super) fn try_bind(pat: &Pat, val: &Value, define: &mut dyn FnMut(&str, Value)) -> bool {
+pub(super) fn try_bind(pat: &PPat, val: &Value, define: &mut dyn FnMut(&str, Value)) -> bool {
     match pat {
-        Pat::Wild(_) | Pat::Rest(_) => true,
-        Pat::Ident(id) => {
-            if let Some(sub) = &id.subpat
-                && !try_bind(&sub.1, val, define)
+        PPat::Wild | PPat::Rest => true,
+        PPat::Ident { name, sub } => {
+            if let Some(subpattern) = sub
+                && !try_bind(subpattern, val, define)
             {
                 return false;
             }
-            define(&id.ident.to_string(), val.clone());
+            define(name, val.clone());
             true
         }
-        Pat::Lit(lit) => match lit_value(&lit.lit) {
-            Some(expected) => expected.eq_value(val),
-            None => false,
-        },
-        Pat::Paren(p) => try_bind(&p.pat, val, define),
-        Pat::Reference(r) => try_bind(&r.pat, val, define),
-        Pat::Type(t) => try_bind(&t.pat, val, define),
-        Pat::Tuple(t) => match val {
-            Value::Tuple(items) => bind_seq(t.elems.iter(), &items.borrow(), define),
-            // The unit pattern `()` is an empty tuple pattern. It matches the
-            // unit value, so `Ok(())` matches a `Result<(), _>` that is Ok.
-            Value::Unit if t.elems.is_empty() => true,
+        PPat::Lit(literal) => literal_matches(literal, val),
+        PPat::Tuple(patterns) => match val {
+            Value::Tuple(items) => bind_seq(patterns, &items.borrow(), define),
+            Value::Unit if patterns.is_empty() => true,
             _ => false,
         },
-        Pat::TupleStruct(ts) => {
-            let name = ts.path.segments.last().map(|s| s.ident.to_string());
-            match val {
-                Value::Enum { variant, data, .. } => {
-                    name.as_deref() == Some(&**variant) && bind_seq(ts.elems.iter(), data, define)
-                }
-                Value::Struct(st) => {
-                    let vals: Vec<Value> = st.values.borrow().clone();
-                    bind_seq(ts.elems.iter(), &vals, define)
-                }
-                _ => false,
+        PPat::TupleStruct { name, elems } => match val {
+            Value::Enum { variant, data, .. } => {
+                name.as_deref() == Some(&**variant) && bind_seq(elems, data, define)
             }
-        }
-        Pat::Path(p) => {
-            let name = p.path.segments.last().map(|s| s.ident.to_string());
-            match val {
-                Value::Enum { variant, .. } => name.as_deref() == Some(&**variant),
-                _ => false,
-            }
-        }
-        Pat::Struct(s) => {
-            let name = s.path.segments.last().map(|s| s.ident.to_string());
-            let st = match val {
-                Value::Struct(st) => {
-                    // Struct values carry canonical names like `foo::Point`,
-                    // patterns compare on the bare type name. The scrutinee
-                    // type is already proven by cargo check.
-                    if let Some(pn) = &name
-                        && pn.as_str() != super::resolver::bare(st.name())
-                    {
-                        return false;
-                    }
-                    st
-                }
-                _ => return false,
+            Value::Struct(structure) => bind_seq(elems, &structure.values.borrow(), define),
+            _ => false,
+        },
+        PPat::Path { name } => match val {
+            Value::Enum { variant, .. } => name.as_deref() == Some(&**variant),
+            _ => false,
+        },
+        PPat::Struct { name, fields } => {
+            let Value::Struct(structure) = val else {
+                return false;
             };
-            for f in &s.fields {
-                let key = match &f.member {
-                    syn::Member::Named(n) => n.to_string(),
-                    syn::Member::Unnamed(i) => i.index.to_string(),
-                };
-                match st.get(&key) {
-                    Some(v) => {
-                        if !try_bind(&f.pat, &v, define) {
-                            return false;
-                        }
-                    }
-                    None => return false,
+            if let Some(pattern_name) = name
+                && pattern_name != super::resolver::bare(structure.name())
+            {
+                return false;
+            }
+            for (field, pattern) in fields {
+                match structure.get(field) {
+                    Some(value) if try_bind(pattern, &value, define) => {}
+                    _ => return false,
                 }
             }
             true
         }
-        Pat::Or(or) => or.cases.iter().any(|c| try_bind(c, val, define)),
-        Pat::Slice(s) => match val {
-            Value::Vec(items) => bind_seq(s.elems.iter(), &items.borrow(), define),
+        PPat::Or(patterns) => patterns
+            .iter()
+            .any(|pattern| try_bind(pattern, val, define)),
+        PPat::Slice(patterns) => match val {
+            Value::Vec(items) => bind_seq(patterns, &items.borrow(), define),
             _ => false,
         },
-        _ => false,
+        PPat::Unsupported => false,
     }
 }
 
-fn bind_seq<'a>(
-    pats: impl Iterator<Item = &'a Pat>,
-    vals: &[Value],
-    define: &mut dyn FnMut(&str, Value),
-) -> bool {
-    let pats: Vec<&Pat> = pats.collect();
-    if pats.iter().any(|p| matches!(p, Pat::Rest(_))) {
-        let head_len = pats
+fn bind_seq(patterns: &[PPat], vals: &[Value], define: &mut dyn FnMut(&str, Value)) -> bool {
+    if patterns.iter().any(|pattern| matches!(pattern, PPat::Rest)) {
+        let head_len = patterns
             .iter()
-            .take_while(|p| !matches!(p, Pat::Rest(_)))
+            .take_while(|pattern| !matches!(pattern, PPat::Rest))
             .count();
-        for (p, v) in pats.iter().take(head_len).zip(vals.iter()) {
-            if !try_bind(p, v, define) {
+        for (pattern, value) in patterns.iter().take(head_len).zip(vals.iter()) {
+            if !try_bind(pattern, value, define) {
                 return false;
             }
         }
-        let tail: Vec<&&Pat> = pats.iter().skip(head_len + 1).collect();
-        for (p, v) in tail.iter().zip(vals.iter().rev()) {
-            if !try_bind(p, v, define) {
+        for (pattern, value) in patterns.iter().skip(head_len + 1).zip(vals.iter().rev()) {
+            if !try_bind(pattern, value, define) {
                 return false;
             }
         }
         return true;
     }
-    if pats.len() != vals.len() {
-        return false;
-    }
-    pats.iter()
-        .zip(vals.iter())
-        .all(|(p, v)| try_bind(p, v, define))
+    patterns.len() == vals.len()
+        && patterns
+            .iter()
+            .zip(vals.iter())
+            .all(|(pattern, value)| try_bind(pattern, value, define))
 }
 
-pub(super) fn lit_value(lit: &Lit) -> Option<Value> {
-    Some(match lit {
-        Lit::Int(i) => Value::Int(i.base10_parse::<i64>().ok()?),
-        Lit::Float(f) => Value::Float(f.base10_parse::<f64>().ok()?),
-        Lit::Bool(b) => Value::Bool(b.value),
-        Lit::Str(s) => Value::str(s.value()),
-        Lit::Char(c) => Value::Char(c.value()),
-        Lit::Byte(b) => Value::Int(b.value() as i64),
-        _ => return None,
-    })
+fn literal_matches(literal: &PLit, value: &Value) -> bool {
+    match (literal, value) {
+        (PLit::Int(left), Value::Int(right)) => left == right,
+        (PLit::Float(left), Value::Float(right)) => left == right,
+        (PLit::Bool(left), Value::Bool(right)) => left == right,
+        (PLit::Str(left), Value::Str(right)) => left == right.as_str(),
+        (PLit::Char(left), Value::Char(right)) => left == right,
+        _ => false,
+    }
 }

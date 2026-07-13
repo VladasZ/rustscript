@@ -404,6 +404,28 @@ impl PInterp {
                     };
                     stack[base + *dst as usize] = v;
                 }
+                Op::MakeEnum {
+                    dst,
+                    info,
+                    base: wbase,
+                    count,
+                } => {
+                    let variant = &cur.enum_variants[*info as usize];
+                    let data = take_range(stack, base + *wbase as usize, *count as usize).into();
+                    stack[base + *dst as usize] = PValue::Enum {
+                        enum_name: variant.enum_name.clone(),
+                        variant: variant.variant.clone(),
+                        data,
+                    };
+                }
+                Op::LoadEnum { dst, info } => {
+                    let variant = &cur.enum_variants[*info as usize];
+                    stack[base + *dst as usize] = PValue::Enum {
+                        enum_name: variant.enum_name.clone(),
+                        variant: variant.variant.clone(),
+                        data: Vec::new().into(),
+                    };
+                }
                 Op::MakeClosure { dst, child } => {
                     let clo =
                         self.make_closure(&cur, *child, stack, base, &cur_clo, entry_upvalues);
