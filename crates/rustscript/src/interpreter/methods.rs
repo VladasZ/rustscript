@@ -120,6 +120,9 @@ pub(super) fn str_method_slow(s: &Rc<RStr>, name: &str, args: &[Value]) -> Resul
         "as_bytes" | "into_bytes" => bytes_to_vec(s.as_bytes()),
         // A byte iterator is an eager Vec of the utf-8 bytes as ints here.
         "bytes" => bytes_to_vec(s.as_bytes()),
+        // The utf-16 code units as an eager Vec of ints, mirroring how `bytes`
+        // gives the utf-8 bytes. std hands back an iterator of u16, we collect.
+        "encode_utf16" => Value::vec(s.encode_utf16().map(|u| Value::Int(i64::from(u))).collect()),
         "strip_prefix" => match s.strip_prefix(&arg_str(0)) {
             Some(rest) => Value::some(Value::str(rest.to_string())),
             None => Value::none(),
