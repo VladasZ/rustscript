@@ -1,111 +1,110 @@
 # bench
 
-Compares rustscript against native Rust, Node, and Python 3 on the same programs.
-Every case is one algorithm written three times, in Rust, TypeScript, and Python,
-all printing byte identical stdout. The Rust file is both a real compiled cargo
-example and a rustscript script, so one source feeds two of the four bars.
+Compares RustScript against native Rust, Node, and Python 3 on equivalent tasks.
+The Rust file is both a compiled Cargo binary and the interpreted RustScript
+source. TypeScript and Python use normal idioms for their runtimes. Every case
+must print byte-identical stdout, and cases that write files must also produce
+byte-identical files.
 
-## What it measures
+## Measurements
 
-Three tracks, because they answer different questions.
+Each timed command runs as a fresh process. The harness records three tracks.
 
-- Wall-clock, via [hyperfine](https://github.com/sharkdp/hyperfine). Time from
-  launch to exit, startup included. This is what you feel when you run a script.
-- Compute only, self timed. Each case starts a clock right before the work and
-  prints the elapsed nanoseconds to stderr as `COMPUTE_NS`. Startup is excluded,
-  so native Rust shows its real compute speed instead of a startup floor.
-- Peak memory, max RSS via `/usr/bin/time`, taken from the same runs as the
-  compute samples.
+- Wall-clock time covers process launch, runtime startup, parsing, compilation,
+  and work.
+- Compute time comes from a timer inside each workload, after argument handling
+  and immediately around the described work.
+- Peak memory is the maximum resident set size reported for each run by
+  `/usr/bin/time`.
 
-Compute samples are interleaved round robin across the four languages, so slow
-thermal drift spreads evenly instead of biasing whichever language runs last.
-`results.json` records the tool versions, hardware, and date of the run, so old
-and new numbers stay comparable.
+The report and charts use the median for every track and retain every raw sample
+in `results.json`. Timed stdout always goes to `/dev/null`, so wall and compute
+runs see the same output destination. Samples run round-robin with a rotating
+language order to spread temperature and background-system drift.
 
-## Two size tiers
+The default is three warmups, ten wall samples, and ten compute/memory samples
+for every case and tier. `--quick` uses three samples per track. `--samples N`
+sets both sample counts explicitly.
 
-Every compute case runs twice, at a base size and at 10x. At the base sizes a
-Node run is mostly startup and JIT warmup, which flatters ahead-of-time
-runtimes on wall clock. The big tier shows the other regime, where the work
-dominates and V8 has warmed up. Both pictures are honest, they answer different
-questions: "run a small script once" versus "chew through real work".
+## Runtime behavior
 
-## Caching, both sides
+Each runtime uses its default source-loading behavior. In particular, Node does
+not receive an opt-in persistent compile cache. The harness builds and invokes
+the workspace's `target/release/rust` directly rather than trusting a `rust`
+binary from `PATH`.
 
-rustscript never runs the `cargo check` gate when it runs a script, so every run
-is warm by construction. Validation is a separate `rust check` step. For
-reference that step runs a full `cargo check`, around 5 seconds the first time
-the dependency set is built, then an unchanged script rechecks at a few
-milliseconds. It is a one-time cost, not a per-run cost, so it does not belong in
-a speed comparison against Node and Python. The bench still records `cold_mean`
-and `warm_mean` in `results.json`.
+Script validation is not part of `rust run`, so it is reported separately. The
+suite records only an unchanged-script warm `rust check` cache hit. Priming and
+measurement use an isolated temporary cache and never touch the user's
+`~/.cache/rustscript`.
 
-For symmetry Node gets `NODE_COMPILE_CACHE`, its own on-disk V8 compile cache,
-so it also does not pay type stripping and compilation on every measured run.
+## Idiomatic tasks
 
-## Implementation standard
-
-Each case is written the way a competent user of that language would write it,
-no micro tuning, no waste. Where languages differ in idiom the natural idiom
-wins: Python builds strings with `join`, sorts with a key function instead of a
-comparator, and JS splits on a regex. The `stdout_lines` case deliberately
-keeps each language's default print and buffering, that policy is part of what
-it measures.
+The cases implement the same task and output, not mechanically identical
+operations. Python uses `join` to build strings and a key function to sort.
+JavaScript uses its normal regex splitting and collection methods. Container
+representations and iterator allocation can differ between runtimes. This suite
+measures programs a competent user would write, not equal VM instruction
+streams.
 
 ## Cases
 
-- `hello`, startup only, no compute timing
-- `big_script`, startup on a generated thousand line source, parse and compile
-  scaling
-- `fib`, recursive fibonacci, call overhead
-- `sieve`, sieve of eratosthenes, integer loops and vector indexing
-- `mandelbrot`, float math in nested loops
-- `collatz`, integer division and branching
-- `binary_trees`, allocate and drop millions of small nodes, allocation churn
-- `string_builder`, grow a large string, then search and replace in it
-- `higher_order`, map, filter, fold, any with closures over a vector
-- `sort`, sort through a per element callback
-- `hashmap_int`, integer keyed hashmap insert and lookup
-- `nbody`, struct field access and float math, the classic 5 body simulation
-- `json_serialize`, build records and stringify them
-- `stdout_lines`, print tens of thousands of lines, default buffering
-- `word_count`, strings and a hashmap over a fixed text file
-- `json`, parse a fixed json file into dynamic values and sum fields
-- `regex`, match, capture, and replace over the word_count corpus
+- `hello`: minimal process startup.
+- `big_script`: startup with a generated thousand-line single file.
+- `multifile_startup`: startup with roughly a thousand lines split across 30
+  modules.
+- `fib`: recursive calls.
+- `sieve`: integer loops and indexed mutation.
+- `mandelbrot`: nested floating-point loops.
+- `collatz`: integer division and branching.
+- `binary_trees`: allocation and recursive traversal.
+- `string_builder`: string growth, search, and replacement.
+- `higher_order`: idiomatic map, filter, fold, and predicate operations.
+- `sort`: idiomatic custom ordering.
+- `hashmap_int`: integer-keyed map insertion and lookup.
+- `nbody`: struct or record access and floating-point math.
+- `json_serialize`: record construction and JSON serialization.
+- `stdout_lines`: repeated use of each runtime's default print API.
+- `word_count`: token counting and ranking over a fixed input.
+- `json`: dynamic JSON parsing and field aggregation.
+- `regex`: matching, captures, and replacement.
+- `file_transform`: timed file read, line transformation, write, and re-read.
+- `process_spawn`: repeated execution of the same benchmark-owned helper.
+- `async_tasks`: task creation, cooperative scheduler yields, and joins using
+  Tokio, promises, or `asyncio`, with no elapsed-time sleeps.
+- `http_local`: persistent-client requests to a benchmark-owned loopback server
+  with JSON responses.
+- `automation`: a mixed config, file, regex, map, sort, and JSON-report script.
 
-The `word_count` and `json` inputs are committed under each case dir and are
-produced by a seeded generator, so all languages read identical bytes. The 10x
-`data_big.*` inputs are too large for git, they are gitignored and `bench`
-regenerates them on demand. The `big_script` sources are also generated but
-committed, since the Rust one must exist as a cargo example. Regenerate all
-with `cargo run --bin gendata`, the big inputs with `cargo run --bin gendata
--- --big`. Case sizes are passed as a single argument with the base size as the
-default, so any case runs standalone too.
+Every compute case has a base tier and a 10x-work tier. The exact arguments and
+fixture hashes are recorded in the report.
+
+## Fixtures and provenance
+
+`gendata` recreates all deterministic inputs and generated sources before every
+run. Committed base fixtures stay synchronized with the generator. Large inputs,
+temporary outputs, the HTTP server, and the check cache live under an isolated
+temporary benchmark directory.
+
+`results.json` records the Git commit and dirty state, RustScript binary hash,
+benchmark-source hash, fixture hashes, tool versions, machine information,
+settings, and all raw measurements. Charts include the commit and a visible
+dirty-tree label when applicable.
 
 ## Running
 
+The suite needs `node` and `python3` on `PATH`. Cargo builds all Rust binaries
+it uses.
+
 ```
-cargo run --release --bin bench       full run, writes results/results.json
-cargo run --release --bin chart       renders one PNG per case and tier
+cargo run --release --bin bench
+cargo run --release --bin chart
 ```
 
-Flags: `--quick` uses fewer samples, `--no-gate` reuses the previous gate number
-so a rerun skips the slow cold rebuild.
+## Scope limits
 
-Needs `hyperfine`, `node`, and `python3` on PATH, and the `rust` binary installed
-from `crates/rustscript`.
-
-## The pictures
-
-`chart` writes one PNG per case and tier, `results/<case>.png` and
-`results/<case>_big.png`. Compute cases get three panels, wall-clock, compute
-only, and peak memory. The startup cases skip the compute panel. Bars carry a
-fixed color per language on a linear scale, with the exact value printed on
-each bar. The two time panels share one axis, the memory panel has its own.
-
-Base sizes were tuned once so warm rustscript takes tens of milliseconds on
-each compute case, then frozen, so runs stay comparable as the interpreter gets
-faster. At those sizes native Rust finishes in well under a millisecond, so its
-bar is a thin sliver next to rustscript. That is the honest picture, native
-compute is effectively free at this scale, and the printed labels give the
-small numbers the bars cannot show.
+The committed report is one run on one machine, not a cross-platform average.
+The suite does not measure live internet services, CPU-parallel equivalents
+across different concurrency models, cold dependency compilation, or cached
+`rust build` mode. Results are directional evidence for the recorded machine
+and versions, not a universal ranking of languages.

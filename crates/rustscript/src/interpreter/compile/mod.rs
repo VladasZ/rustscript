@@ -79,7 +79,10 @@ impl FnState {
     }
 
     fn upvalue_index(&self, name: &str) -> Option<u16> {
-        self.upvalues.iter().position(|(n, _)| n == name).map(|i| i as u16)
+        self.upvalues
+            .iter()
+            .position(|(n, _)| n == name)
+            .map(|i| i as u16)
     }
 
     fn into_chunk(self) -> Chunk {
@@ -136,7 +139,12 @@ enum NameLoc {
 
 impl<'a> Compiler<'a> {
     pub fn new(ctx: &'a Ctx<'a>) -> Compiler<'a> {
-        Compiler { ctx, frames: Vec::new(), loops: Vec::new(), json_let: None }
+        Compiler {
+            ctx,
+            frames: Vec::new(),
+            loops: Vec::new(),
+            json_let: None,
+        }
     }
 
     /// Resolve a path against the module being compiled.
@@ -149,8 +157,11 @@ impl<'a> Compiler<'a> {
         self.frames.push(FnState::new(sig.ident.to_string()));
         // Record generic parameter names so a caller's turbofish type args can
         // be bound to them when the body resolves a type, e.g. `from_str::<T>`.
-        let generics: Vec<Rc<str>> =
-            sig.generics.type_params().map(|p| Rc::from(p.ident.to_string().as_str())).collect();
+        let generics: Vec<Rc<str>> = sig
+            .generics
+            .type_params()
+            .map(|p| Rc::from(p.ident.to_string().as_str()))
+            .collect();
         self.cur().generics = generics;
         // Parameters occupy the first registers, self first if present.
         let mut params: Vec<Option<&Pat>> = Vec::new();
@@ -226,7 +237,11 @@ impl<'a> Compiler<'a> {
     }
 
     fn define(&mut self, name: &str, reg: Reg) {
-        self.cur().scopes.last_mut().unwrap().insert(name.to_string(), reg);
+        self.cur()
+            .scopes
+            .last_mut()
+            .unwrap()
+            .insert(name.to_string(), reg);
     }
 
     fn add_const(&mut self, c: Const) -> u16 {
@@ -249,7 +264,10 @@ impl<'a> Compiler<'a> {
 
     fn add_name(&mut self, name: String) -> u16 {
         let f = self.cur();
-        f.names.push(MethodName { id: BuiltinId::resolve(&name), text: name });
+        f.names.push(MethodName {
+            id: BuiltinId::resolve(&name),
+            text: name,
+        });
         (f.names.len() - 1) as u16
     }
 
@@ -312,9 +330,7 @@ impl<'a> Compiler<'a> {
                 self.emit(Op::LoadUpvalue { dst, idx });
                 Ok(())
             }
-            NameLoc::None => {
-                self.compile_resolved_value(dst, &[name.to_string()])
-            }
+            NameLoc::None => self.compile_resolved_value(dst, &[name.to_string()]),
         }
     }
 
@@ -358,7 +374,6 @@ impl<'a> Compiler<'a> {
     }
 
     // -- blocks and statements --------------------------------------------
-
 
     pub(super) fn patch_jump(&mut self, at: usize, to: u32) {
         match &mut self.cur().code[at] {
@@ -460,7 +475,10 @@ fn collect_pattern_names(pat: &Pat, out: &mut Vec<String>) {
         Pat::Tuple(t) => t.elems.iter().for_each(|p| collect_pattern_names(p, out)),
         Pat::TupleStruct(ts) => ts.elems.iter().for_each(|p| collect_pattern_names(p, out)),
         Pat::Slice(s) => s.elems.iter().for_each(|p| collect_pattern_names(p, out)),
-        Pat::Struct(s) => s.fields.iter().for_each(|f| collect_pattern_names(&f.pat, out)),
+        Pat::Struct(s) => s
+            .fields
+            .iter()
+            .for_each(|f| collect_pattern_names(&f.pat, out)),
         Pat::Reference(r) => collect_pattern_names(&r.pat, out),
         Pat::Paren(p) => collect_pattern_names(&p.pat, out),
         Pat::Type(t) => collect_pattern_names(&t.pat, out),
@@ -495,7 +513,10 @@ fn inline_holes(template: &str) -> Vec<String> {
             if !arg.is_empty()
                 && arg.parse::<usize>().is_err()
                 && arg.chars().all(|c| c.is_alphanumeric() || c == '_')
-                && arg.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                && arg
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_alphabetic() || c == '_')
             {
                 out.push(arg.to_string());
             }
@@ -507,7 +528,12 @@ fn inline_holes(template: &str) -> Vec<String> {
 }
 
 fn macro_yields_value(mac: &syn::Macro) -> bool {
-    let name = mac.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+    let name = mac
+        .path
+        .segments
+        .last()
+        .map(|s| s.ident.to_string())
+        .unwrap_or_default();
     matches!(name.as_str(), "format" | "vec" | "matches" | "dbg")
 }
 

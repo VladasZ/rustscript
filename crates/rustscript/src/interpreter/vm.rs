@@ -11,9 +11,9 @@ use std::rc::Rc;
 
 use anyhow::{Result, bail};
 
+use super::Interp;
 use super::bytecode::{BuiltinId, CapSource, Chunk, DISCARD, MacroKind, MethodName, Op};
 use super::value::{ClosureData, StructShape, Value};
-use super::Interp;
 
 /// Guard against runaway recursion, since script calls no longer consume the
 /// native stack. Depth, not registers, so deep-but-narrow recursion still works.
@@ -26,6 +26,13 @@ pub(super) type TypeEnv = Rc<[(Rc<str>, Rc<syn::Type>, u16)]>;
 
 fn empty_type_env() -> TypeEnv {
     Rc::from(Vec::new())
+}
+
+fn swap_option<T>(current: &mut Option<T>, next: Option<T>) -> Option<T> {
+    match next {
+        Some(value) => current.replace(value),
+        None => current.take(),
+    }
 }
 
 /// A suspended caller, restored when the callee returns.
@@ -45,7 +52,9 @@ thread_local! {
 }
 
 fn take_stack() -> Vec<Value> {
-    STACK_POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default()
+    STACK_POOL
+        .with(|p| p.borrow_mut().pop())
+        .unwrap_or_default()
 }
 
 fn recycle_stack(mut s: Vec<Value>) {
@@ -67,7 +76,12 @@ impl Interp {
         upvalues: &[Value],
     ) -> Result<Value> {
         if args.len() != chunk.num_params {
-            bail!("`{}` expects {} args but got {}", chunk.name, chunk.num_params, args.len());
+            bail!(
+                "`{}` expects {} args but got {}",
+                chunk.name,
+                chunk.num_params,
+                args.len()
+            );
         }
         let mut stack = take_stack();
         stack.resize(chunk.num_regs.max(chunk.num_params), Value::Unit);
@@ -147,7 +161,7 @@ impl Interp {
                 }
                 frames.push(Frame {
                     chunk: replace(&mut cur, callee),
-                    closure: replace(&mut cur_clo, $clo),
+                    closure: swap_option(&mut cur_clo, $clo),
                     type_env: replace(&mut cur_tenv, $tenv),
                     ip: ip + 1,
                     base,
@@ -180,7 +194,10 @@ impl Interp {
                         Some(c) => &c.captured,
                         None => entry_upvalues,
                     };
-                    set_reg(&mut stack[base + *dst as usize], upvals[*idx as usize].clone());
+                    set_reg(
+                        &mut stack[base + *dst as usize],
+                        upvals[*idx as usize].clone(),
+                    );
                 }
                 Op::Move { dst, src } => {
                     let v = stack[base + *src as usize].clone();
@@ -233,7 +250,13 @@ impl Interp {
                     }
                 }
 
-                Op::CallFn { dst, func, base: abase, argc, targ } => {
+                Op::CallFn {
+                    dst,
+                    func,
+                    base: abase,
+                    argc,
+                    targ,
+                } => {
                     let (dst, func) = (*dst, *func as usize);
                     let (abase, argc) = (*abase as usize, *argc as usize);
                     let callee = self.functions[func].clone();
@@ -253,7 +276,12 @@ impl Interp {
                     };
                     call!(callee, None, dst, abase, argc, tenv);
                 }
-                Op::CallValue { dst, callee, base: abase, argc } => {
+                Op::CallValue {
+                    dst,
+                    callee,
+                    base: abase,
+                    argc,
+                } => {
                     let (dst, callee) = (*dst, *callee as usize);
                     let (abase, argc) = (*abase as usize, *argc as usize);
                     let clo = match &stack[base + callee] {
@@ -263,7 +291,12 @@ impl Interp {
                     let chunk = clo.chunk.clone();
                     call!(chunk, Some(clo), dst, abase, argc);
                 }
-                Op::CallPath { dst, path, base: abase, argc } => {
+                Op::CallPath {
+                    dst,
+                    path,
+                    base: abase,
+                    argc,
+                } => {
                     let (dst, path) = (*dst, *path as usize);
                     let (abase, argc) = (*abase as usize, *argc as usize);
                     let (segs, coerce) = &cur.paths[path];
@@ -279,7 +312,8 @@ impl Interp {
                                 && canon[canon.len() - 2] == "serde_json"
                                 && canon[canon.len() - 1] == "from_str"
                             {
-                                let v = self.typed_from_str(&args, ty, cur.module as usize, &cur_tenv)?;
+                                let v =
+                                    self.typed_from_str(&args, ty, cur.module as usize, &cur_tenv)?;
                                 set_reg(&mut stack[base + dst as usize], v);
                                 ip += 1;
                                 continue;
@@ -294,9 +328,18 @@ impl Interp {
                 }
                 Op::PathValue { dst, path } => {
                     let (segs, _) = &cur.paths[*path as usize];
-                    set_reg(&mut stack[base + *dst as usize], self.eval_path_value(segs)?);
+                    set_reg(
+                        &mut stack[base + *dst as usize],
+                        self.eval_path_value(segs)?,
+                    );
                 }
-                Op::Method { dst, recv, name, base: abase, argc } => {
+                Op::Method {
+                    dst,
+                    recv,
+                    name,
+                    base: abase,
+                    argc,
+                } => {
                     let (dst, recv) = (*dst, *recv as usize);
                     let (abase, argc) = (*abase as usize, *argc as usize);
                     let name = &cur.names[*name as usize];
@@ -338,7 +381,9 @@ impl Interp {
                     {
                         // 0 none, 1 clone receiver, 2 clone payload, 3 default
                         let choice = match &stack[base + recv] {
-                            Value::Enum { enum_name, variant, .. } => {
+                            Value::Enum {
+                                enum_name, variant, ..
+                            } => {
                                 if matches!(name.id, BuiltinId::Copied) {
                                     if &**enum_name == "Option" { 1 } else { 0 }
                                 } else if !matches!(&**enum_name, "Option" | "Result") {
@@ -400,14 +445,18 @@ impl Interp {
                         && base + recv < s
                     {
                         let (lo, hi) = stack.split_at_mut(s);
-                        let Value::Map(m) = &lo[base + recv] else { unreachable!() };
+                        let Value::Map(m) = &lo[base + recv] else {
+                            unreachable!()
+                        };
                         let v = match name.id {
                             BuiltinId::Insert => {
                                 let k = take(&mut hi[0]).into_key();
-                                let Some(k) = k else {
-                                    bail!("invalid map key")
+                                let Some(k) = k else { bail!("invalid map key") };
+                                let val = if argc > 1 {
+                                    take(&mut hi[1])
+                                } else {
+                                    Value::Unit
                                 };
-                                let val = if argc > 1 { take(&mut hi[1]) } else { Value::Unit };
                                 let old = m.borrow_mut().insert(k, val);
                                 if dst == DISCARD {
                                     Value::Unit
@@ -455,7 +504,12 @@ impl Interp {
                         set_reg(&mut stack[base + dst as usize], v);
                     }
                 }
-                Op::GetOrDefault { dst, recv, key, default } => {
+                Op::GetOrDefault {
+                    dst,
+                    recv,
+                    key,
+                    default,
+                } => {
                     let (r, k) = (base + *recv as usize, base + *key as usize);
                     let df = base + *default as usize;
                     // Key and default may live in variable registers, so they
@@ -468,20 +522,27 @@ impl Interp {
                             m.borrow().get(&kr).cloned()
                         }
                         Value::Vec(items) => match &stack[k] {
-                            Value::Int(i) => {
-                                usize::try_from(*i).ok().and_then(|i| items.borrow().get(i).cloned())
-                            }
+                            Value::Int(i) => usize::try_from(*i)
+                                .ok()
+                                .and_then(|i| items.borrow().get(i).cloned()),
                             other => bail!("cannot index a vector with {}", other.type_name()),
                         },
                         _ => {
                             let recv_v = stack[r].clone();
-                            let get = MethodName { text: "get".into(), id: BuiltinId::Get };
+                            let get = MethodName {
+                                text: "get".into(),
+                                id: BuiltinId::Get,
+                            };
                             let opt = self.eval_method(&recv_v, &get, &mut [stack[k].clone()])?;
-                            let copied =
-                                MethodName { text: "copied".into(), id: BuiltinId::Copied };
+                            let copied = MethodName {
+                                text: "copied".into(),
+                                id: BuiltinId::Copied,
+                            };
                             let opt = self.eval_method(&opt, &copied, &mut [])?;
-                            let uo =
-                                MethodName { text: "unwrap_or".into(), id: BuiltinId::UnwrapOr };
+                            let uo = MethodName {
+                                text: "unwrap_or".into(),
+                                id: BuiltinId::UnwrapOr,
+                            };
                             Some(self.eval_method(&opt, &uo, &mut [stack[df].clone()])?)
                         }
                     };
@@ -496,15 +557,26 @@ impl Interp {
                     ret!(v);
                 }
 
-                Op::MakeVec { dst, base: wbase, count } => {
+                Op::MakeVec {
+                    dst,
+                    base: wbase,
+                    count,
+                } => {
                     let (dst, wbase, count) = (*dst, *wbase as usize, *count as usize);
                     let items = take_range(stack, base + wbase, count);
                     set_reg(&mut stack[base + dst as usize], Value::vec(items));
                 }
-                Op::MakeTuple { dst, base: wbase, count } => {
+                Op::MakeTuple {
+                    dst,
+                    base: wbase,
+                    count,
+                } => {
                     let (dst, wbase, count) = (*dst, *wbase as usize, *count as usize);
                     let items = take_range(stack, base + wbase, count);
-                    set_reg(&mut stack[base + dst as usize], Value::Tuple(Rc::new(RefCell::new(items))));
+                    set_reg(
+                        &mut stack[base + dst as usize],
+                        Value::Tuple(Rc::new(RefCell::new(items))),
+                    );
                 }
                 Op::MakeArrayRepeat { dst, val, count } => {
                     let n = match &stack[base + *count as usize] {
@@ -512,14 +584,26 @@ impl Interp {
                         _ => bail!("array repeat length must be an integer"),
                     };
                     let v = stack[base + *val as usize].clone();
-                    set_reg(&mut stack[base + *dst as usize], Value::vec(std::iter::repeat_n(v, n).collect()));
+                    set_reg(
+                        &mut stack[base + *dst as usize],
+                        Value::vec(std::iter::repeat_n(v, n).collect()),
+                    );
                 }
-                Op::MakeRange { dst, start, end, inclusive } => {
+                Op::MakeRange {
+                    dst,
+                    start,
+                    end,
+                    inclusive,
+                } => {
                     let s = int_of(&stack[base + *start as usize], "range bound")?;
                     let e = int_of(&stack[base + *end as usize], "range bound")?;
                     set_reg(
                         &mut stack[base + *dst as usize],
-                        Value::Range { start: s, end: e, inclusive: *inclusive },
+                        Value::Range {
+                            start: s,
+                            end: e,
+                            inclusive: *inclusive,
+                        },
                     );
                 }
                 Op::IterInit { dst, src } => {
@@ -528,7 +612,7 @@ impl Interp {
                         // Ranges are stepped in place by ForNext, never
                         // materialized into a Vec.
                         Value::Range { .. } => src_v,
-                        other => Value::vec(self.into_iter_items(other)?),
+                        other => Value::vec(self.iter_items(other)?),
                     };
                     set_reg(&mut stack[base + *dst as usize], it);
                 }
@@ -539,7 +623,11 @@ impl Interp {
                     };
                     let item = match &stack[base + *iter as usize] {
                         Value::Vec(items) => items.borrow().get(i as usize).cloned(),
-                        Value::Range { start, end, inclusive } => {
+                        Value::Range {
+                            start,
+                            end,
+                            inclusive,
+                        } => {
                             let n = start + i;
                             let done = if *inclusive { n > *end } else { n >= *end };
                             if done { None } else { Some(Value::Int(n)) }
@@ -558,7 +646,11 @@ impl Interp {
                         }
                     }
                 }
-                Op::MakeStruct { dst, info, base: wbase } => {
+                Op::MakeStruct {
+                    dst,
+                    info,
+                    base: wbase,
+                } => {
                     let (dst, wbase) = (*dst, *wbase as usize);
                     let lit = &cur.struct_lits[*info as usize];
                     let written = lit.shape.fields.len();
@@ -574,7 +666,9 @@ impl Interp {
                         let mut renames = lit.shape.renames.clone();
                         if let Value::Struct(r) = rest {
                             let rvals = r.values.borrow();
-                            for (slot, (k, v)) in r.shape.fields.iter().zip(rvals.iter()).enumerate() {
+                            for (slot, (k, v)) in
+                                r.shape.fields.iter().zip(rvals.iter()).enumerate()
+                            {
                                 if lit.shape.slot(k).is_none() {
                                     fields.push(k.clone());
                                     values.push(v.clone());
@@ -609,7 +703,10 @@ impl Interp {
                         .collect();
                     set_reg(
                         &mut stack[base + *dst as usize],
-                        Value::Closure(Rc::new(ClosureData { chunk: child_chunk, captured })),
+                        Value::Closure(Rc::new(ClosureData {
+                            chunk: child_chunk,
+                            captured,
+                        })),
                     );
                 }
 
@@ -624,12 +721,20 @@ impl Interp {
                         stack[base + *val as usize].clone(),
                     )?;
                 }
-                Op::GetField { dst, base: b, member } => {
+                Op::GetField {
+                    dst,
+                    base: b,
+                    member,
+                } => {
                     let v =
                         self.get_field(&stack[base + *b as usize], &cur.members[*member as usize])?;
                     set_reg(&mut stack[base + *dst as usize], v);
                 }
-                Op::SetField { base: b, member, val } => {
+                Op::SetField {
+                    base: b,
+                    member,
+                    val,
+                } => {
                     self.set_field(
                         &stack[base + *b as usize],
                         &cur.members[*member as usize],
@@ -644,8 +749,10 @@ impl Interp {
                     }
                 }
                 Op::Cast { dst, src, ty } => {
-                    let v = self
-                        .eval_cast(stack[base + *src as usize].clone(), &cur.casts[*ty as usize])?;
+                    let v = self.eval_cast(
+                        stack[base + *src as usize].clone(),
+                        &cur.casts[*ty as usize],
+                    )?;
                     set_reg(&mut stack[base + *dst as usize], v);
                 }
                 Op::Coerce { dst, src, ty } => {
@@ -685,7 +792,10 @@ impl Interp {
                         MacroKind::Eprint => eprint!("{text}"),
                         MacroKind::Panic => bail!("panicked: {text}"),
                         MacroKind::Anyhow => {
-                            set_reg(&mut stack[base + *dst as usize], Value::err(Value::str(text)));
+                            set_reg(
+                                &mut stack[base + *dst as usize],
+                                Value::err(Value::str(text)),
+                            );
                         }
                         MacroKind::Bail => {
                             ret!(Value::err(Value::str(text)));
@@ -698,7 +808,11 @@ impl Interp {
                 Op::Spawn { .. } | Op::Await { .. } => {
                     bail!("async is only available under #[tokio::main]")
                 }
-                Op::Dbg { dst, base: wbase, argc } => {
+                Op::Dbg {
+                    dst,
+                    base: wbase,
+                    argc,
+                } => {
                     let (dst, wbase, argc) = (*dst, *wbase as usize, *argc as usize);
                     let mut last = Value::Unit;
                     for i in 0..argc {
@@ -745,7 +859,11 @@ impl Interp {
 
     fn render_fmt(&self, chunk: &Chunk, spec: u16, regs: &[Value]) -> Result<String> {
         let f = &chunk.fmts[spec as usize];
-        let positional: Vec<Value> = f.positional.iter().map(|r| regs[*r as usize].clone()).collect();
+        let positional: Vec<Value> = f
+            .positional
+            .iter()
+            .map(|r| regs[*r as usize].clone())
+            .collect();
         let named: Vec<(String, Value)> = f
             .named
             .iter()
@@ -789,6 +907,5 @@ fn int_of(v: &Value, what: &str) -> Result<i64> {
         _ => bail!("{what} must be an integer"),
     }
 }
-
 
 use super::ops::{apply_bin, apply_bin_imm, apply_un, cmp_test, cmp_test_imm, try_bind};

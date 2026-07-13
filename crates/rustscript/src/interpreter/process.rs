@@ -10,8 +10,6 @@ use super::native::{self, Native};
 use super::std_bridge::path_like;
 use super::value::{Map, MapKey, RStr, StructData, Value};
 
-
-
 /// Build a real `Command` from a script `Command` value's fields. Every field
 /// that becomes an OS string goes through `path_like`, so a `Path` or `PathBuf`
 /// value contributes its path, not its struct debug form. current_dir was the
@@ -106,13 +104,23 @@ pub(super) fn spawn_command(s: &StructData) -> Value {
     let stdout = child
         .stdout
         .take()
-        .map(|r| Native::Reader(std::io::BufReader::new(Box::new(r) as Box<dyn std::io::Read>)).wrap())
+        .map(|r| {
+            Native::Reader(std::io::BufReader::new(
+                Box::new(r) as Box<dyn std::io::Read>
+            ))
+            .wrap()
+        })
         .map(Value::some)
         .unwrap_or_else(Value::none);
     let stderr = child
         .stderr
         .take()
-        .map(|r| Native::Reader(std::io::BufReader::new(Box::new(r) as Box<dyn std::io::Read>)).wrap())
+        .map(|r| {
+            Native::Reader(std::io::BufReader::new(
+                Box::new(r) as Box<dyn std::io::Read>
+            ))
+            .wrap()
+        })
         .map(Value::some)
         .unwrap_or_else(Value::none);
     Value::ok(Value::struct_of(
@@ -131,7 +139,10 @@ pub(super) fn make_exit_status(status: std::process::ExitStatus) -> Value {
     Value::struct_of(
         "ExitStatus",
         [
-            ("code".into(), Value::Int(status.code().unwrap_or(-1) as i64)),
+            (
+                "code".into(),
+                Value::Int(status.code().unwrap_or(-1) as i64),
+            ),
             ("success".into(), Value::Bool(status.success())),
         ],
     )
@@ -142,18 +153,20 @@ pub(super) fn make_output(out: std::process::Output) -> Value {
     Value::struct_of(
         "Output",
         [
-            ("stdout".into(), Value::str(String::from_utf8_lossy(&out.stdout).into_owned())),
-            ("stderr".into(), Value::str(String::from_utf8_lossy(&out.stderr).into_owned())),
+            (
+                "stdout".into(),
+                Value::str(String::from_utf8_lossy(&out.stdout).into_owned()),
+            ),
+            (
+                "stderr".into(),
+                Value::str(String::from_utf8_lossy(&out.stderr).into_owned()),
+            ),
             ("status".into(), make_exit_status(out.status)),
         ],
     )
 }
 
-pub(super) fn command_method(
-    s: &Rc<StructData>,
-    name: &str,
-    args: &[Value],
-) -> Result<Value> {
+pub(super) fn command_method(s: &Rc<StructData>, name: &str, args: &[Value]) -> Result<Value> {
     let cmd_value = || Value::Struct(s.clone());
     Ok(match name {
         "arg" => {
@@ -164,8 +177,7 @@ pub(super) fn command_method(
             cmd_value()
         }
         "args" => {
-            if let (Some(Value::Vec(list)), Some(Value::Vec(extra))) =
-                (s.get("args"), args.first())
+            if let (Some(Value::Vec(list)), Some(Value::Vec(extra))) = (s.get("args"), args.first())
             {
                 list.borrow_mut().extend(extra.borrow().iter().cloned());
             }
@@ -207,9 +219,11 @@ pub(super) fn command_method(
 pub(super) fn close_child_stdin(v: &Value) {
     match v {
         Value::Native(rc) => *rc.borrow_mut() = Native::Closed,
-        Value::Enum { enum_name, variant, data }
-            if &**enum_name == "Option" && &**variant == "Some" =>
-        {
+        Value::Enum {
+            enum_name,
+            variant,
+            data,
+        } if &**enum_name == "Option" && &**variant == "Some" => {
             if let Some(inner) = data.first() {
                 close_child_stdin(inner);
             }

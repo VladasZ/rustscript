@@ -18,7 +18,7 @@ fn check(src: &str, tag: &str) -> std::process::Output {
         .arg(&path)
         .output()
         .expect("failed to launch rustscript");
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).unwrap();
     out
 }
 
@@ -46,8 +46,5 @@ fn type_error_fails_check() {
     );
     assert!(!out.status.success(), "type error should fail the check");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("not valid Rust"),
-        "stderr was: {stderr}"
-    );
+    assert!(stderr.contains("not valid Rust"), "stderr was: {stderr}");
 }

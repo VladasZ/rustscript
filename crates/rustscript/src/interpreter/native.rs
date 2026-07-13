@@ -197,7 +197,10 @@ pub fn native_method(
         "lines" => {
             // Move the reader out into a lazy line iterator so a for-loop can
             // stream it. The original handle is left empty.
-            let taken = std::mem::replace(&mut *handle.borrow_mut(), Native::Lines(Box::new(std::iter::empty())));
+            let taken = std::mem::replace(
+                &mut *handle.borrow_mut(),
+                Native::Lines(Box::new(std::iter::empty())),
+            );
             let iter: Box<dyn Iterator<Item = std::io::Result<String>>> = match taken {
                 Native::File(r) => Box::new(r.lines()),
                 Native::Reader(r) => Box::new(r.lines()),
@@ -307,7 +310,10 @@ pub fn native_method(
             }
         }
         "wait_with_output" => {
-            let taken = std::mem::replace(&mut *handle.borrow_mut(), Native::Lines(Box::new(std::iter::empty())));
+            let taken = std::mem::replace(
+                &mut *handle.borrow_mut(),
+                Native::Lines(Box::new(std::iter::empty())),
+            );
             if let Native::Child(c) = taken {
                 return Ok(Some(match c.wait_with_output() {
                     Ok(o) => Value::ok(super::process::make_output(o)),
@@ -355,10 +361,9 @@ pub fn native_method(
         "shutdown" => {
             let h = handle.borrow();
             if let Native::Stream(s) = &*h {
-                return Ok(Some(io_err(
-                    s.shutdown(std::net::Shutdown::Both),
-                    |()| Value::Unit,
-                )));
+                return Ok(Some(io_err(s.shutdown(std::net::Shutdown::Both), |()| {
+                    Value::Unit
+                })));
             }
             bail!("shutdown on {}", h.type_name());
         }
@@ -411,11 +416,16 @@ pub fn native_method(
         "path" => {
             let h = handle.borrow();
             if let Native::TempDir(d) = &*h {
-                return Ok(Some(super::std_bridge::make_path(d.path().display().to_string())));
+                return Ok(Some(super::std_bridge::make_path(
+                    d.path().display().to_string(),
+                )));
             }
         }
         "close" => {
-            let taken = std::mem::replace(&mut *handle.borrow_mut(), Native::Lines(Box::new(std::iter::empty())));
+            let taken = std::mem::replace(
+                &mut *handle.borrow_mut(),
+                Native::Lines(Box::new(std::iter::empty())),
+            );
             if let Native::TempDir(d) = taken {
                 return Ok(Some(io_err(d.close(), |()| Value::Unit)));
             }
@@ -494,8 +504,8 @@ fn seek_from(v: Option<&Value>) -> SeekFrom {
         });
         match (&**variant, n) {
             ("Start", Some(n)) => return SeekFrom::Start(n as u64),
-            ("End", Some(n)) => return SeekFrom::End(n as i64),
-            ("Current", Some(n)) => return SeekFrom::Current(n as i64),
+            ("End", Some(n)) => return SeekFrom::End(n),
+            ("Current", Some(n)) => return SeekFrom::Current(n),
             _ => {}
         }
     }

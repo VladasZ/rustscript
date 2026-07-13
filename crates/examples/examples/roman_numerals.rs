@@ -27,7 +27,7 @@ fn to_roman(mut n: i64) -> String {
 }
 
 fn main() {
-    for n in vec![4, 9, 14, 40, 90, 2024] {
+    for n in [4, 9, 14, 40, 90, 2024] {
         println!("{n} = {}", to_roman(n));
     }
 }

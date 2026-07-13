@@ -2,7 +2,11 @@ use std::time::Instant;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let size: u64 = if args.len() > 1 { args[1].parse().unwrap() } else { 140 };
+    let size: u64 = if args.len() > 1 {
+        args[1].parse().unwrap()
+    } else {
+        140
+    };
     let w: u64 = size;
     let h: u64 = size;
     let max_iter: u64 = 140;

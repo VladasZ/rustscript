@@ -16,7 +16,6 @@ use syn::{Lit, Pat};
 use super::bytecode::{BinKind, UnKind};
 use super::value::Value;
 
-
 // -- operators -------------------------------------------------------------
 
 pub(super) fn apply_bin(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
@@ -161,13 +160,15 @@ fn int_bin(l: &Value, r: &Value, f: impl Fn(i64, i64) -> i64) -> Result<Value> {
 pub(super) fn compare_values(l: &Value, r: &Value) -> Result<Ordering> {
     Ok(match (l, r) {
         (Value::Int(a), Value::Int(b)) => a.cmp(b),
-        (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).ok_or_else(|| anyhow!("cannot order NaN"))?,
-        (Value::Int(a), Value::Float(b)) => {
-            (*a as f64).partial_cmp(b).ok_or_else(|| anyhow!("cannot order NaN"))?
-        }
-        (Value::Float(a), Value::Int(b)) => {
-            a.partial_cmp(&(*b as f64)).ok_or_else(|| anyhow!("cannot order NaN"))?
-        }
+        (Value::Float(a), Value::Float(b)) => a
+            .partial_cmp(b)
+            .ok_or_else(|| anyhow!("cannot order NaN"))?,
+        (Value::Int(a), Value::Float(b)) => (*a as f64)
+            .partial_cmp(b)
+            .ok_or_else(|| anyhow!("cannot order NaN"))?,
+        (Value::Float(a), Value::Int(b)) => a
+            .partial_cmp(&(*b as f64))
+            .ok_or_else(|| anyhow!("cannot order NaN"))?,
         (Value::Str(a), Value::Str(b)) => a.as_str().cmp(b.as_str()),
         (Value::Char(a), Value::Char(b)) => a.cmp(b),
         (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
@@ -227,8 +228,7 @@ pub(super) fn try_bind(pat: &Pat, val: &Value, define: &mut dyn FnMut(&str, Valu
             let name = ts.path.segments.last().map(|s| s.ident.to_string());
             match val {
                 Value::Enum { variant, data, .. } => {
-                    name.as_deref() == Some(&**variant)
-                        && bind_seq(ts.elems.iter(), data, define)
+                    name.as_deref() == Some(&**variant) && bind_seq(ts.elems.iter(), data, define)
                 }
                 Value::Struct(st) => {
                     let vals: Vec<Value> = st.values.borrow().clone();
@@ -292,7 +292,10 @@ fn bind_seq<'a>(
 ) -> bool {
     let pats: Vec<&Pat> = pats.collect();
     if pats.iter().any(|p| matches!(p, Pat::Rest(_))) {
-        let head_len = pats.iter().take_while(|p| !matches!(p, Pat::Rest(_))).count();
+        let head_len = pats
+            .iter()
+            .take_while(|p| !matches!(p, Pat::Rest(_)))
+            .count();
         for (p, v) in pats.iter().take(head_len).zip(vals.iter()) {
             if !try_bind(p, v, define) {
                 return false;
@@ -309,7 +312,9 @@ fn bind_seq<'a>(
     if pats.len() != vals.len() {
         return false;
     }
-    pats.iter().zip(vals.iter()).all(|(p, v)| try_bind(p, v, define))
+    pats.iter()
+        .zip(vals.iter())
+        .all(|(p, v)| try_bind(p, v, define))
 }
 
 pub(super) fn lit_value(lit: &Lit) -> Option<Value> {

@@ -87,10 +87,12 @@ pub(super) fn jwt_encode(args: &[Value]) -> Result<Value> {
         other => bail!("`{other}` is not an EncodingKey"),
     };
 
-    Ok(match jsonwebtoken::encode(&real, &value_to_json(claims)?, &real_key) {
-        Ok(token) => Value::ok(Value::str(token)),
-        Err(e) => Value::err(Value::str(e.to_string())),
-    })
+    Ok(
+        match jsonwebtoken::encode(&real, &value_to_json(claims)?, &real_key) {
+            Ok(token) => Value::ok(Value::str(token)),
+            Err(e) => Value::err(Value::str(e.to_string())),
+        },
+    )
 }
 
 fn header_algorithm(s: &StructData) -> Result<Algorithm> {

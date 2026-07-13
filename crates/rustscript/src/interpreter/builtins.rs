@@ -1,11 +1,12 @@
+use std::f64::consts::PI;
 use std::rc::Rc;
 
 use anyhow::{Result, bail};
 
 use super::bytecode::{BuiltinId, Chunk, MethodName, Op};
 
-use super::value::{ClosureData, StructShape, Value};
 use super::Interp;
+use super::value::{ClosureData, StructShape, Value};
 
 use super::crates_bridge::*;
 use super::http::*;
@@ -14,7 +15,6 @@ use super::methods::*;
 use super::process::*;
 use super::regex_bridge::*;
 use super::std_bridge::*;
-
 
 impl Interp {
     /// Resolve a path used as a value: `None`, a unit enum variant, a constant,
@@ -35,7 +35,10 @@ impl Interp {
             if let Some(def) = self.structs().get(name.as_str())
                 && matches!(def.ast.fields, syn::Fields::Unit)
             {
-                return Ok(Value::structure(StructShape::new(name.as_str(), Vec::new()), Vec::new()));
+                return Ok(Value::structure(
+                    StructShape::new(name.as_str(), Vec::new()),
+                    Vec::new(),
+                ));
             }
             // A `use`d constant like `use std::env::consts::OS` then bare `OS`
             // resolves through its full path.
@@ -55,6 +58,7 @@ impl Interp {
         // Path-value constants from std and bridged crates.
         if ty == "consts" {
             match last.as_str() {
+                "PI" => return Ok(Value::Float(PI)),
                 "OS" => return Ok(Value::str(std::env::consts::OS)),
                 "ARCH" => return Ok(Value::str(std::env::consts::ARCH)),
                 "FAMILY" => return Ok(Value::str(std::env::consts::FAMILY)),
@@ -103,9 +107,11 @@ impl Interp {
             {
                 continue;
             }
-            if def.variants.iter().any(|v| {
-                v.ident == variant && matches!(v.fields, syn::Fields::Unit)
-            }) {
+            if def
+                .variants
+                .iter()
+                .any(|v| v.ident == variant && matches!(v.fields, syn::Fields::Unit))
+            {
                 return Some(Value::Enum {
                     enum_name: name.clone(),
                     variant: variant.into(),
@@ -185,7 +191,10 @@ impl Interp {
         if let Some((recv, rest)) = args.split_first() {
             let recv = recv.clone();
             let mut rest = rest.to_vec();
-            let name = MethodName { id: BuiltinId::resolve(last), text: last.clone() };
+            let name = MethodName {
+                id: BuiltinId::resolve(last),
+                text: last.clone(),
+            };
             return self.eval_method(&recv, &name, &mut rest);
         }
         bail!("unsupported call `{}`", canon.join("::"));
@@ -231,11 +240,16 @@ impl Interp {
         None
     }
 
-    pub(super) fn eval_method(&self, recv: &Value, name: &MethodName, args: &mut [Value]) -> Result<Value> {
+    pub(super) fn eval_method(
+        &self,
+        recv: &Value,
+        name: &MethodName,
+        args: &mut [Value],
+    ) -> Result<Value> {
         // A method on a range acts on it as an iterator, so expand it to a Vec.
         let expanded;
         let recv = if matches!(recv, Value::Range { .. }) {
-            expanded = Value::vec(self.into_iter_items(recv.clone())?);
+            expanded = Value::vec(self.iter_items(recv.clone())?);
             &expanded
         } else {
             recv
@@ -276,7 +290,11 @@ pub(super) fn as_closure(v: Option<&Value>) -> Result<Rc<super::value::ClosureDa
 
 pub(super) fn option_inner(v: &Value) -> Option<Value> {
     match v {
-        Value::Enum { enum_name, variant, data } if &**enum_name == "Option" && &**variant == "Some" => {
+        Value::Enum {
+            enum_name,
+            variant,
+            data,
+        } if &**enum_name == "Option" && &**variant == "Some" => {
             Some(data.first().cloned().unwrap_or(Value::Unit))
         }
         _ => None,
@@ -295,9 +313,17 @@ pub(super) fn path_call_closure(segs: Vec<String>, num_params: usize) -> Value {
     chunk.num_regs = num_params + 1;
     chunk.paths.push((segs, None));
     // Arguments land in registers 0..num_params, the result goes just past them.
-    chunk.code.push(Op::CallPath { dst, path: 0, base: 0, argc: num_params as u16 });
+    chunk.code.push(Op::CallPath {
+        dst,
+        path: 0,
+        base: 0,
+        argc: num_params as u16,
+    });
     chunk.code.push(Op::Ret { src: dst });
-    Value::Closure(Rc::new(ClosureData { chunk: Rc::new(chunk), captured: Vec::new() }))
+    Value::Closure(Rc::new(ClosureData {
+        chunk: Rc::new(chunk),
+        captured: Vec::new(),
+    }))
 }
 
 // `usize::MAX`, `i32::MIN` and friends. The 64 bit and wider limits are
@@ -339,7 +365,9 @@ pub(super) fn make_ordering(o: std::cmp::Ordering) -> Value {
 pub(super) fn ordering_from_value(v: &Value) -> Option<std::cmp::Ordering> {
     use std::cmp::Ordering::*;
     match v {
-        Value::Enum { enum_name, variant, .. } if &**enum_name == "Ordering" => match &**variant {
+        Value::Enum {
+            enum_name, variant, ..
+        } if &**enum_name == "Ordering" => match &**variant {
             "Less" => Some(Less),
             "Equal" => Some(Equal),
             "Greater" => Some(Greater),
@@ -349,10 +377,13 @@ pub(super) fn ordering_from_value(v: &Value) -> Option<std::cmp::Ordering> {
     }
 }
 
-
 // -- builtin methods -------------------------------------------------------
 
-pub(super) fn builtin_method(recv: &Value, method: &MethodName, args: &mut [Value]) -> Result<Value> {
+pub(super) fn builtin_method(
+    recv: &Value,
+    method: &MethodName,
+    args: &mut [Value],
+) -> Result<Value> {
     // The hot receivers dispatch on the precompiled id, no string compares.
     match recv {
         Value::Str(s) => return str_method(s, method, &*args),
@@ -384,8 +415,12 @@ pub(super) fn builtin_method(recv: &Value, method: &MethodName, args: &mut [Valu
             },
             "Command" => command_method(s, name, &*args),
             "ExitStatus" => exitstatus_method(s, name),
-            "ReqwestClientBuilder" | "ReqwestRequest" | "ReqwestResponse" | "StatusCode"
-            | "HeaderMap" | "HeaderValue" => http_method(s, name, &*args),
+            "ReqwestClientBuilder"
+            | "ReqwestRequest"
+            | "ReqwestResponse"
+            | "StatusCode"
+            | "HeaderMap"
+            | "HeaderValue" => http_method(s, name, &*args),
             "StdStream" => std_stream_method(s, name, args),
             "Rng" => rng_method(name, &*args),
             "DateTime" => datetime_method(s, name, &*args),

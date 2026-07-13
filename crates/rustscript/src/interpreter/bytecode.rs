@@ -304,86 +304,250 @@ pub enum MacroKind {
 
 #[derive(Clone)]
 pub enum Op {
-    LoadConst { dst: Reg, k: u16 },
-    LoadInt { dst: Reg, v: i64 },
-    LoadBool { dst: Reg, v: bool },
-    LoadUnit { dst: Reg },
-    LoadUpvalue { dst: Reg, idx: u16 },
+    LoadConst {
+        dst: Reg,
+        k: u16,
+    },
+    LoadInt {
+        dst: Reg,
+        v: i64,
+    },
+    LoadBool {
+        dst: Reg,
+        v: bool,
+    },
+    LoadUnit {
+        dst: Reg,
+    },
+    LoadUpvalue {
+        dst: Reg,
+        idx: u16,
+    },
     /// Read a module level const or static, evaluated lazily on first use.
-    LoadGlobal { dst: Reg, idx: u32 },
-    Move { dst: Reg, src: Reg },
+    LoadGlobal {
+        dst: Reg,
+        idx: u32,
+    },
+    Move {
+        dst: Reg,
+        src: Reg,
+    },
 
-    Bin { dst: Reg, a: Reg, b: Reg, op: BinKind },
+    Bin {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+        op: BinKind,
+    },
     /// Binary op with an integer literal right operand, `n - 1`, `i < len`.
-    BinImm { dst: Reg, a: Reg, imm: i64, op: BinKind },
-    Un { dst: Reg, a: Reg, op: UnKind },
+    BinImm {
+        dst: Reg,
+        a: Reg,
+        imm: i64,
+        op: BinKind,
+    },
+    Un {
+        dst: Reg,
+        a: Reg,
+        op: UnKind,
+    },
 
-    Jump { to: u32 },
-    JumpIfFalse { cond: Reg, to: u32 },
-    JumpIfTrue { cond: Reg, to: u32 },
+    Jump {
+        to: u32,
+    },
+    JumpIfFalse {
+        cond: Reg,
+        to: u32,
+    },
+    JumpIfTrue {
+        cond: Reg,
+        to: u32,
+    },
     /// Fused compare and branch: jump to `to` when `a op b` is false.
-    CmpJump { a: Reg, b: Reg, op: BinKind, to: u32 },
+    CmpJump {
+        a: Reg,
+        b: Reg,
+        op: BinKind,
+        to: u32,
+    },
     /// Fused compare and branch against an integer literal.
-    CmpJumpImm { a: Reg, imm: i64, op: BinKind, to: u32 },
+    CmpJumpImm {
+        a: Reg,
+        imm: i64,
+        op: BinKind,
+        to: u32,
+    },
 
     /// Direct call of a known top level function, by global index.
     /// `targ` indexes the caller chunk's `call_type_args`, or `u32::MAX` when
     /// the call had no turbofish type arguments.
-    CallFn { dst: Reg, func: u32, base: Reg, argc: u16, targ: u32 },
+    CallFn {
+        dst: Reg,
+        func: u32,
+        base: Reg,
+        argc: u16,
+        targ: u32,
+    },
     /// Call a closure value held in a register.
-    CallValue { dst: Reg, callee: Reg, base: Reg, argc: u16 },
+    CallValue {
+        dst: Reg,
+        callee: Reg,
+        base: Reg,
+        argc: u16,
+    },
     /// Any other call, `Type::assoc`, a bridge, a constructor, resolved by path.
-    CallPath { dst: Reg, path: u16, base: Reg, argc: u16 },
+    CallPath {
+        dst: Reg,
+        path: u16,
+        base: Reg,
+        argc: u16,
+    },
     /// A path used as a value, `None`, a unit enum variant, `consts::OS`.
-    PathValue { dst: Reg, path: u16 },
+    PathValue {
+        dst: Reg,
+        path: u16,
+    },
     /// `recv.method(args)`.
-    Method { dst: Reg, recv: Reg, name: u16, base: Reg, argc: u16 },
+    Method {
+        dst: Reg,
+        recv: Reg,
+        name: u16,
+        base: Reg,
+        argc: u16,
+    },
     /// Fused `recv.get(key).copied().unwrap_or(default)`. One probe, no
     /// intermediate Option built. Falls back to the three real methods for
     /// receivers that are not a map or a vector.
-    GetOrDefault { dst: Reg, recv: Reg, key: Reg, default: Reg },
-    Ret { src: Reg },
+    GetOrDefault {
+        dst: Reg,
+        recv: Reg,
+        key: Reg,
+        default: Reg,
+    },
+    Ret {
+        src: Reg,
+    },
 
-    MakeVec { dst: Reg, base: Reg, count: u16 },
-    MakeTuple { dst: Reg, base: Reg, count: u16 },
-    MakeArrayRepeat { dst: Reg, val: Reg, count: Reg },
-    MakeRange { dst: Reg, start: Reg, end: Reg, inclusive: bool },
+    MakeVec {
+        dst: Reg,
+        base: Reg,
+        count: u16,
+    },
+    MakeTuple {
+        dst: Reg,
+        base: Reg,
+        count: u16,
+    },
+    MakeArrayRepeat {
+        dst: Reg,
+        val: Reg,
+        count: Reg,
+    },
+    MakeRange {
+        dst: Reg,
+        start: Reg,
+        end: Reg,
+        inclusive: bool,
+    },
     /// Materialize any iterable in `src` into an iterator held in `dst`.
-    IterInit { dst: Reg, src: Reg },
+    IterInit {
+        dst: Reg,
+        src: Reg,
+    },
     /// Read the next item of the iterator in `iter` into `val`, advancing `idx`.
     /// Jumps to `to` when exhausted.
-    ForNext { iter: Reg, idx: Reg, val: Reg, to: u32 },
-    MakeStruct { dst: Reg, info: u16, base: Reg },
-    MakeClosure { dst: Reg, child: u16 },
+    ForNext {
+        iter: Reg,
+        idx: Reg,
+        val: Reg,
+        to: u32,
+    },
+    MakeStruct {
+        dst: Reg,
+        info: u16,
+        base: Reg,
+    },
+    MakeClosure {
+        dst: Reg,
+        child: u16,
+    },
 
-    Index { dst: Reg, base: Reg, key: Reg },
-    SetIndex { base: Reg, key: Reg, val: Reg },
-    GetField { dst: Reg, base: Reg, member: u16 },
-    SetField { base: Reg, member: u16, val: Reg },
+    Index {
+        dst: Reg,
+        base: Reg,
+        key: Reg,
+    },
+    SetIndex {
+        base: Reg,
+        key: Reg,
+        val: Reg,
+    },
+    GetField {
+        dst: Reg,
+        base: Reg,
+        member: u16,
+    },
+    SetField {
+        base: Reg,
+        member: u16,
+        val: Reg,
+    },
 
     /// The `?` operator. Unwraps Ok/Some into `dst`, or returns early on Err/None.
-    Try { dst: Reg, src: Reg },
-    Cast { dst: Reg, src: Reg, ty: u16 },
+    Try {
+        dst: Reg,
+        src: Reg,
+    },
+    Cast {
+        dst: Reg,
+        src: Reg,
+        ty: u16,
+    },
     /// Coerce a dynamic value into an annotated type, `let c: Config = ..`.
-    Coerce { dst: Reg, src: Reg, ty: u16 },
+    Coerce {
+        dst: Reg,
+        src: Reg,
+        ty: u16,
+    },
 
     /// Test `val` against a pattern, binding its names into their registers.
     /// `dst` receives a bool.
-    TestBind { val: Reg, pat: u16, dst: Reg },
+    TestBind {
+        val: Reg,
+        pat: u16,
+        dst: Reg,
+    },
 
     /// Render a format template into `dst`.
-    Fmt { dst: Reg, spec: u16 },
+    Fmt {
+        dst: Reg,
+        spec: u16,
+    },
     /// A statement macro that renders a template then acts on it.
-    MacroCall { kind: MacroKind, dst: Reg, spec: u16 },
+    MacroCall {
+        kind: MacroKind,
+        dst: Reg,
+        spec: u16,
+    },
     /// `dbg!` takes plain registers, not a template.
-    Dbg { dst: Reg, base: Reg, argc: u16 },
+    Dbg {
+        dst: Reg,
+        base: Reg,
+        argc: u16,
+    },
 
     /// Spawn child closure `child` as a tokio task, writing a JoinHandle into
     /// `dst`. Emitted only for `#[tokio::main]` scripts, run by the parallel VM.
-    Spawn { dst: Reg, child: u16 },
+    Spawn {
+        dst: Reg,
+        child: u16,
+    },
     /// Await the future or JoinHandle in `src`, writing its result into `dst`.
     /// Parallel VM only.
-    Await { dst: Reg, src: Reg },
+    Await {
+        dst: Reg,
+        src: Reg,
+    },
 }
 
 /// One compiled function, method, or closure body.

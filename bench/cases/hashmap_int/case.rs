@@ -3,7 +3,11 @@ use std::time::Instant;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: i64 = if args.len() > 1 { args[1].parse().unwrap() } else { 150_000 };
+    let n: i64 = if args.len() > 1 {
+        args[1].parse().unwrap()
+    } else {
+        150_000
+    };
     let t = Instant::now();
     // minstd LCG, exact in f64 so every language generates the same sequence.
     let mut x: i64 = 12345;

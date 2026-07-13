@@ -2,14 +2,18 @@ use std::time::Instant;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: i64 = if args.len() > 1 { args[1].parse().unwrap() } else { 200_000 };
+    let n: i64 = if args.len() > 1 {
+        args[1].parse().unwrap()
+    } else {
+        200_000
+    };
     let t = Instant::now();
     let mut s = String::new();
     let mut i: i64 = 0;
     while i < n {
         s.push_str("item");
         s.push_str(&i.to_string());
-        s.push_str(" ");
+        s.push(' ');
         i += 1;
     }
     let hits = s.split("item12").count() - 1;

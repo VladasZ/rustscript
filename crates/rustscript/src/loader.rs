@@ -47,16 +47,21 @@ pub struct Program {
 }
 
 pub fn load(script_path: &Path, root_source: &str) -> Result<Program> {
-    let ast = syn::parse_file(root_source)
-        .map_err(|e| anyhow!("parse error: {e}"))?;
+    let ast = syn::parse_file(root_source).map_err(|e| anyhow!("parse error: {e}"))?;
     let dir = script_path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let mut modules: Vec<ModuleSrc> = Vec::new();
-    let mut files: Vec<(PathBuf, String)> = vec![(PathBuf::from("main.rs"), root_source.to_string())];
+    let mut files: Vec<(PathBuf, String)> =
+        vec![(PathBuf::from("main.rs"), root_source.to_string())];
     let root = collect(&mut modules, &mut files, &dir, &dir, Vec::new(), ast.items)?;
     modules.insert(0, root);
     let tokio_main = detect_tokio_main(&modules[0].items)?;
     let crate_deps = graft_crate_deps(&mut modules, script_path)?;
-    Ok(Program { modules, files, crate_deps, tokio_main })
+    Ok(Program {
+        modules,
+        files,
+        crate_deps,
+        tokio_main,
+    })
 }
 
 /// Look for `#[tokio::main]` on `fn main`. Only the multi thread runtime is
@@ -69,10 +74,13 @@ fn detect_tokio_main(items: &[Item]) -> Result<bool> {
             continue;
         }
         for attr in &f.attrs {
-            let segs: Vec<String> =
-                attr.path().segments.iter().map(|s| s.ident.to_string()).collect();
-            if segs.last().map(String::as_str) != Some("main")
-                || !segs.iter().any(|s| s == "tokio")
+            let segs: Vec<String> = attr
+                .path()
+                .segments
+                .iter()
+                .map(|s| s.ident.to_string())
+                .collect();
+            if segs.last().map(String::as_str) != Some("main") || !segs.iter().any(|s| s == "tokio")
             {
                 continue;
             }
@@ -119,7 +127,10 @@ fn collect(
             bail!("unsupported feature: #[path] on `mod {name}`");
         }
         if seen.contains(&name) {
-            bail!("module `{name}` is declared twice in {}", module_label(&path));
+            bail!(
+                "module `{name}` is declared twice in {}",
+                module_label(&path)
+            );
         }
         seen.push(name.clone());
         let mut child_path = path.clone();
@@ -129,7 +140,14 @@ fn collect(
             Some((_, inline_items)) => inline_items,
             None => load_file(files, script_dir, children_dir, &name, &child_path)?,
         };
-        let child = collect(modules, files, script_dir, &child_dir, child_path, child_items)?;
+        let child = collect(
+            modules,
+            files,
+            script_dir,
+            &child_dir,
+            child_path,
+            child_items,
+        )?;
         modules.push(child);
     }
     Ok(ModuleSrc { path, items: kept })
@@ -164,8 +182,8 @@ fn load_file(
     };
     let source = std::fs::read_to_string(&file)
         .map_err(|e| anyhow!("cannot read {}: {e}", file.display()))?;
-    let ast = syn::parse_file(&source)
-        .map_err(|e| anyhow!("parse error in {}: {e}", file.display()))?;
+    let ast =
+        syn::parse_file(&source).map_err(|e| anyhow!("parse error in {}: {e}", file.display()))?;
     let rel = file.strip_prefix(script_dir).unwrap_or(&file).to_path_buf();
     files.push((rel, source));
     Ok(ast.items)
@@ -188,7 +206,14 @@ fn graft_crate_deps(modules: &mut Vec<ModuleSrc>, script_path: &Path) -> Result<
         let ast = syn::parse_file(&source)
             .map_err(|e| anyhow!("parse error in {}: {e}", lib.display()))?;
         let mut files: Vec<(PathBuf, String)> = vec![(PathBuf::from("lib.rs"), source)];
-        let root = collect(modules, &mut files, &src_dir, &src_dir, vec![name.clone()], ast.items)?;
+        let root = collect(
+            modules,
+            &mut files,
+            &src_dir,
+            &src_dir,
+            vec![name.clone()],
+            ast.items,
+        )?;
         modules.push(root);
         deps.push(CrateDep { name, dir, files });
     }
@@ -213,7 +238,11 @@ fn local_path_deps(script_path: &Path) -> Vec<(String, PathBuf)> {
     };
     let mut out = Vec::new();
     for (name, spec) in deps {
-        if let Some(rel) = spec.as_table().and_then(|t| t.get("path")).and_then(|p| p.as_str()) {
+        if let Some(rel) = spec
+            .as_table()
+            .and_then(|t| t.get("path"))
+            .and_then(|p| p.as_str())
+        {
             // The checker writes this dir into a throwaway manifest under the
             // cache dir, so a relative path would resolve against the wrong
             // root. Canonicalize to an absolute path pinned to the real crate.

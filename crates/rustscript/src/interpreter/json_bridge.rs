@@ -8,10 +8,8 @@ use anyhow::{Result, bail};
 
 use rustc_hash::FxHashMap;
 
-use super::value::{MapKey, RStr, StructShape, Value, map_with_capacity};
 use super::Interp;
-
-
+use super::value::{MapKey, RStr, StructShape, Value, map_with_capacity};
 
 // -- serde_json bridge -----------------------------------------------------
 
@@ -84,10 +82,7 @@ impl<'de> serde::de::Visitor<'de> for KeySeed<'_> {
         Ok(self.intern(s))
     }
 
-    fn visit_string<E: serde::de::Error>(
-        self,
-        s: String,
-    ) -> std::result::Result<Rc<RStr>, E> {
+    fn visit_string<E: serde::de::Error>(self, s: String) -> std::result::Result<Rc<RStr>, E> {
         Ok(self.intern(&s))
     }
 }
@@ -151,7 +146,10 @@ impl<'de> serde::de::Visitor<'de> for JsonVisitor<'_> {
     ) -> std::result::Result<Value, A::Error> {
         let mut map = map_with_capacity(access.size_hint().unwrap_or(0));
         while let Some(k) = access.next_key_seed(KeySeed { keys: self.keys })? {
-            map.insert(MapKey::Str(k), access.next_value_seed(JsonSeed { keys: self.keys })?);
+            map.insert(
+                MapKey::Str(k),
+                access.next_value_seed(JsonSeed { keys: self.keys })?,
+            );
         }
         Ok(Value::Map(Rc::new(RefCell::new(map))))
     }
@@ -190,15 +188,20 @@ pub(super) fn serde_rename(field: &syn::Field) -> Option<String> {
             continue;
         }
         // parse_nested_meta walks the `serde(...)` list, e.g. `rename = "x"`.
-        let _ = attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("rename")
-                && let Ok(value) = meta.value()
-                && let Ok(lit) = value.parse::<syn::LitStr>()
-            {
-                renamed = Some(lit.value());
-            }
-            Ok(())
-        });
+        if attr
+            .parse_nested_meta(|meta| {
+                if meta.path.is_ident("rename")
+                    && let Ok(value) = meta.value()
+                    && let Ok(lit) = value.parse::<syn::LitStr>()
+                {
+                    renamed = Some(lit.value());
+                }
+                Ok(())
+            })
+            .is_err()
+        {
+            return None;
+        }
     }
     renamed
 }
@@ -231,8 +234,9 @@ impl Interp {
         // its concrete type, planned in the module that type was named in.
         if p.qself.is_none()
             && p.path.segments.len() == 1
-            && let Some((_, bound, bmod)) =
-                tenv.iter().find(|(n, _, _)| p.path.segments[0].ident == &**n)
+            && let Some((_, bound, bmod)) = tenv
+                .iter()
+                .find(|(n, _, _)| p.path.segments[0].ident == **n)
         {
             return self.json_plan(bound, building, *bmod as usize, tenv);
         }
@@ -242,18 +246,22 @@ impl Interp {
         let name = seg.ident.to_string();
         let generic = |i: usize| -> Option<&syn::Type> {
             match &seg.arguments {
-                syn::PathArguments::AngleBracketed(a) => {
-                    a.args.iter().filter_map(|g| match g {
+                syn::PathArguments::AngleBracketed(a) => a
+                    .args
+                    .iter()
+                    .filter_map(|g| match g {
                         syn::GenericArgument::Type(t) => Some(t),
                         _ => None,
-                    }).nth(i)
-                }
+                    })
+                    .nth(i),
                 _ => None,
             }
         };
         match name.as_str() {
             "Vec" | "VecDeque" => match generic(0) {
-                Some(inner) => JsonPlan::Vec(Box::new(self.json_plan(inner, building, module, tenv))),
+                Some(inner) => {
+                    JsonPlan::Vec(Box::new(self.json_plan(inner, building, module, tenv)))
+                }
                 None => JsonPlan::Dynamic,
             },
             "Option" | "Box" | "Rc" | "Arc" => match generic(0) {
@@ -261,7 +269,9 @@ impl Interp {
                 None => JsonPlan::Dynamic,
             },
             "HashMap" | "BTreeMap" => match generic(1) {
-                Some(inner) => JsonPlan::Map(Box::new(self.json_plan(inner, building, module, tenv))),
+                Some(inner) => {
+                    JsonPlan::Map(Box::new(self.json_plan(inner, building, module, tenv)))
+                }
                 None => JsonPlan::Dynamic,
             },
             _ => {
@@ -359,7 +369,10 @@ impl<'de> serde::de::DeserializeSeed<'de> for PlanSeed<'_> {
         self,
         d: D,
     ) -> std::result::Result<Value, D::Error> {
-        d.deserialize_any(PlanVisitor { plan: self.plan, keys: self.keys })
+        d.deserialize_any(PlanVisitor {
+            plan: self.plan,
+            keys: self.keys,
+        })
     }
 }
 
@@ -444,7 +457,10 @@ impl<'de> serde::de::Visitor<'de> for PlanVisitor<'_> {
             _ => &JsonPlan::Dynamic,
         };
         let mut items = Vec::with_capacity(seq.size_hint().unwrap_or(0));
-        while let Some(v) = seq.next_element_seed(PlanSeed { plan: elem, keys: self.keys })? {
+        while let Some(v) = seq.next_element_seed(PlanSeed {
+            plan: elem,
+            keys: self.keys,
+        })? {
             items.push(v);
         }
         Ok(Value::vec(items))
@@ -459,13 +475,15 @@ impl<'de> serde::de::Visitor<'de> for PlanVisitor<'_> {
                 // Missing fields become None, like the coercion pass did.
                 let mut values: Vec<Value> =
                     (0..sp.shape.fields.len()).map(|_| Value::none()).collect();
-                while let Some(slot) =
-                    access.next_key_seed(FieldSeed { key_map: &sp.key_map })?
-                {
+                while let Some(slot) = access.next_key_seed(FieldSeed {
+                    key_map: &sp.key_map,
+                })? {
                     match slot {
                         Some(i) => {
-                            let v = access
-                                .next_value_seed(PlanSeed { plan: &sp.fields[i], keys: self.keys })?;
+                            let v = access.next_value_seed(PlanSeed {
+                                plan: &sp.fields[i],
+                                keys: self.keys,
+                            })?;
                             // An Option field wraps a present, non-null value in
                             // Some so a `match Some(x)` in the script matches.
                             values[i] = if sp.optional[i] && !v.is_none_value() {
@@ -490,7 +508,10 @@ impl<'de> serde::de::Visitor<'de> for PlanVisitor<'_> {
                 while let Some(k) = access.next_key_seed(KeySeed { keys: self.keys })? {
                     map.insert(
                         MapKey::Str(k),
-                        access.next_value_seed(PlanSeed { plan: elem, keys: self.keys })?,
+                        access.next_value_seed(PlanSeed {
+                            plan: elem,
+                            keys: self.keys,
+                        })?,
                     );
                 }
                 Ok(Value::Map(Rc::new(RefCell::new(map))))
@@ -563,15 +584,19 @@ pub(super) fn value_to_json(v: &Value) -> Result<serde_json::Value> {
     Ok(match v {
         Value::Unit => J::Null,
         Value::Bool(b) => J::Bool(*b),
-        Value::Int(i) => J::Number(serde_json::Number::from(*i as i64)),
+        Value::Int(i) => J::Number(serde_json::Number::from(*i)),
         Value::Float(f) => serde_json::Number::from_f64(*f)
             .map(J::Number)
             .unwrap_or(J::Null),
         Value::Char(c) => J::String(c.to_string()),
         Value::Str(s) => J::String(s.to_string()),
-        Value::Vec(items) | Value::Tuple(items) => {
-            J::Array(items.borrow().iter().map(value_to_json).collect::<Result<_>>()?)
-        }
+        Value::Vec(items) | Value::Tuple(items) => J::Array(
+            items
+                .borrow()
+                .iter()
+                .map(value_to_json)
+                .collect::<Result<_>>()?,
+        ),
         Value::Map(map) => {
             let mut obj = serde_json::Map::default();
             for (k, val) in map.borrow().iter() {
@@ -583,7 +608,12 @@ pub(super) fn value_to_json(v: &Value) -> Result<serde_json::Value> {
             let mut obj = serde_json::Map::default();
             let values = s.values.borrow();
             for (slot, (field, val)) in s.shape.fields.iter().zip(values.iter()).enumerate() {
-                let key = s.shape.renames.get(slot).and_then(Option::as_ref).unwrap_or(field);
+                let key = s
+                    .shape
+                    .renames
+                    .get(slot)
+                    .and_then(Option::as_ref)
+                    .unwrap_or(field);
                 obj.insert(key.to_string(), value_to_json(val)?);
             }
             J::Object(obj)
@@ -599,7 +629,6 @@ pub(super) fn value_to_json(v: &Value) -> Result<serde_json::Value> {
                     _ => J::Null,
                 }
             } else {
-                
                 if data.is_empty() {
                     J::String(variant.to_string())
                 } else {

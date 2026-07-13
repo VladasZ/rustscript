@@ -1,15 +1,12 @@
 //! Expressions and control flow. Split from the compiler.
 
-
 use anyhow::{Result, anyhow, bail};
 use syn::{BinOp, Block, Expr, Lit, Pat, Stmt, UnOp};
 
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::interpreter::bytecode::{
-    BinKind, Const, DISCARD, Op, Reg, UnKind,
-};
+use crate::interpreter::bytecode::{BinKind, Const, DISCARD, Op, Reg, UnKind};
 
 use super::*;
 
@@ -72,7 +69,11 @@ impl Compiler<'_> {
             let is_last = i == last;
             match stmt {
                 Stmt::Local(local)
-                    if local.init.as_ref().and_then(|i| i.diverge.as_ref()).is_some() =>
+                    if local
+                        .init
+                        .as_ref()
+                        .and_then(|i| i.diverge.as_ref())
+                        .is_some() =>
                 {
                     // `let PAT = EXPR else { .. }`. Test the refutable pattern,
                     // and run the diverging else block when it does not match.
@@ -83,9 +84,16 @@ impl Compiler<'_> {
                     self.compile_into(val, &init.expr)?;
                     let matched = self.alloc();
                     let pidx = self.pattern_info(&local.pat)?;
-                    self.emit(Op::TestBind { val, pat: pidx, dst: matched });
+                    self.emit(Op::TestBind {
+                        val,
+                        pat: pidx,
+                        dst: matched,
+                    });
                     let jmp_ok = self.here();
-                    self.emit(Op::JumpIfTrue { cond: matched, to: 0 });
+                    self.emit(Op::JumpIfTrue {
+                        cond: matched,
+                        to: 0,
+                    });
                     let else_dst = self.alloc();
                     self.compile_into(else_dst, else_expr)?;
                     let ok_at = self.here() as u32;
@@ -176,16 +184,28 @@ impl Compiler<'_> {
         };
         if let Some(seg) = p.path.segments.last()
             && !matches!(seg.arguments, syn::PathArguments::AngleBracketed(_))
-            && self.ctx.resolver.resolve_struct_key(self.ctx.module, &p.path).is_none()
+            && self
+                .ctx
+                .resolver
+                .resolve_struct_key(self.ctx.module, &p.path)
+                .is_none()
         {
-            let segs: Vec<String> =
-                p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+            let segs: Vec<String> = p
+                .path
+                .segments
+                .iter()
+                .map(|s| s.ident.to_string())
+                .collect();
             if !matches!(self.resolve_path_res(&segs), Ok(Res::Alias(..))) {
                 return;
             }
         }
         let idx = self.add_cast(ty.clone());
-        self.emit(Op::Coerce { dst: reg, src: reg, ty: idx });
+        self.emit(Op::Coerce {
+            dst: reg,
+            src: reg,
+            ty: idx,
+        });
     }
 
     // -- expressions -------------------------------------------------------
@@ -245,11 +265,19 @@ impl Compiler<'_> {
             Expr::Macro(m) => self.compile_macro(&m.mac, dst)?,
             Expr::Tuple(t) => {
                 let base = self.compile_args(t.elems.iter())?;
-                self.emit(Op::MakeTuple { dst, base, count: t.elems.len() as u16 });
+                self.emit(Op::MakeTuple {
+                    dst,
+                    base,
+                    count: t.elems.len() as u16,
+                });
             }
             Expr::Array(a) => {
                 let base = self.compile_args(a.elems.iter())?;
-                self.emit(Op::MakeVec { dst, base, count: a.elems.len() as u16 });
+                self.emit(Op::MakeVec {
+                    dst,
+                    base,
+                    count: a.elems.len() as u16,
+                });
             }
             Expr::Repeat(r) => {
                 let val = self.compile_expr(&r.expr)?;
@@ -321,7 +349,10 @@ impl Compiler<'_> {
                 let k = self.add_const(Const::Char(c.value()));
                 self.emit(Op::LoadConst { dst, k });
             }
-            Lit::Byte(b) => self.emit(Op::LoadInt { dst, v: b.value() as i64 }),
+            Lit::Byte(b) => self.emit(Op::LoadInt {
+                dst,
+                v: b.value() as i64,
+            }),
             Lit::ByteStr(bs) => {
                 let k = self.add_const(Const::Bytes(Arc::from(bs.value().as_slice())));
                 self.emit(Op::LoadConst { dst, k });
@@ -439,7 +470,12 @@ impl Compiler<'_> {
             None => bail!("open ended ranges are not supported"),
         };
         let inclusive = matches!(r.limits, syn::RangeLimits::Closed(_));
-        self.emit(Op::MakeRange { dst, start, end, inclusive });
+        self.emit(Op::MakeRange {
+            dst,
+            start,
+            end,
+            inclusive,
+        });
         Ok(())
     }
 
@@ -458,8 +494,16 @@ impl Compiler<'_> {
             }
         };
         let end = self.alloc();
-        self.emit(Op::LoadInt { dst: end, v: i64::MAX });
-        self.emit(Op::MakeRange { dst, start, end, inclusive: false });
+        self.emit(Op::LoadInt {
+            dst: end,
+            v: i64::MAX,
+        });
+        self.emit(Op::MakeRange {
+            dst,
+            start,
+            end,
+            inclusive: false,
+        });
         Ok(())
     }
 
@@ -480,9 +524,16 @@ impl Compiler<'_> {
                     let scrut = self.compile_expr(&let_expr.expr)?;
                     let matched = self.alloc();
                     let pat = self.pattern_info(&let_expr.pat)?;
-                    self.emit(Op::TestBind { val: scrut, pat, dst: matched });
+                    self.emit(Op::TestBind {
+                        val: scrut,
+                        pat,
+                        dst: matched,
+                    });
                     else_jumps.push(self.here());
-                    self.emit(Op::JumpIfFalse { cond: matched, to: 0 });
+                    self.emit(Op::JumpIfFalse {
+                        cond: matched,
+                        to: 0,
+                    });
                 } else {
                     let cond = self.compile_expr(term)?;
                     else_jumps.push(self.here());
@@ -528,10 +579,21 @@ impl Compiler<'_> {
             self.push_scope();
             let matched = self.alloc();
             let pat = self.pattern_info(&let_expr.pat)?;
-            self.emit(Op::TestBind { val: scrut, pat, dst: matched });
+            self.emit(Op::TestBind {
+                val: scrut,
+                pat,
+                dst: matched,
+            });
             let exit = self.here();
-            self.emit(Op::JumpIfFalse { cond: matched, to: 0 });
-            self.loops.push(LoopCtx { breaks: vec![exit], continue_to: head, result: dst });
+            self.emit(Op::JumpIfFalse {
+                cond: matched,
+                to: 0,
+            });
+            self.loops.push(LoopCtx {
+                breaks: vec![exit],
+                continue_to: head,
+                result: dst,
+            });
             let body = self.alloc();
             self.compile_block_inner(&w.body, body)?;
             self.pop_scope();
@@ -545,7 +607,11 @@ impl Compiler<'_> {
             return Ok(());
         }
         let exit = self.emit_cond_jump(&w.cond)?;
-        self.loops.push(LoopCtx { breaks: vec![exit], continue_to: head, result: dst });
+        self.loops.push(LoopCtx {
+            breaks: vec![exit],
+            continue_to: head,
+            result: dst,
+        });
         let body = self.alloc();
         self.compile_block(&w.body, body)?;
         self.emit(Op::Jump { to: head as u32 });
@@ -561,7 +627,11 @@ impl Compiler<'_> {
     pub(super) fn compile_loop(&mut self, dst: Reg, l: &syn::ExprLoop) -> Result<()> {
         self.emit(Op::LoadUnit { dst });
         let head = self.here();
-        self.loops.push(LoopCtx { breaks: Vec::new(), continue_to: head, result: dst });
+        self.loops.push(LoopCtx {
+            breaks: Vec::new(),
+            continue_to: head,
+            result: dst,
+        });
         let body = self.alloc();
         self.compile_block(&l.body, body)?;
         self.emit(Op::Jump { to: head as u32 });
@@ -582,10 +652,19 @@ impl Compiler<'_> {
         let val = self.alloc();
         let head = self.here();
         let next = self.here();
-        self.emit(Op::ForNext { iter, idx, val, to: 0 });
+        self.emit(Op::ForNext {
+            iter,
+            idx,
+            val,
+            to: 0,
+        });
         self.push_scope();
         self.bind_pattern_irrefutable(&f.pat, val)?;
-        self.loops.push(LoopCtx { breaks: vec![next], continue_to: head, result: dst });
+        self.loops.push(LoopCtx {
+            breaks: vec![next],
+            continue_to: head,
+            result: dst,
+        });
         let body = self.alloc();
         self.compile_block_inner(&f.body, body)?;
         self.pop_scope();
@@ -602,9 +681,8 @@ impl Compiler<'_> {
     pub(super) fn compile_break(&mut self, b: &syn::ExprBreak) -> Result<()> {
         let result = self.loops.last().map(|l| l.result);
         if let Some(result) = result {
-            match &b.expr {
-                Some(e) => self.compile_into(result, e)?,
-                None => {}
+            if let Some(e) = &b.expr {
+                self.compile_into(result, e)?;
             }
         } else {
             bail!("break outside a loop");
@@ -616,7 +694,11 @@ impl Compiler<'_> {
     }
 
     pub(super) fn compile_continue(&mut self) -> Result<()> {
-        let to = self.loops.last().map(|l| l.continue_to).ok_or_else(|| anyhow!("continue outside a loop"))?;
+        let to = self
+            .loops
+            .last()
+            .map(|l| l.continue_to)
+            .ok_or_else(|| anyhow!("continue outside a loop"))?;
         self.emit(Op::Jump { to: to as u32 });
         Ok(())
     }
@@ -628,9 +710,16 @@ impl Compiler<'_> {
             self.push_scope();
             let matched = self.alloc();
             let pat = self.pattern_info(&arm.pat)?;
-            self.emit(Op::TestBind { val: scrut, pat, dst: matched });
+            self.emit(Op::TestBind {
+                val: scrut,
+                pat,
+                dst: matched,
+            });
             let skip = self.here();
-            self.emit(Op::JumpIfFalse { cond: matched, to: 0 });
+            self.emit(Op::JumpIfFalse {
+                cond: matched,
+                to: 0,
+            });
             // Guard.
             let mut guard_skip = None;
             if let Some((_, guard)) = &arm.guard {
@@ -652,7 +741,12 @@ impl Compiler<'_> {
         }
         // No arm matched, a runtime error mirroring the old behavior.
         let p = self.add_path(vec!["::unreachable_match".to_string()], None);
-        self.emit(Op::CallPath { dst, path: p, base: dst, argc: 0 });
+        self.emit(Op::CallPath {
+            dst,
+            path: p,
+            base: dst,
+            argc: 0,
+        });
         let end = self.here() as u32;
         for j in end_jumps {
             self.patch_jump(j, end);
@@ -661,5 +755,4 @@ impl Compiler<'_> {
     }
 
     // -- calls -------------------------------------------------------------
-
 }

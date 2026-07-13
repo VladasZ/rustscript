@@ -4,7 +4,7 @@ fn steps(start: u64) -> u64 {
     let mut n = start;
     let mut c: u64 = 0;
     while n != 1 {
-        if n % 2 == 0 {
+        if n.is_multiple_of(2) {
             n /= 2;
         } else {
             n = 3 * n + 1;
@@ -16,7 +16,11 @@ fn steps(start: u64) -> u64 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let limit: u64 = if args.len() > 1 { args[1].parse().unwrap() } else { 10_000 };
+    let limit: u64 = if args.len() > 1 {
+        args[1].parse().unwrap()
+    } else {
+        10_000
+    };
     let t = Instant::now();
     let mut total: u64 = 0;
     for i in 1..=limit {

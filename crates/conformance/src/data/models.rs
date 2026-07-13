@@ -21,7 +21,11 @@ pub struct Item {
 
 impl Item {
     pub fn new(id: i64, name: &str, kind: Kind) -> Item {
-        Item { id, name: name.to_string(), kind }
+        Item {
+            id,
+            name: name.to_string(),
+            kind,
+        }
     }
 
     pub fn describe(&self) -> String {

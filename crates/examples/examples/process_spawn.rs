@@ -22,7 +22,10 @@ fn main() -> anyhow::Result<()> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()?;
-    cat.stdin.take().unwrap().write_all(b"fed through stdin\n")?;
+    cat.stdin
+        .take()
+        .unwrap()
+        .write_all(b"fed through stdin\n")?;
     let output = cat.wait_with_output()?;
     print!("cat saw: {}", String::from_utf8_lossy(&output.stdout));
     Ok(())

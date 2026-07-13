@@ -6,8 +6,7 @@ use anyhow::{Result, bail};
 use syn::{Expr, Pat, UnOp};
 
 use crate::interpreter::bytecode::{
-    BinKind, CapSource, DISCARD, Member, Op, PatInfo, Reg,
-    StructLit,
+    BinKind, CapSource, DISCARD, Member, Op, PatInfo, Reg, StructLit,
 };
 use crate::interpreter::json_bridge::serde_rename;
 use crate::interpreter::value::StructShape;
@@ -71,7 +70,11 @@ impl Compiler<'_> {
                 _ => bail!("tokio::spawn needs an async block in this interpreter"),
             }
         }
-        let coerce = path.segments.last().and_then(first_generic_type).map(|t| Rc::new(t.clone()));
+        let coerce = path
+            .segments
+            .last()
+            .and_then(first_generic_type)
+            .map(|t| Rc::new(t.clone()));
         // A pending `let` annotation attaches to exactly this call, see
         // `Compiler::json_let`.
         let coerce = match coerce {
@@ -92,7 +95,12 @@ impl Compiler<'_> {
             // A local closure value called directly.
             if let NameLoc::Local(reg) = self.resolve(&name) {
                 let base = self.compile_args(c.args.iter())?;
-                self.emit(Op::CallValue { dst, callee: reg, base, argc });
+                self.emit(Op::CallValue {
+                    dst,
+                    callee: reg,
+                    base,
+                    argc,
+                });
                 return Ok(());
             }
         }
@@ -107,7 +115,13 @@ impl Compiler<'_> {
             Res::Fn(idx) => {
                 let targ = self.record_call_type_args(path);
                 let base = self.compile_args(c.args.iter())?;
-                self.emit(Op::CallFn { dst, func: idx, base, argc, targ });
+                self.emit(Op::CallFn {
+                    dst,
+                    func: idx,
+                    base,
+                    argc,
+                    targ,
+                });
                 return Ok(());
             }
             // A tuple struct constructor.
@@ -137,11 +151,26 @@ impl Compiler<'_> {
         };
         let p = self.add_path(path_segs, coerce);
         let base = self.compile_args(c.args.iter())?;
-        self.emit(Op::CallPath { dst, path: p, base, argc });
+        self.emit(Op::CallPath {
+            dst,
+            path: p,
+            base,
+            argc,
+        });
         Ok(())
     }
 
     pub(super) fn compile_method(&mut self, dst: Reg, m: &syn::ExprMethodCall) -> Result<()> {
+        // Tokio task handles yield Result in real Rust. The parallel VM already
+        // turns a successful task await into its inner value, so the source-level
+        // unwrap is complete once the await has been compiled.
+        if self.ctx.async_mode
+            && m.method == "unwrap"
+            && m.args.is_empty()
+            && matches!(&*m.receiver, Expr::Await(_))
+        {
+            return self.compile_into(dst, &m.receiver);
+        }
         // Fuse `x.get(k).copied().unwrap_or(d)` into one op. The chain builds
         // and tears down an Option per call, which dominates counting loops.
         if dst != DISCARD
@@ -157,13 +186,24 @@ impl Compiler<'_> {
             let recv = self.compile_expr(&g.receiver)?;
             let key = self.compile_expr(&g.args[0])?;
             let default = self.compile_expr(&m.args[0])?;
-            self.emit(Op::GetOrDefault { dst, recv, key, default });
+            self.emit(Op::GetOrDefault {
+                dst,
+                recv,
+                key,
+                default,
+            });
             return Ok(());
         }
         let recv = self.compile_expr(&m.receiver)?;
         let base = self.compile_args(m.args.iter())?;
         let name = self.add_name(m.method.to_string());
-        self.emit(Op::Method { dst, recv, name, base, argc: m.args.len() as u16 });
+        self.emit(Op::Method {
+            dst,
+            recv,
+            name,
+            base,
+            argc: m.args.len() as u16,
+        });
         // Methods that fill a `&mut` argument, like read_line, write the new
         // value into the arg window. The window slot is only a copy of the
         // variable, so move the result back into the variable register.
@@ -175,7 +215,10 @@ impl Compiler<'_> {
                 && p.qself.is_none()
                 && let NameLoc::Local(reg) = self.resolve(&p.path.segments[0].ident.to_string())
             {
-                self.emit(Op::Move { dst: reg, src: base + i as u16 });
+                self.emit(Op::Move {
+                    dst: reg,
+                    src: base + i as u16,
+                });
             }
         }
         Ok(())
@@ -197,7 +240,10 @@ impl Compiler<'_> {
         let child_idx = parent.children.len() as u16;
         parent.children.push(Rc::new(chunk));
         parent.child_caps.push(caps);
-        self.emit(Op::Spawn { dst, child: child_idx });
+        self.emit(Op::Spawn {
+            dst,
+            child: child_idx,
+        });
         Ok(())
     }
 
@@ -224,7 +270,10 @@ impl Compiler<'_> {
         let child_idx = parent.children.len() as u16;
         parent.children.push(chunk);
         parent.child_caps.push(caps);
-        self.emit(Op::MakeClosure { dst, child: child_idx });
+        self.emit(Op::MakeClosure {
+            dst,
+            child: child_idx,
+        });
         Ok(())
     }
 
@@ -260,7 +309,12 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    pub(super) fn compile_compound_assign(&mut self, target: &Expr, op: BinKind, rhs: &Expr) -> Result<()> {
+    pub(super) fn compile_compound_assign(
+        &mut self,
+        target: &Expr,
+        op: BinKind,
+        rhs: &Expr,
+    ) -> Result<()> {
         // `a op= b` becomes `a = a op b`.
         match target {
             Expr::Path(p) if p.path.segments.len() == 1 => {
@@ -270,31 +324,67 @@ impl Compiler<'_> {
                     _ => bail!("assignment to unknown or captured variable `{name}`"),
                 };
                 if let Some(imm) = int_literal(rhs) {
-                    self.emit(Op::BinImm { dst: reg, a: reg, imm, op });
+                    self.emit(Op::BinImm {
+                        dst: reg,
+                        a: reg,
+                        imm,
+                        op,
+                    });
                     return Ok(());
                 }
                 let b = self.compile_expr(rhs)?;
-                self.emit(Op::Bin { dst: reg, a: reg, b, op });
+                self.emit(Op::Bin {
+                    dst: reg,
+                    a: reg,
+                    b,
+                    op,
+                });
             }
             Expr::Index(idx) => {
                 let base = self.compile_expr(&idx.expr)?;
                 let key = self.compile_expr(&idx.index)?;
                 let cur = self.alloc();
-                self.emit(Op::Index { dst: cur, base, key });
+                self.emit(Op::Index {
+                    dst: cur,
+                    base,
+                    key,
+                });
                 let b = self.compile_expr(rhs)?;
                 let res = self.alloc();
-                self.emit(Op::Bin { dst: res, a: cur, b, op });
-                self.emit(Op::SetIndex { base, key, val: res });
+                self.emit(Op::Bin {
+                    dst: res,
+                    a: cur,
+                    b,
+                    op,
+                });
+                self.emit(Op::SetIndex {
+                    base,
+                    key,
+                    val: res,
+                });
             }
             Expr::Field(f) => {
                 let base = self.compile_expr(&f.base)?;
                 let member = self.member_of(&f.member);
                 let cur = self.alloc();
-                self.emit(Op::GetField { dst: cur, base, member });
+                self.emit(Op::GetField {
+                    dst: cur,
+                    base,
+                    member,
+                });
                 let b = self.compile_expr(rhs)?;
                 let res = self.alloc();
-                self.emit(Op::Bin { dst: res, a: cur, b, op });
-                self.emit(Op::SetField { base, member, val: res });
+                self.emit(Op::Bin {
+                    dst: res,
+                    a: cur,
+                    b,
+                    op,
+                });
+                self.emit(Op::SetField {
+                    base,
+                    member,
+                    val: res,
+                });
             }
             _ => bail!("invalid compound assignment target"),
         }
@@ -312,13 +402,22 @@ impl Compiler<'_> {
         // A user struct resolves to its canonical name, which keys shapes,
         // methods, and coercions. Anything else, an enum struct variant for
         // example, keeps the bare last segment.
-        let (name, def) = match self.ctx.resolver.resolve_struct_key(self.ctx.module, &s.path) {
+        let (name, def) = match self
+            .ctx
+            .resolver
+            .resolve_struct_key(self.ctx.module, &s.path)
+        {
             Some(canon) => {
                 let def = self.ctx.resolver.structs.get(&canon).map(|d| d.ast.clone());
                 (canon.to_string(), def)
             }
             None => {
-                let bare = s.path.segments.last().map(|seg| seg.ident.to_string()).unwrap_or_default();
+                let bare = s
+                    .path
+                    .segments
+                    .last()
+                    .map(|seg| seg.ident.to_string())
+                    .unwrap_or_default();
                 (bare, None)
             }
         };
@@ -356,7 +455,7 @@ impl Compiler<'_> {
                             .iter()
                             .find(|f| f.ident.as_ref().is_some_and(|i| i == k))
                             .and_then(serde_rename)
-                            .map(|s| Rc::<str>::from(s))
+                            .map(Rc::<str>::from)
                     })
                     .collect();
                 (ordered, renames)
@@ -408,7 +507,10 @@ impl Compiler<'_> {
             binds.push((n, reg));
         }
         let f = self.cur();
-        f.pats.push(PatInfo { pat: Rc::new(pat.clone()), binds });
+        f.pats.push(PatInfo {
+            pat: Rc::new(pat.clone()),
+            binds,
+        });
         Ok((f.pats.len() - 1) as u16)
     }
 
@@ -428,14 +530,17 @@ impl Compiler<'_> {
                 // matches for these irrefutable shapes.
                 let matched = self.alloc();
                 let pidx = self.pattern_info(pat)?;
-                self.emit(Op::TestBind { val: reg, pat: pidx, dst: matched });
+                self.emit(Op::TestBind {
+                    val: reg,
+                    pat: pidx,
+                    dst: matched,
+                });
                 Ok(())
             }
         }
     }
 
     // -- macros ------------------------------------------------------------
-
 }
 
 /// Whether a call path names tokio's `spawn`, either `tokio::spawn` or

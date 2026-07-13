@@ -13,10 +13,16 @@ fn main() {
         counts.insert(w.to_string(), n);
     }
     let mut pairs: Vec<(String, i64)> = counts.into_iter().collect();
-    pairs.sort_by(|a, b| if a.1 == b.1 { a.0.cmp(&b.0) } else { b.1.cmp(&a.1) });
+    pairs.sort_by(|a, b| {
+        if a.1 == b.1 {
+            a.0.cmp(&b.0)
+        } else {
+            b.1.cmp(&a.1)
+        }
+    });
     let ns = t.elapsed().as_nanos();
-    for i in 0..15 {
-        println!("{} {}", pairs[i].0, pairs[i].1);
+    for pair in pairs.iter().take(15) {
+        println!("{} {}", pair.0, pair.1);
     }
     eprintln!("COMPUTE_NS {ns}");
 }

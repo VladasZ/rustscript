@@ -22,7 +22,11 @@ fn check(t: &Tree) -> i64 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let max: i64 = if args.len() > 1 { args[1].parse().unwrap() } else { 11 };
+    let max: i64 = if args.len() > 1 {
+        args[1].parse().unwrap()
+    } else {
+        11
+    };
     let t = Instant::now();
     let mut total: i64 = 0;
     let mut d = 4;

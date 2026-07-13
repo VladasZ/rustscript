@@ -48,9 +48,7 @@ fn real_main() -> Result<()> {
         // `rust file.rs` and the shebang form both land here. Everything after
         // the filename is passed through to the script. An extensionless path
         // still runs when it is a real file, e.g. a launcher symlink.
-        path if path.ends_with(".rs") || Path::new(path).is_file() => {
-            run(path, &all[1..])
-        }
+        path if path.ends_with(".rs") || Path::new(path).is_file() => run(path, &all[1..]),
         other => bail!("unknown command `{other}`, try `rust help`"),
     }
 }
@@ -66,9 +64,11 @@ fn run(file: &str, script_args: &[String]) -> Result<()> {
 
     // A launcher symlink must resolve to the real script so module files are
     // found next to the source, not next to the link.
-    let path = Path::new(file).canonicalize().unwrap_or_else(|_| Path::new(file).to_path_buf());
-    let source = std::fs::read_to_string(&path)
-        .map_err(|e| anyhow::anyhow!("cannot read {file}: {e}"))?;
+    let path = Path::new(file)
+        .canonicalize()
+        .unwrap_or_else(|_| Path::new(file).to_path_buf());
+    let source =
+        std::fs::read_to_string(&path).map_err(|e| anyhow::anyhow!("cannot read {file}: {e}"))?;
 
     let program = loader::load(&path, &source)?;
 
@@ -91,9 +91,11 @@ fn run(file: &str, script_args: &[String]) -> Result<()> {
 /// with the caller's arguments and exit with its status. Unlike `run`, this
 /// path never touches the interpreter.
 fn build_run(file: &str, script_args: &[String]) -> Result<()> {
-    let path = Path::new(file).canonicalize().unwrap_or_else(|_| Path::new(file).to_path_buf());
-    let source = std::fs::read_to_string(&path)
-        .map_err(|e| anyhow::anyhow!("cannot read {file}: {e}"))?;
+    let path = Path::new(file)
+        .canonicalize()
+        .unwrap_or_else(|_| Path::new(file).to_path_buf());
+    let source =
+        std::fs::read_to_string(&path).map_err(|e| anyhow::anyhow!("cannot read {file}: {e}"))?;
     let program = loader::load(&path, &source)?;
 
     let bin = checker::build(&path, &program.files, &program.crate_deps)?;

@@ -1,7 +1,6 @@
 //! Bridges for the extra crates a script may use: base64, chrono,
 //! rand and friends. Split from `builtins.rs`.
 
-
 use anyhow::{Result, bail};
 
 use super::native::Native;
@@ -11,7 +10,6 @@ use super::value::{StructData, Value};
 use super::json_bridge::*;
 use super::jwt_bridge::*;
 use super::std_bridge::*;
-
 
 /// `module::func` call is not a plain std bridge.
 pub(super) fn crate_bridge(module: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
@@ -104,14 +102,15 @@ pub(super) fn base64_engine(name: &str) -> Option<Value> {
         "URL_SAFE_NO_PAD" | "BASE64_URL_SAFE_NO_PAD" => "url_safe_no_pad",
         _ => return None,
     };
-    Some(Value::struct_of("Base64Engine", [("kind".into(), Value::str(kind))]))
+    Some(Value::struct_of(
+        "Base64Engine",
+        [("kind".into(), Value::str(kind))],
+    ))
 }
 
 pub(super) fn base64_method(s: &StructData, method: &str, args: &[Value]) -> Result<Value> {
     use base64::Engine;
-    use base64::engine::general_purpose::{
-        STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD,
-    };
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
     let kind = s.get("kind").map(|v| v.display()).unwrap_or_default();
     macro_rules! pick {
         ($m:ident, $($a:tt)*) => {
@@ -159,8 +158,8 @@ pub(super) fn datetime_method(s: &StructData, name: &str, args: &[Value]) -> Res
     let local = matches!(s.get("local"), Some(Value::Bool(true)));
     let utc: DateTime<Utc> = DateTime::from_timestamp(secs, nanos).unwrap_or_default();
     Ok(match name {
-        "timestamp" => Value::Int(secs as i64),
-        "timestamp_millis" => Value::Int(secs as i64 * 1000 + (nanos / 1_000_000) as i64),
+        "timestamp" => Value::Int(secs),
+        "timestamp_millis" => Value::Int(secs * 1000 + (nanos / 1_000_000) as i64),
         "to_rfc3339" => Value::str(utc.to_rfc3339()),
         "format" => {
             let fmt = args.first().map(|v| v.display()).unwrap_or_default();
@@ -185,7 +184,11 @@ pub(super) fn rng_method(name: &str, args: &[Value]) -> Result<Value> {
     let mut rng = rand::rng();
     Ok(match name {
         "random_range" | "gen_range" => match args.first() {
-            Some(Value::Range { start, end, inclusive }) => {
+            Some(Value::Range {
+                start,
+                end,
+                inclusive,
+            }) => {
                 let hi = if *inclusive { end + 1 } else { *end };
                 if hi > *start {
                     Value::Int(rng.random_range(*start..hi))

@@ -23,6 +23,9 @@ fn main() {
     let re_sub = regex::Regex::new(r"w00\d").unwrap();
     let replaced = re_sub.replace_all(&text, "X");
     let ns = t.elapsed().as_nanos();
-    println!("matches={matches} spans={spans} digits={digits} rlen={}", replaced.len());
+    println!(
+        "matches={matches} spans={spans} digits={digits} rlen={}",
+        replaced.len()
+    );
     eprintln!("COMPUTE_NS {ns}");
 }

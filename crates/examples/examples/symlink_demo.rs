@@ -23,7 +23,10 @@ fn main() -> anyhow::Result<()> {
     symlink(&target, &link)?;
 
     let pointed = fs::read_link(&link)?;
-    println!("link resolves to target: {}", pointed.to_string_lossy() == target);
+    println!(
+        "link resolves to target: {}",
+        pointed.to_string_lossy() == target
+    );
 
     let meta = fs::symlink_metadata(&link)?;
     println!("is_symlink: {}", meta.is_symlink());

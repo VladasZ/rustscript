@@ -13,5 +13,8 @@ fn main() {
 
     let styled = "status".green().bold().to_string();
     // When not a tty the styled text equals the plain text.
-    println!("styled clean when piped: {}", styled == "status" || interactive);
+    println!(
+        "styled clean when piped: {}",
+        styled == "status" || interactive
+    );
 }

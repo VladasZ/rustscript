@@ -3,32 +3,38 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::slice::from_ref;
 
 use anyhow::{Result, anyhow, bail};
 
-
-use super::value::{StructData, Value};
 use super::Interp;
+use super::value::{StructData, Value};
 
 use super::builtins::*;
 use super::methods::*;
 
-
 impl Interp {
     /// Methods that take a closure, on Vec, Option, and Result. Returns None
     /// when the method is not one of these, so plain dispatch can handle it.
-    pub(super) fn higher_order(&self, recv: &Value, name: &str, args: &[Value]) -> Result<Option<Value>> {
+    pub(super) fn higher_order(
+        &self,
+        recv: &Value,
+        name: &str,
+        args: &[Value],
+    ) -> Result<Option<Value>> {
         match recv {
             Value::Vec(items) => self.vec_higher_order(items, name, args),
-            Value::Enum { enum_name, variant, data } if &**enum_name == "Option" => {
-                self.option_higher_order(variant, data, name, args)
-            }
-            Value::Enum { enum_name, variant, data } if &**enum_name == "Result" => {
-                self.result_higher_order(variant, data, name, args)
-            }
-            Value::Struct(s) if &**s.name() == "Entry" => {
-                self.entry_higher_order(s, name, args)
-            }
+            Value::Enum {
+                enum_name,
+                variant,
+                data,
+            } if &**enum_name == "Option" => self.option_higher_order(variant, data, name, args),
+            Value::Enum {
+                enum_name,
+                variant,
+                data,
+            } if &**enum_name == "Result" => self.result_higher_order(variant, data, name, args),
+            Value::Struct(s) if &**s.name() == "Entry" => self.entry_higher_order(s, name, args),
             _ => Ok(None),
         }
     }
@@ -102,7 +108,7 @@ impl Interp {
                 let f = clo(0)?;
                 let mut r = Vec::new();
                 for x in list {
-                    if self.call_closure(&f, &[x.clone()])?.is_truthy() {
+                    if self.call_closure(&f, from_ref(&x))?.is_truthy() {
                         r.push(x);
                     }
                 }
@@ -122,7 +128,7 @@ impl Interp {
                 let f = clo(0)?;
                 let mut r = Vec::new();
                 for x in list {
-                    r.extend(self.into_iter_items(self.call_closure(&f, &[x])?)?);
+                    r.extend(self.iter_items(self.call_closure(&f, &[x])?)?);
                 }
                 Value::vec(r)
             }
@@ -137,7 +143,7 @@ impl Interp {
                 let f = clo(0)?;
                 let mut found = Value::none();
                 for x in list {
-                    if self.call_closure(&f, &[x.clone()])?.is_truthy() {
+                    if self.call_closure(&f, from_ref(&x))?.is_truthy() {
                         found = Value::some(x);
                         break;
                     }
@@ -204,7 +210,7 @@ impl Interp {
                 let f = clo(0)?;
                 let mut kept = Vec::new();
                 for x in list {
-                    if self.call_closure(&f, &[x.clone()])?.is_truthy() {
+                    if self.call_closure(&f, from_ref(&x))?.is_truthy() {
                         kept.push(x);
                     }
                 }
@@ -215,7 +221,7 @@ impl Interp {
                 let f = clo(0)?;
                 let mut keyed = Vec::new();
                 for x in list {
-                    let k = self.call_closure(&f, &[x.clone()])?;
+                    let k = self.call_closure(&f, from_ref(&x))?;
                     keyed.push((sort_key(&k), x));
                 }
                 keyed.sort_by(|a, b| a.0.cmp(&b.0));
@@ -249,7 +255,7 @@ impl Interp {
                 let want_max = name == "max_by_key";
                 let mut best: Option<(SortKey, Value)> = None;
                 for x in list {
-                    let k = sort_key(&self.call_closure(&f, &[x.clone()])?);
+                    let k = sort_key(&self.call_closure(&f, from_ref(&x))?);
                     let take = match &best {
                         None => true,
                         Some((bk, _)) => {
@@ -273,7 +279,7 @@ impl Interp {
                 let f = clo(0)?;
                 let mut r = Vec::new();
                 for x in list {
-                    if self.call_closure(&f, &[x.clone()])?.is_truthy() {
+                    if self.call_closure(&f, from_ref(&x))?.is_truthy() {
                         r.push(x);
                     } else {
                         break;
@@ -286,7 +292,7 @@ impl Interp {
                 let mut r = Vec::new();
                 let mut skipping = true;
                 for x in list {
-                    if skipping && self.call_closure(&f, &[x.clone()])?.is_truthy() {
+                    if skipping && self.call_closure(&f, from_ref(&x))?.is_truthy() {
                         continue;
                     }
                     skipping = false;
@@ -298,7 +304,7 @@ impl Interp {
                 let f = clo(0)?;
                 let (mut yes, mut no) = (Vec::new(), Vec::new());
                 for x in list {
-                    if self.call_closure(&f, &[x.clone()])?.is_truthy() {
+                    if self.call_closure(&f, from_ref(&x))?.is_truthy() {
                         yes.push(x);
                     } else {
                         no.push(x);
@@ -428,7 +434,10 @@ impl Interp {
                     Value::ok(inner())
                 } else {
                     let ctx = self.call_closure(&*clo(0)?, &[])?.display();
-                    Value::err(Value::str(format!("{ctx}\nCaused by: {}", inner().display())))
+                    Value::err(Value::str(format!(
+                        "{ctx}\nCaused by: {}",
+                        inner().display()
+                    )))
                 }
             }
             _ => return Ok(None),

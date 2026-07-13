@@ -15,7 +15,6 @@ use super::builtins::*;
 use super::ops::compare_values;
 use super::std_bridge::bytes_to_vec;
 
-
 /// `map.entry(k).or_insert_with(Vec::new).push(x)` accumulates in place.
 pub(super) fn entry_method(s: &StructData, name: &str, args: &[Value]) -> Result<Value> {
     let key = s
@@ -33,20 +32,25 @@ pub(super) fn entry_method(s: &StructData, name: &str, args: &[Value]) -> Result
         }
         "or_default" => {
             let mut map = m.borrow_mut();
-            map.entry(key).or_insert(Value::Int(0)).clone()
+            map.entry(key)
+                .or_insert_with(|| Value::vec(Vec::new()))
+                .clone()
         }
         "key" => key.to_value(),
         _ => bail!("unknown method `{name}` on Entry"),
     })
 }
 
-
 pub(super) fn generic_method(recv: &Value, name: &str, _args: &[Value]) -> Result<Value> {
     match (recv, name) {
         (_, "clone") => Ok(recv.clone()),
         (_, "to_string") => Ok(Value::str(recv.display())),
         (Value::Bool(b), "as_bool") => Ok(Value::some(Value::Bool(*b))),
-        (Value::Bool(b), "then_some") => Ok(if *b { Value::some(Value::Unit) } else { Value::none() }),
+        (Value::Bool(b), "then_some") => Ok(if *b {
+            Value::some(Value::Unit)
+        } else {
+            Value::none()
+        }),
         (Value::Vec(v), "as_array") => Ok(Value::some(Value::vec(v.borrow().clone()))),
         _ => bail!("unknown method `{name}` on {}", recv.type_name()),
     }
@@ -54,9 +58,7 @@ pub(super) fn generic_method(recv: &Value, name: &str, _args: &[Value]) -> Resul
 
 pub(super) fn str_method(s: &Rc<RStr>, method: &MethodName, args: &[Value]) -> Result<Value> {
     use BuiltinId as B;
-    let arg_str = |i: usize| -> String {
-        args.get(i).map(|v| v.display()).unwrap_or_default()
-    };
+    let arg_str = |i: usize| -> String { args.get(i).map(|v| v.display()).unwrap_or_default() };
     Ok(match method.id {
         B::Len => Value::Int(s.len() as i64),
         B::IsEmpty => Value::Bool(s.is_empty()),
@@ -75,9 +77,7 @@ pub(super) fn str_method(s: &Rc<RStr>, method: &MethodName, args: &[Value]) -> R
             let sep = arg_str(0);
             Value::vec(s.split(&sep).map(Value::str).collect())
         }
-        B::SplitWhitespace => {
-            Value::vec(s.split_whitespace().map(Value::str).collect())
-        }
+        B::SplitWhitespace => Value::vec(s.split_whitespace().map(Value::str).collect()),
         B::Count => Value::Int(s.chars().count() as i64),
         B::Parse => {
             let t = s.trim();
@@ -96,9 +96,7 @@ pub(super) fn str_method(s: &Rc<RStr>, method: &MethodName, args: &[Value]) -> R
 }
 
 pub(super) fn str_method_slow(s: &Rc<RStr>, name: &str, args: &[Value]) -> Result<Value> {
-    let arg_str = |i: usize| -> String {
-        args.get(i).map(|v| v.display()).unwrap_or_default()
-    };
+    let arg_str = |i: usize| -> String { args.get(i).map(|v| v.display()).unwrap_or_default() };
     Ok(match name {
         "to_owned" | "trim_string" => Value::Str(s.clone()),
         "to_uppercase" | "to_ascii_uppercase" => Value::str(s.to_uppercase()),
@@ -221,14 +219,19 @@ pub(super) fn color_method(s: &str, name: &str) -> Option<Value> {
     Some(Value::str(out.to_string()))
 }
 
-pub(super) fn vec_method(v: &Rc<RefCell<Vec<Value>>>, method: &MethodName, args: &mut [Value]) -> Result<Value> {
+pub(super) fn vec_method(
+    v: &Rc<RefCell<Vec<Value>>>,
+    method: &MethodName,
+    args: &mut [Value],
+) -> Result<Value> {
     use BuiltinId as B;
     Ok(match method.id {
         B::Len | B::Count => Value::Int(v.borrow().len() as i64),
         B::IsEmpty => Value::Bool(v.borrow().is_empty()),
         B::Clone | B::Iter => Value::vec(v.borrow().clone()),
         B::Push => {
-            v.borrow_mut().push(args.first_mut().map(take).unwrap_or(Value::Unit));
+            v.borrow_mut()
+                .push(args.first_mut().map(take).unwrap_or(Value::Unit));
             Value::Unit
         }
         B::Pop => match v.borrow_mut().pop() {
@@ -237,7 +240,8 @@ pub(super) fn vec_method(v: &Rc<RefCell<Vec<Value>>>, method: &MethodName, args:
         },
         B::Insert => {
             let i = int_arg(args, 0)? as usize;
-            v.borrow_mut().insert(i, args.get(1).cloned().unwrap_or(Value::Unit));
+            v.borrow_mut()
+                .insert(i, args.get(1).cloned().unwrap_or(Value::Unit));
             Value::Unit
         }
         B::Remove => {
@@ -251,15 +255,25 @@ pub(super) fn vec_method(v: &Rc<RefCell<Vec<Value>>>, method: &MethodName, args:
                 None => Value::none(),
             }
         }
-        B::First => v.borrow().first().cloned().map(Value::some).unwrap_or_else(Value::none),
-        B::Last => v.borrow().last().cloned().map(Value::some).unwrap_or_else(Value::none),
+        B::First => v
+            .borrow()
+            .first()
+            .cloned()
+            .map(Value::some)
+            .unwrap_or_else(Value::none),
+        B::Last => v
+            .borrow()
+            .last()
+            .cloned()
+            .map(Value::some)
+            .unwrap_or_else(Value::none),
         B::Contains => {
             let needle = args.first().cloned().unwrap_or(Value::Unit);
             Value::Bool(v.borrow().iter().any(|x| x.eq_value(&needle)))
         }
         B::Sort => {
             let mut items = v.borrow_mut();
-            items.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
+            items.sort_by_key(sort_key);
             Value::Unit
         }
         B::Join => {
@@ -348,7 +362,9 @@ pub(super) fn vec_method(v: &Rc<RefCell<Vec<Value>>>, method: &MethodName, args:
                 for item in items.iter() {
                     match item {
                         Value::Vec(inner) => out.extend(inner.borrow().iter().cloned()),
-                        Value::Enum { variant, data, .. } if matches!(&**variant, "Some" | "Ok") => {
+                        Value::Enum { variant, data, .. }
+                            if matches!(&**variant, "Some" | "Ok") =>
+                        {
                             if let Some(inner) = data.first() {
                                 out.push(inner.clone());
                             }
@@ -361,7 +377,12 @@ pub(super) fn vec_method(v: &Rc<RefCell<Vec<Value>>>, method: &MethodName, args:
             }
             // Iterators are eager vectors here, so `next` is the first item.
             // The check gate keeps it off real vectors, where it won't compile.
-            "next" => v.borrow().first().cloned().map(Value::some).unwrap_or_else(Value::none),
+            "next" => v
+                .borrow()
+                .first()
+                .cloned()
+                .map(Value::some)
+                .unwrap_or_else(Value::none),
             "max" | "min" => {
                 let items = v.borrow();
                 let mut best: Option<&Value> = None;
@@ -369,7 +390,11 @@ pub(super) fn vec_method(v: &Rc<RefCell<Vec<Value>>>, method: &MethodName, args:
                     let better = match best {
                         Some(b) => {
                             let ord = compare_values(item, b)?;
-                            if method.text == "max" { ord.is_gt() } else { ord.is_lt() }
+                            if method.text == "max" {
+                                ord.is_gt()
+                            } else {
+                                ord.is_lt()
+                            }
                         }
                         None => true,
                     };
@@ -384,7 +409,11 @@ pub(super) fn vec_method(v: &Rc<RefCell<Vec<Value>>>, method: &MethodName, args:
     })
 }
 
-pub(super) fn map_method(m: &Rc<RefCell<Map>>, method: &MethodName, args: &mut [Value]) -> Result<Value> {
+pub(super) fn map_method(
+    m: &Rc<RefCell<Map>>,
+    method: &MethodName,
+    args: &mut [Value],
+) -> Result<Value> {
     use BuiltinId as B;
     // Read-only lookups borrow the key instead of cloning it.
     let lookup = |i: usize, f: &dyn Fn(Option<&Value>) -> Value| -> Result<Value> {
@@ -397,7 +426,9 @@ pub(super) fn map_method(m: &Rc<RefCell<Map>>, method: &MethodName, args: &mut [
         B::IsEmpty => Value::Bool(m.borrow().is_empty()),
         B::Clone => Value::Map(Rc::new(RefCell::new(m.borrow().clone()))),
         B::Insert => {
-            let k = take(&mut args[0]).into_key().ok_or_else(|| anyhow!("invalid map key"))?;
+            let k = take(&mut args[0])
+                .into_key()
+                .ok_or_else(|| anyhow!("invalid map key"))?;
             let val = args.get_mut(1).map(take).unwrap_or(Value::Unit);
             let old = m.borrow_mut().insert(k, val);
             match old {
@@ -455,7 +486,9 @@ pub(super) fn num_method(recv: &Value, name: &str, args: &[Value]) -> Result<Val
     Ok(match (recv, name) {
         (_, "to_string") => Value::str(recv.display()),
         (_, "clone") => recv.clone(),
-        (Value::Int(i), "as_i64" | "as_u64" | "as_i128" | "as_usize") => Value::some(Value::Int(*i)),
+        (Value::Int(i), "as_i64" | "as_u64" | "as_i128" | "as_usize") => {
+            Value::some(Value::Int(*i))
+        }
         (_, "as_f64") => Value::some(Value::Float(as_f())),
         (Value::Int(i), "abs") => Value::Int(i.abs()),
         (Value::Float(f), "abs") => Value::Float(f.abs()),
@@ -466,8 +499,10 @@ pub(super) fn num_method(recv: &Value, name: &str, args: &[Value]) -> Result<Val
         (Value::Float(f), "floor") => Value::Float(f.floor()),
         (Value::Float(f), "ceil") => Value::Float(f.ceil()),
         (Value::Float(f), "round") => Value::Float(f.round()),
+        (Value::Float(f), "is_sign_positive") => Value::Bool(f.is_sign_positive()),
         (Value::Int(a), "min") => Value::Int((*a).min(int_arg(args, 0)?)),
         (Value::Int(a), "max") => Value::Int((*a).max(int_arg(args, 0)?)),
+        (Value::Int(a), "is_multiple_of") => Value::Bool(a % int_arg(args, 0)? == 0),
         (Value::Int(a), "saturating_sub") => Value::Int(a.saturating_sub(int_arg(args, 0)?)),
         (Value::Int(a), "saturating_add") => Value::Int(a.saturating_add(int_arg(args, 0)?)),
         (Value::Int(a), "saturating_mul") => Value::Int(a.saturating_mul(int_arg(args, 0)?)),
@@ -489,9 +524,7 @@ pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
         return Ok(recv.clone());
     }
     let (is_some, inner) = match recv {
-        Value::Enum { variant, data, .. } => {
-            (&**variant == "Some", data.first().cloned())
-        }
+        Value::Enum { variant, data, .. } => (&**variant == "Some", data.first().cloned()),
         _ => unreachable!(),
     };
     match method.id {
@@ -523,9 +556,7 @@ pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
 
 pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> Result<Value> {
     let (is_ok, inner) = match recv {
-        Value::Enum { variant, data, .. } => {
-            (&**variant == "Ok", data.first().cloned())
-        }
+        Value::Enum { variant, data, .. } => (&**variant == "Ok", data.first().cloned()),
         _ => unreachable!(),
     };
     let name = method.text.as_str();
@@ -539,7 +570,10 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
             if is_ok {
                 inner.unwrap_or(Value::Unit)
             } else {
-                bail!("called unwrap on an Err value: {}", inner.map(|v| v.display()).unwrap_or_default());
+                bail!(
+                    "called unwrap on an Err value: {}",
+                    inner.map(|v| v.display()).unwrap_or_default()
+                );
             }
         }
         "expect" => {
@@ -558,7 +592,11 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
         }
         // Same string-default reasoning as Option::unwrap_or_default above.
         "unwrap_or_default" => {
-            if is_ok { inner.unwrap_or_else(|| Value::str(String::new())) } else { Value::str(String::new()) }
+            if is_ok {
+                inner.unwrap_or_else(|| Value::str(String::new()))
+            } else {
+                Value::str(String::new())
+            }
         }
         "ok" => {
             if is_ok {
@@ -638,9 +676,7 @@ impl Ord for SortKey {
         use std::cmp::Ordering;
         match (self, other) {
             (SortKey::Int(a), SortKey::Int(b)) => a.cmp(b),
-            (SortKey::Float(a), SortKey::Float(b)) => {
-                a.partial_cmp(b).unwrap_or(Ordering::Equal)
-            }
+            (SortKey::Float(a), SortKey::Float(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
             (SortKey::Int(a), SortKey::Float(b)) => {
                 (*a as f64).partial_cmp(b).unwrap_or(Ordering::Equal)
             }

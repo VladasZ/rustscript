@@ -24,7 +24,7 @@ fn run(src: &str) -> String {
         .env("RUSTSCRIPT_SKIP_CHECK", "1")
         .output()
         .expect("failed to launch rustscript");
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).unwrap();
     assert!(
         out.status.success(),
         "script failed:\n{}",
@@ -42,7 +42,7 @@ fn run_fail(src: &str) -> String {
         .env("RUSTSCRIPT_SKIP_CHECK", "1")
         .output()
         .expect("failed to launch rustscript");
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).unwrap();
     assert!(!out.status.success(), "script unexpectedly succeeded");
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
@@ -292,8 +292,14 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 "##);
-    assert!(out.contains(r#""type":"command""#), "serialize missing rename: {out}");
-    assert!(out.contains(r#""type": "command""#), "to_value missing rename: {out}");
+    assert!(
+        out.contains(r#""type":"command""#),
+        "serialize missing rename: {out}"
+    );
+    assert!(
+        out.contains(r#""type": "command""#),
+        "to_value missing rename: {out}"
+    );
     assert!(!out.contains("kind"), "raw field name leaked: {out}");
 }
 
@@ -338,30 +344,32 @@ fn main() -> anyhow::Result<()> {
 
 #[test]
 fn shebang_is_ignored() {
-    let out = run(
-        "#!/usr/bin/env rust\nfn main() { println!(\"ok\"); }\n",
-    );
+    let out = run("#!/usr/bin/env rust\nfn main() { println!(\"ok\"); }\n");
     assert_eq!(out, "ok\n");
 }
 
 #[test]
 fn error_from_main_exits_nonzero() {
-    let err = run_fail(r#"
+    let err = run_fail(
+        r#"
 fn main() -> anyhow::Result<()> {
     anyhow::bail!("boom");
 }
-"#);
+"#,
+    );
     assert!(err.contains("boom"), "stderr was: {err}");
 }
 
 #[test]
 fn panic_exits_nonzero() {
-    let err = run_fail(r#"
+    let err = run_fail(
+        r#"
 fn main() {
     let v: Vec<i64> = vec![];
     println!("{}", v[0]);
 }
-"#);
+"#,
+    );
     assert!(!err.is_empty());
 }
 
@@ -421,9 +429,10 @@ fn main() {
     println!("{}", u8::MAX);
     println!("{}", i32::MIN);
     println!("{}", 3i64.saturating_sub(10));
+    println!("{}", 10u64.is_multiple_of(2));
 }
 "#);
-    assert_eq!(out, "5\n255\n-2147483648\n-7\n");
+    assert_eq!(out, "5\n255\n-2147483648\n-7\ntrue\n");
 }
 
 #[test]
@@ -474,21 +483,40 @@ fn tokio_parallel_tasks_capture_and_await() {
     let out = run(r#"
 #[tokio::main]
 async fn main() {
+    let count: i64 = "5".parse().unwrap();
     let mut handles = Vec::new();
-    for i in 0..5 {
+    for i in 0..count {
         handles.push(tokio::spawn(async {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             i
         }));
     }
+    let handles: Vec<_> = handles.into_iter().collect();
     let mut total = 0;
     for h in handles {
-        total += h.await;
+        total += h.await.unwrap();
     }
     println!("total={total}");
 }
 "#);
     assert_eq!(out, "total=10\n");
+}
+
+#[test]
+fn tokio_tasks_can_yield() {
+    let out = run(r#"
+#[tokio::main]
+async fn main() {
+    let task = tokio::spawn(async {
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+        42
+    });
+    println!("{}", task.await.unwrap());
+}
+"#);
+    assert_eq!(out, "42\n");
 }
 
 #[test]
@@ -515,10 +543,12 @@ async fn main() {
 fn tokio_current_thread_flavor_is_rejected() {
     // Only the multi thread runtime is offered, so an explicit current_thread
     // flavor is rejected at load time.
-    let err = run_fail(r#"
+    let err = run_fail(
+        r#"
 #[tokio::main(flavor = "current_thread")]
 async fn main() {}
-"#);
+"#,
+    );
     assert!(err.contains("multi_thread"), "stderr was: {err}");
 }
 
@@ -606,12 +636,17 @@ async fn main() {
 
 #[test]
 fn std_thread_is_rejected() {
-    let err = run_fail(r#"
+    let err = run_fail(
+        r#"
 use std::thread;
 fn main() {
     let h = thread::spawn(|| 1);
     println!("{}", h.join().unwrap());
 }
-"#);
-    assert!(err.contains("std::thread is not supported"), "stderr was: {err}");
+"#,
+    );
+    assert!(
+        err.contains("std::thread is not supported"),
+        "stderr was: {err}"
+    );
 }
