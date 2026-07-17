@@ -103,6 +103,31 @@ fn detect_tokio_main(items: &[Item]) -> Result<bool> {
     Ok(false)
 }
 
+/// Whether an item is gated to `#[cfg(test)]`, matched narrowly so a
+/// `#[cfg(not(test))]` item is still kept.
+fn is_cfg_test(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|a| {
+        a.path().is_ident("cfg")
+            && matches!(&a.meta, syn::Meta::List(list) if list.tokens.to_string().replace(' ', "") == "test")
+    })
+}
+
+fn item_attrs(item: &Item) -> &[syn::Attribute] {
+    match item {
+        Item::Const(i) => &i.attrs,
+        Item::Enum(i) => &i.attrs,
+        Item::Fn(i) => &i.attrs,
+        Item::Impl(i) => &i.attrs,
+        Item::Mod(i) => &i.attrs,
+        Item::Static(i) => &i.attrs,
+        Item::Struct(i) => &i.attrs,
+        Item::Trait(i) => &i.attrs,
+        Item::Type(i) => &i.attrs,
+        Item::Use(i) => &i.attrs,
+        _ => &[],
+    }
+}
+
 /// Walk one module's items, loading `mod name;` files and expanding inline
 /// `mod name { .. }` blocks. `children_dir` is where this module's child
 /// files live. Returns this module with its `mod` items stripped; discovered
@@ -118,6 +143,11 @@ fn collect(
     let mut kept = Vec::with_capacity(items.len());
     let mut seen: Vec<String> = Vec::new();
     for item in items {
+        // A `#[cfg(test)]` item, usually a `mod tests`, never runs under the
+        // interpreter, so skip it rather than compile its test-only constructs.
+        if is_cfg_test(item_attrs(&item)) {
+            continue;
+        }
         let Item::Mod(m) = item else {
             kept.push(item);
             continue;
@@ -254,9 +284,13 @@ fn local_path_deps(script_path: &Path) -> Vec<(String, PathBuf)> {
     out
 }
 
-/// The closest `Cargo.toml` at or above the script's directory, if any.
+/// The closest `Cargo.toml` at or above the script's directory, if any. The
+/// path is canonicalized first, so a script run by a bare relative name like
+/// `rust kimai.rs` still walks up the real tree to find the manifest that
+/// grafts its `shared` crate.
 fn nearest_manifest(script_path: &Path) -> Option<PathBuf> {
-    let mut dir = script_path.parent();
+    let absolute = std::fs::canonicalize(script_path).unwrap_or_else(|_| script_path.to_path_buf());
+    let mut dir = absolute.parent();
     while let Some(d) = dir {
         let candidate = d.join("Cargo.toml");
         if candidate.is_file() {

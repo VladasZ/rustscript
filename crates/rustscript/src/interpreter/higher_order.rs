@@ -40,6 +40,13 @@ impl Interp {
                 data,
             } if &**enum_name == "Result" => self.result_higher_order(variant, data, name, args),
             Value::Struct(s) if &**s.name() == "Entry" => self.entry_higher_order(s, name, args),
+            // A JSON string is a plain String, but Value::as_str hands it back as
+            // an already unwrapped Some, so its Option closure methods route here
+            // as Some. Unknown names fall through to Ok(None) and plain dispatch.
+            Value::Str(s) => {
+                let data: Rc<[Value]> = Rc::from([Value::Str(s.clone())]);
+                self.option_higher_order("Some", &data, name, args)
+            }
             _ => Ok(None),
         }
     }
@@ -335,6 +342,9 @@ impl Interp {
         let inner = || data.first().cloned().unwrap_or(Value::Unit);
         let clo = |i: usize| as_closure(args.get(i));
         let out = match name {
+            "is_some_and" => {
+                Value::Bool(is_some && self.call_closure(&*clo(0)?, &[inner()])?.is_truthy())
+            }
             "map" => {
                 if is_some {
                     Value::some(self.call_closure(&*clo(0)?, &[inner()])?)
@@ -362,6 +372,13 @@ impl Interp {
                     self.call_closure(&*clo(1)?, &[inner()])?
                 } else {
                     default
+                }
+            }
+            "map_or_else" => {
+                if is_some {
+                    self.call_closure(&*clo(1)?, &[inner()])?
+                } else {
+                    self.call_closure(&*clo(0)?, &[])?
                 }
             }
             "unwrap_or_else" => {
@@ -408,6 +425,12 @@ impl Interp {
         let inner = || data.first().cloned().unwrap_or(Value::Unit);
         let clo = |i: usize| as_closure(args.get(i));
         let out = match name {
+            "is_ok_and" => {
+                Value::Bool(is_ok && self.call_closure(&*clo(0)?, &[inner()])?.is_truthy())
+            }
+            "is_err_and" => {
+                Value::Bool(!is_ok && self.call_closure(&*clo(0)?, &[inner()])?.is_truthy())
+            }
             "map" => {
                 if is_ok {
                     Value::ok(self.call_closure(&*clo(0)?, &[inner()])?)

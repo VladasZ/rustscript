@@ -52,6 +52,11 @@ pub(super) fn generic_method(recv: &Value, name: &str, _args: &[Value]) -> Resul
             Value::none()
         }),
         (Value::Vec(v), "as_array") => Ok(Value::some(Value::vec(v.borrow().clone()))),
+        // Serde accessors on a value that is not the matching type, for example
+        // as_str on Null, are None rather than an error.
+        (_, "as_str" | "as_i64" | "as_u64" | "as_f64" | "as_bool" | "as_array" | "as_object") => {
+            Ok(Value::none())
+        }
         _ => bail!("unknown method `{name}` on {}", recv.type_name()),
     }
 }
@@ -114,7 +119,14 @@ pub(super) fn str_method_slow(s: &Rc<RStr>, name: &str, args: &[Value]) -> Resul
         // String::as_str gives the string back. serde_json::Value::as_str
         // gives an Option, and a json string is a plain Str here, so unwrap
         // and expect on a string are identity to keep that pattern working.
+        // A JSON string parsed by the interpreter is a plain String, so the
+        // serde_json Value::as_str chains resolve by treating the string as an
+        // already-unwrapped Some. as_str keeps the string, and the Option
+        // consumers below hand it straight back.
         "as_str" | "as_string" | "unwrap" | "expect" => Value::Str(s.clone()),
+        "unwrap_or" | "unwrap_or_else" | "unwrap_or_default" => Value::Str(s.clone()),
+        "is_some" => Value::Bool(true),
+        "is_none" => Value::Bool(false),
         "as_bytes" | "into_bytes" => bytes_to_vec(s.as_bytes()),
         "bytes" => super::iterator::bytes(s.clone()),
         // The utf-16 code units as an eager Vec of ints, mirroring how `bytes`
@@ -175,6 +187,8 @@ pub(super) fn str_method_slow(s: &Rc<RStr>, name: &str, args: &[Value]) -> Resul
             Value::str(out.to_string())
         }
         "cmp" => make_ordering((***s).cmp(arg_str(0).as_str())),
+        // A String or a Cow that already owns its data, into_owned returns self.
+        "into_owned" | "into_string" => Value::Str(s.clone()),
         _ => {
             if let Some(colored) = color_method(s, name) {
                 colored
@@ -404,7 +418,13 @@ pub(super) fn vec_method(
                 }
                 best.cloned().map(Value::some).unwrap_or_else(Value::none)
             }
-            name => bail!("unknown method `{name}` on Vec"),
+            // A JSON array parsed by the interpreter is a plain Vec, so the
+            // serde_json accessors resolve against it here.
+            _ => match method.text.as_str() {
+                "as_array" => Value::some(Value::vec(v.borrow().clone())),
+                "as_object" => Value::none(),
+                other => bail!("unknown method `{other}` on Vec"),
+            },
         },
     })
 }
@@ -463,6 +483,10 @@ pub(super) fn map_method(
         _ => match method.text.as_str() {
             "values_mut" => Value::vec(m.borrow().values().cloned().collect()),
             "drain" => map_pairs(m),
+            // A JSON object parsed by the interpreter is a Map, so the
+            // serde_json accessors resolve against it here.
+            "as_object" => Value::some(Value::Map(m.clone())),
+            "as_array" => Value::none(),
             name => bail!("unknown method `{name}` on HashMap"),
         },
     })
@@ -490,6 +514,8 @@ pub(super) fn num_method(recv: &Value, name: &str, args: &[Value]) -> Result<Val
             Value::some(Value::Int(*i))
         }
         (_, "as_f64") => Value::some(Value::Float(as_f())),
+        // A number is not these serde types, so the accessor is None.
+        (_, "as_str" | "as_bool" | "as_array" | "as_object") => Value::none(),
         (Value::Int(i), "abs") => Value::Int(i.abs()),
         (Value::Float(f), "abs") => Value::Float(f.abs()),
         (Value::Int(i), "pow") => Value::Int(i.pow(int_arg(args, 0)? as u32)),
@@ -502,6 +528,12 @@ pub(super) fn num_method(recv: &Value, name: &str, args: &[Value]) -> Result<Val
         (Value::Float(f), "is_sign_positive") => Value::Bool(f.is_sign_positive()),
         (Value::Int(a), "min") => Value::Int((*a).min(int_arg(args, 0)?)),
         (Value::Int(a), "max") => Value::Int((*a).max(int_arg(args, 0)?)),
+        (Value::Int(a), "clamp") => Value::Int((*a).clamp(int_arg(args, 0)?, int_arg(args, 1)?)),
+        (Value::Float(a), "clamp") => {
+            Value::Float((*a).clamp(float_arg(args, 0)?, float_arg(args, 1)?))
+        }
+        (Value::Float(a), "min") => Value::Float((*a).min(float_arg(args, 0)?)),
+        (Value::Float(a), "max") => Value::Float((*a).max(float_arg(args, 0)?)),
         (Value::Int(a), "is_multiple_of") => Value::Bool(a % int_arg(args, 0)? == 0),
         (Value::Int(a), "saturating_sub") => Value::Int(a.saturating_sub(int_arg(args, 0)?)),
         (Value::Int(a), "saturating_add") => Value::Int(a.saturating_add(int_arg(args, 0)?)),

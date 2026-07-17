@@ -604,6 +604,14 @@ pub(super) fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Va
             Ok(s) => Value::ok(Native::Stream(s).wrap()),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
+        ("UdpSocket", "bind") => match std::net::UdpSocket::bind(arg_str(args, 0)) {
+            Ok(s) => Value::ok(Native::Udp(s).wrap()),
+            Err(e) => Value::err(Value::str(e.to_string())),
+        },
+        ("Pdf", "load") => super::pdf_bridge::load(&arg_str(args, 0)),
+        ("Docx", "edit_document_xml") => {
+            super::docx_bridge::edit_document_xml(&arg_str(args, 0), &arg_str(args, 1))
+        }
         ("SeekFrom", "Start" | "End" | "Current") => Value::Enum {
             enum_name: "SeekFrom".into(),
             variant: func.into(),

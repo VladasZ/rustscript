@@ -9,7 +9,7 @@
 use std::cell::RefCell;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::process::{Child, ChildStdin};
 use std::rc::Rc;
 use std::time::{Instant, SystemTime};
@@ -32,6 +32,8 @@ pub enum Native {
     ChildStdin(ChildStdin),
     Listener(TcpListener),
     Stream(TcpStream),
+    Udp(UdpSocket),
+    Pdf(lopdf::Document),
     Instant(Instant),
     SystemTime(SystemTime),
     TempDir(tempfile::TempDir),
@@ -62,6 +64,8 @@ impl Native {
             Native::ChildStdin(_) => "ChildStdin",
             Native::Listener(_) => "TcpListener",
             Native::Stream(_) => "TcpStream",
+            Native::Udp(_) => "UdpSocket",
+            Native::Pdf(_) => "PdfDocument",
             Native::Instant(_) => "Instant",
             Native::SystemTime(_) => "SystemTime",
             Native::TempDir(_) => "TempDir",
@@ -359,6 +363,7 @@ pub fn native_method(
             let addr = match &*h {
                 Native::Listener(l) => l.local_addr(),
                 Native::Stream(s) => s.local_addr(),
+                Native::Udp(s) => s.local_addr(),
                 _ => bail!("local_addr on {}", h.type_name()),
             };
             return Ok(Some(io_err(addr, |a| Value::str(a.to_string()))));
@@ -385,8 +390,84 @@ pub fn native_method(
                 Native::Stream(s) => {
                     return Ok(Some(io_err(s.try_clone(), |s| Native::Stream(s).wrap())));
                 }
+                Native::Udp(s) => {
+                    return Ok(Some(io_err(s.try_clone(), |s| Native::Udp(s).wrap())));
+                }
                 _ => bail!("try_clone on {}", h.type_name()),
             }
+        }
+        // UdpSocket --------------------------------------------------------
+        "set_broadcast" => {
+            let on = matches!(args.first(), Some(Value::Bool(true)));
+            let h = handle.borrow();
+            if let Native::Udp(s) = &*h {
+                return Ok(Some(io_err(s.set_broadcast(on), |()| Value::Unit)));
+            }
+            bail!("set_broadcast on {}", h.type_name());
+        }
+        "send_to" => {
+            let bytes = value_to_bytes(args.first());
+            let addr = args.get(1).map(|v| v.display()).unwrap_or_default();
+            let h = handle.borrow();
+            if let Native::Udp(s) = &*h {
+                return Ok(Some(io_err(s.send_to(&bytes, addr), |n| Value::Int(n as i64))));
+            }
+            bail!("send_to on {}", h.type_name());
+        }
+        "send" => {
+            let bytes = value_to_bytes(args.first());
+            let h = handle.borrow();
+            if let Native::Udp(s) = &*h {
+                return Ok(Some(io_err(s.send(&bytes), |n| Value::Int(n as i64))));
+            }
+            bail!("send on {}", h.type_name());
+        }
+        "connect" => {
+            let addr = args.first().map(|v| v.display()).unwrap_or_default();
+            let h = handle.borrow();
+            if let Native::Udp(s) = &*h {
+                return Ok(Some(io_err(s.connect(addr), |()| Value::Unit)));
+            }
+            bail!("connect on {}", h.type_name());
+        }
+        // PDF (lopdf) ------------------------------------------------------
+        "page_count" => {
+            let h = handle.borrow();
+            if let Native::Pdf(doc) = &*h {
+                return Ok(Some(super::pdf_bridge::page_count(doc)));
+            }
+            bail!("page_count on {}", h.type_name());
+        }
+        "page_content" => {
+            let index = match args.first() {
+                Some(Value::Int(n)) => *n,
+                _ => 0,
+            };
+            let h = handle.borrow();
+            if let Native::Pdf(doc) = &*h {
+                return Ok(Some(super::pdf_bridge::page_content(doc, index)));
+            }
+            bail!("page_content on {}", h.type_name());
+        }
+        "set_page_content" => {
+            let index = match args.first() {
+                Some(Value::Int(n)) => *n,
+                _ => 0,
+            };
+            let bytes = value_to_bytes(args.get(1));
+            let mut h = handle.borrow_mut();
+            if let Native::Pdf(doc) = &mut *h {
+                return Ok(Some(super::pdf_bridge::set_page_content(doc, index, bytes)));
+            }
+            bail!("set_page_content on {}", h.type_name());
+        }
+        "save" => {
+            let path = args.first().map(|v| v.display()).unwrap_or_default();
+            let mut h = handle.borrow_mut();
+            if let Native::Pdf(doc) = &mut *h {
+                return Ok(Some(super::pdf_bridge::save(doc, &path)));
+            }
+            bail!("save on {}", h.type_name());
         }
         // Instant / SystemTime --------------------------------------------
         "elapsed" => {

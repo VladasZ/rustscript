@@ -24,6 +24,7 @@ fn build_client(
     cookie_store: bool,
     timeout: Option<std::time::Duration>,
     ua: Option<String>,
+    redirect: Option<reqwest::redirect::Policy>,
 ) -> Result<Client> {
     let mut b = Client::builder().cookie_store(cookie_store);
     if let Some(d) = timeout {
@@ -31,6 +32,9 @@ fn build_client(
     }
     if let Some(ua) = ua {
         b = b.user_agent(ua);
+    }
+    if let Some(policy) = redirect {
+        b = b.redirect(policy);
     }
     b.build()
         .map_err(|e| anyhow!("http client build failed: {e}"))
@@ -43,7 +47,7 @@ fn default_client() -> Result<Client> {
     if let Some(c) = C.get() {
         return Ok(c.clone());
     }
-    let c = build_client(false, None, None)?;
+    let c = build_client(false, None, None, None)?;
     if C.set(c.clone()).is_err() {
         return C
             .get()
@@ -62,13 +66,28 @@ fn client_value(c: Client) -> Value {
 /// Handle a call whose canonical path starts with `reqwest`. Only the blocking
 /// API runs here; the async API is served by the parallel engine.
 pub(super) fn reqwest_call(canon: &[String], args: &[Value]) -> Result<Value> {
+    let last = canon.last().map(String::as_str).unwrap_or("");
+    // A redirect policy marker, built by `reqwest::redirect::Policy::none()` or
+    // `::limited(n)`. It carries no `blocking` segment, so match it first.
+    if canon.iter().any(|s| s == "redirect") {
+        return Ok(match last {
+            "none" => Value::struct_of("RedirectPolicy", [("kind".into(), Value::str("none"))]),
+            "limited" => Value::struct_of(
+                "RedirectPolicy",
+                [
+                    ("kind".into(), Value::str("limited")),
+                    ("n".into(), args.first().cloned().unwrap_or(Value::Int(10))),
+                ],
+            ),
+            _ => bail!("unsupported redirect policy `{last}`"),
+        });
+    }
     if !canon.iter().any(|s| s == "blocking") {
         bail!("async reqwest needs #[tokio::main]; use reqwest::blocking in a plain script");
     }
-    let last = canon.last().map(String::as_str).unwrap_or("");
     if canon.iter().any(|s| s == "Client") {
         return match last {
-            "new" => Ok(client_value(build_client(false, None, None)?)),
+            "new" => Ok(client_value(build_client(false, None, None, None)?)),
             "builder" => Ok(builder_value()),
             _ => bail!("unknown reqwest::blocking::Client function `{last}`"),
         };
@@ -122,6 +141,28 @@ fn builder_value() -> Value {
     )
 }
 
+// Read the redirect policy a builder stashed via `.redirect(..)`. The policy
+// marker is built by the `reqwest::redirect::Policy::..` path calls below.
+fn redirect_policy(s: &StructData) -> Option<reqwest::redirect::Policy> {
+    let Some(Value::Struct(rp)) = s.get("redirect") else {
+        return None;
+    };
+    if &**rp.name() != "RedirectPolicy" {
+        return None;
+    }
+    match rp.get("kind").map(|v| v.display()).as_deref() {
+        Some("none") => Some(reqwest::redirect::Policy::none()),
+        Some("limited") => {
+            let n = match rp.get("n") {
+                Some(Value::Int(n)) => usize::try_from(n).unwrap_or(10),
+                _ => 10,
+            };
+            Some(reqwest::redirect::Policy::limited(n))
+        }
+        _ => None,
+    }
+}
+
 // -- method dispatch -------------------------------------------------------
 
 pub(super) fn http_method(s: &Rc<StructData>, method: &str, args: &[Value]) -> Result<Value> {
@@ -156,6 +197,10 @@ fn builder_method(s: &Rc<StructData>, method: &str, args: &[Value]) -> Result<Va
             s.set("user_agent", args.first().cloned().unwrap_or(Value::Unit));
             Ok(this())
         }
+        "redirect" => {
+            s.set("redirect", args.first().cloned().unwrap_or(Value::Unit));
+            Ok(this())
+        }
         "build" => {
             let cookie_store = matches!(s.get("cookie_store"), Some(Value::Bool(true)));
             let timeout = s.get("timeout").and_then(|v| duration_from_value(&v));
@@ -163,7 +208,7 @@ fn builder_method(s: &Rc<StructData>, method: &str, args: &[Value]) -> Result<Va
                 Some(Value::Str(u)) => Some(u.as_str().to_string()),
                 _ => None,
             };
-            Ok(match build_client(cookie_store, timeout, ua) {
+            Ok(match build_client(cookie_store, timeout, ua, redirect_policy(s)) {
                 Ok(c) => Value::ok(client_value(c)),
                 Err(e) => Value::err(Value::str(e.to_string())),
             })
@@ -415,6 +460,28 @@ fn header_map_method(s: &StructData, method: &str, args: &[Value]) -> Value {
                 }
             }
             Value::none()
+        }
+        // Every value for a name, in order, each as a HeaderValue so `.to_str()`
+        // works the same as on `get`. Set-Cookie repeats, so a cookie jar needs
+        // all of them, not just the first that `get` returns.
+        "get_all" => {
+            let name = args
+                .first()
+                .map(|v| v.display())
+                .unwrap_or_default()
+                .to_lowercase();
+            let mut out: Vec<Value> = Vec::new();
+            if let Some(Value::Vec(h)) = s.get("map") {
+                for item in h.borrow().iter() {
+                    if let Value::Tuple(pair) = item {
+                        let pair = pair.borrow();
+                        if pair[0].display().to_lowercase() == name {
+                            out.push(Value::struct_of("HeaderValue", [("text".into(), pair[1].clone())]));
+                        }
+                    }
+                }
+            }
+            Value::vec(out)
         }
         _ => Value::Unit,
     }
