@@ -33,10 +33,11 @@ pub enum Native {
     Listener(TcpListener),
     Stream(TcpStream),
     Udp(UdpSocket),
-    Pdf(lopdf::Document),
+    Pdf(Box<lopdf::Document>),
     Instant(Instant),
     SystemTime(SystemTime),
     TempDir(tempfile::TempDir),
+    NamedTempFile(tempfile::NamedTempFile),
     HttpClient(reqwest::blocking::Client),
     Regex(RegexValue),
     RegexMatch(MatchValue),
@@ -69,6 +70,7 @@ impl Native {
             Native::Instant(_) => "Instant",
             Native::SystemTime(_) => "SystemTime",
             Native::TempDir(_) => "TempDir",
+            Native::NamedTempFile(_) => "NamedTempFile",
             Native::HttpClient(_) => "HttpClient",
             Native::Regex(_) => "Regex",
             Native::RegexMatch(_) => "Match",
@@ -410,7 +412,9 @@ pub fn native_method(
             let addr = args.get(1).map(|v| v.display()).unwrap_or_default();
             let h = handle.borrow();
             if let Native::Udp(s) = &*h {
-                return Ok(Some(io_err(s.send_to(&bytes, addr), |n| Value::Int(n as i64))));
+                return Ok(Some(io_err(s.send_to(&bytes, addr), |n| {
+                    Value::Int(n as i64)
+                })));
             }
             bail!("send_to on {}", h.type_name());
         }
@@ -508,10 +512,18 @@ pub fn native_method(
         // TempDir ----------------------------------------------------------
         "path" => {
             let h = handle.borrow();
-            if let Native::TempDir(d) = &*h {
-                return Ok(Some(super::std_bridge::make_path(
-                    d.path().display().to_string(),
-                )));
+            match &*h {
+                Native::TempDir(d) => {
+                    return Ok(Some(super::std_bridge::make_path(
+                        d.path().display().to_string(),
+                    )));
+                }
+                Native::NamedTempFile(f) => {
+                    return Ok(Some(super::std_bridge::make_path(
+                        f.path().display().to_string(),
+                    )));
+                }
+                _ => {}
             }
         }
         "close" => {

@@ -45,6 +45,7 @@ pub(super) fn generic_method(recv: &Value, name: &str, _args: &[Value]) -> Resul
     match (recv, name) {
         (_, "clone") => Ok(recv.clone()),
         (_, "to_string") => Ok(Value::str(recv.display())),
+        (Value::Char(ch), "is_ascii_digit") => Ok(Value::Bool(ch.is_ascii_digit())),
         (Value::Bool(b), "as_bool") => Ok(Value::some(Value::Bool(*b))),
         (Value::Bool(b), "then_some") => Ok(if *b {
             Value::some(Value::Unit)
@@ -109,6 +110,7 @@ pub(super) fn str_method_slow(s: &Rc<RStr>, name: &str, args: &[Value]) -> Resul
         "trim_start" => Value::str(s.trim_start().to_string()),
         "trim_end" => Value::str(s.trim_end().to_string()),
         "replace" => Value::str(s.replace(&arg_str(0), &arg_str(1))),
+        "replacen" => Value::str(s.replacen(&arg_str(0), &arg_str(1), int_arg(args, 2)? as usize)),
         "repeat" => {
             let n = match args.first() {
                 Some(Value::Int(n)) => *n as usize,
@@ -582,6 +584,10 @@ pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
             Some(v) => Value::ok(v),
             None => Value::err(args.first().cloned().unwrap_or(Value::Unit)),
         },
+        "context" => match inner {
+            Some(v) => Value::ok(v),
+            None => Value::err(args.first().cloned().unwrap_or(Value::Unit)),
+        },
         _ => bail!("unknown method `{name}` on Option"),
     })
 }
@@ -606,6 +612,16 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
                     "called unwrap on an Err value: {}",
                     inner.map(|v| v.display()).unwrap_or_default()
                 );
+            }
+        }
+        "unwrap_err" => {
+            if is_ok {
+                bail!(
+                    "called unwrap_err on an Ok value: {}",
+                    inner.map(|v| v.display()).unwrap_or_default()
+                );
+            } else {
+                inner.unwrap_or(Value::Unit)
             }
         }
         "expect" => {

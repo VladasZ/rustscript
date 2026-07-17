@@ -502,6 +502,10 @@ fn scalar_method(recv: &PValue, m: &str, args: &[PValue]) -> Result<PValue> {
             PValue::Float(value) => PValue::Bool(value.is_sign_positive()),
             _ => bail!("is_sign_positive on non float"),
         },
+        "is_ascii_digit" => match recv {
+            PValue::Char(ch) => PValue::Bool(ch.is_ascii_digit()),
+            _ => bail!("is_ascii_digit on non char"),
+        },
         _ => bail!(
             "method `{m}` on {} is not supported in tokio mode",
             recv.type_name()
@@ -577,6 +581,15 @@ fn str_method(s: &Arc<str>, m: &str, args: &mut [PValue]) -> Result<PValue> {
             let from = args.first().map(PValue::display).unwrap_or_default();
             let to = args.get(1).map(PValue::display).unwrap_or_default();
             PValue::str(s.replace(&from, &to))
+        }
+        "replacen" => {
+            let from = args.first().map(PValue::display).unwrap_or_default();
+            let to = args.get(1).map(PValue::display).unwrap_or_default();
+            let count = match args.get(2) {
+                Some(PValue::Int(count)) => *count as usize,
+                _ => 0,
+            };
+            PValue::str(s.replacen(&from, &to, count))
         }
         "split" => {
             let sep = a0();

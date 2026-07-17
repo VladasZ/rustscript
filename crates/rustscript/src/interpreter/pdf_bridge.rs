@@ -10,7 +10,7 @@ use super::value::Value;
 
 pub(super) fn load(path: &str) -> Value {
     match Document::load(path) {
-        Ok(doc) => Value::ok(Native::Pdf(doc).wrap()),
+        Ok(doc) => Value::ok(Native::Pdf(Box::new(doc)).wrap()),
         Err(e) => Value::err(Value::str(e.to_string())),
     }
 }
@@ -20,7 +20,9 @@ fn page_ids(doc: &Document) -> Vec<ObjectId> {
 }
 
 fn page_at(doc: &Document, index: i64) -> Option<ObjectId> {
-    usize::try_from(index).ok().and_then(|i| page_ids(doc).get(i).copied())
+    usize::try_from(index)
+        .ok()
+        .and_then(|i| page_ids(doc).get(i).copied())
 }
 
 pub(super) fn page_count(doc: &Document) -> Value {
@@ -32,7 +34,9 @@ pub(super) fn page_content(doc: &Document, index: i64) -> Value {
         return Value::err(Value::str(format!("page index {index} out of range")));
     };
     let bytes = doc.get_page_content(id);
-    Value::ok(Value::vec(bytes.iter().map(|b| Value::Int(i64::from(*b))).collect()))
+    Value::ok(Value::vec(
+        bytes.iter().map(|b| Value::Int(i64::from(*b))).collect(),
+    ))
 }
 
 pub(super) fn set_page_content(doc: &mut Document, index: i64, bytes: Vec<u8>) -> Value {

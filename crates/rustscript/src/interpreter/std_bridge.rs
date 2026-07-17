@@ -80,7 +80,7 @@ pub(super) fn native_call(module: &str, func: &str, args: &[Value]) -> Result<Op
             Value::Unit
         }
         ("env", "var_os") => match std::env::var_os(s(0)?) {
-            Some(v) => Value::some(Value::str(v.to_string_lossy().into_owned())),
+            Some(v) => Value::some(make_os_string(v.to_string_lossy().into_owned())),
             None => Value::none(),
         },
         ("env", "vars") | ("env", "vars_os") => Value::vec(
@@ -291,6 +291,20 @@ pub(super) fn make_path(s: impl Into<String>) -> Value {
     Value::struct_of("Path", [("s".into(), Value::str(s.into()))])
 }
 
+fn make_os_string(s: impl Into<String>) -> Value {
+    Value::struct_of("OsString", [("s".into(), Value::str(s.into()))])
+}
+
+pub(super) fn os_string_method(s: &StructData, method: &str) -> Result<Value> {
+    let value = s.get("s").map(|value| value.display()).unwrap_or_default();
+    Ok(match method {
+        "into" => make_path(value),
+        "to_string_lossy" | "to_str" => Value::str(value),
+        "is_empty" => Value::Bool(value.is_empty()),
+        _ => bail!("unknown method `{method}` on OsString"),
+    })
+}
+
 pub(super) fn make_dir_entry(entry: &std::fs::DirEntry) -> Value {
     Value::struct_of(
         "DirEntry",
@@ -353,6 +367,11 @@ pub(super) fn path_method(st: &StructData, method: &str, args: &[Value]) -> Resu
             Some(par) => Value::some(make_path(par.display().to_string())),
             None => Value::none(),
         },
+        "ancestors" => Value::vec(
+            p.ancestors()
+                .map(|ancestor| make_path(ancestor.display().to_string()))
+                .collect(),
+        ),
         "join" | "push" => {
             let joined = p.join(args.first().map(|v| v.display()).unwrap_or_default());
             make_path(joined.display().to_string())

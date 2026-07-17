@@ -395,6 +395,13 @@ impl Interp {
                     Value::err(self.call_closure(&*clo(0)?, &[])?)
                 }
             }
+            "with_context" => {
+                if is_some {
+                    Value::ok(inner())
+                } else {
+                    Value::err(self.call_closure(&*clo(0)?, &[])?)
+                }
+            }
             "or_else" => {
                 if is_some {
                     Value::some(inner())
