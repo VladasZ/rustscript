@@ -168,6 +168,27 @@ fn main() {
 }
 
 #[test]
+fn option_context_and_namespaced_map_or_else() {
+    let out = run(r#"
+use anyhow::Context;
+mod helper {
+    pub fn fallback() -> String { "fallback".to_string() }
+}
+fn main() {
+    let none: Option<String> = None;
+    println!("{}", none.map_or_else(helper::fallback, String::from));
+    let some = Some("value".to_string());
+    println!("{}", some.map_or_else(helper::fallback, String::from));
+    let missing: Option<i64> = None;
+    println!("{}", missing.context("missing value").unwrap_err());
+    let lazy_missing: Option<i64> = None;
+    println!("{}", lazy_missing.with_context(|| "lazy missing").unwrap_err());
+}
+"#);
+    assert_eq!(out, "fallback\nvalue\nmissing value\nlazy missing\n");
+}
+
+#[test]
 fn format_specs() {
     let out = run(r#"
 fn main() {
@@ -323,6 +344,50 @@ fn main() -> anyhow::Result<()> {
 }
 "#);
     assert_eq!(out, "[\"one.txt\", \"two.txt\"]\n");
+}
+
+#[test]
+fn path_ancestors() {
+    let out = run(r#"
+use std::path::Path;
+fn main() {
+    let mut paths = Vec::new();
+    for path in Path::new("one/two").ancestors() {
+        paths.push(path.display().to_string());
+    }
+    println!("{:?}", paths);
+}
+"#);
+    assert_eq!(out, "[\"one/two\", \"one\", \"\"]\n");
+}
+
+#[test]
+fn named_temp_file_and_os_string_into_path() {
+    let out = run(r#"
+use std::env;
+use std::path::PathBuf;
+use tempfile::NamedTempFile;
+fn main() {
+    let file = NamedTempFile::new().unwrap();
+    println!("{}", file.path().is_file());
+    unsafe { env::set_var("RUSTSCRIPT_PATH_TEST", "/tmp/rustscript-path") };
+    let path: PathBuf = env::var_os("RUSTSCRIPT_PATH_TEST").map(Into::into).unwrap();
+    println!("{}", path.display());
+    unsafe { env::remove_var("RUSTSCRIPT_PATH_TEST") };
+}
+"#);
+    assert_eq!(out, "true\n/tmp/rustscript-path\n");
+}
+
+#[test]
+fn char_ascii_digit() {
+    let out = run(r#"
+fn main() {
+    println!("{} {}", '7'.is_ascii_digit(), 'x'.is_ascii_digit());
+    println!("{}", "/dev/disk9".replacen("/dev/disk", "/dev/rdisk", 1));
+}
+"#);
+    assert_eq!(out, "true false\n/dev/rdisk9\n");
 }
 
 #[test]

@@ -166,10 +166,12 @@ Scripts use plain `std`. The interpreter bridges the common parts.
   and a `Child` you can stream, feed, and `wait` on
 - `std::net`, blocking `TcpListener` and `TcpStream`
 - `std::time`, `Instant`, `SystemTime`, and `Duration`
-- `std::env`, real script args, `vars`, `var`, `set_var`, `remove_var`,
-  `current_dir`, `set_current_dir`, `temp_dir`, and `consts::OS` / `ARCH`
+- `std::env`, real script args, `vars`, `var`, `var_os`, `set_var`,
+  `remove_var`, `current_dir`, `set_current_dir`, `temp_dir`, and
+  `consts::OS` / `ARCH`
 - `std::process::exit`
-- `std::path`, `Path` and `PathBuf` with `display`, `is_dir`, `join`, and more
+- `std::path`, `Path` and `PathBuf` with `display`, `is_dir`, `join`,
+  `ancestors`, and more
 - `std::collections`, `HashMap`, `BTreeMap`, sets, and the `entry` API
 
 ## Bridged crates
@@ -201,7 +203,8 @@ a native bridge for it. These are bridged today.
 - [`base64`](https://github.com/marshallpierce/base64) and
   [`hex`](https://github.com/KokaKiwi/rust-hex) for encoding
 - [`ctrlc`](https://github.com/Detegr/rust-ctrlc) for a Ctrl-C handler
-- [`tempfile`](https://github.com/Stebalien/tempfile) for temp dirs and files
+- [`tempfile`](https://github.com/Stebalien/tempfile) for temp dirs, files, and
+  `NamedTempFile`
 - [`jsonwebtoken`](https://github.com/Keats/jsonwebtoken) for signing JWTs,
   `Header`, `EncodingKey::from_ec_pem` and `from_secret`, and `encode`, so
   ES256 and HS256 tokens work

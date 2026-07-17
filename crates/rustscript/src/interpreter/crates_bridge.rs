@@ -88,6 +88,10 @@ pub(super) fn crate_bridge(module: &str, func: &str, args: &[Value]) -> Result<O
             Ok(f) => Value::ok(Native::File(std::io::BufReader::new(f)).wrap()),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
+        ("NamedTempFile", "new") => match tempfile::NamedTempFile::new() {
+            Ok(f) => Value::ok(Native::NamedTempFile(f).wrap()),
+            Err(e) => Value::err(Value::str(e.to_string())),
+        },
         _ => return Ok(None),
     }))
 }

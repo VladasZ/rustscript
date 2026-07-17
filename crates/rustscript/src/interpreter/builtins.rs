@@ -95,6 +95,14 @@ impl Interp {
         if matches!(last.as_str(), "new" | "default") {
             return Ok(path_call_closure(segs.to_vec(), 0));
         }
+        let function = segs.join("::");
+        if let Some(chunk) = self
+            .user_method(ty, last)
+            .or_else(|| self.user_function(&function))
+            .or_else(|| self.user_function(last))
+        {
+            return Ok(path_call_closure(segs.to_vec(), chunk.num_params));
+        }
         Ok(path_call_closure(segs.to_vec(), 1))
     }
 
@@ -169,6 +177,9 @@ impl Interp {
         // native dispatch.
         if canon.first().map(String::as_str) == Some("reqwest") {
             return super::http::reqwest_call(&canon, &args);
+        }
+        if let Some(chunk) = self.user_function(&canon.join("::")) {
+            return self.run_chunk(&chunk, &args, &[]);
         }
         if let Some(v) = native_call(ns, last, &args)? {
             return Ok(v);
@@ -482,6 +493,7 @@ pub(super) fn builtin_method(
             "Entry" => entry_method(s, name, &*args),
             "Child" => child_method(s, name, args),
             "Path" => path_method(s, name, &*args),
+            "OsString" => os_string_method(s, name),
             "DirEntry" => dir_entry_method(s, name),
             "FileType" => file_type_method(s, name),
             _ => generic_method(recv, name, &*args),
