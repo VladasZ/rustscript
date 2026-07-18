@@ -127,6 +127,10 @@ pub enum BuiltinId {
     Take,
     Skip,
     PushStr,
+    /// `bool::then`, which takes a closure.
+    Then,
+    /// `clone_from`, which replaces the receiver and so is handled by the VM.
+    CloneFrom,
     SplitWhitespace,
     Split,
     Chars,
@@ -179,7 +183,13 @@ impl BuiltinId {
             "is_empty" => IsEmpty,
             "clone" => Clone,
             "to_string" => ToString,
-            "get" => Get,
+            // A returned container is Rc shared, so mutating it reaches the
+            // original. That is what `get_mut` is for, so it resolves to the
+            // same op rather than needing a mutable borrow the VM has no
+            // concept of.
+            "get" | "get_mut" => Get,
+            "then" => Then,
+            "clone_from" => CloneFrom,
             "insert" => Insert,
             "contains_key" => ContainsKey,
             "remove" => Remove,
@@ -251,7 +261,8 @@ impl BuiltinId {
         use BuiltinId::*;
         matches!(
             self,
-            Map | Filter
+            Then | Map
+                | Filter
                 | FilterMap
                 | FlatMap
                 | ForEach

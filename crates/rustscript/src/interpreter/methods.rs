@@ -41,14 +41,38 @@ pub(super) fn entry_method(s: &StructData, name: &str, args: &[Value]) -> Result
     })
 }
 
-pub(super) fn generic_method(recv: &Value, name: &str, _args: &[Value]) -> Result<Value> {
+/// The serde_json `is_*` family. A json value is a plain interpreter value
+/// here, so each one is a type test. These apply to every receiver, so they are
+/// answered before the per type dispatch, which returns early for the hot
+/// receivers and would otherwise never reach them.
+pub(super) fn json_type_test(recv: &Value, name: &str) -> Option<Value> {
+    let is = |b: bool| Some(Value::Bool(b));
+    match name {
+        "is_object" => is(matches!(recv, Value::Map(_))),
+        "is_array" => is(matches!(recv, Value::Vec(_))),
+        "is_string" => is(matches!(recv, Value::Str(_))),
+        "is_boolean" => is(matches!(recv, Value::Bool(_))),
+        "is_number" => is(matches!(recv, Value::Int(_) | Value::Float(_))),
+        "is_i64" | "is_u64" => is(matches!(recv, Value::Int(_))),
+        "is_f64" => is(matches!(recv, Value::Float(_))),
+        "is_null" => is(matches!(recv, Value::Unit)),
+        _ => None,
+    }
+}
+
+pub(super) fn generic_method(recv: &Value, name: &str, args: &[Value]) -> Result<Value> {
     match (recv, name) {
         (_, "clone") => Ok(recv.clone()),
         (_, "to_string") => Ok(Value::str(recv.display())),
-        (Value::Char(ch), "is_ascii_digit") => Ok(Value::Bool(ch.is_ascii_digit())),
+        (Value::Char(ch), name) if let Some(out) = char_method(*ch, name) => Ok(match out {
+            CharOut::Bool(v) => Value::Bool(v),
+            CharOut::Char(c) => Value::Char(c),
+            CharOut::Str(s) => Value::str(s),
+        }),
         (Value::Bool(b), "as_bool") => Ok(Value::some(Value::Bool(*b))),
+        // `then_some(v)` yields that value, not a placeholder.
         (Value::Bool(b), "then_some") => Ok(if *b {
-            Value::some(Value::Unit)
+            Value::some(args.first().cloned().unwrap_or(Value::Unit))
         } else {
             Value::none()
         }),
@@ -79,10 +103,7 @@ pub(super) fn str_method(s: &Rc<RStr>, method: &MethodName, args: &[Value]) -> R
         B::EndsWith => Value::Bool(s.ends_with(&arg_str(0))),
         B::Chars => super::iterator::chars(s.clone()),
         B::Lines => super::iterator::lines(s.clone()),
-        B::Split => {
-            let sep = arg_str(0);
-            Value::vec(s.split(&sep).map(Value::str).collect())
-        }
+        B::Split => split_value(s, args.first()),
         B::SplitWhitespace => super::iterator::split_whitespace(s.clone()),
         B::Count => Value::Int(s.chars().count() as i64),
         B::Parse => {
@@ -127,6 +148,9 @@ pub(super) fn str_method_slow(s: &Rc<RStr>, name: &str, args: &[Value]) -> Resul
         // consumers below hand it straight back.
         "as_str" | "as_string" | "unwrap" | "expect" => Value::Str(s.clone()),
         "unwrap_or" | "unwrap_or_else" | "unwrap_or_default" => Value::Str(s.clone()),
+        // `Option::context` returns a Result, so the pre-unwrapped string has to
+        // come back wrapped or a following `?` would have nothing to unwrap.
+        "context" | "with_context" => Value::ok(Value::Str(s.clone())),
         "is_some" => Value::Bool(true),
         "is_none" => Value::Bool(false),
         "as_bytes" | "into_bytes" => bytes_to_vec(s.as_bytes()),
@@ -346,6 +370,13 @@ pub(super) fn vec_method(
         }
         _ => match method.text.as_str() {
             "to_vec" | "collect" | "cloned" | "copied" => Value::vec(v.borrow().clone()),
+            "nth" => match v.borrow().get(int_arg(args, 0)? as usize) {
+                Some(item) => Value::some(item.clone()),
+                None => Value::none(),
+            },
+            "collect_string" => {
+                Value::str(v.borrow().iter().map(Value::display).collect::<String>())
+            }
             "reverse" => {
                 v.borrow_mut().reverse();
                 Value::Unit
@@ -739,4 +770,66 @@ impl Ord for SortKey {
             (SortKey::List(_), SortKey::Str(_)) => Ordering::Greater,
         }
     }
+}
+
+/// The result of a `char` method, in a form either engine can turn into its own
+/// value type. Keeps the classification table in one place.
+pub(super) enum CharOut {
+    Bool(bool),
+    Char(char),
+    Str(String),
+}
+
+/// The `char` classification and conversion methods, shared by both engines so
+/// a script sees the same set whichever one runs it.
+pub(super) fn char_method(ch: char, name: &str) -> Option<CharOut> {
+    let b = |v: bool| Some(CharOut::Bool(v));
+    match name {
+        "is_ascii_digit" => b(ch.is_ascii_digit()),
+        "is_ascii_alphabetic" => b(ch.is_ascii_alphabetic()),
+        "is_ascii_alphanumeric" => b(ch.is_ascii_alphanumeric()),
+        "is_ascii_uppercase" => b(ch.is_ascii_uppercase()),
+        "is_ascii_lowercase" => b(ch.is_ascii_lowercase()),
+        "is_ascii_whitespace" => b(ch.is_ascii_whitespace()),
+        "is_ascii_punctuation" => b(ch.is_ascii_punctuation()),
+        "is_ascii_hexdigit" => b(ch.is_ascii_hexdigit()),
+        "is_ascii" => b(ch.is_ascii()),
+        "is_alphabetic" => b(ch.is_alphabetic()),
+        "is_alphanumeric" => b(ch.is_alphanumeric()),
+        "is_numeric" => b(ch.is_numeric()),
+        "is_whitespace" => b(ch.is_whitespace()),
+        "is_uppercase" => b(ch.is_uppercase()),
+        "is_lowercase" => b(ch.is_lowercase()),
+        "to_ascii_uppercase" => Some(CharOut::Char(ch.to_ascii_uppercase())),
+        "to_ascii_lowercase" => Some(CharOut::Char(ch.to_ascii_lowercase())),
+        // These yield an iterator in real Rust, but a script only ever renders
+        // or collects it, so the string it would produce is handed back.
+        "to_uppercase" => Some(CharOut::Str(ch.to_uppercase().to_string())),
+        "to_lowercase" => Some(CharOut::Str(ch.to_lowercase().to_string())),
+        _ => None,
+    }
+}
+
+/// `str::split` with either a string pattern or a set of chars. A char array
+/// like `['-', '_']` splits on any of them, which a plain string pattern would
+/// otherwise match only as the literal sequence.
+pub(super) fn split_value(s: &Rc<RStr>, pattern: Option<&Value>) -> Value {
+    if let Some(Value::Vec(items)) = pattern {
+        let chars: Vec<char> = items
+            .borrow()
+            .iter()
+            .filter_map(|v| match v {
+                Value::Char(c) => Some(*c),
+                Value::Str(text) => text.chars().next(),
+                _ => None,
+            })
+            .collect();
+        return Value::vec(
+            s.split(|c: char| chars.contains(&c))
+                .map(Value::str)
+                .collect(),
+        );
+    }
+    let sep = pattern.map(Value::display).unwrap_or_default();
+    Value::vec(s.split(&sep).map(Value::str).collect())
 }

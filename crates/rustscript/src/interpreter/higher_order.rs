@@ -23,6 +23,15 @@ impl Interp {
         args: &[Value],
     ) -> Result<Option<Value>> {
         match recv {
+            // `then` takes a closure, unlike `then_some` which takes a value,
+            // so it is only reachable from the higher order path.
+            Value::Bool(b) if name == "then" => {
+                if !*b {
+                    return Ok(Some(Value::none()));
+                }
+                let f = as_closure(args.first())?;
+                Ok(Some(Value::some(self.call_closure(&f, &[])?)))
+            }
             Value::Vec(items) => self.vec_higher_order(items, name, args),
             Value::Native(iterator)
                 if matches!(&*iterator.borrow(), super::native::Native::Iterator(_)) =>

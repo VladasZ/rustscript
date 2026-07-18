@@ -36,7 +36,11 @@ fn real_main() -> Result<()> {
             let file = all.get(1).ok_or_else(err_usage)?;
             let source = fs::read_to_string(file)?;
             let program = loader::load(Path::new(file), &source)?;
+            // Gate one: is it valid Rust. `cargo check` is the authority.
             checker::check(Path::new(file), &program.files, &program.crate_deps)?;
+            // Gate two: does this interpreter implement everything it calls.
+            // Compiling is enough to reach it, nothing is executed.
+            check_coverage(&program)?;
             println!("ok");
             Ok(())
         }
@@ -60,6 +64,44 @@ fn real_main() -> Result<()> {
         path if path.ends_with(".rs") || Path::new(path).is_file() => run(path, &all[1..]),
         other => bail!("unknown command `{other}`, try `rust help`"),
     }
+}
+
+/// Compile the program and report anything the interpreter cannot run.
+///
+/// Compiling alone already rejects unsupported macros and expressions, so this
+/// reaches those too. The coverage walk then adds every method call the VM
+/// could make, on every branch, without executing a line.
+fn check_coverage(program: &loader::Program) -> Result<()> {
+    let engine = if program.tokio_main {
+        interpreter::coverage::Engine::Parallel
+    } else {
+        interpreter::coverage::Engine::Fast
+    };
+    let interp = interpreter::Interp::load(&program.modules, program.tokio_main)?;
+    let findings = interp.coverage(engine);
+    if findings.is_empty() {
+        return Ok(());
+    }
+    let mut out = String::new();
+    for finding in &findings {
+        out.push_str("  ");
+        out.push_str(&finding.message());
+        out.push('\n');
+    }
+    let engine_name = if program.tokio_main {
+        "the parallel engine, which #[tokio::main] selects"
+    } else {
+        "the interpreter"
+    };
+    let (count, verb) = if findings.len() == 1 {
+        ("1 method".to_string(), "is")
+    } else {
+        (format!("{} methods", findings.len()), "are")
+    };
+    Err(anyhow!(
+        "{count} used by this script {verb} not implemented by {engine_name}:\n{}",
+        out.trim_end()
+    ))
 }
 
 fn run(file: &str, script_args: &[String]) -> Result<()> {

@@ -150,6 +150,15 @@ impl Compiler<'_> {
                 self.patch_jump(ok, end);
                 self.emit(Op::LoadUnit { dst });
             }
+            "cfg" => {
+                // A compile time predicate in real Rust. The interpreter runs on
+                // the host it was built for, so it folds to a constant here too.
+                let meta = mac.parse_body::<syn::Meta>()?;
+                self.emit(Op::LoadBool {
+                    dst,
+                    v: eval_cfg(&meta)?,
+                });
+            }
             "dbg" => {
                 let args = parse_exprs(mac)?;
                 let base = self.compile_args(args.iter())?;
@@ -265,4 +274,68 @@ impl Compiler<'_> {
     }
 
     // -- jump patching -----------------------------------------------------
+}
+
+/// Evaluate a `cfg!` predicate against the host the interpreter runs on. Only
+/// the forms a script realistically uses are handled, and anything else is an
+/// error rather than a silent false, which would pick the wrong branch.
+fn eval_cfg(meta: &syn::Meta) -> Result<bool> {
+    match meta {
+        syn::Meta::Path(path) => {
+            let name = path
+                .get_ident()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            match name.as_str() {
+                "windows" => Ok(cfg!(windows)),
+                "unix" => Ok(cfg!(unix)),
+                // A script is interpreted, never compiled with these on.
+                "test" | "debug_assertions" | "doc" | "miri" => Ok(false),
+                other => bail!("unsupported cfg predicate `{other}`"),
+            }
+        }
+        syn::Meta::NameValue(nv) => {
+            let key = nv
+                .path
+                .get_ident()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            let Expr::Lit(lit) = &nv.value else {
+                bail!("cfg value must be a string literal");
+            };
+            let Lit::Str(want) = &lit.lit else {
+                bail!("cfg value must be a string literal");
+            };
+            let want = want.value();
+            Ok(match key.as_str() {
+                "target_os" => want == std::env::consts::OS,
+                "target_arch" => want == std::env::consts::ARCH,
+                "target_family" => want == std::env::consts::FAMILY,
+                "target_pointer_width" => want == (usize::BITS).to_string(),
+                other => bail!("unsupported cfg key `{other}`"),
+            })
+        }
+        syn::Meta::List(list) => {
+            let op = list
+                .path
+                .get_ident()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            let inner: Punctuated<syn::Meta, syn::Token![,]> =
+                list.parse_args_with(Punctuated::parse_terminated)?;
+            let mut results = Vec::new();
+            for m in &inner {
+                results.push(eval_cfg(m)?);
+            }
+            match op.as_str() {
+                "not" => match results.as_slice() {
+                    [one] => Ok(!one),
+                    _ => bail!("cfg not() takes exactly one predicate"),
+                },
+                "all" => Ok(results.iter().all(|r| *r)),
+                "any" => Ok(results.iter().any(|r| *r)),
+                other => bail!("unsupported cfg combinator `{other}`"),
+            }
+        }
+    }
 }

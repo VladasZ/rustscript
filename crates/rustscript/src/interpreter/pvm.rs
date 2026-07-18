@@ -11,10 +11,12 @@ use anyhow::{Result, bail};
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
 
-use super::bytecode::{CapSource, MacroKind, MethodName, Op};
+use super::bytecode::{BuiltinId, CapSource, MacroKind, MethodName, Op};
 use super::pchunk::{PChunk, PMember};
 use super::pnative::PNative;
-use super::pops::{apply_bin, apply_bin_imm, apply_un, cmp_test, cmp_test_imm, try_bind};
+use super::pops::{
+    self, apply_bin, apply_bin_imm, apply_un, cmp_test, cmp_test_imm, int_of, try_bind,
+};
 use super::pvalue::{PClosure, PStructShape, PValue};
 
 const MAX_CALL_DEPTH: usize = 100_000;
@@ -257,6 +259,39 @@ impl PInterp {
                 } => {
                     let (recv, abase, argc) = (*recv as usize, *abase as usize, *argc as usize);
                     let name = &cur.names[*name as usize];
+                    // A string is an immutable `Arc<str>`, so a push has to
+                    // rewrite the receiver register itself. The normal path
+                    // hands the method a clone and the change would be lost.
+                    // `clone_from` replaces the receiver outright, so it has
+                    // to write the register rather than a copy of it.
+                    if name.id == BuiltinId::CloneFrom {
+                        let src = stack[base + abase..base + abase + argc]
+                            .first()
+                            .cloned()
+                            .unwrap_or(PValue::Unit);
+                        stack[base + recv] = src;
+                        if *dst != u16::MAX {
+                            stack[base + *dst as usize] = PValue::Unit;
+                        }
+                        ip += 1;
+                        continue;
+                    }
+                    if matches!(name.id, BuiltinId::Push | BuiltinId::PushStr)
+                        && let PValue::Str(s) = &stack[base + recv]
+                    {
+                        let mut out = s.to_string();
+                        match (&name.id, stack[base + abase..base + abase + argc].first()) {
+                            (BuiltinId::Push, Some(PValue::Char(c))) => out.push(*c),
+                            (BuiltinId::PushStr, Some(arg)) => out.push_str(&arg.display()),
+                            _ => {}
+                        }
+                        stack[base + recv] = PValue::str(out);
+                        if *dst != u16::MAX {
+                            stack[base + *dst as usize] = PValue::Unit;
+                        }
+                        ip += 1;
+                        continue;
+                    }
                     let recv_v = stack[base + recv].clone();
                     let mut margs = take_range(stack, base + abase, argc);
                     let v = self.eval_method(&recv_v, name, &mut margs)?;
@@ -330,7 +365,10 @@ impl PInterp {
                 Op::IterInit { dst, src } => {
                     let src_v = stack[base + *src as usize].clone();
                     let it = match src_v {
-                        PValue::Range { .. } => src_v,
+                        // A range and a live line iterator stay lazy, so a loop
+                        // over a child's pipe streams instead of buffering the
+                        // whole output before the first line runs.
+                        PValue::Range { .. } | PValue::Native(_) => src_v,
                         other => PValue::vec(self.iter_items(other)?),
                     };
                     stack[base + *dst as usize] = it;
@@ -351,6 +389,14 @@ impl PInterp {
                             let done = if *inclusive { n > *end } else { n >= *end };
                             if done { None } else { Some(PValue::Int(n)) }
                         }
+                        PValue::Native(h) => match &mut *h.lock() {
+                            PNative::Lines(lines) => match lines.next() {
+                                Some(Ok(line)) => Some(PValue::ok(PValue::str(line))),
+                                Some(Err(e)) => Some(PValue::err(PValue::str(e.to_string()))),
+                                None => None,
+                            },
+                            other => bail!("cannot iterate a {}", other.type_name()),
+                        },
                         _ => None,
                     };
                     match item {
@@ -432,11 +478,11 @@ impl PInterp {
                     stack[base + *dst as usize] = PValue::Closure(clo);
                 }
                 Op::Index { dst, base: b, key } => {
-                    let v = self.index(&stack[base + *b as usize], &stack[base + *key as usize])?;
+                    let v = pops::index(&stack[base + *b as usize], &stack[base + *key as usize])?;
                     stack[base + *dst as usize] = v;
                 }
                 Op::SetIndex { base: b, key, val } => {
-                    self.set_index(
+                    pops::set_index(
                         &stack[base + *b as usize],
                         &stack[base + *key as usize],
                         stack[base + *val as usize].clone(),
@@ -462,10 +508,12 @@ impl PInterp {
                         stack[base + *val as usize].clone(),
                     )?;
                 }
-                Op::Try { dst, src } => match self.eval_try(stack[base + *src as usize].clone())? {
-                    Ok(v) => stack[base + *dst as usize] = v,
-                    Err(early) => ret!(early),
-                },
+                Op::Try { dst, src } => {
+                    match pops::eval_try(stack[base + *src as usize].clone())? {
+                        Ok(v) => stack[base + *dst as usize] = v,
+                        Err(early) => ret!(early),
+                    }
+                }
                 Op::Cast { dst, src, ty } => {
                     let v = eval_cast(
                         &cur.casts[*ty as usize],
@@ -576,26 +624,38 @@ impl PInterp {
         })
     }
 
+    /// Invoke a closure value, for the higher order bridge methods.
+    pub(super) fn call_closure(self: &Arc<Self>, f: &PValue, args: &[PValue]) -> Result<PValue> {
+        let PValue::Closure(clo) = f else {
+            bail!("expected a closure, got {}", f.type_name());
+        };
+        let chunk = clo.chunk.clone();
+        self.run_chunk(&chunk, args, &clo.captured)
+    }
+
     /// Drive an awaited value to its result. A JoinHandle joins, a future is
     /// run to completion, anything else is already a value.
     fn await_value(&self, v: PValue) -> Result<PValue> {
         let PValue::Native(n) = v else { return Ok(v) };
         let taken = replace(&mut *n.lock(), PNative::Taken);
         match taken {
-            PNative::Task(h) => Ok(self
-                .rt
-                .block_on(h)
-                .unwrap_or_else(|e| PValue::err(PValue::str(e.to_string())))),
+            // Awaiting a JoinHandle yields `Result<T, JoinError>` in real Rust,
+            // so it wraps. A script that passes `rust check` writes `.await?` or
+            // `.await.unwrap()`, and both need the Ok layer to be here.
+            PNative::Task(h) => Ok(match self.rt.block_on(h) {
+                Ok(v) => PValue::ok(v),
+                Err(e) => PValue::err(PValue::str(e.to_string())),
+            }),
+            // Awaiting a plain future yields its output directly, no wrapper.
             PNative::Future(f) => Ok(self.rt.block_on(f)),
-            PNative::HttpClient(c) => {
-                *n.lock() = PNative::HttpClient(c);
-                bail!("cannot await a client")
-            }
-            PNative::Instant(instant) => {
-                *n.lock() = PNative::Instant(instant);
-                bail!("cannot await an instant")
-            }
             PNative::Taken => bail!("this value was already awaited"),
+            // Everything else is a live resource, not an awaitable. Put it back
+            // so the handle stays usable after the bad await is reported.
+            other => {
+                let name = other.type_name();
+                *n.lock() = other;
+                bail!("cannot await a {name}")
+            }
         }
     }
 
@@ -640,13 +700,6 @@ impl PInterp {
 
 fn take_range(stack: &mut [PValue], s: usize, count: usize) -> Vec<PValue> {
     (0..count).map(|i| take(&mut stack[s + i])).collect()
-}
-
-fn int_of(v: &PValue) -> Result<i64> {
-    match v {
-        PValue::Int(i) => Ok(*i),
-        _ => bail!("range bound must be an integer"),
-    }
 }
 
 /// Apply an `as` cast to a value, keyed by the target type name.
@@ -715,76 +768,5 @@ impl PInterp {
             _ => bail!("cannot set a field of {}", recv.type_name()),
         }
         Ok(())
-    }
-
-    pub(super) fn index(&self, recv: &PValue, key: &PValue) -> Result<PValue> {
-        match recv {
-            PValue::Vec(items) => {
-                let i = int_of(key)? as usize;
-                items
-                    .lock()
-                    .get(i)
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("index {i} out of bounds"))
-            }
-            PValue::Map(m) => {
-                let k = key
-                    .as_key()
-                    .ok_or_else(|| anyhow::anyhow!("invalid map key"))?;
-                m.lock()
-                    .get(&k)
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("key not found"))
-            }
-            PValue::Str(s) => {
-                let i = int_of(key)? as usize;
-                s.chars()
-                    .nth(i)
-                    .map(PValue::Char)
-                    .ok_or_else(|| anyhow::anyhow!("index out of bounds"))
-            }
-            _ => bail!("cannot index {}", recv.type_name()),
-        }
-    }
-
-    pub(super) fn set_index(&self, recv: &PValue, key: &PValue, v: PValue) -> Result<()> {
-        match recv {
-            PValue::Vec(items) => {
-                let i = int_of(key)? as usize;
-                let mut items = items.lock();
-                if i >= items.len() {
-                    bail!("index {i} out of bounds");
-                }
-                items[i] = v;
-            }
-            PValue::Map(m) => {
-                let k = key
-                    .as_key()
-                    .ok_or_else(|| anyhow::anyhow!("invalid map key"))?;
-                m.lock().insert(k, v);
-            }
-            _ => bail!("cannot index {}", recv.type_name()),
-        }
-        Ok(())
-    }
-
-    pub(super) fn eval_try(&self, v: PValue) -> Result<std::result::Result<PValue, PValue>> {
-        match v {
-            PValue::Enum {
-                enum_name,
-                variant,
-                data,
-            } => match (&*enum_name, &*variant) {
-                ("Result", "Ok") | ("Option", "Some") => {
-                    Ok(Ok(data.first().cloned().unwrap_or(PValue::Unit)))
-                }
-                ("Result", "Err") => Ok(Err(PValue::err(
-                    data.first().cloned().unwrap_or(PValue::Unit),
-                ))),
-                ("Option", "None") => Ok(Err(PValue::none())),
-                _ => bail!("`?` on a non Result/Option value"),
-            },
-            _ => bail!("`?` on a {}", v.type_name()),
-        }
     }
 }

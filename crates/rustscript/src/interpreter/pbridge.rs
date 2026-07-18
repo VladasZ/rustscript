@@ -11,6 +11,7 @@ use anyhow::{Result, bail};
 use parking_lot::Mutex;
 
 use super::bytecode::MethodName;
+use super::methods::CharOut;
 use super::pchunk::PChunk;
 use super::pnative::PNative;
 use super::pvalue::PValue;
@@ -100,6 +101,25 @@ impl PInterp {
                 super::script_args().into_iter().map(PValue::str).collect(),
             )),
             ("Command", "new") => Ok(command_new(args.into_iter().next().unwrap_or(PValue::Unit))),
+            ("Regex", "new") => {
+                let pattern = arg0(&args).display();
+                match regex::Regex::new(&pattern) {
+                    Ok(r) => Ok(PValue::ok(super::pregex::make_regex(r, &pattern))),
+                    Err(e) => Ok(PValue::err(PValue::str(e.to_string()))),
+                }
+            }
+            ("Stdio", "piped" | "inherit" | "null") => Ok(PValue::struct_of(
+                "Stdio",
+                [("kind".into(), PValue::str(last))],
+            )),
+            // A child's piped end is already buffered, so wrapping it is a no-op
+            // that hands the same handle back.
+            ("BufReader" | "BufWriter", "new" | "with_capacity") => {
+                match args.into_iter().next_back() {
+                    Some(v @ PValue::Native(_)) => Ok(v),
+                    _ => bail!("BufReader::new needs a reader handle in tokio mode"),
+                }
+            }
             ("Vec", "new") | ("Vec", "with_capacity") => Ok(PValue::vec(vec![])),
             ("HashMap", "new") | ("HashMap", "with_capacity") | ("BTreeMap", "new") => {
                 Ok(PValue::map())
@@ -109,6 +129,13 @@ impl PInterp {
             ("Instant", "now") => Ok(PNative::Instant(Instant::now()).wrap()),
             ("Duration", "from_millis") => Ok(duration_value(int_arg(&args))),
             ("Duration", "from_secs") => Ok(duration_value(int_arg(&args).saturating_mul(1000))),
+            ("process", "exit") => {
+                let code = match args.first() {
+                    Some(PValue::Int(i)) => *i as i32,
+                    _ => 0,
+                };
+                std::process::exit(code)
+            }
             ("time", "sleep") => Ok(sleep_future(&args)),
             ("task", "yield_now") => Ok(yield_future()),
             _ => {
@@ -173,11 +200,14 @@ impl PInterp {
             PValue::Vec(_) => self.vec_method(recv, m, args),
             PValue::Map(_) => map_method(recv, m, args),
             PValue::Enum { .. } => enum_method(recv, m, args),
-            PValue::Struct(st) if &**st.name() == "Command" => self.command_method(recv, m, args),
+            PValue::Struct(st) if &**st.name() == "Command" => {
+                super::pprocess::command_method(recv, m, args)
+            }
+            PValue::Struct(st) if &**st.name() == "Child" => super::pprocess::child_method(recv, m),
             PValue::Struct(st) if &**st.name() == "ExitStatus" => exitstatus_method(st, m),
             PValue::Struct(st) if &**st.name() == "Output" => output_method(st, m),
             PValue::Struct(st) if &**st.name() == "Duration" => duration_method(st, m),
-            PValue::Native(native) => native_method(native, m),
+            PValue::Native(native) => native_method(native, m, args),
             PValue::Int(_) | PValue::Float(_) | PValue::Bool(_) | PValue::Char(_) => {
                 scalar_method(recv, m, args)
             }
@@ -224,6 +254,20 @@ impl PInterp {
                 PValue::Bool(items.lock().iter().any(|v| v.eq_value(&needle)))
             }
             "iter" | "into_iter" | "collect" | "to_vec" => PValue::vec(items.lock().clone()),
+            "nth" => {
+                let index = match args.first() {
+                    Some(PValue::Int(i)) => usize::try_from(*i).unwrap_or(0),
+                    _ => 0,
+                };
+                items
+                    .lock()
+                    .get(index)
+                    .cloned()
+                    .map_or_else(PValue::none, PValue::some)
+            }
+            "collect_string" => {
+                PValue::str(items.lock().iter().map(PValue::display).collect::<String>())
+            }
             "sort" => {
                 items.lock().sort_by(|a, b| {
                     super::pops::compare_values(a, b).unwrap_or(std::cmp::Ordering::Equal)
@@ -235,42 +279,57 @@ impl PInterp {
                 let parts: Vec<String> = items.lock().iter().map(PValue::display).collect();
                 PValue::str(parts.join(&sep))
             }
-            _ => bail!("method `{m}` on Vec is not supported in tokio mode"),
-        })
-    }
-
-    // -- subprocess --------------------------------------------------------
-
-    fn command_method(
-        self: &Arc<Self>,
-        recv: &PValue,
-        m: &str,
-        args: &mut [PValue],
-    ) -> Result<PValue> {
-        let PValue::Struct(s) = recv else {
-            unreachable!()
-        };
-        match m {
-            "arg" => {
-                push_arg(recv, args.first().cloned().unwrap_or(PValue::Unit));
-                Ok(recv.clone())
+            // Higher order methods. The parallel engine keeps collections eager,
+            // so each of these runs the closure over every item right here
+            // rather than building a lazy iterator.
+            "map" | "filter" | "filter_map" | "flat_map" | "any" | "all" | "find" | "position"
+            | "for_each" => {
+                let f = args.first().cloned().unwrap_or(PValue::Unit);
+                let items = items.lock().clone();
+                return self.higher_order(m, &items, &f);
             }
-            "args" => {
-                if let Some(PValue::Vec(list)) = args.first() {
-                    for a in list.lock().iter() {
-                        push_arg(recv, a.clone());
+            "rev" => {
+                let mut out = items.lock().clone();
+                out.reverse();
+                PValue::vec(out)
+            }
+            "enumerate" => PValue::vec(
+                items
+                    .lock()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| PValue::tuple(vec![PValue::Int(i as i64), v.clone()]))
+                    .collect(),
+            ),
+            "count" => PValue::Int(items.lock().len() as i64),
+            "sum" => {
+                let mut total = PValue::Int(0);
+                for v in items.lock().iter() {
+                    total = super::pops::apply_bin(super::bytecode::BinKind::Add, &total, v)?;
+                }
+                total
+            }
+            "max" | "min" => {
+                let items = items.lock();
+                let want = if m == "max" {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Less
+                };
+                let mut best: Option<PValue> = None;
+                for v in items.iter() {
+                    let take = match &best {
+                        None => true,
+                        Some(b) => super::pops::compare_values(v, b)? == want,
+                    };
+                    if take {
+                        best = Some(v.clone());
                     }
                 }
-                Ok(recv.clone())
+                best.map_or_else(PValue::none, PValue::some)
             }
-            "current_dir" => {
-                s.set("current_dir", args.first().cloned().unwrap_or(PValue::Unit));
-                Ok(recv.clone())
-            }
-            "status" => Ok(run_command(s, false)),
-            "output" => Ok(run_command(s, true)),
-            _ => bail!("method `{m}` on Command is not supported in tokio mode"),
-        }
+            _ => bail!("method `{m}` on Vec is not supported in tokio mode"),
+        })
     }
 }
 
@@ -286,6 +345,9 @@ fn arg0(args: &[PValue]) -> PValue {
     args.first().cloned().unwrap_or(PValue::Unit)
 }
 
+/// The shape carries every field a later builder call can set, since a shape
+/// cannot grow once the instance exists and `set` on an unknown field is a
+/// silent no-op.
 fn command_new(program: PValue) -> PValue {
     PValue::struct_of(
         "Command",
@@ -293,66 +355,12 @@ fn command_new(program: PValue) -> PValue {
             ("program".into(), PValue::str(program.display())),
             ("args".into(), PValue::vec(vec![])),
             ("current_dir".into(), PValue::Unit),
+            ("envs".into(), PValue::Unit),
+            ("stdin".into(), PValue::Unit),
+            ("stdout".into(), PValue::Unit),
+            ("stderr".into(), PValue::Unit),
         ],
     )
-}
-
-fn push_arg(cmd: &PValue, a: PValue) {
-    if let PValue::Struct(s) = cmd
-        && let Some(PValue::Vec(list)) = s.get("args")
-    {
-        list.lock().push(PValue::str(a.display()));
-    }
-}
-
-fn run_command(s: &Arc<super::pvalue::PStructData>, capture: bool) -> PValue {
-    let program = s.get("program").map(|v| v.display()).unwrap_or_default();
-    let mut cmd = std::process::Command::new(&program);
-    if let Some(PValue::Vec(list)) = s.get("args") {
-        for a in list.lock().iter() {
-            cmd.arg(a.display());
-        }
-    }
-    if let Some(dir) = s.get("current_dir")
-        && !matches!(dir, PValue::Unit)
-    {
-        cmd.current_dir(dir.display());
-    }
-    if capture {
-        match cmd.output() {
-            Ok(out) => PValue::ok(PValue::struct_of(
-                "Output",
-                [
-                    (
-                        "status".into(),
-                        exit_status(out.status.success(), out.status.code()),
-                    ),
-                    ("stdout".into(), byte_vec(&out.stdout)),
-                    ("stderr".into(), byte_vec(&out.stderr)),
-                ],
-            )),
-            Err(e) => PValue::err(PValue::str(e.to_string())),
-        }
-    } else {
-        match cmd.status() {
-            Ok(st) => PValue::ok(exit_status(st.success(), st.code())),
-            Err(e) => PValue::err(PValue::str(e.to_string())),
-        }
-    }
-}
-
-fn exit_status(success: bool, code: Option<i32>) -> PValue {
-    PValue::struct_of(
-        "ExitStatus",
-        [
-            ("success".into(), PValue::Bool(success)),
-            ("code".into(), PValue::Int(code.unwrap_or(-1) as i64)),
-        ],
-    )
-}
-
-fn byte_vec(bytes: &[u8]) -> PValue {
-    PValue::vec(bytes.iter().map(|&b| PValue::Int(b as i64)).collect())
 }
 
 fn exitstatus_method(s: &Arc<super::pvalue::PStructData>, m: &str) -> Result<PValue> {
@@ -368,7 +376,7 @@ fn exitstatus_method(s: &Arc<super::pvalue::PStructData>, m: &str) -> Result<PVa
 
 fn output_method(s: &Arc<super::pvalue::PStructData>, m: &str) -> Result<PValue> {
     Ok(match m {
-        "status" => s.get("status").unwrap_or(PValue::Unit),
+        "status" | "stdout" | "stderr" => s.get(m).unwrap_or(PValue::Unit),
         _ => bail!("method `{m}` on Output is not supported in tokio mode"),
     })
 }
@@ -437,15 +445,24 @@ fn duration_method(s: &Arc<super::pvalue::PStructData>, m: &str) -> Result<PValu
     })
 }
 
-fn native_method(native: &Arc<Mutex<PNative>>, m: &str) -> Result<PValue> {
-    let native = native.lock();
-    match (&*native, m) {
-        (PNative::Instant(instant), "elapsed") => Ok(duration_from_std(instant.elapsed())),
-        (value, _) => bail!(
-            "method `{m}` on {} is not supported in tokio mode",
-            value.type_name()
-        ),
+fn native_method(native: &Arc<Mutex<PNative>>, m: &str, args: &mut [PValue]) -> Result<PValue> {
+    if let PNative::Instant(instant) = &*native.lock()
+        && m == "elapsed"
+    {
+        return Ok(duration_from_std(instant.elapsed()));
     }
+    // The subprocess family: pipe readers, line iterators and the stdin writer.
+    if let Some(v) = super::pprocess::native_method(native, m, args)? {
+        return Ok(v);
+    }
+    if let Some(v) = super::pregex::regex_native_method(native, m, args)? {
+        return Ok(v);
+    }
+    let native = native.lock();
+    bail!(
+        "method `{m}` on {} is not supported in tokio mode",
+        native.type_name()
+    )
 }
 
 fn map_method(recv: &PValue, m: &str, args: &mut [PValue]) -> Result<PValue> {
@@ -502,10 +519,15 @@ fn scalar_method(recv: &PValue, m: &str, args: &[PValue]) -> Result<PValue> {
             PValue::Float(value) => PValue::Bool(value.is_sign_positive()),
             _ => bail!("is_sign_positive on non float"),
         },
-        "is_ascii_digit" => match recv {
-            PValue::Char(ch) => PValue::Bool(ch.is_ascii_digit()),
-            _ => bail!("is_ascii_digit on non char"),
-        },
+        _ if let PValue::Char(ch) = recv
+            && let Some(out) = super::methods::char_method(*ch, m) =>
+        {
+            match out {
+                CharOut::Bool(v) => PValue::Bool(v),
+                CharOut::Char(c) => PValue::Char(c),
+                CharOut::Str(s) => PValue::str(s),
+            }
+        }
         _ => bail!(
             "method `{m}` on {} is not supported in tokio mode",
             recv.type_name()
@@ -550,6 +572,21 @@ fn enum_method(recv: &PValue, m: &str, args: &mut [PValue]) -> Result<PValue> {
                 PValue::Unit
             }
         }
+        // These borrow or move the payload in real Rust. The interpreter shares
+        // values, so handing the same value back is equivalent, and it is what
+        // the fast engine does too.
+        "as_ref" | "as_deref" | "as_mut" | "take" | "cloned" | "copied" => recv.clone(),
+        // `Option::context` and `Result::context` produce a Result, so a
+        // following `?` has something to unwrap.
+        "context" | "with_context" => {
+            if matches!(&**variant, "Some" | "Ok") {
+                PValue::ok(payload())
+            } else {
+                PValue::err(PValue::str(
+                    args.first().map(PValue::display).unwrap_or_default(),
+                ))
+            }
+        }
         "is_some" => PValue::Bool(&**variant == "Some"),
         "is_none" => PValue::Bool(&**variant == "None"),
         "is_ok" => PValue::Bool(&**variant == "Ok"),
@@ -567,6 +604,11 @@ fn enum_method(recv: &PValue, m: &str, args: &mut [PValue]) -> Result<PValue> {
 
 fn str_method(s: &Arc<str>, m: &str, args: &mut [PValue]) -> Result<PValue> {
     let a0 = || args.first().map(PValue::display).unwrap_or_default();
+    let a1 = || args.get(1).map(PValue::display).unwrap_or_default();
+    let n0 = || match args.first() {
+        Some(PValue::Int(i)) => usize::try_from(*i).unwrap_or(0),
+        _ => 0,
+    };
     Ok(match m {
         "len" => PValue::Int(s.len() as i64),
         "is_empty" => PValue::Bool(s.is_empty()),
@@ -612,6 +654,50 @@ fn str_method(s: &Arc<str>, m: &str, args: &mut [PValue]) -> Result<PValue> {
                 PValue::err(PValue::str(format!("cannot parse `{value}`")))
             }
         }
+        // The rest of the String surface the fast engine carries, so a script
+        // behaves the same whichever engine runs it.
+        "repeat" => PValue::str(s.repeat(n0())),
+        "as_string" | "into_owned" | "into_string" => PValue::str(&**s),
+        "find" => match s.find(&a0()) {
+            Some(i) => PValue::some(PValue::Int(i as i64)),
+            None => PValue::none(),
+        },
+        "rfind" => match s.rfind(&a0()) {
+            Some(i) => PValue::some(PValue::Int(i as i64)),
+            None => PValue::none(),
+        },
+        "split_once" => match s.split_once(&a0()) {
+            Some((a, b)) => PValue::some(PValue::tuple(vec![PValue::str(a), PValue::str(b)])),
+            None => PValue::none(),
+        },
+        "rsplit_once" => match s.rsplit_once(&a0()) {
+            Some((a, b)) => PValue::some(PValue::tuple(vec![PValue::str(a), PValue::str(b)])),
+            None => PValue::none(),
+        },
+        "strip_prefix" => match s.strip_prefix(&a0()) {
+            Some(rest) => PValue::some(PValue::str(rest)),
+            None => PValue::none(),
+        },
+        "strip_suffix" => match s.strip_suffix(&a0()) {
+            Some(rest) => PValue::some(PValue::str(rest)),
+            None => PValue::none(),
+        },
+        "trim_matches" => PValue::str(s.trim_matches(|c: char| a0().contains(c))),
+        "trim_start_matches" => PValue::str(s.trim_start_matches(&a0())),
+        "trim_end_matches" => PValue::str(s.trim_end_matches(&a0())),
+        "rsplit" => PValue::vec(s.rsplit(&a0()).map(PValue::str).collect()),
+        "splitn" => PValue::vec(s.splitn(n0(), &a1()).map(PValue::str).collect()),
+        "as_bytes" | "into_bytes" => {
+            PValue::vec(s.bytes().map(|b| PValue::Int(i64::from(b))).collect())
+        }
+        "bytes" => PValue::vec(s.bytes().map(|b| PValue::Int(i64::from(b))).collect()),
+        "char_indices" => PValue::vec(
+            s.char_indices()
+                .map(|(i, c)| PValue::tuple(vec![PValue::Int(i as i64), PValue::Char(c)]))
+                .collect(),
+        ),
+        "matches" => PValue::vec(s.matches(&a0()).map(PValue::str).collect()),
+        "count" => PValue::Int(s.chars().count() as i64),
         _ => bail!("method `{m}` on String is not supported in tokio mode"),
     })
 }
@@ -645,13 +731,30 @@ fn render_template(
                     spec.push(c);
                 }
                 let (name, fmt) = spec.split_once(':').unwrap_or((&spec, ""));
-                let debug = fmt.contains('?');
                 let value = resolve_arg(name, &mut next_pos, positional, named)?;
-                if debug {
-                    out.push_str(&value.debug());
-                } else {
-                    out.push_str(&value.display());
-                }
+                // A `{:w$}` width names another argument, so resolve it against
+                // the same tables before the spec is applied.
+                let mut lookup = |token: &str| -> Result<i64> {
+                    let mut pos = 0;
+                    match resolve_arg(token, &mut pos, positional, named)? {
+                        PValue::Int(i) => Ok(i),
+                        other => {
+                            bail!("format width must be an integer, got {}", other.type_name())
+                        }
+                    }
+                };
+                let fmt = super::format::expand_widths_with(fmt, &mut lookup)?;
+                let number = match &value {
+                    PValue::Float(f) => Some(*f),
+                    PValue::Int(i) => Some(*i as f64),
+                    _ => None,
+                };
+                out.push_str(&super::format::apply_spec(
+                    &fmt,
+                    &value.display(),
+                    &value.debug(),
+                    number,
+                ));
             }
             other => out.push(other),
         }
@@ -684,4 +787,63 @@ fn resolve_arg(
         .find(|(n, _)| *n == name)
         .map(|(_, v)| v.clone())
         .ok_or_else(|| anyhow::anyhow!("format name `{name}` is missing"))
+}
+
+impl PInterp {
+    /// Run a closure over every item for the higher order Vec methods. Kept in
+    /// one place so map, filter and the predicates share their calling shape.
+    fn higher_order(self: &Arc<Self>, m: &str, items: &[PValue], f: &PValue) -> Result<PValue> {
+        let mut out = Vec::new();
+        for (index, item) in items.iter().enumerate() {
+            let got = self.call_closure(f, std::slice::from_ref(item))?;
+            match m {
+                "map" => out.push(got),
+                "for_each" => {}
+                "filter" => {
+                    if got.is_truthy() {
+                        out.push(item.clone());
+                    }
+                }
+                "filter_map" => {
+                    if let PValue::Enum { variant, data, .. } = &got
+                        && &**variant == "Some"
+                    {
+                        out.push(data.first().cloned().unwrap_or(PValue::Unit));
+                    }
+                }
+                "flat_map" => match got {
+                    PValue::Vec(inner) => out.extend(inner.lock().iter().cloned()),
+                    other => out.push(other),
+                },
+                "any" => {
+                    if got.is_truthy() {
+                        return Ok(PValue::Bool(true));
+                    }
+                }
+                "all" => {
+                    if !got.is_truthy() {
+                        return Ok(PValue::Bool(false));
+                    }
+                }
+                "find" => {
+                    if got.is_truthy() {
+                        return Ok(PValue::some(item.clone()));
+                    }
+                }
+                "position" => {
+                    if got.is_truthy() {
+                        return Ok(PValue::some(PValue::Int(index as i64)));
+                    }
+                }
+                _ => bail!("unknown higher order method `{m}`"),
+            }
+        }
+        Ok(match m {
+            "any" => PValue::Bool(false),
+            "all" => PValue::Bool(true),
+            "find" | "position" => PValue::none(),
+            "for_each" => PValue::Unit,
+            _ => PValue::vec(out),
+        })
+    }
 }

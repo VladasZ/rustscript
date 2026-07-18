@@ -33,7 +33,8 @@ pub(super) fn render_values(
                     None => (inner.trim(), ""),
                 };
                 let value = resolve_arg(arg_ref, &mut next_positional, positional, named)?;
-                out.push_str(&format_value(&value, spec)?);
+                let spec = expand_arg_widths(spec, positional, named)?;
+                out.push_str(&format_value(&value, &spec)?);
             }
             '}' => {
                 if chars.peek() == Some(&'}') {
@@ -76,31 +77,43 @@ fn resolve_arg(
 
 /// Apply a subset of the format spec: debug flag, precision, width, and fill.
 fn format_value(value: &Value, spec: &str) -> Result<String> {
-    let debug = spec.contains('?');
+    let number = match value {
+        Value::Float(f) => Some(*f),
+        Value::Int(i) => Some(*i as f64),
+        _ => None,
+    };
+    Ok(apply_spec(spec, &value.display(), &value.debug(), number))
+}
+
+/// Apply the precision, width, alignment and fill parts of a spec to a value
+/// that has already been rendered. Shared by both engines so a script formats
+/// the same whichever one runs it.
+pub(super) fn apply_spec(spec: &str, display: &str, debug: &str, number: Option<f64>) -> String {
+    let is_debug = spec.contains('?');
     let spec = spec.replace(['#', '?'], "");
 
-    let mut base = if debug {
-        value.debug()
+    let mut base = if is_debug {
+        debug.to_string()
     } else {
-        // Precision applies to floats as decimal places.
-        if let Some((_, prec)) = spec.split_once('.') {
-            let prec: usize = prec
-                .trim_end_matches(|c: char| !c.is_ascii_digit())
-                .parse()
-                .unwrap_or(0);
-            match value {
-                Value::Float(f) => format!("{f:.prec$}"),
-                Value::Int(i) => format!("{:.prec$}", *i as f64),
-                other => other.display(),
+        // Precision applies to numbers as decimal places.
+        match (spec.split_once('.'), number) {
+            (Some((_, prec)), Some(f)) => {
+                let prec: usize = prec
+                    .trim_end_matches(|c: char| !c.is_ascii_digit())
+                    .parse()
+                    .unwrap_or(0);
+                format!("{f:.prec$}")
             }
-        } else {
-            value.display()
+            _ => display.to_string(),
         }
     };
+    let value_is_numeric = number.is_some();
 
-    // Width and alignment, `{:>8}`, `{:<8}`, `{:^8}`, `{:08}`.
+    // Width and alignment, `{:>8}`, `{:<8}`, `{:^8}`, `{:08}`. Numbers default
+    // to right aligned and everything else to left, same as real Rust.
+    let numeric = value_is_numeric;
     let width_part = spec.split('.').next().unwrap_or("");
-    let (align, rest) = split_align(width_part);
+    let (align, rest) = split_align(width_part, numeric);
     let zero = rest.starts_with('0');
     let rest = rest.trim_start_matches('0');
     if let Ok(width) = rest.parse::<usize>()
@@ -121,14 +134,105 @@ fn format_value(value: &Value, spec: &str) -> Result<String> {
             _ => base = format!("{}{base}", fill_str(fill, pad)),
         }
     }
-    Ok(base)
+    base
 }
 
-fn split_align(spec: &str) -> (char, &str) {
+fn split_align(spec: &str, numeric: bool) -> (char, &str) {
     let mut chars = spec.chars();
+    // An explicit fill character sits before the alignment, as in `{:*>8}`.
+    let rest = chars.as_str();
+    if let Some(a) = chars.clone().nth(1)
+        && matches!(a, '<' | '>' | '^')
+        && let Some(fill) = chars.next()
+        && fill != '<'
+        && fill != '>'
+        && fill != '^'
+    {
+        chars.next();
+        return (a, chars.as_str());
+    }
+    let mut chars = rest.chars();
     match chars.next() {
         Some(a @ ('<' | '>' | '^')) => (a, chars.as_str()),
-        _ => ('>', spec),
+        _ => (if numeric { '>' } else { '<' }, rest),
+    }
+}
+
+/// Replace `name$` and `0$` width or precision references with their value, so
+/// `{:w$}` pads by whatever `w` holds at render time.
+pub(super) fn expand_widths_with(
+    spec: &str,
+    lookup: &mut dyn FnMut(&str) -> Result<i64>,
+) -> Result<String> {
+    if !spec.contains('$') {
+        return Ok(spec.to_string());
+    }
+    let mut out = String::new();
+    let mut token = String::new();
+    for c in spec.chars() {
+        if c.is_alphanumeric() || c == '_' {
+            token.push(c);
+            continue;
+        }
+        if c == '$' {
+            out.push_str(&lookup(&token)?.to_string());
+            token.clear();
+            continue;
+        }
+        out.push_str(&token);
+        token.clear();
+        out.push(c);
+    }
+    out.push_str(&token);
+    Ok(out)
+}
+
+fn expand_arg_widths(
+    spec: &str,
+    positional: &[Value],
+    named: &[(String, Value)],
+) -> Result<String> {
+    if !spec.contains('$') {
+        return Ok(spec.to_string());
+    }
+    let mut out = String::new();
+    let mut token = String::new();
+    for c in spec.chars() {
+        if c.is_alphanumeric() || c == '_' {
+            token.push(c);
+            continue;
+        }
+        if c == '$' {
+            out.push_str(&width_arg(&token, positional, named)?.to_string());
+            token.clear();
+            continue;
+        }
+        out.push_str(&token);
+        token.clear();
+        out.push(c);
+    }
+    out.push_str(&token);
+    Ok(out)
+}
+
+fn width_arg(token: &str, positional: &[Value], named: &[(String, Value)]) -> Result<i64> {
+    let value = match token.parse::<usize>() {
+        Ok(idx) => positional
+            .get(idx)
+            .cloned()
+            .ok_or_else(|| anyhow!("format width argument {idx} out of range"))?,
+        Err(_) => named
+            .iter()
+            .find(|(n, _)| n == token)
+            .map(|(_, v)| v.clone())
+            .ok_or_else(|| anyhow!("`{token}` not found for a format width"))?,
+    };
+    match value {
+        Value::Int(i) => Ok(i),
+        other => Err(anyhow!(
+            "format width must be an integer, got {}",
+            other.type_name()
+        )),
     }
 }
 

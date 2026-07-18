@@ -560,7 +560,7 @@ async fn main() {
     let a = tokio::spawn(async { 2 + 3 });
     let b = tokio::spawn(async { 10 * 4 });
     let (x, y) = tokio::join!(a, b);
-    println!("sum={x} prod={y}");
+    println!("sum={} prod={}", x.unwrap(), y.unwrap());
 }
 "#);
     assert_eq!(out, "sum=5 prod=40\n");
@@ -621,7 +621,7 @@ async fn main() {
         o.status().success()
     });
     let (x, y) = tokio::join!(a, b);
-    println!("{x} {y}");
+    println!("{} {}", x.unwrap(), y.unwrap());
 }
 "#);
     assert_eq!(out, "true true\n");
@@ -737,4 +737,53 @@ fn main() {
         err.contains("std::thread is not supported"),
         "stderr was: {err}"
     );
+}
+
+#[test]
+fn check_reports_a_method_the_interpreter_lacks() {
+    // Valid Rust that `cargo check` accepts, but the parallel engine has no
+    // `rposition`, so the coverage gate must catch it without running anything.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("script.rs");
+    std::fs::write(
+        &file,
+        r#"
+#[tokio::main(flavor = "multi_thread")]
+async fn main() {
+    let v = vec![1, 2, 3];
+    println!("{:?}", v.iter().rposition(|x| *x == 2));
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_rust"))
+        .args(["check", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "check should fail, stderr: {err}");
+    assert!(err.contains("rposition"), "stderr was: {err}");
+}
+
+#[test]
+fn check_stays_quiet_on_a_script_the_interpreter_supports() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("script.rs");
+    std::fs::write(
+        &file,
+        r#"
+fn main() {
+    let v = vec![1, 2, 3];
+    let doubled: Vec<i64> = v.iter().map(|x| x * 2).collect();
+    println!("{} {}", doubled.len(), "ab".repeat(2));
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_rust"))
+        .args(["check", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "check should pass, stderr: {err}");
 }
