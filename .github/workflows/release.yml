@@ -233,11 +233,24 @@ jobs:
           case "$TAG" in
             *-*) prerelease="--prerelease" ;;
           esac
-          gh release create "$TAG" \
-            --title "$TAG" \
-            --generate-notes \
-            $prerelease \
-            assets/rust-*.* assets/SHA256SUMS
+
+          # Once the action is listed on the marketplace, GitHub creates a
+          # release by itself as soon as the tag is pushed, so the release can
+          # already exist here with no assets on it. Fill that one in rather
+          # than failing, and still create it when it is absent.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists, filling in its assets"
+            gh release upload "$TAG" assets/rust-*.* assets/SHA256SUMS --clobber
+            notes=$(gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+              -f tag_name="$TAG" -q .body)
+            gh release edit "$TAG" --title "$TAG" --notes "$notes" $prerelease
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --generate-notes \
+              $prerelease \
+              assets/rust-*.* assets/SHA256SUMS
+          fi
 
       - name: Move the minor tag
         shell: bash
