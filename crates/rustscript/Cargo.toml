@@ -1,6 +1,6 @@
 [package]
 name = "rustscript"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Run a subset of Rust as an interpreted script"
 repository = "https://github.com/VladasZ/rustscript"
