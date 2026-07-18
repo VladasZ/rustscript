@@ -25,6 +25,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: Swatinem/rust-cache@v2
+      # Clippy covers the whole workspace, so it builds bench and needs the same
+      # system fontconfig the test job does.
+      - name: Install fontconfig
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
