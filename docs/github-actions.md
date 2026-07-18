@@ -44,7 +44,8 @@ Pin the interpreter version independently of the action.
 | `github-token` | `github.token` | only used to resolve the newest release |
 
 `mode` maps straight onto the CLI. `run` interprets, `build` compiles with cargo
-and then runs, and `check` validates with `cargo check` without running. Both
+and then runs, and `check` validates with `cargo check` and the interpreter
+coverage walk without running. Both
 `build` and `check` need a cargo toolchain in the job, which the GitHub hosted
 images already provide.
 

@@ -231,3 +231,86 @@ fn plit_eq(l: &PLit, val: &PValue) -> bool {
         _ => false,
     }
 }
+
+/// An integer operand, for range bounds and sequence indexes.
+pub(super) fn int_of(v: &PValue) -> Result<i64> {
+    match v {
+        PValue::Int(i) => Ok(*i),
+        _ => bail!("range bound must be an integer"),
+    }
+}
+
+// -- indexing and `?` ------------------------------------------------------
+
+pub(super) fn index(recv: &PValue, key: &PValue) -> Result<PValue> {
+    match recv {
+        PValue::Vec(items) => {
+            let i = int_of(key)? as usize;
+            items
+                .lock()
+                .get(i)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("index {i} out of bounds"))
+        }
+        PValue::Map(m) => {
+            let k = key
+                .as_key()
+                .ok_or_else(|| anyhow::anyhow!("invalid map key"))?;
+            m.lock()
+                .get(&k)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("key not found"))
+        }
+        PValue::Str(s) => {
+            let i = int_of(key)? as usize;
+            s.chars()
+                .nth(i)
+                .map(PValue::Char)
+                .ok_or_else(|| anyhow::anyhow!("index out of bounds"))
+        }
+        // `caps[1]` and `caps["name"]` on a capture set.
+        PValue::Native(h) => super::pregex::capture_index(h, key),
+        _ => bail!("cannot index {}", recv.type_name()),
+    }
+}
+
+pub(super) fn set_index(recv: &PValue, key: &PValue, v: PValue) -> Result<()> {
+    match recv {
+        PValue::Vec(items) => {
+            let i = int_of(key)? as usize;
+            let mut items = items.lock();
+            if i >= items.len() {
+                bail!("index {i} out of bounds");
+            }
+            items[i] = v;
+        }
+        PValue::Map(m) => {
+            let k = key
+                .as_key()
+                .ok_or_else(|| anyhow::anyhow!("invalid map key"))?;
+            m.lock().insert(k, v);
+        }
+        _ => bail!("cannot index {}", recv.type_name()),
+    }
+    Ok(())
+}
+
+pub(super) fn eval_try(v: PValue) -> Result<std::result::Result<PValue, PValue>> {
+    match v {
+        PValue::Enum {
+            enum_name,
+            variant,
+            data,
+        } => match (&*enum_name, &*variant) {
+            ("Result", "Ok") | ("Option", "Some") => {
+                Ok(Ok(data.first().cloned().unwrap_or(PValue::Unit)))
+            }
+            ("Result", "Err") => Ok(Err(PValue::err(
+                data.first().cloned().unwrap_or(PValue::Unit),
+            ))),
+            ("Option", "None") => Ok(Err(PValue::none())),
+            _ => bail!("`?` on a non Result/Option value"),
+        },
+        _ => bail!("`?` on a {}", v.type_name()),
+    }
+}

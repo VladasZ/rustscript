@@ -1,3 +1,6 @@
+#[path = "src/bridge_tables_build.rs"]
+mod bridge_tables_build;
+
 use std::env;
 use std::path::PathBuf;
 use std::process::Command;
@@ -30,6 +33,14 @@ fn git_commit() -> String {
 }
 
 fn main() {
+    // Harvest the interpreter's supported method names from the bridge sources
+    // so `rust check` can tell a script when it uses one that does not exist.
+    let interpreter = std::path::Path::new("src/interpreter");
+    let tables = bridge_tables_build::generate(interpreter);
+    let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")).join("bridge_tables.rs");
+    std::fs::write(&out, tables).expect("write bridge tables");
+    println!("cargo:rerun-if-changed=src/interpreter");
+    println!("cargo:rerun-if-changed=src/bridge_tables_build.rs");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-changed=src");

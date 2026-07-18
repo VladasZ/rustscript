@@ -532,6 +532,17 @@ fn collect_pattern_names(pat: &Pat, out: &mut Vec<String>) {
 }
 
 /// Identifiers used as inline `{name}` holes in a format template.
+/// Whether a format hole names an identifier rather than a position.
+fn is_name(arg: &str) -> bool {
+    !arg.is_empty()
+        && arg.parse::<usize>().is_err()
+        && arg.chars().all(|c| c.is_alphanumeric() || c == '_')
+        && arg
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_')
+}
+
 fn inline_holes(template: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut chars = template.chars().peekable();
@@ -548,15 +559,24 @@ fn inline_holes(template: &str) -> Vec<String> {
                 }
                 inner.push(ic);
             }
+            // A spec can name a variable for the width or precision, as in
+            // `{:w$}`. That name is a hole too, even though it sits after the
+            // colon, so the value is in scope when the template renders.
+            if let Some((_, spec)) = inner.split_once(':') {
+                let mut token = String::new();
+                for c in spec.chars() {
+                    if c.is_alphanumeric() || c == '_' {
+                        token.push(c);
+                        continue;
+                    }
+                    if c == '$' && is_name(&token) {
+                        out.push(token.clone());
+                    }
+                    token.clear();
+                }
+            }
             let arg = inner.split(':').next().unwrap_or("").trim();
-            if !arg.is_empty()
-                && arg.parse::<usize>().is_err()
-                && arg.chars().all(|c| c.is_alphanumeric() || c == '_')
-                && arg
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_alphabetic() || c == '_')
-            {
+            if is_name(arg) {
                 out.push(arg.to_string());
             }
         } else if c == '}' && chars.peek() == Some(&'}') {

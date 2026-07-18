@@ -179,16 +179,6 @@ impl Compiler<'_> {
     }
 
     pub(super) fn compile_method(&mut self, dst: Reg, m: &syn::ExprMethodCall) -> Result<()> {
-        // Tokio task handles yield Result in real Rust. The parallel VM already
-        // turns a successful task await into its inner value, so the source-level
-        // unwrap is complete once the await has been compiled.
-        if self.ctx.async_mode
-            && m.method == "unwrap"
-            && m.args.is_empty()
-            && matches!(&*m.receiver, Expr::Await(_))
-        {
-            return self.compile_into(dst, &m.receiver);
-        }
         // Fuse `x.get(k).copied().unwrap_or(d)` into one op. The chain builds
         // and tears down an Option per call, which dominates counting loops.
         if dst != DISCARD
@@ -214,7 +204,17 @@ impl Compiler<'_> {
         }
         let recv = self.compile_expr(&m.receiver)?;
         let base = self.compile_args(m.args.iter())?;
-        let name = self.add_name(m.method.to_string());
+        // `collect` is type driven in real Rust. The interpreter has no types,
+        // so a turbofish asking for a String is lowered to its own method here,
+        // the one place the target is knowable.
+        let mut method = m.method.to_string();
+        if method == "collect"
+            && let Some(tf) = &m.turbofish
+            && names_string(tf)
+        {
+            method = "collect_string".to_string();
+        }
+        let name = self.add_name(method);
         self.emit(Op::Method {
             dst,
             recv,
@@ -648,4 +648,12 @@ fn lower_literal(literal: &Lit) -> PPat {
 fn is_tokio_spawn(path: &syn::Path) -> bool {
     let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
     segs.last().map(String::as_str) == Some("spawn") && segs.iter().any(|s| s == "tokio")
+}
+
+/// Whether a turbofish asks for a `String`, as in `collect::<String>()`.
+fn names_string(tf: &syn::AngleBracketedGenericArguments) -> bool {
+    tf.args.iter().any(|arg| {
+        matches!(arg, syn::GenericArgument::Type(syn::Type::Path(p))
+            if p.path.segments.last().is_some_and(|s| s.ident == "String"))
+    })
 }

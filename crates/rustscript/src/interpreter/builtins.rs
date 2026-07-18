@@ -444,6 +444,11 @@ pub(super) fn builtin_method(
     method: &MethodName,
     args: &mut [Value],
 ) -> Result<Value> {
+    // Type tests apply to any receiver, so they are answered before the per
+    // type dispatch below, which returns early and would never reach them.
+    if let Some(v) = json_type_test(recv, method.text.as_str()) {
+        return Ok(v);
+    }
     // The hot receivers dispatch on the precompiled id, no string compares.
     match recv {
         Value::Str(s) => return str_method(s, method, &*args),

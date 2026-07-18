@@ -1,6 +1,7 @@
 mod builtins;
 mod bytecode;
 mod compile;
+pub mod coverage;
 mod crates_bridge;
 mod docx_bridge;
 mod eval;
@@ -19,6 +20,8 @@ mod pdf_bridge;
 mod phttp;
 mod pnative;
 mod pops;
+mod pprocess;
+mod pregex;
 mod process;
 mod pvalue;
 mod pvm;
@@ -227,6 +230,13 @@ impl Interp {
     }
 
     /// Run `fn main`. Its returned `Result::Err` is reported like anyhow does.
+    /// Report methods the interpreter does not implement, without running
+    /// anything. Used by `rust check`.
+    pub fn coverage(&self, engine: coverage::Engine) -> Vec<coverage::Finding> {
+        let user = self.methods.keys().map(|(_, m)| m.clone());
+        coverage::report(&self.functions, user, engine)
+    }
+
     pub fn run_main(&self) -> Result<()> {
         let idx = self
             .main_index

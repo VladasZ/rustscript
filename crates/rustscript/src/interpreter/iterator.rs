@@ -88,6 +88,12 @@ pub enum IteratorState {
         closure: Rc<ClosureData>,
         skipping: bool,
     },
+    /// `peekable`. Holds at most one item pulled early by `peek`, which the
+    /// next `next` hands back before touching the source again.
+    Peekable {
+        source: Handle,
+        buffered: Option<Value>,
+    },
 }
 
 enum Step {
@@ -319,6 +325,10 @@ impl IteratorState {
                 closure,
                 skipping,
             } => Step::SkipWhile(source.clone(), closure.clone(), *skipping),
+            IteratorState::Peekable { source, buffered } => match buffered.take() {
+                Some(item) => Step::Ready(Some(item)),
+                None => Step::Take(source.clone()),
+            },
         }
     }
 }
@@ -481,13 +491,59 @@ impl Interp {
                     .map(Value::some)
                     .unwrap_or_else(Value::none),
                 "collect" | "to_vec" => Value::vec(self.drain_iterator(iterator)?),
+                "collect_string" => Value::str(
+                    self.drain_iterator(iterator)?
+                        .iter()
+                        .map(Value::display)
+                        .collect::<String>(),
+                ),
                 "cloned" | "copied" => Value::Native(iterator.clone()),
+                "peekable" => wrap(IteratorState::Peekable {
+                    source: iterator.clone(),
+                    buffered: None,
+                }),
+                // `peek` pulls one item early and keeps it, so the value is
+                // still there for the next `next`.
+                "peek" => {
+                    let buffered = match &*iterator.borrow() {
+                        Native::Iterator(IteratorState::Peekable { buffered, .. }) => {
+                            buffered.clone()
+                        }
+                        _ => return Ok(None),
+                    };
+                    if let Some(item) = buffered {
+                        return Ok(Some(Value::some(item)));
+                    }
+                    let source = match &*iterator.borrow() {
+                        Native::Iterator(IteratorState::Peekable { source, .. }) => source.clone(),
+                        _ => return Ok(None),
+                    };
+                    let item = self.iterator_next(&source)?;
+                    if let Native::Iterator(IteratorState::Peekable { buffered, .. }) =
+                        &mut *iterator.borrow_mut()
+                    {
+                        buffered.clone_from(&item);
+                    }
+                    match item {
+                        Some(item) => Value::some(item),
+                        None => Value::none(),
+                    }
+                }
                 "rev" => {
                     let mut items = self.drain_iterator(iterator)?;
                     items.reverse();
                     Value::vec(items)
                 }
                 "max" | "min" => self.iterator_extreme(iterator, method.text.as_str())?,
+                // `Chars::as_str` gives the not yet consumed tail, which is what
+                // makes the `chars.next()` then `chars.as_str()` capitalize idiom
+                // work. Only a char iterator still knows its source text.
+                "as_str" => match &*iterator.borrow() {
+                    Native::Iterator(IteratorState::Chars { source, offset }) => {
+                        Value::str(source[*offset..].to_string())
+                    }
+                    _ => return Ok(None),
+                },
                 _ => return Ok(None),
             },
         };

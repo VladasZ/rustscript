@@ -41,15 +41,23 @@ Two layers share the same source.
   are numbered slots, so a variable read is an array index, not a name lookup.
   Ownership and borrow rules carry no meaning at runtime, so there is no borrow
   checker cost and startup is fast.
-- `rust check` builds a small cargo project around the files and runs
-  `cargo check` on it. This proves the script is valid Rust. It is a separate
-  opt-in step, not part of running, and its result is cached by source hash.
+- `rust check` runs two gates. It builds a small cargo project around the files
+  and runs `cargo check` on it, which proves the script is valid Rust. It then
+  compiles the script and walks the bytecode to find methods this interpreter
+  does not implement. It is a separate opt-in step, not part of running, and the
+  cargo result is cached by source hash.
 
 Running never waits on a check, so a script starts at once, like Python. The
 interpreter needs no type checker of its own. When you want proof that a script
-is valid Rust, `rust check` makes the real compiler the authority. The
-interpreter stays small and optimistic, and a bad path surfaces as a runtime
-error when it is reached.
+is valid Rust, `rust check` makes the real compiler the authority.
+
+Being valid Rust is not the whole story, because the interpreter runs a subset.
+`"x".repeat(3)` compiles whether or not the bridge implements `repeat`, and
+running the script only exercises the lines that execute, so a gap inside a loop
+body stays hidden until that loop has data. So `rust check` also walks the
+compiled bytecode and reports every method call the interpreter has no
+implementation for, on every branch, without executing anything. Path calls like
+`std::process::exit` are not covered yet.
 
 ## Install
 
@@ -107,7 +115,7 @@ rust run FILE.rs     interpret the script
 rust FILE.rs         same as run
 rust FILE.rs cmp     compile and run, `cmp` first arg is reserved
 rust build FILE.rs   compile to a native binary, cache it, then run
-rust check FILE.rs   validate with cargo check, does not run
+rust check FILE.rs   validate with cargo check and interpreter coverage, does not run
 rust clean           clear the cache
 rust update          install the latest RustScript from GitHub
 rust --version       show version and build information

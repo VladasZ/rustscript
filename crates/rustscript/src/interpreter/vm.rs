@@ -301,6 +301,17 @@ impl Interp {
                     // Strings are copy on write, so push must edit the Rc in
                     // the receiver register itself. Going through the normal
                     // path would edit a copy and drop the change.
+                    // `clone_from` replaces the receiver outright, so it has
+                    // to write the register rather than a copy of it.
+                    if name.id == BuiltinId::CloneFrom {
+                        let src = stack[s..s + argc].first().cloned().unwrap_or(Value::Unit);
+                        set_reg(&mut stack[base + recv], src);
+                        if dst != DISCARD {
+                            set_reg(&mut stack[base + dst as usize], Value::Unit);
+                        }
+                        ip += 1;
+                        continue;
+                    }
                     if matches!(name.id, BuiltinId::Push | BuiltinId::PushStr)
                         && matches!(stack[base + recv], Value::Str(_))
                     {
