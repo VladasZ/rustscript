@@ -1,11 +1,15 @@
+mod build_info;
 mod checker;
 mod interpreter;
 mod loader;
+mod update;
 
+use std::env;
+use std::fs;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, exit};
 
-use anyhow::{Result, bail};
+use anyhow::{Error, Result, anyhow, bail};
 use mimalloc::MiMalloc;
 
 /// Value churn makes the interpreter allocation bound, and mimalloc handles
@@ -16,12 +20,12 @@ static GLOBAL: MiMalloc = MiMalloc;
 fn main() {
     if let Err(e) = real_main() {
         eprintln!("rust error: {e:#}");
-        std::process::exit(1);
+        exit(1);
     }
 }
 
 fn real_main() -> Result<()> {
-    let all: Vec<String> = std::env::args().skip(1).collect();
+    let all: Vec<String> = env::args().skip(1).collect();
     let cmd = all.first().cloned().unwrap_or_default();
     match cmd.as_str() {
         "run" => {
@@ -30,7 +34,7 @@ fn real_main() -> Result<()> {
         }
         "check" => {
             let file = all.get(1).ok_or_else(err_usage)?;
-            let source = std::fs::read_to_string(file)?;
+            let source = fs::read_to_string(file)?;
             let program = loader::load(Path::new(file), &source)?;
             checker::check(Path::new(file), &program.files, &program.crate_deps)?;
             println!("ok");
@@ -41,6 +45,11 @@ fn real_main() -> Result<()> {
             build_run(file, &all[2..])
         }
         "clean" => checker::clean(),
+        "update" => update::update(),
+        "-V" | "--version" => {
+            println!("{}", build_info::version());
+            Ok(())
+        }
         "-h" | "--help" | "help" | "" => {
             print_usage();
             Ok(())
@@ -67,8 +76,7 @@ fn run(file: &str, script_args: &[String]) -> Result<()> {
     let path = Path::new(file)
         .canonicalize()
         .unwrap_or_else(|_| Path::new(file).to_path_buf());
-    let source =
-        std::fs::read_to_string(&path).map_err(|e| anyhow::anyhow!("cannot read {file}: {e}"))?;
+    let source = fs::read_to_string(&path).map_err(|e| anyhow!("cannot read {file}: {e}"))?;
 
     let program = loader::load(&path, &source)?;
 
@@ -94,20 +102,19 @@ fn build_run(file: &str, script_args: &[String]) -> Result<()> {
     let path = Path::new(file)
         .canonicalize()
         .unwrap_or_else(|_| Path::new(file).to_path_buf());
-    let source =
-        std::fs::read_to_string(&path).map_err(|e| anyhow::anyhow!("cannot read {file}: {e}"))?;
+    let source = fs::read_to_string(&path).map_err(|e| anyhow!("cannot read {file}: {e}"))?;
     let program = loader::load(&path, &source)?;
 
     let bin = checker::build(&path, &program.files, &program.crate_deps)?;
     let status = Command::new(&bin)
         .args(script_args)
         .status()
-        .map_err(|e| anyhow::anyhow!("cannot run compiled binary {}: {e}", bin.display()))?;
-    std::process::exit(status.code().unwrap_or(1));
+        .map_err(|e| anyhow!("cannot run compiled binary {}: {e}", bin.display()))?;
+    exit(status.code().unwrap_or(1));
 }
 
-fn err_usage() -> anyhow::Error {
-    anyhow::anyhow!("missing file argument, try `rust help`")
+fn err_usage() -> Error {
+    anyhow!("missing file argument, try `rust help`")
 }
 
 fn print_usage() {
@@ -121,6 +128,8 @@ usage:
   rust build FILE.rs   compile to a native binary, cache it, then run
   rust check FILE.rs   validate with cargo check, does not run
   rust clean           clear the cache
+  rust update          install the latest RustScript from GitHub
+  rust --version       show version and build information
   rust help            show this help"
     );
 }

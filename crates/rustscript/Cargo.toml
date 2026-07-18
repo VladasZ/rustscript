@@ -36,3 +36,6 @@ compact_str = { workspace = true }
 jsonwebtoken = { workspace = true }
 lopdf = "0.44.0"
 xmltree = "0.12.0"
+
+[build-dependencies]
+chrono = { workspace = true }
