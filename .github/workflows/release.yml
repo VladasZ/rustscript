@@ -136,12 +136,13 @@ jobs:
       - name: Build
         shell: bash
         env:
-          # mimalloc and ring both compile C, so a musl build needs musl-gcc for
-          # the compiler and the linker, not just the Rust target.
+          # mimalloc and ring compile C, so musl-gcc is needed to build those
+          # sources. Linking is deliberately left to Rust's own self-contained
+          # musl, because using musl-gcc as the linker driver produces a
+          # dynamically linked binary once ring's objects are in the link, and
+          # that binary then dies on any distro without a musl loader.
           CC_x86_64_unknown_linux_musl: musl-gcc
           CC_aarch64_unknown_linux_musl: musl-gcc
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -161,6 +162,21 @@ jobs:
               cp "target/${{ matrix.target }}/release/rust" dist/rust
             fi
           fi
+
+      - name: Check the musl binary is static
+        if: contains(matrix.target, 'linux-musl')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A dynamically linked musl binary looks fine here and then fails to
+          # start on any distro without a musl loader, so catch it before it
+          # ships rather than in a user's pipeline.
+          if readelf -l dist/rust | grep -q INTERP; then
+            echo "the musl build is dynamically linked, it must be static" >&2
+            readelf -l dist/rust | grep -A1 INTERP >&2
+            exit 1
+          fi
+          echo "musl binary is static"
 
       - name: Package
         shell: bash
