@@ -60,6 +60,22 @@ rust FILE.rs cmp     compile and run, `cmp` first arg is reserved
 rust build FILE.rs   compile to a native binary, cache it, then run
 rust check FILE.rs   validate with cargo check, does not run
 rust clean           clear the cache
+rust update          install the latest RustScript from GitHub
+rust --version       show version and build information
+```
+
+`rust update` is explicit. It compares the interpreter's embedded Git commit
+with the default branch HEAD of `VladasZ/rustscript`. An exact match is a
+no-op; otherwise it installs that HEAD with `cargo install`. On Windows it
+moves the running executable aside before installation and restores it if the
+update fails.
+
+`rust --version` prints the package version, Git commit, UTC build time, and
+Cargo build profile. A local build with tracked changes marks the commit as
+dirty, for example:
+
+```
+rustscript 0.1.0 (4ea5a27-dirty, built 2026-07-18T09:21:09Z, release)
 ```
 
 `rust build` compiles the script with cargo instead of interpreting it, then
