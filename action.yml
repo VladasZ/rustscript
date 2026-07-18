@@ -1,5 +1,5 @@
 name: RustScript Action
-description: Install the RustScript interpreter and optionally run a Rust script with it.
+description: Runs RustScript.
 author: VladasZ
 
 branding:
