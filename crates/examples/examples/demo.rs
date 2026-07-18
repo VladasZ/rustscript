@@ -2,6 +2,8 @@
 
 use anyhow::Result;
 use serde::Serialize;
+use std::env::consts::OS;
+use std::env::temp_dir;
 use std::fs;
 use std::process::Command;
 
@@ -33,11 +35,22 @@ fn main() -> Result<()> {
     }
     println!("pending: {pending}");
 
-    fs::write("/tmp/rustscript-demo.txt", "hello from script")?;
-    let back = fs::read_to_string("/tmp/rustscript-demo.txt")?;
+    let file = temp_dir().join("rustscript-demo.txt");
+    fs::write(&file, "hello from script")?;
+    let back = fs::read_to_string(&file)?;
     println!("read back: {back}");
 
-    let out = Command::new("echo").arg("from a shell command").output()?;
+    // Windows has no echo binary, it is a cmd builtin, so the command differs
+    // per platform even though the output is the same.
+    let out = if OS == "windows" {
+        Command::new("cmd")
+            .arg("/C")
+            .arg("echo")
+            .arg("from a shell command")
+            .output()?
+    } else {
+        Command::new("echo").arg("from a shell command").output()?
+    };
     let text = String::from_utf8_lossy(&out.stdout);
     println!("command said: {}", text.trim());
 
