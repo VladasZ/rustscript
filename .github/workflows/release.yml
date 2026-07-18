@@ -10,7 +10,10 @@ on:
         default: patch
   push:
     tags:
-      - 'v*'
+      # Full versions only. A bare 'v*' also matches the moving minor tag like
+      # v0.1, so every tag move would start a release run that builds all five
+      # targets before the version guard kills it.
+      - 'v*.*.*'
 
 permissions:
   contents: write

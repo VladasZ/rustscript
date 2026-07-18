@@ -73,3 +73,30 @@ jobs:
             echo "unexpected output: $out" >&2
             exit 1
           fi
+
+  published:
+    name: Published ref ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      # The job above exercises the action logic on every platform from the
+      # local checkout. This one exercises the published reference instead, so
+      # the exact line the README tells people to write is covered, including
+      # GitHub resolving the action from a moving tag.
+      - uses: VladasZ/rustscript@v0.1
+
+      - name: The published action installs and runs
+        shell: bash
+        run: |
+          set -euo pipefail
+          rust --version
+          printf 'fn main() { println!("published ref works"); }\n' > published.rs
+          out=$(rust run published.rs)
+          echo "$out"
+          if [ "$out" != "published ref works" ]; then
+            echo "unexpected output: $out" >&2
+            exit 1
+          fi
