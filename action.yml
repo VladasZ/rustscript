@@ -1,4 +1,4 @@
-name: RustScript
+name: RustScript Action
 description: Install the RustScript interpreter and optionally run a Rust script with it.
 author: VladasZ
 
