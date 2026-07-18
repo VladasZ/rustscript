@@ -37,4 +37,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: Swatinem/rust-cache@v2
+      # The bench crate draws charts with plotters, which links system
+      # fontconfig on Linux. macOS and Windows use their own font stacks.
+      - name: Install fontconfig
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
       - run: cargo test --workspace
