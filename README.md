@@ -51,6 +51,47 @@ cargo install --path crates/rustscript
 
 This installs a binary named `rust`.
 
+Released versions also ship prebuilt binaries on the
+[releases page](https://github.com/VladasZ/rustscript/releases). The Linux
+builds are static musl binaries, so they run on any distribution, including
+Alpine and old container images. The macOS build is one universal binary that
+covers both Intel and Apple Silicon.
+
+## GitHub Actions
+
+This repository is also a GitHub Action, so a workflow can install the
+interpreter and run scripts with it.
+
+```yaml
+- uses: VladasZ/rustscript@v0.1
+```
+
+That puts `rust` on `PATH` for the rest of the job. Give it a `script` to
+install and run in one step.
+
+```yaml
+- uses: VladasZ/rustscript@v0.1
+  with:
+    script: tools/release.rs
+    args: --dry-run
+```
+
+| input | default | meaning |
+| --- | --- | --- |
+| `version` | the calling tag, else newest | version to install, for example `v0.1.0` |
+| `script` | empty | script to execute, empty means install only |
+| `mode` | `run` | `run`, `build` or `check` |
+| `args` | empty | extra arguments passed to the script |
+| `github-token` | `github.token` | only used to resolve the newest release |
+
+Outputs are `version`, the version that was installed, and `bin-path`, the
+directory holding the binary.
+
+The action downloads a prebuilt binary and verifies it against the published
+`SHA256SUMS`, so it costs a second or two rather than a full compile. It covers
+Linux, macOS and Windows on both x86_64 and arm64. See
+[docs/github-actions.md](docs/github-actions.md) for the details.
+
 ## Usage
 
 ```
@@ -64,11 +105,12 @@ rust update          install the latest RustScript from GitHub
 rust --version       show version and build information
 ```
 
-`rust update` is explicit. It compares the interpreter's embedded Git commit
-with the default branch HEAD of `VladasZ/rustscript`. An exact match is a
-no-op; otherwise it installs that HEAD with `cargo install`. On Windows it
-moves the running executable aside before installation and restores it if the
-update fails.
+`rust update` is explicit. It lists the release tags of `VladasZ/rustscript`,
+takes the newest full version, and compares it with the running version. An
+installed version that already matches, or is newer, is a no-op. Otherwise it
+installs that tag with `cargo install`. Prereleases and the moving minor tags
+are never update targets. On Windows it moves the running executable aside
+before installation and restores it if the update fails.
 
 `rust --version` prints the package version, Git commit, UTC build time, and
 Cargo build profile. A local build with tracked changes marks the commit as
@@ -296,6 +338,10 @@ multifile suite does the same for the `crates/conformance` crate, a deep module
 tree that exercises every import style, re-export chains, and cross module
 types, consts, and aliases.
 
+CI runs the same suites on every push to `main` and every pull request, on
+Linux, macOS and Windows, alongside `cargo fmt --check` and
+`cargo clippy --workspace --all-targets -- -D warnings`.
+
 ## Benchmarks
 
 The `bench` crate compares rustscript against native Rust, Node, and Python 3 on
@@ -309,6 +355,32 @@ and `docs/profiling.md` for how to find interpreter hot spots.
 cargo run --release --bin bench
 cargo run --release --bin chart
 ```
+
+## Versioning
+
+Releases are semver tags like `v0.1.0`. RustScript is still 0.x, so the minor
+is the breaking axis, and each minor line gets a moving tag that follows its
+newest patch.
+
+```
+v0.1.0    exact release, never moves
+v0.1      moving, follows the newest v0.1.z
+```
+
+Track `@v0.1` to pick up patches without surprises, or pin `@v0.1.0` when a
+workflow must never change. A breaking change becomes `v0.2.0` with a new
+`v0.2` tag, so it can only arrive when you move the ref yourself. There is no
+moving `v0` tag, because it would span breaking changes and promise nothing.
+
+The action and the interpreter share the tag. Calling the action at an exact
+version tag installs that same interpreter version by default, so one number
+covers both. The `version` input overrides it when you want a new action with
+an older interpreter.
+
+## Licence
+
+Dual licensed under either [MIT](LICENSE-MIT) or
+[Apache-2.0](LICENSE-APACHE), at your option.
 
 ## Status
 

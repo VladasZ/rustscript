@@ -208,10 +208,12 @@ fn builder_method(s: &Rc<StructData>, method: &str, args: &[Value]) -> Result<Va
                 Some(Value::Str(u)) => Some(u.as_str().to_string()),
                 _ => None,
             };
-            Ok(match build_client(cookie_store, timeout, ua, redirect_policy(s)) {
-                Ok(c) => Value::ok(client_value(c)),
-                Err(e) => Value::err(Value::str(e.to_string())),
-            })
+            Ok(
+                match build_client(cookie_store, timeout, ua, redirect_policy(s)) {
+                    Ok(c) => Value::ok(client_value(c)),
+                    Err(e) => Value::err(Value::str(e.to_string())),
+                },
+            )
         }
         _ => bail!("unknown method `{method}` on a client builder"),
     }
@@ -476,7 +478,10 @@ fn header_map_method(s: &StructData, method: &str, args: &[Value]) -> Value {
                     if let Value::Tuple(pair) = item {
                         let pair = pair.borrow();
                         if pair[0].display().to_lowercase() == name {
-                            out.push(Value::struct_of("HeaderValue", [("text".into(), pair[1].clone())]));
+                            out.push(Value::struct_of(
+                                "HeaderValue",
+                                [("text".into(), pair[1].clone())],
+                            ));
                         }
                     }
                 }
