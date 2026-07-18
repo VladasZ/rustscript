@@ -1,5 +1,13 @@
 # rustscript
 
+[![CI](https://github.com/VladasZ/rustscript/actions/workflows/ci.yml/badge.svg)](https://github.com/VladasZ/rustscript/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/VladasZ/rustscript?sort=semver)](https://github.com/VladasZ/rustscript/releases/latest)
+[![Licence](https://img.shields.io/badge/licence-MIT%20OR%20Apache--2.0-blue)](#licence)
+
+[![Linux](https://img.shields.io/badge/linux-x86__64%20%7C%20arm64-informational?logo=linux&logoColor=white)](https://github.com/VladasZ/rustscript/releases/latest)
+[![macOS](https://img.shields.io/badge/macos-universal-informational?logo=apple&logoColor=white)](https://github.com/VladasZ/rustscript/releases/latest)
+[![Windows](https://img.shields.io/badge/windows-x86__64%20%7C%20arm64-informational?logo=windows&logoColor=white)](https://github.com/VladasZ/rustscript/releases/latest)
+
 Run a subset of Rust as an interpreted script. Write helper and automation
 scripts in real Rust and run them like Python or a shell script, without waiting
 for a full compile.
