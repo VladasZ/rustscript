@@ -1,0 +1,75 @@
+name: Test action
+
+on:
+  pull_request:
+    paths:
+      - 'action.yml'
+      - '.github/workflows/test-action.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'action.yml'
+      - '.github/workflows/test-action.yml'
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-22.04
+          - ubuntu-22.04-arm
+          - macos-15
+          - macos-15-intel
+          - windows-2025
+          - windows-11-arm
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install only
+        id: setup
+        uses: ./
+
+      - name: The binary is on PATH and reports a version
+        shell: bash
+        run: |
+          set -euo pipefail
+          rust --version
+          if [ -z "${{ steps.setup.outputs.version }}" ]; then
+            echo "the action did not report an installed version" >&2
+            exit 1
+          fi
+          echo "installed ${{ steps.setup.outputs.version }}"
+
+      - name: Write a script
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .github/fixtures
+          cat > .github/fixtures/hello.rs <<'EOF'
+          fn main() {
+              let args: Vec<String> = std::env::args().skip(1).collect();
+              println!("hello from {}", args.first().map_or("nobody", |a| a.as_str()));
+          }
+          EOF
+
+      - name: Run the script through the action
+        uses: ./
+        with:
+          script: .github/fixtures/hello.rs
+          mode: run
+          args: rustscript
+
+      - name: The same script runs directly
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=$(rust run .github/fixtures/hello.rs rustscript)
+          echo "$out"
+          if [ "$out" != "hello from rustscript" ]; then
+            echo "unexpected output: $out" >&2
+            exit 1
+          fi

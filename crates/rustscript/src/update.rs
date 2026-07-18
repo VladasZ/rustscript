@@ -6,9 +6,14 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use which::which;
 
-use crate::build_info::{GIT_COMMIT, short_commit};
-
 const REPOSITORY: &str = "https://github.com/VladasZ/rustscript";
+
+type Version = (u64, u64, u64);
+
+struct Release {
+    tag: String,
+    version: Version,
+}
 
 pub fn update() -> Result<()> {
     let rust_bin = which("rust").or_else(|_| current_exe())?;
@@ -16,19 +21,22 @@ pub fn update() -> Result<()> {
         cleanup_stale_binaries(&rust_bin);
     }
 
-    let remote = remote_head()?;
-    if is_current(GIT_COMMIT, &remote) {
+    let installed = parse_version(env!("CARGO_PKG_VERSION"))
+        .context("the installed rustscript reports an unreadable version")?;
+    let latest = latest_release()?;
+
+    if installed >= latest.version {
         println!(
-            "rustscript is already up to date ({})",
-            short_commit(&remote)
+            "rustscript is already up to date (v{})",
+            format_version(installed)
         );
         return Ok(());
     }
 
     println!(
-        "updating rustscript from {} to {}",
-        short_commit(GIT_COMMIT),
-        short_commit(&remote)
+        "updating rustscript from v{} to {}",
+        format_version(installed),
+        latest.tag
     );
 
     let moved = if cfg!(windows) && rust_bin.exists() {
@@ -37,7 +45,7 @@ pub fn update() -> Result<()> {
         None
     };
 
-    if let Err(error) = install_latest(&remote) {
+    if let Err(error) = install_release(&latest.tag) {
         if let Some(old) = &moved
             && let Err(restore_error) = restore_binary(old, &rust_bin)
         {
@@ -65,43 +73,62 @@ pub fn update() -> Result<()> {
         );
     }
 
-    println!("updated rustscript to {}", short_commit(&remote));
+    println!("updated rustscript to {}", latest.tag);
     Ok(())
 }
 
-fn is_current(installed: &str, remote: &str) -> bool {
-    installed == remote
+fn format_version((major, minor, patch): Version) -> String {
+    format!("{major}.{minor}.{patch}")
 }
 
-fn remote_head() -> Result<String> {
+fn parse_version(tag: &str) -> Option<Version> {
+    let tag = tag.strip_prefix('v').unwrap_or(tag);
+    // A prerelease is never an update target, and a moving tag like v0.2 has no
+    // patch component, so both fail this parse on purpose.
+    if tag.contains('-') {
+        return None;
+    }
+    let mut parts = tag.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
+fn latest_release() -> Result<Release> {
     let output = Command::new("git")
-        .args(["ls-remote", REPOSITORY, "HEAD"])
+        .args(["ls-remote", "--tags", REPOSITORY])
         .output()
         .context("could not query the RustScript repository")?;
     if !output.status.success() {
         bail!("git ls-remote exited with {}", output.status);
     }
-    let stdout = String::from_utf8(output.stdout).context("git returned a non-UTF-8 commit")?;
-    let commit = stdout
-        .split_whitespace()
-        .next()
-        .context("git returned no RustScript HEAD commit")?;
-    if commit.len() != 40 || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        bail!("git returned an invalid RustScript HEAD commit: {commit}");
-    }
-    Ok(commit.to_string())
+    let stdout = String::from_utf8(output.stdout).context("git returned non-UTF-8 tags")?;
+    newest_release(&stdout).context("the RustScript repository has no released version yet")
 }
 
-fn install_latest(commit: &str) -> Result<()> {
+fn newest_release(ls_remote: &str) -> Option<Release> {
+    ls_remote
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(1))
+        .filter_map(|reference| reference.strip_prefix("refs/tags/"))
+        // An annotated tag also lists a peeled entry for the object it points at.
+        .map(|tag| tag.trim_end_matches("^{}"))
+        .filter_map(|tag| {
+            Some(Release {
+                tag: tag.to_string(),
+                version: parse_version(tag)?,
+            })
+        })
+        .max_by_key(|release| release.version)
+}
+
+fn install_release(tag: &str) -> Result<()> {
     let status = Command::new("cargo")
-        .args([
-            "install",
-            "--git",
-            REPOSITORY,
-            "--rev",
-            commit,
-            "rustscript",
-        ])
+        .args(["install", "--git", REPOSITORY, "--tag", tag, "rustscript"])
         .status()
         .context("could not start cargo install")?;
     if !status.success() {
@@ -174,17 +201,43 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{is_current, move_aside, old_path, restore_binary};
+    use super::{move_aside, newest_release, old_path, parse_version, restore_binary};
 
     #[test]
-    fn only_the_exact_remote_commit_is_current() {
-        let commit = "4ea5a27a1ffa91d6cbaecb9576f80fab0c69990d";
-        assert!(is_current(commit, commit));
-        assert!(!is_current(&format!("{commit}-dirty"), commit));
-        assert!(!is_current(
-            "40043615996fbb085e7f708c4508b5a517889f37",
-            commit
-        ));
+    fn versions_parse_with_and_without_the_v_prefix() {
+        assert_eq!(parse_version("v0.2.1"), Some((0, 2, 1)));
+        assert_eq!(parse_version("0.2.1"), Some((0, 2, 1)));
+        assert_eq!(parse_version("v10.20.30"), Some((10, 20, 30)));
+    }
+
+    #[test]
+    fn moving_tags_and_prereleases_are_not_update_targets() {
+        assert_eq!(parse_version("v0.2"), None);
+        assert_eq!(parse_version("v0.2.0-rc.1"), None);
+        assert_eq!(parse_version("v0.2.0.1"), None);
+        assert_eq!(parse_version("main"), None);
+        assert_eq!(parse_version("vX.Y.Z"), None);
+    }
+
+    #[test]
+    fn the_newest_release_wins_over_peeled_and_moving_tags() {
+        let ls_remote = r"1111111111111111111111111111111111111111	refs/tags/v0.1.0
+2222222222222222222222222222222222222222	refs/tags/v0.2.0
+2222222222222222222222222222222222222222	refs/tags/v0.2.0^{}
+3333333333333333333333333333333333333333	refs/tags/v0.2
+4444444444444444444444444444444444444444	refs/tags/v0.3.0-rc.1
+5555555555555555555555555555555555555555	refs/tags/v0.10.0
+";
+        let newest = newest_release(ls_remote).unwrap();
+        assert_eq!(newest.tag, "v0.10.0");
+        assert_eq!(newest.version, (0, 10, 0));
+    }
+
+    #[test]
+    fn a_repository_without_releases_has_no_newest_release() {
+        let ls_remote = "3333333333333333333333333333333333333333	refs/tags/v0.2\n";
+        assert!(newest_release(ls_remote).is_none());
+        assert!(newest_release("").is_none());
     }
 
     #[test]

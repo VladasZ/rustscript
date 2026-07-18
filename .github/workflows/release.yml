@@ -1,0 +1,245 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Which part of the version to increase
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_RELEASE_STRIP: symbols
+
+jobs:
+  prepare:
+    name: Prepare version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.pick.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Bump the version and tag it
+        id: pick
+        shell: bash
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+
+          # A pushed tag is the manual escape hatch, the version is already set.
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "releasing the pushed tag $GITHUB_REF_NAME"
+            exit 0
+          fi
+
+          manifest=crates/rustscript/Cargo.toml
+          current=$(grep -m1 '^version = ' "$manifest" | cut -d'"' -f2)
+          IFS=. read -r major minor patch <<< "$current"
+          case "$BUMP" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+            *) echo "unknown bump '$BUMP'" >&2; exit 1 ;;
+          esac
+          next="$major.$minor.$patch"
+          tag="v$next"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "$tag already exists" >&2
+            exit 1
+          fi
+
+          # Only the first version line is the package version, the rest of the
+          # manifest is dependencies.
+          awk -v cur="$current" -v newver="$next" '
+            !done && $0 == "version = \"" cur "\"" {
+              print "version = \"" newver "\""
+              done = 1
+              next
+            }
+            { print }
+          ' "$manifest" > "$manifest.tmp"
+          mv "$manifest.tmp" "$manifest"
+
+          if ! grep -q "^version = \"$next\"\$" "$manifest"; then
+            echo "could not rewrite the version in $manifest" >&2
+            exit 1
+          fi
+          cargo update --workspace
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$manifest" Cargo.lock
+          git commit -m "release $tag"
+          git tag "$tag"
+          git push origin HEAD
+          git push origin "refs/tags/$tag"
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "bumped $current to $next"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-22.04
+            ext: tar.gz
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-22.04-arm
+            ext: tar.gz
+          - target: universal-apple-darwin
+            os: macos-15
+            ext: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-2025
+            ext: zip
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            ext: zip
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Check the tag matches the crate version
+        shell: bash
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          crate=$(grep -m1 '^version = ' crates/rustscript/Cargo.toml | cut -d'"' -f2)
+          if [ "${TAG#v}" != "$crate" ]; then
+            echo "tag $TAG does not match crate version $crate" >&2
+            exit 1
+          fi
+
+      - name: Install musl toolchain
+        if: contains(matrix.target, 'linux-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        shell: bash
+        env:
+          # mimalloc and ring both compile C, so a musl build needs musl-gcc for
+          # the compiler and the linker, not just the Rust target.
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          if [ "${{ matrix.target }}" = "universal-apple-darwin" ]; then
+            rustup target add x86_64-apple-darwin aarch64-apple-darwin
+            cargo build --release -p rustscript --target x86_64-apple-darwin
+            cargo build --release -p rustscript --target aarch64-apple-darwin
+            lipo -create -output dist/rust \
+              target/x86_64-apple-darwin/release/rust \
+              target/aarch64-apple-darwin/release/rust
+          else
+            rustup target add "${{ matrix.target }}"
+            cargo build --release -p rustscript --target "${{ matrix.target }}"
+            if [ "${{ matrix.ext }}" = "zip" ]; then
+              cp "target/${{ matrix.target }}/release/rust.exe" dist/rust.exe
+            else
+              cp "target/${{ matrix.target }}/release/rust" dist/rust
+            fi
+          fi
+
+      - name: Package
+        shell: bash
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          asset="rust-$TAG-${{ matrix.target }}.${{ matrix.ext }}"
+          cd dist
+          if [ "${{ matrix.ext }}" = "zip" ]; then
+            powershell -NoProfile -Command \
+              "Compress-Archive -Path 'rust.exe' -DestinationPath '$asset' -Force"
+          else
+            tar -czf "$asset" rust
+          fi
+          echo "packaged $asset"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/rust-*.*
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: Write checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd assets
+          sha256sum rust-*.* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          prerelease=""
+          case "$TAG" in
+            *-*) prerelease="--prerelease" ;;
+          esac
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            $prerelease \
+            assets/rust-*.* assets/SHA256SUMS
+
+      - name: Move the minor tag
+        shell: bash
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # In 0.x the minor is the breaking axis, so v0.1 is the tag users can
+          # track safely. A prerelease must never move it.
+          case "$TAG" in
+            *-*)
+              echo "$TAG is a prerelease, leaving the moving tag alone"
+              exit 0
+              ;;
+          esac
+          minor=$(echo "$TAG" | cut -d. -f1,2)
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f "$minor" "$TAG"
+          git push --force origin "refs/tags/$minor"
+          echo "moved $minor to $TAG"

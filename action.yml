@@ -1,0 +1,160 @@
+name: RustScript
+description: Install the RustScript interpreter and optionally run a Rust script with it.
+author: VladasZ
+
+branding:
+  icon: play-circle
+  color: orange
+
+inputs:
+  version:
+    description: >
+      RustScript version to install, for example v0.2.0. Defaults to the tag this
+      action was called with when that tag is an exact version, otherwise to the
+      newest release.
+    required: false
+    default: ''
+  script:
+    description: >
+      Path to a script to execute after installing. When empty the action only
+      installs the binary.
+    required: false
+    default: ''
+  mode:
+    description: How to execute the script, one of run, build or check.
+    required: false
+    default: run
+  args:
+    description: Extra arguments passed to the script.
+    required: false
+    default: ''
+  github-token:
+    description: Token used to query the releases API, only needed to resolve the newest release.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  version:
+    description: The version that was installed, for example v0.2.0.
+    value: ${{ steps.install.outputs.version }}
+  bin-path:
+    description: Directory containing the installed rust binary.
+    value: ${{ steps.install.outputs.bin-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install RustScript
+      id: install
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+        ACTION_REF: ${{ github.action_ref }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        RUNNER_OS: ${{ runner.os }}
+        RUNNER_ARCH: ${{ runner.arch }}
+      run: |
+        set -euo pipefail
+
+        repo="VladasZ/rustscript"
+
+        version="$INPUT_VERSION"
+        if [ -z "$version" ]; then
+          # An exact tag ref means the caller pinned the action, so install the
+          # matching tool version. A moving tag or a branch carries no version.
+          if [[ "$ACTION_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            version="$ACTION_REF"
+          else
+            version="latest"
+          fi
+        fi
+
+        if [ "$version" = "latest" ]; then
+          api="https://api.github.com/repos/$repo/releases/latest"
+          version=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" "$api" \
+            | grep -m1 '"tag_name"' | cut -d'"' -f4)
+          if [ -z "$version" ]; then
+            echo "could not resolve the newest RustScript release" >&2
+            exit 1
+          fi
+        fi
+        [[ "$version" == v* ]] || version="v$version"
+
+        case "$RUNNER_OS/$RUNNER_ARCH" in
+          Linux/X64)    target=x86_64-unknown-linux-musl  ; ext=tar.gz ;;
+          Linux/ARM64)  target=aarch64-unknown-linux-musl ; ext=tar.gz ;;
+          macOS/*)      target=universal-apple-darwin     ; ext=tar.gz ;;
+          Windows/X64)  target=x86_64-pc-windows-msvc     ; ext=zip    ;;
+          Windows/ARM64) target=aarch64-pc-windows-msvc   ; ext=zip    ;;
+          *)
+            echo "RustScript has no prebuilt binary for $RUNNER_OS/$RUNNER_ARCH" >&2
+            exit 1
+            ;;
+        esac
+
+        asset="rust-$version-$target.$ext"
+        base="https://github.com/$repo/releases/download/$version"
+        work="$RUNNER_TEMP/rustscript-download"
+        dest="${RUNNER_TOOL_CACHE:-$RUNNER_TEMP}/rustscript/$version/$target"
+
+        if [ -x "$dest/rust" ] || [ -x "$dest/rust.exe" ]; then
+          echo "RustScript $version already present at $dest"
+        else
+          mkdir -p "$work" "$dest"
+          curl -fsSL -o "$work/$asset" "$base/$asset"
+          curl -fsSL -o "$work/SHA256SUMS" "$base/SHA256SUMS"
+
+          # A tampered or truncated download must fail here, not surface later as
+          # a confusing interpreter crash.
+          (
+            cd "$work"
+            grep " $asset\$" SHA256SUMS > expected.txt
+            if [ ! -s expected.txt ]; then
+              echo "$asset is not listed in SHA256SUMS for $version" >&2
+              exit 1
+            fi
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum -c expected.txt
+            else
+              shasum -a 256 -c expected.txt
+            fi
+          )
+
+          if [ "$ext" = "zip" ]; then
+            powershell -NoProfile -Command \
+              "Expand-Archive -Path '$work/$asset' -DestinationPath '$dest' -Force"
+          else
+            tar -xzf "$work/$asset" -C "$dest"
+          fi
+          rm -rf "$work"
+        fi
+
+        chmod +x "$dest/rust" 2>/dev/null || true
+        echo "$dest" >> "$GITHUB_PATH"
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        echo "bin-path=$dest" >> "$GITHUB_OUTPUT"
+        echo "installed RustScript $version for $target"
+
+    - name: Run script
+      if: inputs.script != ''
+      shell: bash
+      env:
+        SCRIPT: ${{ inputs.script }}
+        MODE: ${{ inputs.mode }}
+        ARGS: ${{ inputs.args }}
+      run: |
+        set -euo pipefail
+        case "$MODE" in
+          run|build|check) ;;
+          *)
+            echo "mode must be one of run, build or check, got '$MODE'" >&2
+            exit 1
+            ;;
+        esac
+        # Split args on whitespace without letting the shell glob them, and keep
+        # the empty case safe on the bash 3.2 that macOS runners still ship.
+        extra=()
+        if [ -n "$ARGS" ]; then
+          read -ra extra <<< "$ARGS"
+        fi
+        rust "$MODE" "$SCRIPT" ${extra[@]+"${extra[@]}"}
