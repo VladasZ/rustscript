@@ -71,8 +71,14 @@ runs:
 
         if [ "$version" = "latest" ]; then
           api="https://api.github.com/repos/$repo/releases/latest"
-          version=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" "$api" \
-            | grep -m1 '"tag_name"' | cut -d'"' -f4)
+          # Capture first, then parse. Piping curl into an early-exiting reader
+          # like `grep -m1` makes curl die with "failed writing body" once the
+          # reader closes the pipe, and pipefail turns that into a failed step.
+          if ! response=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" "$api"); then
+            echo "could not reach the releases API for $repo, is there a release yet?" >&2
+            exit 1
+          fi
+          version=$(printf '%s\n' "$response" | grep '"tag_name"' | cut -d'"' -f4)
           if [ -z "$version" ]; then
             echo "could not resolve the newest RustScript release" >&2
             exit 1
