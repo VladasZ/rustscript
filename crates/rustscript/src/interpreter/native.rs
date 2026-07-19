@@ -345,10 +345,10 @@ pub fn native_method(
             let h = handle.borrow();
             if let Native::Listener(l) = &*h {
                 return Ok(Some(match l.accept() {
-                    Ok((stream, addr)) => Value::ok(Value::Tuple(Rc::new(RefCell::new(vec![
+                    Ok((stream, addr)) => Value::ok(Value::tuple(vec![
                         Native::Stream(stream).wrap(),
                         Value::str(addr.to_string()),
-                    ])))),
+                    ])),
                     Err(e) => Value::err(Value::str(e.to_string())),
                 }));
             }

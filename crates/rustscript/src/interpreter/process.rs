@@ -155,11 +155,11 @@ pub(super) fn make_output(out: std::process::Output) -> Value {
         [
             (
                 "stdout".into(),
-                Value::str(String::from_utf8_lossy(&out.stdout).into_owned()),
+                Value::str(super::console::decode(&out.stdout)),
             ),
             (
                 "stderr".into(),
-                Value::str(String::from_utf8_lossy(&out.stderr).into_owned()),
+                Value::str(super::console::decode(&out.stderr)),
             ),
             ("status".into(), make_exit_status(out.status)),
         ],

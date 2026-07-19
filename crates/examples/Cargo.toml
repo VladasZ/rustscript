@@ -27,3 +27,31 @@ hex = { workspace = true }
 ctrlc = { workspace = true }
 tempfile = { workspace = true }
 jsonwebtoken = { workspace = true }
+
+[target."cfg(windows)".dev-dependencies]
+winreg = { workspace = true }
+windows-service = { workspace = true }
+wmi = { workspace = true }
+
+# registry_demo only compiles where the registry exists. Naming it explicitly
+# turns off example autodiscovery for that one file, and the required-feature
+# is never set, so cargo skips building it. The examples suite skips running it
+# off Windows the same way it skips symlink_demo.
+[[example]]
+name = "registry_demo"
+required-features = ["windows-only"]
+
+[[example]]
+name = "service_demo"
+required-features = ["windows-only"]
+
+[[example]]
+name = "wmi_demo"
+required-features = ["windows-only"]
+
+[[example]]
+name = "manual_service_write"
+required-features = ["windows-only"]
+
+[features]
+windows-only = []

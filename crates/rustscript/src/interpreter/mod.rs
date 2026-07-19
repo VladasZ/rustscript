@@ -1,6 +1,7 @@
 mod builtins;
 mod bytecode;
 mod compile;
+mod console;
 pub mod coverage;
 mod crates_bridge;
 mod docx_bridge;
@@ -27,11 +28,14 @@ mod pvalue;
 mod pvm;
 mod regex_bridge;
 mod resolver;
+mod service_bridge;
 mod runner;
 mod std_bridge;
 mod value;
 mod vm;
 mod vm_support;
+mod winreg_bridge;
+mod wmi_bridge;
 
 use std::cell::RefCell;
 use std::collections::HashMap;

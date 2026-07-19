@@ -333,7 +333,7 @@ impl Interp {
                         no.push(x);
                     }
                 }
-                Value::Tuple(Rc::new(RefCell::new(vec![Value::vec(yes), Value::vec(no)])))
+                Value::tuple(vec![Value::vec(yes), Value::vec(no)])
             }
             _ => return Ok(None),
         };
