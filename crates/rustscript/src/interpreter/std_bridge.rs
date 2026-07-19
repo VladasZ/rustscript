@@ -86,7 +86,7 @@ pub(super) fn native_call(module: &str, func: &str, args: &[Value]) -> Result<Op
         ("env", "vars") | ("env", "vars_os") => Value::vec(
             std::env::vars()
                 .map(|(k, v)| {
-                    Value::Tuple(Rc::new(RefCell::new(vec![Value::str(k), Value::str(v)])))
+                    Value::tuple(vec![Value::str(k), Value::str(v)])
                 })
                 .collect(),
         ),

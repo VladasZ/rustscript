@@ -198,6 +198,11 @@ tempfile = "3"
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking", "cookies"], default-features = false }
+
+[target."cfg(windows)".dependencies]
+winreg = "0.56"
+windows-service = "0.8"
+wmi = "0.18"
 "#;
 
 /// The cargo project manifest, the fixed dependency set plus one `path` entry

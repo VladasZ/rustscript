@@ -118,6 +118,15 @@ pub const BRIDGES: &[Bridge] = &[
     ),
     b("crates_bridge.rs", "base64_method", Engine::Fast, "Base64"),
     b("crates_bridge.rs", "rng_method", Engine::Fast, "Rng"),
+    b("winreg_bridge.rs", "regkey_method", Engine::Fast, "RegKey"),
+    b("service_bridge.rs", "service_method", Engine::Fast, "Service"),
+    b(
+        "service_bridge.rs",
+        "manager_method",
+        Engine::Fast,
+        "ServiceManager",
+    ),
+    b("wmi_bridge.rs", "wmi_method", Engine::Fast, "WmiConnection"),
     b(
         "process.rs",
         "exitstatus_method",
@@ -264,7 +273,13 @@ impl<'ast> Visit<'ast> for LitCollector {
 }
 
 /// Find a function by name anywhere in the file, including inside `impl`
-/// blocks, and harvest its arms.
+/// blocks and inside `mod` blocks, and harvest its arms.
+///
+/// Names are unioned across every match rather than replaced. A bridge split
+/// by `#[cfg]` declares the same function twice, once real and once as a stub
+/// that bails, and replacing would let whichever copy comes last win. The stub
+/// has no arms, so that emptied the table and `rust check` then rejected every
+/// method the real one implements.
 struct FnFinder<'a> {
     want: &'a str,
     found: Option<BTreeSet<String>>,
@@ -275,7 +290,7 @@ impl<'ast> Visit<'ast> for FnFinder<'_> {
         if item.sig.ident == self.want {
             let mut c = LitCollector::default();
             c.visit_block(&item.block);
-            self.found = Some(c.names);
+            self.found.get_or_insert_with(BTreeSet::new).extend(c.names);
         }
         syn::visit::visit_item_fn(self, item);
     }
@@ -284,7 +299,7 @@ impl<'ast> Visit<'ast> for FnFinder<'_> {
         if item.sig.ident == self.want {
             let mut c = LitCollector::default();
             c.visit_block(&item.block);
-            self.found = Some(c.names);
+            self.found.get_or_insert_with(BTreeSet::new).extend(c.names);
         }
         syn::visit::visit_impl_item_fn(self, item);
     }

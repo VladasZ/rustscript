@@ -31,3 +31,8 @@ hex = "0.4"
 ctrlc = "3.5"
 tempfile = "3.27"
 jsonwebtoken = { version = "10.4", features = ["rust_crypto"] }
+winreg = "0.56"
+encoding_rs = "0.8"
+windows-service = "0.8"
+wmi = "0.18"
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }

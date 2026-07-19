@@ -20,16 +20,23 @@ fn every_example_runs() {
             continue;
         }
         // Network examples need connectivity, so they are not run here.
+        // manual_ examples change real machine state and are run by hand.
         if path
             .file_name()
             .and_then(|n| n.to_str())
-            .is_some_and(|n| n.starts_with("net_"))
+            .is_some_and(|n| n.starts_with("net_") || n.starts_with("manual_"))
         {
             continue;
         }
         // Creating a symlink on Windows needs privileges unix grants freely.
         let stem = path.file_stem().and_then(|n| n.to_str());
         if !cfg!(unix) && stem == Some("symlink_demo") {
+            continue;
+        }
+        // The registry, services and WMI exist only on Windows.
+        if !cfg!(windows)
+            && matches!(stem, Some("registry_demo" | "service_demo" | "wmi_demo"))
+        {
             continue;
         }
         let out = Command::new(env!("CARGO_BIN_EXE_rust"))

@@ -92,6 +92,13 @@ pub(super) fn crate_bridge(module: &str, func: &str, args: &[Value]) -> Result<O
             Ok(f) => Value::ok(Native::NamedTempFile(f).wrap()),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
+        // winreg -----------------------------------------------------------
+        ("RegKey", "predef") => super::winreg_bridge::predef(args),
+        // windows-service ---------------------------------------------------
+        ("ServiceManager", "local_computer") => super::service_bridge::local_computer(args),
+        // wmi ---------------------------------------------------------------
+        ("WMIConnection", "new") => super::wmi_bridge::connection(args, true),
+        ("WMIConnection", "with_namespace_path") => super::wmi_bridge::connection(args, false),
         _ => return Ok(None),
     }))
 }

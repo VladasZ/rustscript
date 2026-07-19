@@ -332,6 +332,10 @@ impl Value {
         Value::Vec(Rc::new(RefCell::new(items)))
     }
 
+    pub fn tuple(items: Vec<Value>) -> Value {
+        Value::Tuple(Rc::new(RefCell::new(items)))
+    }
+
     pub fn structure(shape: Rc<StructShape>, values: Vec<Value>) -> Value {
         Value::Struct(Rc::new(StructData {
             shape,

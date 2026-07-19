@@ -5,7 +5,6 @@
 //! arguments. Anything else, methods and std or crate bridges, is delegated to
 //! the existing dispatch on `Interp` with already evaluated values.
 
-use std::cell::RefCell;
 use std::mem::{replace, take};
 use std::rc::Rc;
 
@@ -540,7 +539,7 @@ impl Interp {
                     let items = take_range(stack, base + wbase, count);
                     set_reg(
                         &mut stack[base + dst as usize],
-                        Value::Tuple(Rc::new(RefCell::new(items))),
+                        Value::tuple(items),
                     );
                 }
                 Op::MakeArrayRepeat { dst, val, count } => {

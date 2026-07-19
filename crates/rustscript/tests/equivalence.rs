@@ -6,11 +6,19 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Examples that are not deterministic across the two runs, so they cannot be
-/// compared byte for byte. Network ones depend on a live response; `args_echo`
-/// prints its own path as argv[0], which differs between the compiled binary
-/// and the script.
-const SKIP: &[&str] = &["net_get", "net_query", "args_echo"];
+/// Examples that cannot be compared byte for byte. Network ones depend on a
+/// live response, `args_echo` prints its own path as argv[0], which differs
+/// between the compiled binary and the script, and `registry_demo` is gated
+/// behind a required-feature so cargo never builds a binary to compare against.
+const SKIP: &[&str] = &[
+    "net_get",
+    "net_query",
+    "args_echo",
+    "registry_demo",
+    "service_demo",
+    "wmi_demo",
+    "manual_service_write",
+];
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

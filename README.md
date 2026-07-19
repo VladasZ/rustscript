@@ -283,6 +283,23 @@ a native bridge for it. These are bridged today.
   `Header`, `EncodingKey::from_ec_pem` and `from_secret`, and `encode`, so
   ES256 and HS256 tokens work
 
+Three more are bridged on Windows only. Each is compiled out elsewhere, and
+calling one on another platform returns a plain error saying so rather than
+failing to resolve.
+
+- [`winreg`](https://github.com/gentoo90/winreg-rs) for the registry.
+  `RegKey::predef`, `open_subkey`, `create_subkey`, `enum_keys`, `enum_values`,
+  the typed `get_value` and `set_value` for numbers and strings, the untyped
+  `get_raw_value` and `set_raw_value` for binary and multi string, plus
+  `delete_value`, `delete_subkey` and `delete_subkey_all`
+- [`windows-service`](https://github.com/mullvad/windows-service-rs) for
+  services. `ServiceManager::local_computer`, `open_service`, then
+  `query_status`, `query_config`, `change_config`, `start` and `stop`
+- [`wmi`](https://github.com/ohadravid/wmi-rs) for WMI queries.
+  `WMIConnection::new` and `with_namespace_path`, then `raw_query`, which
+  returns one map per instance. Queries only, no instance creation or method
+  invocation yet
+
 A crate without a bridge still passes `cargo check` but stops the interpreter
 with `unsupported crate` when its code runs.
 

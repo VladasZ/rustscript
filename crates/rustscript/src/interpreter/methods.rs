@@ -63,6 +63,11 @@ pub(super) fn json_type_test(recv: &Value, name: &str) -> Option<Value> {
 pub(super) fn generic_method(recv: &Value, name: &str, args: &[Value]) -> Result<Value> {
     match (recv, name) {
         (_, "clone") => Ok(recv.clone()),
+        // Values are structurally typed here, so a conversion that only changes
+        // the static type is a no-op. `vec.into()` for a `Cow<[u8]>` field is
+        // the same vec. A receiver with a real conversion, an OsString into a
+        // PathBuf for example, handles `into` in its own bridge before this.
+        (_, "into") => Ok(recv.clone()),
         (_, "to_string") => Ok(Value::str(recv.display())),
         (Value::Char(ch), name) if let Some(out) = char_method(*ch, name) => Ok(match out {
             CharOut::Bool(v) => Value::Bool(v),
@@ -81,6 +86,11 @@ pub(super) fn generic_method(recv: &Value, name: &str, args: &[Value]) -> Result
         // as_str on Null, are None rather than an error.
         (_, "as_str" | "as_i64" | "as_u64" | "as_f64" | "as_bool" | "as_array" | "as_object") => {
             Ok(Value::none())
+        }
+        // An enum names itself, so an unknown method on an Option says Option
+        // and not the bare word enum.
+        (Value::Enum { enum_name, .. }, _) => {
+            bail!("unknown method `{name}` on {enum_name}")
         }
         _ => bail!("unknown method `{name}` on {}", recv.type_name()),
     }
@@ -177,17 +187,17 @@ pub(super) fn str_method_slow(s: &Rc<RStr>, name: &str, args: &[Value]) -> Resul
             None => Value::none(),
         },
         "split_once" => match s.split_once(&arg_str(0)) {
-            Some((a, b)) => Value::some(Value::Tuple(Rc::new(RefCell::new(vec![
+            Some((a, b)) => Value::some(Value::tuple(vec![
                 Value::str(a.to_string()),
                 Value::str(b.to_string()),
-            ])))),
+            ])),
             None => Value::none(),
         },
         "rsplit_once" => match s.rsplit_once(&arg_str(0)) {
-            Some((a, b)) => Value::some(Value::Tuple(Rc::new(RefCell::new(vec![
+            Some((a, b)) => Value::some(Value::tuple(vec![
                 Value::str(a.to_string()),
                 Value::str(b.to_string()),
-            ])))),
+            ])),
             None => Value::none(),
         },
         "rsplit" => {
@@ -219,7 +229,7 @@ pub(super) fn str_method_slow(s: &Rc<RStr>, name: &str, args: &[Value]) -> Resul
             if let Some(colored) = color_method(s, name) {
                 colored
             } else {
-                bail!("unknown method `{name}` on String")
+                return generic_method(&Value::Str(s.clone()), name, args);
             }
         }
     })
@@ -356,7 +366,7 @@ pub(super) fn vec_method(
                 .iter()
                 .enumerate()
                 .map(|(i, x)| {
-                    Value::Tuple(Rc::new(RefCell::new(vec![Value::Int(i as i64), x.clone()])))
+                    Value::tuple(vec![Value::Int(i as i64), x.clone()])
                 })
                 .collect(),
         ),
@@ -456,7 +466,9 @@ pub(super) fn vec_method(
             _ => match method.text.as_str() {
                 "as_array" => Value::some(Value::vec(v.borrow().clone())),
                 "as_object" => Value::none(),
-                other => bail!("unknown method `{other}` on Vec"),
+                // Names that apply to any receiver, `clone` and `into` and the
+                // rest, live in one place instead of being repeated per type.
+                other => return generic_method(&Value::Vec(v.clone()), other, args),
             },
         },
     })
@@ -520,7 +532,7 @@ pub(super) fn map_method(
             // serde_json accessors resolve against it here.
             "as_object" => Value::some(Value::Map(m.clone())),
             "as_array" => Value::none(),
-            name => bail!("unknown method `{name}` on HashMap"),
+            name => return generic_method(&Value::Map(m.clone()), name, &*args),
         },
     })
 }
@@ -529,7 +541,7 @@ pub(super) fn map_pairs(m: &Rc<RefCell<Map>>) -> Value {
     Value::vec(
         m.borrow()
             .iter()
-            .map(|(k, v)| Value::Tuple(Rc::new(RefCell::new(vec![k.to_value(), v.clone()]))))
+            .map(|(k, v)| Value::tuple(vec![k.to_value(), v.clone()]))
             .collect(),
     )
 }
@@ -619,7 +631,7 @@ pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
             Some(v) => Value::ok(v),
             None => Value::err(args.first().cloned().unwrap_or(Value::Unit)),
         },
-        _ => bail!("unknown method `{name}` on Option"),
+        _ => return generic_method(recv, method.text.as_str(), args),
     })
 }
 
@@ -700,7 +712,7 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
                 Value::err(Value::str(format!("{ctx}\nCaused by: {cause}")))
             }
         }
-        _ => bail!("unknown method `{name}` on Result"),
+        _ => return generic_method(recv, method.text.as_str(), args),
     })
 }
 

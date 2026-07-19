@@ -15,6 +15,9 @@ use super::methods::*;
 use super::process::*;
 use super::regex_bridge::*;
 use super::std_bridge::*;
+use super::service_bridge::{manager_method, service_const, service_method, service_variant};
+use super::winreg_bridge::{winreg_const, winreg_method};
+use super::wmi_bridge::wmi_method;
 
 impl Interp {
     /// Resolve a path used as a value: `None`, a unit enum variant, a constant,
@@ -26,6 +29,12 @@ impl Interp {
                 return Ok(Value::none());
             }
             if let Some(v) = base64_engine(name) {
+                return Ok(v);
+            }
+            if let Some(v) = winreg_const(name) {
+                return Ok(v);
+            }
+            if let Some(v) = service_const(name) {
                 return Ok(v);
             }
             if let Some(v) = self.unit_variant(None, name) {
@@ -71,6 +80,15 @@ impl Interp {
             return Ok(v);
         }
         if let Some(v) = base64_engine(last) {
+            return Ok(v);
+        }
+        if let Some(v) = winreg_const(last) {
+            return Ok(v);
+        }
+        if let Some(v) = service_variant(ty, last) {
+            return Ok(v);
+        }
+        if let Some(v) = service_const(last) {
             return Ok(v);
         }
         if ty == "Ordering" {
@@ -170,7 +188,17 @@ impl Interp {
             });
         }
         if ns == "thread" {
-            bail!("std::thread is not supported, use #[tokio::main] with tokio::spawn");
+            // sleep is the one thread function that needs no threading. Polling
+            // an asynchronous thing, a service reaching Running for example,
+            // needs it, and rejecting it would push scripts to spin instead.
+            if last == "sleep" {
+                let Some(d) = args.first().and_then(duration_from_value) else {
+                    bail!("thread::sleep takes a Duration");
+                };
+                std::thread::sleep(d);
+                return Ok(Value::Unit);
+            }
+            bail!("std::thread is not supported beyond sleep, use #[tokio::main] with tokio::spawn");
         }
         // reqwest paths need the whole canonical path, since a blocking call
         // has three or four segments, so route them before the two-segment
@@ -492,6 +520,10 @@ pub(super) fn builtin_method(
             | "HeaderMap"
             | "HeaderValue" => http_method(s, name, &*args),
             "StdStream" => std_stream_method(s, name, args),
+            "RegKey" => winreg_method(s, name, &*args),
+            "ServiceManager" => manager_method(s, name, &*args),
+            "Service" => service_method(s, name, &*args),
+            "WmiConnection" => wmi_method(s, name, &*args),
             "Rng" => rng_method(name, &*args),
             "DateTime" => datetime_method(s, name, &*args),
             "Base64Engine" => base64_method(s, name, &*args),
