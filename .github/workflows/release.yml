@@ -151,14 +151,14 @@ jobs:
           mkdir -p dist
           if [ "${{ matrix.target }}" = "universal-apple-darwin" ]; then
             rustup target add x86_64-apple-darwin aarch64-apple-darwin
-            cargo build --release -p rustscript --target x86_64-apple-darwin
-            cargo build --release -p rustscript --target aarch64-apple-darwin
+            cargo build --release -p run-rs --target x86_64-apple-darwin
+            cargo build --release -p run-rs --target aarch64-apple-darwin
             lipo -create -output dist/rust \
               target/x86_64-apple-darwin/release/rust \
               target/aarch64-apple-darwin/release/rust
           else
             rustup target add "${{ matrix.target }}"
-            cargo build --release -p rustscript --target "${{ matrix.target }}"
+            cargo build --release -p run-rs --target "${{ matrix.target }}"
             if [ "${{ matrix.ext }}" = "zip" ]; then
               cp "target/${{ matrix.target }}/release/rust.exe" dist/rust.exe
             else

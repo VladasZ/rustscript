@@ -17,7 +17,7 @@ cargo run --release -p rustscript-bench --bin gendata -- /tmp/rustscript-bench-f
 ```
 
 ```sh
-cargo build --release -p rustscript
+cargo build --release -p run-rs
 export RUSTSCRIPT_SKIP_CHECK=1
 
 ./target/release/rust /tmp/case_prof.rs >/dev/null &
