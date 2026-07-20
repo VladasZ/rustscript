@@ -358,7 +358,7 @@ fn generate_fixtures(root: &Path, scratch: &Scratch) -> Result<()> {
 
 fn build_binaries(root: &Path) -> Result<()> {
     println!("building workspace rustscript and benchmark binaries ...");
-    run_cargo(root, &["build", "--release", "-p", "rustscript"])?;
+    run_cargo(root, &["build", "--release", "-p", "run-rs"])?;
     run_cargo(
         root,
         &["build", "--release", "-p", "rustscript-bench", "--bins"],

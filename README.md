@@ -62,6 +62,12 @@ implementation for, on every branch, without executing anything. Path calls like
 ## Install
 
 ```
+cargo install run-rs
+```
+
+To install it from a local checkout instead:
+
+```
 cargo install --path crates/rustscript
 ```
 

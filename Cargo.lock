@@ -1561,9 +1561,9 @@ dependencies = [
 
 [[package]]
 name = "num-bigint"
-version = "0.4.7"
+version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c863e9ab5e7bf9c99ba75e1050f1e4d624ae87ed3532d6238ffbdc7b585dbbe6"
+checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
 dependencies = [
  "num-integer",
  "num-traits",
@@ -2180,6 +2180,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "run-rs"
+version = "0.1.5"
+dependencies = [
+ "anyhow",
+ "base64",
+ "chrono",
+ "colored",
+ "compact_str",
+ "ctrlc",
+ "dirs",
+ "encoding_rs",
+ "glob",
+ "hex",
+ "indexmap",
+ "jsonwebtoken",
+ "lopdf",
+ "mimalloc",
+ "parking_lot",
+ "proc-macro2",
+ "rand 0.10.2",
+ "regex",
+ "reqwest",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "syn",
+ "tempfile",
+ "tokio",
+ "toml",
+ "which",
+ "windows-service",
+ "windows-sys 0.61.2",
+ "winreg",
+ "wmi",
+ "xmltree",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2240,45 +2279,6 @@ dependencies = [
  "ring",
  "rustls-pki-types",
  "untrusted",
-]
-
-[[package]]
-name = "rustscript"
-version = "0.1.5"
-dependencies = [
- "anyhow",
- "base64",
- "chrono",
- "colored",
- "compact_str",
- "ctrlc",
- "dirs",
- "encoding_rs",
- "glob",
- "hex",
- "indexmap",
- "jsonwebtoken",
- "lopdf",
- "mimalloc",
- "parking_lot",
- "proc-macro2",
- "rand 0.10.2",
- "regex",
- "reqwest",
- "rustc-hash",
- "serde",
- "serde_json",
- "serde_yaml",
- "syn",
- "tempfile",
- "tokio",
- "toml",
- "which",
- "windows-service",
- "windows-sys 0.61.2",
- "winreg",
- "wmi",
- "xmltree",
 ]
 
 [[package]]
@@ -2542,9 +2542,9 @@ dependencies = [
 
 [[package]]
 name = "spin"
-version = "0.9.8"
+version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
+checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 
 [[package]]
 name = "spki"

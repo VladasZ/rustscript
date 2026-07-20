@@ -128,7 +128,7 @@ fn newest_release(ls_remote: &str) -> Option<Release> {
 
 fn install_release(tag: &str) -> Result<()> {
     let status = Command::new("cargo")
-        .args(["install", "--git", REPOSITORY, "--tag", tag, "rustscript"])
+        .args(["install", "--git", REPOSITORY, "--tag", tag, "run-rs"])
         .status()
         .context("could not start cargo install")?;
     if !status.success() {
