@@ -28,7 +28,12 @@ fn build_command(s: &Arc<PStructData>) -> std::process::Command {
     }
     if let Some(PValue::Map(envs)) = s.get("envs") {
         for (k, v) in envs.lock().iter() {
-            cmd.env(k.to_value().display(), v.display());
+            let key = k.to_value().display();
+            if matches!(v, PValue::Unit) {
+                cmd.env_remove(key);
+            } else {
+                cmd.env(key, v.display());
+            }
         }
     }
     cmd
@@ -154,18 +159,21 @@ pub(super) fn command_method(recv: &PValue, m: &str, args: &mut [PValue]) -> Res
         "env" => {
             let key = args.first().map(PValue::display).unwrap_or_default();
             let val = args.get(1).cloned().unwrap_or(PValue::Unit);
-            let envs = match s.get("envs") {
-                Some(PValue::Map(m)) => PValue::Map(m),
-                _ => {
-                    let m = PValue::map();
-                    s.set("envs", m.clone());
-                    m
-                }
-            };
+            let envs = command_envs(s);
             if let PValue::Map(map) = envs
                 && let Some(k) = PValue::str(key).as_key()
             {
                 map.lock().insert(k, val);
+            }
+            recv.clone()
+        }
+        "env_remove" => {
+            let key = args.first().map(PValue::display).unwrap_or_default();
+            let envs = command_envs(s);
+            if let PValue::Map(map) = envs
+                && let Some(k) = PValue::str(key).as_key()
+            {
+                map.lock().insert(k, PValue::Unit);
             }
             recv.clone()
         }
@@ -178,6 +186,17 @@ pub(super) fn command_method(recv: &PValue, m: &str, args: &mut [PValue]) -> Res
         "output" => run_command(s, true),
         _ => bail!("method `{m}` on Command is not supported in tokio mode"),
     })
+}
+
+fn command_envs(s: &PStructData) -> PValue {
+    match s.get("envs") {
+        Some(PValue::Map(envs)) => PValue::Map(envs),
+        _ => {
+            let envs = PValue::map();
+            s.set("envs", envs.clone());
+            envs
+        }
+    }
 }
 
 fn push_arg(s: &Arc<PStructData>, a: PValue) {
