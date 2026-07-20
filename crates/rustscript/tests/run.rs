@@ -257,6 +257,38 @@ fn main() -> anyhow::Result<()> {
 }
 
 #[test]
+fn command_env_remove() {
+    let script = if cfg!(windows) {
+        r#"
+use std::process::Command;
+fn main() -> anyhow::Result<()> {
+    let out = Command::new("cmd")
+        .args(["/C", "if defined RUSTSCRIPT_REMOVE_ME (echo present) else (echo absent)"])
+        .env("RUSTSCRIPT_REMOVE_ME", "present")
+        .env_remove("RUSTSCRIPT_REMOVE_ME")
+        .output()?;
+    print!("{}", String::from_utf8_lossy(&out.stdout));
+    Ok(())
+}
+"#
+    } else {
+        r#"
+use std::process::Command;
+fn main() -> anyhow::Result<()> {
+    let out = Command::new("sh")
+        .args(["-c", "if [ -z \"${RUSTSCRIPT_REMOVE_ME+x}\" ]; then echo absent; else echo present; fi"])
+        .env("RUSTSCRIPT_REMOVE_ME", "present")
+        .env_remove("RUSTSCRIPT_REMOVE_ME")
+        .output()?;
+    print!("{}", String::from_utf8_lossy(&out.stdout));
+    Ok(())
+}
+"#
+    };
+    assert_eq!(run(script), "absent\n");
+}
+
+#[test]
 fn serde_json_roundtrip() {
     let out = run(r#"
 use serde::Serialize;
@@ -625,6 +657,38 @@ async fn main() {
 }
 "#);
     assert_eq!(out, "true true\n");
+}
+
+#[test]
+fn tokio_command_env_remove() {
+    let script = if cfg!(windows) {
+        r#"
+#[tokio::main]
+async fn main() {
+    let out = std::process::Command::new("cmd")
+        .args(["/C", "if defined RUSTSCRIPT_REMOVE_ME (exit /b 1) else (exit /b 0)"])
+        .env("RUSTSCRIPT_REMOVE_ME", "present")
+        .env_remove("RUSTSCRIPT_REMOVE_ME")
+        .output()
+        .unwrap();
+    println!("{}", out.status().success());
+}
+"#
+    } else {
+        r#"
+#[tokio::main]
+async fn main() {
+    let out = std::process::Command::new("sh")
+        .args(["-c", "test -z \"${RUSTSCRIPT_REMOVE_ME+x}\""])
+        .env("RUSTSCRIPT_REMOVE_ME", "present")
+        .env_remove("RUSTSCRIPT_REMOVE_ME")
+        .output()
+        .unwrap();
+    println!("{}", out.status().success());
+}
+"#
+    };
+    assert_eq!(run(script), "true\n");
 }
 
 #[test]

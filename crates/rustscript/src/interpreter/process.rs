@@ -31,7 +31,12 @@ pub(super) fn build_command(s: &StructData) -> std::process::Command {
     }
     if let Some(Value::Map(envs)) = s.get("envs") {
         for (k, v) in envs.borrow().iter() {
-            cmd.env(path_like(&k.to_value()), path_like(v));
+            let key = path_like(&k.to_value());
+            if matches!(v, Value::Unit) {
+                cmd.env_remove(key);
+            } else {
+                cmd.env(key, path_like(v));
+            }
         }
     }
     cmd
@@ -190,15 +195,15 @@ pub(super) fn command_method(s: &Rc<StructData>, name: &str, args: &[Value]) -> 
         "env" => {
             let key = args.first().map(|v| v.display()).unwrap_or_default();
             let val = args.get(1).cloned().unwrap_or(Value::Unit);
-            let envs = match s.get("envs") {
-                Some(Value::Map(m)) => m,
-                _ => {
-                    let m = Rc::new(RefCell::new(Map::default()));
-                    s.set("envs", Value::Map(m.clone()));
-                    m
-                }
-            };
+            let envs = command_envs(s);
             envs.borrow_mut().insert(MapKey::Str(RStr::new(key)), val);
+            cmd_value()
+        }
+        "env_remove" => {
+            let key = args.first().map(|v| v.display()).unwrap_or_default();
+            let envs = command_envs(s);
+            envs.borrow_mut()
+                .insert(MapKey::Str(RStr::new(key)), Value::Unit);
             cmd_value()
         }
         "stdin" | "stdout" | "stderr" => {
@@ -210,6 +215,17 @@ pub(super) fn command_method(s: &Rc<StructData>, name: &str, args: &[Value]) -> 
         "status" => status_command(s),
         _ => bail!("unknown method `{name}` on Command"),
     })
+}
+
+fn command_envs(s: &StructData) -> Rc<RefCell<Map>> {
+    match s.get("envs") {
+        Some(Value::Map(envs)) => envs,
+        _ => {
+            let envs = Rc::new(RefCell::new(Map::default()));
+            s.set("envs", Value::Map(envs.clone()));
+            envs
+        }
+    }
 }
 
 /// Methods on a spawned `Child`. Lifecycle calls delegate to the real child
