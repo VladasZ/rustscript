@@ -365,9 +365,7 @@ pub(super) fn vec_method(
             v.borrow()
                 .iter()
                 .enumerate()
-                .map(|(i, x)| {
-                    Value::tuple(vec![Value::Int(i as i64), x.clone()])
-                })
+                .map(|(i, x)| Value::tuple(vec![Value::Int(i as i64), x.clone()]))
                 .collect(),
         ),
         B::Take => {

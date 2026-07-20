@@ -537,10 +537,7 @@ impl Interp {
                 } => {
                     let (dst, wbase, count) = (*dst, *wbase as usize, *count as usize);
                     let items = take_range(stack, base + wbase, count);
-                    set_reg(
-                        &mut stack[base + dst as usize],
-                        Value::tuple(items),
-                    );
+                    set_reg(&mut stack[base + dst as usize], Value::tuple(items));
                 }
                 Op::MakeArrayRepeat { dst, val, count } => {
                     let n = match &stack[base + *count as usize] {

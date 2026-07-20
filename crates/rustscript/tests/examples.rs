@@ -34,9 +34,7 @@ fn every_example_runs() {
             continue;
         }
         // The registry, services and WMI exist only on Windows.
-        if !cfg!(windows)
-            && matches!(stem, Some("registry_demo" | "service_demo" | "wmi_demo"))
-        {
+        if !cfg!(windows) && matches!(stem, Some("registry_demo" | "service_demo" | "wmi_demo")) {
             continue;
         }
         let out = Command::new(env!("CARGO_BIN_EXE_rust"))

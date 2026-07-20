@@ -23,9 +23,12 @@ fn decode_native(bytes: &[u8]) -> String {
     use windows_sys::Win32::System::Console::GetConsoleOutputCP;
 
     // A detached process, a scheduled task or an ssh session, has no console
-    // and GetConsoleOutputCP returns 0. cp1252 is the sane default there.
+    // and GetConsoleOutputCP returns 0. A console set to UTF-8 returns 65001,
+    // but these bytes already failed to parse as UTF-8, so asking for UTF-8 a
+    // second time only yields replacement characters. cp1252 is the sane
+    // default for both.
     let cp = match unsafe { GetConsoleOutputCP() } {
-        0 => 1252,
+        0 | 65001 => 1252,
         n => n,
     };
     let Some(encoding) = codepage_encoding(cp) else {
@@ -45,7 +48,6 @@ fn decode_native(bytes: &[u8]) -> String {
 #[cfg(windows)]
 fn codepage_encoding(cp: u32) -> Option<&'static encoding_rs::Encoding> {
     let label: &str = match cp {
-        65001 => return Some(encoding_rs::UTF_8),
         437 | 850 | 858 | 1252 => "windows-1252",
         866 => "ibm866",
         1251 => "windows-1251",

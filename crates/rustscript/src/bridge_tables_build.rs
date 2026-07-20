@@ -119,7 +119,12 @@ pub const BRIDGES: &[Bridge] = &[
     b("crates_bridge.rs", "base64_method", Engine::Fast, "Base64"),
     b("crates_bridge.rs", "rng_method", Engine::Fast, "Rng"),
     b("winreg_bridge.rs", "regkey_method", Engine::Fast, "RegKey"),
-    b("service_bridge.rs", "service_method", Engine::Fast, "Service"),
+    b(
+        "service_bridge.rs",
+        "service_method",
+        Engine::Fast,
+        "Service",
+    ),
     b(
         "service_bridge.rs",
         "manager_method",

@@ -300,13 +300,19 @@ mod imp {
                 Ok(cfg) => Value::ok(Value::struct_of(
                     "ServiceConfig",
                     [
-                        ("service_type".into(), Value::Int(i64::from(cfg.service_type.bits()))),
+                        (
+                            "service_type".into(),
+                            Value::Int(i64::from(cfg.service_type.bits())),
+                        ),
                         (
                             "start_type".into(),
                             service_variant("ServiceStartType", start_type_name(cfg.start_type))
                                 .unwrap_or(Value::Unit),
                         ),
-                        ("error_control".into(), Value::Int(error_control_raw(cfg.error_control))),
+                        (
+                            "error_control".into(),
+                            Value::Int(error_control_raw(cfg.error_control)),
+                        ),
                         (
                             "executable_path".into(),
                             Value::str(cfg.executable_path.display().to_string()),
@@ -318,7 +324,9 @@ mod imp {
                         (
                             "account_name".into(),
                             match cfg.account_name {
-                                Some(a) => Value::some(Value::str(a.to_string_lossy().into_owned())),
+                                Some(a) => {
+                                    Value::some(Value::str(a.to_string_lossy().into_owned()))
+                                }
                                 None => Value::none(),
                             },
                         ),
