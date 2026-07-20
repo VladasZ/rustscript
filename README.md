@@ -1,5 +1,6 @@
-# rustscript
+# RustScript
 
+[![Crates.io](https://img.shields.io/crates/v/run-rs.svg)](https://crates.io/crates/run-rs)
 [![CI](https://github.com/VladasZ/rustscript/actions/workflows/ci.yml/badge.svg)](https://github.com/VladasZ/rustscript/actions/workflows/ci.yml)
 [![Marketplace](https://img.shields.io/badge/marketplace-rustscript--action-2088FF?logo=githubactions&logoColor=white)](https://github.com/marketplace/actions/rustscript-action)
 [![Licence](https://img.shields.io/badge/licence-MIT%20OR%20Apache--2.0-blue)](#licence)
@@ -8,9 +9,21 @@
 [![macOS](https://img.shields.io/badge/macos-universal-informational?logo=apple&logoColor=white)](https://github.com/VladasZ/rustscript/releases/latest)
 [![Windows](https://img.shields.io/badge/windows-x86__64%20%7C%20arm64-informational?logo=windows&logoColor=white)](https://github.com/VladasZ/rustscript/releases/latest)
 
-Run a subset of Rust as an interpreted script. Write helper and automation
-scripts in real Rust and run them like Python or a shell script, without waiting
-for a full compile.
+Run helper and automation scripts in Rust without waiting for a full compile.
+RustScript interprets a practical subset of the language. `rust check`
+validates the same files with rustc.
+
+## Install
+
+Install the [`run-rs`](https://crates.io/crates/run-rs) package from crates.io:
+
+```sh
+cargo install run-rs
+```
+
+This installs a binary named `rust`.
+
+## First script
 
 ```rust
 #!/usr/bin/env rust
@@ -24,72 +37,135 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
-Make it executable and run it directly.
+Make the file executable and run it directly:
 
-```
+```sh
 chmod +x notes.rs
 ./notes.rs
 ```
 
-## The idea
+## Usage
 
-A script is a normal Rust program with `fn main`, one file or a module tree.
-Two layers share the same source.
-
-- An interpreter parses the files with [`syn`](https://github.com/dtolnay/syn),
-  compiles them once to bytecode, and runs them on a register machine. Locals
-  are numbered slots, so a variable read is an array index, not a name lookup.
-  Ownership and borrow rules carry no meaning at runtime, so there is no borrow
-  checker cost and startup is fast.
-- `rust check` runs two gates. It builds a small cargo project around the files
-  and runs `cargo check` on it, which proves the script is valid Rust. It then
-  compiles the script and walks the bytecode to find methods this interpreter
-  does not implement. It is a separate opt-in step, not part of running, and the
-  cargo result is cached by source hash.
-
-Running never waits on a check, so a script starts at once, like Python. The
-interpreter needs no type checker of its own. When you want proof that a script
-is valid Rust, `rust check` makes the real compiler the authority.
-
-Being valid Rust is not the whole story, because the interpreter runs a subset.
-`"x".repeat(3)` compiles whether or not the bridge implements `repeat`, and
-running the script only exercises the lines that execute, so a gap inside a loop
-body stays hidden until that loop has data. So `rust check` also walks the
-compiled bytecode and reports every method call the interpreter has no
-implementation for, on every branch, without executing anything. Path calls like
-`std::process::exit` are not covered yet.
-
-## Install
-
-```
-cargo install run-rs
+```text
+rust FILE.rs         interpret the script
+rust run FILE.rs     same as above
+rust check FILE.rs   validate without running
+rust build FILE.rs   compile, cache, and run a native binary
+rust clean           clear cached checks and builds
+rust update          install the newest RustScript release
+rust --version       show version and build information
 ```
 
-To install it from a local checkout instead:
+Arguments after the file are passed to the script. The first argument `cmp` is
+reserved as a shorthand for compiled mode:
 
+```sh
+rust tool.rs one two
+rust tool.rs cmp one two
 ```
-cargo install --path crates/rustscript
-```
 
-This installs a binary named `rust`.
+The shebang is valid Rust, so the same file can still be compiled or checked by
+Cargo. Symlinks to scripts work too, including extensionless command names.
 
-Released versions also ship prebuilt binaries on the
-[releases page](https://github.com/VladasZ/rustscript/releases). The Linux
-builds are static musl binaries, so they run on any distribution, including
-Alpine and old container images. The macOS build is one universal binary that
-covers both Intel and Apple Silicon.
+## How it works
+
+- `rust FILE.rs` parses the source with
+  [`syn`](https://github.com/dtolnay/syn), compiles it to bytecode, and runs it
+  on a register VM. It does not invoke Cargo or a type checker.
+- `rust check FILE.rs` creates a small Cargo project and runs `cargo check`.
+  It then inspects every compiled branch for method calls the interpreter does
+  not implement. Results are cached by source hash.
+- `rust build FILE.rs` asks Cargo for a native binary, caches it, and runs it.
+  Use it for CPU-heavy scripts that justify the initial build.
+
+rustc remains responsible for type, ownership, borrowing, and visibility
+errors. The interpreter does not implement a second Rust type system.
+
+## Supported Rust
+
+Supported language features include:
+
+- functions, recursion, closures, methods, associated functions, and aliases
+- structs, tuple structs, enums, patterns, guards, `if let`, and `let else`
+- loops, ranges, arithmetic, comparison, casts, and bitwise operations
+- `Vec`, strings, maps, sets, `Option`, `Result`, and `?`
+- iterators including `map`, `filter`, `fold`, `find`, sorting, and predicates
+- formatting, named arguments, width, precision, and common macros
+- modules, imports, re-exports, constants, statics, and local path crates
+- `#[tokio::main]`, spawned tasks, joins, yielding, timers, and async HTTP
+
+The standard-library bridge covers files, directories, paths, stdin and stdout,
+buffered I/O, processes, TCP sockets, environment variables, arguments, time,
+and collections.
+
+The following crates have native interpreter bridges:
+
+- [`anyhow`](https://github.com/dtolnay/anyhow),
+  [`serde`](https://serde.rs), and
+  [`serde_json`](https://github.com/serde-rs/json)
+- [`reqwest`](https://github.com/seanmonstar/reqwest),
+  [`regex`](https://github.com/rust-lang/regex),
+  [`jsonwebtoken`](https://github.com/Keats/jsonwebtoken), and
+  [`tokio`](https://tokio.rs)
+- [`chrono`](https://github.com/chronotope/chrono),
+  [`rand`](https://github.com/rust-random/rand),
+  [`which`](https://github.com/harshadgavali/which-rs),
+  [`glob`](https://github.com/rust-lang/glob), and
+  [`dirs`](https://github.com/dirs-dev/dirs-rs)
+- [`toml`](https://github.com/toml-rs/toml),
+  [`serde_yaml`](https://github.com/dtolnay/serde-yaml),
+  [`base64`](https://github.com/marshallpierce/base64),
+  [`hex`](https://github.com/KokaKiwi/rust-hex), and
+  [`colored`](https://github.com/colored-rs/colored)
+- [`ctrlc`](https://github.com/Detegr/rust-ctrlc) and
+  [`tempfile`](https://github.com/Stebalien/tempfile)
+
+Windows builds also bridge
+[`winreg`](https://github.com/gentoo90/winreg-rs),
+[`windows-service`](https://github.com/mullvad/windows-service-rs), and
+[`wmi`](https://github.com/ohadravid/wmi-rs).
+
+See the programs under `crates/examples/examples` for working examples of the
+language, standard library, and crate bridges.
+
+## Modules and local crates
+
+Normal module layouts work: `mod name;` loads `name.rs` or `name/mod.rs`, and
+modules can nest to any depth. Imports support `crate::`, `self::`, `super::`,
+renames, groups, and re-export chains.
+
+A script inside a Cargo project can use local library crates declared as path
+dependencies in the nearest `Cargo.toml`. Both the interpreter and `rust check`
+load the same source tree.
+
+See [Writing multifile scripts](docs/multifile.md) for layout rules, a complete
+example, and the unsupported module forms.
+
+## Current limitations
+
+`cargo check` proves that a program is valid Rust, not that every operation has
+an interpreter bridge. `rust check` adds that coverage pass.
+
+- Crates without a native bridge stop with an `unsupported crate` error.
+- Coverage currently checks methods, not path calls such as
+  `std::process::exit`.
+- `#[path]` module declarations and glob imports from script modules are not
+  supported.
+- `std::thread` is not supported; use Tokio tasks for parallel work.
+- `static mut` is rejected. Plain statics behave like constants.
+- Lifetimes and generics are accepted but carry no runtime meaning.
+- Serde container attributes such as `rename_all` and `default` are not yet
+  implemented by the reflection bridge.
+
+## Caching
+
+Checks, compiled binaries, and shared Cargo dependencies live under
+`~/.cache/rustscript`. Interpreted runs do not touch the cache. `rust clean`
+removes it.
 
 ## GitHub Actions
 
-This repository is also a GitHub Action, so a workflow can install the
-interpreter and run scripts with it.
-
-```yaml
-- uses: VladasZ/rustscript@v0.1
-```
-
-That puts `rust` on `PATH` for the rest of the job. Give it a `script` to
-install and run in one step.
+The repository is also a GitHub Action:
 
 ```yaml
 - uses: VladasZ/rustscript@v0.1
@@ -98,332 +174,50 @@ install and run in one step.
     args: --dry-run
 ```
 
-| input | default | meaning |
-| --- | --- | --- |
-| `version` | the calling tag, else newest | version to install, for example `v0.1.0` |
-| `script` | empty | script to execute, empty means install only |
-| `mode` | `run` | `run`, `build` or `check` |
-| `args` | empty | extra arguments passed to the script |
-| `github-token` | `github.token` | only used to resolve the newest release |
+The Action downloads a checksum-verified prebuilt binary, so setup takes
+seconds instead of compiling the crate. It supports Linux, macOS, and Windows
+on x86_64 and arm64. See the [GitHub Actions guide](docs/github-actions.md) for
+inputs, outputs, version selection, and pinning.
 
-Outputs are `version`, the version that was installed, and `bin-path`, the
-directory holding the binary.
+## Development
 
-The action downloads a prebuilt binary and verifies it against the published
-`SHA256SUMS`, so it costs a second or two rather than a full compile. It covers
-Linux, macOS and Windows on both x86_64 and arm64. See
-[docs/github-actions.md](docs/github-actions.md) for the details.
+Install the current checkout when testing unpublished changes:
 
-## Usage
-
-```
-rust run FILE.rs     interpret the script
-rust FILE.rs         same as run
-rust FILE.rs cmp     compile and run, `cmp` first arg is reserved
-rust build FILE.rs   compile to a native binary, cache it, then run
-rust check FILE.rs   validate with cargo check and interpreter coverage, does not run
-rust clean           clear the cache
-rust update          install the latest RustScript from GitHub
-rust --version       show version and build information
+```sh
+cargo install --path crates/rustscript
 ```
 
-`rust update` is explicit. It lists the release tags of `VladasZ/rustscript`,
-takes the newest full version, and compares it with the running version. An
-installed version that already matches, or is newer, is a no-op. Otherwise it
-installs that tag with `cargo install`. Prereleases and the moving minor tags
-are never update targets. On Windows it moves the running executable aside
-before installation and restores it if the update fails.
+Run the repository checks:
 
-`rust --version` prints the package version, Git commit, UTC build time, and
-Cargo build profile. A local build with tracked changes marks the commit as
-dirty, for example:
-
-```
-rustscript 0.1.0 (4ea5a27-dirty, built 2026-07-18T09:21:09Z, release)
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ```
 
-`rust build` compiles the script with cargo instead of interpreting it, then
-runs the resulting binary and exits with its status. The binary is cached by
-source hash under the cache dir, so an unchanged script runs again instantly
-with no cargo call. The first build of a new or edited script is a real cargo
-build, so it is slow, later runs are not. A successful build also proves the
-script is valid Rust, so it doubles as a check. Use it for CPU heavy scripts
-where native speed pays back the build cost. The one shared cargo target dir is
-kept so an edit rebuilds only the script crate, but only the final binaries are
-cached, never per script target dirs.
-
-The word `cmp` as the first argument to a script is reserved. When you run
-`FILE.rs cmp ...`, the interpreter compiles and runs the script the same way
-`rust build` does, then passes the rest of the arguments on. This is what makes
-a plain launcher give both modes for free. A command named `foo` interprets,
-and `foo cmp` runs the compiled build, since the launcher forwards the words
-unchanged. Because `cmp` is intercepted, a script must not use `cmp` as its own
-first positional argument, it would never reach the script. Later arguments are
-free, only the very first is reserved.
-
-A `#!/usr/bin/env rust` first line lets a `.rs` file run on its own. A shebang
-is legal Rust, so the file still passes `cargo check`. A symlink to a script
-runs too, even without an `.rs` extension. The link is resolved first, so
-module files are found next to the real source.
-
-## Modules
-
-A script can span multiple files with normal Rust module syntax. `mod name;`
-loads `name.rs` or `name/mod.rs` next to the declaring file, following the same
-directory rules as rustc, and inline `mod name { .. }` blocks work too. Modules
-nest to any depth.
-
-```rust
-// tool.rs
-mod util;
-use util::math::add;
-
-fn main() {
-    println!("{}", add(2, 3));
-}
-```
-
-```rust
-// util.rs
-pub mod math;
-```
-
-```rust
-// util/math.rs
-pub fn add(a: i64, b: i64) -> i64 { a + b }
-```
-
-Paths resolve like real Rust: `crate::`, `self::`, `super::`, plain, renamed,
-and grouped imports, `use x::{self}`, and `pub use` re-export chains. Imported
-structs, enums, functions, consts, statics, and type aliases all work across
-files, including struct literals and tuple struct constructors through an
-alias. Two modules can each define a type with the same name. When you run
-`rust check` it covers the whole file tree, and a change to any module rechecks.
-Visibility is not enforced at runtime, `rust check` is the authority when you
-want it.
-
-Not supported: `#[path]` on a mod declaration, and glob imports of script
-modules like `use util::*`, both stop with a clear error.
-
-A script inside a cargo crate can also `use` a local library crate declared as a
-`path` dependency in the nearest `Cargo.toml`. The interpreter grafts that crate
-in from source, and the `cargo check` gate treats it as a real path dependency,
-so a set of scripts can share one helper crate.
-
-See [docs/multifile.md](docs/multifile.md) for a proper guide, a worked
-example, and the common mistakes.
-
-## What works
-
-- functions, recursion, `let` and `mut`, arithmetic, comparison, logical and
-  bitwise operators, casts, and `T::from` / `T::try_from` numeric conversions
-- `if`, `if let`, `while`, `loop`, `for` over ranges, vectors, maps, and chars,
-  `match` with guards and patterns
-- `struct`, `enum`, tuple structs, unit structs, `impl` methods and associated
-  functions
-- modules across files and inline, every import style, re-exports, module
-  level `const` and `static`, and type aliases
-- closures and the common iterator methods, `map`, `filter`, `fold`, `find`,
-  `any`, `all`, `sort_by`, `sort_by_key`, `copied`, `cloned`, and more,
-  including method paths like `ToString::to_string` passed as a function value
-- `Vec`, `String`, `HashMap`, `Option`, `Result`, the `?` operator
-- slicing with ranges, `&v[1..3]`, `&s[..n]`, and open ends like `v[1..]` in
-  index position
-- `format!` and `println!` with `{name}`, `{:?}`, width, and precision
-- `matches!`, byte string literals `b"..."`, and `unsafe` blocks run their body
-- `#[derive(...)]` is accepted, serialization is done by reflection
-
-## Standard library subset
-
-Scripts use plain `std`. The interpreter bridges the common parts.
-
-- `std::fs`, read, write, create and remove dirs, copy, rename, `read_dir`,
-  `canonicalize`, `metadata`, `symlink_metadata`, `read_link`, `File`,
-  `OpenOptions`, and the platform `symlink`
-- `std::io`, `stdin`, `stdout`, `stderr`, `Read`, `Write`, `BufReader`, `Seek`,
-  `lines` reading, and `IsTerminal`
-- `std::process::Command`, `output`, `status`, and `spawn` with `Stdio` piping
-  and a `Child` you can stream, feed, and `wait` on
-- `std::net`, blocking `TcpListener` and `TcpStream`
-- `std::time`, `Instant`, `SystemTime`, and `Duration`
-- `std::env`, real script args, `vars`, `var`, `var_os`, `set_var`,
-  `remove_var`, `current_dir`, `set_current_dir`, `temp_dir`, and
-  `consts::OS` / `ARCH`
-- `std::process::exit`
-- `std::path`, `Path` and `PathBuf` with `display`, `is_dir`, `join`,
-  `ancestors`, and more
-- `std::collections`, `HashMap`, `BTreeMap`, sets, and the `entry` API
-
-## Bridged crates
-
-A script may declare real dependencies. A crate runs only if the interpreter has
-a native bridge for it. These are bridged today.
-
-- [`serde`](https://serde.rs) and
-  [`serde_json`](https://github.com/serde-rs/json), including typed
-  `from_str::<T>` into your own structs, with `#[serde(rename = "..")]` and
-  `Option<T>` fields honored, so camelCase APIs map onto snake_case fields
-- [`anyhow`](https://github.com/dtolnay/anyhow) for `Result`, `?`, `bail!`,
-  `ensure!`, and `context`
-- [`reqwest`](https://github.com/seanmonstar/reqwest) for HTTP and HTTPS over
-  rustls, the blocking API in a plain script and the async API under
-  `#[tokio::main]`, with headers, query params, json bodies, a timeout, and
-  cookies
-- [`regex`](https://github.com/rust-lang/regex) for matching, capture groups,
-  and replace
-- [`which`](https://github.com/harshadgavali/which-rs) to find a program on PATH
-- [`glob`](https://github.com/rust-lang/glob) for path matching
-- [`dirs`](https://github.com/dirs-dev/dirs-rs) for home, cache, and config dirs
-- [`chrono`](https://github.com/chronotope/chrono) for `Utc::now`, formatting,
-  and date parts
-- [`rand`](https://github.com/rust-random/rand) for random numbers and bytes
-- [`toml`](https://github.com/toml-rs/toml) and
-  [`serde_yaml`](https://github.com/dtolnay/serde-yaml) for typed config
-- [`colored`](https://github.com/colored-rs/colored) for terminal colors
-- [`base64`](https://github.com/marshallpierce/base64) and
-  [`hex`](https://github.com/KokaKiwi/rust-hex) for encoding
-- [`ctrlc`](https://github.com/Detegr/rust-ctrlc) for a Ctrl-C handler
-- [`tempfile`](https://github.com/Stebalien/tempfile) for temp dirs, files, and
-  `NamedTempFile`
-- [`jsonwebtoken`](https://github.com/Keats/jsonwebtoken) for signing JWTs,
-  `Header`, `EncodingKey::from_ec_pem` and `from_secret`, and `encode`, so
-  ES256 and HS256 tokens work
-
-Three more are bridged on Windows only. Each is compiled out elsewhere, and
-calling one on another platform returns a plain error saying so rather than
-failing to resolve.
-
-- [`winreg`](https://github.com/gentoo90/winreg-rs) for the registry.
-  `RegKey::predef`, `open_subkey`, `create_subkey`, `enum_keys`, `enum_values`,
-  the typed `get_value` and `set_value` for numbers and strings, the untyped
-  `get_raw_value` and `set_raw_value` for binary and multi string, plus
-  `delete_value`, `delete_subkey` and `delete_subkey_all`
-- [`windows-service`](https://github.com/mullvad/windows-service-rs) for
-  services. `ServiceManager::local_computer`, `open_service`, then
-  `query_status`, `query_config`, `change_config`, `start` and `stop`
-- [`wmi`](https://github.com/ohadravid/wmi-rs) for WMI queries.
-  `WMIConnection::new` and `with_namespace_path`, then `raw_query`, which
-  returns one map per instance. Queries only, no instance creation or method
-  invocation yet
-
-A crate without a bridge still passes `cargo check` but stops the interpreter
-with `unsupported crate` when its code runs.
-
-## Async and parallelism
-
-A script whose `main` is `#[tokio::main]` runs on a second engine built for real
-multi-core work. It uses a multi-thread tokio runtime, so `tokio::spawn` tasks
-run on many threads at once, `.await`, `tokio::join!`, and
-`tokio::task::yield_now` work, `tokio::time::sleep` is real, and the async
-`reqwest` client sends requests concurrently. A plain script with no
-`#[tokio::main]` keeps the fast single-thread engine untouched, so it pays
-nothing for this. The `current_thread` flavor is rejected, only the multi-thread
-runtime is offered.
-
-## Not supported
-
-`std::thread` is rejected, use `tokio::spawn` under `#[tokio::main]` for real
-parallelism. `unsafe` blocks run their body, since edition 2024 needs `unsafe`
-around calls like `env::set_var`. Lifetimes and generics parse and run, they
-just carry no meaning at runtime. `static mut` is rejected, plain `static`
-behaves like a const.
-
-## Caching
-
-Check results, compiled binaries, and the prebuilt dependencies live in
-`~/.cache/rustscript`. Interpreting a script never touches this cache. When you
-run `rust check`, the fixed dependency set compiles once into a shared target,
-and each script's result is cached by source hash so an unchanged script
-rechecks instantly. `rust build` shares that target and adds the finished
-binary to a `bin` folder keyed by the same hash, so a rerun of an unchanged
-script skips cargo. `rust clean` clears the cache.
-
-## Examples
-
-The scripts in `crates/examples/examples` cover the common ground people use to
-judge a scripting language. Fizzbuzz, fibonacci, word count, quicksort, sieve,
-towers of hanoi, roman numerals, a state machine, file and directory work, a
-shell command, json config, typed json, an http fetch, and regex extraction.
-Newer ones show process spawning with streamed output, file and stdin I/O, file
-metadata and symlinks, tcp sockets, threads, dates, temp dirs, base64 and hex,
-toml and yaml config, terminal colors, and running a program from PATH.
-
-Run one with the interpreter.
-
-```
-rust run crates/examples/examples/word_count.rs
-```
-
-Compile all of them with the real toolchain as a second check.
-
-```
-cargo build --examples -p rustscript-examples
-```
-
-## Tests
-
-```
-cargo test                              all suites, see below
-cargo test --test run                   interpreter behavior
-cargo test --test equivalence           compiled example vs interpreted, byte identical
-cargo test --test multifile             module loading, imports, and conformance
-cargo test --test check -- --ignored    the cargo check gate, valid and invalid
-```
-
-The equivalence suite runs every example both as a compiled cargo binary and
-through the interpreter, then checks the output matches byte for byte. It is the
-strongest guarantee that the interpreter behaves like the real compiler. The
-multifile suite does the same for the `crates/conformance` crate, a deep module
-tree that exercises every import style, re-export chains, and cross module
-types, consts, and aliases.
-
-CI runs the same suites on every push to `main` and every pull request, on
-Linux, macOS and Windows, alongside `cargo fmt --check` and
-`cargo clippy --workspace --all-targets -- -D warnings`.
+The equivalence tests run the same examples through rustc and the interpreter
+and compare their output byte for byte. The multifile conformance test does the
+same for a deep module tree.
 
 ## Benchmarks
 
-The `bench` crate compares rustscript against native Rust, Node, and Python 3 on
-equivalent idiomatic tasks with byte-identical output. It records interleaved
-wall-clock, self-timed compute, and peak-memory samples at two sizes, retains the
-raw data and provenance, and draws one PNG per case and tier. See
-`bench/README.md` for the methodology, current scope limits, and result format,
-and `docs/profiling.md` for how to find interpreter hot spots.
+The benchmark suite compares RustScript with native Rust, Node, and Python on
+equivalent programs. It records wall time, compute time, peak memory, raw
+samples, and build provenance.
 
-```
-cargo run --release --bin bench
-cargo run --release --bin chart
-```
+See the [benchmark guide](bench/README.md) for methodology and results, and the
+[profiling guide](docs/profiling.md) for finding interpreter hot spots.
 
-## Versioning
+## Releases
 
-Releases are semver tags like `v0.1.0`. RustScript is still 0.x, so the minor
-is the breaking axis, and each minor line gets a moving tag that follows its
-newest patch.
+RustScript is still 0.x, so minor versions may contain breaking changes. Exact
+tags such as `v0.1.5` never move; the `v0.1` tag follows the newest patch in
+that line. Pin an exact tag when a workflow must not change.
 
-```
-v0.1.0    exact release, never moves
-v0.1      moving, follows the newest v0.1.z
-```
-
-Track `@v0.1` to pick up patches without surprises, or pin `@v0.1.0` when a
-workflow must never change. A breaking change becomes `v0.2.0` with a new
-`v0.2` tag, so it can only arrive when you move the ref yourself. There is no
-moving `v0` tag, because it would span breaking changes and promise nothing.
-
-The action and the interpreter share the tag. Calling the action at an exact
-version tag installs that same interpreter version by default, so one number
-covers both. The `version` input overrides it when you want a new action with
-an older interpreter.
+`rust update` finds the newest full GitHub release and installs it with Cargo.
+Prereleases and moving minor tags are not update targets.
 
 ## Licence
 
 Dual licensed under either [MIT](LICENSE-MIT) or
 [Apache-2.0](LICENSE-APACHE), at your option.
-
-## Status
-
-Early but usable. Script arguments, `std::io::stdin`, process spawning, files,
-sockets, and time all work now. Typed deserialization honors
-`#[serde(rename = "..")]` and `Option<T>` fields. Known refinements still open
-are container-level `#[serde(rename_all = "..")]` and `#[serde(default)]`.
