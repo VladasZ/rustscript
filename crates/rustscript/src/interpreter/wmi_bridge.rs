@@ -106,9 +106,7 @@ mod imp {
                 match connect(&namespace)
                     .and_then(|c| Ok(c.raw_query::<HashMap<String, Variant>>(&q)?))
                 {
-                    Ok(rows) => {
-                        Value::ok(Value::vec(rows.iter().map(row_to_value).collect()))
-                    }
+                    Ok(rows) => Value::ok(Value::vec(rows.iter().map(row_to_value).collect())),
                     Err(e) => Value::err(Value::str(e.to_string())),
                 }
             }

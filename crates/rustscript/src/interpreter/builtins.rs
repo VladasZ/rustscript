@@ -14,8 +14,8 @@ use super::jwt_bridge::*;
 use super::methods::*;
 use super::process::*;
 use super::regex_bridge::*;
-use super::std_bridge::*;
 use super::service_bridge::{manager_method, service_const, service_method, service_variant};
+use super::std_bridge::*;
 use super::winreg_bridge::{winreg_const, winreg_method};
 use super::wmi_bridge::wmi_method;
 
@@ -198,7 +198,9 @@ impl Interp {
                 std::thread::sleep(d);
                 return Ok(Value::Unit);
             }
-            bail!("std::thread is not supported beyond sleep, use #[tokio::main] with tokio::spawn");
+            bail!(
+                "std::thread is not supported beyond sleep, use #[tokio::main] with tokio::spawn"
+            );
         }
         // reqwest paths need the whole canonical path, since a blocking call
         // has three or four segments, so route them before the two-segment

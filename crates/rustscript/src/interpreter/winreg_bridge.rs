@@ -330,9 +330,7 @@ mod imp {
                 io_result(open(s).and_then(|k| k.set_raw_value(&arg0(), &raw)))
             }
             "delete_value" => io_result(open(s).and_then(|k| k.delete_value(arg0()))),
-            "delete_subkey" => {
-                io_result(root_key(root).delete_subkey(join(&path, &arg0())))
-            }
+            "delete_subkey" => io_result(root_key(root).delete_subkey(join(&path, &arg0()))),
             "delete_subkey_all" => {
                 io_result(root_key(root).delete_subkey_all(join(&path, &arg0())))
             }

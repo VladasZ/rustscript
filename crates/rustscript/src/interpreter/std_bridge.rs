@@ -85,9 +85,7 @@ pub(super) fn native_call(module: &str, func: &str, args: &[Value]) -> Result<Op
         },
         ("env", "vars") | ("env", "vars_os") => Value::vec(
             std::env::vars()
-                .map(|(k, v)| {
-                    Value::tuple(vec![Value::str(k), Value::str(v)])
-                })
+                .map(|(k, v)| Value::tuple(vec![Value::str(k), Value::str(v)]))
                 .collect(),
         ),
         ("env", "set_current_dir") => wrap_unit(std::env::set_current_dir(s(0)?)),

@@ -293,10 +293,7 @@ fn push_pair(s: &StructData, field: &str, k: Option<&Value>, v: Option<&Value>) 
 fn add_header(s: &StructData, k: &str, v: &str) {
     ensure_vec_field(s, "headers")
         .borrow_mut()
-        .push(Value::tuple(vec![
-            Value::str(k),
-            Value::str(v),
-        ]));
+        .push(Value::tuple(vec![Value::str(k), Value::str(v)]));
 }
 
 fn ensure_vec_field(s: &StructData, field: &str) -> Rc<RefCell<Vec<Value>>> {

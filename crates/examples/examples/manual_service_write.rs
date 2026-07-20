@@ -58,8 +58,8 @@ fn main() {
     }
     println!("created {TEST_SVC}");
 
-    let access = ServiceAccess::QUERY_STATUS | ServiceAccess::QUERY_CONFIG
-        | ServiceAccess::CHANGE_CONFIG;
+    let access =
+        ServiceAccess::QUERY_STATUS | ServiceAccess::QUERY_CONFIG | ServiceAccess::CHANGE_CONFIG;
     let svc = manager.open_service(TEST_SVC, access).expect("open it");
     let status = svc.query_status().expect("status");
     println!("state = {:?}", status.current_state);
