@@ -104,16 +104,20 @@ fn grafts_local_crate_at_runtime() {
 #[test]
 fn checks_local_crate_as_path_dep() {
     let (bin, root) = fixture();
-    // No skip: the checker must resolve `shared` as a real path dependency.
-    let out = run_bin(&bin, false);
+    // The `check` command, not `run`. Only `check` builds a cargo project and
+    // resolves `shared` as a real path dependency, so `run` never exercised
+    // this. A manifest bug once appended the graft as a bare key after the
+    // `[target."cfg(windows)".dependencies]` table, which made it Windows only,
+    // so `cargo check` dropped it and `use shared::..` failed off Windows.
+    let out = Command::new(env!("CARGO_BIN_EXE_rust"))
+        .arg("check")
+        .arg(&bin)
+        .output()
+        .expect("failed to launch rustscript");
     std::fs::remove_dir_all(&root).unwrap();
     assert!(
         out.status.success(),
-        "checked run failed:\n{}",
+        "rust check failed to resolve the local crate:\n{}",
         String::from_utf8_lossy(&out.stderr)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout),
-        "hi world\ndeep world\n"
     );
 }
