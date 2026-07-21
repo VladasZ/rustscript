@@ -851,3 +851,107 @@ fn main() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "check should pass, stderr: {err}");
 }
+
+#[test]
+fn tokio_fs_bridge_reads_dirs_and_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, "hi there").unwrap();
+    let src = format!(
+        r#"
+#[tokio::main]
+async fn main() {{
+    let text = std::fs::read_to_string("{file}").unwrap();
+    let bytes = std::fs::read("{file}").unwrap();
+    let lossy = String::from_utf8_lossy(&bytes).to_string();
+    let meta = std::fs::metadata("{file}").unwrap();
+    let entries = std::fs::read_dir("{dir}").unwrap();
+    for entry in entries {{
+        let entry = entry.unwrap();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let is_file = match entry.file_type() {{
+            Ok(ft) => ft.is_file(),
+            Err(_) => false,
+        }};
+        println!("{{name}} {{is_file}}");
+    }}
+    println!("{{text}} {{lossy}} {{}}", meta.is_file());
+}}
+"#,
+        file = file.display(),
+        dir = dir.path().display()
+    );
+    let out = run(&src);
+    assert_eq!(out, "a.txt true\nhi there hi there true\n");
+}
+
+#[test]
+fn tokio_numeric_conversions_and_env_consts() {
+    let out = run(r#"
+#[tokio::main]
+async fn main() {
+    let oct = i64::from_str_radix("644", 8).unwrap();
+    let narrow = u8::try_from(300).is_err();
+    let wide = i64::from(42);
+    let os = std::env::consts::OS;
+    println!("{oct} {narrow} {wide} {}", os.is_empty());
+}
+"#);
+    assert_eq!(out, "420 true 42 false\n");
+}
+
+#[test]
+fn tokio_slices_strings_and_vecs() {
+    let out = run(r#"
+#[tokio::main]
+async fn main() {
+    let s = "hello world";
+    let v = vec![1, 2, 3, 4, 5];
+    let mut tail: Vec<i64> = Vec::new();
+    tail.extend_from_slice(&v[2..]);
+    println!("{} {} {} {}", &s[6..], &s[0..5], tail.len(), tail[0]);
+}
+"#);
+    assert_eq!(out, "world hello 3 3\n");
+}
+
+#[test]
+fn tokio_streams_and_home_dir() {
+    let out = run(r#"
+use std::io::IsTerminal;
+
+#[tokio::main]
+async fn main() {
+    let tty = std::io::stdout().is_terminal();
+    let home = dirs::home_dir().unwrap();
+    let sub = home.join("x");
+    println!("{tty} {}", sub.display().to_string().len() > 2);
+}
+"#);
+    assert_eq!(out, "false true\n");
+}
+
+#[test]
+fn concat_joins_strings_and_flattens_vecs() {
+    let out = run(r#"
+fn main() {
+    let words = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+    let nested = vec![vec![1, 2], vec![3]];
+    let flat = nested.concat();
+    println!("{} {} {}", words.concat(), flat.len(), flat[2]);
+}
+"#);
+    assert_eq!(out, "abc 3 3\n");
+}
+
+#[test]
+fn tokio_concat_joins_strings() {
+    let out = run(r#"
+#[tokio::main]
+async fn main() {
+    let words = vec!["x".to_string(), "y".to_string()];
+    println!("{}", words.concat());
+}
+"#);
+    assert_eq!(out, "xy\n");
+}

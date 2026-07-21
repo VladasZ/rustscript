@@ -65,6 +65,12 @@ impl PInterp {
         match segs.last().map(String::as_str) {
             Some("None") => Ok(PValue::none()),
             Some("PI") if segs.iter().any(|segment| segment == "consts") => Ok(PValue::Float(PI)),
+            Some("OS") if segs.iter().any(|segment| segment == "consts") => {
+                Ok(PValue::str(std::env::consts::OS))
+            }
+            Some("ARCH") if segs.iter().any(|segment| segment == "consts") => {
+                Ok(PValue::str(std::env::consts::ARCH))
+            }
             Some(other) => bail!("unsupported path value `{other}` in tokio mode"),
             None => bail!("empty path"),
         }
@@ -139,6 +145,9 @@ impl PInterp {
             ("time", "sleep") => Ok(sleep_future(&args)),
             ("task", "yield_now") => Ok(yield_future()),
             _ => {
+                if let Some(v) = super::pstd::native_call(ns, last, &args)? {
+                    return Ok(v);
+                }
                 // A user associated function like `Type::new`, keyed by type.
                 if let Some(chunk) = self.user_method(ns, last) {
                     return self.run_chunk(&chunk, &args, &[]);
@@ -207,6 +216,22 @@ impl PInterp {
             PValue::Struct(st) if &**st.name() == "ExitStatus" => exitstatus_method(st, m),
             PValue::Struct(st) if &**st.name() == "Output" => output_method(st, m),
             PValue::Struct(st) if &**st.name() == "Duration" => duration_method(st, m),
+            PValue::Struct(st) if matches!(&**st.name(), "Path" | "PathBuf") => {
+                super::pstd::path_method(st, m, args)
+            }
+            PValue::Struct(st) if &**st.name() == "OsString" => {
+                super::pstd::os_string_method(st, m)
+            }
+            PValue::Struct(st) if &**st.name() == "DirEntry" => {
+                super::pstd::dir_entry_method(st, m)
+            }
+            PValue::Struct(st) if &**st.name() == "FileType" => {
+                super::pstd::file_type_method(st, m)
+            }
+            PValue::Struct(st) if &**st.name() == "Metadata" => super::pstd::metadata_method(st, m),
+            PValue::Struct(st) if &**st.name() == "StdStream" => {
+                super::pstd::std_stream_method(st, m)
+            }
             PValue::Native(native) => native_method(native, m, args),
             PValue::Int(_) | PValue::Float(_) | PValue::Bool(_) | PValue::Char(_) => {
                 scalar_method(recv, m, args)
@@ -254,6 +279,15 @@ impl PInterp {
                 PValue::Bool(items.lock().iter().any(|v| v.eq_value(&needle)))
             }
             "iter" | "into_iter" | "collect" | "to_vec" => PValue::vec(items.lock().clone()),
+            "extend" | "extend_from_slice" => {
+                // Clone the source first, so extending a vec with itself does
+                // not deadlock on the same mutex.
+                if let Some(PValue::Vec(other)) = args.first() {
+                    let vals = other.lock().clone();
+                    items.lock().extend(vals);
+                }
+                PValue::Unit
+            }
             "nth" => {
                 let index = match args.first() {
                     Some(PValue::Int(i)) => usize::try_from(*i).unwrap_or(0),
@@ -273,6 +307,24 @@ impl PInterp {
                     super::pops::compare_values(a, b).unwrap_or(std::cmp::Ordering::Equal)
                 });
                 PValue::Unit
+            }
+            // A vec of vecs flattens like the real slice `concat`; anything
+            // else concatenates the display forms, which covers `Vec<String>`.
+            // The empty case cannot know its element type, so it is a string.
+            "concat" => {
+                let items = items.lock();
+                match items.first() {
+                    Some(PValue::Vec(_)) => {
+                        let mut out = Vec::new();
+                        for x in items.iter() {
+                            if let PValue::Vec(inner) = x {
+                                out.extend(inner.lock().iter().cloned());
+                            }
+                        }
+                        PValue::vec(out)
+                    }
+                    _ => PValue::str(items.iter().map(PValue::display).collect::<String>()),
+                }
             }
             "join" => {
                 let sep = args.first().map(PValue::display).unwrap_or_default();

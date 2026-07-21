@@ -336,6 +336,24 @@ pub(super) fn vec_method(
                 .join(&sep);
             Value::str(joined)
         }
+        // A vec of vecs flattens like the real slice `concat`; anything else
+        // concatenates the display forms, which covers `Vec<String>`. The
+        // empty case cannot know its element type, so it is a string.
+        B::Concat => {
+            let items = v.borrow();
+            match items.first() {
+                Some(Value::Vec(_)) => {
+                    let mut out = Vec::new();
+                    for x in items.iter() {
+                        if let Value::Vec(inner) = x {
+                            out.extend(inner.borrow().iter().cloned());
+                        }
+                    }
+                    Value::vec(out)
+                }
+                _ => Value::str(items.iter().map(|x| x.display()).collect::<String>()),
+            }
+        }
         B::Sum => {
             let mut acc_i = 0i64;
             let mut acc_f = 0f64;
