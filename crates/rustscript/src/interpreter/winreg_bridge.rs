@@ -305,7 +305,7 @@ mod imp {
                     Err(e) => Value::err(Value::str(e.to_string())),
                 }
             }
-            "get_value" => match open(s).and_then(|k| k.get_raw_value(&arg0())) {
+            "get_value" => match open(s).and_then(|k| k.get_raw_value(arg0())) {
                 Ok(v) => Value::ok(read(&v)),
                 Err(e) => Value::err(Value::str(e.to_string())),
             },
@@ -314,11 +314,11 @@ mod imp {
                     bail!("set_value takes a name and a value");
                 };
                 let raw = write(v)?;
-                io_result(open(s).and_then(|k| k.set_raw_value(&arg0(), &raw)))
+                io_result(open(s).and_then(|k| k.set_raw_value(arg0(), &raw)))
             }
             // The untyped pair. Binary has no typed form in winreg, so a script
             // that writes REG_BINARY goes through these two.
-            "get_raw_value" => match open(s).and_then(|k| k.get_raw_value(&arg0())) {
+            "get_raw_value" => match open(s).and_then(|k| k.get_raw_value(arg0())) {
                 Ok(v) => Value::ok(raw_value(&v)),
                 Err(e) => Value::err(Value::str(e.to_string())),
             },
@@ -327,7 +327,7 @@ mod imp {
                     bail!("set_raw_value takes a name and a RegValue");
                 };
                 let raw = raw_from(v)?;
-                io_result(open(s).and_then(|k| k.set_raw_value(&arg0(), &raw)))
+                io_result(open(s).and_then(|k| k.set_raw_value(arg0(), &raw)))
             }
             "delete_value" => io_result(open(s).and_then(|k| k.delete_value(arg0()))),
             "delete_subkey" => io_result(root_key(root).delete_subkey(join(&path, &arg0()))),

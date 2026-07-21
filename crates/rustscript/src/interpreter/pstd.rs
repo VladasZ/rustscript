@@ -50,6 +50,10 @@ pub(super) fn native_call(module: &str, func: &str, args: &[PValue]) -> Result<O
             Some(p) => PValue::some(make_path(p.display().to_string())),
             None => PValue::none(),
         },
+        ("which", "which") => match which::which(s(0)?) {
+            Ok(p) => PValue::ok(make_path(p.display().to_string())),
+            Err(e) => PValue::err(PValue::str(e.to_string())),
+        },
         ("String", "from_utf8_lossy") => PValue::str(bytes_to_string(args.first())),
         // Every integer type parses the same way here, values are untyped ints.
         (
