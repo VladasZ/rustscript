@@ -55,7 +55,9 @@ pub(super) fn json_type_test(recv: &Value, name: &str) -> Option<Value> {
         "is_number" => is(matches!(recv, Value::Int(_) | Value::Float(_))),
         "is_i64" | "is_u64" => is(matches!(recv, Value::Int(_))),
         "is_f64" => is(matches!(recv, Value::Float(_))),
-        "is_null" => is(matches!(recv, Value::Unit)),
+        // The parser maps a json null to None, so that is what is_null has to
+        // answer for. Unit counts too, it is the interpreter's own empty value.
+        "is_null" => is(recv.is_none_value() || matches!(recv, Value::Unit)),
         _ => None,
     }
 }
@@ -639,6 +641,9 @@ pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
         // default. For another type use unwrap_or with an explicit value.
         "unwrap_or_default" => inner.unwrap_or_else(|| Value::str(String::new())),
         "as_ref" | "as_deref" | "take" | "as_mut" => recv.clone(),
+        // A json null parses to None here, so a serde lookup into a value that
+        // turned out to be null is None rather than an unknown method error.
+        "get" => Value::none(),
         "ok_or" => match inner {
             Some(v) => Value::ok(v),
             None => Value::err(args.first().cloned().unwrap_or(Value::Unit)),

@@ -199,6 +199,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
+    use pretty_assertions::assert_eq;
     use tempfile::tempdir;
 
     use super::{move_aside, newest_release, old_path, parse_version, restore_binary};

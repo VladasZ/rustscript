@@ -1,5 +1,7 @@
 use std::process::Command;
 
+use pretty_assertions::assert_eq;
+
 fn rust(args: &[&str]) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_rust"))
         .args(args)

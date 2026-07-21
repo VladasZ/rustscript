@@ -6,6 +6,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use pretty_assertions::assert_eq;
+
 /// Examples that cannot be compared byte for byte. Network ones depend on a
 /// live response, `args_echo` prints its own path as argv[0], which differs
 /// between the compiled binary and the script, `registry_demo` is gated
