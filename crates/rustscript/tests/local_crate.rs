@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use pretty_assertions::assert_eq;
+
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Lay out a crate `app` with a bin that uses a sibling `shared` path crate,

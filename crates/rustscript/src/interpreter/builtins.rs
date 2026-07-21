@@ -105,6 +105,13 @@ impl Interp {
         if let Some(v) = jwt_algorithm(ty, last) {
             return Ok(v);
         }
+        // A json null is None here, the same mapping the parser uses, so
+        // `serde_json::Value::Null` written in a script lands on the same
+        // value. Without this it falls through to the closure fallback below
+        // and every later accessor on it reports a method on a closure.
+        if ty == "Value" && last == "Null" {
+            return Ok(Value::none());
+        }
         // A path used as a function value. A zero-arg constructor like
         // `Vec::new` handed to `or_insert_with` becomes a nullary closure.
         // Anything else, a method reference like `str::trim` or a one-arg

@@ -219,7 +219,15 @@ pub(super) fn try_bind(pat: &PPat, val: &Value, define: &mut dyn FnMut(&str, Val
                 name.as_deref() == Some(&**variant) && bind_seq(elems, data, define)
             }
             Value::Struct(structure) => bind_seq(elems, &structure.values.borrow(), define),
-            _ => false,
+            // A json string is a plain Str here, so a serde accessor like
+            // as_str hands back the string itself as an already unwrapped Some,
+            // the same model the Option methods on a Str follow. Matching a
+            // bare value against Some(x) does not type check in real Rust, so
+            // the script can only mean that pre-unwrapped Some. Unit is left
+            // out because it is also this interpreter's filler for a missing
+            // value.
+            Value::Unit => false,
+            other => name.as_deref() == Some("Some") && bind_seq(elems, &[other.clone()], define),
         },
         PPat::Path { name } => match val {
             Value::Enum { variant, .. } => name.as_deref() == Some(&**variant),

@@ -163,7 +163,9 @@ pub(super) fn try_bind(pat: &PPat, val: &PValue, define: &mut dyn FnMut(&str, PV
                 let vals: Vec<PValue> = st.values.lock().clone();
                 bind_seq(elems, &vals, define)
             }
-            _ => false,
+            // Matches the pre-unwrapped Some rule in ops.rs, see the note there.
+            PValue::Unit => false,
+            other => name.as_deref() == Some("Some") && bind_seq(elems, &[other.clone()], define),
         },
         PPat::Path { name } => match val {
             PValue::Enum { variant, .. } => name.as_deref() == Some(&**variant),

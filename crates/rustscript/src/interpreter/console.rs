@@ -69,6 +69,8 @@ fn codepage_encoding(cp: u32) -> Option<&'static encoding_rs::Encoding> {
 
 #[cfg(test)]
 mod tests {
+    use pretty_assertions::assert_eq;
+
     use super::decode;
 
     #[test]

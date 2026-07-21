@@ -1,9 +1,14 @@
 //! End to end tests. Each writes a script to a temp file and runs it through
 //! the real `rustscript` binary, then checks stdout. The `cargo check` gate is
 //! skipped here so the interpreter is exercised on its own and stays fast.
+//! The two `check_` tests at the end are the exception, they invoke a real
+//! cargo, so they are ignored by default like the ones in `check.rs`. Run them
+//! with `cargo test --test run -- --ignored`.
 
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+use pretty_assertions::assert_eq;
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -814,6 +819,7 @@ fn main() {
 }
 
 #[test]
+#[ignore = "runs real cargo check, slow"]
 fn check_reports_a_method_the_interpreter_lacks() {
     // Valid Rust that `cargo check` accepts, but the parallel engine has no
     // `rposition`, so the coverage gate must catch it without running anything.
@@ -840,6 +846,7 @@ async fn main() {
 }
 
 #[test]
+#[ignore = "runs real cargo check, slow"]
 fn check_stays_quiet_on_a_script_the_interpreter_supports() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("script.rs");
