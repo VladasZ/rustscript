@@ -41,8 +41,15 @@ fn run_script(path: &Path) -> std::process::Output {
 #[test]
 fn conformance_matches_compiler() {
     let root = workspace_root();
+    // The compiled binary is looked up next to this test binary, so it has to be
+    // built into the same profile. Without this a `cargo test --release` run
+    // builds a debug binary and then goes looking for it in the release tree.
+    let mut build_args = vec!["build", "-p", "rustscript-conformance"];
+    if !cfg!(debug_assertions) {
+        build_args.push("--release");
+    }
     let build = Command::new(env!("CARGO"))
-        .args(["build", "-p", "rustscript-conformance"])
+        .args(&build_args)
         .current_dir(&root)
         .status()
         .expect("failed to build conformance crate");

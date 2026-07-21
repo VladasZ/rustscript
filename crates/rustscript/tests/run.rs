@@ -15,6 +15,13 @@ fn temp_script(src: &str) -> std::path::PathBuf {
     path
 }
 
+/// Render a real path for pasting into generated script source. A windows
+/// separator would read as an escape sequence in a string literal and fail to
+/// parse, and windows accepts a forward slash in a path just as well.
+fn embed_path(path: &std::path::Path) -> String {
+    path.display().to_string().replace('\\', "/")
+}
+
 /// Run a script that is expected to succeed and return its stdout.
 fn run(src: &str) -> String {
     let path = temp_script(src);
@@ -285,7 +292,10 @@ fn main() -> anyhow::Result<()> {
 }
 "#
     };
-    assert_eq!(run(script), "absent\n");
+    // cmd echo ends its line with CRLF, sh echo with LF, and the point of the
+    // check is the missing variable, not the separator the shell chose.
+    let expected = if cfg!(windows) { "absent\r\n" } else { "absent\n" };
+    assert_eq!(run(script), expected);
 }
 
 #[test]
@@ -878,8 +888,8 @@ async fn main() {{
     println!("{{text}} {{lossy}} {{}}", meta.is_file());
 }}
 "#,
-        file = file.display(),
-        dir = dir.path().display()
+        file = embed_path(&file),
+        dir = embed_path(dir.path())
     );
     let out = run(&src);
     assert_eq!(out, "a.txt true\nhi there hi there true\n");
