@@ -212,7 +212,13 @@ fn manifest(crate_deps: &[CrateDep]) -> String {
     let mut out = String::from(MANIFEST);
     for dep in crate_deps {
         let dir = dep.dir.to_string_lossy();
-        out.push_str(&format!("{} = {{ path = {dir:?} }}\n", dep.name));
+        // Each graft gets its own `[dependencies.name]` table header, not a
+        // bare `name = ..` line. MANIFEST ends with the
+        // `[target."cfg(windows)".dependencies]` table, so a bare key appended
+        // after it would join that table and make the crate Windows only,
+        // unresolved on every other platform. The explicit header puts it back
+        // in the all-target dependencies no matter what section precedes it.
+        out.push_str(&format!("\n[dependencies.{}]\npath = {dir:?}\n", dep.name));
     }
     out.push_str("\n[workspace]\n");
     out
@@ -233,4 +239,39 @@ fn hash_files(files: &[(PathBuf, String)], crate_deps: &[CrateDep]) -> u64 {
         }
     }
     hasher.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A grafted `path` crate must be an all-target dependency. A regression
+    /// once appended it as a bare key after the Windows target table, so it
+    /// became Windows only and `use shared::..` failed to compile on macOS and
+    /// Linux while `rust run` still worked through the interpreter.
+    #[test]
+    fn graft_dep_is_all_target_not_windows_only() {
+        let dep = CrateDep {
+            name: "shared".to_string(),
+            dir: PathBuf::from("/tmp/shared"),
+            files: Vec::new(),
+        };
+        let text = manifest(&[dep]);
+        let value: toml::Value =
+            toml::from_str(&text).unwrap_or_else(|e| panic!("manifest must be valid TOML: {e}\n{text}"));
+
+        let all_target = value
+            .get("dependencies")
+            .and_then(|d| d.get("shared"))
+            .is_some();
+        assert!(all_target, "shared must be an all-target dependency:\n{text}");
+
+        let windows_only = value
+            .get("target")
+            .and_then(|t| t.get("cfg(windows)"))
+            .and_then(|c| c.get("dependencies"))
+            .and_then(|d| d.get("shared"))
+            .is_some();
+        assert!(!windows_only, "shared must not be a Windows only dependency:\n{text}");
+    }
 }
