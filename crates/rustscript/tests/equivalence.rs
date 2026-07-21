@@ -8,8 +8,9 @@ use std::process::Command;
 
 /// Examples that cannot be compared byte for byte. Network ones depend on a
 /// live response, `args_echo` prints its own path as argv[0], which differs
-/// between the compiled binary and the script, and `registry_demo` is gated
-/// behind a required-feature so cargo never builds a binary to compare against.
+/// between the compiled binary and the script, `registry_demo` is gated
+/// behind a required-feature so cargo never builds a binary to compare against,
+/// and `parallel` interleaves its task prints in a different order every run.
 const SKIP: &[&str] = &[
     "net_get",
     "net_query",
@@ -18,6 +19,7 @@ const SKIP: &[&str] = &[
     "service_demo",
     "wmi_demo",
     "manual_service_write",
+    "parallel",
 ];
 
 fn workspace_root() -> PathBuf {

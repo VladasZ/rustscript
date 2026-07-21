@@ -243,6 +243,14 @@ pub(super) fn int_of(v: &PValue) -> Result<i64> {
 // -- indexing and `?` ------------------------------------------------------
 
 pub(super) fn index(recv: &PValue, key: &PValue) -> Result<PValue> {
+    if let PValue::Range {
+        start,
+        end,
+        inclusive,
+    } = key
+    {
+        return slice_value(recv, *start, *end, *inclusive);
+    }
     match recv {
         PValue::Vec(items) => {
             let i = int_of(key)? as usize;
@@ -271,6 +279,40 @@ pub(super) fn index(recv: &PValue, key: &PValue) -> Result<PValue> {
         // `caps[1]` and `caps["name"]` on a capture set.
         PValue::Native(h) => super::pregex::capture_index(h, key),
         _ => bail!("cannot index {}", recv.type_name()),
+    }
+}
+
+fn slice_value(base: &PValue, start: i64, end: i64, inclusive: bool) -> Result<PValue> {
+    let bounds = |len: usize| -> Result<(usize, usize)> {
+        if start < 0 {
+            bail!("negative slice start {start}");
+        }
+        let end = if end == i64::MAX {
+            len as i64
+        } else if inclusive {
+            end + 1
+        } else {
+            end
+        };
+        if end < start || end as usize > len {
+            bail!("slice {start}..{end} out of bounds (len {len})");
+        }
+        Ok((start as usize, end as usize))
+    };
+    match base {
+        PValue::Vec(items) => {
+            let items = items.lock();
+            let (a, b) = bounds(items.len())?;
+            Ok(PValue::vec(items[a..b].to_vec()))
+        }
+        PValue::Str(s) => {
+            let (a, b) = bounds(s.len())?;
+            match s.get(a..b) {
+                Some(sub) => Ok(PValue::str(sub.to_string())),
+                None => bail!("slice {a}..{b} is not on a char boundary"),
+            }
+        }
+        other => bail!("cannot slice {}", other.type_name()),
     }
 }
 

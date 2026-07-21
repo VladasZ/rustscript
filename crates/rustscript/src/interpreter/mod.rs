@@ -24,6 +24,7 @@ mod pops;
 mod pprocess;
 mod pregex;
 mod process;
+mod pstd;
 mod pvalue;
 mod pvm;
 mod regex_bridge;
