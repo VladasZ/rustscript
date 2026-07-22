@@ -94,8 +94,8 @@ versioned directory under the runner tool cache and the second finds it there.
 ## Cutting a release
 
 Releases start from the Actions tab. Open the Release workflow, press Run
-workflow, and choose `patch`, `minor` or `major`. Nothing has to be done
-locally, and there is no version to remember to bump.
+workflow, and choose `patch`, `minor` or `major`. There is no version to
+remember to bump.
 
 The workflow then does all of this in one run.
 
@@ -116,6 +116,11 @@ It is one workflow rather than a bump workflow feeding a release workflow on
 purpose. A tag pushed with the default `GITHUB_TOKEN` does not trigger other
 workflows, since GitHub blocks that cascade to prevent loops. Keeping it in one
 run avoids needing a personal access token just to wire two halves together.
+
+The workflow does not publish to crates.io on purpose, so the registry token
+never leaves the local machine. After the run finishes, pull the release commit
+and publish with `cargo publish -p run-rs`. A release is not complete until
+crates.io has it.
 
 Pushing a tag by hand still works and skips only the bump.
 
