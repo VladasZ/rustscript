@@ -576,6 +576,9 @@ pub(super) fn num_method(recv: &Value, name: &str, args: &[Value]) -> Result<Val
         (Value::Int(i), "as_i64" | "as_u64" | "as_i128" | "as_usize") => {
             Value::some(Value::Int(*i))
         }
+        // serde_json keeps every json float as f64 and its integer accessors
+        // answer None on it, even for a whole value like 5.0.
+        (Value::Float(_), "as_i64" | "as_u64" | "as_i128" | "as_usize") => Value::none(),
         (_, "as_f64") => Value::some(Value::Float(as_f())),
         // A number is not these serde types, so the accessor is None.
         (_, "as_str" | "as_bool" | "as_array" | "as_object") => Value::none(),

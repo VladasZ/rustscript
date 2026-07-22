@@ -257,14 +257,17 @@ mod tests {
             files: Vec::new(),
         };
         let text = manifest(&[dep]);
-        let value: toml::Value =
-            toml::from_str(&text).unwrap_or_else(|e| panic!("manifest must be valid TOML: {e}\n{text}"));
+        let value: toml::Value = toml::from_str(&text)
+            .unwrap_or_else(|e| panic!("manifest must be valid TOML: {e}\n{text}"));
 
         let all_target = value
             .get("dependencies")
             .and_then(|d| d.get("shared"))
             .is_some();
-        assert!(all_target, "shared must be an all-target dependency:\n{text}");
+        assert!(
+            all_target,
+            "shared must be an all-target dependency:\n{text}"
+        );
 
         let windows_only = value
             .get("target")
@@ -272,6 +275,9 @@ mod tests {
             .and_then(|c| c.get("dependencies"))
             .and_then(|d| d.get("shared"))
             .is_some();
-        assert!(!windows_only, "shared must not be a Windows only dependency:\n{text}");
+        assert!(
+            !windows_only,
+            "shared must not be a Windows only dependency:\n{text}"
+        );
     }
 }

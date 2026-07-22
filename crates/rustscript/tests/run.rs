@@ -299,7 +299,11 @@ fn main() -> anyhow::Result<()> {
     };
     // cmd echo ends its line with CRLF, sh echo with LF, and the point of the
     // check is the missing variable, not the separator the shell chose.
-    let expected = if cfg!(windows) { "absent\r\n" } else { "absent\n" };
+    let expected = if cfg!(windows) {
+        "absent\r\n"
+    } else {
+        "absent\n"
+    };
     assert_eq!(run(script), expected);
 }
 
@@ -369,6 +373,25 @@ fn main() -> anyhow::Result<()> {
         "to_value missing rename: {out}"
     );
     assert!(!out.contains("kind"), "raw field name leaked: {out}");
+}
+
+#[test]
+fn json_float_integer_accessors_answer_none() {
+    // The claude statusline sends used_percentage as a float like 4.4. The
+    // integer accessors must answer None on it so the derived fallback runs,
+    // as real serde_json does, instead of failing on the method.
+    let out = run(r##"
+use serde_json::Value;
+fn main() {
+    let cw: Value = serde_json::from_str(r#"{"used_percentage":4.4,"size":7}"#).unwrap();
+    let derived = 42;
+    let pct = cw.get("used_percentage").and_then(Value::as_i64).unwrap_or(derived);
+    println!("pct {pct}");
+    println!("u64 {:?}", cw.get("used_percentage").and_then(Value::as_u64));
+    println!("int {:?}", cw.get("size").and_then(Value::as_i64));
+}
+"##);
+    assert_eq!(out, "pct 42\nu64 None\nint Some(7)\n");
 }
 
 #[test]

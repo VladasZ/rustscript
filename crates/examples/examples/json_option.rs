@@ -62,4 +62,25 @@ fn main() {
             .and_then(Value::as_str)
             .unwrap_or("none")
     );
+
+    // A json float stays f64, so the integer accessors answer None on it even
+    // for a whole value like 5.0, and the caller's fallback has to kick in.
+    let nums: Value = serde_json::from_str(r#"{"pct":4.4,"whole":5.0,"count":7}"#).unwrap();
+    let derived = 42;
+    println!(
+        "float as_i64 {}",
+        nums.get("pct").and_then(Value::as_i64).unwrap_or(derived)
+    );
+    println!(
+        "whole as_i64 {}",
+        nums.get("whole").and_then(Value::as_i64).unwrap_or(derived)
+    );
+    println!(
+        "int as_i64   {}",
+        nums.get("count").and_then(Value::as_i64).unwrap_or(derived)
+    );
+    println!(
+        "float as_f64 {}",
+        nums.get("pct").and_then(Value::as_f64).unwrap_or(0.0)
+    );
 }
