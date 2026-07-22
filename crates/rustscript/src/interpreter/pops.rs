@@ -2,6 +2,7 @@
 //! `ops.rs`. Same logic, different value type.
 
 use std::cmp::Ordering;
+use std::slice::from_ref;
 
 use anyhow::{Result, anyhow, bail};
 
@@ -165,7 +166,7 @@ pub(super) fn try_bind(pat: &PPat, val: &PValue, define: &mut dyn FnMut(&str, PV
             }
             // Matches the pre-unwrapped Some rule in ops.rs, see the note there.
             PValue::Unit => false,
-            other => name.as_deref() == Some("Some") && bind_seq(elems, &[other.clone()], define),
+            other => name.as_deref() == Some("Some") && bind_seq(elems, from_ref(other), define),
         },
         PPat::Path { name } => match val {
             PValue::Enum { variant, .. } => name.as_deref() == Some(&**variant),

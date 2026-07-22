@@ -9,6 +9,7 @@
 //! the existing dispatch on `Interp` with already evaluated values.
 
 use std::cmp::Ordering;
+use std::slice::from_ref;
 
 use super::bytecode::{BinKind, PLit, PPat, UnKind};
 use super::value::Value;
@@ -227,7 +228,7 @@ pub(super) fn try_bind(pat: &PPat, val: &Value, define: &mut dyn FnMut(&str, Val
             // out because it is also this interpreter's filler for a missing
             // value.
             Value::Unit => false,
-            other => name.as_deref() == Some("Some") && bind_seq(elems, &[other.clone()], define),
+            other => name.as_deref() == Some("Some") && bind_seq(elems, from_ref(other), define),
         },
         PPat::Path { name } => match val {
             Value::Enum { variant, .. } => name.as_deref() == Some(&**variant),
