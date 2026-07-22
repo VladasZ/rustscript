@@ -842,6 +842,75 @@ fn main() {
 }
 
 #[test]
+fn annotated_let_collects_chars_into_string() {
+    // The trello script failure shape. Without the let annotation reaching
+    // collect, head and rest stayed char lists and trim on the result failed.
+    let out = run(r#"
+fn idx(arr: &[String], i: usize) -> &str {
+    match arr.get(i) {
+        Some(s) => s.as_str(),
+        None => "missing",
+    }
+}
+
+fn main() {
+    let chars: Vec<char> = "Token: abc ".chars().collect();
+    let head: String = chars[0..6].iter().collect();
+    let rest: String = chars[7..11].iter().collect();
+    let parts = vec![head, rest];
+    let token = idx(&parts, 1).trim().to_string();
+    println!("{} [{token}]", parts[0]);
+}
+"#);
+    assert_eq!(out, "Token: [abc]\n");
+}
+
+#[test]
+fn range_patterns_and_mut_string_args() {
+    let out = run(r#"
+fn shift(out: &mut String, b: u8) {
+    match b {
+        b'a'..=b'z' => out.push(char::from(b - 32)),
+        b'0'..=b'9' => out.push('#'),
+        _ => out.push(char::from(b)),
+    }
+}
+
+fn main() {
+    let mut s = String::new();
+    for b in "ab3-Z".bytes() {
+        shift(&mut s, b);
+    }
+    println!("[{s}]");
+}
+"#);
+    assert_eq!(out, "[AB#-Z]\n");
+}
+
+#[test]
+fn tokio_range_patterns_and_mut_string_args() {
+    let out = run(r#"
+fn tag(out: &mut String, c: char) {
+    match c {
+        'a'..='z' => out.push('l'),
+        'A'..='Z' => out.push('u'),
+        _ => out.push('?'),
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    let mut s = String::new();
+    for c in "aZ!".chars() {
+        tag(&mut s, c);
+    }
+    println!("[{s}]");
+}
+"#);
+    assert_eq!(out, "[lu?]\n");
+}
+
+#[test]
 #[ignore = "runs real cargo check, slow"]
 fn check_reports_a_method_the_interpreter_lacks() {
     // Valid Rust that `cargo check` accepts, but the parallel engine has no

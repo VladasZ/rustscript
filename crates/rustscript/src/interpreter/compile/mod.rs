@@ -130,6 +130,10 @@ pub struct Compiler<'a> {
     /// inside its arguments cannot steal it. Lets the typed json path run
     /// without a turbofish.
     pub(super) json_let: Option<(*const syn::ExprCall, Rc<syn::Type>)>,
+    /// A `let s: String = ...collect()` annotation waiting to attach to that
+    /// exact `collect` call, keyed by the call's address like `json_let`.
+    /// Lets an annotated let collect into a String without a turbofish.
+    pub(super) string_let: Option<*const syn::ExprMethodCall>,
 }
 
 /// Where a referenced name lives.
@@ -147,6 +151,7 @@ impl<'a> Compiler<'a> {
             frames: Vec::new(),
             loops: Vec::new(),
             json_let: None,
+            string_let: None,
         }
     }
 

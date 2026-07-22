@@ -345,6 +345,13 @@ pub enum PPat {
     },
     Or(Vec<PPat>),
     Slice(Vec<PPat>),
+    /// A literal range like `b'a'..=b'z'`, `'0'..='9'`, or `1..5`. A missing
+    /// endpoint leaves that side unbounded.
+    Range {
+        lo: Option<PLit>,
+        hi: Option<PLit>,
+        inclusive: bool,
+    },
     Unsupported,
 }
 

@@ -51,6 +51,10 @@ struct Frame {
     ip: usize,
     base: usize,
     dst: u16,
+    /// The caller's arg window, so the callee's final parameter values can be
+    /// handed back on return for `&mut` argument writebacks.
+    abase: u16,
+    argc: u16,
 }
 
 impl PInterp {
@@ -96,7 +100,14 @@ impl PInterp {
                         cur = f.chunk;
                         cur_clo = f.closure;
                         ip = f.ip;
+                        // The callee's final parameter values go back into the
+                        // caller's arg window, where a `&mut` argument
+                        // writeback emitted by the compiler picks them up.
+                        let callee_base = base;
                         base = f.base;
+                        for i in 0..f.argc as usize {
+                            stack[base + f.abase as usize + i] = take(&mut stack[callee_base + i]);
+                        }
                         stack[base + f.dst as usize] = v;
                         continue;
                     }
@@ -135,6 +146,8 @@ impl PInterp {
                     ip: ip + 1,
                     base,
                     dst: $dst,
+                    abase: $abase as u16,
+                    argc: $argc as u16,
                 });
                 base = nbase;
                 ip = 0;

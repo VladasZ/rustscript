@@ -51,6 +51,23 @@ fn from_str_root(e: &Expr) -> Option<&syn::ExprCall> {
     }
 }
 
+/// The `collect` call at the root of a `let` init chain. Only a call without
+/// its own turbofish counts, a turbofish already names the target itself.
+fn collect_root(e: &Expr) -> Option<&syn::ExprMethodCall> {
+    match e {
+        Expr::MethodCall(m) if m.method == "collect" && m.turbofish.is_none() => Some(m),
+        Expr::Paren(p) => collect_root(&p.expr),
+        Expr::Group(g) => collect_root(&g.expr),
+        _ => None,
+    }
+}
+
+/// Whether an annotated type is a plain `String`.
+fn is_string_type(ty: &syn::Type) -> bool {
+    matches!(ty, syn::Type::Path(p)
+        if p.path.segments.last().is_some_and(|s| s.ident == "String"))
+}
+
 impl Compiler<'_> {
     pub(super) fn compile_block(&mut self, block: &Block, dst: Reg) -> Result<()> {
         self.push_scope();
@@ -109,12 +126,21 @@ impl Compiler<'_> {
                     // parse is typed at the source and no coerce op is
                     // needed afterwards.
                     let mut offered = false;
+                    // A let nested in the init chain, say in a closure body,
+                    // runs this code again before the outer collect consumes
+                    // its hint, so the outer hint is restored, not cleared.
+                    let outer_string_let = self.string_let.take();
                     if let Pat::Type(t) = &local.pat
                         && let Some(init) = &local.init
-                        && let Some(call) = from_str_root(&init.expr)
                     {
-                        self.json_let = Some((call as *const _, Rc::new((*t.ty).clone())));
-                        offered = true;
+                        if let Some(call) = from_str_root(&init.expr) {
+                            self.json_let = Some((call as *const _, Rc::new((*t.ty).clone())));
+                            offered = true;
+                        } else if is_string_type(&t.ty)
+                            && let Some(mc) = collect_root(&init.expr)
+                        {
+                            self.string_let = Some(mc as *const _);
+                        }
                     }
                     match &local.init {
                         Some(init) => self.compile_into(val, &init.expr)?,
@@ -122,6 +148,7 @@ impl Compiler<'_> {
                     }
                     let consumed = offered && self.json_let.is_none();
                     self.json_let = None;
+                    self.string_let = outer_string_let;
                     // A type annotation coerces a dynamic value into that type.
                     if let Pat::Type(t) = &local.pat {
                         if !consumed {

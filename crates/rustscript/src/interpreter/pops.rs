@@ -198,7 +198,23 @@ pub(super) fn try_bind(pat: &PPat, val: &PValue, define: &mut dyn FnMut(&str, PV
             PValue::Vec(items) => bind_seq(elems, &items.lock(), define),
             _ => false,
         },
+        PPat::Range { lo, hi, inclusive } => {
+            super::ops::range_matches(lo.as_ref(), hi.as_ref(), *inclusive, |l| {
+                endpoint_cmp(l, val)
+            })
+        }
         PPat::Unsupported => false,
+    }
+}
+
+/// Order a range endpoint against a value of the same type. `None` for a type
+/// mismatch, which makes the range not match.
+fn endpoint_cmp(literal: &PLit, value: &PValue) -> Option<Ordering> {
+    match (literal, value) {
+        (PLit::Int(a), PValue::Int(b)) => Some(a.cmp(b)),
+        (PLit::Float(a), PValue::Float(b)) => a.partial_cmp(b),
+        (PLit::Char(a), PValue::Char(b)) => Some(a.cmp(b)),
+        _ => None,
     }
 }
 

@@ -42,6 +42,10 @@ struct Frame {
     ip: usize,
     base: usize,
     dst: u16,
+    /// The caller's arg window, so the callee's final parameter values can be
+    /// handed back on return for `&mut` argument writebacks.
+    abase: u16,
+    argc: u16,
     type_env: TypeEnv,
 }
 
@@ -71,7 +75,15 @@ impl Interp {
                         cur_clo = f.closure;
                         cur_tenv = f.type_env;
                         ip = f.ip;
+                        // The callee's final parameter values go back into the
+                        // caller's arg window, where a `&mut` argument
+                        // writeback emitted by the compiler picks them up.
+                        let callee_base = base;
                         base = f.base;
+                        for i in 0..f.argc as usize {
+                            let p = take(&mut stack[callee_base + i]);
+                            set_reg(&mut stack[base + f.abase as usize + i], p);
+                        }
                         set_reg(&mut stack[base + f.dst as usize], v);
                         continue;
                     }
@@ -119,6 +131,8 @@ impl Interp {
                     ip: ip + 1,
                     base,
                     dst: $dst,
+                    abase: $abase as u16,
+                    argc: $argc as u16,
                 });
                 base = nbase;
                 ip = 0;
