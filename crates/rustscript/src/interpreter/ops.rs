@@ -258,8 +258,48 @@ pub(super) fn try_bind(pat: &PPat, val: &Value, define: &mut dyn FnMut(&str, Val
             Value::Vec(items) => bind_seq(patterns, &items.borrow(), define),
             _ => false,
         },
+        PPat::Range { lo, hi, inclusive } => {
+            range_matches(lo.as_ref(), hi.as_ref(), *inclusive, |l| {
+                endpoint_cmp(l, val)
+            })
+        }
         PPat::Unsupported => false,
     }
+}
+
+/// Order a range endpoint against a value of the same type. `None` for a type
+/// mismatch, which makes the range not match.
+fn endpoint_cmp(literal: &PLit, value: &Value) -> Option<Ordering> {
+    match (literal, value) {
+        (PLit::Int(a), Value::Int(b)) => Some(a.cmp(b)),
+        (PLit::Float(a), Value::Float(b)) => a.partial_cmp(b),
+        (PLit::Char(a), Value::Char(b)) => Some(a.cmp(b)),
+        _ => None,
+    }
+}
+
+/// Shared range test, parameterized over the engine's endpoint comparison.
+/// `cmp` orders an endpoint literal against the matched value.
+pub(super) fn range_matches<L>(
+    lo: Option<&L>,
+    hi: Option<&L>,
+    inclusive: bool,
+    cmp: impl Fn(&L) -> Option<Ordering>,
+) -> bool {
+    if let Some(l) = lo {
+        match cmp(l) {
+            Some(Ordering::Less | Ordering::Equal) => {}
+            _ => return false,
+        }
+    }
+    if let Some(h) = hi {
+        match cmp(h) {
+            Some(Ordering::Greater) => {}
+            Some(Ordering::Equal) if inclusive => {}
+            _ => return false,
+        }
+    }
+    true
 }
 
 fn bind_seq(patterns: &[PPat], vals: &[Value], define: &mut dyn FnMut(&str, Value)) -> bool {

@@ -55,6 +55,13 @@ pub(super) fn native_call(module: &str, func: &str, args: &[PValue]) -> Result<O
             Err(e) => PValue::err(PValue::str(e.to_string())),
         },
         ("String", "from_utf8_lossy") => PValue::str(bytes_to_string(args.first())),
+        // `char::from` only converts a u8 in real Rust, so the byte range is
+        // enforced even though every integer is an i64 here.
+        ("char", "from") => match args.first() {
+            Some(PValue::Char(c)) => PValue::Char(*c),
+            Some(PValue::Int(n)) if (0..=255).contains(n) => PValue::Char(char::from(*n as u8)),
+            _ => bail!("`char::from` needs a u8"),
+        },
         // Every integer type parses the same way here, values are untyped ints.
         (
             "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128"

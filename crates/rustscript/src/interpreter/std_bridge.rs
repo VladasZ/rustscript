@@ -440,6 +440,13 @@ pub(super) fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Va
         ("String", "new") | ("String", "with_capacity") => Value::str(""),
         ("String", "from") => Value::str(args.first().map(|v| v.display()).unwrap_or_default()),
         ("String", "from_utf8_lossy") => Value::str(bytes_to_string(args.first())),
+        // `char::from` only converts a u8 in real Rust, so the byte range is
+        // enforced even though every integer is an i64 here.
+        ("char", "from") => match args.first() {
+            Some(Value::Char(c)) => Value::Char(*c),
+            Some(Value::Int(n)) if (0..=255).contains(n) => Value::Char(char::from(*n as u8)),
+            _ => bail!("`char::from` needs a u8"),
+        },
         ("char", "from_u32") => match args.first().and_then(as_i64) {
             Some(n) if (0..=0x10FFFF).contains(&n) => match char::from_u32(n as u32) {
                 Some(c) => Value::some(Value::Char(c)),

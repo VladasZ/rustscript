@@ -101,6 +101,7 @@ impl Compiler<'_> {
                     base,
                     argc,
                 });
+                self.emit_mut_arg_writebacks(c.args.iter(), base);
                 return Ok(());
             }
         }
@@ -122,6 +123,7 @@ impl Compiler<'_> {
                     argc,
                     targ,
                 });
+                self.emit_mut_arg_writebacks(c.args.iter(), base);
                 return Ok(());
             }
             // A tuple struct constructor.
@@ -205,14 +207,17 @@ impl Compiler<'_> {
         let recv = self.compile_expr(&m.receiver)?;
         let base = self.compile_args(m.args.iter())?;
         // `collect` is type driven in real Rust. The interpreter has no types,
-        // so a turbofish asking for a String is lowered to its own method here,
-        // the one place the target is knowable.
+        // so the two places the target is knowable lower to their own method
+        // here, a turbofish asking for a String and a pending `let s: String`
+        // annotation attached to exactly this call, see `Compiler::string_let`.
         let mut method = m.method.to_string();
-        if method == "collect"
-            && let Some(tf) = &m.turbofish
-            && names_string(tf)
-        {
-            method = "collect_string".to_string();
+        if method == "collect" {
+            let turbofish_string = m.turbofish.as_ref().is_some_and(names_string);
+            let let_string = matches!(self.string_let, Some(ptr) if std::ptr::eq(ptr, m));
+            if turbofish_string || let_string {
+                self.string_let = None;
+                method = "collect_string".to_string();
+            }
         }
         let name = self.add_name(method);
         self.emit(Op::Method {
@@ -225,7 +230,21 @@ impl Compiler<'_> {
         // Methods that fill a `&mut` argument, like read_line, write the new
         // value into the arg window. The window slot is only a copy of the
         // variable, so move the result back into the variable register.
-        for (i, arg) in m.args.iter().enumerate() {
+        self.emit_mut_arg_writebacks(m.args.iter(), base);
+        Ok(())
+    }
+
+    /// Emit a writeback for every `&mut variable` argument of a finished call.
+    /// The callee worked on the arg window copy, and the VM hands the final
+    /// values back into that window on return, so a move from the window slot
+    /// lands the mutation in the caller's variable. Only calls whose window
+    /// survives the call may use this, a `CallPath` consumes its args instead.
+    fn emit_mut_arg_writebacks<'e>(
+        &mut self,
+        args: impl Iterator<Item = &'e Expr>,
+        base: Reg,
+    ) {
+        for (i, arg) in args.enumerate() {
             if let Expr::Reference(r) = arg
                 && r.mutability.is_some()
                 && let Expr::Path(p) = &*r.expr
@@ -239,7 +258,6 @@ impl Compiler<'_> {
                 });
             }
         }
-        Ok(())
     }
 
     /// Compile an `async { .. }` block from `tokio::spawn` into a zero argument
@@ -621,7 +639,73 @@ fn lower_pattern(pattern: &Pat) -> PPat {
         },
         Pat::Or(or) => PPat::Or(or.cases.iter().map(lower_pattern).collect()),
         Pat::Slice(slice) => PPat::Slice(slice.elems.iter().map(lower_pattern).collect()),
+        Pat::Range(range) => lower_range(range),
         _ => PPat::Unsupported,
+    }
+}
+
+fn lower_range(range: &syn::PatRange) -> PPat {
+    // Outer None means a present endpoint that is not a supported literal,
+    // inner None means that side of the range is unbounded.
+    let endpoint = |e: &Option<Box<Expr>>| match e {
+        Some(e) => endpoint_lit(e).map(Some),
+        None => Some(None),
+    };
+    let (Some(lo), Some(hi)) = (endpoint(&range.start), endpoint(&range.end)) else {
+        return PPat::Unsupported;
+    };
+    PPat::Range {
+        lo,
+        hi,
+        inclusive: matches!(range.limits, syn::RangeLimits::Closed(_)),
+    }
+}
+
+/// A literal range endpoint, including a negated number, seen through parens.
+fn endpoint_lit(e: &Expr) -> Option<PLit> {
+    match e {
+        Expr::Lit(l) => match &l.lit {
+            Lit::Int(value) => value.base10_parse().ok().map(PLit::Int),
+            Lit::Float(value) => value.base10_parse().ok().map(PLit::Float),
+            Lit::Char(value) => Some(PLit::Char(value.value())),
+            Lit::Byte(value) => Some(PLit::Int(i64::from(value.value()))),
+            _ => None,
+        },
+        Expr::Unary(u) if matches!(u.op, syn::UnOp::Neg(_)) => match endpoint_lit(&u.expr) {
+            Some(PLit::Int(n)) => Some(PLit::Int(-n)),
+            Some(PLit::Float(f)) => Some(PLit::Float(-f)),
+            _ => None,
+        },
+        Expr::Paren(p) => endpoint_lit(&p.expr),
+        Expr::Group(g) => endpoint_lit(&g.expr),
+        Expr::Path(p) if p.path.segments.len() == 2 => {
+            let ty = p.path.segments[0].ident.to_string();
+            let which = p.path.segments[1].ident.to_string();
+            int_type_bound(&ty, &which).map(PLit::Int)
+        }
+        _ => None,
+    }
+}
+
+/// The `MIN` or `MAX` associated const of an integer type, as the i64 the
+/// interpreter stores every integer in. Bounds outside i64, the u64 and u128
+/// maxima, clamp to i64's range, which acts as unbounded for stored values.
+fn int_type_bound(ty: &str, which: &str) -> Option<i64> {
+    let (lo, hi) = match ty {
+        "i8" => (i64::from(i8::MIN), i64::from(i8::MAX)),
+        "i16" => (i64::from(i16::MIN), i64::from(i16::MAX)),
+        "i32" => (i64::from(i32::MIN), i64::from(i32::MAX)),
+        "i64" | "isize" | "i128" => (i64::MIN, i64::MAX),
+        "u8" => (0, i64::from(u8::MAX)),
+        "u16" => (0, i64::from(u16::MAX)),
+        "u32" => (0, i64::from(u32::MAX)),
+        "u64" | "usize" | "u128" => (0, i64::MAX),
+        _ => return None,
+    };
+    match which {
+        "MIN" => Some(lo),
+        "MAX" => Some(hi),
+        _ => None,
     }
 }
 
