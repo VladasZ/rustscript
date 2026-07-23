@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow, bail};
 
 use super::Interp;
 use super::resolver::Res;
-use super::value::{KeyRef, Map, StructShape, Value};
+use super::value::{KeyRef, Map, StructShape, Value, truncate_int};
 
 /// Field layout of a user struct, built once per struct and reused for every
 /// coerced instance so field names are shared instead of re-allocated.
@@ -251,13 +251,16 @@ impl Interp {
                 other => bail!("cannot cast {} to float", other.type_name()),
             }),
             "usize" | "u8" | "u16" | "u32" | "u64" | "u128" | "isize" | "i8" | "i16" | "i32"
-            | "i64" | "i128" => Value::Int(match v {
-                Value::Int(i) => i,
-                Value::Float(f) => f as i64,
-                Value::Char(c) => c as i64,
-                Value::Bool(b) => b as i64,
-                other => bail!("cannot cast {} to integer", other.type_name()),
-            }),
+            | "i64" | "i128" => {
+                let source = match v {
+                    Value::Int(i) => i,
+                    Value::Float(f) => f as i64,
+                    Value::Char(c) => c as i64,
+                    Value::Bool(b) => b as i64,
+                    other => bail!("cannot cast {} to integer", other.type_name()),
+                };
+                Value::Int(truncate_int(source, target.as_str()))
+            }
             "char" => match v {
                 Value::Int(i) => Value::Char(
                     char::from_u32(i as u32).ok_or_else(|| anyhow!("invalid char code {i}"))?,

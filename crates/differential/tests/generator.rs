@@ -121,7 +121,10 @@ fn generated_sources_parse_as_rust() {
 #[test]
 fn generated_sources_compile_with_rustc() {
     let directory = tempfile::tempdir().unwrap();
-    for seed in 0..100 {
+    // The higher range covers seed 543626, where raw arithmetic once folded to
+    // a constant divide by zero and the compiler rejected the program. The
+    // `diff_opaque` shield keeps every raw operand out of const evaluation.
+    for seed in (0..100).chain(543_600..543_660) {
         let source = generate(seed).render();
         let source_path = directory.path().join(format!("case_{seed}.rs"));
         let output_path = directory.path().join(format!("case_{seed}.rmeta"));

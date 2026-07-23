@@ -18,6 +18,7 @@ use super::pops::{
     self, apply_bin, apply_bin_imm, apply_un, cmp_test, cmp_test_imm, int_of, try_bind,
 };
 use super::pvalue::{PClosure, PStructShape, PUpvalue, PValue};
+use super::value::truncate_int;
 use super::vm_support::trace_error;
 
 const MAX_CALL_DEPTH: usize = 100_000;
@@ -823,13 +824,16 @@ fn eval_cast(target: &str, v: PValue) -> Result<PValue> {
             other => bail!("cannot cast {} to float", other.type_name()),
         }),
         "usize" | "u8" | "u16" | "u32" | "u64" | "u128" | "isize" | "i8" | "i16" | "i32"
-        | "i64" | "i128" => PValue::Int(match v {
-            PValue::Int(i) => i,
-            PValue::Float(f) => f as i64,
-            PValue::Char(c) => c as i64,
-            PValue::Bool(b) => b as i64,
-            other => bail!("cannot cast {} to integer", other.type_name()),
-        }),
+        | "i64" | "i128" => {
+            let source = match v {
+                PValue::Int(i) => i,
+                PValue::Float(f) => f as i64,
+                PValue::Char(c) => c as i64,
+                PValue::Bool(b) => b as i64,
+                other => bail!("cannot cast {} to integer", other.type_name()),
+            };
+            PValue::Int(truncate_int(source, target))
+        }
         "char" => match v {
             PValue::Int(i) => PValue::Char(
                 char::from_u32(i as u32).ok_or_else(|| anyhow::anyhow!("invalid char code {i}"))?,

@@ -20,10 +20,16 @@ fn add_direct_reductions(expression: &GeneratedExpr, candidates: &mut Vec<Genera
         | GeneratedExpr::Less(left, right)
         | GeneratedExpr::And(left, right)
         | GeneratedExpr::Or(left, right)
-        | GeneratedExpr::Concat(left, right) => {
+        | GeneratedExpr::Concat(left, right)
+        | GeneratedExpr::RawAdd(left, right)
+        | GeneratedExpr::RawSub(left, right)
+        | GeneratedExpr::RawMul(left, right)
+        | GeneratedExpr::RawDiv(left, right)
+        | GeneratedExpr::RawRem(left, right) => {
             push_same_type(candidates, expression.ty(), left);
             push_same_type(candidates, expression.ty(), right);
         }
+        GeneratedExpr::Cast(value, _) => candidates.push((**value).clone()),
         GeneratedExpr::If {
             then_expr,
             else_expr,
@@ -59,7 +65,9 @@ fn add_direct_reductions(expression: &GeneratedExpr, candidates: &mut Vec<Genera
         | GeneratedExpr::Some(_)
         | GeneratedExpr::None
         | GeneratedExpr::OptionUnwrapOr { .. }
-        | GeneratedExpr::OptionIsSome(_) => {}
+        | GeneratedExpr::OptionIsSome(_)
+        | GeneratedExpr::Index { .. }
+        | GeneratedExpr::Unwrap(_) => {}
     }
 }
 
@@ -352,6 +360,37 @@ fn add_child_reductions(expression: &GeneratedExpr, candidates: &mut Vec<Generat
                     ty: *ty,
                 });
             }
+        }
+        GeneratedExpr::RawAdd(left, right) => {
+            shrink_binary(candidates, left, right, GeneratedExpr::RawAdd);
+        }
+        GeneratedExpr::RawSub(left, right) => {
+            shrink_binary(candidates, left, right, GeneratedExpr::RawSub);
+        }
+        GeneratedExpr::RawMul(left, right) => {
+            shrink_binary(candidates, left, right, GeneratedExpr::RawMul);
+        }
+        GeneratedExpr::RawDiv(left, right) => {
+            shrink_binary(candidates, left, right, GeneratedExpr::RawDiv);
+        }
+        GeneratedExpr::RawRem(left, right) => {
+            shrink_binary(candidates, left, right, GeneratedExpr::RawRem);
+        }
+        GeneratedExpr::Cast(value, target) => {
+            for shrunk in value.shrinks() {
+                candidates.push(GeneratedExpr::Cast(Box::new(shrunk), *target));
+            }
+        }
+        GeneratedExpr::Index { values, index } => {
+            for shrunk in values.shrinks() {
+                candidates.push(GeneratedExpr::Index {
+                    values: Box::new(shrunk),
+                    index: *index,
+                });
+            }
+        }
+        GeneratedExpr::Unwrap(value) => {
+            shrink_unary(candidates, value, GeneratedExpr::Unwrap);
         }
         GeneratedExpr::I64(_)
         | GeneratedExpr::Bool(_)

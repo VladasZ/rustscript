@@ -137,6 +137,36 @@ fn both_print_the_panic_header() {
     );
 }
 
+/// Integer overflow aborts like debug Rust in both engines with the same
+/// message. The `keep` helper is not `const`, so the compiler cannot fold the
+/// operation and reject it, which leaves the overflow to happen at runtime.
+#[test]
+fn integer_overflow_panics_like_rust() {
+    fn overflow(expr: &str) -> String {
+        format!("fn keep(n: i64) -> i64 {{ n }}\nfn main() {{ let _ = {expr}; }}\n")
+    }
+    assert_parity(
+        &overflow("keep(i64::MAX) + keep(1)"),
+        101,
+        "attempt to add with overflow",
+    );
+    assert_parity(
+        &overflow("keep(i64::MIN) - keep(1)"),
+        101,
+        "attempt to subtract with overflow",
+    );
+    assert_parity(
+        &overflow("keep(3037000500) * keep(3037000500)"),
+        101,
+        "attempt to multiply with overflow",
+    );
+    assert_parity(
+        &overflow("keep(i64::MIN) / keep(-1)"),
+        101,
+        "attempt to divide with overflow",
+    );
+}
+
 #[test]
 fn process_exit_code_passes_through_alike() {
     assert_parity("fn main() {\n    std::process::exit(3);\n}\n", 3, "");
