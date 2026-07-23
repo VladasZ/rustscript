@@ -95,6 +95,7 @@ pub(super) fn native_call(module: &str, func: &str, args: &[Value]) -> Result<Op
             std::process::exit(code);
         }
         ("process", "abort") => std::process::abort(),
+        ("process", "id") => Value::Int(i64::from(std::process::id())),
         // -- io -------------------------------------------------------
         ("io", "stdin") => make_std_stream(
             "stdin",
