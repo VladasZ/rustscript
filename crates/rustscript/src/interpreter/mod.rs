@@ -4,7 +4,6 @@ mod compile;
 mod console;
 pub mod coverage;
 mod crates_bridge;
-mod docx_bridge;
 mod eval;
 mod format;
 mod higher_order;
@@ -31,12 +30,14 @@ mod regex_bridge;
 mod resolver;
 mod runner;
 mod service_bridge;
+mod shared;
 mod std_bridge;
 mod value;
 mod vm;
 mod vm_support;
 mod winreg_bridge;
 mod wmi_bridge;
+mod xmltree_bridge;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -53,6 +54,7 @@ use bytecode::Chunk;
 use compile::{Compiler, Ctx};
 use resolver::{ModuleSyms, Res, Resolver, StructDef};
 pub use value::Value;
+pub use vm_support::{ErrReturn, ScriptPanic};
 
 /// Set by the real Ctrl-C handler, which must stay `Send`, and drained by the
 /// interpreter between loop iterations so it can run the script's own handler.
@@ -163,6 +165,7 @@ impl Interp {
             let ctx = Ctx {
                 resolver: &resolver,
                 module: *m,
+                file: modules[*m].file.clone(),
                 async_mode,
             };
             let mut c = Compiler::new(&ctx);
@@ -173,6 +176,7 @@ impl Interp {
             let ctx = Ctx {
                 resolver: &resolver,
                 module: *m,
+                file: modules[*m].file.clone(),
                 async_mode,
             };
             let mut c = Compiler::new(&ctx);
@@ -186,6 +190,7 @@ impl Interp {
             let ctx = Ctx {
                 resolver: &resolver,
                 module: *m,
+                file: modules[*m].file.clone(),
                 async_mode,
             };
             let mut c = Compiler::new(&ctx);
@@ -257,7 +262,7 @@ impl Interp {
             && &**variant == "Err"
         {
             let msg = data.first().map(|v| v.display()).unwrap_or_default();
-            bail!("Error: {msg}");
+            return Err(anyhow::Error::new(vm_support::ErrReturn(msg)));
         }
         Ok(())
     }
@@ -316,7 +321,7 @@ impl Interp {
             && &**variant == "Err"
         {
             let msg = data.first().map(|v| v.display()).unwrap_or_default();
-            bail!("Error: {msg}");
+            return Err(anyhow::Error::new(vm_support::ErrReturn(msg)));
         }
         Ok(())
     }

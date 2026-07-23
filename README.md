@@ -49,8 +49,10 @@ chmod +x notes.rs
 ```text
 rust FILE.rs         interpret the script
 rust run FILE.rs     same as above
+rust -e 'CODE'       run a snippet, arguments after CODE go to it
 rust check FILE.rs   validate without running
 rust build FILE.rs   compile, cache, and run a native binary
+rust supported       list every bridged method per receiver and engine
 rust clean           clear cached checks and builds
 rust update          install the newest RustScript release
 rust --version       show version and build information
@@ -80,6 +82,10 @@ Cargo. Symlinks to scripts work too, including extensionless command names.
 
 rustc remains responsible for type, ownership, borrowing, and visibility
 errors. The interpreter does not implement a second Rust type system.
+
+Failures behave like compiled Rust: a runtime abort prints a panic header
+with the failing file and line plus a script backtrace and exits 101, and an
+`Err` out of `main` prints `Error: ...` and exits 1.
 
 ## Supported Rust
 
@@ -119,6 +125,8 @@ The following crates have native interpreter bridges:
   [`colored`](https://github.com/colored-rs/colored)
 - [`ctrlc`](https://github.com/Detegr/rust-ctrlc) and
   [`tempfile`](https://github.com/Stebalien/tempfile)
+- [`lopdf`](https://github.com/J-F-Liu/lopdf) and
+  [`xmltree`](https://github.com/eminence/xmltree-rs)
 
 Windows builds also bridge
 [`winreg`](https://github.com/gentoo90/winreg-rs),
@@ -126,7 +134,9 @@ Windows builds also bridge
 [`wmi`](https://github.com/ohadravid/wmi-rs).
 
 See the programs under `crates/examples/examples` for working examples of the
-language, standard library, and crate bridges.
+language, standard library, and crate bridges, and
+[docs/supported.md](docs/supported.md) for the full generated list of bridged
+methods per receiver and engine.
 
 ## Modules and local crates
 
@@ -160,8 +170,9 @@ an interpreter bridge. `rust check` adds that coverage pass.
 ## Caching
 
 Checks, compiled binaries, and shared Cargo dependencies live under
-`~/.cache/rustscript`. Interpreted runs do not touch the cache. `rust clean`
-removes it.
+`~/.cache/rustscript`. Interpreted runs do not touch the cache. Entries unused
+for 30 days are swept automatically on every check and build, and `rust clean`
+removes everything at once.
 
 ## GitHub Actions
 
@@ -198,6 +209,12 @@ cargo test --workspace
 The equivalence tests run the same examples through rustc and the interpreter
 and compare their output byte for byte. The multifile conformance test does the
 same for a deep module tree.
+
+Every bridge and language feature must have an example under
+`crates/examples/examples`. Examples build as real cargo binaries, and the
+equivalence test runs each one compiled and interpreted, so every feature is
+always tested against the real Rust compiler. A change the real compiler
+cannot build has no coverage and is not done.
 
 ## Benchmarks
 

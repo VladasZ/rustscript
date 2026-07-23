@@ -3,9 +3,12 @@
 //! `rust check` command, never when a script runs. Results cache by source
 //! hash, so an unchanged script rechecks instantly.
 
+use std::fs::File;
 use std::hash::{Hash, Hasher};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Result, anyhow, bail};
 
@@ -27,6 +30,105 @@ fn bin_cache() -> PathBuf {
     cache_root().join("bin")
 }
 
+/// A cache entry unused for this long is removed by the sweep that runs after
+/// every check and build. Interpreted runs never touch the cache.
+const GC_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// Mark a cache file as used now, so the age sweep keeps its entry.
+fn touch(path: &Path) {
+    let refreshed = File::options()
+        .append(true)
+        .open(path)
+        .and_then(|f| f.set_modified(SystemTime::now()));
+    if let Err(e) = refreshed {
+        eprintln!(
+            "rust: could not refresh cache stamp {}: {e}",
+            path.display()
+        );
+    }
+}
+
+/// Drop cache entries unused for `GC_MAX_AGE`. A project dir's use time is its
+/// `.checked` stamp, refreshed on every hit, with the mirrored `Cargo.toml` as
+/// the fallback for a project that never earned a stamp. A compiled binary's
+/// use time is its own mtime. The shared `target` dir is never removed, cargo
+/// reuses it across entries and rebuilding it is the cost the cache exists to
+/// avoid.
+fn sweep() {
+    sweep_root(&cache_root(), SystemTime::now());
+}
+
+fn sweep_root(root: &Path, now: SystemTime) {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) => {
+            if e.kind() != ErrorKind::NotFound {
+                eprintln!("rust: could not sweep cache {}: {e}", root.display());
+            }
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if entry.file_name() == "target" {
+            continue;
+        }
+        if entry.file_name() == "bin" {
+            sweep_bin(&path, now);
+            continue;
+        }
+        if !path.is_dir() {
+            continue;
+        }
+        let used = mtime(&path.join(".checked"))
+            .or_else(|| mtime(&path.join("Cargo.toml")))
+            .or_else(|| mtime(&path));
+        if is_expired(used, now)
+            && let Err(e) = std::fs::remove_dir_all(&path)
+        {
+            eprintln!(
+                "rust: could not remove stale cache entry {}: {e}",
+                path.display()
+            );
+        }
+    }
+}
+
+/// Compiled binaries and leftover temp copies, one file per entry.
+fn sweep_bin(dir: &Path, now: SystemTime) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            if e.kind() != ErrorKind::NotFound {
+                eprintln!("rust: could not sweep cache {}: {e}", dir.display());
+            }
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if is_expired(mtime(&path), now)
+            && let Err(e) = std::fs::remove_file(&path)
+        {
+            eprintln!(
+                "rust: could not remove stale cache binary {}: {e}",
+                path.display()
+            );
+        }
+    }
+}
+
+fn mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// Missing metadata and a clock that ran backwards both read as fresh, so the
+/// sweep only removes entries whose age is positively known.
+fn is_expired(used: Option<SystemTime>, now: SystemTime) -> bool {
+    let Some(used) = used else { return false };
+    now.duration_since(used).is_ok_and(|age| age > GC_MAX_AGE)
+}
+
 pub fn clean() -> Result<()> {
     let root = cache_root();
     if root.exists() {
@@ -39,7 +141,7 @@ pub fn clean() -> Result<()> {
 }
 
 /// `files` are the script's sources: path relative to the script directory
-/// and content, the root script first as `main.rs`. The layout is mirrored
+/// and content, the root script first under its real name. The layout is mirrored
 /// into the cache project so `mod` declarations resolve the same way.
 /// `crate_deps` are local `path` crates the script uses; they join the cargo
 /// project as path dependencies so `use crate_name::..` resolves.
@@ -56,6 +158,8 @@ pub fn check(
     let project = cache_root().join(format!("{hash:016x}"));
     let stamp = project.join(".checked");
     if stamp.exists() {
+        touch(&stamp);
+        sweep();
         return Ok(());
     }
 
@@ -85,6 +189,7 @@ pub fn check(
     }
 
     std::fs::write(&stamp, "")?;
+    sweep();
     Ok(())
 }
 
@@ -97,7 +202,8 @@ fn write_project(
     crate_deps: &[CrateDep],
 ) -> Result<()> {
     std::fs::create_dir_all(project)?;
-    std::fs::write(project.join("Cargo.toml"), manifest(crate_deps))?;
+    let root = files.first().map(|(rel, _)| rel.as_path());
+    std::fs::write(project.join("Cargo.toml"), manifest(root, crate_deps))?;
     for (rel, source) in files {
         let dst = project.join(rel);
         if let Some(parent) = dst.parent() {
@@ -121,6 +227,8 @@ pub fn build(
     let hash = hash_files(files, crate_deps);
     let bin = bin_cache().join(format!("{hash:016x}{}", std::env::consts::EXE_SUFFIX));
     if bin.exists() {
+        touch(&bin);
+        sweep();
         return Ok(bin);
     }
 
@@ -164,21 +272,13 @@ pub fn build(
             }
         }
     }
+    sweep();
     Ok(bin)
 }
 
 /// Scripts use plain `std`. A few common crates are always available so a
 /// script can `use` them without declaring anything.
-const MANIFEST: &str = r#"[package]
-name = "script"
-version = "0.0.0"
-edition = "2024"
-
-[[bin]]
-name = "script"
-path = "main.rs"
-
-[dependencies]
+const MANIFEST: &str = r#"[dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
@@ -196,6 +296,8 @@ hex = "0.4"
 ctrlc = "3"
 tempfile = "3"
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+lopdf = "0.44"
+xmltree = { version = "0.12", features = ["attribute-order"] }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking", "cookies"], default-features = false }
 
@@ -207,9 +309,23 @@ wmi = "0.18"
 
 /// The cargo project manifest, the fixed dependency set plus one `path` entry
 /// per local crate the script grafts in. The empty `[workspace]` detaches the
-/// project from any workspace above the cache directory.
-fn manifest(crate_deps: &[CrateDep]) -> String {
-    let mut out = String::from(MANIFEST);
+/// project from any workspace above the cache directory. The bin path is the
+/// root script's real name, so rustc diagnostics name the script the user ran,
+/// not a generic `main.rs`.
+fn manifest(root: Option<&Path>, crate_deps: &[CrateDep]) -> String {
+    let root = root.unwrap_or(Path::new("main.rs")).to_string_lossy();
+    let mut out = format!(
+        r#"[package]
+name = "script"
+version = "0.0.0"
+edition = "2024"
+
+[[bin]]
+name = "script"
+path = {root:?}
+
+{MANIFEST}"#
+    );
     for dep in crate_deps {
         let dir = dep.dir.to_string_lossy();
         // Each graft gets its own `[dependencies.name]` table header, not a
@@ -256,7 +372,7 @@ mod tests {
             dir: PathBuf::from("/tmp/shared"),
             files: Vec::new(),
         };
-        let text = manifest(&[dep]);
+        let text = manifest(Some(Path::new("notes.rs")), &[dep]);
         let value: toml::Value = toml::from_str(&text)
             .unwrap_or_else(|e| panic!("manifest must be valid TOML: {e}\n{text}"));
 
@@ -279,5 +395,72 @@ mod tests {
             !windows_only,
             "shared must not be a Windows only dependency:\n{text}"
         );
+    }
+
+    fn set_mtime(path: &Path, to: SystemTime) {
+        File::options()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .set_modified(to)
+            .unwrap();
+    }
+
+    fn project_entry(root: &Path, name: &str, stamped: bool, used: SystemTime) {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "").unwrap();
+        set_mtime(&dir.join("Cargo.toml"), used);
+        if stamped {
+            std::fs::write(dir.join(".checked"), "").unwrap();
+            set_mtime(&dir.join(".checked"), used);
+        }
+    }
+
+    #[test]
+    fn sweep_removes_stale_entries_and_never_the_target_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let now = SystemTime::now();
+        let old = now - GC_MAX_AGE - Duration::from_secs(60 * 60 * 24);
+
+        project_entry(root, "stale", true, old);
+        project_entry(root, "fresh", true, now);
+        // A project that never earned a stamp, a failed check for example,
+        // must still age out through its mirrored Cargo.toml.
+        project_entry(root, "unstamped", false, old);
+        std::fs::create_dir_all(root.join("target/debug")).unwrap();
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("aaaa"), "x").unwrap();
+        set_mtime(&bin.join("aaaa"), old);
+        std::fs::write(bin.join("bbbb"), "x").unwrap();
+
+        sweep_root(root, now);
+
+        assert!(!root.join("stale").exists(), "stale project must go");
+        assert!(
+            !root.join("unstamped").exists(),
+            "unstamped project must go"
+        );
+        assert!(root.join("fresh").exists(), "fresh project must stay");
+        assert!(root.join("target/debug").exists(), "target must never go");
+        assert!(!bin.join("aaaa").exists(), "stale binary must go");
+        assert!(bin.join("bbbb").exists(), "fresh binary must stay");
+    }
+
+    /// The bin path must be the script's real name, so a rustc diagnostic from
+    /// the mirrored project points at `notes.rs`, not a generic `main.rs`.
+    #[test]
+    fn manifest_bin_path_is_the_real_script_name() {
+        let text = manifest(Some(Path::new("notes.rs")), &[]);
+        let value: toml::Value = toml::from_str(&text)
+            .unwrap_or_else(|e| panic!("manifest must be valid TOML: {e}\n{text}"));
+        let path = value
+            .get("bin")
+            .and_then(|b| b.get(0))
+            .and_then(|b| b.get("path"))
+            .and_then(|p| p.as_str());
+        assert_eq!(path, Some("notes.rs"), "manifest was:\n{text}");
     }
 }

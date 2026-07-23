@@ -47,13 +47,13 @@ pub(super) fn apply_bin_imm(op: BinKind, l: &Value, imm: i64) -> Result<Value> {
             Mul => Value::Int(a.wrapping_mul(imm)),
             Div => {
                 if imm == 0 {
-                    bail!("divide by zero");
+                    bail!("attempt to divide by zero");
                 }
                 Value::Int(a.wrapping_div(imm))
             }
             Rem => {
                 if imm == 0 {
-                    bail!("remainder by zero");
+                    bail!("attempt to calculate the remainder with a divisor of zero");
                 }
                 Value::Int(a.wrapping_rem(imm))
             }
@@ -121,13 +121,13 @@ fn arith(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
                 Mul => a.wrapping_mul(b),
                 Div => {
                     if b == 0 {
-                        bail!("divide by zero");
+                        bail!("attempt to divide by zero");
                     }
                     a.wrapping_div(b)
                 }
                 Rem => {
                     if b == 0 {
-                        bail!("remainder by zero");
+                        bail!("attempt to calculate the remainder with a divisor of zero");
                     }
                     a.wrapping_rem(b)
                 }

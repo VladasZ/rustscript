@@ -2,6 +2,7 @@ mod build_info;
 mod checker;
 mod interpreter;
 mod loader;
+mod supported;
 mod update;
 
 use std::env;
@@ -19,6 +20,23 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 fn main() {
     if let Err(e) = real_main() {
+        // A script runtime abort reports and exits like a compiled panic,
+        // and a `Result::Err` out of main like a compiled anyhow main, so
+        // callers checking `$?` or grepping stderr see the same behavior
+        // either way the script runs.
+        if let Some(p) = e.downcast_ref::<interpreter::ScriptPanic>() {
+            if p.file.is_empty() {
+                eprintln!("thread 'main' panicked:");
+            } else {
+                eprintln!("thread 'main' panicked at {}:{}:", p.file, p.line);
+            }
+            eprintln!("{}", p.rendered);
+            exit(101);
+        }
+        if let Some(r) = e.downcast_ref::<interpreter::ErrReturn>() {
+            eprintln!("Error: {}", r.0);
+            exit(1);
+        }
         eprintln!("rust error: {e:#}");
         exit(1);
     }
@@ -50,6 +68,21 @@ fn real_main() -> Result<()> {
         }
         "clean" => checker::clean(),
         "update" => update::update(),
+        "supported" => {
+            // `rust supported md` prints the docs page for regeneration.
+            if all.get(1).map(String::as_str) == Some("md") {
+                print!("{}", supported::markdown());
+            } else {
+                supported::print_supported();
+            }
+            Ok(())
+        }
+        "-e" => {
+            let code = all
+                .get(1)
+                .ok_or_else(|| anyhow!("missing code after -e, try `rust help`"))?;
+            eval(code, &all[2..])
+        }
         "-V" | "--version" => {
             println!("{}", build_info::version());
             Ok(())
@@ -137,6 +170,50 @@ fn run(file: &str, script_args: &[String]) -> Result<()> {
     interp.run_main()
 }
 
+/// Run a command line snippet, `rust -e 'println!("hi")'`. A snippet that is
+/// already a complete program with its own `fn main` runs as written, so
+/// `#[tokio::main]` still selects the parallel engine. Anything else becomes
+/// the body of a plain `fn main`. `?` still works there: the interpreter
+/// propagates an `Err` out of `main` regardless of the signature, ending the
+/// run the same way an `anyhow::Result` main does.
+fn eval(code: &str, script_args: &[String]) -> Result<()> {
+    let source = if is_program(code) {
+        code.to_string()
+    } else {
+        // The wrapper shares the snippet's first line, so line numbers in
+        // error traces match the snippet as typed. The newline before `}`
+        // keeps a snippet ending in a comment intact.
+        format!("fn main() {{ {code}\n}}\n")
+    };
+    // The snippet has no file, so module and local crate lookups anchor to the
+    // working directory, the same places a script saved there would see.
+    let dir = env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
+    let program = loader::load(&dir.join("-e.rs"), &source)?;
+
+    let mut args = vec!["-e".to_string()];
+    args.extend(script_args.iter().cloned());
+    interpreter::set_script_args(args);
+
+    if program.tokio_main {
+        return interpreter::run_parallel(&program.modules);
+    }
+    let interp = interpreter::Interp::load(&program.modules, false)?;
+    interp.run_main()
+}
+
+/// Whether the snippet is a complete program: it parses as a file and has a
+/// top level `fn main`. A statement list is not, `println!("hi");` alone
+/// parses as a file of one macro item, so the main requirement is what keeps
+/// plain statements on the wrapped path.
+fn is_program(code: &str) -> bool {
+    let Ok(ast) = syn::parse_file(code) else {
+        return false;
+    };
+    ast.items
+        .iter()
+        .any(|item| matches!(item, syn::Item::Fn(f) if f.sig.ident == "main"))
+}
+
 /// Compile the script to a native binary, cached by source hash, then run it
 /// with the caller's arguments and exit with its status. Unlike `run`, this
 /// path never touches the interpreter.
@@ -166,9 +243,11 @@ fn print_usage() {
 usage:
   rust run FILE.rs     interpret the script
   rust FILE.rs         same as run
+  rust -e 'CODE'       run a snippet, arguments after CODE go to it
   rust FILE.rs cmp     compile and run, `cmp` first arg is reserved
   rust build FILE.rs   compile to a native binary, cache it, then run
   rust check FILE.rs   validate with cargo check, does not run
+  rust supported       list every bridged method per receiver and engine
   rust clean           clear the cache
   rust update          install the latest RustScript from GitHub
   rust --version       show version and build information

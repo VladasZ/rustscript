@@ -1,6 +1,7 @@
 //! Expressions and control flow. Split from the compiler.
 
 use anyhow::{Result, anyhow, bail};
+use syn::spanned::Spanned;
 use syn::{BinOp, Block, Expr, Lit, Pat, Stmt, UnOp};
 
 use std::rc::Rc;
@@ -84,6 +85,7 @@ impl Compiler<'_> {
         let last = block.stmts.len() - 1;
         for (i, stmt) in block.stmts.iter().enumerate() {
             let is_last = i == last;
+            self.set_line(stmt.span());
             match stmt {
                 Stmt::Local(local)
                     if local
@@ -255,6 +257,7 @@ impl Compiler<'_> {
     }
 
     pub(super) fn compile_into(&mut self, dst: Reg, expr: &Expr) -> Result<()> {
+        self.set_line(expr.span());
         match expr {
             Expr::Lit(lit) => self.compile_lit(dst, &lit.lit)?,
             Expr::Paren(p) => self.compile_into(dst, &p.expr)?,

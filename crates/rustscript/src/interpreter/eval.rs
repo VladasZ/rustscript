@@ -22,6 +22,11 @@ pub(super) struct Shape {
     pub module: usize,
 }
 
+/// The exact message a compiled binary panics with on a bad index.
+fn oob(len: usize, i: usize) -> anyhow::Error {
+    anyhow!("index out of bounds: the len is {len} but the index is {i}")
+}
+
 impl Interp {
     /// Turn a dynamic value into `ty` when `ty` names a known struct, walking
     /// `Vec<T>`, `Option<T>`, smart pointers, and type aliases. `module` is
@@ -278,26 +283,20 @@ impl Interp {
         Ok(match base {
             Value::Vec(items) => {
                 let i = as_index(key)?;
-                items
-                    .borrow()
-                    .get(i)
-                    .cloned()
-                    .ok_or_else(|| anyhow!("index {i} out of bounds"))?
+                let items = items.borrow();
+                items.get(i).cloned().ok_or_else(|| oob(items.len(), i))?
             }
             Value::Str(s) => {
                 let i = as_index(key)?;
                 s.chars()
                     .nth(i)
                     .map(Value::Char)
-                    .ok_or_else(|| anyhow!("index {i} out of bounds"))?
+                    .ok_or_else(|| oob(s.chars().count(), i))?
             }
             Value::Tuple(items) => {
                 let i = as_index(key)?;
-                items
-                    .borrow()
-                    .get(i)
-                    .cloned()
-                    .ok_or_else(|| anyhow!("index {i} out of bounds"))?
+                let items = items.borrow();
+                items.get(i).cloned().ok_or_else(|| oob(items.len(), i))?
             }
             Value::Map(map) => {
                 let k = key
@@ -306,7 +305,7 @@ impl Interp {
                 map.borrow()
                     .get(&k)
                     .cloned()
-                    .ok_or_else(|| anyhow!("key not found"))?
+                    .ok_or_else(|| anyhow!("no entry found for key"))?
             }
             Value::Native(handle)
                 if matches!(&*handle.borrow(), super::native::Native::RegexCaptures(_)) =>
@@ -323,7 +322,7 @@ impl Interp {
                 let i = as_index(key)?;
                 let mut items = items.borrow_mut();
                 if i >= items.len() {
-                    bail!("index {i} out of bounds (len {})", items.len());
+                    return Err(oob(items.len(), i));
                 }
                 items[i] = val;
             }

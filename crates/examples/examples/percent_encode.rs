@@ -49,7 +49,13 @@ fn main() {
     println!("[{}]", quote_plus("a/b:c?d=e&f"));
     println!("[{}]", quote_plus("тест"));
 
-    println!("{} {} {} {}", classify('q'), classify('Q'), classify('7'), classify('/'));
+    println!(
+        "{} {} {} {}",
+        classify('q'),
+        classify('Q'),
+        classify('7'),
+        classify('/')
+    );
     println!("{} {} {} {}", bucket(-5), bucket(0), bucket(7), bucket(10));
 
     // A closure taking &mut must write back the same way a function does.

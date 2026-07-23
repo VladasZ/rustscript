@@ -181,6 +181,58 @@ impl Compiler<'_> {
     }
 
     pub(super) fn compile_method(&mut self, dst: Reg, m: &syn::ExprMethodCall) -> Result<()> {
+        // `v[a..b].copy_from_slice(src)` must write through to `v`. Indexing
+        // with a range builds a copied temporary, so the call is compiled
+        // against the base vec with the bounds as leading arguments instead.
+        // An open end becomes the max sentinel the bridge clamps to the len.
+        if m.method == "copy_from_slice" {
+            let Expr::Index(ix) = &*m.receiver else {
+                bail!("copy_from_slice is only supported on a `v[a..b]` receiver");
+            };
+            let Expr::Range(r) = &*ix.index else {
+                bail!("copy_from_slice is only supported on a `v[a..b]` receiver");
+            };
+            let Some(src) = m.args.first() else {
+                bail!("copy_from_slice takes the source slice");
+            };
+            let recv = self.compile_expr(&ix.expr)?;
+            let base = self.cur().reg_top;
+            for _ in 0..3 {
+                self.alloc();
+            }
+            match &r.start {
+                Some(e) => self.compile_into(base, e)?,
+                None => self.emit(Op::LoadInt { dst: base, v: 0 }),
+            }
+            match &r.end {
+                Some(e) => {
+                    self.compile_into(base + 1, e)?;
+                    if matches!(r.limits, syn::RangeLimits::Closed(_)) {
+                        self.emit(Op::BinImm {
+                            dst: base + 1,
+                            a: base + 1,
+                            imm: 1,
+                            op: BinKind::Add,
+                        });
+                    }
+                }
+                None => self.emit(Op::LoadInt {
+                    dst: base + 1,
+                    v: i64::MAX,
+                }),
+            }
+            self.compile_into(base + 2, src)?;
+            let name = self.add_name("copy_from_slice".to_string());
+            self.set_line(m.method.span());
+            self.emit(Op::Method {
+                dst,
+                recv,
+                name,
+                base,
+                argc: 3,
+            });
+            return Ok(());
+        }
         // Fuse `x.get(k).copied().unwrap_or(d)` into one op. The chain builds
         // and tears down an Option per call, which dominates counting loops.
         if dst != DISCARD
@@ -220,6 +272,10 @@ impl Compiler<'_> {
             }
         }
         let name = self.add_name(method);
+        // A multiline chain compiles its receiver and args first, so restamp
+        // with the method's own line before the op lands, the line rustc
+        // would name for this call.
+        self.set_line(m.method.span());
         self.emit(Op::Method {
             dst,
             recv,
@@ -239,11 +295,7 @@ impl Compiler<'_> {
     /// values back into that window on return, so a move from the window slot
     /// lands the mutation in the caller's variable. Only calls whose window
     /// survives the call may use this, a `CallPath` consumes its args instead.
-    fn emit_mut_arg_writebacks<'e>(
-        &mut self,
-        args: impl Iterator<Item = &'e Expr>,
-        base: Reg,
-    ) {
+    fn emit_mut_arg_writebacks<'e>(&mut self, args: impl Iterator<Item = &'e Expr>, base: Reg) {
         for (i, arg) in args.enumerate() {
             if let Expr::Reference(r) = arg
                 && r.mutability.is_some()
@@ -270,7 +322,7 @@ impl Compiler<'_> {
         self.emit(Op::Ret { src: ret });
         let child = self.frames.pop().unwrap();
         let caps: Vec<CapSource> = child.upvalues.iter().map(|(_, s)| *s).collect();
-        let mut chunk = child.into_chunk();
+        let mut chunk = child.into_chunk(self.ctx.file.clone());
         chunk.module = self.ctx.module as u16;
         let parent = self.cur();
         let child_idx = parent.children.len() as u16;
@@ -299,7 +351,7 @@ impl Compiler<'_> {
         self.emit(Op::Ret { src: ret });
         let child = self.frames.pop().unwrap();
         let caps: Vec<CapSource> = child.upvalues.iter().map(|(_, s)| *s).collect();
-        let mut chunk = child.into_chunk();
+        let mut chunk = child.into_chunk(self.ctx.file.clone());
         chunk.module = self.ctx.module as u16;
         let chunk = Rc::new(chunk);
         let parent = self.cur();

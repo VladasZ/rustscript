@@ -21,6 +21,9 @@ pub struct Ctx<'r> {
     pub resolver: &'r Resolver,
     /// The module whose source is being compiled. Paths resolve against it.
     pub module: usize,
+    /// The file the module was read from, carried into every chunk it
+    /// produces so runtime error traces can name it.
+    pub file: std::sync::Arc<str>,
     /// True when compiling a `#[tokio::main]` program, which lets `.await`,
     /// `tokio::spawn`, and `join!` compile instead of being rejected.
     pub async_mode: bool,
@@ -29,6 +32,7 @@ pub struct Ctx<'r> {
 /// Per function compilation state. A stack of these supports nested closures.
 struct FnState {
     code: Vec<Op>,
+    lines: Vec<u32>,
     consts: Vec<Const>,
     members: Vec<Member>,
     pats: Vec<PatInfo>,
@@ -54,6 +58,7 @@ impl FnState {
     fn new(name: String) -> FnState {
         FnState {
             code: Vec::new(),
+            lines: Vec::new(),
             consts: Vec::new(),
             members: Vec::new(),
             pats: Vec::new(),
@@ -87,9 +92,11 @@ impl FnState {
             .map(|i| i as u16)
     }
 
-    fn into_chunk(self) -> Chunk {
+    fn into_chunk(self, file: std::sync::Arc<str>) -> Chunk {
         Chunk {
             code: self.code,
+            lines: self.lines,
+            file,
             num_regs: self.max_reg as usize,
             num_params: self.num_params,
             name: self.name,
@@ -125,6 +132,9 @@ pub struct Compiler<'a> {
     ctx: &'a Ctx<'a>,
     frames: Vec<FnState>,
     loops: Vec<LoopCtx>,
+    /// Source line of the expression being lowered, stamped onto every emitted
+    /// op so runtime errors can point at the failing line.
+    cur_line: u32,
     /// A `let x: T = from_str(..)...` annotation waiting to attach to that
     /// exact `from_str` call, keyed by the call's address so a nested call
     /// inside its arguments cannot steal it. Lets the typed json path run
@@ -150,9 +160,15 @@ impl<'a> Compiler<'a> {
             ctx,
             frames: Vec::new(),
             loops: Vec::new(),
+            cur_line: 0,
             json_let: None,
             string_let: None,
         }
+    }
+
+    /// Remember the line an AST node starts on, for the ops it lowers to.
+    pub(super) fn set_line(&mut self, span: proc_macro2::Span) {
+        self.cur_line = span.start().line as u32;
     }
 
     /// Resolve a path against the module being compiled.
@@ -207,7 +223,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn finish_chunk(&mut self) -> Chunk {
-        let mut chunk = self.frames.pop().unwrap().into_chunk();
+        let mut chunk = self.frames.pop().unwrap().into_chunk(self.ctx.file.clone());
         chunk.module = self.ctx.module as u16;
         chunk
     }
@@ -219,7 +235,10 @@ impl<'a> Compiler<'a> {
     }
 
     fn emit(&mut self, op: Op) {
-        self.cur().code.push(op);
+        let line = self.cur_line;
+        let f = self.cur();
+        f.code.push(op);
+        f.lines.push(line);
     }
 
     fn here(&mut self) -> usize {

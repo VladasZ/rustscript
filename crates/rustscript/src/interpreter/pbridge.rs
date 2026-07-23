@@ -11,11 +11,11 @@ use anyhow::{Result, bail};
 use parking_lot::Mutex;
 
 use super::bytecode::MethodName;
-use super::methods::CharOut;
 use super::pchunk::PChunk;
 use super::pnative::PNative;
 use super::pvalue::PValue;
 use super::pvm::PInterp;
+use super::shared::{self, Args, CharOut, Num, NumOut, ParseNum, StrOut};
 
 impl PInterp {
     // -- format ------------------------------------------------------------
@@ -258,6 +258,41 @@ impl PInterp {
                 Some(v) => PValue::some(v),
                 None => PValue::none(),
             },
+            // Compiled from `v[a..b].copy_from_slice(src)`, see the fast twin.
+            "copy_from_slice" => {
+                let start = usize::try_from(int_arg(args)).unwrap_or(0);
+                let end_raw = match args.get(1) {
+                    Some(PValue::Int(n)) => *n,
+                    _ => bail!("copy_from_slice takes numeric bounds"),
+                };
+                let src: Vec<PValue> = match args.get(2) {
+                    Some(PValue::Vec(other)) => other.lock().clone(),
+                    _ => bail!("copy_from_slice takes a slice argument"),
+                };
+                let mut items = items.lock();
+                let end = if end_raw == i64::MAX {
+                    items.len()
+                } else {
+                    end_raw as usize
+                };
+                if end > items.len() {
+                    bail!(
+                        "range end index {end} out of range for slice of length {}",
+                        items.len()
+                    );
+                }
+                let dst_len = end.saturating_sub(start);
+                if dst_len != src.len() {
+                    bail!(
+                        "source slice length ({}) does not match destination slice length ({dst_len})",
+                        src.len()
+                    );
+                }
+                for (k, val) in src.into_iter().enumerate() {
+                    items[start + k] = val;
+                }
+                PValue::Unit
+            }
             "len" => PValue::Int(items.lock().len() as i64),
             "is_empty" => PValue::Bool(items.lock().is_empty()),
             "clear" => {
@@ -557,34 +592,59 @@ fn map_method(recv: &PValue, m: &str, args: &mut [PValue]) -> Result<PValue> {
 }
 
 fn scalar_method(recv: &PValue, m: &str, args: &[PValue]) -> Result<PValue> {
-    Ok(match m {
-        "abs" => match recv {
-            PValue::Int(i) => PValue::Int(i.abs()),
-            PValue::Float(f) => PValue::Float(f.abs()),
-            _ => bail!("abs on non number"),
-        },
-        "is_multiple_of" => match recv {
-            PValue::Int(value) => PValue::Bool(value % int_arg(args) == 0),
-            _ => bail!("is_multiple_of on non integer"),
-        },
-        "is_sign_positive" => match recv {
-            PValue::Float(value) => PValue::Bool(value.is_sign_positive()),
-            _ => bail!("is_sign_positive on non float"),
-        },
-        _ if let PValue::Char(ch) = recv
-            && let Some(out) = super::methods::char_method(*ch, m) =>
-        {
-            match out {
-                CharOut::Bool(v) => PValue::Bool(v),
-                CharOut::Char(c) => PValue::Char(c),
-                CharOut::Str(s) => PValue::str(s),
-            }
+    let n = match recv {
+        PValue::Int(i) => Some(Num::Int(*i)),
+        PValue::Float(f) => Some(Num::Float(*f)),
+        _ => None,
+    };
+    if let Some(n) = n {
+        if let Some(out) = shared::num_core(n, m, &PArgs(args))? {
+            return Ok(num_out(out));
         }
-        _ => bail!(
-            "method `{m}` on {} is not supported in tokio mode",
-            recv.type_name()
-        ),
-    })
+        bail!("method `{m}` on a number is not supported in tokio mode");
+    }
+    if let PValue::Char(ch) = recv
+        && let Some(out) = shared::char_method(*ch, m)
+    {
+        return Ok(match out {
+            CharOut::Bool(v) => PValue::Bool(v),
+            CharOut::Char(c) => PValue::Char(c),
+            CharOut::Str(s) => PValue::str(s),
+        });
+    }
+    bail!(
+        "method `{m}` on {} is not supported in tokio mode",
+        recv.type_name()
+    )
+}
+
+/// Turn a neutral numeric core answer into a parallel engine value.
+fn num_out(out: NumOut) -> PValue {
+    match out {
+        NumOut::Int(i) => PValue::Int(i),
+        NumOut::Float(f) => PValue::Float(f),
+        NumOut::Bool(b) => PValue::Bool(b),
+        NumOut::SomeInt(i) => PValue::some(PValue::Int(i)),
+        NumOut::SomeFloat(f) => PValue::some(PValue::Float(f)),
+        NumOut::Nothing => PValue::none(),
+        NumOut::Ordering(o) => p_ordering(o),
+        NumOut::SomeOrdering(o) => PValue::some(p_ordering(o)),
+    }
+}
+
+/// `std::cmp::Ordering` as the enum value scripts match on, the parallel twin
+/// of the fast engine's `make_ordering`.
+fn p_ordering(o: std::cmp::Ordering) -> PValue {
+    let variant = match o {
+        std::cmp::Ordering::Less => "Less",
+        std::cmp::Ordering::Equal => "Equal",
+        std::cmp::Ordering::Greater => "Greater",
+    };
+    PValue::Enum {
+        enum_name: Arc::from("Ordering"),
+        variant: Arc::from(variant),
+        data: Arc::from(Vec::new()),
+    }
 }
 
 fn enum_method(recv: &PValue, m: &str, args: &mut [PValue]) -> Result<PValue> {
@@ -604,8 +664,10 @@ fn enum_method(recv: &PValue, m: &str, args: &mut [PValue]) -> Result<PValue> {
             } else {
                 let msg = if m == "expect" {
                     args.first().map(PValue::display).unwrap_or_default()
+                } else if &**enum_name == "Option" {
+                    "called `Option::unwrap()` on a `None` value".to_string()
                 } else {
-                    format!("called unwrap on a {variant} value")
+                    format!("called `Result::unwrap()` on an `{variant}` value")
                 };
                 bail!("{msg}");
             }
@@ -655,103 +717,99 @@ fn enum_method(recv: &PValue, m: &str, args: &mut [PValue]) -> Result<PValue> {
 }
 
 fn str_method(s: &Arc<str>, m: &str, args: &mut [PValue]) -> Result<PValue> {
-    let a0 = || args.first().map(PValue::display).unwrap_or_default();
-    let a1 = || args.get(1).map(PValue::display).unwrap_or_default();
-    let n0 = || match args.first() {
-        Some(PValue::Int(i)) => usize::try_from(*i).unwrap_or(0),
-        _ => 0,
-    };
+    if let Some(out) = shared::str_core(s, m, &PArgs(args))? {
+        return Ok(str_out(s, out));
+    }
+    if let Some(text) = shared::color_core(s, m) {
+        return Ok(PValue::str(text));
+    }
     Ok(match m {
-        "len" => PValue::Int(s.len() as i64),
-        "is_empty" => PValue::Bool(s.is_empty()),
-        "trim" => PValue::str(s.trim()),
-        "to_string" | "as_str" | "to_owned" => PValue::str(&**s),
-        "to_lowercase" | "to_ascii_lowercase" => PValue::str(s.to_lowercase()),
-        "to_uppercase" | "to_ascii_uppercase" => PValue::str(s.to_uppercase()),
-        "contains" => PValue::Bool(s.contains(&a0())),
-        "starts_with" => PValue::Bool(s.starts_with(&a0())),
-        "ends_with" => PValue::Bool(s.ends_with(&a0())),
-        "replace" => {
-            let from = args.first().map(PValue::display).unwrap_or_default();
-            let to = args.get(1).map(PValue::display).unwrap_or_default();
-            PValue::str(s.replace(&from, &to))
-        }
-        "replacen" => {
-            let from = args.first().map(PValue::display).unwrap_or_default();
-            let to = args.get(1).map(PValue::display).unwrap_or_default();
-            let count = match args.get(2) {
-                Some(PValue::Int(count)) => *count as usize,
-                _ => 0,
-            };
-            PValue::str(s.replacen(&from, &to, count))
-        }
-        "split" => {
-            let sep = a0();
-            PValue::vec(s.split(&sep).map(PValue::str).collect())
-        }
+        // Eager forms of what the fast engine serves as lazy iterators.
         "split_whitespace" => PValue::vec(s.split_whitespace().map(PValue::str).collect()),
         "lines" => PValue::vec(s.lines().map(PValue::str).collect()),
         "chars" => PValue::vec(s.chars().map(PValue::Char).collect()),
-        "trim_end" => PValue::str(s.trim_end()),
-        "trim_start" => PValue::str(s.trim_start()),
-        "parse" => {
-            let value = s.trim();
-            if let Ok(value) = value.parse::<i64>() {
-                PValue::ok(PValue::Int(value))
-            } else if let Ok(value) = value.parse::<f64>() {
-                PValue::ok(PValue::Float(value))
-            } else if let Ok(value) = value.parse::<bool>() {
-                PValue::ok(PValue::Bool(value))
-            } else {
-                PValue::err(PValue::str(format!("cannot parse `{value}`")))
-            }
-        }
-        // The rest of the String surface the fast engine carries, so a script
-        // behaves the same whichever engine runs it.
-        "repeat" => PValue::str(s.repeat(n0())),
-        "as_string" | "into_owned" | "into_string" => PValue::str(&**s),
-        "find" => match s.find(&a0()) {
-            Some(i) => PValue::some(PValue::Int(i as i64)),
-            None => PValue::none(),
-        },
-        "rfind" => match s.rfind(&a0()) {
-            Some(i) => PValue::some(PValue::Int(i as i64)),
-            None => PValue::none(),
-        },
-        "split_once" => match s.split_once(&a0()) {
-            Some((a, b)) => PValue::some(PValue::tuple(vec![PValue::str(a), PValue::str(b)])),
-            None => PValue::none(),
-        },
-        "rsplit_once" => match s.rsplit_once(&a0()) {
-            Some((a, b)) => PValue::some(PValue::tuple(vec![PValue::str(a), PValue::str(b)])),
-            None => PValue::none(),
-        },
-        "strip_prefix" => match s.strip_prefix(&a0()) {
-            Some(rest) => PValue::some(PValue::str(rest)),
-            None => PValue::none(),
-        },
-        "strip_suffix" => match s.strip_suffix(&a0()) {
-            Some(rest) => PValue::some(PValue::str(rest)),
-            None => PValue::none(),
-        },
-        "trim_matches" => PValue::str(s.trim_matches(|c: char| a0().contains(c))),
-        "trim_start_matches" => PValue::str(s.trim_start_matches(&a0())),
-        "trim_end_matches" => PValue::str(s.trim_end_matches(&a0())),
-        "rsplit" => PValue::vec(s.rsplit(&a0()).map(PValue::str).collect()),
-        "splitn" => PValue::vec(s.splitn(n0(), &a1()).map(PValue::str).collect()),
-        "as_bytes" | "into_bytes" => {
-            PValue::vec(s.bytes().map(|b| PValue::Int(i64::from(b))).collect())
-        }
         "bytes" => PValue::vec(s.bytes().map(|b| PValue::Int(i64::from(b))).collect()),
-        "char_indices" => PValue::vec(
-            s.char_indices()
-                .map(|(i, c)| PValue::tuple(vec![PValue::Int(i as i64), PValue::Char(c)]))
-                .collect(),
-        ),
-        "matches" => PValue::vec(s.matches(&a0()).map(PValue::str).collect()),
-        "count" => PValue::Int(s.chars().count() as i64),
         _ => bail!("method `{m}` on String is not supported in tokio mode"),
     })
+}
+
+/// Turn a neutral string core answer into a parallel engine value. `Keep`
+/// clones the `Arc`, so handing the receiver back stays a refcount bump.
+fn str_out(s: &Arc<str>, out: StrOut) -> PValue {
+    match out {
+        StrOut::Bool(b) => PValue::Bool(b),
+        StrOut::Int(i) => PValue::Int(i),
+        StrOut::Owned(o) => PValue::str(o),
+        StrOut::Keep => PValue::Str(s.clone()),
+        StrOut::OkKeep => PValue::ok(PValue::Str(s.clone())),
+        StrOut::Strs(v) => PValue::vec(v.into_iter().map(PValue::str).collect()),
+        StrOut::CharIdx(v) => PValue::vec(
+            v.into_iter()
+                .map(|(i, c)| PValue::tuple(vec![PValue::Int(i), PValue::Char(c)]))
+                .collect(),
+        ),
+        StrOut::Ints(v) => PValue::vec(v.into_iter().map(PValue::Int).collect()),
+        StrOut::OptOwned(o) => match o {
+            Some(x) => PValue::some(PValue::str(x)),
+            None => PValue::none(),
+        },
+        StrOut::OptInt(o) => match o {
+            Some(i) => PValue::some(PValue::Int(i)),
+            None => PValue::none(),
+        },
+        StrOut::OptPair(o) => match o {
+            Some((x, y)) => PValue::some(PValue::tuple(vec![PValue::str(x), PValue::str(y)])),
+            None => PValue::none(),
+        },
+        StrOut::Ordering(o) => p_ordering(o),
+        StrOut::Parse(p) => match p {
+            ParseNum::Int(i) => PValue::ok(PValue::Int(i)),
+            ParseNum::Float(f) => PValue::ok(PValue::Float(f)),
+            ParseNum::Bool(b) => PValue::ok(PValue::Bool(b)),
+            ParseNum::Fail(msg) => PValue::err(PValue::str(msg)),
+        },
+    }
+}
+
+/// The parallel engine's argument view for the shared cores.
+struct PArgs<'a>(&'a [PValue]);
+
+impl Args for PArgs<'_> {
+    fn text(&self, i: usize) -> String {
+        self.0.get(i).map(PValue::display).unwrap_or_default()
+    }
+
+    fn int(&self, i: usize) -> Option<i64> {
+        match self.0.get(i) {
+            Some(PValue::Int(n)) => Some(*n),
+            _ => None,
+        }
+    }
+
+    fn float(&self, i: usize) -> Option<f64> {
+        match self.0.get(i) {
+            Some(PValue::Float(f)) => Some(*f),
+            Some(PValue::Int(n)) => Some(*n as f64),
+            _ => None,
+        }
+    }
+
+    fn pattern_chars(&self, i: usize) -> Option<Vec<char>> {
+        let Some(PValue::Vec(items)) = self.0.get(i) else {
+            return None;
+        };
+        Some(
+            items
+                .lock()
+                .iter()
+                .filter_map(|v| match v {
+                    PValue::Char(c) => Some(*c),
+                    PValue::Str(text) => text.chars().next(),
+                    _ => None,
+                })
+                .collect(),
+        )
+    }
 }
 
 // -- template rendering ----------------------------------------------------

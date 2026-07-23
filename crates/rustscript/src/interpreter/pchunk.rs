@@ -44,6 +44,10 @@ pub struct PPatInfo {
 /// One compiled function, method, or closure body, `Send + Sync`.
 pub struct PChunk {
     pub code: Vec<Op>,
+    /// Source line of each op, parallel to `code`. Zero means unknown.
+    pub lines: Vec<u32>,
+    /// Source file this body was written in, shown in runtime error traces.
+    pub file: Arc<str>,
     pub num_regs: usize,
     pub num_params: usize,
     pub name: String,
@@ -68,6 +72,8 @@ pub struct PChunk {
 pub fn convert(chunk: &Chunk) -> Arc<PChunk> {
     Arc::new(PChunk {
         code: chunk.code.clone(),
+        lines: chunk.lines.clone(),
+        file: chunk.file.clone(),
         num_regs: chunk.num_regs,
         num_params: chunk.num_params,
         name: chunk.name.clone(),
