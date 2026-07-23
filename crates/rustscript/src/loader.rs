@@ -178,9 +178,6 @@ fn collect(
             continue;
         };
         let name = m.ident.to_string();
-        if m.attrs.iter().any(|a| a.path().is_ident("path")) {
-            bail!("unsupported feature: #[path] on `mod {name}`");
-        }
         if seen.contains(&name) {
             bail!(
                 "module `{name}` is declared twice in {}",
@@ -190,11 +187,31 @@ fn collect(
         seen.push(name.clone());
         let mut child_path = path.clone();
         child_path.push(name.clone());
-        let child_dir = children_dir.join(&name);
+        // `#[path = ".."]` on `mod name;` points at an explicit file, resolved relative to the
+        // declaring module's directory. A file loaded that way has its own submodules resolve
+        // relative to that file's own directory, which is what Rust does. This lets a bin split its
+        // modules into a subdirectory named after the bin, the only way to avoid cargo treating each
+        // module file in src/bin as a separate binary.
+        let path_attr = mod_path_attr(&m);
+        let child_dir;
         let (child_items, child_file) = match m.content {
             // An inline module lives in its parent's file.
-            Some((_, inline_items)) => (inline_items, file.clone()),
-            None => load_file(files, script_dir, children_dir, &name, &child_path)?,
+            Some((_, inline_items)) => {
+                child_dir = children_dir.join(&name);
+                (inline_items, file.clone())
+            }
+            None => match &path_attr {
+                Some(rel) => {
+                    let target = children_dir.join(rel);
+                    let loaded = load_file_at(files, script_dir, &target, &child_path)?;
+                    child_dir = target.parent().map_or_else(|| children_dir.to_path_buf(), Path::to_path_buf);
+                    loaded
+                }
+                None => {
+                    child_dir = children_dir.join(&name);
+                    load_file(files, script_dir, children_dir, &name, &child_path)?
+                }
+            },
         };
         let child = collect(
             modules,
@@ -212,6 +229,19 @@ fn collect(
         items: kept,
         file,
     })
+}
+
+/// The string in `#[path = ".."]` on a `mod`, if present.
+fn mod_path_attr(m: &syn::ItemMod) -> Option<String> {
+    for attr in &m.attrs {
+        if attr.path().is_ident("path")
+            && let syn::Meta::NameValue(nv) = &attr.meta
+            && let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = &nv.value
+        {
+            return Some(s.value());
+        }
+    }
+    None
 }
 
 /// Read and parse the file behind `mod name;`, trying `name.rs` then
@@ -241,11 +271,24 @@ fn load_file(
             nested.display()
         ),
     };
-    let source = std::fs::read_to_string(&file)
+    load_file_at(files, script_dir, &file, child_path)
+}
+
+/// Read and parse one module source file at an explicit path, recording it for the checker.
+fn load_file_at(
+    files: &mut Vec<(PathBuf, String)>,
+    script_dir: &Path,
+    file: &Path,
+    child_path: &[String],
+) -> Result<(Vec<Item>, Arc<str>)> {
+    if !file.is_file() {
+        bail!("cannot find module `{}`: {} does not exist", child_path.join("::"), file.display());
+    }
+    let source = std::fs::read_to_string(file)
         .map_err(|e| anyhow!("cannot read {}: {e}", file.display()))?;
     let ast =
         syn::parse_file(&source).map_err(|e| anyhow!("parse error in {}: {e}", file.display()))?;
-    let rel = file.strip_prefix(script_dir).unwrap_or(&file).to_path_buf();
+    let rel = file.strip_prefix(script_dir).unwrap_or(file).to_path_buf();
     let display: Arc<str> = Arc::from(rel.to_string_lossy().as_ref());
     files.push((rel, source));
     Ok((ast.items, display))
@@ -268,12 +311,17 @@ fn graft_crate_deps(modules: &mut Vec<ModuleSrc>, script_path: &Path) -> Result<
         let ast = syn::parse_file(&source)
             .map_err(|e| anyhow!("parse error in {}: {e}", lib.display()))?;
         let mut files: Vec<(PathBuf, String)> = vec![(PathBuf::from("lib.rs"), source)];
+        // Rust code refers to a crate by its identifier, so a hyphenated package
+        // name like `verify-common` is `verify_common` in `use`. Cargo does this
+        // mapping for the checker's real path dependency; the grafted module must
+        // match it or `use verify_common::..` resolves against nothing at runtime.
+        let module_name = name.replace('-', "_");
         let root = collect(
             modules,
             &mut files,
             &src_dir,
             &src_dir,
-            vec![name.clone()],
+            vec![module_name],
             Arc::from("lib.rs"),
             ast.items,
         )?;

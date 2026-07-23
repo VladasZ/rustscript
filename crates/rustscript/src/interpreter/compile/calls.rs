@@ -649,10 +649,25 @@ fn is_transparent_new(segments: &[String]) -> bool {
         && matches!(receiver.as_str(), "Box" | "Rc" | "Arc" | "RefCell" | "Cell")
 }
 
+// A bare identifier pattern that names a unit variant, not a new binding. Real Rust tells the two
+// apart by name resolution, which we do not have, so we lean on the naming rule these scripts
+// follow. Bindings are snake_case and variants are UpperCamel. So an uppercase-initial ident with no
+// ref, mut, or subpattern is a unit-variant pattern like None, not a binding. Without this a bare
+// None arm lowers to an always-true catch-all and matches a Some value.
+pub(super) fn is_unit_variant_ident(id: &syn::PatIdent) -> bool {
+    id.by_ref.is_none()
+        && id.mutability.is_none()
+        && id.subpat.is_none()
+        && id.ident.to_string().chars().next().is_some_and(|c| c.is_ascii_uppercase())
+}
+
 fn lower_pattern(pattern: &Pat) -> PPat {
     match pattern {
         Pat::Wild(_) => PPat::Wild,
         Pat::Rest(_) => PPat::Rest,
+        Pat::Ident(ident) if is_unit_variant_ident(ident) => PPat::Path {
+            name: Some(ident.ident.to_string()),
+        },
         Pat::Ident(ident) => PPat::Ident {
             name: ident.ident.to_string(),
             sub: ident

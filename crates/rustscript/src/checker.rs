@@ -293,6 +293,7 @@ serde_yaml = "0.9"
 colored = "3"
 base64 = "0.22"
 hex = "0.4"
+sha2 = "0.11"
 ctrlc = "3"
 tempfile = "3"
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }

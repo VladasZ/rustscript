@@ -190,6 +190,52 @@ pub use crate::inner::{Widget, WIDGET_NAME};
 }
 
 #[test]
+fn path_attribute_points_at_an_explicit_file() {
+    // A bin splits its modules into a subdirectory via #[path], and a #[path] module's own
+    // submodules resolve relative to that file's directory, so the nested inner lands in sub/.
+    let dir = fixture(&[
+        (
+            "main.rs",
+            r#"
+#[path = "sub/state.rs"]
+mod state;
+use state::greeting;
+
+fn main() {
+    println!("{}", greeting());
+}
+"#,
+        ),
+        (
+            "sub/state.rs",
+            r#"
+#[path = "helpers/inner.rs"]
+mod inner;
+
+pub fn greeting() -> String {
+    format!("hi {}", inner::who())
+}
+"#,
+        ),
+        (
+            "sub/helpers/inner.rs",
+            r#"
+pub fn who() -> &'static str {
+    "world"
+}
+"#,
+        ),
+    ]);
+    let out = run_script(&dir.join("main.rs"));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi world\n");
+}
+
+#[test]
 fn missing_module_file_errors() {
     let dir = fixture(&[(
         "main.rs",
