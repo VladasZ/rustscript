@@ -1,6 +1,9 @@
 //! Bridges for the extra crates a script may use: base64, chrono,
 //! rand and friends. Split from `builtins.rs`.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use anyhow::{Result, bail};
 
 use super::native::Native;
@@ -44,6 +47,17 @@ pub(super) fn crate_bridge(module: &str, func: &str, args: &[Value]) -> Result<O
             )),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
+        // sha2 -------------------------------------------------------------
+        ("Sha256", "new") | ("Sha256", "default") => {
+            use sha2::Digest;
+            Native::Sha256(sha2::Sha256::new()).wrap()
+        }
+        ("Sha256", "digest") => {
+            use sha2::Digest;
+            bytes_to_vec(&sha2::Sha256::digest(bytes_arg(args.first())))
+        }
+        // regex free functions ---------------------------------------------
+        ("regex", "escape") => Value::str(regex::escape(&s0())),
         // hex --------------------------------------------------------------
         ("hex", "encode") => Value::str(hex::encode(bytes_arg(args.first()))),
         ("hex", "decode") => match hex::decode(s0()) {
@@ -229,4 +243,33 @@ pub(super) fn rng_method(name: &str, args: &[Value]) -> Result<Value> {
         }
         _ => bail!("unknown method `{name}` on Rng"),
     })
+}
+
+/// Methods on an in-progress `Sha256` hasher handle. `update` feeds bytes and
+/// returns unit like the real `Digest::update`, `chain_update` feeds then hands
+/// the same hasher back for chaining, and `finalize` reads the digest as a byte
+/// vec. `finalize` clones the hasher rather than consuming it, so the byte vec
+/// pairs with `hex::encode` exactly as the compiled crate does.
+pub(super) fn sha256_method(
+    handle: &Rc<RefCell<Native>>,
+    method: &str,
+    args: &[Value],
+) -> Result<Option<Value>> {
+    use sha2::Digest;
+    let mut h = handle.borrow_mut();
+    let Native::Sha256(hasher) = &mut *h else {
+        return Ok(None);
+    };
+    Ok(Some(match method {
+        "update" => {
+            hasher.update(bytes_arg(args.first()));
+            Value::Unit
+        }
+        "chain_update" => {
+            hasher.update(bytes_arg(args.first()));
+            Value::Native(handle.clone())
+        }
+        "finalize" => bytes_to_vec(&hasher.clone().finalize()),
+        _ => return Ok(None),
+    }))
 }

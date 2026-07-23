@@ -13,6 +13,12 @@ fn main() -> Result<()> {
     let count = re.find_iter(text).count();
     println!("entries: {count}");
 
+    // The iterator terminal `last` drains to the final item.
+    let last_start = re.find_iter(text).last().map(|m| m.start()).unwrap_or(0);
+    println!("last entry starts at: {last_start}");
+    let last_level = re.captures_iter(text).last().map(|c| c[4].to_string()).unwrap_or_default();
+    println!("last level: {last_level}");
+
     if let Some(caps) = re.captures(text) {
         println!("first year: {}", &caps[1]);
         println!("first level: {}", &caps[4]);
@@ -28,5 +34,8 @@ fn main() -> Result<()> {
     let errors = Regex::new(r"ERROR")?;
     let redacted = errors.replace_all(text, "WARN");
     println!("redacted: {redacted}");
+
+    // regex::escape turns metacharacters into literals.
+    println!("escaped: {}", regex::escape("a.b*c?"));
     Ok(())
 }

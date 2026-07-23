@@ -490,6 +490,13 @@ impl Interp {
                     .iterator_next(iterator)?
                     .map(Value::some)
                     .unwrap_or_else(Value::none),
+                "last" => {
+                    let mut last = None;
+                    while let Some(item) = self.iterator_next(iterator)? {
+                        last = Some(item);
+                    }
+                    last.map(Value::some).unwrap_or_else(Value::none)
+                }
                 "collect" | "to_vec" => Value::vec(self.drain_iterator(iterator)?),
                 "collect_string" => Value::str(
                     self.drain_iterator(iterator)?

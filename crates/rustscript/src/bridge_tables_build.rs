@@ -128,6 +128,7 @@ pub const BRIDGES: &[Bridge] = &[
     ),
     b("crates_bridge.rs", "base64_method", Engine::Fast, "Base64"),
     b("crates_bridge.rs", "rng_method", Engine::Fast, "Rng"),
+    b("crates_bridge.rs", "sha256_method", Engine::Fast, "Sha256"),
     b("winreg_bridge.rs", "regkey_method", Engine::Fast, "RegKey"),
     b(
         "service_bridge.rs",
@@ -149,6 +150,7 @@ pub const BRIDGES: &[Bridge] = &[
         "ExitStatus",
     ),
     b("std_bridge.rs", "std_stream_method", Engine::Fast, "Native"),
+    b("std_bridge.rs", "openoptions_method", Engine::Fast, "OpenOptions"),
     b("http.rs", "header_map_method", Engine::Fast, "HeaderMap"),
     b(
         "http.rs",

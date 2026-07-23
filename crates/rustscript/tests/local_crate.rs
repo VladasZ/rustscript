@@ -102,6 +102,37 @@ fn grafts_local_crate_at_runtime() {
 }
 
 #[test]
+fn grafts_hyphenated_local_crate() {
+    // A hyphenated package name like `my-shared` is `my_shared` in Rust code.
+    // Cargo maps the hyphen to an underscore for the crate identifier, so the
+    // grafted module has to be named `my_shared`, not the raw dependency key.
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!("rustscript_hyphen_{}_{}", std::process::id(), id));
+    if root.exists() {
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+    write(
+        &root.join("my-shared/Cargo.toml"),
+        "[package]\nname = \"my-shared\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[dependencies]\n[workspace]\n",
+    );
+    write(&root.join("my-shared/src/lib.rs"), "pub mod util;\n");
+    write(&root.join("my-shared/src/util.rs"), "pub fn who() -> String { \"world\".to_string() }\n");
+    write(
+        &root.join("app/Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[dependencies]\nmy-shared = { path = \"../my-shared\" }\n[workspace]\n",
+    );
+    let bin = root.join("app/src/bin/foo.rs");
+    write(
+        &bin,
+        "#!/usr/bin/env rust\nuse my_shared::util::who;\nfn main() { println!(\"hi {}\", who()); }\n",
+    );
+    let out = run_bin(&bin, true);
+    std::fs::remove_dir_all(&root).unwrap();
+    assert!(out.status.success(), "run failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi world\n");
+}
+
+#[test]
 fn checks_local_crate_as_path_dep() {
     let (bin, root) = fixture();
     // The `check` command, not `run`. Only `check` builds a cargo project and

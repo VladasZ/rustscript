@@ -86,7 +86,7 @@ selects. Unmarked methods run on both.
 
 ## Iterator
 
-`all` (fast), `any` (fast), `as_str` (fast), `cloned` (fast), `collect` (fast), `collect_string` (fast), `copied` (fast), `filter` (fast), `filter_map` (fast), `find` (fast), `flat_map` (fast), `fold` (fast), `for_each` (fast), `map` (fast), `max` (fast), `max_by_key` (fast), `min` (fast), `min_by_key` (fast), `next` (fast), `partition` (fast), `peek` (fast), `peekable` (fast), `position` (fast), `reduce` (fast), `rev` (fast), `skip_while` (fast), `take_while` (fast), `to_vec` (fast)
+`all` (fast), `any` (fast), `as_str` (fast), `cloned` (fast), `collect` (fast), `collect_string` (fast), `copied` (fast), `filter` (fast), `filter_map` (fast), `find` (fast), `flat_map` (fast), `fold` (fast), `for_each` (fast), `last` (fast), `map` (fast), `max` (fast), `max_by_key` (fast), `min` (fast), `min_by_key` (fast), `next` (fast), `partition` (fast), `peek` (fast), `peekable` (fast), `position` (fast), `reduce` (fast), `rev` (fast), `skip_while` (fast), `take_while` (fast), `to_vec` (fast)
 
 ## Map
 
@@ -102,7 +102,11 @@ selects. Unmarked methods run on both.
 
 ## native handles (files, sockets, readers, processes)
 
-`accept` (fast), `by_ref` (fast), `close` (fast), `collect` (fast), `connect` (fast), `delete` (fast), `duration_since` (fast), `elapsed` (fast), `flush`, `get` (fast), `head` (fast), `id` (fast), `incoming` (fast), `inner` (fast), `is_terminal` (fast), `kill` (fast), `kind` (fast), `lines`, `local_addr` (fast), `lock` (fast), `metadata` (fast), `next`, `patch` (fast), `path` (fast), `peer_addr` (fast), `post` (fast), `put` (fast), `read` (fast), `read_line`, `read_to_end` (fast), `read_to_string`, `seek` (fast), `send` (fast), `send_to` (fast), `set_broadcast` (fast), `set_len` (fast), `shutdown` (fast), `stderr` (fast), `stdin` (fast), `sync_all` (fast), `sync_data` (fast), `try_clone` (fast), `try_wait` (fast), `wait` (fast), `wait_with_output` (fast), `write`, `write_all`
+`accept` (fast), `by_ref` (fast), `close` (fast), `collect` (fast), `connect` (fast), `delete` (fast), `duration_since` (fast), `elapsed` (fast), `flush`, `get` (fast), `head` (fast), `id` (fast), `incoming` (fast), `inner` (fast), `is_terminal` (fast), `kill` (fast), `kind` (fast), `lines`, `local_addr` (fast), `lock` (fast), `metadata` (fast), `next`, `patch` (fast), `path` (fast), `peer_addr` (fast), `post` (fast), `put` (fast), `read` (fast), `read_line`, `read_to_end` (fast), `read_to_string`, `seek` (fast), `send` (fast), `send_to` (fast), `set_broadcast` (fast), `set_len` (fast), `set_modified` (fast), `shutdown` (fast), `stderr` (fast), `stdin` (fast), `sync_all` (fast), `sync_data` (fast), `try_clone` (fast), `try_wait` (fast), `wait` (fast), `wait_with_output` (fast), `write`, `write_all`
+
+## OpenOptions
+
+`append` (fast), `create` (fast), `create_new` (fast), `open` (fast), `read` (fast), `truncate` (fast), `write` (fast)
 
 ## Option
 
@@ -151,6 +155,10 @@ selects. Unmarked methods run on both.
 ## ServiceManager
 
 `access` (fast), `manager_access` (fast), `name` (fast), `open_service` (fast)
+
+## Sha256
+
+`chain_update` (fast), `finalize` (fast), `update` (fast)
 
 ## Status
 

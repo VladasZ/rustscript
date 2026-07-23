@@ -515,6 +515,9 @@ pub(super) fn builtin_method(
             if let Some(v) = regex_native_method(h, name, &*args)? {
                 return Ok(v);
             }
+            if let Some(v) = super::crates_bridge::sha256_method(h, name, &*args)? {
+                return Ok(v);
+            }
             match super::native::native_method(h, name, args)? {
                 Some(v) => Ok(v),
                 None => generic_method(recv, name, &*args),
@@ -559,6 +562,7 @@ pub(super) fn builtin_method(
             "OsString" => os_string_method(s, name),
             "DirEntry" => dir_entry_method(s, name),
             "FileType" => file_type_method(s, name),
+            "OpenOptions" => super::std_bridge::openoptions_method(s, name, &*args),
             _ => generic_method(recv, name, &*args),
         },
         _ => generic_method(recv, name, &*args),

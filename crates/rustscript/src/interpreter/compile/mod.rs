@@ -529,6 +529,7 @@ pub fn first_generic_type(seg: &syn::PathSegment) -> Option<&syn::Type> {
 
 fn collect_pattern_names(pat: &Pat, out: &mut Vec<String>) {
     match pat {
+        Pat::Ident(id) if calls::is_unit_variant_ident(id) => {}
         Pat::Ident(id) => {
             out.push(id.ident.to_string());
             if let Some(sub) = &id.subpat {

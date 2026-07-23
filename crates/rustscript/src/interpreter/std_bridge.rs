@@ -700,6 +700,33 @@ pub(super) fn open_file(path: &str, opts: &std::fs::OpenOptions) -> Value {
     }
 }
 
+// Methods on the OpenOptions struct built by `OpenOptions::new`. The builder setters return a
+// fresh struct with one flag flipped, matching the real `&mut self -> &mut Self` chain, and
+// `open` assembles a real std OpenOptions from the flags and opens the file.
+pub(super) fn openoptions_method(s: &StructData, name: &str, args: &[Value]) -> Result<Value> {
+    const FLAGS: [&str; 6] = ["read", "write", "append", "create", "create_new", "truncate"];
+    let field_bool = |k: &str| matches!(s.get(k), Some(Value::Bool(true)));
+    if FLAGS.contains(&name) {
+        let on = matches!(args.first(), Some(Value::Bool(true)));
+        let pairs = FLAGS
+            .iter()
+            .map(|&k| (Rc::from(k), Value::Bool(if k == name { on } else { field_bool(k) })));
+        return Ok(Value::struct_of("OpenOptions", pairs));
+    }
+    if name == "open" {
+        let path = args.first().map(path_like).unwrap_or_default();
+        let mut opts = std::fs::OpenOptions::new();
+        opts.read(field_bool("read"))
+            .write(field_bool("write"))
+            .append(field_bool("append"))
+            .create(field_bool("create"))
+            .create_new(field_bool("create_new"))
+            .truncate(field_bool("truncate"));
+        return Ok(open_file(&path, &opts));
+    }
+    bail!("unknown method `{name}` on OpenOptions")
+}
+
 /// Bridges for the extra crates a script may `use`. Reached when a
 pub(super) fn opt_path(p: Option<std::path::PathBuf>) -> Value {
     match p {

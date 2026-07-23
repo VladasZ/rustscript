@@ -42,6 +42,8 @@ pub enum Native {
     Regex(RegexValue),
     RegexMatch(MatchValue),
     RegexCaptures(CapturesValue),
+    /// An in-progress SHA-256 hasher, fed by `update` and read by `finalize`.
+    Sha256(sha2::Sha256),
     Iterator(IteratorState),
     /// A lazy line iterator, so `for line in reader.lines()` streams instead of
     /// buffering the whole input first.
@@ -75,6 +77,7 @@ impl Native {
             Native::Regex(_) => "Regex",
             Native::RegexMatch(_) => "Match",
             Native::RegexCaptures(_) => "Captures",
+            Native::Sha256(_) => "Sha256",
             Native::Iterator(_) => "Iterator",
             Native::Lines(_) => "Lines",
             Native::Closed => "Closed",
@@ -294,6 +297,20 @@ pub fn native_method(
                 return Ok(Some(io_err(r.get_ref().set_len(n), |()| Value::Unit)));
             }
             bail!("set_len on non-file {}", h.type_name());
+        }
+        "set_modified" => {
+            let time = match args.first() {
+                Some(Value::Native(other)) => match &*other.borrow() {
+                    Native::SystemTime(t) => *t,
+                    o => bail!("set_modified needs a SystemTime, got {}", o.type_name()),
+                },
+                _ => bail!("set_modified needs a SystemTime argument"),
+            };
+            let h = handle.borrow();
+            if let Native::File(r) = &*h {
+                return Ok(Some(io_err(r.get_ref().set_modified(time), |()| Value::Unit)));
+            }
+            bail!("set_modified on non-file {}", h.type_name());
         }
         "metadata" => {
             let h = handle.borrow();
