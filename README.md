@@ -180,7 +180,7 @@ removes everything at once.
 The repository is also a GitHub Action:
 
 ```yaml
-- uses: VladasZ/rustscript@v0.1
+- uses: VladasZ/rustscript@v0.2
   with:
     script: tools/release.rs
     args: --dry-run
@@ -250,7 +250,7 @@ See the [benchmark guide](bench/README.md) for methodology and results, and the
 ## Releases
 
 RustScript is still 0.x, so minor versions may contain breaking changes. Exact
-tags such as `v0.1.5` never move; the `v0.1` tag follows the newest patch in
+tags such as `v0.2.5` never move; the `v0.2` tag follows the newest patch in
 that line. Pin an exact tag when a workflow must not change.
 
 `rust update` finds the newest full GitHub release and installs it with Cargo.

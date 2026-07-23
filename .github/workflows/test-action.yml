@@ -86,7 +86,7 @@ jobs:
       # local checkout. This one exercises the published reference instead, so
       # the exact line the README tells people to write is covered, including
       # GitHub resolving the action from a moving tag.
-      - uses: VladasZ/rustscript@v0.1
+      - uses: VladasZ/rustscript@v0.2
 
       - name: The published action installs and runs
         shell: bash

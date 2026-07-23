@@ -10,7 +10,7 @@ Install only, then use `rust` from any later step in the job.
 ```yaml
 steps:
   - uses: actions/checkout@v5
-  - uses: VladasZ/rustscript@v0.1
+  - uses: VladasZ/rustscript@v0.2
   - run: rust run tools/report.rs
 ```
 
@@ -19,7 +19,7 @@ Install and run in one step.
 ```yaml
 steps:
   - uses: actions/checkout@v5
-  - uses: VladasZ/rustscript@v0.1
+  - uses: VladasZ/rustscript@v0.2
     with:
       script: tools/release.rs
       args: --dry-run
@@ -28,16 +28,16 @@ steps:
 Pin the interpreter version independently of the action.
 
 ```yaml
-  - uses: VladasZ/rustscript@v0.1
+  - uses: VladasZ/rustscript@v0.2
     with:
-      version: v0.1.0
+      version: v0.2.0
 ```
 
 ## Inputs
 
 | input | default | meaning |
 | --- | --- | --- |
-| `version` | the calling tag, else newest | version to install, for example `v0.1.0` |
+| `version` | the calling tag, else newest | version to install, for example `v0.2.0` |
 | `script` | empty | script to execute, empty means install only |
 | `mode` | `run` | `run`, `build` or `check` |
 | `args` | empty | extra arguments passed to the script |
@@ -53,7 +53,7 @@ images already provide.
 
 | output | meaning |
 | --- | --- |
-| `version` | the version that was installed, for example `v0.1.0` |
+| `version` | the version that was installed, for example `v0.2.0` |
 | `bin-path` | directory holding the installed binary |
 
 ## How the version is resolved
@@ -62,12 +62,12 @@ The action checks three things in order.
 
 1. The `version` input, when it is set.
 2. The tag the action itself was called with, when that tag is an exact version
-   like `v0.1.0`. This is what makes a pinned action install a matching
+   like `v0.2.0`. This is what makes a pinned action install a matching
    interpreter with no extra configuration.
-3. The newest release otherwise, which is what a moving tag like `@v0.1` or a
+3. The newest release otherwise, which is what a moving tag like `@v0.2` or a
    branch like `@main` falls back to.
 
-A leading `v` is optional in the input, so `0.1.0` and `v0.1.0` both work.
+A leading `v` is optional in the input, so `0.2.0` and `v0.2.0` both work.
 
 ## Platforms
 
@@ -103,14 +103,14 @@ The workflow then does all of this in one run.
    `crates/rustscript/Cargo.toml`.
 2. Stops if that tag already exists on the remote.
 3. Rewrites the package version, syncs `Cargo.lock`, and commits it as
-   `release v0.1.1`.
+   `release v0.2.5`.
 4. Pushes the commit and the tag.
 5. Checks the tag matches the crate version, so assets can never disagree with
    the tag they ship under.
 6. Builds all five assets on native runners, so nothing is cross compiled.
 7. Writes `SHA256SUMS` over the assets.
 8. Creates the release with generated notes.
-9. Force moves the minor tag, so `v0.1` follows the newest `v0.1.z`.
+9. Force moves the minor tag, so `v0.2` follows the newest `v0.2.z`.
 
 It is one workflow rather than a bump workflow feeding a release workflow on
 purpose. A tag pushed with the default `GITHUB_TOKEN` does not trigger other
