@@ -80,13 +80,16 @@ pub fn markdown() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::read_to_string;
 
     /// The committed page must match what the tables render right now.
     /// Regenerate with `rust supported md > docs/supported.md`.
     #[test]
     fn supported_page_is_current() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/supported.md");
-        let committed = std::fs::read_to_string(path).unwrap_or_default();
+        let committed = read_to_string(path)
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
         assert_eq!(
             committed,
             markdown(),
