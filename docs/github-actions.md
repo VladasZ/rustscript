@@ -131,8 +131,8 @@ git push origin v0.2.0-rc.1
 
 That is also the only way to cut a prerelease, since the dispatch form offers
 just the three ordinary bumps. A tag with a hyphen in it is marked as a
-prerelease on the release, does not move the minor tag, and is ignored by
-`rust update`.
+prerelease on the release, does not move the minor tag, and is never picked by
+a bare `rust update`. Naming it installs it, `rust update v0.2.0-rc.1`.
 
 ## CI
 

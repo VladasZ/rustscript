@@ -54,7 +54,7 @@ rust check FILE.rs   validate without running
 rust build FILE.rs   compile, cache, and run a native binary
 rust supported       list every bridged method per receiver and engine
 rust clean           clear cached checks and builds
-rust update          install the newest RustScript release
+rust update [VER]    install a release, the newest one by default
 rust --version       show version and build information
 ```
 
@@ -262,8 +262,17 @@ RustScript is still 0.x, so minor versions may contain breaking changes. Exact
 tags such as `v0.2.5` never move; the `v0.2` tag follows the newest patch in
 that line. Pin an exact tag when a workflow must not change.
 
-`rust update` finds the newest full GitHub release and installs it with Cargo.
-Prereleases and moving minor tags are not update targets.
+`rust update` installs the newest full release. It downloads the prebuilt
+binary for the current platform, verifies it against the published
+`SHA256SUMS`, runs it once to confirm the version, and only then replaces the
+binary in the cargo bin directory. The previous binary is kept until the swap
+succeeds, so a failed update rolls back. Cargo's own install list is updated
+as well, so `cargo install --list` stays correct.
+
+Prereleases and moving minor tags are never picked automatically. Naming a tag
+installs exactly that version, so `rust update v0.2.3` also downgrades and
+repairs a broken binary. `--from-source` builds with Cargo instead, which is
+also the automatic fallback on a platform with no prebuilt binary.
 
 ## Licence
 

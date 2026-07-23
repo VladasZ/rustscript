@@ -67,7 +67,7 @@ fn real_main() -> Result<()> {
             build_run(file, &all[2..])
         }
         "clean" => checker::clean(),
-        "update" => update::update(),
+        "update" => update::update(&all[1..]),
         "supported" => {
             // `rust supported md` prints the docs page for regeneration.
             if all.get(1).map(String::as_str) == Some("md") {
@@ -249,7 +249,8 @@ usage:
   rust check FILE.rs   validate with cargo check, does not run
   rust supported       list every bridged method per receiver and engine
   rust clean           clear the cache
-  rust update          install the latest RustScript from GitHub
+  rust update [VER]    install a prebuilt release, the newest one by default,
+                       --from-source builds it with cargo instead
   rust --version       show version and build information
   rust help            show this help"
     );
