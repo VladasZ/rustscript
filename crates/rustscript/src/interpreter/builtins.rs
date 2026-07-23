@@ -28,6 +28,11 @@ impl Interp {
             if name == "None" {
                 return Ok(Value::none());
             }
+            // A function-local `use std::time::UNIX_EPOCH` does not register in the uses map, so the
+            // bare name resolves here, the same way the other std constants below do.
+            if name == "UNIX_EPOCH" {
+                return Ok(super::native::Native::SystemTime(std::time::UNIX_EPOCH).wrap());
+            }
             if let Some(v) = base64_engine(name) {
                 return Ok(v);
             }
@@ -75,6 +80,10 @@ impl Interp {
                 "EXE_SUFFIX" => return Ok(Value::str(std::env::consts::EXE_SUFFIX)),
                 _ => {}
             }
+        }
+        // std::time::UNIX_EPOCH (imported bare, resolved via its use path) or SystemTime::UNIX_EPOCH.
+        if last == "UNIX_EPOCH" && matches!(ty.as_str(), "time" | "SystemTime") {
+            return Ok(super::native::Native::SystemTime(std::time::UNIX_EPOCH).wrap());
         }
         if let Some(v) = int_limit(ty, last) {
             return Ok(v);
