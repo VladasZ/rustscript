@@ -36,7 +36,10 @@ fn main() -> anyhow::Result<()> {
     let copy = copy.to_string_lossy().to_string();
     fs::copy(&path, &copy)?;
     let mtime = fs::metadata(&path)?.modified()?;
-    OpenOptions::new().write(true).open(&copy)?.set_modified(mtime)?;
+    OpenOptions::new()
+        .write(true)
+        .open(&copy)?
+        .set_modified(mtime)?;
     println!("copy bytes: {}", fs::metadata(&copy)?.len());
 
     std::fs::remove_file(&path)?;

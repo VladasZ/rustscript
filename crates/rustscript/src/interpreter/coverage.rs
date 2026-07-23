@@ -246,7 +246,9 @@ fn writes(op: &Op) -> Option<u16> {
         | Op::MakeEnum { dst, .. }
         | Op::LoadGlobal { dst, .. }
         | Op::LoadUpvalue { dst, .. }
+        | Op::LoadCell { dst, .. }
         | Op::Index { dst, .. }
+        | Op::Deref { dst, .. }
         | Op::GetField { dst, .. } => Some(*dst),
         _ => None,
     }

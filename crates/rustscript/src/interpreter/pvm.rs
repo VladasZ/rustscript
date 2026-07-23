@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::mem::{replace, take};
 use std::sync::Arc;
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
 
@@ -17,7 +17,7 @@ use super::pnative::PNative;
 use super::pops::{
     self, apply_bin, apply_bin_imm, apply_un, cmp_test, cmp_test_imm, int_of, try_bind,
 };
-use super::pvalue::{PClosure, PStructShape, PValue};
+use super::pvalue::{PClosure, PStructShape, PUpvalue, PValue};
 use super::vm_support::trace_error;
 
 const MAX_CALL_DEPTH: usize = 100_000;
@@ -70,7 +70,7 @@ impl PInterp {
         self: &Arc<Self>,
         chunk: &Arc<PChunk>,
         args: &[PValue],
-        upvalues: &[PValue],
+        upvalues: &[PUpvalue],
     ) -> Result<PValue> {
         if args.len() != chunk.num_params {
             bail!(
@@ -91,9 +91,10 @@ impl PInterp {
         self: &Arc<Self>,
         entry: &Arc<PChunk>,
         stack: &mut Vec<PValue>,
-        entry_upvalues: &[PValue],
+        entry_upvalues: &[PUpvalue],
     ) -> Result<PValue> {
         let mut frames: Vec<Frame> = Vec::new();
+        let mut local_cells: HashMap<usize, Arc<Mutex<PValue>>> = HashMap::new();
         let mut cur = entry.clone();
         let mut cur_clo: Option<Arc<PClosure>> = None;
         let mut base = 0usize;
@@ -110,13 +111,16 @@ impl PInterp {
                     match frames.pop() {
                         None => return Ok(v),
                         Some(f) => {
+                            let callee_base = base;
+                            let callee_end = callee_base + cur.num_regs;
+                            local_cells
+                                .retain(|slot, _| *slot < callee_base || *slot >= callee_end);
                             cur = f.chunk;
                             cur_clo = f.closure;
                             ip = f.ip;
                             // The callee's final parameter values go back into the
                             // caller's arg window, where a `&mut` argument
                             // writeback emitted by the compiler picks them up.
-                            let callee_base = base;
                             base = f.base;
                             for i in 0..f.argc as usize {
                                 stack[base + f.abase as usize + i] =
@@ -185,11 +189,34 @@ impl PInterp {
                         stack[base + *dst as usize] = v;
                     }
                     Op::LoadUpvalue { dst, idx } => {
-                        let upvals: &[PValue] = match &cur_clo {
+                        let upvals: &[PUpvalue] = match &cur_clo {
                             Some(c) => &c.captured,
                             None => entry_upvalues,
                         };
-                        stack[base + *dst as usize] = upvals[*idx as usize].clone();
+                        stack[base + *dst as usize] = upvals[*idx as usize].get();
+                    }
+                    Op::LoadCell { dst, cell } => {
+                        let slot = base + *cell as usize;
+                        let Some(value) = local_cells.get(&slot) else {
+                            bail!("missing mutable capture cell");
+                        };
+                        stack[base + *dst as usize] = value.lock().clone();
+                    }
+                    Op::StoreCell { cell, src } => {
+                        let slot = base + *cell as usize;
+                        let Some(value) = local_cells.get(&slot) else {
+                            bail!("missing mutable capture cell");
+                        };
+                        *value.lock() = stack[base + *src as usize].clone();
+                    }
+                    Op::StoreUpvalue { idx, src } => {
+                        let upvalues: &[PUpvalue] = match &cur_clo {
+                            Some(closure) => &closure.captured,
+                            None => entry_upvalues,
+                        };
+                        if !upvalues[*idx as usize].set(stack[base + *src as usize].clone()) {
+                            bail!("cannot assign to immutable capture");
+                        }
                     }
                     Op::Move { dst, src } => {
                         stack[base + *dst as usize] = stack[base + *src as usize].clone();
@@ -504,8 +531,15 @@ impl PInterp {
                         };
                     }
                     Op::MakeClosure { dst, child } => {
-                        let clo =
-                            self.make_closure(&cur, *child, stack, base, &cur_clo, entry_upvalues);
+                        let clo = Self::make_closure(
+                            &cur,
+                            *child,
+                            stack,
+                            base,
+                            &cur_clo,
+                            entry_upvalues,
+                            &mut local_cells,
+                        );
                         stack[base + *dst as usize] = PValue::Closure(clo);
                     }
                     Op::Index { dst, base: b, key } => {
@@ -519,6 +553,22 @@ impl PInterp {
                             &stack[base + *key as usize],
                             stack[base + *val as usize].clone(),
                         )?;
+                    }
+                    Op::Deref { dst, src } => {
+                        stack[base + *dst as usize] = match &stack[base + *src as usize] {
+                            PValue::Ref(reference) => reference
+                                .get()
+                                .ok_or_else(|| anyhow!("dereference of a dangling reference"))?,
+                            value => value.clone(),
+                        };
+                    }
+                    Op::SetDeref { target, val } => {
+                        let PValue::Ref(reference) = &stack[base + *target as usize] else {
+                            bail!("assignment through a non-reference value");
+                        };
+                        if !reference.set(stack[base + *val as usize].clone()) {
+                            bail!("assignment through a dangling reference");
+                        }
                     }
                     Op::GetField {
                         dst,
@@ -611,8 +661,15 @@ impl PInterp {
                         stack[base + *dst as usize] = last;
                     }
                     Op::Spawn { dst, child } => {
-                        let clo =
-                            self.make_closure(&cur, *child, stack, base, &cur_clo, entry_upvalues);
+                        let clo = Self::make_closure(
+                            &cur,
+                            *child,
+                            stack,
+                            base,
+                            &cur_clo,
+                            entry_upvalues,
+                            &mut local_cells,
+                        );
                         let interp = self.clone();
                         let handle = self.rt.spawn_blocking(move || {
                             interp
@@ -641,25 +698,36 @@ impl PInterp {
     }
 
     fn make_closure(
-        self: &Arc<Self>,
         cur: &Arc<PChunk>,
         child: u16,
         stack: &[PValue],
         base: usize,
         cur_clo: &Option<Arc<PClosure>>,
-        entry_upvalues: &[PValue],
+        entry_upvalues: &[PUpvalue],
+        local_cells: &mut HashMap<usize, Arc<Mutex<PValue>>>,
     ) -> Arc<PClosure> {
         let child_chunk = cur.children[child as usize].clone();
         let caps = &cur.child_caps[child as usize];
-        let upvals: &[PValue] = match cur_clo {
+        let upvals: &[PUpvalue] = match cur_clo {
             Some(c) => &c.captured,
             None => entry_upvalues,
         };
-        let captured: Vec<PValue> = caps
+        let captured: Vec<PUpvalue> = caps
             .iter()
             .map(|c| match c {
-                CapSource::Local(reg) => stack[base + *reg as usize].clone(),
-                CapSource::Upvalue(idx) => upvals[*idx as usize].clone(),
+                CapSource::Local(reg) => PUpvalue::Value(stack[base + *reg as usize].clone()),
+                CapSource::Upvalue(idx) | CapSource::MutableUpvalue(idx) => {
+                    upvals[*idx as usize].clone()
+                }
+                CapSource::MutableLocal(reg) => {
+                    let slot = base + *reg as usize;
+                    let value = stack[slot].clone();
+                    let cell = local_cells
+                        .entry(slot)
+                        .or_insert_with(|| Arc::new(Mutex::new(value)))
+                        .clone();
+                    PUpvalue::Mutable(cell)
+                }
             })
             .collect();
         Arc::new(PClosure {

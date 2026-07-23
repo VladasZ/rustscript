@@ -5,14 +5,16 @@
 //! arguments. Anything else, methods and std or crate bridges, is delegated to
 //! the existing dispatch on `Interp` with already evaluated values.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::mem::{replace, take};
 use std::rc::Rc;
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 
 use super::Interp;
 use super::bytecode::{BuiltinId, CapSource, Chunk, DISCARD, MacroKind, MethodName, Op};
-use super::value::{ClosureData, StructShape, Value};
+use super::value::{ClosureData, StructShape, Upvalue, Value};
 use super::vm_support::{int_of, set_reg, take_range, trace_error};
 
 /// Guard against runaway recursion, since script calls no longer consume the
@@ -54,9 +56,10 @@ impl Interp {
         &self,
         entry: &Rc<Chunk>,
         stack: &mut Vec<Value>,
-        entry_upvalues: &[Value],
+        entry_upvalues: &[Upvalue],
     ) -> Result<Value> {
         let mut frames: Vec<Frame> = Vec::new();
+        let mut local_cells: HashMap<usize, Rc<RefCell<Value>>> = HashMap::new();
         let mut cur = entry.clone();
         let mut cur_clo: Option<Rc<ClosureData>> = None;
         let mut cur_tenv: TypeEnv = empty_type_env();
@@ -76,6 +79,10 @@ impl Interp {
                     match frames.pop() {
                         None => return Ok(v),
                         Some(f) => {
+                            let callee_base = base;
+                            let callee_end = callee_base + cur.num_regs;
+                            local_cells
+                                .retain(|slot, _| *slot < callee_base || *slot >= callee_end);
                             cur = f.chunk;
                             cur_clo = f.closure;
                             cur_tenv = f.type_env;
@@ -83,7 +90,6 @@ impl Interp {
                             // The callee's final parameter values go back into the
                             // caller's arg window, where a `&mut` argument
                             // writeback emitted by the compiler picks them up.
-                            let callee_base = base;
                             base = f.base;
                             for i in 0..f.argc as usize {
                                 let p = take(&mut stack[callee_base + i]);
@@ -162,14 +168,36 @@ impl Interp {
                         set_reg(&mut stack[base + *dst as usize], v);
                     }
                     Op::LoadUpvalue { dst, idx } => {
-                        let upvals: &[Value] = match &cur_clo {
+                        let upvals: &[Upvalue] = match &cur_clo {
                             Some(c) => &c.captured,
                             None => entry_upvalues,
                         };
-                        set_reg(
-                            &mut stack[base + *dst as usize],
-                            upvals[*idx as usize].clone(),
-                        );
+                        let value = upvals[*idx as usize].get();
+                        set_reg(&mut stack[base + *dst as usize], value);
+                    }
+                    Op::LoadCell { dst, cell } => {
+                        let slot = base + *cell as usize;
+                        let Some(value) = local_cells.get(&slot) else {
+                            bail!("missing mutable capture cell");
+                        };
+                        let value = value.borrow().clone();
+                        set_reg(&mut stack[base + *dst as usize], value);
+                    }
+                    Op::StoreCell { cell, src } => {
+                        let slot = base + *cell as usize;
+                        let Some(value) = local_cells.get(&slot) else {
+                            bail!("missing mutable capture cell");
+                        };
+                        *value.borrow_mut() = stack[base + *src as usize].clone();
+                    }
+                    Op::StoreUpvalue { idx, src } => {
+                        let upvalues: &[Upvalue] = match &cur_clo {
+                            Some(closure) => &closure.captured,
+                            None => entry_upvalues,
+                        };
+                        if !upvalues[*idx as usize].set(stack[base + *src as usize].clone()) {
+                            bail!("cannot assign to immutable capture");
+                        }
                     }
                     Op::Move { dst, src } => {
                         let v = stack[base + *src as usize].clone();
@@ -692,15 +720,28 @@ impl Interp {
                     Op::MakeClosure { dst, child } => {
                         let child_chunk = cur.children[*child as usize].clone();
                         let caps = &cur.child_caps[*child as usize];
-                        let upvals: &[Value] = match &cur_clo {
+                        let upvals: &[Upvalue] = match &cur_clo {
                             Some(c) => &c.captured,
                             None => entry_upvalues,
                         };
-                        let captured: Vec<Value> = caps
+                        let captured: Vec<Upvalue> = caps
                             .iter()
                             .map(|c| match c {
-                                CapSource::Local(reg) => stack[base + *reg as usize].clone(),
-                                CapSource::Upvalue(idx) => upvals[*idx as usize].clone(),
+                                CapSource::Local(reg) => {
+                                    Upvalue::Value(stack[base + *reg as usize].clone())
+                                }
+                                CapSource::Upvalue(idx) | CapSource::MutableUpvalue(idx) => {
+                                    upvals[*idx as usize].clone()
+                                }
+                                CapSource::MutableLocal(reg) => {
+                                    let slot = base + *reg as usize;
+                                    let value = stack[slot].clone();
+                                    let cell = local_cells
+                                        .entry(slot)
+                                        .or_insert_with(|| Rc::new(RefCell::new(value)))
+                                        .clone();
+                                    Upvalue::Mutable(cell)
+                                }
                             })
                             .collect();
                         set_reg(
@@ -723,6 +764,23 @@ impl Interp {
                             &stack[base + *key as usize],
                             stack[base + *val as usize].clone(),
                         )?;
+                    }
+                    Op::Deref { dst, src } => {
+                        let value = match &stack[base + *src as usize] {
+                            Value::Ref(reference) => reference
+                                .get()
+                                .ok_or_else(|| anyhow!("dereference of a dangling reference"))?,
+                            value => value.clone(),
+                        };
+                        set_reg(&mut stack[base + *dst as usize], value);
+                    }
+                    Op::SetDeref { target, val } => {
+                        let Value::Ref(reference) = &stack[base + *target as usize] else {
+                            bail!("assignment through a non-reference value");
+                        };
+                        if !reference.set(stack[base + *val as usize].clone()) {
+                            bail!("assignment through a dangling reference");
+                        }
                     }
                     Op::GetField {
                         dst,

@@ -705,13 +705,23 @@ pub(super) fn open_file(path: &str, opts: &std::fs::OpenOptions) -> Value {
 // fresh struct with one flag flipped, matching the real `&mut self -> &mut Self` chain, and
 // `open` assembles a real std OpenOptions from the flags and opens the file.
 pub(super) fn openoptions_method(s: &StructData, name: &str, args: &[Value]) -> Result<Value> {
-    const FLAGS: [&str; 6] = ["read", "write", "append", "create", "create_new", "truncate"];
+    const FLAGS: [&str; 6] = [
+        "read",
+        "write",
+        "append",
+        "create",
+        "create_new",
+        "truncate",
+    ];
     let field_bool = |k: &str| matches!(s.get(k), Some(Value::Bool(true)));
     if FLAGS.contains(&name) {
         let on = matches!(args.first(), Some(Value::Bool(true)));
-        let pairs = FLAGS
-            .iter()
-            .map(|&k| (Rc::from(k), Value::Bool(if k == name { on } else { field_bool(k) })));
+        let pairs = FLAGS.iter().map(|&k| {
+            (
+                Rc::from(k),
+                Value::Bool(if k == name { on } else { field_bool(k) }),
+            )
+        });
         return Ok(Value::struct_of("OpenOptions", pairs));
     }
     if name == "open" {

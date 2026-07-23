@@ -404,7 +404,9 @@ impl Compiler<'_> {
 
     pub(super) fn compile_unary(&mut self, dst: Reg, u: &syn::ExprUnary) -> Result<()> {
         if matches!(u.op, UnOp::Deref(_)) {
-            return self.compile_into(dst, &u.expr);
+            let src = self.compile_expr(&u.expr)?;
+            self.emit(Op::Deref { dst, src });
+            return Ok(());
         }
         let a = self.compile_expr(&u.expr)?;
         let op = match u.op {

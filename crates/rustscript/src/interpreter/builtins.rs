@@ -303,6 +303,15 @@ impl Interp {
         name: &MethodName,
         args: &mut [Value],
     ) -> Result<Value> {
+        let dereferenced = if let Value::Ref(reference) = recv {
+            let Some(value) = reference.get() else {
+                bail!("method call through a dangling reference");
+            };
+            Some(value)
+        } else {
+            None
+        };
+        let recv = dereferenced.as_ref().unwrap_or(recv);
         if let Value::Range {
             start,
             end,

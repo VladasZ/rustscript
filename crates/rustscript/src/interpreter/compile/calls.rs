@@ -56,10 +56,19 @@ impl Compiler<'_> {
     }
 
     pub(super) fn compile_call(&mut self, dst: Reg, c: &syn::ExprCall) -> Result<()> {
-        let path = match &*c.func {
-            Expr::Path(p) => &p.path,
-            _ => bail!("cannot call this kind of expression"),
+        let Expr::Path(path_expr) = &*c.func else {
+            let callee = self.compile_expr(&c.func)?;
+            let base = self.compile_args(c.args.iter())?;
+            self.emit(Op::CallValue {
+                dst,
+                callee,
+                base,
+                argc: c.args.len() as u16,
+            });
+            self.emit_mut_arg_writebacks(c.args.iter(), base)?;
+            return Ok(());
         };
+        let path = &path_expr.path;
         // tokio::spawn(async { .. }) lowers to a Spawn op carrying the async
         // block as a child chunk, so the task runs on its own worker thread.
         if self.ctx.async_mode && is_tokio_spawn(path) {
@@ -95,6 +104,11 @@ impl Compiler<'_> {
             // A local or captured closure value called directly.
             let callee = match self.resolve(&name) {
                 NameLoc::Local(reg) => Some(reg),
+                NameLoc::Cell(cell) => {
+                    let reg = self.alloc();
+                    self.emit(Op::LoadCell { dst: reg, cell });
+                    Some(reg)
+                }
                 NameLoc::Upvalue(idx) => {
                     let reg = self.alloc();
                     self.emit(Op::LoadUpvalue { dst: reg, idx });
@@ -110,7 +124,7 @@ impl Compiler<'_> {
                     base,
                     argc,
                 });
-                self.emit_mut_arg_writebacks(c.args.iter(), base);
+                self.emit_mut_arg_writebacks(c.args.iter(), base)?;
                 return Ok(());
             }
         }
@@ -132,7 +146,7 @@ impl Compiler<'_> {
                     argc,
                     targ,
                 });
-                self.emit_mut_arg_writebacks(c.args.iter(), base);
+                self.emit_mut_arg_writebacks(c.args.iter(), base)?;
                 return Ok(());
             }
             // A tuple struct constructor.
@@ -295,7 +309,7 @@ impl Compiler<'_> {
         // Methods that fill a `&mut` argument, like read_line, write the new
         // value into the arg window. The window slot is only a copy of the
         // variable, so move the result back into the variable register.
-        self.emit_mut_arg_writebacks(m.args.iter(), base);
+        self.emit_mut_arg_writebacks(m.args.iter(), base)?;
         Ok(())
     }
 
@@ -304,21 +318,24 @@ impl Compiler<'_> {
     /// values back into that window on return, so a move from the window slot
     /// lands the mutation in the caller's variable. Only calls whose window
     /// survives the call may use this, a `CallPath` consumes its args instead.
-    fn emit_mut_arg_writebacks<'e>(&mut self, args: impl Iterator<Item = &'e Expr>, base: Reg) {
+    fn emit_mut_arg_writebacks<'e>(
+        &mut self,
+        args: impl Iterator<Item = &'e Expr>,
+        base: Reg,
+    ) -> Result<()> {
         for (i, arg) in args.enumerate() {
             if let Expr::Reference(r) = arg
                 && r.mutability.is_some()
                 && let Expr::Path(p) = &*r.expr
                 && p.path.segments.len() == 1
                 && p.qself.is_none()
-                && let NameLoc::Local(reg) = self.resolve(&p.path.segments[0].ident.to_string())
             {
-                self.emit(Op::Move {
-                    dst: reg,
-                    src: base + i as u16,
-                });
+                let name = p.path.segments[0].ident.to_string();
+                let location = self.resolve_for_write(&name);
+                self.emit_name_store(location, base + i as u16, &name)?;
             }
         }
+        Ok(())
     }
 
     /// Compile an `async { .. }` block from `tokio::spawn` into a zero argument
@@ -380,10 +397,9 @@ impl Compiler<'_> {
         match target {
             Expr::Path(p) if p.path.segments.len() == 1 => {
                 let name = p.path.segments[0].ident.to_string();
-                match self.resolve(&name) {
-                    NameLoc::Local(reg) => self.compile_into(reg, value)?,
-                    _ => bail!("assignment to unknown or captured variable `{name}`"),
-                }
+                let location = self.resolve_for_write(&name);
+                let value = self.compile_expr(value)?;
+                self.emit_name_store(location, value, &name)?;
             }
             Expr::Index(idx) => {
                 let base = self.compile_expr(&idx.expr)?;
@@ -398,7 +414,9 @@ impl Compiler<'_> {
                 self.emit(Op::SetField { base, member, val });
             }
             Expr::Unary(u) if matches!(u.op, UnOp::Deref(_)) => {
-                self.compile_assign(&u.expr, value)?;
+                let target = self.compile_expr(&u.expr)?;
+                let val = self.compile_expr(value)?;
+                self.emit(Op::SetDeref { target, val });
             }
             Expr::Paren(p) => self.compile_assign(&p.expr, value)?,
             _ => bail!("invalid assignment target"),
@@ -416,26 +434,26 @@ impl Compiler<'_> {
         match target {
             Expr::Path(p) if p.path.segments.len() == 1 => {
                 let name = p.path.segments[0].ident.to_string();
-                let reg = match self.resolve(&name) {
-                    NameLoc::Local(reg) => reg,
-                    _ => bail!("assignment to unknown or captured variable `{name}`"),
-                };
+                let location = self.resolve_for_write(&name);
+                let current = self.load_name_location(location, &name)?;
+                let result = self.alloc();
                 if let Some(imm) = int_literal(rhs) {
                     self.emit(Op::BinImm {
-                        dst: reg,
-                        a: reg,
+                        dst: result,
+                        a: current,
                         imm,
                         op,
                     });
-                    return Ok(());
+                } else {
+                    let b = self.compile_expr(rhs)?;
+                    self.emit(Op::Bin {
+                        dst: result,
+                        a: current,
+                        b,
+                        op,
+                    });
                 }
-                let b = self.compile_expr(rhs)?;
-                self.emit(Op::Bin {
-                    dst: reg,
-                    a: reg,
-                    b,
-                    op,
-                });
+                self.emit_name_store(location, result, &name)?;
             }
             Expr::Index(idx) => {
                 let base = self.compile_expr(&idx.expr)?;
@@ -483,7 +501,55 @@ impl Compiler<'_> {
                     val: res,
                 });
             }
+            Expr::Unary(u) if matches!(u.op, UnOp::Deref(_)) => {
+                let target = self.compile_expr(&u.expr)?;
+                let current = self.alloc();
+                self.emit(Op::Deref {
+                    dst: current,
+                    src: target,
+                });
+                let b = self.compile_expr(rhs)?;
+                let result = self.alloc();
+                self.emit(Op::Bin {
+                    dst: result,
+                    a: current,
+                    b,
+                    op,
+                });
+                self.emit(Op::SetDeref {
+                    target,
+                    val: result,
+                });
+            }
             _ => bail!("invalid compound assignment target"),
+        }
+        Ok(())
+    }
+
+    fn load_name_location(&mut self, location: NameLoc, name: &str) -> Result<Reg> {
+        match location {
+            NameLoc::Local(reg) => Ok(reg),
+            NameLoc::Cell(cell) => {
+                let reg = self.alloc();
+                self.emit(Op::LoadCell { dst: reg, cell });
+                Ok(reg)
+            }
+            NameLoc::Upvalue(idx) => {
+                let reg = self.alloc();
+                self.emit(Op::LoadUpvalue { dst: reg, idx });
+                Ok(reg)
+            }
+            NameLoc::None => bail!("assignment to unknown variable `{name}`"),
+        }
+    }
+
+    fn emit_name_store(&mut self, location: NameLoc, src: Reg, name: &str) -> Result<()> {
+        match location {
+            NameLoc::Local(dst) if dst != src => self.emit(Op::Move { dst, src }),
+            NameLoc::Local(_) => {}
+            NameLoc::Cell(cell) => self.emit(Op::StoreCell { cell, src }),
+            NameLoc::Upvalue(idx) => self.emit(Op::StoreUpvalue { idx, src }),
+            NameLoc::None => bail!("assignment to unknown variable `{name}`"),
         }
         Ok(())
     }
@@ -499,11 +565,15 @@ impl Compiler<'_> {
         // A user struct resolves to its canonical name, which keys shapes,
         // methods, and coercions. Anything else, an enum struct variant for
         // example, keeps the bare last segment.
-        let (name, def) = match self
-            .ctx
-            .resolver
-            .resolve_struct_key(self.ctx.module, &s.path)
-        {
+        let self_type = (s.path.segments.len() == 1 && s.path.segments[0].ident == "Self")
+            .then_some(self.ctx.impl_type)
+            .flatten();
+        let resolved = self_type.map(Rc::<str>::from).or_else(|| {
+            self.ctx
+                .resolver
+                .resolve_struct_key(self.ctx.module, &s.path)
+        });
+        let (name, def) = match resolved {
             Some(canon) => {
                 let def = self.ctx.resolver.structs.get(&canon).map(|d| d.ast.clone());
                 (canon.to_string(), def)
@@ -658,7 +728,12 @@ pub(super) fn is_unit_variant_ident(id: &syn::PatIdent) -> bool {
     id.by_ref.is_none()
         && id.mutability.is_none()
         && id.subpat.is_none()
-        && id.ident.to_string().chars().next().is_some_and(|c| c.is_ascii_uppercase())
+        && id
+            .ident
+            .to_string()
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_uppercase())
 }
 
 fn lower_pattern(pattern: &Pat) -> PPat {

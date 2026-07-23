@@ -204,7 +204,9 @@ fn collect(
                 Some(rel) => {
                     let target = children_dir.join(rel);
                     let loaded = load_file_at(files, script_dir, &target, &child_path)?;
-                    child_dir = target.parent().map_or_else(|| children_dir.to_path_buf(), Path::to_path_buf);
+                    child_dir = target
+                        .parent()
+                        .map_or_else(|| children_dir.to_path_buf(), Path::to_path_buf);
                     loaded
                 }
                 None => {
@@ -236,7 +238,10 @@ fn mod_path_attr(m: &syn::ItemMod) -> Option<String> {
     for attr in &m.attrs {
         if attr.path().is_ident("path")
             && let syn::Meta::NameValue(nv) = &attr.meta
-            && let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = &nv.value
+            && let syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(s),
+                ..
+            }) = &nv.value
         {
             return Some(s.value());
         }
@@ -282,7 +287,11 @@ fn load_file_at(
     child_path: &[String],
 ) -> Result<(Vec<Item>, Arc<str>)> {
     if !file.is_file() {
-        bail!("cannot find module `{}`: {} does not exist", child_path.join("::"), file.display());
+        bail!(
+            "cannot find module `{}`: {} does not exist",
+            child_path.join("::"),
+            file.display()
+        );
     }
     let source = std::fs::read_to_string(file)
         .map_err(|e| anyhow!("cannot read {}: {e}", file.display()))?;

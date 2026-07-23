@@ -160,6 +160,30 @@ impl StructData {
 /// Lookups by a borrowed key go through `KeyRef` so they never clone the key.
 pub type Map = IndexMap<MapKey, Value, FxBuildHasher>;
 
+pub struct ValueRef {
+    values: Rc<RefCell<Vec<Value>>>,
+    index: usize,
+}
+
+impl ValueRef {
+    pub fn vec_element(values: Rc<RefCell<Vec<Value>>>, index: usize) -> Self {
+        Self { values, index }
+    }
+
+    pub fn get(&self) -> Option<Value> {
+        self.values.borrow().get(self.index).cloned()
+    }
+
+    pub fn set(&self, value: Value) -> bool {
+        let mut values = self.values.borrow_mut();
+        let Some(slot) = values.get_mut(self.index) else {
+            return false;
+        };
+        *slot = value;
+        true
+    }
+}
+
 /// A runtime value. Containers use `Rc<RefCell<..>>` so that `&mut` aliasing and
 /// shared mutation behave, since the interpreter ignores ownership entirely.
 #[derive(Clone)]
@@ -188,17 +212,40 @@ pub enum Value {
         inclusive: bool,
     },
     Closure(Rc<ClosureData>),
+    Ref(Rc<ValueRef>),
     /// A live host resource: an open file, a child process, a socket, a
     /// buffered reader. Shared by `Rc` so the same handle can be passed around.
     Native(Rc<RefCell<Native>>),
 }
 
-/// A closure is a compiled body plus the upvalues it captured by value when it
-/// was built. Container captures share their `Rc`, so mutation through them is
-/// visible, matching a by-value capture of the handle.
+#[derive(Clone)]
+pub enum Upvalue {
+    Value(Value),
+    Mutable(Rc<RefCell<Value>>),
+}
+
+impl Upvalue {
+    pub fn get(&self) -> Value {
+        match self {
+            Self::Value(value) => value.clone(),
+            Self::Mutable(value) => value.borrow().clone(),
+        }
+    }
+
+    pub fn set(&self, value: Value) -> bool {
+        let Self::Mutable(cell) = self else {
+            return false;
+        };
+        *cell.borrow_mut() = value;
+        true
+    }
+}
+
+/// A closure is a compiled body plus its captured upvalues. Immutable captures
+/// hold values directly; mutable captures share a cell with the defining frame.
 pub struct ClosureData {
     pub chunk: Rc<super::bytecode::Chunk>,
-    pub captured: Vec<Value>,
+    pub captured: Vec<Upvalue>,
 }
 
 /// Hashable key for maps. Only a subset of values can be keys. String keys
@@ -419,6 +466,9 @@ impl Value {
             Value::Enum { .. } => "enum",
             Value::Range { .. } => "range",
             Value::Closure(_) => "closure",
+            Value::Ref(reference) => reference
+                .get()
+                .map_or("reference", |value| value.type_name()),
             Value::Native(n) => n.borrow().type_name(),
         }
     }
@@ -459,6 +509,12 @@ impl Value {
 
     /// Value equality used by `==`, `match`, and map lookups.
     pub fn eq_value(&self, other: &Value) -> bool {
+        if let Value::Ref(reference) = self {
+            return reference.get().is_some_and(|value| value.eq_value(other));
+        }
+        if let Value::Ref(reference) = other {
+            return reference.get().is_some_and(|value| self.eq_value(&value));
+        }
         match (self, other) {
             (Value::Unit, Value::Unit) => true,
             (Value::Bool(a), Value::Bool(b)) => a == b,
@@ -612,6 +668,10 @@ impl Value {
                 out.push_str(" }");
             }
             Value::Closure(_) => out.push_str("<closure>"),
+            Value::Ref(reference) => match reference.get() {
+                Some(value) => value.write_debug(out),
+                None => out.push_str("<dangling reference>"),
+            },
             Value::Native(n) => write!(out, "<{}>", n.borrow().type_name()).unwrap(),
             Value::Enum { variant, data, .. } => {
                 write!(out, "{variant}").unwrap();

@@ -16,7 +16,11 @@ fn main() -> Result<()> {
     // The iterator terminal `last` drains to the final item.
     let last_start = re.find_iter(text).last().map(|m| m.start()).unwrap_or(0);
     println!("last entry starts at: {last_start}");
-    let last_level = re.captures_iter(text).last().map(|c| c[4].to_string()).unwrap_or_default();
+    let last_level = re
+        .captures_iter(text)
+        .last()
+        .map(|c| c[4].to_string())
+        .unwrap_or_default();
     println!("last level: {last_level}");
 
     if let Some(caps) = re.captures(text) {

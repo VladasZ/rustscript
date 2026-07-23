@@ -18,6 +18,30 @@ use super::pnative::PNative;
 pub type PList = Arc<Mutex<Vec<PValue>>>;
 pub type PMap = Arc<Mutex<IndexMap<PKey, PValue>>>;
 
+pub struct PValueRef {
+    values: PList,
+    index: usize,
+}
+
+impl PValueRef {
+    pub fn vec_element(values: PList, index: usize) -> Self {
+        Self { values, index }
+    }
+
+    pub fn get(&self) -> Option<PValue> {
+        self.values.lock().get(self.index).cloned()
+    }
+
+    pub fn set(&self, value: PValue) -> bool {
+        let mut values = self.values.lock();
+        let Some(slot) = values.get_mut(self.index) else {
+            return false;
+        };
+        *slot = value;
+        true
+    }
+}
+
 /// Field layout of a struct, shared by every instance from the same site.
 pub struct PStructShape {
     pub name: Arc<str>,
@@ -68,9 +92,32 @@ impl PStructData {
 }
 
 /// A compiled closure body plus its captured upvalues.
+#[derive(Clone)]
+pub enum PUpvalue {
+    Value(PValue),
+    Mutable(Arc<Mutex<PValue>>),
+}
+
+impl PUpvalue {
+    pub fn get(&self) -> PValue {
+        match self {
+            Self::Value(value) => value.clone(),
+            Self::Mutable(value) => value.lock().clone(),
+        }
+    }
+
+    pub fn set(&self, value: PValue) -> bool {
+        let Self::Mutable(cell) = self else {
+            return false;
+        };
+        *cell.lock() = value;
+        true
+    }
+}
+
 pub struct PClosure {
     pub chunk: Arc<super::pchunk::PChunk>,
-    pub captured: Vec<PValue>,
+    pub captured: Vec<PUpvalue>,
 }
 
 /// A runtime value that is `Send + Sync`.
@@ -98,6 +145,7 @@ pub enum PValue {
         inclusive: bool,
     },
     Closure(Arc<PClosure>),
+    Ref(Arc<PValueRef>),
     Native(Arc<Mutex<PNative>>),
 }
 
@@ -204,6 +252,9 @@ impl PValue {
             PValue::Enum { .. } => "enum",
             PValue::Range { .. } => "range",
             PValue::Closure(_) => "closure",
+            PValue::Ref(reference) => reference
+                .get()
+                .map_or("reference", |value| value.type_name()),
             PValue::Native(_) => "native",
         }
     }
@@ -219,6 +270,12 @@ impl PValue {
     }
 
     pub fn eq_value(&self, other: &PValue) -> bool {
+        if let PValue::Ref(reference) = self {
+            return reference.get().is_some_and(|value| value.eq_value(other));
+        }
+        if let PValue::Ref(reference) = other {
+            return reference.get().is_some_and(|value| self.eq_value(&value));
+        }
         match (self, other) {
             (PValue::Unit, PValue::Unit) => true,
             (PValue::Bool(a), PValue::Bool(b)) => a == b,
@@ -371,6 +428,10 @@ impl PValue {
                 out.push_str(" }");
             }
             PValue::Closure(_) => out.push_str("<closure>"),
+            PValue::Ref(reference) => match reference.get() {
+                Some(value) => value.write_debug(out),
+                None => out.push_str("<dangling reference>"),
+            },
             PValue::Native(n) => write!(out, "<{}>", n.lock().type_name()).unwrap(),
             PValue::Enum { variant, data, .. } => {
                 write!(out, "{variant}").unwrap();

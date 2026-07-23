@@ -243,6 +243,7 @@ pub(super) fn vec_method(
         B::IsEmpty => Value::Bool(v.borrow().is_empty()),
         B::Clone => Value::vec(v.borrow().clone()),
         B::Iter => super::iterator::value_iter(v.clone()),
+        B::IterMut => super::iterator::value_iter_mut(v.clone()),
         B::Push => {
             v.borrow_mut()
                 .push(args.first_mut().map(take).unwrap_or(Value::Unit));

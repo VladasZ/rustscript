@@ -107,7 +107,8 @@ fn grafts_hyphenated_local_crate() {
     // Cargo maps the hyphen to an underscore for the crate identifier, so the
     // grafted module has to be named `my_shared`, not the raw dependency key.
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!("rustscript_hyphen_{}_{}", std::process::id(), id));
+    let root =
+        std::env::temp_dir().join(format!("rustscript_hyphen_{}_{}", std::process::id(), id));
     if root.exists() {
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -116,7 +117,10 @@ fn grafts_hyphenated_local_crate() {
         "[package]\nname = \"my-shared\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[dependencies]\n[workspace]\n",
     );
     write(&root.join("my-shared/src/lib.rs"), "pub mod util;\n");
-    write(&root.join("my-shared/src/util.rs"), "pub fn who() -> String { \"world\".to_string() }\n");
+    write(
+        &root.join("my-shared/src/util.rs"),
+        "pub fn who() -> String { \"world\".to_string() }\n",
+    );
     write(
         &root.join("app/Cargo.toml"),
         "[package]\nname = \"app\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[dependencies]\nmy-shared = { path = \"../my-shared\" }\n[workspace]\n",
@@ -128,7 +132,11 @@ fn grafts_hyphenated_local_crate() {
     );
     let out = run_bin(&bin, true);
     std::fs::remove_dir_all(&root).unwrap();
-    assert!(out.status.success(), "run failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "run failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(String::from_utf8_lossy(&out.stdout), "hi world\n");
 }
 
