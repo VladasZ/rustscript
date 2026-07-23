@@ -183,7 +183,9 @@ pub(super) fn as_i64(v: &Value) -> Option<i64> {
 pub(super) fn path_like(v: &Value) -> String {
     match v {
         Value::Str(s) => s.to_string(),
-        Value::Struct(st) if &**st.name() == "Path" || &**st.name() == "PathBuf" => {
+        // Path/PathBuf carry the path in `s`; an OsString (e.g. from env::var_os) carries its text
+        // there too. Without unwrapping it, PathBuf::from(os_string) would Debug-print the struct.
+        Value::Struct(st) if matches!(&**st.name(), "Path" | "PathBuf" | "OsString") => {
             st.get("s").map(|s| s.display()).unwrap_or_default()
         }
         other => other.display(),
@@ -560,10 +562,8 @@ pub(super) fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Va
             other => other.cloned().unwrap_or(Value::Unit),
         },
         ("PathBuf", "new") => make_path(""),
-        ("PathBuf" | "Path", "from") => {
-            make_path(args.first().map(|v| v.display()).unwrap_or_default())
-        }
-        ("Path", "new") => make_path(args.first().map(|v| v.display()).unwrap_or_default()),
+        ("PathBuf" | "Path", "from") => make_path(args.first().map(path_like).unwrap_or_default()),
+        ("Path", "new") => make_path(args.first().map(path_like).unwrap_or_default()),
         ("Regex", "new") => {
             let pat = args.first().map(|v| v.display()).unwrap_or_default();
             match regex::Regex::new(&pat) {
