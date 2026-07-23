@@ -60,24 +60,34 @@ fn arith(op: BinKind, l: &PValue, r: &PValue) -> Result<PValue> {
     match (l, r) {
         (PValue::Int(a), PValue::Int(b)) => {
             let (a, b) = (*a, *b);
-            Ok(PValue::Int(match op {
-                Add => a.wrapping_add(b),
-                Sub => a.wrapping_sub(b),
-                Mul => a.wrapping_mul(b),
+            let result = match op {
+                Add => a
+                    .checked_add(b)
+                    .ok_or_else(|| anyhow!("attempt to add with overflow"))?,
+                Sub => a
+                    .checked_sub(b)
+                    .ok_or_else(|| anyhow!("attempt to subtract with overflow"))?,
+                Mul => a
+                    .checked_mul(b)
+                    .ok_or_else(|| anyhow!("attempt to multiply with overflow"))?,
                 Div => {
                     if b == 0 {
                         bail!("attempt to divide by zero");
                     }
-                    a.wrapping_div(b)
+                    a.checked_div(b)
+                        .ok_or_else(|| anyhow!("attempt to divide with overflow"))?
                 }
                 Rem => {
                     if b == 0 {
                         bail!("attempt to calculate the remainder with a divisor of zero");
                     }
-                    a.wrapping_rem(b)
+                    a.checked_rem(b).ok_or_else(|| {
+                        anyhow!("attempt to calculate the remainder with overflow")
+                    })?
                 }
                 _ => unreachable!(),
-            }))
+            };
+            Ok(PValue::Int(result))
         }
         (a, b) => {
             let (x, y) = (to_float(a)?, to_float(b)?);

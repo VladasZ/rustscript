@@ -47,9 +47,15 @@ fn run_campaign(args: &[String]) -> anyhow::Result<()> {
     let mut seed = 0;
     let mut cases = 100;
     let mut timeout_ms = 2_000;
+    let mut stop_on_first = false;
     let mut index = 0;
     while index < args.len() {
         let option = &args[index];
+        if option == "--stop-on-first" {
+            stop_on_first = true;
+            index += 1;
+            continue;
+        }
         let value = args
             .get(index + 1)
             .ok_or_else(|| anyhow::anyhow!("missing value after `{option}`"))?;
@@ -64,13 +70,13 @@ fn run_campaign(args: &[String]) -> anyhow::Result<()> {
 
     let root = workspace_root();
     let runner = Runner::build(&root, timeout_ms)?;
-    let mut matches = 0;
+    let mut report = CampaignReport::default();
     let started = Instant::now();
     let mut last_progress = started;
     println!("running {cases} cases from seed {seed}");
 
     let mut offset = 0;
-    while offset < cases {
+    'campaign: while offset < cases {
         let batch_size = CAMPAIGN_BATCH_SIZE.min(cases - offset);
         let programs = (0..batch_size)
             .map(|batch_offset| generate(seed + (offset + batch_offset) as u64))
@@ -80,43 +86,163 @@ fn run_campaign(args: &[String]) -> anyhow::Result<()> {
 
         for ((program, source), result) in programs.into_iter().zip(sources).zip(results) {
             let case_seed = program.seed;
-            match result.classification {
+            match &result.classification {
                 Classification::Match => {
-                    matches += 1;
-                    if matches % 100 == 0 || last_progress.elapsed() >= PROGRESS_INTERVAL {
-                        print_campaign_progress(matches, cases, case_seed, started.elapsed());
+                    report.matched += 1;
+                    if report.matched % 100 == 0 || last_progress.elapsed() >= PROGRESS_INTERVAL {
+                        print_campaign_progress(
+                            report.matched,
+                            cases,
+                            case_seed,
+                            started.elapsed(),
+                        );
                         last_progress = Instant::now();
                     }
                 }
-                _ => {
-                    let artifact = Artifact::new(case_seed, program, source, result);
-                    let path = artifact.save(&root)?;
-                    println!("seed {case_seed} differs; minimizing the saved case");
-                    let (program, result) = reduce_with_cli_progress(
-                        &runner,
-                        &artifact.program,
-                        &artifact.result.classification,
-                    )?;
-                    let reduced =
-                        Artifact::new(case_seed, program.clone(), program.render(), result);
-                    let artifact_dir = path
-                        .parent()
-                        .ok_or_else(|| anyhow::anyhow!("artifact has no parent directory"))?;
-                    let reduced_path = reduced.save_under(artifact_dir, "reduced")?;
-                    anyhow::bail!(
-                        "stopped after {matches} matches: seed {case_seed} is {:?}; reduced artifact \
-                         at {}",
-                        artifact.result.classification,
-                        reduced_path.display(),
-                    );
+                Classification::InterpreterUnsupported => {
+                    report.record_gap(&result);
                 }
+                classification => {
+                    if stop_on_first {
+                        return stop_and_reduce(&runner, &root, case_seed, program, source, result);
+                    }
+                    let key = format!("{classification:?}");
+                    let saved = report.should_save(&key);
+                    let path = if saved {
+                        Some(
+                            Artifact::new(case_seed, program, source, result.clone())
+                                .save(&root)?,
+                        )
+                    } else {
+                        None
+                    };
+                    report.record_bug(key, case_seed, path);
+                }
+            }
+            report.checked += 1;
+            if report.checked >= cases {
+                break 'campaign;
             }
         }
         offset += batch_size;
     }
 
-    println!("{matches} matched, no findings");
+    report.print(started.elapsed());
     Ok(())
+}
+
+const MAX_SEEDS_PER_GROUP: usize = 8;
+const MAX_ARTIFACTS_PER_GROUP: usize = 3;
+
+#[derive(Default)]
+struct CampaignReport {
+    checked: usize,
+    matched: usize,
+    gaps: std::collections::BTreeMap<String, usize>,
+    bugs: std::collections::BTreeMap<String, BugGroup>,
+}
+
+#[derive(Default)]
+struct BugGroup {
+    count: usize,
+    seeds: Vec<u64>,
+    artifacts: Vec<std::path::PathBuf>,
+}
+
+impl CampaignReport {
+    fn record_gap(&mut self, result: &RunResult) {
+        let message = gap_message(&result.interpreted.stderr);
+        *self.gaps.entry(message).or_default() += 1;
+    }
+
+    fn should_save(&self, key: &str) -> bool {
+        self.bugs
+            .get(key)
+            .is_none_or(|group| group.artifacts.len() < MAX_ARTIFACTS_PER_GROUP)
+    }
+
+    fn record_bug(&mut self, key: String, seed: u64, path: Option<std::path::PathBuf>) {
+        let group = self.bugs.entry(key).or_default();
+        group.count += 1;
+        if group.seeds.len() < MAX_SEEDS_PER_GROUP {
+            group.seeds.push(seed);
+        }
+        if let Some(path) = path {
+            group.artifacts.push(path);
+        }
+    }
+
+    fn print(&self, elapsed: Duration) {
+        let findings: usize = self.bugs.values().map(|group| group.count).sum();
+        let gaps: usize = self.gaps.values().sum();
+        println!(
+            "\nchecked {}: {} matched, {} findings, {} gaps, {:.1}s",
+            self.checked,
+            self.matched,
+            findings,
+            gaps,
+            elapsed.as_secs_f64()
+        );
+        if !self.bugs.is_empty() {
+            println!("\nfindings (real divergences):");
+            for (kind, group) in &self.bugs {
+                let seeds = group
+                    .seeds
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!("  {kind}: {} case(s), seeds {seeds}", group.count);
+                for path in &group.artifacts {
+                    if let Some(dir) = path.parent() {
+                        println!("    saved {}", dir.display());
+                    }
+                }
+            }
+        }
+        if !self.gaps.is_empty() {
+            println!("\ngaps (features the interpreter does not run yet):");
+            for (message, count) in &self.gaps {
+                println!("  {count} case(s): {message}");
+            }
+        }
+    }
+}
+
+/// The first meaningful line of an interpreter error, used to group gaps by the
+/// missing feature rather than by the exact values in the message.
+fn gap_message(stderr: &str) -> String {
+    stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && *line != "Error:")
+        .unwrap_or("unknown gap")
+        .to_string()
+}
+
+fn stop_and_reduce(
+    runner: &Runner,
+    root: &std::path::Path,
+    case_seed: u64,
+    program: Program,
+    source: String,
+    result: RunResult,
+) -> anyhow::Result<()> {
+    let artifact = Artifact::new(case_seed, program, source, result);
+    let path = artifact.save(root)?;
+    println!("seed {case_seed} differs; minimizing the saved case");
+    let (program, result) =
+        reduce_with_cli_progress(runner, &artifact.program, &artifact.result.classification)?;
+    let reduced = Artifact::new(case_seed, program.clone(), program.render(), result);
+    let artifact_dir = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("artifact has no parent directory"))?;
+    let reduced_path = reduced.save_under(artifact_dir, "reduced")?;
+    anyhow::bail!(
+        "seed {case_seed} is {:?}; reduced artifact at {}",
+        artifact.result.classification,
+        reduced_path.display(),
+    );
 }
 
 fn generate_one(args: &[String]) -> anyhow::Result<()> {
@@ -281,7 +407,7 @@ fn print_usage() {
     println!(
         r"rustscript-differential
 
-  run [--seed N] [--cases N] [--timeout-ms N]
+  run [--seed N] [--cases N] [--timeout-ms N] [--stop-on-first]
   generate --seed N
   mutate ARTIFACT --seed N
   replay ARTIFACT

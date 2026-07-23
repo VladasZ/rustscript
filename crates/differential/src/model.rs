@@ -467,6 +467,13 @@ impl Program {
         {
             source.push_str(apply_helper());
         }
+        if self
+            .structural_features()
+            .iter()
+            .any(|feature| feature.starts_with("raw-"))
+        {
+            source.push_str(crate::typed::opaque_helper());
+        }
         for structural_case in &self.structural_cases {
             source.push_str(&structural_case.prelude());
         }

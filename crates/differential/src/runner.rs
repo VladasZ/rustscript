@@ -11,12 +11,24 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Classification {
     Match,
+    /// Both ran to completion but printed different output.
     SemanticMismatch,
+    /// Both panicked, but with different panic messages. A message the
+    /// interpreter formats unlike the real compiler lands here.
+    PanicMessageMismatch,
+    /// The real binary panicked where the interpreter ran on. This is the
+    /// overflow and narrowing-cast vein: the interpreter wraps or keeps an
+    /// i64 where compiled Rust aborts.
+    InterpreterMissingPanic,
+    /// The interpreter panicked where the real binary finished cleanly.
+    InterpreterSpuriousPanic,
+    /// The interpreter reported a feature it does not implement. A gap to
+    /// close in the interpreter, not a semantic bug.
     InterpreterUnsupported,
-    InterpreterPanic,
+    /// The interpreter errored for a reason that is not a panic and not a
+    /// declared gap.
     InterpreterCrash,
     InterpreterTimeout,
-    NativePanic,
     NativeCrash,
     NativeTimeout,
     RustcRejected,
@@ -28,10 +40,26 @@ impl Classification {
         self == other
     }
 
+    /// A real divergence worth saving and fixing. `Match` is agreement and
+    /// `InterpreterUnsupported` is a known gap, so neither is hard.
     pub fn is_hard_failure(&self) -> bool {
         !matches!(self, Self::Match | Self::InterpreterUnsupported)
     }
 }
+
+/// A process that exits 101 is a panic, the code both the compiled binary and
+/// the interpreter use for a runtime abort.
+const PANIC_STATUS: i32 = 101;
+
+/// How the native binary is compiled: the same way the default `cargo run`,
+/// `build`, and `test` profiles do, with no optimization and overflow checks
+/// on. That is the behavior a script author gets by default, so it is the
+/// semantics RustScript targets, which means integer overflow must panic, not
+/// wrap. It is also the only setting that lets the harness see an overflow
+/// divergence at all, because with the checks off both sides wrap and agree.
+/// Skipping optimization keeps each of the many compiles fast. Do not drop the
+/// overflow flag.
+const RUSTC_COMPILE_ARGS: [&str; 5] = ["--edition", "2024", "-C", "overflow-checks=yes", "-o"];
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ProcessOutput {
@@ -94,7 +122,7 @@ impl Runner {
         let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
         let compiler = run_command(
             Command::new(rustc)
-                .args(["--edition", "2024", "-C", "overflow-checks=yes", "-o"])
+                .args(RUSTC_COMPILE_ARGS)
                 .arg(&binary_path)
                 .arg(&source_path)
                 .current_dir(directory.path()),
@@ -147,7 +175,7 @@ impl Runner {
         let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
         let compiler = run_command(
             Command::new(rustc)
-                .args(["--edition", "2024", "-C", "overflow-checks=yes", "-o"])
+                .args(RUSTC_COMPILE_ARGS)
                 .arg(&binary_path)
                 .arg(&bundle_path)
                 .current_dir(directory.path()),
@@ -278,25 +306,29 @@ fn classify(native: &ProcessOutput, interpreted: &ProcessOutput) -> Classificati
     if native.timed_out {
         return Classification::NativeTimeout;
     }
-    if native.status != Some(0) {
-        return if native.status == Some(101) {
-            Classification::NativePanic
-        } else {
-            Classification::NativeCrash
-        };
-    }
     if interpreted.timed_out {
         return Classification::InterpreterTimeout;
     }
-    if interpreted.status == Some(101) {
-        return Classification::InterpreterPanic;
+
+    let native_panicked = native.status == Some(PANIC_STATUS);
+    let interpreted_panicked = interpreted.status == Some(PANIC_STATUS);
+
+    // A native exit that is neither success nor a panic is not something the
+    // generator produces, so surface it rather than compare against it.
+    if native.status != Some(0) && !native_panicked {
+        return Classification::NativeCrash;
+    }
+
+    if native_panicked {
+        return classify_native_panic(native, interpreted, interpreted_panicked);
+    }
+
+    // The real binary finished cleanly from here on.
+    if interpreted_panicked {
+        return Classification::InterpreterSpuriousPanic;
     }
     if interpreted.status != Some(0) {
-        let error = interpreted.stderr.to_ascii_lowercase();
-        return if error.contains("unsupported")
-            || error.contains("not supported")
-            || error.contains("not implemented by the interpreter")
-        {
+        return if is_unsupported(&interpreted.stderr) {
             Classification::InterpreterUnsupported
         } else {
             Classification::InterpreterCrash
@@ -307,6 +339,70 @@ fn classify(native: &ProcessOutput, interpreted: &ProcessOutput) -> Classificati
     } else {
         Classification::SemanticMismatch
     }
+}
+
+fn classify_native_panic(
+    native: &ProcessOutput,
+    interpreted: &ProcessOutput,
+    interpreted_panicked: bool,
+) -> Classification {
+    if !interpreted_panicked {
+        // The interpreter ran past a point the compiled binary aborts at, the
+        // overflow and narrowing-cast vein. An unsupported error is still a
+        // gap even when it hides a missing panic.
+        return if interpreted.status != Some(0) && is_unsupported(&interpreted.stderr) {
+            Classification::InterpreterUnsupported
+        } else {
+            Classification::InterpreterMissingPanic
+        };
+    }
+    // Both aborted. Output printed before the abort must still agree, and the
+    // panic message the interpreter renders must match the real compiler.
+    if native.stdout != interpreted.stdout {
+        return Classification::SemanticMismatch;
+    }
+    if panic_payload(&native.stderr) == panic_payload(&interpreted.stderr) {
+        Classification::Match
+    } else {
+        Classification::PanicMessageMismatch
+    }
+}
+
+fn is_unsupported(stderr: &str) -> bool {
+    let error = stderr.to_ascii_lowercase();
+    error.contains("unsupported")
+        || error.contains("not supported")
+        || error.contains("not implemented by the interpreter")
+}
+
+/// The message a panic carries, without the location line or the backtrace
+/// note. The compiled binary prints `panicked at FILE:LINE:COL:` and a
+/// `note: run with RUST_BACKTRACE` line the interpreter never emits, so those
+/// are dropped before the payloads are compared.
+fn panic_payload(stderr: &str) -> String {
+    let mut lines = stderr.lines();
+    for line in lines.by_ref() {
+        if line.contains("panicked at") {
+            break;
+        }
+    }
+    lines
+        .map(str::trim)
+        .take_while(|line| !is_backtrace_line(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+/// A line that belongs to a backtrace or the backtrace hint, not the panic
+/// message. The compiled binary prints `note: run with RUST_BACKTRACE`; the
+/// interpreter prints its own script frames as `at <function> (<file>:<line>)`
+/// with a `... N more frames` tail. Neither is part of the message compared.
+fn is_backtrace_line(line: &str) -> bool {
+    line.starts_with("note:")
+        || line.starts_with("at ")
+        || (line.starts_with("...") && line.ends_with("more frames"))
 }
 
 fn run_command(command: &mut Command, timeout: Duration) -> Result<ProcessOutput> {
@@ -393,6 +489,84 @@ mod tests {
         assert_eq!(
             classify(&native, &interpreted),
             Classification::SemanticMismatch
+        );
+    }
+
+    fn panic(payload: &str) -> ProcessOutput {
+        ProcessOutput {
+            status: Some(PANIC_STATUS),
+            stdout: String::new(),
+            stderr: format!(
+                "thread 'main' panicked at case.rs:1:1:\n{payload}\nnote: run with `RUST_BACKTRACE=1`\n"
+            ),
+            timed_out: false,
+        }
+    }
+
+    #[test]
+    fn matching_panics_agree_despite_location_and_backtrace_noise() {
+        assert_eq!(
+            classify(
+                &panic("attempt to add with overflow"),
+                &panic("attempt to add with overflow")
+            ),
+            Classification::Match
+        );
+    }
+
+    #[test]
+    fn interpreter_script_backtrace_is_not_part_of_the_message() {
+        // The interpreter appends `at <frame>` lines the compiled binary never
+        // prints; the same overflow must still read as agreement.
+        let native = panic("attempt to multiply with overflow");
+        let interpreted = ProcessOutput {
+            status: Some(PANIC_STATUS),
+            stdout: String::new(),
+            stderr: "thread 'main' panicked at case_0.rs:82:\nattempt to multiply with overflow\n  at main (case_0.rs:82)\n".to_string(),
+            timed_out: false,
+        };
+        assert_eq!(classify(&native, &interpreted), Classification::Match);
+    }
+
+    #[test]
+    fn interpreter_running_past_a_real_panic_is_a_finding() {
+        let native = panic("attempt to add with overflow");
+        let interpreted = ProcessOutput {
+            stdout: "9223372036854775808".to_string(),
+            ..output(0, "")
+        };
+        assert_eq!(
+            classify(&native, &interpreted),
+            Classification::InterpreterMissingPanic
+        );
+    }
+
+    #[test]
+    fn interpreter_panicking_alone_is_a_finding() {
+        assert_eq!(
+            classify(&output(0, ""), &panic("attempt to divide by zero")),
+            Classification::InterpreterSpuriousPanic
+        );
+    }
+
+    #[test]
+    fn differing_panic_messages_are_a_finding() {
+        assert_eq!(
+            classify(
+                &panic("range end index 5 out of range for slice of length 1"),
+                &panic("slice 0..5 out of bounds (len 1)")
+            ),
+            Classification::PanicMessageMismatch
+        );
+    }
+
+    #[test]
+    fn a_gap_that_hides_a_missing_panic_stays_a_gap() {
+        let native = panic("attempt to add with overflow");
+        let interpreted = output(1, "unsupported item: macro");
+        assert_eq!(
+            classify(&native, &interpreted),
+            Classification::InterpreterUnsupported
         );
     }
 

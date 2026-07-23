@@ -27,6 +27,36 @@ impl GeneratedType {
     }
 }
 
+/// Integer types a value can be narrowed to with `as`. The interpreter keeps
+/// every integer as an i64, so a narrowing cast that truncates in compiled Rust
+/// is a divergence the harness hunts for.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+pub enum IntCast {
+    U8,
+    U16,
+    U32,
+    U64,
+    I8,
+    I16,
+    I32,
+    USize,
+}
+
+impl IntCast {
+    fn rust(self) -> &'static str {
+        match self {
+            Self::U8 => "u8",
+            Self::U16 => "u16",
+            Self::U32 => "u32",
+            Self::U64 => "u64",
+            Self::I8 => "i8",
+            Self::I16 => "i16",
+            Self::I32 => "i32",
+            Self::USize => "usize",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum GeneratedExpr {
     I64(i64),
@@ -111,6 +141,26 @@ pub enum GeneratedExpr {
         body: Box<Self>,
         ty: GeneratedType,
     },
+    /// `(value as u8) as i64` and friends. Truncates in compiled Rust, keeps
+    /// the full i64 in the interpreter.
+    Cast(Box<Self>, IntCast),
+    /// Plain `+ - *`, which panic on overflow under the compiler's overflow
+    /// checks and wrap in the interpreter. The left operand is always a
+    /// variable so the operands are never both constant, which keeps the
+    /// compiler's const-overflow lint from rejecting the program.
+    RawAdd(Box<Self>, Box<Self>),
+    RawSub(Box<Self>, Box<Self>),
+    RawMul(Box<Self>, Box<Self>),
+    /// Plain `/ %`, which panic on a zero divisor or on `i64::MIN / -1`.
+    RawDiv(Box<Self>, Box<Self>),
+    RawRem(Box<Self>, Box<Self>),
+    /// `values[index]`, which panics out of bounds.
+    Index {
+        values: Box<Self>,
+        index: usize,
+    },
+    /// `option.unwrap()`, which panics on `None`.
+    Unwrap(Box<Self>),
 }
 
 impl GeneratedExpr {
@@ -129,7 +179,15 @@ impl GeneratedExpr {
             | Self::Multiply(..)
             | Self::VecLen(_)
             | Self::VecGetOr { .. }
-            | Self::OptionUnwrapOr { .. } => GeneratedType::I64,
+            | Self::OptionUnwrapOr { .. }
+            | Self::Cast(..)
+            | Self::RawAdd(..)
+            | Self::RawSub(..)
+            | Self::RawMul(..)
+            | Self::RawDiv(..)
+            | Self::RawRem(..)
+            | Self::Index { .. }
+            | Self::Unwrap(_) => GeneratedType::I64,
             Self::Bool(_)
             | Self::Equal(..)
             | Self::Less(..)
@@ -160,6 +218,9 @@ impl GeneratedExpr {
 
     pub fn render(&self) -> String {
         match self {
+            // `-9223372036854775808i64` overflows the literal and will not
+            // parse, so the minimum is written through its associated constant.
+            Self::I64(i64::MIN) => "i64::MIN".to_string(),
             Self::I64(value) => format!("{value}i64"),
             Self::Bool(value) => value.to_string(),
             Self::Text(value) => format!("{value:?}.to_string()"),
@@ -293,6 +354,20 @@ impl GeneratedExpr {
                 body,
                 ..
             } => format!("(|{binding}: i64| {})({})", body.render(), input.render()),
+            Self::Cast(value, target) => {
+                format!("(({} as {}) as i64)", value.render(), target.rust())
+            }
+            // Each operand goes through `diff_opaque`, a plain non-const
+            // function, so the compiler cannot fold the operation to a constant
+            // and reject it with the const-overflow lint. The overflow, divide
+            // by zero, or `i64::MIN / -1` then still happens at runtime.
+            Self::RawAdd(left, right) => raw_binary_source(left, "+", right),
+            Self::RawSub(left, right) => raw_binary_source(left, "-", right),
+            Self::RawMul(left, right) => raw_binary_source(left, "*", right),
+            Self::RawDiv(left, right) => raw_binary_source(left, "/", right),
+            Self::RawRem(left, right) => raw_binary_source(left, "%", right),
+            Self::Index { values, index } => format!("{}[{index}usize]", grouped(values)),
+            Self::Unwrap(value) => format!("{}.unwrap()", grouped(value)),
         }
     }
 
@@ -351,6 +426,13 @@ impl GeneratedExpr {
                 option, some, none, ..
             } => option.uses(name) || some.uses(name) || none.uses(name),
             Self::ClosureCall { input, body, .. } => input.uses(name) || body.uses(name),
+            Self::RawAdd(left, right)
+            | Self::RawSub(left, right)
+            | Self::RawMul(left, right)
+            | Self::RawDiv(left, right)
+            | Self::RawRem(left, right) => left.uses(name) || right.uses(name),
+            Self::Cast(value, _) | Self::Unwrap(value) => value.uses(name),
+            Self::Index { values, .. } => values.uses(name),
             Self::I64(_) | Self::Bool(_) | Self::Text(_) | Self::None => false,
         }
     }
@@ -417,6 +499,14 @@ impl GeneratedExpr {
             Self::OptionIsSome(_) => "option-is-some",
             Self::MatchOption { .. } => "match-option",
             Self::ClosureCall { .. } => "closure-call",
+            Self::Cast(..) => "cast",
+            Self::RawAdd(..) => "raw-add",
+            Self::RawSub(..) => "raw-sub",
+            Self::RawMul(..) => "raw-mul",
+            Self::RawDiv(..) => "raw-div",
+            Self::RawRem(..) => "raw-rem",
+            Self::Index { .. } => "index",
+            Self::Unwrap(_) => "unwrap",
         }
     }
 
@@ -474,6 +564,13 @@ impl GeneratedExpr {
                 option, some, none, ..
             } => vec![option, some, none],
             Self::ClosureCall { input, body, .. } => vec![input, body],
+            Self::RawAdd(left, right)
+            | Self::RawSub(left, right)
+            | Self::RawMul(left, right)
+            | Self::RawDiv(left, right)
+            | Self::RawRem(left, right) => vec![left, right],
+            Self::Cast(value, _) | Self::Unwrap(value) => vec![value],
+            Self::Index { values, .. } => vec![values],
             Self::I64(_) | Self::Bool(_) | Self::Text(_) | Self::Variable { .. } | Self::None => {
                 Vec::new()
             }
@@ -483,4 +580,20 @@ impl GeneratedExpr {
 
 fn grouped(expr: &GeneratedExpr) -> String {
     format!("({})", expr.render())
+}
+
+fn raw_binary_source(left: &GeneratedExpr, op: &str, right: &GeneratedExpr) -> String {
+    format!(
+        "(diff_opaque({}) {op} diff_opaque({}))",
+        left.render(),
+        right.render()
+    )
+}
+
+/// The identity helper the raw arithmetic operands pass through. It is a plain
+/// function, not a `const fn`, so the compiler cannot evaluate it while linting
+/// and cannot reject a program for a constant overflow or divide by zero that
+/// only shows up at runtime.
+pub fn opaque_helper() -> &'static str {
+    "fn diff_opaque(x: i64) -> i64 {\n    x\n}\n\n"
 }

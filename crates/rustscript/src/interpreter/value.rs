@@ -717,3 +717,19 @@ fn format_float(f: f64) -> String {
         f.to_string()
     }
 }
+
+/// Narrow an i64 the way an `as` cast to a smaller integer type does, then
+/// widen the result back to the i64 the interpreter stores every integer in.
+/// Types that are already 64 bits wide, or wider than i64 can hold, pass
+/// through unchanged, since the store cannot represent more than that.
+pub(super) fn truncate_int(source: i64, target: &str) -> i64 {
+    match target {
+        "u8" => source as u8 as i64,
+        "u16" => source as u16 as i64,
+        "u32" => source as u32 as i64,
+        "i8" => source as i8 as i64,
+        "i16" => source as i16 as i64,
+        "i32" => source as i32 as i64,
+        _ => source,
+    }
+}
