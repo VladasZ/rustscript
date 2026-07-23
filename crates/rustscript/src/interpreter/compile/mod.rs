@@ -3,7 +3,7 @@
 //! name lookup. Control flow becomes jumps, patterns become test-and-bind ops,
 //! and the common macros are lowered inline.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use anyhow::{Result, bail};
@@ -27,6 +27,8 @@ pub struct Ctx<'r> {
     /// True when compiling a `#[tokio::main]` program, which lets `.await`,
     /// `tokio::spawn`, and `join!` compile instead of being rejected.
     pub async_mode: bool,
+    /// Concrete target of the `impl` whose method is being compiled.
+    pub impl_type: Option<&'r str>,
 }
 
 /// Per function compilation state. A stack of these supports nested closures.
@@ -45,6 +47,7 @@ struct FnState {
     children: Vec<Rc<Chunk>>,
     child_caps: Vec<Vec<CapSource>>,
     upvalues: Vec<(String, CapSource)>,
+    mutable_locals: HashSet<Reg>,
     scopes: Vec<HashMap<String, Reg>>,
     reg_top: Reg,
     max_reg: Reg,
@@ -71,6 +74,7 @@ impl FnState {
             children: Vec::new(),
             child_caps: Vec::new(),
             upvalues: Vec::new(),
+            mutable_locals: HashSet::new(),
             scopes: vec![HashMap::default()],
             reg_top: 0,
             max_reg: 0,
@@ -147,8 +151,10 @@ pub struct Compiler<'a> {
 }
 
 /// Where a referenced name lives.
+#[derive(Clone, Copy)]
 enum NameLoc {
     Local(Reg),
+    Cell(Reg),
     Upvalue(u16),
     /// Not a variable, so a function, enum variant, or other path value.
     None,
@@ -338,7 +344,11 @@ impl<'a> Compiler<'a> {
     fn resolve(&mut self, name: &str) -> NameLoc {
         let depth = self.frames.len() - 1;
         if let Some(reg) = self.frames[depth].local_reg(name) {
-            return NameLoc::Local(reg);
+            return if self.frames[depth].mutable_locals.contains(&reg) {
+                NameLoc::Cell(reg)
+            } else {
+                NameLoc::Local(reg)
+            };
         }
         if let Some(idx) = self.frames[depth].upvalue_index(name) {
             return NameLoc::Upvalue(idx);
@@ -356,13 +366,80 @@ impl<'a> Compiler<'a> {
         }
         let parent = depth - 1;
         if let Some(reg) = self.frames[parent].local_reg(name) {
-            return Some(self.add_upvalue(depth, name, CapSource::Local(reg)));
+            let source = if self.frames[parent].mutable_locals.contains(&reg) {
+                CapSource::MutableLocal(reg)
+            } else {
+                CapSource::Local(reg)
+            };
+            return Some(self.add_upvalue(depth, name, source));
         }
         if let Some(idx) = self.frames[parent].upvalue_index(name) {
-            return Some(self.add_upvalue(depth, name, CapSource::Upvalue(idx)));
+            let source = if self.frames[parent].upvalues[idx as usize].1.is_mutable() {
+                CapSource::MutableUpvalue(idx)
+            } else {
+                CapSource::Upvalue(idx)
+            };
+            return Some(self.add_upvalue(depth, name, source));
         }
         let idx = self.capture(parent, name)?;
-        Some(self.add_upvalue(depth, name, CapSource::Upvalue(idx)))
+        let source = if self.frames[parent].upvalues[idx as usize].1.is_mutable() {
+            CapSource::MutableUpvalue(idx)
+        } else {
+            CapSource::Upvalue(idx)
+        };
+        Some(self.add_upvalue(depth, name, source))
+    }
+
+    fn resolve_for_write(&mut self, name: &str) -> NameLoc {
+        let depth = self.frames.len() - 1;
+        if let Some(reg) = self.frames[depth].local_reg(name) {
+            return if self.frames[depth].mutable_locals.contains(&reg) {
+                NameLoc::Cell(reg)
+            } else {
+                NameLoc::Local(reg)
+            };
+        }
+        if let Some(idx) = self.frames[depth].upvalue_index(name) {
+            self.mark_upvalue_mutable(depth, idx);
+            return NameLoc::Upvalue(idx);
+        }
+        match self.capture_mutable(depth, name) {
+            Some(idx) => NameLoc::Upvalue(idx),
+            None => NameLoc::None,
+        }
+    }
+
+    fn capture_mutable(&mut self, depth: usize, name: &str) -> Option<u16> {
+        if depth == 0 {
+            return None;
+        }
+        let parent = depth - 1;
+        if let Some(reg) = self.frames[parent].local_reg(name) {
+            self.frames[parent].mutable_locals.insert(reg);
+            return Some(self.add_upvalue(depth, name, CapSource::MutableLocal(reg)));
+        }
+        if let Some(idx) = self.frames[parent].upvalue_index(name) {
+            self.mark_upvalue_mutable(parent, idx);
+            return Some(self.add_upvalue(depth, name, CapSource::MutableUpvalue(idx)));
+        }
+        let idx = self.capture_mutable(parent, name)?;
+        Some(self.add_upvalue(depth, name, CapSource::MutableUpvalue(idx)))
+    }
+
+    fn mark_upvalue_mutable(&mut self, depth: usize, idx: u16) {
+        let source = self.frames[depth].upvalues[idx as usize].1;
+        let mutable_source = match source {
+            CapSource::Local(reg) => {
+                self.frames[depth - 1].mutable_locals.insert(reg);
+                CapSource::MutableLocal(reg)
+            }
+            CapSource::Upvalue(parent_idx) => {
+                self.mark_upvalue_mutable(depth - 1, parent_idx);
+                CapSource::MutableUpvalue(parent_idx)
+            }
+            CapSource::MutableLocal(_) | CapSource::MutableUpvalue(_) => return,
+        };
+        self.frames[depth].upvalues[idx as usize].1 = mutable_source;
     }
 
     fn add_upvalue(&mut self, depth: usize, name: &str, src: CapSource) -> u16 {
@@ -380,6 +457,10 @@ impl<'a> Compiler<'a> {
                 if reg != dst {
                     self.emit(Op::Move { dst, src: reg });
                 }
+                Ok(())
+            }
+            NameLoc::Cell(cell) => {
+                self.emit(Op::LoadCell { dst, cell });
                 Ok(())
             }
             NameLoc::Upvalue(idx) => {

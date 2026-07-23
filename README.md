@@ -95,7 +95,8 @@ Supported language features include:
 - structs, tuple structs, enums, patterns, guards, `if let`, and `let else`
 - loops, ranges, arithmetic, comparison, casts, and bitwise operations
 - `Vec`, strings, maps, sets, `Option`, `Result`, and `?`
-- iterators including `map`, `filter`, `fold`, `find`, sorting, and predicates
+- iterators including mutable iteration, `map`, `filter`, `fold`, `find`,
+  sorting, and predicates
 - formatting, named arguments, width, precision, and common macros
 - modules, imports, re-exports, constants, statics, and local path crates
 - `#[tokio::main]`, spawned tasks, joins, yielding, timers, and async HTTP
@@ -209,6 +210,27 @@ cargo test --workspace
 The equivalence tests run the same examples through rustc and the interpreter
 and compare their output byte for byte. The multifile conformance test does the
 same for a deep module tree.
+
+The differential harness generates deterministic, compile-valid Rust programs
+and compares their native output with RustScript. Generated cases cover typed
+expressions, ownership and borrowing, collections, closures, structs, enums,
+patterns, iterators, loops, and `Result`. Some seeds combine parts of other
+programs through replayable structured mutation.
+
+```sh
+# Print one generated program.
+cargo run -p rustscript-differential -- generate --seed 42
+
+# Compare 10,000 programs, stopping and minimizing the first difference.
+cargo run --release -p rustscript-differential -- run \
+  --seed 0 \
+  --cases 10000 \
+  --timeout-ms 5000
+```
+
+Saved cases live under `target/rustscript-differential/failures`. The harness
+batches native compilation, reports progress during long runs, caches repeated
+reduction candidates, and stores enough program data to replay every result.
 
 Every bridge and language feature must have an example under
 `crates/examples/examples`. Examples build as real cargo binaries, and the

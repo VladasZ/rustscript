@@ -13,7 +13,7 @@ use parking_lot::Mutex;
 use super::bytecode::MethodName;
 use super::pchunk::PChunk;
 use super::pnative::PNative;
-use super::pvalue::PValue;
+use super::pvalue::{PValue, PValueRef};
 use super::pvm::PInterp;
 use super::shared::{self, Args, CharOut, Num, NumOut, ParseNum, StrOut};
 
@@ -178,6 +178,15 @@ impl PInterp {
         name: &MethodName,
         args: &mut [PValue],
     ) -> Result<PValue> {
+        let dereferenced = if let PValue::Ref(reference) = recv {
+            let Some(value) = reference.get() else {
+                bail!("method call through a dangling reference");
+            };
+            Some(value)
+        } else {
+            None
+        };
+        let recv = dereferenced.as_ref().unwrap_or(recv);
         let m = name.text.as_str();
         // A user defined `impl` method takes priority on a struct or enum, so a
         // script's own method is not shadowed by a builtin of the same name.
@@ -313,7 +322,19 @@ impl PInterp {
                 let needle = args.first().cloned().unwrap_or(PValue::Unit);
                 PValue::Bool(items.lock().iter().any(|v| v.eq_value(&needle)))
             }
-            "iter" | "into_iter" | "collect" | "to_vec" => PValue::vec(items.lock().clone()),
+            "iter" | "into_iter" | "collect" | "to_vec" | "copied" => {
+                PValue::vec(items.lock().clone())
+            }
+            "iter_mut" => {
+                let len = items.lock().len();
+                PValue::vec(
+                    (0..len)
+                        .map(|index| {
+                            PValue::Ref(Arc::new(PValueRef::vec_element(items.clone(), index)))
+                        })
+                        .collect(),
+                )
+            }
             "extend" | "extend_from_slice" => {
                 // Clone the source first, so extending a vec with itself does
                 // not deadlock on the same mutex.

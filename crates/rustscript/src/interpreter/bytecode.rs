@@ -70,6 +70,16 @@ pub enum CapSource {
     Local(Reg),
     /// An upvalue of the enclosing closure.
     Upvalue(u16),
+    /// A local register shared through a mutable capture cell.
+    MutableLocal(Reg),
+    /// A mutable capture cell from the enclosing closure.
+    MutableUpvalue(u16),
+}
+
+impl CapSource {
+    pub fn is_mutable(self) -> bool {
+        matches!(self, Self::MutableLocal(_) | Self::MutableUpvalue(_))
+    }
 }
 
 /// A struct literal, fields already ordered to match the declaration so
@@ -113,6 +123,7 @@ pub enum BuiltinId {
     Keys,
     Values,
     Iter,
+    IterMut,
     Push,
     Pop,
     First,
@@ -198,6 +209,7 @@ impl BuiltinId {
             "keys" => Keys,
             "values" => Values,
             "iter" | "into_iter" => Iter,
+            "iter_mut" => IterMut,
             "push" => Push,
             "pop" => Pop,
             "first" => First,
@@ -387,6 +399,18 @@ pub enum Op {
         dst: Reg,
         idx: u16,
     },
+    LoadCell {
+        dst: Reg,
+        cell: Reg,
+    },
+    StoreCell {
+        cell: Reg,
+        src: Reg,
+    },
+    StoreUpvalue {
+        idx: u16,
+        src: Reg,
+    },
     /// Read a module level const or static, evaluated lazily on first use.
     LoadGlobal {
         dst: Reg,
@@ -554,6 +578,14 @@ pub enum Op {
     SetIndex {
         base: Reg,
         key: Reg,
+        val: Reg,
+    },
+    Deref {
+        dst: Reg,
+        src: Reg,
+    },
+    SetDeref {
+        target: Reg,
         val: Reg,
     },
     GetField {

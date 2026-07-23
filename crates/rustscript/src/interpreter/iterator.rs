@@ -10,12 +10,16 @@ use super::bytecode::{BuiltinId, MethodName};
 use super::native::{Native, lines_next};
 use super::ops::compare_values;
 use super::regex_bridge::{CapturesValue, MatchValue, RegexValue};
-use super::value::{ClosureData, Map, RStr, Value};
+use super::value::{ClosureData, Map, RStr, Value, ValueRef};
 
 type Handle = Rc<RefCell<Native>>;
 
 pub enum IteratorState {
     Values {
+        values: Rc<RefCell<Vec<Value>>>,
+        index: usize,
+    },
+    MutableValues {
         values: Rc<RefCell<Vec<Value>>>,
         index: usize,
     },
@@ -119,6 +123,13 @@ pub(super) fn value_iter(items: Rc<RefCell<Vec<Value>>>) -> Value {
     })
 }
 
+pub(super) fn value_iter_mut(items: Rc<RefCell<Vec<Value>>>) -> Value {
+    wrap(IteratorState::MutableValues {
+        values: items,
+        index: 0,
+    })
+}
+
 pub(super) fn bytes(source: Rc<RStr>) -> Value {
     wrap(IteratorState::Bytes { source, index: 0 })
 }
@@ -195,6 +206,13 @@ impl IteratorState {
             IteratorState::Values { values, index } => {
                 let value = values.borrow().get(*index).cloned();
                 *index += usize::from(value.is_some());
+                Step::Ready(value)
+            }
+            IteratorState::MutableValues { values, index } => {
+                let exists = *index < values.borrow().len();
+                let value = exists
+                    .then(|| Value::Ref(Rc::new(ValueRef::vec_element(values.clone(), *index))));
+                *index += usize::from(exists);
                 Step::Ready(value)
             }
             IteratorState::Owned { values, index } => {

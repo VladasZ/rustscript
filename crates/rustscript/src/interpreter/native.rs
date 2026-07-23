@@ -308,7 +308,9 @@ pub fn native_method(
             };
             let h = handle.borrow();
             if let Native::File(r) = &*h {
-                return Ok(Some(io_err(r.get_ref().set_modified(time), |()| Value::Unit)));
+                return Ok(Some(io_err(r.get_ref().set_modified(time), |()| {
+                    Value::Unit
+                })));
             }
             bail!("set_modified on non-file {}", h.type_name());
         }

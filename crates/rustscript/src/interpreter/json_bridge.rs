@@ -643,6 +643,12 @@ pub(super) fn value_to_json(v: &Value) -> Result<serde_json::Value> {
         }
         Value::Range { .. } => bail!("cannot serialize a range to json"),
         Value::Closure(_) => bail!("cannot serialize a closure to json"),
+        Value::Ref(reference) => {
+            let Some(value) = reference.get() else {
+                bail!("cannot serialize a dangling reference to json");
+            };
+            value_to_json(&value)?
+        }
         Value::Native(n) => bail!("cannot serialize a {} to json", n.borrow().type_name()),
     })
 }

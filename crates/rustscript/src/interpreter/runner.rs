@@ -6,7 +6,7 @@ use anyhow::{Result, bail};
 
 use super::Interp;
 use super::bytecode::Chunk;
-use super::value::{ClosureData, Value};
+use super::value::{ClosureData, Upvalue, Value};
 
 thread_local! {
     static STACK_POOL: RefCell<Vec<Vec<Value>>> = const { RefCell::new(Vec::new()) };
@@ -39,7 +39,7 @@ impl Interp {
         &self,
         chunk: &Rc<Chunk>,
         args: &[Value],
-        upvalues: &[Value],
+        upvalues: &[Upvalue],
     ) -> Result<Value> {
         check_arity(chunk, args.len())?;
         let mut stack = take_stack();

@@ -167,6 +167,7 @@ impl Interp {
                 module: *m,
                 file: modules[*m].file.clone(),
                 async_mode,
+                impl_type: None,
             };
             let mut c = Compiler::new(&ctx);
             functions.push(Rc::new(c.compile_fn(&f.sig, &f.block)?));
@@ -178,6 +179,7 @@ impl Interp {
                 module: *m,
                 file: modules[*m].file.clone(),
                 async_mode,
+                impl_type: Some(ty),
             };
             let mut c = Compiler::new(&ctx);
             methods.insert(
@@ -192,6 +194,7 @@ impl Interp {
                 module: *m,
                 file: modules[*m].file.clone(),
                 async_mode,
+                impl_type: None,
             };
             let mut c = Compiler::new(&ctx);
             globals.push(GlobalSlot::Todo(Rc::new(c.compile_const(expr)?)));

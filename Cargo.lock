@@ -2319,6 +2319,18 @@ name = "rustscript-conformance"
 version = "0.1.0"
 
 [[package]]
+name = "rustscript-differential"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rand 0.10.2",
+ "serde",
+ "serde_json",
+ "syn",
+ "tempfile",
+]
+
+[[package]]
 name = "rustscript-examples"
 version = "0.1.0"
 dependencies = [

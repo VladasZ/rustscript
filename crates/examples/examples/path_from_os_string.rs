@@ -12,12 +12,19 @@ fn main() {
     if let Some(v) = env::var_os("PATH") {
         let p = PathBuf::from(v);
         // After the fix the display is the real path text, never the "OsString { s: .. }" debug form.
-        println!("has_debug_wrapper: {}", p.display().to_string().contains("OsString {"));
+        println!(
+            "has_debug_wrapper: {}",
+            p.display().to_string().contains("OsString {")
+        );
     }
 
     let zero = UNIX_EPOCH.duration_since(UNIX_EPOCH).unwrap().as_millis();
     println!("epoch_delta: {zero}");
 
-    let now_after_epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() > 0;
+    let now_after_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        > 0;
     println!("now_after_epoch: {now_after_epoch}");
 }
