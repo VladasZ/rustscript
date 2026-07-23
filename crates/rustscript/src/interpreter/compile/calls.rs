@@ -92,12 +92,21 @@ impl Compiler<'_> {
 
         if path.segments.len() == 1 {
             let name = path.segments[0].ident.to_string();
-            // A local closure value called directly.
-            if let NameLoc::Local(reg) = self.resolve(&name) {
+            // A local or captured closure value called directly.
+            let callee = match self.resolve(&name) {
+                NameLoc::Local(reg) => Some(reg),
+                NameLoc::Upvalue(idx) => {
+                    let reg = self.alloc();
+                    self.emit(Op::LoadUpvalue { dst: reg, idx });
+                    Some(reg)
+                }
+                NameLoc::None => None,
+            };
+            if let Some(callee) = callee {
                 let base = self.compile_args(c.args.iter())?;
                 self.emit(Op::CallValue {
                     dst,
-                    callee: reg,
+                    callee,
                     base,
                     argc,
                 });
