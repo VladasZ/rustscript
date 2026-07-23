@@ -204,8 +204,16 @@ pub(super) fn str_core(s: &str, name: &str, args: &impl Args) -> Result<Option<S
         "trim_end" => O::Owned(s.trim_end().to_string()),
         "to_uppercase" | "to_ascii_uppercase" => O::Owned(s.to_uppercase()),
         "to_lowercase" | "to_ascii_lowercase" => O::Owned(s.to_lowercase()),
-        "replace" => O::Owned(s.replace(&a(0), &a(1))),
-        "replacen" => O::Owned(s.replacen(&a(0), &a(1), int_arg(args, 2)? as usize)),
+        // A char-set pattern like `[':', '.']` replaces any of its members, matching real Rust. Without
+        // this the array renders as text and matches nothing, silently leaving the string unchanged.
+        "replace" => match args.pattern_chars(0) {
+            Some(cs) => O::Owned(s.replace(cs.as_slice(), &a(1))),
+            None => O::Owned(s.replace(&a(0), &a(1))),
+        },
+        "replacen" => match args.pattern_chars(0) {
+            Some(cs) => O::Owned(s.replacen(cs.as_slice(), &a(1), int_arg(args, 2)? as usize)),
+            None => O::Owned(s.replacen(&a(0), &a(1), int_arg(args, 2)? as usize)),
+        },
         "repeat" => {
             let n = args
                 .int(0)
