@@ -43,6 +43,10 @@ compact_str = { workspace = true }
 jsonwebtoken = { workspace = true }
 lopdf = { workspace = true }
 xmltree = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+indicatif = { workspace = true }
+zip = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }
