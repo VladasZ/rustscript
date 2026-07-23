@@ -147,6 +147,17 @@ pub fn native_method(
     method: &str,
     args: &mut [Value],
 ) -> Result<Option<Value>> {
+    // A lopdf Document dispatches by receiver first, its method names mirror
+    // the real crate and must not collide with the name-keyed arms below.
+    if matches!(&*handle.borrow(), Native::Pdf(_)) {
+        let mut h = handle.borrow_mut();
+        let Native::Pdf(doc) = &mut *h else {
+            unreachable!()
+        };
+        if let Some(v) = super::pdf_bridge::document_method(doc, method, args)? {
+            return Ok(Some(v));
+        }
+    }
     // Handles that consume self or hand out sub-handles need to move out of the
     // RefCell, so they are matched first with a dedicated borrow.
     match method {
@@ -433,45 +444,6 @@ pub fn native_method(
                 return Ok(Some(io_err(s.connect(addr), |()| Value::Unit)));
             }
             bail!("connect on {}", h.type_name());
-        }
-        // PDF (lopdf) ------------------------------------------------------
-        "page_count" => {
-            let h = handle.borrow();
-            if let Native::Pdf(doc) = &*h {
-                return Ok(Some(super::pdf_bridge::page_count(doc)));
-            }
-            bail!("page_count on {}", h.type_name());
-        }
-        "page_content" => {
-            let index = match args.first() {
-                Some(Value::Int(n)) => *n,
-                _ => 0,
-            };
-            let h = handle.borrow();
-            if let Native::Pdf(doc) = &*h {
-                return Ok(Some(super::pdf_bridge::page_content(doc, index)));
-            }
-            bail!("page_content on {}", h.type_name());
-        }
-        "set_page_content" => {
-            let index = match args.first() {
-                Some(Value::Int(n)) => *n,
-                _ => 0,
-            };
-            let bytes = value_to_bytes(args.get(1));
-            let mut h = handle.borrow_mut();
-            if let Native::Pdf(doc) = &mut *h {
-                return Ok(Some(super::pdf_bridge::set_page_content(doc, index, bytes)));
-            }
-            bail!("set_page_content on {}", h.type_name());
-        }
-        "save" => {
-            let path = args.first().map(|v| v.display()).unwrap_or_default();
-            let mut h = handle.borrow_mut();
-            if let Native::Pdf(doc) = &mut *h {
-                return Ok(Some(super::pdf_bridge::save(doc, &path)));
-            }
-            bail!("save on {}", h.type_name());
         }
         // Instant / SystemTime --------------------------------------------
         "elapsed" => {

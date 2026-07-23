@@ -49,6 +49,11 @@ pub struct Bridge {
 }
 
 pub const BRIDGES: &[Bridge] = &[
+    // -- shared cores, one source materialized by both engines ------------
+    b("shared.rs", "str_core", Engine::Both, "Str"),
+    b("shared.rs", "color_core", Engine::Both, "Str"),
+    b("shared.rs", "num_core", Engine::Both, "*"),
+    b("shared.rs", "char_method", Engine::Both, "Char"),
     // -- fast engine ------------------------------------------------------
     b("methods.rs", "str_method_slow", Engine::Fast, "Str"),
     b("methods.rs", "vec_method", Engine::Fast, "Vec"),
@@ -56,8 +61,6 @@ pub const BRIDGES: &[Bridge] = &[
     b("methods.rs", "opt_method", Engine::Fast, "Option"),
     b("methods.rs", "res_method", Engine::Fast, "Result"),
     b("methods.rs", "entry_method", Engine::Fast, "Entry"),
-    b("methods.rs", "color_method", Engine::Fast, "Color"),
-    b("methods.rs", "char_method", Engine::Both, "Char"),
     b("builtins.rs", "builtin_method", Engine::Fast, "*"),
     b("methods.rs", "generic_method", Engine::Fast, "*"),
     b("methods.rs", "json_type_test", Engine::Fast, "*"),
@@ -84,6 +87,13 @@ pub const BRIDGES: &[Bridge] = &[
         "FileType",
     ),
     b("native.rs", "native_method", Engine::Fast, "Native"),
+    b("pdf_bridge.rs", "document_method", Engine::Fast, "Document"),
+    b(
+        "xmltree_bridge.rs",
+        "element_method",
+        Engine::Fast,
+        "Element",
+    ),
     b("process.rs", "command_method", Engine::Fast, "Command"),
     b("regex_bridge.rs", "regex_method", Engine::Fast, "Regex"),
     b("regex_bridge.rs", "match_method", Engine::Fast, "Match"),

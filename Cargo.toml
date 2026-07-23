@@ -9,7 +9,7 @@ anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 syn = { version = "2.0", features = ["full", "extra-traits"] }
-proc-macro2 = "1.0"
+proc-macro2 = { version = "1.0", features = ["span-locations"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking", "cookies"], default-features = false }
 tokio = { version = "1", features = ["full"] }
 parking_lot = "0.12"
@@ -31,6 +31,8 @@ hex = "0.4"
 ctrlc = "3.5"
 tempfile = "3.27"
 jsonwebtoken = { version = "10.4", features = ["rust_crypto"] }
+lopdf = "0.44"
+xmltree = { version = "0.12", features = ["attribute-order"] }
 winreg = "0.56"
 encoding_rs = "0.8"
 windows-service = "0.8"

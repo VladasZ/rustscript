@@ -627,6 +627,11 @@ pub enum Op {
 /// One compiled function, method, or closure body.
 pub struct Chunk {
     pub code: Vec<Op>,
+    /// Source line of each op, parallel to `code`. Zero means unknown, so a
+    /// synthesized chunk with no lines still traces by function name alone.
+    pub lines: Vec<u32>,
+    /// Source file this body was written in, shown in runtime error traces.
+    pub file: Arc<str>,
     pub num_regs: usize,
     pub num_params: usize,
     pub name: String,
@@ -659,6 +664,8 @@ impl Chunk {
     pub fn empty(name: impl Into<String>) -> Chunk {
         Chunk {
             code: Vec::new(),
+            lines: Vec::new(),
+            file: Arc::from(""),
             num_regs: 0,
             num_params: 0,
             name: name.into(),

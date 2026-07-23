@@ -13,7 +13,7 @@ use super::value::{Map, RStr, StructData, Value};
 
 use super::builtins::*;
 use super::ops::compare_values;
-use super::std_bridge::bytes_to_vec;
+use super::shared::{self, Args, CharOut, Num, NumOut, ParseNum, StrOut};
 
 /// `map.entry(k).or_insert_with(Vec::new).push(x)` accumulates in place.
 pub(super) fn entry_method(s: &StructData, name: &str, args: &[Value]) -> Result<Value> {
@@ -71,11 +71,13 @@ pub(super) fn generic_method(recv: &Value, name: &str, args: &[Value]) -> Result
         // PathBuf for example, handles `into` in its own bridge before this.
         (_, "into") => Ok(recv.clone()),
         (_, "to_string") => Ok(Value::str(recv.display())),
-        (Value::Char(ch), name) if let Some(out) = char_method(*ch, name) => Ok(match out {
-            CharOut::Bool(v) => Value::Bool(v),
-            CharOut::Char(c) => Value::Char(c),
-            CharOut::Str(s) => Value::str(s),
-        }),
+        (Value::Char(ch), name) if let Some(out) = shared::char_method(*ch, name) => {
+            Ok(match out {
+                CharOut::Bool(v) => Value::Bool(v),
+                CharOut::Char(c) => Value::Char(c),
+                CharOut::Str(s) => Value::str(s),
+            })
+        }
         (Value::Bool(b), "as_bool") => Ok(Value::some(Value::Bool(*b))),
         // `then_some(v)` yields that value, not a placeholder.
         (Value::Bool(b), "then_some") => Ok(if *b {
@@ -90,9 +92,12 @@ pub(super) fn generic_method(recv: &Value, name: &str, args: &[Value]) -> Result
             Ok(Value::none())
         }
         // An enum names itself, so an unknown method on an Option says Option
-        // and not the bare word enum.
+        // and not the bare word enum. A struct names itself the same way.
         (Value::Enum { enum_name, .. }, _) => {
             bail!("unknown method `{name}` on {enum_name}")
+        }
+        (Value::Struct(s), _) => {
+            bail!("unknown method `{name}` on struct `{}`", s.name())
         }
         _ => bail!("unknown method `{name}` on {}", recv.type_name()),
     }
@@ -135,139 +140,96 @@ pub(super) fn str_method(s: &Rc<RStr>, method: &MethodName, args: &[Value]) -> R
 }
 
 pub(super) fn str_method_slow(s: &Rc<RStr>, name: &str, args: &[Value]) -> Result<Value> {
-    let arg_str = |i: usize| -> String { args.get(i).map(|v| v.display()).unwrap_or_default() };
-    Ok(match name {
-        "to_owned" | "trim_string" => Value::Str(s.clone()),
-        "to_uppercase" | "to_ascii_uppercase" => Value::str(s.to_uppercase()),
-        "to_lowercase" | "to_ascii_lowercase" => Value::str(s.to_lowercase()),
-        "trim_start" => Value::str(s.trim_start().to_string()),
-        "trim_end" => Value::str(s.trim_end().to_string()),
-        "replace" => Value::str(s.replace(&arg_str(0), &arg_str(1))),
-        "replacen" => Value::str(s.replacen(&arg_str(0), &arg_str(1), int_arg(args, 2)? as usize)),
-        "repeat" => {
-            let n = match args.first() {
-                Some(Value::Int(n)) => *n as usize,
-                _ => 0,
-            };
-            Value::str(s.repeat(n))
-        }
-        // String::as_str gives the string back. serde_json::Value::as_str
-        // gives an Option, and a json string is a plain Str here, so unwrap
-        // and expect on a string are identity to keep that pattern working.
-        // A JSON string parsed by the interpreter is a plain String, so the
-        // serde_json Value::as_str chains resolve by treating the string as an
-        // already-unwrapped Some. as_str keeps the string, and the Option
-        // consumers below hand it straight back.
-        "as_str" | "as_string" | "unwrap" | "expect" => Value::Str(s.clone()),
-        "unwrap_or" | "unwrap_or_else" | "unwrap_or_default" => Value::Str(s.clone()),
-        // `Option::context` returns a Result, so the pre-unwrapped string has to
-        // come back wrapped or a following `?` would have nothing to unwrap.
-        "context" | "with_context" => Value::ok(Value::Str(s.clone())),
-        "is_some" => Value::Bool(true),
-        "is_none" => Value::Bool(false),
-        "as_bytes" | "into_bytes" => bytes_to_vec(s.as_bytes()),
-        "bytes" => super::iterator::bytes(s.clone()),
-        // The utf-16 code units as an eager Vec of ints, mirroring how `bytes`
-        // gives the utf-8 bytes. std hands back an iterator of u16, we collect.
-        "encode_utf16" => Value::vec(s.encode_utf16().map(|u| Value::Int(i64::from(u))).collect()),
-        "strip_prefix" => match s.strip_prefix(&arg_str(0)) {
-            Some(rest) => Value::some(Value::str(rest.to_string())),
-            None => Value::none(),
-        },
-        "strip_suffix" => match s.strip_suffix(&arg_str(0)) {
-            Some(rest) => Value::some(Value::str(rest.to_string())),
-            None => Value::none(),
-        },
-        // Byte offsets, same as the real std, and the slicing here is
-        // byte-based too, so `&s[..s.find(x).unwrap()]` behaves right.
-        "find" => match s.find(&arg_str(0)) {
-            Some(i) => Value::some(Value::Int(i as i64)),
-            None => Value::none(),
-        },
-        "rfind" => match s.rfind(&arg_str(0)) {
-            Some(i) => Value::some(Value::Int(i as i64)),
-            None => Value::none(),
-        },
-        "split_once" => match s.split_once(&arg_str(0)) {
-            Some((a, b)) => Value::some(Value::tuple(vec![
-                Value::str(a.to_string()),
-                Value::str(b.to_string()),
-            ])),
-            None => Value::none(),
-        },
-        "rsplit_once" => match s.rsplit_once(&arg_str(0)) {
-            Some((a, b)) => Value::some(Value::tuple(vec![
-                Value::str(a.to_string()),
-                Value::str(b.to_string()),
-            ])),
-            None => Value::none(),
-        },
-        "rsplit" => {
-            let sep = arg_str(0);
-            Value::vec(s.rsplit(&sep).map(Value::str).collect())
-        }
-        "splitn" => {
-            let n = int_arg(args, 0)? as usize;
-            Value::vec(s.splitn(n, &arg_str(1)).map(Value::str).collect())
-        }
-        "rsplitn" => {
-            let n = int_arg(args, 0)? as usize;
-            Value::vec(s.rsplitn(n, &arg_str(1)).map(Value::str).collect())
-        }
-        "trim_matches" | "trim_start_matches" | "trim_end_matches" => {
-            let pat = arg_str(0);
-            let out = match name {
-                "trim_start_matches" => s.trim_start_matches(&pat),
-                "trim_end_matches" => s.trim_end_matches(&pat),
-                // trim_matches only takes chars in real Rust
-                _ => s.trim_matches(pat.chars().next().unwrap_or(' ')),
-            };
-            Value::str(out.to_string())
-        }
-        "cmp" => make_ordering((***s).cmp(arg_str(0).as_str())),
-        // A String or a Cow that already owns its data, into_owned returns self.
-        "into_owned" | "into_string" => Value::Str(s.clone()),
-        _ => {
-            if let Some(colored) = color_method(s, name) {
-                colored
-            } else {
-                return generic_method(&Value::Str(s.clone()), name, args);
-            }
-        }
-    })
+    if let Some(out) = shared::str_core(s.as_str(), name, &VArgs(args))? {
+        return Ok(str_out(s, out));
+    }
+    if let Some(text) = shared::color_core(s.as_str(), name) {
+        return Ok(Value::str(text));
+    }
+    match name {
+        // The lazy iterator form of the byte walk, engine specific by design.
+        "bytes" => Ok(super::iterator::bytes(s.clone())),
+        _ => generic_method(&Value::Str(s.clone()), name, args),
+    }
 }
 
-/// The `colored` crate as string methods. Returns the styled text as a plain
-/// string carrying ANSI codes, so chaining and printing both work. Honors the
-/// crate's own NO_COLOR and terminal detection.
-pub(super) fn color_method(s: &str, name: &str) -> Option<Value> {
-    use colored::Colorize;
-    let out = match name {
-        "red" => s.red(),
-        "green" => s.green(),
-        "yellow" => s.yellow(),
-        "blue" => s.blue(),
-        "magenta" | "purple" => s.magenta(),
-        "cyan" => s.cyan(),
-        "white" => s.white(),
-        "black" => s.black(),
-        "bright_red" => s.bright_red(),
-        "bright_green" => s.bright_green(),
-        "bright_yellow" => s.bright_yellow(),
-        "bright_blue" => s.bright_blue(),
-        "bright_cyan" => s.bright_cyan(),
-        "on_red" => s.on_red(),
-        "on_green" => s.on_green(),
-        "on_blue" => s.on_blue(),
-        "bold" => s.bold(),
-        "dimmed" => s.dimmed(),
-        "italic" => s.italic(),
-        "underline" => s.underline(),
-        "reversed" => s.reversed(),
-        "clear" | "normal" => s.normal(),
-        _ => return None,
-    };
-    Some(Value::str(out.to_string()))
+/// Turn a neutral string core answer into a fast engine value. `Keep` clones
+/// the `Rc`, so handing the receiver back stays a refcount bump.
+fn str_out(s: &Rc<RStr>, out: StrOut) -> Value {
+    match out {
+        StrOut::Bool(b) => Value::Bool(b),
+        StrOut::Int(i) => Value::Int(i),
+        StrOut::Owned(o) => Value::str(o),
+        StrOut::Keep => Value::Str(s.clone()),
+        StrOut::OkKeep => Value::ok(Value::Str(s.clone())),
+        StrOut::Strs(v) => Value::vec(v.into_iter().map(Value::str).collect()),
+        StrOut::CharIdx(v) => Value::vec(
+            v.into_iter()
+                .map(|(i, c)| Value::tuple(vec![Value::Int(i), Value::Char(c)]))
+                .collect(),
+        ),
+        StrOut::Ints(v) => Value::vec(v.into_iter().map(Value::Int).collect()),
+        StrOut::OptOwned(o) => match o {
+            Some(x) => Value::some(Value::str(x)),
+            None => Value::none(),
+        },
+        StrOut::OptInt(o) => match o {
+            Some(i) => Value::some(Value::Int(i)),
+            None => Value::none(),
+        },
+        StrOut::OptPair(o) => match o {
+            Some((x, y)) => Value::some(Value::tuple(vec![Value::str(x), Value::str(y)])),
+            None => Value::none(),
+        },
+        StrOut::Ordering(o) => make_ordering(o),
+        StrOut::Parse(p) => match p {
+            ParseNum::Int(i) => Value::ok(Value::Int(i)),
+            ParseNum::Float(f) => Value::ok(Value::Float(f)),
+            ParseNum::Bool(b) => Value::ok(Value::Bool(b)),
+            ParseNum::Fail(m) => Value::err(Value::str(m)),
+        },
+    }
+}
+
+/// The fast engine's argument view for the shared cores.
+pub(super) struct VArgs<'a>(pub(super) &'a [Value]);
+
+impl Args for VArgs<'_> {
+    fn text(&self, i: usize) -> String {
+        self.0.get(i).map(|v| v.display()).unwrap_or_default()
+    }
+
+    fn int(&self, i: usize) -> Option<i64> {
+        match self.0.get(i) {
+            Some(Value::Int(n)) => Some(*n),
+            _ => None,
+        }
+    }
+
+    fn float(&self, i: usize) -> Option<f64> {
+        match self.0.get(i) {
+            Some(Value::Float(f)) => Some(*f),
+            Some(Value::Int(n)) => Some(*n as f64),
+            _ => None,
+        }
+    }
+
+    fn pattern_chars(&self, i: usize) -> Option<Vec<char>> {
+        let Some(Value::Vec(items)) = self.0.get(i) else {
+            return None;
+        };
+        Some(
+            items
+                .borrow()
+                .iter()
+                .filter_map(|v| match v {
+                    Value::Char(c) => Some(*c),
+                    Value::Str(text) => text.chars().next(),
+                    _ => None,
+                })
+                .collect(),
+        )
+    }
 }
 
 pub(super) fn vec_method(
@@ -418,6 +380,40 @@ pub(super) fn vec_method(
                 v.borrow_mut().clear();
                 Value::Unit
             }
+            // Compiled from `v[a..b].copy_from_slice(src)` with the bounds as
+            // leading args, so the write reaches the base vec instead of a
+            // copied slice temporary. An open end arrives as the max sentinel.
+            "copy_from_slice" => {
+                let start = int_arg(args, 0)? as usize;
+                let end_raw = int_arg(args, 1)?;
+                let src: Vec<Value> = match args.get(2) {
+                    Some(Value::Vec(other)) => other.borrow().clone(),
+                    _ => bail!("copy_from_slice takes a slice argument"),
+                };
+                let mut items = v.borrow_mut();
+                let end = if end_raw == i64::MAX {
+                    items.len()
+                } else {
+                    end_raw as usize
+                };
+                if end > items.len() {
+                    bail!(
+                        "range end index {end} out of range for slice of length {}",
+                        items.len()
+                    );
+                }
+                let dst_len = end.saturating_sub(start);
+                if dst_len != src.len() {
+                    bail!(
+                        "source slice length ({}) does not match destination slice length ({dst_len})",
+                        src.len()
+                    );
+                }
+                for (k, val) in src.into_iter().enumerate() {
+                    items[start + k] = val;
+                }
+                Value::Unit
+            }
             "truncate" => {
                 let n = int_arg(args, 0)? as usize;
                 v.borrow_mut().truncate(n);
@@ -565,53 +561,34 @@ pub(super) fn map_pairs(m: &Rc<RefCell<Map>>) -> Value {
 }
 
 pub(super) fn num_method(recv: &Value, name: &str, args: &[Value]) -> Result<Value> {
-    let as_f = || match recv {
-        Value::Int(i) => *i as f64,
-        Value::Float(f) => *f,
-        _ => 0.0,
-    };
-    Ok(match (recv, name) {
-        (_, "to_string") => Value::str(recv.display()),
-        (_, "clone") => recv.clone(),
-        (Value::Int(i), "as_i64" | "as_u64" | "as_i128" | "as_usize") => {
-            Value::some(Value::Int(*i))
-        }
-        // serde_json keeps every json float as f64 and its integer accessors
-        // answer None on it, even for a whole value like 5.0.
-        (Value::Float(_), "as_i64" | "as_u64" | "as_i128" | "as_usize") => Value::none(),
-        (_, "as_f64") => Value::some(Value::Float(as_f())),
-        // A number is not these serde types, so the accessor is None.
-        (_, "as_str" | "as_bool" | "as_array" | "as_object") => Value::none(),
-        (Value::Int(i), "abs") => Value::Int(i.abs()),
-        (Value::Float(f), "abs") => Value::Float(f.abs()),
-        (Value::Int(i), "pow") => Value::Int(i.pow(int_arg(args, 0)? as u32)),
-        (Value::Float(f), "powi") => Value::Float(f.powi(int_arg(args, 0)? as i32)),
-        (Value::Float(f), "powf") => Value::Float(f.powf(float_arg(args, 0)?)),
-        (Value::Float(_), "sqrt") => Value::Float(as_f().sqrt()),
-        (Value::Float(f), "floor") => Value::Float(f.floor()),
-        (Value::Float(f), "ceil") => Value::Float(f.ceil()),
-        (Value::Float(f), "round") => Value::Float(f.round()),
-        (Value::Float(f), "is_sign_positive") => Value::Bool(f.is_sign_positive()),
-        (Value::Int(a), "min") => Value::Int((*a).min(int_arg(args, 0)?)),
-        (Value::Int(a), "max") => Value::Int((*a).max(int_arg(args, 0)?)),
-        (Value::Int(a), "clamp") => Value::Int((*a).clamp(int_arg(args, 0)?, int_arg(args, 1)?)),
-        (Value::Float(a), "clamp") => {
-            Value::Float((*a).clamp(float_arg(args, 0)?, float_arg(args, 1)?))
-        }
-        (Value::Float(a), "min") => Value::Float((*a).min(float_arg(args, 0)?)),
-        (Value::Float(a), "max") => Value::Float((*a).max(float_arg(args, 0)?)),
-        (Value::Int(a), "is_multiple_of") => Value::Bool(a % int_arg(args, 0)? == 0),
-        (Value::Int(a), "saturating_sub") => Value::Int(a.saturating_sub(int_arg(args, 0)?)),
-        (Value::Int(a), "saturating_add") => Value::Int(a.saturating_add(int_arg(args, 0)?)),
-        (Value::Int(a), "saturating_mul") => Value::Int(a.saturating_mul(int_arg(args, 0)?)),
-        (Value::Int(a), "cmp") => make_ordering(a.cmp(&int_arg(args, 0)?)),
-        (_, "partial_cmp") => Value::some(make_ordering(
-            as_f()
-                .partial_cmp(&float_arg(args, 0)?)
-                .unwrap_or(std::cmp::Ordering::Equal),
-        )),
+    match name {
+        "to_string" => return Ok(Value::str(recv.display())),
+        "clone" => return Ok(recv.clone()),
+        _ => {}
+    }
+    let n = match recv {
+        Value::Int(i) => Num::Int(*i),
+        Value::Float(f) => Num::Float(*f),
         _ => bail!("unknown numeric method `{name}`"),
-    })
+    };
+    match shared::num_core(n, name, &VArgs(args))? {
+        Some(out) => Ok(num_out(out)),
+        None => bail!("unknown numeric method `{name}`"),
+    }
+}
+
+/// Turn a neutral numeric core answer into a fast engine value.
+fn num_out(out: NumOut) -> Value {
+    match out {
+        NumOut::Int(i) => Value::Int(i),
+        NumOut::Float(f) => Value::Float(f),
+        NumOut::Bool(b) => Value::Bool(b),
+        NumOut::SomeInt(i) => Value::some(Value::Int(i)),
+        NumOut::SomeFloat(f) => Value::some(Value::Float(f)),
+        NumOut::Nothing => Value::none(),
+        NumOut::Ordering(o) => make_ordering(o),
+        NumOut::SomeOrdering(o) => Value::some(make_ordering(o)),
+    }
 }
 
 pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> Result<Value> {
@@ -626,7 +603,9 @@ pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
         _ => unreachable!(),
     };
     match method.id {
-        B::Unwrap => return inner.ok_or_else(|| anyhow!("called unwrap on a None value")),
+        B::Unwrap => {
+            return inner.ok_or_else(|| anyhow!("called `Option::unwrap()` on a `None` value"));
+        }
         B::UnwrapOr => {
             return Ok(inner.unwrap_or_else(|| args.first().cloned().unwrap_or(Value::Unit)));
         }
@@ -676,16 +655,16 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
                 inner.unwrap_or(Value::Unit)
             } else {
                 bail!(
-                    "called unwrap on an Err value: {}",
-                    inner.map(|v| v.display()).unwrap_or_default()
+                    "called `Result::unwrap()` on an `Err` value: {}",
+                    inner.map(|v| v.debug()).unwrap_or_default()
                 );
             }
         }
         "unwrap_err" => {
             if is_ok {
                 bail!(
-                    "called unwrap_err on an Ok value: {}",
-                    inner.map(|v| v.display()).unwrap_or_default()
+                    "called `Result::unwrap_err()` on an `Ok` value: {}",
+                    inner.map(|v| v.debug()).unwrap_or_default()
                 );
             } else {
                 inner.unwrap_or(Value::Unit)
@@ -747,14 +726,6 @@ pub(super) fn int_arg(args: &[Value], i: usize) -> Result<i64> {
     }
 }
 
-pub(super) fn float_arg(args: &[Value], i: usize) -> Result<f64> {
-    match args.get(i) {
-        Some(Value::Float(f)) => Ok(*f),
-        Some(Value::Int(n)) => Ok(*n as f64),
-        _ => bail!("expected a float argument"),
-    }
-}
-
 /// Ordering key for `sort`, good enough for numbers and strings.
 pub(super) fn sort_key(v: &Value) -> SortKey {
     match v {
@@ -805,44 +776,6 @@ impl Ord for SortKey {
             (SortKey::Str(_), SortKey::List(_)) => Ordering::Less,
             (SortKey::List(_), SortKey::Str(_)) => Ordering::Greater,
         }
-    }
-}
-
-/// The result of a `char` method, in a form either engine can turn into its own
-/// value type. Keeps the classification table in one place.
-pub(super) enum CharOut {
-    Bool(bool),
-    Char(char),
-    Str(String),
-}
-
-/// The `char` classification and conversion methods, shared by both engines so
-/// a script sees the same set whichever one runs it.
-pub(super) fn char_method(ch: char, name: &str) -> Option<CharOut> {
-    let b = |v: bool| Some(CharOut::Bool(v));
-    match name {
-        "is_ascii_digit" => b(ch.is_ascii_digit()),
-        "is_ascii_alphabetic" => b(ch.is_ascii_alphabetic()),
-        "is_ascii_alphanumeric" => b(ch.is_ascii_alphanumeric()),
-        "is_ascii_uppercase" => b(ch.is_ascii_uppercase()),
-        "is_ascii_lowercase" => b(ch.is_ascii_lowercase()),
-        "is_ascii_whitespace" => b(ch.is_ascii_whitespace()),
-        "is_ascii_punctuation" => b(ch.is_ascii_punctuation()),
-        "is_ascii_hexdigit" => b(ch.is_ascii_hexdigit()),
-        "is_ascii" => b(ch.is_ascii()),
-        "is_alphabetic" => b(ch.is_alphabetic()),
-        "is_alphanumeric" => b(ch.is_alphanumeric()),
-        "is_numeric" => b(ch.is_numeric()),
-        "is_whitespace" => b(ch.is_whitespace()),
-        "is_uppercase" => b(ch.is_uppercase()),
-        "is_lowercase" => b(ch.is_lowercase()),
-        "to_ascii_uppercase" => Some(CharOut::Char(ch.to_ascii_uppercase())),
-        "to_ascii_lowercase" => Some(CharOut::Char(ch.to_ascii_lowercase())),
-        // These yield an iterator in real Rust, but a script only ever renders
-        // or collects it, so the string it would produce is handed back.
-        "to_uppercase" => Some(CharOut::Str(ch.to_uppercase().to_string())),
-        "to_lowercase" => Some(CharOut::Str(ch.to_lowercase().to_string())),
-        _ => None,
     }
 }
 

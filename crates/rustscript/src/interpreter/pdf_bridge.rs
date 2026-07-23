@@ -1,12 +1,17 @@
-//! A focused PDF bridge backed by lopdf. It exposes only the operations the
-//! fix_export_pdf skill script needs, loading a document, reading and replacing
-//! a page's decoded content stream, and saving. The byte level editing stays in
-//! the script, this bridge is only the PDF plumbing lopdf provides.
+//! The lopdf bridge. Exposes the real `lopdf::Document` API subset instead of
+//! an invented type, so a script using it is valid Rust that compiles with the
+//! actual crate and passes `rust check`: `Document::load`, `get_pages`,
+//! `get_page_content`, `change_page_content`, and `save`. An `ObjectId` is the
+//! `(u32, u16)` tuple lopdf defines, carried here as a plain tuple value.
 
-use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use anyhow::{Result, bail};
+use lopdf::{Document, ObjectId};
 
 use super::native::Native;
-use super::value::Value;
+use super::value::{Map, Value};
 
 pub(super) fn load(path: &str) -> Value {
     match Document::load(path) {
@@ -15,47 +20,83 @@ pub(super) fn load(path: &str) -> Value {
     }
 }
 
-fn page_ids(doc: &Document) -> Vec<ObjectId> {
-    doc.get_pages().into_values().collect()
-}
-
-fn page_at(doc: &Document, index: i64) -> Option<ObjectId> {
-    usize::try_from(index)
-        .ok()
-        .and_then(|i| page_ids(doc).get(i).copied())
-}
-
-pub(super) fn page_count(doc: &Document) -> Value {
-    Value::Int(i64::try_from(page_ids(doc).len()).unwrap_or(0))
-}
-
-pub(super) fn page_content(doc: &Document, index: i64) -> Value {
-    let Some(id) = page_at(doc, index) else {
-        return Value::err(Value::str(format!("page index {index} out of range")));
-    };
-    let bytes = doc.get_page_content(id);
-    Value::ok(Value::vec(
-        bytes.iter().map(|b| Value::Int(i64::from(*b))).collect(),
-    ))
-}
-
-pub(super) fn set_page_content(doc: &mut Document, index: i64, bytes: Vec<u8>) -> Value {
-    let Some(id) = page_at(doc, index) else {
-        return Value::err(Value::str(format!("page index {index} out of range")));
-    };
-    let stream_id = doc.add_object(Stream::new(Dictionary::new(), bytes));
-    match doc.get_object_mut(id).and_then(Object::as_dict_mut) {
-        Ok(dict) => {
-            dict.set("Contents", Object::Reference(stream_id));
-            Value::ok(Value::Unit)
+/// Methods on a loaded `Document`, mirroring lopdf's names and shapes.
+pub(super) fn document_method(
+    doc: &mut Document,
+    name: &str,
+    args: &[Value],
+) -> Result<Option<Value>> {
+    Ok(Some(match name {
+        // BTreeMap of page number to page ObjectId, as a map of int to tuple.
+        "get_pages" => {
+            let mut map = Map::default();
+            for (num, id) in doc.get_pages() {
+                let key = Value::Int(i64::from(num))
+                    .into_key()
+                    .expect("an int is always a valid map key");
+                map.insert(key, object_id_value(id));
+            }
+            Value::Map(Rc::new(RefCell::new(map)))
         }
-        Err(e) => Value::err(Value::str(e.to_string())),
-    }
+        "get_page_content" => {
+            let id = object_id_arg(args, 0)?;
+            let bytes = doc.get_page_content(id);
+            Value::vec(
+                bytes
+                    .into_iter()
+                    .map(|b| Value::Int(i64::from(b)))
+                    .collect(),
+            )
+        }
+        "change_page_content" => {
+            let id = object_id_arg(args, 0)?;
+            let bytes = bytes_arg(args, 1);
+            match doc.change_page_content(id, bytes) {
+                Ok(()) => Value::ok(Value::Unit),
+                Err(e) => Value::err(Value::str(e.to_string())),
+            }
+        }
+        // The real save returns the created File; scripts drop it, so Unit.
+        "save" => {
+            let path = args.first().map(|v| v.display()).unwrap_or_default();
+            match doc.save(&path) {
+                Ok(_) => Value::ok(Value::Unit),
+                Err(e) => Value::err(Value::str(e.to_string())),
+            }
+        }
+        _ => return Ok(None),
+    }))
 }
 
-pub(super) fn save(doc: &mut Document, path: &str) -> Value {
-    match doc.save(path) {
-        Ok(_) => Value::ok(Value::Unit),
-        Err(e) => Value::err(Value::str(e.to_string())),
+fn object_id_value(id: ObjectId) -> Value {
+    Value::tuple(vec![
+        Value::Int(i64::from(id.0)),
+        Value::Int(i64::from(id.1)),
+    ])
+}
+
+/// An `ObjectId` argument, the `(u32, u16)` tuple `get_pages` handed out.
+fn object_id_arg(args: &[Value], i: usize) -> Result<ObjectId> {
+    if let Some(Value::Tuple(items)) = args.get(i) {
+        let items = items.borrow();
+        if let (Some(Value::Int(a)), Some(Value::Int(b))) = (items.first(), items.get(1)) {
+            return Ok((*a as u32, *b as u16));
+        }
     }
+    bail!("expected a page ObjectId tuple like the ones get_pages returns");
+}
+
+/// A `Vec<u8>` argument, a list of byte-sized ints.
+fn bytes_arg(args: &[Value], i: usize) -> Vec<u8> {
+    let Some(Value::Vec(items)) = args.get(i) else {
+        return Vec::new();
+    };
+    items
+        .borrow()
+        .iter()
+        .filter_map(|v| match v {
+            Value::Int(n) => Some(*n as u8),
+            _ => None,
+        })
+        .collect()
 }

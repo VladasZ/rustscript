@@ -361,6 +361,7 @@ pub(super) fn path_method(st: &StructData, method: &str, args: &[Value]) -> Resu
         },
         "file_stem" => opt_str(p.file_stem()),
         "extension" => opt_str(p.extension()),
+        "with_extension" => make_path(p.with_extension(arg_str(args, 0)).display().to_string()),
         "parent" => match p.parent() {
             Some(par) => Value::some(make_path(par.display().to_string())),
             None => Value::none(),
@@ -632,9 +633,17 @@ pub(super) fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Va
             Ok(s) => Value::ok(Native::Udp(s).wrap()),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
-        ("Pdf", "load") => super::pdf_bridge::load(&arg_str(args, 0)),
-        ("Docx", "edit_document_xml") => {
-            super::docx_bridge::edit_document_xml(&arg_str(args, 0), &arg_str(args, 1))
+        ("Document", "load") => super::pdf_bridge::load(&arg_str(args, 0)),
+        ("Element", "parse") => super::xmltree_bridge::parse(args),
+        ("Element", "new") => super::xmltree_bridge::new_element(&arg_str(args, 0)),
+        // The real xmltree node enum, constructed like `SeekFrom` below since
+        // no user declaration exists for it.
+        ("XMLNode", "Element" | "Text" | "Comment" | "CData" | "ProcessingInstruction") => {
+            Value::Enum {
+                enum_name: "XMLNode".into(),
+                variant: func.into(),
+                data: args.iter().cloned().collect(),
+            }
         }
         ("SeekFrom", "Start" | "End" | "Current") => Value::Enum {
             enum_name: "SeekFrom".into(),

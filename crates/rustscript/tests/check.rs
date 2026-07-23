@@ -48,3 +48,25 @@ fn type_error_fails_check() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("not valid Rust"), "stderr was: {stderr}");
 }
+
+#[test]
+#[ignore = "runs real cargo check, slow"]
+fn diagnostics_name_the_real_script_file() {
+    // The script is mirrored into a cache project under its own name, so the
+    // rustc arrow line must point at that name, not a generic `main.rs`.
+    let out = check(
+        "fn main() { let x: i64 = \"nope\"; println!(\"{x}\"); }\n",
+        "diagname",
+    );
+    assert!(!out.status.success(), "type error should fail the check");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let expected = format!("rustscript_check_{}_diagname.rs", std::process::id());
+    assert!(
+        stderr.contains(&expected),
+        "diagnostic should name {expected}, stderr was: {stderr}"
+    );
+    assert!(
+        !stderr.contains("main.rs"),
+        "diagnostic should not name main.rs, stderr was: {stderr}"
+    );
+}

@@ -66,13 +66,13 @@ fn arith(op: BinKind, l: &PValue, r: &PValue) -> Result<PValue> {
                 Mul => a.wrapping_mul(b),
                 Div => {
                     if b == 0 {
-                        bail!("divide by zero");
+                        bail!("attempt to divide by zero");
                     }
                     a.wrapping_div(b)
                 }
                 Rem => {
                     if b == 0 {
-                        bail!("remainder by zero");
+                        bail!("attempt to calculate the remainder with a divisor of zero");
                     }
                     a.wrapping_rem(b)
                 }
@@ -273,11 +273,13 @@ pub(super) fn index(recv: &PValue, key: &PValue) -> Result<PValue> {
     match recv {
         PValue::Vec(items) => {
             let i = int_of(key)? as usize;
-            items
-                .lock()
-                .get(i)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("index {i} out of bounds"))
+            let items = items.lock();
+            items.get(i).cloned().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "index out of bounds: the len is {} but the index is {i}",
+                    items.len()
+                )
+            })
         }
         PValue::Map(m) => {
             let k = key
@@ -286,14 +288,16 @@ pub(super) fn index(recv: &PValue, key: &PValue) -> Result<PValue> {
             m.lock()
                 .get(&k)
                 .cloned()
-                .ok_or_else(|| anyhow::anyhow!("key not found"))
+                .ok_or_else(|| anyhow::anyhow!("no entry found for key"))
         }
         PValue::Str(s) => {
             let i = int_of(key)? as usize;
-            s.chars()
-                .nth(i)
-                .map(PValue::Char)
-                .ok_or_else(|| anyhow::anyhow!("index out of bounds"))
+            s.chars().nth(i).map(PValue::Char).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "index out of bounds: the len is {} but the index is {i}",
+                    s.chars().count()
+                )
+            })
         }
         // `caps[1]` and `caps["name"]` on a capture set.
         PValue::Native(h) => super::pregex::capture_index(h, key),
@@ -341,7 +345,10 @@ pub(super) fn set_index(recv: &PValue, key: &PValue, v: PValue) -> Result<()> {
             let i = int_of(key)? as usize;
             let mut items = items.lock();
             if i >= items.len() {
-                bail!("index {i} out of bounds");
+                bail!(
+                    "index out of bounds: the len is {} but the index is {i}",
+                    items.len()
+                );
             }
             items[i] = v;
         }

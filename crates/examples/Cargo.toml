@@ -28,6 +28,8 @@ ctrlc = { workspace = true }
 tempfile = { workspace = true }
 jsonwebtoken = { workspace = true }
 tokio = { workspace = true }
+lopdf = { workspace = true }
+xmltree = { workspace = true }
 
 [target."cfg(windows)".dev-dependencies]
 winreg = { workspace = true }

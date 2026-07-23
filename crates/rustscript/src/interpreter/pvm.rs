@@ -18,6 +18,7 @@ use super::pops::{
     self, apply_bin, apply_bin_imm, apply_un, cmp_test, cmp_test_imm, int_of, try_bind,
 };
 use super::pvalue::{PClosure, PStructShape, PValue};
+use super::vm_support::trace_error;
 
 const MAX_CALL_DEPTH: usize = 100_000;
 
@@ -26,6 +27,13 @@ fn swap_option<T>(current: &mut Option<T>, next: Option<T>) -> Option<T> {
         Some(value) => current.replace(value),
         None => current.take(),
     }
+}
+
+/// One backtrace entry: the function, its file, and the line of the op at
+/// `ip`. The fast engine has its twin in `vm.rs`.
+fn frame_line(chunk: &PChunk, ip: usize) -> (String, String, u32) {
+    let line = chunk.lines.get(ip).copied().unwrap_or(0);
+    (chunk.name.clone(), chunk.file.to_string(), line)
 }
 
 /// A module level const or static: converted once, evaluated on first read.
@@ -91,522 +99,545 @@ impl PInterp {
         let mut base = 0usize;
         let mut ip = 0usize;
 
-        macro_rules! ret {
-            ($v:expr) => {{
-                let v = $v;
-                match frames.pop() {
-                    None => return Ok(v),
-                    Some(f) => {
-                        cur = f.chunk;
-                        cur_clo = f.closure;
-                        ip = f.ip;
-                        // The callee's final parameter values go back into the
-                        // caller's arg window, where a `&mut` argument
-                        // writeback emitted by the compiler picks them up.
-                        let callee_base = base;
-                        base = f.base;
-                        for i in 0..f.argc as usize {
-                            stack[base + f.abase as usize + i] = take(&mut stack[callee_base + i]);
+        // The dispatch runs inside one immediately called closure so an error
+        // can be annotated with the script call chain still held in `frames`
+        // and the failing op still addressed by `cur` and `ip`. The closure
+        // runs exactly once, so the hot loop itself is unchanged.
+        let result = (|| -> Result<PValue> {
+            macro_rules! ret {
+                ($v:expr) => {{
+                    let v = $v;
+                    match frames.pop() {
+                        None => return Ok(v),
+                        Some(f) => {
+                            cur = f.chunk;
+                            cur_clo = f.closure;
+                            ip = f.ip;
+                            // The callee's final parameter values go back into the
+                            // caller's arg window, where a `&mut` argument
+                            // writeback emitted by the compiler picks them up.
+                            let callee_base = base;
+                            base = f.base;
+                            for i in 0..f.argc as usize {
+                                stack[base + f.abase as usize + i] =
+                                    take(&mut stack[callee_base + i]);
+                            }
+                            stack[base + f.dst as usize] = v;
+                            continue;
                         }
-                        stack[base + f.dst as usize] = v;
-                        continue;
                     }
-                }
-            }};
-        }
-
-        macro_rules! call {
-            ($chunk:expr, $clo:expr, $dst:expr, $abase:expr, $argc:expr) => {{
-                let callee: Arc<PChunk> = $chunk;
-                if $argc != callee.num_params {
-                    bail!(
-                        "`{}` expects {} args but got {}",
-                        callee.name,
-                        callee.num_params,
-                        $argc
-                    );
-                }
-                if frames.len() >= MAX_CALL_DEPTH {
-                    bail!("stack overflow: call depth exceeded {MAX_CALL_DEPTH}");
-                }
-                let nbase = base + cur.num_regs;
-                let need = nbase + callee.num_regs.max(callee.num_params);
-                if stack.len() < need {
-                    stack.resize(need, PValue::Unit);
-                }
-                for i in 0..$argc {
-                    stack[nbase + i] = take(&mut stack[base + $abase + i]);
-                }
-                for slot in &mut stack[nbase + $argc..need] {
-                    *slot = PValue::Unit;
-                }
-                frames.push(Frame {
-                    chunk: replace(&mut cur, callee),
-                    closure: swap_option(&mut cur_clo, $clo),
-                    ip: ip + 1,
-                    base,
-                    dst: $dst,
-                    abase: $abase as u16,
-                    argc: $argc as u16,
-                });
-                base = nbase;
-                ip = 0;
-                continue;
-            }};
-        }
-
-        loop {
-            if ip >= cur.code.len() {
-                ret!(PValue::Unit);
+                }};
             }
-            match &cur.code[ip] {
-                Op::LoadConst { dst, k } => {
-                    stack[base + *dst as usize] = PValue::from_const(&cur.consts[*k as usize]);
-                }
-                Op::LoadInt { dst, v } => stack[base + *dst as usize] = PValue::Int(*v),
-                Op::LoadBool { dst, v } => stack[base + *dst as usize] = PValue::Bool(*v),
-                Op::LoadUnit { dst } => stack[base + *dst as usize] = PValue::Unit,
-                Op::LoadGlobal { dst, idx } => {
-                    let v = self.global(*idx as usize)?;
-                    stack[base + *dst as usize] = v;
-                }
-                Op::LoadUpvalue { dst, idx } => {
-                    let upvals: &[PValue] = match &cur_clo {
-                        Some(c) => &c.captured,
-                        None => entry_upvalues,
-                    };
-                    stack[base + *dst as usize] = upvals[*idx as usize].clone();
-                }
-                Op::Move { dst, src } => {
-                    stack[base + *dst as usize] = stack[base + *src as usize].clone();
-                }
-                Op::Bin { dst, a, b, op } => {
-                    let v = apply_bin(*op, &stack[base + *a as usize], &stack[base + *b as usize])?;
-                    stack[base + *dst as usize] = v;
-                }
-                Op::BinImm { dst, a, imm, op } => {
-                    let v = apply_bin_imm(*op, &stack[base + *a as usize], *imm)?;
-                    stack[base + *dst as usize] = v;
-                }
-                Op::Un { dst, a, op } => {
-                    let v = apply_un(*op, &stack[base + *a as usize])?;
-                    stack[base + *dst as usize] = v;
-                }
-                Op::Jump { to } => {
-                    ip = *to as usize;
+
+            macro_rules! call {
+                ($chunk:expr, $clo:expr, $dst:expr, $abase:expr, $argc:expr) => {{
+                    let callee: Arc<PChunk> = $chunk;
+                    if $argc != callee.num_params {
+                        bail!(
+                            "`{}` expects {} args but got {}",
+                            callee.name,
+                            callee.num_params,
+                            $argc
+                        );
+                    }
+                    if frames.len() >= MAX_CALL_DEPTH {
+                        bail!("stack overflow: call depth exceeded {MAX_CALL_DEPTH}");
+                    }
+                    let nbase = base + cur.num_regs;
+                    let need = nbase + callee.num_regs.max(callee.num_params);
+                    if stack.len() < need {
+                        stack.resize(need, PValue::Unit);
+                    }
+                    for i in 0..$argc {
+                        stack[nbase + i] = take(&mut stack[base + $abase + i]);
+                    }
+                    for slot in &mut stack[nbase + $argc..need] {
+                        *slot = PValue::Unit;
+                    }
+                    frames.push(Frame {
+                        chunk: replace(&mut cur, callee),
+                        closure: swap_option(&mut cur_clo, $clo),
+                        ip: ip + 1,
+                        base,
+                        dst: $dst,
+                        abase: $abase as u16,
+                        argc: $argc as u16,
+                    });
+                    base = nbase;
+                    ip = 0;
                     continue;
+                }};
+            }
+
+            loop {
+                if ip >= cur.code.len() {
+                    ret!(PValue::Unit);
                 }
-                Op::JumpIfFalse { cond, to } => {
-                    if !stack[base + *cond as usize].is_truthy() {
-                        ip = *to as usize;
-                        continue;
+                match &cur.code[ip] {
+                    Op::LoadConst { dst, k } => {
+                        stack[base + *dst as usize] = PValue::from_const(&cur.consts[*k as usize]);
                     }
-                }
-                Op::JumpIfTrue { cond, to } => {
-                    if stack[base + *cond as usize].is_truthy() {
-                        ip = *to as usize;
-                        continue;
-                    }
-                }
-                Op::CmpJump { a, b, op, to } => {
-                    if !cmp_test(*op, &stack[base + *a as usize], &stack[base + *b as usize])? {
-                        ip = *to as usize;
-                        continue;
-                    }
-                }
-                Op::CmpJumpImm { a, imm, op, to } => {
-                    if !cmp_test_imm(*op, &stack[base + *a as usize], *imm)? {
-                        ip = *to as usize;
-                        continue;
-                    }
-                }
-                Op::CallFn {
-                    dst,
-                    func,
-                    base: abase,
-                    argc,
-                    ..
-                } => {
-                    let (dst, func, abase, argc) =
-                        (*dst, *func as usize, *abase as usize, *argc as usize);
-                    let callee = self.functions[func].clone();
-                    call!(callee, None, dst, abase, argc);
-                }
-                Op::CallValue {
-                    dst,
-                    callee,
-                    base: abase,
-                    argc,
-                } => {
-                    let (dst, callee_reg, abase, argc) =
-                        (*dst, *callee as usize, *abase as usize, *argc as usize);
-                    let clo = match &stack[base + callee_reg] {
-                        PValue::Closure(clo) => clo.clone(),
-                        other => bail!("cannot call {}", other.type_name()),
-                    };
-                    let chunk = clo.chunk.clone();
-                    call!(chunk, Some(clo), dst, abase, argc);
-                }
-                Op::CallPath {
-                    dst,
-                    path,
-                    base: abase,
-                    argc,
-                } => {
-                    let (abase, argc) = (*abase as usize, *argc as usize);
-                    let segs = &cur.paths[*path as usize];
-                    let args = take_range(stack, base + abase, argc);
-                    let v = self.dispatch_call(segs, args)?;
-                    stack[base + *dst as usize] = v;
-                }
-                Op::PathValue { dst, path } => {
-                    let segs = &cur.paths[*path as usize];
-                    stack[base + *dst as usize] = self.eval_path_value(segs)?;
-                }
-                Op::Method {
-                    dst,
-                    recv,
-                    name,
-                    base: abase,
-                    argc,
-                } => {
-                    let (recv, abase, argc) = (*recv as usize, *abase as usize, *argc as usize);
-                    let name = &cur.names[*name as usize];
-                    // A string is an immutable `Arc<str>`, so a push has to
-                    // rewrite the receiver register itself. The normal path
-                    // hands the method a clone and the change would be lost.
-                    // `clone_from` replaces the receiver outright, so it has
-                    // to write the register rather than a copy of it.
-                    if name.id == BuiltinId::CloneFrom {
-                        let src = stack[base + abase..base + abase + argc]
-                            .first()
-                            .cloned()
-                            .unwrap_or(PValue::Unit);
-                        stack[base + recv] = src;
-                        if *dst != u16::MAX {
-                            stack[base + *dst as usize] = PValue::Unit;
-                        }
-                        ip += 1;
-                        continue;
-                    }
-                    if matches!(name.id, BuiltinId::Push | BuiltinId::PushStr)
-                        && let PValue::Str(s) = &stack[base + recv]
-                    {
-                        let mut out = s.to_string();
-                        match (&name.id, stack[base + abase..base + abase + argc].first()) {
-                            (BuiltinId::Push, Some(PValue::Char(c))) => out.push(*c),
-                            (BuiltinId::PushStr, Some(arg)) => out.push_str(&arg.display()),
-                            _ => {}
-                        }
-                        stack[base + recv] = PValue::str(out);
-                        if *dst != u16::MAX {
-                            stack[base + *dst as usize] = PValue::Unit;
-                        }
-                        ip += 1;
-                        continue;
-                    }
-                    let recv_v = stack[base + recv].clone();
-                    let mut margs = take_range(stack, base + abase, argc);
-                    let v = self.eval_method(&recv_v, name, &mut margs)?;
-                    if *dst != u16::MAX {
+                    Op::LoadInt { dst, v } => stack[base + *dst as usize] = PValue::Int(*v),
+                    Op::LoadBool { dst, v } => stack[base + *dst as usize] = PValue::Bool(*v),
+                    Op::LoadUnit { dst } => stack[base + *dst as usize] = PValue::Unit,
+                    Op::LoadGlobal { dst, idx } => {
+                        let v = self.global(*idx as usize)?;
                         stack[base + *dst as usize] = v;
                     }
-                }
-                Op::GetOrDefault {
-                    dst,
-                    recv,
-                    key,
-                    default,
-                } => {
-                    let recv_v = stack[base + *recv as usize].clone();
-                    let key_v = stack[base + *key as usize].clone();
-                    let get = MethodName {
-                        text: "get".into(),
-                        id: super::bytecode::BuiltinId::Get,
-                    };
-                    let opt = self.eval_method(&recv_v, &get, &mut [key_v])?;
-                    let v = match opt {
-                        PValue::Enum { variant, data, .. } if &*variant == "Some" => {
-                            data.first().cloned().unwrap_or(PValue::Unit)
-                        }
-                        _ => stack[base + *default as usize].clone(),
-                    };
-                    stack[base + *dst as usize] = v;
-                }
-                Op::Ret { src } => {
-                    let v = take(&mut stack[base + *src as usize]);
-                    ret!(v);
-                }
-                Op::MakeVec {
-                    dst,
-                    base: wbase,
-                    count,
-                } => {
-                    let items = take_range(stack, base + *wbase as usize, *count as usize);
-                    stack[base + *dst as usize] = PValue::vec(items);
-                }
-                Op::MakeTuple {
-                    dst,
-                    base: wbase,
-                    count,
-                } => {
-                    let items = take_range(stack, base + *wbase as usize, *count as usize);
-                    stack[base + *dst as usize] = PValue::tuple(items);
-                }
-                Op::MakeArrayRepeat { dst, val, count } => {
-                    let n = match &stack[base + *count as usize] {
-                        PValue::Int(n) => *n as usize,
-                        _ => bail!("array repeat length must be an integer"),
-                    };
-                    let v = stack[base + *val as usize].clone();
-                    stack[base + *dst as usize] = PValue::vec(std::iter::repeat_n(v, n).collect());
-                }
-                Op::MakeRange {
-                    dst,
-                    start,
-                    end,
-                    inclusive,
-                } => {
-                    let s = int_of(&stack[base + *start as usize])?;
-                    let e = int_of(&stack[base + *end as usize])?;
-                    stack[base + *dst as usize] = PValue::Range {
-                        start: s,
-                        end: e,
-                        inclusive: *inclusive,
-                    };
-                }
-                Op::IterInit { dst, src } => {
-                    let src_v = stack[base + *src as usize].clone();
-                    let it = match src_v {
-                        // A range and a live line iterator stay lazy, so a loop
-                        // over a child's pipe streams instead of buffering the
-                        // whole output before the first line runs.
-                        PValue::Range { .. } | PValue::Native(_) => src_v,
-                        other => PValue::vec(self.iter_items(other)?),
-                    };
-                    stack[base + *dst as usize] = it;
-                }
-                Op::ForNext { iter, idx, val, to } => {
-                    let i = match &stack[base + *idx as usize] {
-                        PValue::Int(i) => *i,
-                        _ => unreachable!("for index is an integer"),
-                    };
-                    let item = match &stack[base + *iter as usize] {
-                        PValue::Vec(items) => items.lock().get(i as usize).cloned(),
-                        PValue::Range {
-                            start,
-                            end,
-                            inclusive,
-                        } => {
-                            let n = start + i;
-                            let done = if *inclusive { n > *end } else { n >= *end };
-                            if done { None } else { Some(PValue::Int(n)) }
-                        }
-                        PValue::Native(h) => match &mut *h.lock() {
-                            PNative::Lines(lines) => match lines.next() {
-                                Some(Ok(line)) => Some(PValue::ok(PValue::str(line))),
-                                Some(Err(e)) => Some(PValue::err(PValue::str(e.to_string()))),
-                                None => None,
-                            },
-                            other => bail!("cannot iterate a {}", other.type_name()),
-                        },
-                        _ => None,
-                    };
-                    match item {
-                        Some(v) => {
-                            stack[base + *val as usize] = v;
-                            stack[base + *idx as usize] = PValue::Int(i + 1);
-                        }
-                        None => {
+                    Op::LoadUpvalue { dst, idx } => {
+                        let upvals: &[PValue] = match &cur_clo {
+                            Some(c) => &c.captured,
+                            None => entry_upvalues,
+                        };
+                        stack[base + *dst as usize] = upvals[*idx as usize].clone();
+                    }
+                    Op::Move { dst, src } => {
+                        stack[base + *dst as usize] = stack[base + *src as usize].clone();
+                    }
+                    Op::Bin { dst, a, b, op } => {
+                        let v =
+                            apply_bin(*op, &stack[base + *a as usize], &stack[base + *b as usize])?;
+                        stack[base + *dst as usize] = v;
+                    }
+                    Op::BinImm { dst, a, imm, op } => {
+                        let v = apply_bin_imm(*op, &stack[base + *a as usize], *imm)?;
+                        stack[base + *dst as usize] = v;
+                    }
+                    Op::Un { dst, a, op } => {
+                        let v = apply_un(*op, &stack[base + *a as usize])?;
+                        stack[base + *dst as usize] = v;
+                    }
+                    Op::Jump { to } => {
+                        ip = *to as usize;
+                        continue;
+                    }
+                    Op::JumpIfFalse { cond, to } => {
+                        if !stack[base + *cond as usize].is_truthy() {
                             ip = *to as usize;
                             continue;
                         }
                     }
-                }
-                Op::MakeStruct {
-                    dst,
-                    info,
-                    base: wbase,
-                } => {
-                    let wbase = *wbase as usize;
-                    let lit = &cur.struct_lits[*info as usize];
-                    let written = lit.shape.fields.len();
-                    let mut values: Vec<PValue> = (0..written)
-                        .map(|k| take(&mut stack[base + wbase + k]))
-                        .collect();
-                    let v = if lit.has_rest {
-                        let rest = stack[base + wbase + written].clone();
-                        let mut fields = lit.shape.fields.clone();
-                        let mut renames = lit.shape.renames.clone();
-                        if let PValue::Struct(r) = rest {
-                            let rvals = r.values.lock();
-                            for (slot, (k, v)) in
-                                r.shape.fields.iter().zip(rvals.iter()).enumerate()
-                            {
-                                if lit.shape.slot(k).is_none() {
-                                    fields.push(k.clone());
-                                    values.push(v.clone());
-                                    if !renames.is_empty() {
-                                        renames.push(r.shape.renames.get(slot).cloned().flatten());
+                    Op::JumpIfTrue { cond, to } => {
+                        if stack[base + *cond as usize].is_truthy() {
+                            ip = *to as usize;
+                            continue;
+                        }
+                    }
+                    Op::CmpJump { a, b, op, to } => {
+                        if !cmp_test(*op, &stack[base + *a as usize], &stack[base + *b as usize])? {
+                            ip = *to as usize;
+                            continue;
+                        }
+                    }
+                    Op::CmpJumpImm { a, imm, op, to } => {
+                        if !cmp_test_imm(*op, &stack[base + *a as usize], *imm)? {
+                            ip = *to as usize;
+                            continue;
+                        }
+                    }
+                    Op::CallFn {
+                        dst,
+                        func,
+                        base: abase,
+                        argc,
+                        ..
+                    } => {
+                        let (dst, func, abase, argc) =
+                            (*dst, *func as usize, *abase as usize, *argc as usize);
+                        let callee = self.functions[func].clone();
+                        call!(callee, None, dst, abase, argc);
+                    }
+                    Op::CallValue {
+                        dst,
+                        callee,
+                        base: abase,
+                        argc,
+                    } => {
+                        let (dst, callee_reg, abase, argc) =
+                            (*dst, *callee as usize, *abase as usize, *argc as usize);
+                        let clo = match &stack[base + callee_reg] {
+                            PValue::Closure(clo) => clo.clone(),
+                            other => bail!("cannot call {}", other.type_name()),
+                        };
+                        let chunk = clo.chunk.clone();
+                        call!(chunk, Some(clo), dst, abase, argc);
+                    }
+                    Op::CallPath {
+                        dst,
+                        path,
+                        base: abase,
+                        argc,
+                    } => {
+                        let (abase, argc) = (*abase as usize, *argc as usize);
+                        let segs = &cur.paths[*path as usize];
+                        let args = take_range(stack, base + abase, argc);
+                        let v = self.dispatch_call(segs, args)?;
+                        stack[base + *dst as usize] = v;
+                    }
+                    Op::PathValue { dst, path } => {
+                        let segs = &cur.paths[*path as usize];
+                        stack[base + *dst as usize] = self.eval_path_value(segs)?;
+                    }
+                    Op::Method {
+                        dst,
+                        recv,
+                        name,
+                        base: abase,
+                        argc,
+                    } => {
+                        let (recv, abase, argc) = (*recv as usize, *abase as usize, *argc as usize);
+                        let name = &cur.names[*name as usize];
+                        // A string is an immutable `Arc<str>`, so a push has to
+                        // rewrite the receiver register itself. The normal path
+                        // hands the method a clone and the change would be lost.
+                        // `clone_from` replaces the receiver outright, so it has
+                        // to write the register rather than a copy of it.
+                        if name.id == BuiltinId::CloneFrom {
+                            let src = stack[base + abase..base + abase + argc]
+                                .first()
+                                .cloned()
+                                .unwrap_or(PValue::Unit);
+                            stack[base + recv] = src;
+                            if *dst != u16::MAX {
+                                stack[base + *dst as usize] = PValue::Unit;
+                            }
+                            ip += 1;
+                            continue;
+                        }
+                        if matches!(name.id, BuiltinId::Push | BuiltinId::PushStr)
+                            && let PValue::Str(s) = &stack[base + recv]
+                        {
+                            let mut out = s.to_string();
+                            match (&name.id, stack[base + abase..base + abase + argc].first()) {
+                                (BuiltinId::Push, Some(PValue::Char(c))) => out.push(*c),
+                                (BuiltinId::PushStr, Some(arg)) => out.push_str(&arg.display()),
+                                _ => {}
+                            }
+                            stack[base + recv] = PValue::str(out);
+                            if *dst != u16::MAX {
+                                stack[base + *dst as usize] = PValue::Unit;
+                            }
+                            ip += 1;
+                            continue;
+                        }
+                        let recv_v = stack[base + recv].clone();
+                        let mut margs = take_range(stack, base + abase, argc);
+                        let v = self.eval_method(&recv_v, name, &mut margs)?;
+                        if *dst != u16::MAX {
+                            stack[base + *dst as usize] = v;
+                        }
+                    }
+                    Op::GetOrDefault {
+                        dst,
+                        recv,
+                        key,
+                        default,
+                    } => {
+                        let recv_v = stack[base + *recv as usize].clone();
+                        let key_v = stack[base + *key as usize].clone();
+                        let get = MethodName {
+                            text: "get".into(),
+                            id: super::bytecode::BuiltinId::Get,
+                        };
+                        let opt = self.eval_method(&recv_v, &get, &mut [key_v])?;
+                        let v = match opt {
+                            PValue::Enum { variant, data, .. } if &*variant == "Some" => {
+                                data.first().cloned().unwrap_or(PValue::Unit)
+                            }
+                            _ => stack[base + *default as usize].clone(),
+                        };
+                        stack[base + *dst as usize] = v;
+                    }
+                    Op::Ret { src } => {
+                        let v = take(&mut stack[base + *src as usize]);
+                        ret!(v);
+                    }
+                    Op::MakeVec {
+                        dst,
+                        base: wbase,
+                        count,
+                    } => {
+                        let items = take_range(stack, base + *wbase as usize, *count as usize);
+                        stack[base + *dst as usize] = PValue::vec(items);
+                    }
+                    Op::MakeTuple {
+                        dst,
+                        base: wbase,
+                        count,
+                    } => {
+                        let items = take_range(stack, base + *wbase as usize, *count as usize);
+                        stack[base + *dst as usize] = PValue::tuple(items);
+                    }
+                    Op::MakeArrayRepeat { dst, val, count } => {
+                        let n = match &stack[base + *count as usize] {
+                            PValue::Int(n) => *n as usize,
+                            _ => bail!("array repeat length must be an integer"),
+                        };
+                        let v = stack[base + *val as usize].clone();
+                        stack[base + *dst as usize] =
+                            PValue::vec(std::iter::repeat_n(v, n).collect());
+                    }
+                    Op::MakeRange {
+                        dst,
+                        start,
+                        end,
+                        inclusive,
+                    } => {
+                        let s = int_of(&stack[base + *start as usize])?;
+                        let e = int_of(&stack[base + *end as usize])?;
+                        stack[base + *dst as usize] = PValue::Range {
+                            start: s,
+                            end: e,
+                            inclusive: *inclusive,
+                        };
+                    }
+                    Op::IterInit { dst, src } => {
+                        let src_v = stack[base + *src as usize].clone();
+                        let it = match src_v {
+                            // A range and a live line iterator stay lazy, so a loop
+                            // over a child's pipe streams instead of buffering the
+                            // whole output before the first line runs.
+                            PValue::Range { .. } | PValue::Native(_) => src_v,
+                            other => PValue::vec(self.iter_items(other)?),
+                        };
+                        stack[base + *dst as usize] = it;
+                    }
+                    Op::ForNext { iter, idx, val, to } => {
+                        let i = match &stack[base + *idx as usize] {
+                            PValue::Int(i) => *i,
+                            _ => unreachable!("for index is an integer"),
+                        };
+                        let item = match &stack[base + *iter as usize] {
+                            PValue::Vec(items) => items.lock().get(i as usize).cloned(),
+                            PValue::Range {
+                                start,
+                                end,
+                                inclusive,
+                            } => {
+                                let n = start + i;
+                                let done = if *inclusive { n > *end } else { n >= *end };
+                                if done { None } else { Some(PValue::Int(n)) }
+                            }
+                            PValue::Native(h) => match &mut *h.lock() {
+                                PNative::Lines(lines) => match lines.next() {
+                                    Some(Ok(line)) => Some(PValue::ok(PValue::str(line))),
+                                    Some(Err(e)) => Some(PValue::err(PValue::str(e.to_string()))),
+                                    None => None,
+                                },
+                                other => bail!("cannot iterate a {}", other.type_name()),
+                            },
+                            _ => None,
+                        };
+                        match item {
+                            Some(v) => {
+                                stack[base + *val as usize] = v;
+                                stack[base + *idx as usize] = PValue::Int(i + 1);
+                            }
+                            None => {
+                                ip = *to as usize;
+                                continue;
+                            }
+                        }
+                    }
+                    Op::MakeStruct {
+                        dst,
+                        info,
+                        base: wbase,
+                    } => {
+                        let wbase = *wbase as usize;
+                        let lit = &cur.struct_lits[*info as usize];
+                        let written = lit.shape.fields.len();
+                        let mut values: Vec<PValue> = (0..written)
+                            .map(|k| take(&mut stack[base + wbase + k]))
+                            .collect();
+                        let v = if lit.has_rest {
+                            let rest = stack[base + wbase + written].clone();
+                            let mut fields = lit.shape.fields.clone();
+                            let mut renames = lit.shape.renames.clone();
+                            if let PValue::Struct(r) = rest {
+                                let rvals = r.values.lock();
+                                for (slot, (k, v)) in
+                                    r.shape.fields.iter().zip(rvals.iter()).enumerate()
+                                {
+                                    if lit.shape.slot(k).is_none() {
+                                        fields.push(k.clone());
+                                        values.push(v.clone());
+                                        if !renames.is_empty() {
+                                            renames
+                                                .push(r.shape.renames.get(slot).cloned().flatten());
+                                        }
                                     }
                                 }
                             }
-                        }
-                        let shape = Arc::new(PStructShape {
-                            name: lit.shape.name.clone(),
-                            fields,
-                            renames,
-                        });
-                        PValue::structure(shape, values)
-                    } else {
-                        PValue::structure(lit.shape.clone(), values)
-                    };
-                    stack[base + *dst as usize] = v;
-                }
-                Op::MakeEnum {
-                    dst,
-                    info,
-                    base: wbase,
-                    count,
-                } => {
-                    let variant = &cur.enum_variants[*info as usize];
-                    let data = take_range(stack, base + *wbase as usize, *count as usize).into();
-                    stack[base + *dst as usize] = PValue::Enum {
-                        enum_name: variant.enum_name.clone(),
-                        variant: variant.variant.clone(),
-                        data,
-                    };
-                }
-                Op::LoadEnum { dst, info } => {
-                    let variant = &cur.enum_variants[*info as usize];
-                    stack[base + *dst as usize] = PValue::Enum {
-                        enum_name: variant.enum_name.clone(),
-                        variant: variant.variant.clone(),
-                        data: Vec::new().into(),
-                    };
-                }
-                Op::MakeClosure { dst, child } => {
-                    let clo =
-                        self.make_closure(&cur, *child, stack, base, &cur_clo, entry_upvalues);
-                    stack[base + *dst as usize] = PValue::Closure(clo);
-                }
-                Op::Index { dst, base: b, key } => {
-                    let v = pops::index(&stack[base + *b as usize], &stack[base + *key as usize])?;
-                    stack[base + *dst as usize] = v;
-                }
-                Op::SetIndex { base: b, key, val } => {
-                    pops::set_index(
-                        &stack[base + *b as usize],
-                        &stack[base + *key as usize],
-                        stack[base + *val as usize].clone(),
-                    )?;
-                }
-                Op::GetField {
-                    dst,
-                    base: b,
-                    member,
-                } => {
-                    let v =
-                        self.get_field(&stack[base + *b as usize], &cur.members[*member as usize])?;
-                    stack[base + *dst as usize] = v;
-                }
-                Op::SetField {
-                    base: b,
-                    member,
-                    val,
-                } => {
-                    self.set_field(
-                        &stack[base + *b as usize],
-                        &cur.members[*member as usize],
-                        stack[base + *val as usize].clone(),
-                    )?;
-                }
-                Op::Try { dst, src } => {
-                    match pops::eval_try(stack[base + *src as usize].clone())? {
-                        Ok(v) => stack[base + *dst as usize] = v,
-                        Err(early) => ret!(early),
-                    }
-                }
-                Op::Cast { dst, src, ty } => {
-                    let v = eval_cast(
-                        &cur.casts[*ty as usize],
-                        stack[base + *src as usize].clone(),
-                    )?;
-                    stack[base + *dst as usize] = v;
-                }
-                Op::Coerce { dst, src, .. } => {
-                    stack[base + *dst as usize] = stack[base + *src as usize].clone();
-                }
-                Op::TestBind { val, pat, dst } => {
-                    let info = &cur.pats[*pat as usize];
-                    let value = stack[base + *val as usize].clone();
-                    let binds = &info.binds;
-                    let mut writes: Vec<(u16, PValue)> = Vec::new();
-                    let matched = {
-                        let mut define = |name: &str, v: PValue| {
-                            if let Some((_, reg)) = binds.iter().find(|(n, _)| n == name) {
-                                writes.push((*reg, v));
-                            }
+                            let shape = Arc::new(PStructShape {
+                                name: lit.shape.name.clone(),
+                                fields,
+                                renames,
+                            });
+                            PValue::structure(shape, values)
+                        } else {
+                            PValue::structure(lit.shape.clone(), values)
                         };
-                        try_bind(&info.pat, &value, &mut define)
-                    };
-                    for (reg, v) in writes {
-                        stack[base + reg as usize] = v;
+                        stack[base + *dst as usize] = v;
                     }
-                    stack[base + *dst as usize] = PValue::Bool(matched);
-                }
-                Op::Fmt { dst, spec } => {
-                    let text = self.render_fmt(&cur, *spec, &stack[base..])?;
-                    stack[base + *dst as usize] = PValue::str(text);
-                }
-                Op::MacroCall { kind, dst, spec } => {
-                    let text = self.render_fmt(&cur, *spec, &stack[base..])?;
-                    match kind {
-                        MacroKind::Println => println!("{text}"),
-                        MacroKind::Print => print!("{text}"),
-                        MacroKind::Eprintln => eprintln!("{text}"),
-                        MacroKind::Eprint => eprint!("{text}"),
-                        MacroKind::Panic => bail!("panicked: {text}"),
-                        MacroKind::Anyhow => {
-                            stack[base + *dst as usize] = PValue::err(PValue::str(text));
+                    Op::MakeEnum {
+                        dst,
+                        info,
+                        base: wbase,
+                        count,
+                    } => {
+                        let variant = &cur.enum_variants[*info as usize];
+                        let data =
+                            take_range(stack, base + *wbase as usize, *count as usize).into();
+                        stack[base + *dst as usize] = PValue::Enum {
+                            enum_name: variant.enum_name.clone(),
+                            variant: variant.variant.clone(),
+                            data,
+                        };
+                    }
+                    Op::LoadEnum { dst, info } => {
+                        let variant = &cur.enum_variants[*info as usize];
+                        stack[base + *dst as usize] = PValue::Enum {
+                            enum_name: variant.enum_name.clone(),
+                            variant: variant.variant.clone(),
+                            data: Vec::new().into(),
+                        };
+                    }
+                    Op::MakeClosure { dst, child } => {
+                        let clo =
+                            self.make_closure(&cur, *child, stack, base, &cur_clo, entry_upvalues);
+                        stack[base + *dst as usize] = PValue::Closure(clo);
+                    }
+                    Op::Index { dst, base: b, key } => {
+                        let v =
+                            pops::index(&stack[base + *b as usize], &stack[base + *key as usize])?;
+                        stack[base + *dst as usize] = v;
+                    }
+                    Op::SetIndex { base: b, key, val } => {
+                        pops::set_index(
+                            &stack[base + *b as usize],
+                            &stack[base + *key as usize],
+                            stack[base + *val as usize].clone(),
+                        )?;
+                    }
+                    Op::GetField {
+                        dst,
+                        base: b,
+                        member,
+                    } => {
+                        let v = self.get_field(
+                            &stack[base + *b as usize],
+                            &cur.members[*member as usize],
+                        )?;
+                        stack[base + *dst as usize] = v;
+                    }
+                    Op::SetField {
+                        base: b,
+                        member,
+                        val,
+                    } => {
+                        self.set_field(
+                            &stack[base + *b as usize],
+                            &cur.members[*member as usize],
+                            stack[base + *val as usize].clone(),
+                        )?;
+                    }
+                    Op::Try { dst, src } => {
+                        match pops::eval_try(stack[base + *src as usize].clone())? {
+                            Ok(v) => stack[base + *dst as usize] = v,
+                            Err(early) => ret!(early),
                         }
-                        MacroKind::Bail => ret!(PValue::err(PValue::str(text))),
                     }
-                    if !matches!(kind, MacroKind::Anyhow) {
-                        stack[base + *dst as usize] = PValue::Unit;
+                    Op::Cast { dst, src, ty } => {
+                        let v = eval_cast(
+                            &cur.casts[*ty as usize],
+                            stack[base + *src as usize].clone(),
+                        )?;
+                        stack[base + *dst as usize] = v;
+                    }
+                    Op::Coerce { dst, src, .. } => {
+                        stack[base + *dst as usize] = stack[base + *src as usize].clone();
+                    }
+                    Op::TestBind { val, pat, dst } => {
+                        let info = &cur.pats[*pat as usize];
+                        let value = stack[base + *val as usize].clone();
+                        let binds = &info.binds;
+                        let mut writes: Vec<(u16, PValue)> = Vec::new();
+                        let matched = {
+                            let mut define = |name: &str, v: PValue| {
+                                if let Some((_, reg)) = binds.iter().find(|(n, _)| n == name) {
+                                    writes.push((*reg, v));
+                                }
+                            };
+                            try_bind(&info.pat, &value, &mut define)
+                        };
+                        for (reg, v) in writes {
+                            stack[base + reg as usize] = v;
+                        }
+                        stack[base + *dst as usize] = PValue::Bool(matched);
+                    }
+                    Op::Fmt { dst, spec } => {
+                        let text = self.render_fmt(&cur, *spec, &stack[base..])?;
+                        stack[base + *dst as usize] = PValue::str(text);
+                    }
+                    Op::MacroCall { kind, dst, spec } => {
+                        let text = self.render_fmt(&cur, *spec, &stack[base..])?;
+                        match kind {
+                            MacroKind::Println => println!("{text}"),
+                            MacroKind::Print => print!("{text}"),
+                            MacroKind::Eprintln => eprintln!("{text}"),
+                            MacroKind::Eprint => eprint!("{text}"),
+                            MacroKind::Panic => bail!("panicked: {text}"),
+                            MacroKind::Anyhow => {
+                                stack[base + *dst as usize] = PValue::err(PValue::str(text));
+                            }
+                            MacroKind::Bail => ret!(PValue::err(PValue::str(text))),
+                        }
+                        if !matches!(kind, MacroKind::Anyhow) {
+                            stack[base + *dst as usize] = PValue::Unit;
+                        }
+                    }
+                    Op::Dbg {
+                        dst,
+                        base: wbase,
+                        argc,
+                    } => {
+                        let (wbase, argc) = (*wbase as usize, *argc as usize);
+                        let mut last = PValue::Unit;
+                        for i in 0..argc {
+                            last = stack[base + wbase + i].clone();
+                            eprintln!("[dbg] {}", last.debug());
+                        }
+                        stack[base + *dst as usize] = last;
+                    }
+                    Op::Spawn { dst, child } => {
+                        let clo =
+                            self.make_closure(&cur, *child, stack, base, &cur_clo, entry_upvalues);
+                        let interp = self.clone();
+                        let handle = self.rt.spawn_blocking(move || {
+                            interp
+                                .run_chunk(&clo.chunk, &[], &clo.captured)
+                                .unwrap_or_else(|e| PValue::err(PValue::str(e.to_string())))
+                        });
+                        stack[base + *dst as usize] = PNative::Task(handle).wrap();
+                    }
+                    Op::Await { dst, src } => {
+                        let v = take(&mut stack[base + *src as usize]);
+                        stack[base + *dst as usize] = self.await_value(v)?;
                     }
                 }
-                Op::Dbg {
-                    dst,
-                    base: wbase,
-                    argc,
-                } => {
-                    let (wbase, argc) = (*wbase as usize, *argc as usize);
-                    let mut last = PValue::Unit;
-                    for i in 0..argc {
-                        last = stack[base + wbase + i].clone();
-                        eprintln!("[dbg] {}", last.debug());
-                    }
-                    stack[base + *dst as usize] = last;
-                }
-                Op::Spawn { dst, child } => {
-                    let clo =
-                        self.make_closure(&cur, *child, stack, base, &cur_clo, entry_upvalues);
-                    let interp = self.clone();
-                    let handle = self.rt.spawn_blocking(move || {
-                        interp
-                            .run_chunk(&clo.chunk, &[], &clo.captured)
-                            .unwrap_or_else(|e| PValue::err(PValue::str(e.to_string())))
-                    });
-                    stack[base + *dst as usize] = PNative::Task(handle).wrap();
-                }
-                Op::Await { dst, src } => {
-                    let v = take(&mut stack[base + *src as usize]);
-                    stack[base + *dst as usize] = self.await_value(v)?;
-                }
+                ip += 1;
             }
-            ip += 1;
-        }
+        })();
+        result.map_err(|e| {
+            let trace = std::iter::once(frame_line(&cur, ip)).chain(
+                frames
+                    .iter()
+                    .rev()
+                    .map(|f| frame_line(&f.chunk, f.ip.saturating_sub(1))),
+            );
+            trace_error(e, trace)
+        })
     }
 
     fn make_closure(

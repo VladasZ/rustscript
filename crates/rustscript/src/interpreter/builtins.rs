@@ -416,6 +416,22 @@ pub(super) fn path_call_closure(segs: Vec<String>, num_params: usize) -> Value {
 // clamped to what an i64 value can hold, which is enough for sentinels and
 // bounds. Returns None for anything that is not an integer limit path.
 fn int_limit(ty: &str, name: &str) -> Option<Value> {
+    // The float limits first, `f64::EPSILON` guards float comparisons.
+    if ty == "f64" || ty == "f32" {
+        let v = match (ty, name) {
+            ("f64", "EPSILON") => f64::EPSILON,
+            ("f32", "EPSILON") => f64::from(f32::EPSILON),
+            ("f64", "MAX") => f64::MAX,
+            ("f32", "MAX") => f64::from(f32::MAX),
+            ("f64", "MIN") => f64::MIN,
+            ("f32", "MIN") => f64::from(f32::MIN),
+            (_, "INFINITY") => f64::INFINITY,
+            (_, "NEG_INFINITY") => f64::NEG_INFINITY,
+            (_, "NAN") => f64::NAN,
+            _ => return None,
+        };
+        return Some(Value::Float(v));
+    }
     let (min, max): (i64, i64) = match ty {
         "i8" => (i8::MIN as i64, i8::MAX as i64),
         "i16" => (i16::MIN as i64, i16::MAX as i64),
@@ -537,6 +553,7 @@ pub(super) fn builtin_method(
             "DateTime" => datetime_method(s, name, &*args),
             "Base64Engine" => base64_method(s, name, &*args),
             "Entry" => entry_method(s, name, &*args),
+            "Element" => super::xmltree_bridge::element_method(s, name, &*args),
             "Child" => child_method(s, name, args),
             "Path" => path_method(s, name, &*args),
             "OsString" => os_string_method(s, name),

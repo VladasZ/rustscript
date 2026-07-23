@@ -9,6 +9,7 @@
 //! declaration, while the checker sees it as a real path dependency.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
 use syn::{Item, LitStr};
@@ -19,6 +20,9 @@ pub struct ModuleSrc {
     pub path: Vec<String>,
     /// The module's items, with `mod` declarations already expanded away.
     pub items: Vec<Item>,
+    /// The file the module was read from, relative to the script directory.
+    /// Inline modules carry their parent's file. Shown in error traces.
+    pub file: Arc<str>,
 }
 
 /// A local `path` dependency crate that the script uses, grafted in from
@@ -37,7 +41,8 @@ pub struct Program {
     /// Root module first, then discovery order, then grafted crate modules.
     pub modules: Vec<ModuleSrc>,
     /// Every source file: path relative to the script directory, and content.
-    /// The root script is first, stored as `main.rs`.
+    /// The root script is first, stored under its own file name so rustc
+    /// diagnostics from the mirrored project show the real script name.
     pub files: Vec<(PathBuf, String)>,
     /// Local crates the script pulls in through a `path` dependency.
     pub crate_deps: Vec<CrateDep>,
@@ -50,9 +55,18 @@ pub fn load(script_path: &Path, root_source: &str) -> Result<Program> {
     let ast = syn::parse_file(root_source).map_err(|e| anyhow!("parse error: {e}"))?;
     let dir = script_path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let mut modules: Vec<ModuleSrc> = Vec::new();
+    let root_file = root_file_name(script_path);
     let mut files: Vec<(PathBuf, String)> =
-        vec![(PathBuf::from("main.rs"), root_source.to_string())];
-    let root = collect(&mut modules, &mut files, &dir, &dir, Vec::new(), ast.items)?;
+        vec![(PathBuf::from(&root_file), root_source.to_string())];
+    let root = collect(
+        &mut modules,
+        &mut files,
+        &dir,
+        &dir,
+        Vec::new(),
+        Arc::from(root_file.as_str()),
+        ast.items,
+    )?;
     modules.insert(0, root);
     let tokio_main = detect_tokio_main(&modules[0].items)?;
     let crate_deps = graft_crate_deps(&mut modules, script_path)?;
@@ -62,6 +76,16 @@ pub fn load(script_path: &Path, root_source: &str) -> Result<Program> {
         crate_deps,
         tokio_main,
     })
+}
+
+/// The name the root script keeps inside the mirrored cargo project. An
+/// extensionless name, a launcher symlink target for example, falls back to
+/// `main.rs` so the mirrored file stays a name cargo builds without fuss.
+fn root_file_name(script_path: &Path) -> String {
+    match script_path.file_name().and_then(|n| n.to_str()) {
+        Some(name) if name.ends_with(".rs") => name.to_string(),
+        _ => "main.rs".to_string(),
+    }
 }
 
 /// Look for `#[tokio::main]` on `fn main`. Only the multi thread runtime is
@@ -138,6 +162,7 @@ fn collect(
     script_dir: &Path,
     children_dir: &Path,
     path: Vec<String>,
+    file: Arc<str>,
     items: Vec<Item>,
 ) -> Result<ModuleSrc> {
     let mut kept = Vec::with_capacity(items.len());
@@ -166,8 +191,9 @@ fn collect(
         let mut child_path = path.clone();
         child_path.push(name.clone());
         let child_dir = children_dir.join(&name);
-        let child_items = match m.content {
-            Some((_, inline_items)) => inline_items,
+        let (child_items, child_file) = match m.content {
+            // An inline module lives in its parent's file.
+            Some((_, inline_items)) => (inline_items, file.clone()),
             None => load_file(files, script_dir, children_dir, &name, &child_path)?,
         };
         let child = collect(
@@ -176,11 +202,16 @@ fn collect(
             script_dir,
             &child_dir,
             child_path,
+            child_file,
             child_items,
         )?;
         modules.push(child);
     }
-    Ok(ModuleSrc { path, items: kept })
+    Ok(ModuleSrc {
+        path,
+        items: kept,
+        file,
+    })
 }
 
 /// Read and parse the file behind `mod name;`, trying `name.rs` then
@@ -191,7 +222,7 @@ fn load_file(
     children_dir: &Path,
     name: &str,
     child_path: &[String],
-) -> Result<Vec<Item>> {
+) -> Result<(Vec<Item>, Arc<str>)> {
     let flat = children_dir.join(format!("{name}.rs"));
     let nested = children_dir.join(name).join("mod.rs");
     let file = match (flat.is_file(), nested.is_file()) {
@@ -215,8 +246,9 @@ fn load_file(
     let ast =
         syn::parse_file(&source).map_err(|e| anyhow!("parse error in {}: {e}", file.display()))?;
     let rel = file.strip_prefix(script_dir).unwrap_or(&file).to_path_buf();
+    let display: Arc<str> = Arc::from(rel.to_string_lossy().as_ref());
     files.push((rel, source));
-    Ok(ast.items)
+    Ok((ast.items, display))
 }
 
 /// Graft each local `path` dependency crate in as a top level module named
@@ -242,6 +274,7 @@ fn graft_crate_deps(modules: &mut Vec<ModuleSrc>, script_path: &Path) -> Result<
             &src_dir,
             &src_dir,
             vec![name.clone()],
+            Arc::from("lib.rs"),
             ast.items,
         )?;
         modules.push(root);
