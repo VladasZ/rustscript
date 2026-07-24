@@ -148,6 +148,19 @@ pub(super) fn apply_un(op: UnKind, v: &PValue) -> Result<PValue> {
     })
 }
 
+/// The parallel-engine twin of the serde_json variant check in ops.rs. See the
+/// note there.
+fn json_variant_kind_matches(name: Option<&str>, val: &PValue) -> bool {
+    matches!(
+        (name, val),
+        (Some("String"), PValue::Str(_))
+            | (Some("Number"), PValue::Int(_) | PValue::Float(_))
+            | (Some("Bool"), PValue::Bool(_))
+            | (Some("Array"), PValue::Vec(_))
+            | (Some("Object"), PValue::Map(_))
+    )
+}
+
 pub(super) fn try_bind(pat: &PPat, val: &PValue, define: &mut dyn FnMut(&str, PValue)) -> bool {
     match pat {
         PPat::Wild | PPat::Rest => true,
@@ -176,10 +189,24 @@ pub(super) fn try_bind(pat: &PPat, val: &PValue, define: &mut dyn FnMut(&str, PV
             }
             // Matches the pre-unwrapped Some rule in ops.rs, see the note there.
             PValue::Unit => false,
-            other => name.as_deref() == Some("Some") && bind_seq(elems, from_ref(other), define),
+            other => {
+                if json_variant_kind_matches(name.as_deref(), other) {
+                    bind_seq(elems, from_ref(other), define)
+                } else {
+                    name.as_deref() == Some("Some") && bind_seq(elems, from_ref(other), define)
+                }
+            }
         },
         PPat::Path { name } => match val {
-            PValue::Enum { variant, .. } => name.as_deref() == Some(&**variant),
+            PValue::Enum {
+                enum_name, variant, ..
+            } => {
+                name.as_deref() == Some(&**variant)
+                    // A json null is Option::None here, so `Value::Null` matches it.
+                    || (name.as_deref() == Some("Null")
+                        && &**enum_name == "Option"
+                        && &**variant == "None")
+            }
             _ => false,
         },
         PPat::Struct { name, fields } => {
