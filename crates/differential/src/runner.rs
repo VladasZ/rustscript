@@ -407,6 +407,25 @@ fn classify(native: &ProcessOutput, interpreted: &ProcessOutput) -> Classificati
         return Classification::NativeCrash;
     }
 
+    // A `rust error:` line with nothing printed means the interpreter
+    // rejected the program at load and never ran it. Comparing that against
+    // the native run would scatter one load bug across unrelated buckets, so
+    // it is classified by the load failure itself.
+    if interpreted.status == Some(1)
+        && interpreted.stdout.is_empty()
+        && interpreted
+            .stderr
+            .lines()
+            .next()
+            .is_some_and(|line| line.starts_with("rust error:"))
+    {
+        return if is_unsupported(&interpreted.stderr) {
+            Classification::InterpreterUnsupported
+        } else {
+            Classification::InterpreterCrash
+        };
+    }
+
     if native_panicked {
         return classify_native_panic(native, interpreted, interpreted_panicked);
     }

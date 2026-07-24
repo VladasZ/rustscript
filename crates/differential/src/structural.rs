@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::numeric::NumericCase;
 use crate::typed::{GeneratedExpr, GeneratedType};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -595,6 +596,7 @@ pub enum StructuralCase {
     MutableClosure(MutableClosureCase),
     Enum(Box<EnumCase>),
     Function(FunctionCase),
+    Numeric(NumericCase),
 }
 
 impl StructuralCase {
@@ -602,7 +604,7 @@ impl StructuralCase {
         match self {
             Self::Enum(case) => case.prelude(),
             Self::Function(case) => case.prelude(),
-            Self::Dataflow(_) | Self::MutableClosure(_) => String::new(),
+            Self::Dataflow(_) | Self::MutableClosure(_) | Self::Numeric(_) => String::new(),
         }
     }
 
@@ -612,6 +614,7 @@ impl StructuralCase {
             Self::MutableClosure(case) => case.render(),
             Self::Enum(case) => case.render(),
             Self::Function(case) => case.render(),
+            Self::Numeric(case) => case.render(),
         }
     }
 
@@ -629,6 +632,7 @@ impl StructuralCase {
                 .map(|case| Self::Enum(Box::new(case)))
                 .collect(),
             Self::Function(case) => case.shrinks().into_iter().map(Self::Function).collect(),
+            Self::Numeric(case) => case.shrinks().into_iter().map(Self::Numeric).collect(),
         }
     }
 
@@ -638,6 +642,7 @@ impl StructuralCase {
             Self::MutableClosure(case) => case.shape(output),
             Self::Enum(case) => case.shape(output),
             Self::Function(case) => case.shape(output),
+            Self::Numeric(case) => case.shape(output),
         }
     }
 
@@ -647,6 +652,7 @@ impl StructuralCase {
             Self::MutableClosure(case) => case.features(output),
             Self::Enum(case) => case.features(output),
             Self::Function(case) => case.features(output),
+            Self::Numeric(case) => case.features(output),
         }
     }
 }

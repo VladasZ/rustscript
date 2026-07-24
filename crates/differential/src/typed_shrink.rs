@@ -31,8 +31,7 @@ fn add_direct_reductions(expression: &GeneratedExpr, candidates: &mut Vec<Genera
         | GeneratedExpr::FMul(left, right)
         | GeneratedExpr::FDiv(left, right)
         | GeneratedExpr::FLess(left, right)
-        | GeneratedExpr::FEq(left, right)
-        | GeneratedExpr::NarrowArith { left, right, .. } => {
+        | GeneratedExpr::FEq(left, right) => {
             push_same_type(candidates, expression.ty(), left);
             push_same_type(candidates, expression.ty(), right);
         }
@@ -408,29 +407,6 @@ fn add_child_reductions(expression: &GeneratedExpr, candidates: &mut Vec<Generat
         }
         GeneratedExpr::FEq(left, right) => {
             shrink_binary(candidates, left, right, GeneratedExpr::FEq);
-        }
-        GeneratedExpr::NarrowArith {
-            target,
-            op,
-            left,
-            right,
-        } => {
-            for shrunk in left.shrinks() {
-                candidates.push(GeneratedExpr::NarrowArith {
-                    target: *target,
-                    op: *op,
-                    left: Box::new(shrunk),
-                    right: right.clone(),
-                });
-            }
-            for shrunk in right.shrinks() {
-                candidates.push(GeneratedExpr::NarrowArith {
-                    target: *target,
-                    op: *op,
-                    left: left.clone(),
-                    right: Box::new(shrunk),
-                });
-            }
         }
         GeneratedExpr::Cast(value, target) => {
             for shrunk in value.shrinks() {

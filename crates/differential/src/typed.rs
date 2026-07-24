@@ -29,31 +29,6 @@ impl GeneratedType {
     }
 }
 
-/// Plain `+ - * / %` applied in a narrow integer type between two casts from
-/// i64. Overflow panics under the compiler's debug semantics and division by
-/// zero panics in any width, both places an interpreter that computes in i64
-/// can silently diverge.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum NarrowOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Rem,
-}
-
-impl NarrowOp {
-    pub(crate) fn token(self) -> &'static str {
-        match self {
-            Self::Add => "+",
-            Self::Sub => "-",
-            Self::Mul => "*",
-            Self::Div => "/",
-            Self::Rem => "%",
-        }
-    }
-}
-
 /// Integer types a value can be narrowed to with `as`. The interpreter keeps
 /// every integer as an i64, so a narrowing cast that truncates in compiled Rust
 /// is a divergence the harness hunts for.
@@ -208,13 +183,6 @@ pub enum GeneratedExpr {
     /// `format!("{:?}", value)` over an f64, the Debug path, where whole
     /// numbers must keep their `.0`.
     DebugF64(Box<Self>),
-    /// See [`NarrowOp`].
-    NarrowArith {
-        target: IntCast,
-        op: NarrowOp,
-        left: Box<Self>,
-        right: Box<Self>,
-    },
     /// `format!("{SPEC}", value)` with a non-trivial format spec, width, fill,
     /// alignment, sign, zero padding, precision, radix, or exponent.
     FormatSpec {
@@ -248,8 +216,7 @@ impl GeneratedExpr {
             | Self::RawRem(..)
             | Self::Index { .. }
             | Self::Unwrap(_)
-            | Self::F64ToI64(_)
-            | Self::NarrowArith { .. } => GeneratedType::I64,
+            | Self::F64ToI64(_) => GeneratedType::I64,
             Self::F64(_)
             | Self::FAdd(..)
             | Self::FSub(..)
@@ -354,8 +321,7 @@ impl GeneratedExpr {
             | Self::FMul(left, right)
             | Self::FDiv(left, right)
             | Self::FLess(left, right)
-            | Self::FEq(left, right)
-            | Self::NarrowArith { left, right, .. } => left.uses(name) || right.uses(name),
+            | Self::FEq(left, right) => left.uses(name) || right.uses(name),
             Self::Cast(value, _)
             | Self::Unwrap(value)
             | Self::I64ToF64(value)
@@ -450,13 +416,6 @@ impl GeneratedExpr {
             Self::F64ToI64(_) => "cast-f64-i64",
             Self::FormatF64(_) => "format-f64",
             Self::DebugF64(_) => "debug-f64",
-            Self::NarrowArith { op, .. } => match op {
-                NarrowOp::Add => "narrow-add",
-                NarrowOp::Sub => "narrow-sub",
-                NarrowOp::Mul => "narrow-mul",
-                NarrowOp::Div => "narrow-div",
-                NarrowOp::Rem => "narrow-rem",
-            },
             Self::FormatSpec { .. } => "format-spec",
         }
     }
@@ -511,8 +470,7 @@ impl GeneratedExpr {
             | Self::FMul(left, right)
             | Self::FDiv(left, right)
             | Self::FLess(left, right)
-            | Self::FEq(left, right)
-            | Self::NarrowArith { left, right, .. } => vec![left, right],
+            | Self::FEq(left, right) => vec![left, right],
             Self::Not(value)
             | Self::Uppercase(value)
             | Self::FormatI64(value)
@@ -638,8 +596,7 @@ impl GeneratedExpr {
             | Self::FMul(left, right)
             | Self::FDiv(left, right)
             | Self::FLess(left, right)
-            | Self::FEq(left, right)
-            | Self::NarrowArith { left, right, .. } => vec![left, right],
+            | Self::FEq(left, right) => vec![left, right],
             Self::Cast(value, _)
             | Self::Unwrap(value)
             | Self::I64ToF64(value)

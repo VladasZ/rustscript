@@ -89,7 +89,11 @@ with the failing file and line plus a script backtrace and exits 101, and an
 
 Runtime numerics match a default `cargo run`, which is debug Rust. Integer
 overflow on `+`, `-`, `*`, `/`, and `%` panics instead of wrapping, and a
-narrowing `as` cast truncates to the target type.
+narrowing `as` cast truncates to the target type. This currently holds for
+i64 and f64. Narrower widths are not tracked yet, so u8 through u32
+arithmetic runs in i64, f32 runs as f64, and integer literals above i64::MAX
+are rejected. These open gaps are listed in the differential quarantine
+file, see Development below.
 
 ## Supported Rust
 
@@ -168,6 +172,8 @@ an interpreter bridge. `rust check` adds that coverage pass.
   supported.
 - `std::thread` is not supported; use Tokio tasks for parallel work.
 - `static mut` is rejected. Plain statics behave like constants.
+- Integer widths below 64 bits and `f32` carry no runtime meaning yet, values
+  compute in i64 and f64.
 - Lifetimes and generics are accepted but carry no runtime meaning.
 - Serde container attributes such as `rename_all` and `default` are not yet
   implemented by the reflection bridge.
@@ -220,11 +226,23 @@ and compares native and interpreted runs, including panics. Native is built
 with overflow checks on, the debug default. Generated cases cover typed
 expressions, ownership and borrowing, collections, closures, structs, enums,
 patterns, iterators, loops, `Result`, floats with their special values,
-narrowing casts, arithmetic done in narrow integer types, plain arithmetic
-that can overflow, division, indexing, `unwrap`, format specs, and a catalog
-of bridged `String`, `Vec`, and map methods. Some seeds splice same-typed
-expression subtrees from other programs through replayable structured
-mutation.
+plain arithmetic that can overflow, division, indexing, `unwrap`, format
+specs, and a catalog of bridged `String`, `Vec`, and map methods. Every
+program also carries a numeric case that computes in real integer and float
+widths, u8 through u64, usize, f32, and f64. Width flows through annotated
+and suffixed bindings, inference, casts, compound assignment, shifts, and
+negation across statements, the shapes a per-expression check cannot see.
+Values the overflow lint would fold pass through an opaque helper, so panics
+stay runtime events. Some seeds splice same-typed expression subtrees from
+other programs through replayable structured mutation.
+
+The generator covers what the language supports, never only what the
+interpreter handles. Known divergences live in
+`crates/differential/quarantine.toml`, keyed by classification and a
+signature pattern where `*` matches any substring. The campaign prints them
+with their notes but stays green, and a finding outside the list still fails
+the run. Each entry is an open bug, fix the interpreter and delete the
+entry.
 
 ```sh
 # Print one generated program.
