@@ -6,7 +6,6 @@ pub mod model;
 pub mod mutator;
 pub mod numeric;
 pub mod numeric_gen;
-pub mod quarantine;
 pub mod reduce;
 pub mod rich;
 pub mod runner;

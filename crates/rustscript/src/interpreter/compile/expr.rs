@@ -8,6 +8,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::interpreter::bytecode::{BinKind, Const, DISCARD, Op, Reg, UnKind};
+use crate::interpreter::numeric::{IntWidth, truncate};
 
 use super::*;
 
@@ -144,17 +145,29 @@ impl Compiler<'_> {
                             self.string_let = Some(mc as *const _);
                         }
                     }
-                    match &local.init {
-                        Some(init) => self.compile_into(val, &init.expr)?,
-                        None => self.emit(Op::LoadUnit { dst: val }),
+                    // A numeric annotation types a bare literal init at
+                    // compile time, so the value never exists at the wrong
+                    // width.
+                    let mut typed_literal = false;
+                    if let Pat::Type(t) = &local.pat
+                        && let Some(init) = &local.init
+                        && let Some(target) = numeric_annotation(&t.ty)
+                    {
+                        typed_literal = self.compile_numeric_annotated(val, &init.expr, target)?;
+                    }
+                    if !typed_literal {
+                        match &local.init {
+                            Some(init) => self.compile_into(val, &init.expr)?,
+                            None => self.emit(Op::LoadUnit { dst: val }),
+                        }
                     }
                     let consumed = offered && self.json_let.is_none();
                     self.json_let = None;
                     self.string_let = outer_string_let;
                     // A type annotation coerces a dynamic value into that type.
                     if let Pat::Type(t) = &local.pat {
-                        if !consumed {
-                            self.emit_coerce(val, &t.ty);
+                        if !consumed && !typed_literal {
+                            self.emit_annotation(val, &t.ty);
                         }
                         self.bind_pattern_irrefutable(&t.pat, val)?;
                     } else {
@@ -199,6 +212,23 @@ impl Compiler<'_> {
             }
         }
         Ok(())
+    }
+
+    /// Apply a `let` annotation to an already-computed init value. A numeric
+    /// primitive retags through a cast, which only ever acts on a bare
+    /// literal's value, an init typed by the real checker already has the
+    /// annotated type. Everything else goes through the struct coercion.
+    fn emit_annotation(&mut self, reg: Reg, ty: &syn::Type) {
+        if numeric_annotation(ty).is_some() {
+            let idx = self.add_cast(ty.clone());
+            self.emit(Op::Cast {
+                dst: reg,
+                src: reg,
+                ty: idx,
+            });
+            return;
+        }
+        self.emit_coerce(reg, ty);
     }
 
     /// Emit a coercion of `reg` into the annotated type when it names a struct,
@@ -362,15 +392,9 @@ impl Compiler<'_> {
 
     pub(super) fn compile_lit(&mut self, dst: Reg, lit: &Lit) -> Result<()> {
         match lit {
-            Lit::Int(i) => {
-                let v = i.base10_parse::<i64>()?;
-                self.emit(Op::LoadInt { dst, v });
-            }
+            Lit::Int(i) => self.compile_int_lit(dst, i, false, None)?,
             Lit::Bool(b) => self.emit(Op::LoadBool { dst, v: b.value }),
-            Lit::Float(f) => {
-                let k = self.add_const(Const::Float(f.base10_parse::<f64>()?));
-                self.emit(Op::LoadConst { dst, k });
-            }
+            Lit::Float(f) => self.compile_float_lit(dst, f, false, None)?,
             Lit::Str(s) => {
                 let k = self.add_const(Const::Str(Arc::from(s.value().as_str())));
                 self.emit(Op::LoadConst { dst, k });
@@ -392,6 +416,130 @@ impl Compiler<'_> {
         Ok(())
     }
 
+    /// An integer literal with its real width: from its suffix first, else
+    /// from an annotation the caller saw, else untyped. Parses through u128
+    /// so a bare literal past i64::MAX, which real Rust types as u64 or
+    /// usize, still loads with its full value. The sign of an enclosing
+    /// negation comes in as `negated` so `-128i8` and `-9223372036854775808`
+    /// type before they could overflow.
+    fn compile_int_lit(
+        &mut self,
+        dst: Reg,
+        lit: &syn::LitInt,
+        negated: bool,
+        annotation: Option<IntWidth>,
+    ) -> Result<()> {
+        let raw: u128 = lit.base10_parse()?;
+        if raw > u128::from(u64::MAX) {
+            bail!("integer literal does not fit any supported width");
+        }
+        let mut value = raw as i128;
+        if negated {
+            value = -value;
+        }
+        let width = match lit.suffix() {
+            "" | "u128" | "i128" => annotation,
+            suffix => Some(
+                IntWidth::parse(suffix)
+                    .ok_or_else(|| anyhow!("unsupported literal suffix `{suffix}`"))?,
+            ),
+        };
+        let width = width.unwrap_or({
+            // Untyped and past i64::MAX can only be u64 or usize in a valid
+            // program, and those two share one runtime semantic.
+            if value > i128::from(i64::MAX) {
+                IntWidth::U64
+            } else {
+                IntWidth::I64
+            }
+        });
+        match width {
+            IntWidth::I64 => self.emit(Op::LoadInt {
+                dst,
+                v: value as i64,
+            }),
+            w => self.emit(Op::LoadIntW {
+                dst,
+                v: w.encode(truncate(value, w)),
+                w,
+            }),
+        }
+        Ok(())
+    }
+
+    /// A float literal at its real width. An f32 parses from its own digits,
+    /// never through f64 rounding.
+    fn compile_float_lit(
+        &mut self,
+        dst: Reg,
+        lit: &syn::LitFloat,
+        negated: bool,
+        annotation: Option<FloatTy>,
+    ) -> Result<()> {
+        let is_f32 = match lit.suffix() {
+            "f32" => true,
+            "f64" => false,
+            _ => annotation == Some(FloatTy::F32),
+        };
+        let k = if is_f32 {
+            let mut v: f32 = lit.base10_parse()?;
+            if negated {
+                v = -v;
+            }
+            self.add_const(Const::F32(v))
+        } else {
+            let mut v: f64 = lit.base10_parse()?;
+            if negated {
+                v = -v;
+            }
+            self.add_const(Const::Float(v))
+        };
+        self.emit(Op::LoadConst { dst, k });
+        Ok(())
+    }
+
+    /// Compile an annotated numeric init directly at the annotated type when
+    /// it is a plain literal, possibly negated or parenthesized. False means
+    /// the init needs a runtime cast after normal compilation.
+    fn compile_numeric_annotated(
+        &mut self,
+        dst: Reg,
+        expr: &Expr,
+        target: NumericTy,
+    ) -> Result<bool> {
+        match expr {
+            Expr::Paren(p) => self.compile_numeric_annotated(dst, &p.expr, target),
+            Expr::Group(g) => self.compile_numeric_annotated(dst, &g.expr, target),
+            Expr::Unary(u) if matches!(u.op, UnOp::Neg(_)) => {
+                self.compile_numeric_lit(dst, &u.expr, true, target)
+            }
+            other => self.compile_numeric_lit(dst, other, false, target),
+        }
+    }
+
+    fn compile_numeric_lit(
+        &mut self,
+        dst: Reg,
+        expr: &Expr,
+        negated: bool,
+        target: NumericTy,
+    ) -> Result<bool> {
+        let Expr::Lit(l) = expr else {
+            return Ok(false);
+        };
+        match (&l.lit, target) {
+            (Lit::Int(i), NumericTy::Int(width)) => {
+                self.compile_int_lit(dst, i, negated, Some(width))?;
+                Ok(true)
+            }
+            (Lit::Float(f), NumericTy::Float(ty)) => {
+                self.compile_float_lit(dst, f, negated, Some(ty))?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     pub(super) fn compile_path(&mut self, dst: Reg, path: &syn::Path) -> Result<()> {
         if path.segments.len() == 1 {
             let name = path.segments[0].ident.to_string();
@@ -407,6 +555,18 @@ impl Compiler<'_> {
             let src = self.compile_expr(&u.expr)?;
             self.emit(Op::Deref { dst, src });
             return Ok(());
+        }
+        // A negated literal types as one token, so `-128i8` and the i64
+        // minimum load directly instead of negating an unrepresentable
+        // positive value.
+        if matches!(u.op, UnOp::Neg(_))
+            && let Expr::Lit(l) = &*u.expr
+        {
+            match &l.lit {
+                Lit::Int(i) => return self.compile_int_lit(dst, i, true, None),
+                Lit::Float(f) => return self.compile_float_lit(dst, f, true, None),
+                _ => {}
+            }
         }
         let a = self.compile_expr(&u.expr)?;
         let op = match u.op {
@@ -449,38 +609,15 @@ impl Compiler<'_> {
             _ => {}
         }
         let op = bin_kind(&b.op).ok_or_else(|| anyhow!("unsupported operator {:?}", b.op))?;
-        let guard = matches!(
-            op,
-            BinKind::Add | BinKind::Sub | BinKind::Mul | BinKind::Div | BinKind::Rem
-        )
-        .then(|| narrow_type_of(&b.left).zip(narrow_type_of(&b.right)))
-        .flatten()
-        .and_then(|(left, right)| (left == right).then_some(left));
         let a = self.compile_expr(&b.left)?;
-        if let Some(imm) = int_literal(&b.right)
-            && guard.is_none()
-        {
+        // A literal immediate is width-safe: when the left side carries a
+        // width the general path adopts it, exactly like a bare literal.
+        if let Some(imm) = int_literal(&b.right) {
             self.emit(Op::BinImm { dst, a, imm, op });
             return Ok(());
         }
         let c = self.compile_expr(&b.right)?;
-        // A narrow `MIN % -1` overflows in compiled Rust but its i64 result
-        // is 0, inside every range, so the remainder checks its operands
-        // before the op runs.
-        if let (Some(ty), BinKind::Rem) = (guard, op) {
-            self.emit(Op::NarrowRemGuard {
-                left: a,
-                right: c,
-                ty,
-            });
-        }
         self.emit(Op::Bin { dst, a, b: c, op });
-        // Both operands are statically a narrow integer type, so compiled
-        // Rust computes in that width and panics when the result leaves it.
-        // The i64 result is range checked to reproduce that panic.
-        if let Some(ty) = guard {
-            self.emit(Op::NarrowGuard { src: dst, ty, op });
-        }
         Ok(())
     }
 

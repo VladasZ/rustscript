@@ -12,8 +12,50 @@ use std::cmp::Ordering;
 use std::slice::from_ref;
 
 use super::bytecode::{BinKind, PLit, PPat, UnKind};
+use super::numeric::{IntWidth, int_arith, int_bit, int_neg, int_not, int_shift, unify};
 use super::value::Value;
 use anyhow::{Result, anyhow, bail};
+
+/// The u64 view of a width-tagged value when its width is 64-bit unsigned.
+/// u64 and usize dominate real scripts, sizes, counts, and hashes, so they
+/// get the same kind of inline fast path plain i64 has.
+#[inline(always)]
+fn as_u64(v: &Value) -> Option<(u64, IntWidth)> {
+    match v {
+        Value::IntW(stored, w @ (IntWidth::U64 | IntWidth::USize)) => Some((*stored as u64, *w)),
+        _ => None,
+    }
+}
+
+#[inline(always)]
+fn u64_arith(op: BinKind, a: u64, b: u64, w: IntWidth) -> Result<Value> {
+    use BinKind::*;
+    let result = match op {
+        Add => a
+            .checked_add(b)
+            .ok_or_else(|| anyhow!("attempt to add with overflow"))?,
+        Sub => a
+            .checked_sub(b)
+            .ok_or_else(|| anyhow!("attempt to subtract with overflow"))?,
+        Mul => a
+            .checked_mul(b)
+            .ok_or_else(|| anyhow!("attempt to multiply with overflow"))?,
+        Div => {
+            if b == 0 {
+                bail!("attempt to divide by zero");
+            }
+            a / b
+        }
+        Rem => {
+            if b == 0 {
+                bail!("attempt to calculate the remainder with a divisor of zero");
+            }
+            a % b
+        }
+        _ => unreachable!(),
+    };
+    Ok(Value::IntW(result as i64, w))
+}
 
 // -- operators -------------------------------------------------------------
 
@@ -33,16 +75,15 @@ pub(super) fn apply_bin(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
             partial_compare(l, r)?,
             Some(Ordering::Greater | Ordering::Equal)
         )),
-        BitAnd => int_bin(l, r, |a, b| a & b)?,
-        BitOr => int_bin(l, r, |a, b| a | b)?,
-        BitXor => int_bin(l, r, |a, b| a ^ b)?,
-        Shl => int_bin(l, r, |a, b| a << b)?,
-        Shr => int_bin(l, r, |a, b| a >> b)?,
+        BitAnd | BitOr | BitXor => bit_bin(op, l, r)?,
+        Shl | Shr => shift_bin(op, l, r)?,
     })
 }
 
 /// `apply_bin` with an integer literal right operand, with a fast integer path
-/// that skips building a `Value` for the literal.
+/// that skips building a `Value` for the literal. Each operator keeps its own
+/// arm so the dispatch stays a single match.
+#[inline]
 pub(super) fn apply_bin_imm(op: BinKind, l: &Value, imm: i64) -> Result<Value> {
     use BinKind::*;
     if let Value::Int(a) = l {
@@ -88,8 +129,27 @@ pub(super) fn apply_bin_imm(op: BinKind, l: &Value, imm: i64) -> Result<Value> {
             BitAnd => Value::Int(a & imm),
             BitOr => Value::Int(a | imm),
             BitXor => Value::Int(a ^ imm),
-            Shl => Value::Int(a << imm),
-            Shr => Value::Int(a >> imm),
+            Shl | Shr => shift_bin(op, l, &Value::Int(imm))?,
+        });
+    }
+    // A literal next to a u64 or usize value is that type itself, so it is
+    // never negative in a program that passed the real type checker.
+    if let Some((a, w)) = as_u64(l)
+        && imm >= 0
+    {
+        let b = imm as u64;
+        return Ok(match op {
+            Add | Sub | Mul | Div | Rem => u64_arith(op, a, b, w)?,
+            Eq => Value::Bool(a == b),
+            Ne => Value::Bool(a != b),
+            Lt => Value::Bool(a < b),
+            Le => Value::Bool(a <= b),
+            Gt => Value::Bool(a > b),
+            Ge => Value::Bool(a >= b),
+            BitAnd => Value::IntW((a & b) as i64, w),
+            BitOr => Value::IntW((a | b) as i64, w),
+            BitXor => Value::IntW((a ^ b) as i64, w),
+            Shl | Shr => shift_bin(op, l, &Value::Int(imm))?,
         });
     }
     apply_bin(op, l, &Value::Int(imm))
@@ -129,10 +189,67 @@ pub(super) fn cmp_test_imm(op: BinKind, l: &Value, imm: i64) -> Result<bool> {
             _ => unreachable!("compare jump carries a non-comparison operator"),
         });
     }
+    if let Some((a, _)) = as_u64(l)
+        && imm >= 0
+    {
+        let b = imm as u64;
+        return Ok(match op {
+            Eq => a == b,
+            Ne => a != b,
+            Lt => a < b,
+            Le => a <= b,
+            Gt => a > b,
+            Ge => a >= b,
+            _ => unreachable!("compare jump carries a non-comparison operator"),
+        });
+    }
     cmp_test(op, l, &Value::Int(imm))
 }
 
+/// The hot i64 case stays inline in the dispatch loop with one match per
+/// operator, and everything else, strings, width-tagged integers, and
+/// floats, lives in the outlined general path.
+#[inline]
 fn arith(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
+    use BinKind::*;
+    if let (Value::Int(a), Value::Int(b)) = (l, r) {
+        let (a, b) = (*a, *b);
+        let result = match op {
+            Add => a
+                .checked_add(b)
+                .ok_or_else(|| anyhow!("attempt to add with overflow"))?,
+            Sub => a
+                .checked_sub(b)
+                .ok_or_else(|| anyhow!("attempt to subtract with overflow"))?,
+            Mul => a
+                .checked_mul(b)
+                .ok_or_else(|| anyhow!("attempt to multiply with overflow"))?,
+            Div => {
+                if b == 0 {
+                    bail!("attempt to divide by zero");
+                }
+                a.checked_div(b)
+                    .ok_or_else(|| anyhow!("attempt to divide with overflow"))?
+            }
+            Rem => {
+                if b == 0 {
+                    bail!("attempt to calculate the remainder with a divisor of zero");
+                }
+                a.checked_rem(b)
+                    .ok_or_else(|| anyhow!("attempt to calculate the remainder with overflow"))?
+            }
+            _ => unreachable!(),
+        };
+        return Ok(Value::Int(result));
+    }
+    if let (Some((a, w)), Some((b, _))) = (as_u64(l), as_u64(r)) {
+        return u64_arith(op, a, b, w);
+    }
+    arith_general(op, l, r)
+}
+
+#[inline(never)]
+fn arith_general(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
     use BinKind::*;
     if let (Add, Value::Str(a), Value::Str(b)) = (op, l, r) {
         let mut out = String::with_capacity(a.len() + b.len());
@@ -140,58 +257,78 @@ fn arith(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
         out.push_str(b);
         return Ok(Value::str(out));
     }
-    match (l, r) {
-        (Value::Int(a), Value::Int(b)) => {
-            let (a, b) = (*a, *b);
-            let result = match op {
-                Add => a
-                    .checked_add(b)
-                    .ok_or_else(|| anyhow!("attempt to add with overflow"))?,
-                Sub => a
-                    .checked_sub(b)
-                    .ok_or_else(|| anyhow!("attempt to subtract with overflow"))?,
-                Mul => a
-                    .checked_mul(b)
-                    .ok_or_else(|| anyhow!("attempt to multiply with overflow"))?,
-                Div => {
-                    if b == 0 {
-                        bail!("attempt to divide by zero");
-                    }
-                    a.checked_div(b)
-                        .ok_or_else(|| anyhow!("attempt to divide with overflow"))?
-                }
-                Rem => {
-                    if b == 0 {
-                        bail!("attempt to calculate the remainder with a divisor of zero");
-                    }
-                    a.checked_rem(b).ok_or_else(|| {
-                        anyhow!("attempt to calculate the remainder with overflow")
-                    })?
-                }
-                _ => unreachable!(),
-            };
-            Ok(Value::Int(result))
-        }
-        (a, b) => {
-            let (x, y) = (to_float(a)?, to_float(b)?);
-            Ok(Value::Float(match op {
-                Add => x + y,
-                Sub => x - y,
-                Mul => x * y,
-                Div => x / y,
-                Rem => x % y,
-                _ => unreachable!(),
-            }))
-        }
+    if let (Some((a, wa)), Some((b, wb))) = (l.int_parts(), r.int_parts()) {
+        let width = unify(wa, wb)?;
+        return Ok(Value::int_of_width(int_arith(op, width, a, b)?, width));
+    }
+    match float_pair(l, r)? {
+        FloatPair::F64(x, y) => Ok(Value::Float(match op {
+            Add => x + y,
+            Sub => x - y,
+            Mul => x * y,
+            Div => x / y,
+            Rem => x % y,
+            _ => unreachable!(),
+        })),
+        FloatPair::F32(x, y) => Ok(Value::F32(match op {
+            Add => x + y,
+            Sub => x - y,
+            Mul => x * y,
+            Div => x / y,
+            Rem => x % y,
+            _ => unreachable!(),
+        })),
     }
 }
 
-fn int_bin(l: &Value, r: &Value, f: impl Fn(i64, i64) -> i64) -> Result<Value> {
-    match (l, r) {
-        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(f(*a, *b))),
-        (Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(f(*a as i64, *b as i64) != 0)),
-        _ => bail!("bitwise operators need integers"),
+/// The two sides of a float op at the width they compute in. An untagged f64
+/// next to an f32 is a bare literal that is f32 in the source types, so it
+/// rounds to f32 and the op runs at f32 precision.
+enum FloatPair {
+    F64(f64, f64),
+    F32(f32, f32),
+}
+
+fn float_pair(l: &Value, r: &Value) -> Result<FloatPair> {
+    Ok(match (l, r) {
+        (Value::F32(a), Value::F32(b)) => FloatPair::F32(*a, *b),
+        (Value::F32(a), Value::Float(b)) => FloatPair::F32(*a, *b as f32),
+        (Value::Float(a), Value::F32(b)) => FloatPair::F32(*a as f32, *b),
+        (a, b) => FloatPair::F64(to_float(a)?, to_float(b)?),
+    })
+}
+
+fn bit_bin(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
+    if let (Value::Int(a), Value::Int(b)) = (l, r) {
+        return Ok(Value::Int(match op {
+            BinKind::BitAnd => a & b,
+            BinKind::BitOr => a | b,
+            _ => a ^ b,
+        }));
     }
+    if let (Value::Bool(a), Value::Bool(b)) = (l, r) {
+        let (a, b) = (*a as i64, *b as i64);
+        let bits = match op {
+            BinKind::BitAnd => a & b,
+            BinKind::BitOr => a | b,
+            _ => a ^ b,
+        };
+        return Ok(Value::Bool(bits != 0));
+    }
+    if let (Some((a, wa)), Some((b, wb))) = (l.int_parts(), r.int_parts()) {
+        let width = unify(wa, wb)?;
+        return Ok(Value::int_of_width(int_bit(op, a, b)?, width));
+    }
+    bail!("bitwise operators need integers")
+}
+
+/// `<<` and `>>`. The amount side keeps its own width and only supplies the
+/// count, the result has the shifted side's width.
+fn shift_bin(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
+    let (Some((a, wa)), Some((b, _))) = (l.int_parts(), r.int_parts()) else {
+        bail!("shift operators need integers");
+    };
+    Ok(Value::int_of_width(int_shift(op, wa, a, b)?, wa))
 }
 
 pub(super) fn compare_values(l: &Value, r: &Value) -> Result<Ordering> {
@@ -205,7 +342,15 @@ pub(super) fn compare_values(l: &Value, r: &Value) -> Result<Ordering> {
 fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
     Ok(match (l, r) {
         (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
+        (Value::IntW(..), Value::Int(_) | Value::IntW(..)) | (Value::Int(_), Value::IntW(..)) => {
+            let (a, _) = l.int_parts().unwrap();
+            let (b, _) = r.int_parts().unwrap();
+            Some(a.cmp(&b))
+        }
         (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
+        (Value::F32(a), Value::F32(b)) => a.partial_cmp(b),
+        (Value::F32(a), Value::Float(b)) => a.partial_cmp(&(*b as f32)),
+        (Value::Float(a), Value::F32(b)) => (*a as f32).partial_cmp(b),
         (Value::Int(a), Value::Float(b)) => (*a as f64).partial_cmp(b),
         (Value::Float(a), Value::Int(b)) => a.partial_cmp(&(*b as f64)),
         (Value::Str(a), Value::Str(b)) => Some(a.as_str().cmp(b.as_str())),
@@ -225,10 +370,16 @@ fn to_float(v: &Value) -> Result<f64> {
 
 pub(super) fn apply_un(op: UnKind, v: &Value) -> Result<Value> {
     Ok(match (op, v) {
-        (UnKind::Neg, Value::Int(i)) => Value::Int(-*i),
+        (UnKind::Neg, Value::Int(i)) => Value::Int(
+            i.checked_neg()
+                .ok_or_else(|| anyhow!("attempt to negate with overflow"))?,
+        ),
+        (UnKind::Neg, Value::IntW(v, w)) => Value::int_of_width(int_neg(*w, w.decode(*v))?, *w),
         (UnKind::Neg, Value::Float(f)) => Value::Float(-*f),
+        (UnKind::Neg, Value::F32(f)) => Value::F32(-*f),
         (UnKind::Not, Value::Bool(b)) => Value::Bool(!*b),
         (UnKind::Not, Value::Int(i)) => Value::Int(!*i),
+        (UnKind::Not, Value::IntW(v, w)) => Value::int_of_width(int_not(*w, w.decode(*v)), *w),
         (op, v) => bail!("cannot apply {:?} to {}", op, v.type_name()),
     })
 }
@@ -345,7 +496,12 @@ pub(super) fn try_bind(pat: &PPat, val: &Value, define: &mut dyn FnMut(&str, Val
 fn endpoint_cmp(literal: &PLit, value: &Value) -> Option<Ordering> {
     match (literal, value) {
         (PLit::Int(a), Value::Int(b)) => Some(a.cmp(b)),
+        (PLit::Int(a), Value::IntW(..)) => {
+            let (b, _) = value.int_parts()?;
+            Some(i128::from(*a).cmp(&b))
+        }
         (PLit::Float(a), Value::Float(b)) => a.partial_cmp(b),
+        (PLit::Float(a), Value::F32(b)) => (*a as f32).partial_cmp(b),
         (PLit::Char(a), Value::Char(b)) => Some(a.cmp(b)),
         _ => None,
     }
@@ -403,7 +559,11 @@ fn bind_seq(patterns: &[PPat], vals: &[Value], define: &mut dyn FnMut(&str, Valu
 fn literal_matches(literal: &PLit, value: &Value) -> bool {
     match (literal, value) {
         (PLit::Int(left), Value::Int(right)) => left == right,
+        (PLit::Int(left), Value::IntW(..)) => {
+            value.int_parts().map(|(v, _)| v) == Some(i128::from(*left))
+        }
         (PLit::Float(left), Value::Float(right)) => left == right,
+        (PLit::Float(left), Value::F32(right)) => *left as f32 == *right,
         (PLit::Bool(left), Value::Bool(right)) => left == right,
         (PLit::Str(left), Value::Str(right)) => left == right.as_str(),
         (PLit::Char(left), Value::Char(right)) => left == right,

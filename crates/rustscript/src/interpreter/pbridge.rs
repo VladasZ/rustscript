@@ -127,6 +127,15 @@ impl PInterp {
         }
         let last = segs[segs.len() - 1].as_str();
         let ns = segs[segs.len() - 2].as_str();
+        // Namespaced calls reach native bridges that compute in i64 and f64,
+        // so width-tagged numbers pass their plain image.
+        let args: Vec<PValue> = args
+            .into_iter()
+            .map(|arg| match arg.bridge_image() {
+                Some(image) => image,
+                None => arg,
+            })
+            .collect();
         match (ns, last) {
             ("env", "args") => Ok(PValue::vec(
                 super::script_args().into_iter().map(PValue::str).collect(),
@@ -233,6 +242,21 @@ impl PInterp {
             "clone" => return Ok(recv.clone()),
             "to_string" => return Ok(PValue::str(recv.display())),
             _ => {}
+        }
+        // Everything below computes in i64 and f64, so width-tagged numbers
+        // pass their plain image.
+        let widened;
+        let recv = match recv.bridge_image() {
+            Some(image) => {
+                widened = image;
+                &widened
+            }
+            None => recv,
+        };
+        for arg in args.iter_mut() {
+            if let Some(image) = arg.bridge_image() {
+                *arg = image;
+            }
         }
         // The async http client, request, and response types.
         if let Some(res) = super::phttp::http_method(recv, m, args) {
@@ -914,6 +938,9 @@ fn render_template(
                     let mut pos = 0;
                     match resolve_arg(token, &mut pos, positional, named)? {
                         PValue::Int(i) => Ok(i),
+                        ref other @ PValue::IntW(..) => other
+                            .untag_int()
+                            .ok_or_else(|| anyhow::anyhow!("format width out of range")),
                         other => {
                             bail!("format width must be an integer, got {}", other.type_name())
                         }
@@ -922,7 +949,12 @@ fn render_template(
                 let fmt = super::format::expand_widths_with(fmt, &mut lookup)?;
                 let number = match &value {
                     PValue::Float(f) => Some(super::format::SpecNumber::Float(*f)),
+                    PValue::F32(f) => Some(super::format::SpecNumber::F32(*f)),
                     PValue::Int(i) => Some(super::format::SpecNumber::Int(*i)),
+                    PValue::IntW(v, w) => Some(super::format::SpecNumber::Sized {
+                        value: w.decode(*v),
+                        bits: w.bits(),
+                    }),
                     _ => None,
                 };
                 out.push_str(&super::format::apply_spec(

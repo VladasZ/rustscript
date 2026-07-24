@@ -324,7 +324,7 @@ pub(super) fn vec_method(
             let mut acc_f = 0f64;
             let mut is_float = false;
             for x in v.borrow().iter() {
-                match x {
+                match &x.bridge_image().unwrap_or_else(|| x.clone()) {
                     Value::Int(i) => {
                         acc_i = acc_i
                             .checked_add(*i)
@@ -348,7 +348,7 @@ pub(super) fn vec_method(
             let mut acc_f = 1f64;
             let mut is_float = false;
             for x in v.borrow().iter() {
-                match x {
+                match &x.bridge_image().unwrap_or_else(|| x.clone()) {
                     Value::Int(i) => {
                         acc_i = acc_i
                             .checked_mul(*i)
@@ -759,6 +759,11 @@ pub(super) fn int_arg(args: &[Value], i: usize) -> Result<i64> {
 pub(super) fn sort_key(v: &Value) -> SortKey {
     match v {
         Value::Int(i) => SortKey::Int(*i),
+        Value::IntW(..) => match v.bridge_image() {
+            Some(Value::Int(i)) => SortKey::Int(i),
+            _ => SortKey::Str(v.display()),
+        },
+        Value::F32(f) => SortKey::Float(f64::from(*f)),
         Value::Float(f) => SortKey::Float(*f),
         Value::Bool(b) => SortKey::Int(*b as i64),
         Value::Str(s) => SortKey::Str(s.to_string()),

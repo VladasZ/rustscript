@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 /// Every integer width real Rust has, including u64 and usize whose full
 /// range does not fit the i64 the interpreter computes in. The grammar covers
 /// what the language supports, never only what the interpreter handles. A
-/// divergence found here goes to the quarantine list, not out of the grammar.
+/// divergence found here is a finding to fix, not a reason to shrink the
+/// grammar.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum IntWidth {
     U8,

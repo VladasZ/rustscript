@@ -139,7 +139,9 @@ pub(super) fn set_reg(slot: &mut Value, value: Value) {
         Value::Unit
             | Value::Bool(_)
             | Value::Int(_)
+            | Value::IntW(..)
             | Value::Float(_)
+            | Value::F32(_)
             | Value::Char(_)
             | Value::Range { .. }
     ) {
@@ -152,6 +154,9 @@ pub(super) fn set_reg(slot: &mut Value, value: Value) {
 pub(super) fn int_of(value: &Value, description: &str) -> Result<i64> {
     match value {
         Value::Int(value) => Ok(*value),
+        Value::IntW(..) => value
+            .untag_int()
+            .ok_or_else(|| anyhow::anyhow!("{description} is out of the i64 range")),
         _ => bail!("{description} must be an integer"),
     }
 }

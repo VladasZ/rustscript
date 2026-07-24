@@ -213,7 +213,7 @@ fn infer(chunk: &Chunk, before: usize, reg: u16) -> Ty {
                 return match chunk.consts[*k as usize] {
                     Const::Str(_) => Ty::Str,
                     Const::Char(_) => Ty::Char,
-                    Const::Float(_) => Ty::Float,
+                    Const::Float(_) | Const::F32(_) => Ty::Float,
                     Const::Bytes(_) => Ty::Vec,
                 };
             }
