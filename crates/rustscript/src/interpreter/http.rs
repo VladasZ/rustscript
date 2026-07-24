@@ -491,10 +491,10 @@ fn header_map_method(s: &StructData, method: &str, args: &[Value]) -> Value {
 
 fn header_value_method(s: &StructData, method: &str) -> Value {
     let text = s.get("text").map(|v| v.display()).unwrap_or_default();
-    match method {
-        "to_str" => Value::ok(Value::str(text)),
-        "as_str" | "as_string" | "to_string" => Value::str(text),
-        _ => Value::Unit,
+    match super::shared::header_value_core(method, text) {
+        Some(super::shared::HeaderOut::Ok(t)) => Value::ok(Value::str(t)),
+        Some(super::shared::HeaderOut::Text(t)) => Value::str(t),
+        None => Value::Unit,
     }
 }
 
@@ -503,11 +503,9 @@ pub(super) fn status_method(s: &StructData, method: &str) -> Value {
         Some(Value::Int(c)) => c,
         _ => 0,
     };
-    match method {
-        "as_u16" | "as_int" => Value::Int(code),
-        "is_success" => Value::Bool((200..300).contains(&code)),
-        "is_client_error" => Value::Bool((400..500).contains(&code)),
-        "is_server_error" => Value::Bool((500..600).contains(&code)),
-        _ => Value::Unit,
+    match super::shared::status_core(method, code) {
+        Some(super::shared::StatusOut::Int(i)) => Value::Int(i),
+        Some(super::shared::StatusOut::Bool(b)) => Value::Bool(b),
+        None => Value::Unit,
     }
 }

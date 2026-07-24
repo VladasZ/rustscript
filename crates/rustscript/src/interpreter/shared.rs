@@ -305,6 +305,214 @@ pub(super) fn str_core(s: &str, name: &str, args: &impl Args) -> Result<Option<S
     }))
 }
 
+// -- regex -----------------------------------------------------------------
+
+/// What a `Regex` method produced. Spans index into the source string the
+/// engine already holds, so each engine materializes its own match handles.
+pub(super) enum RegexOut {
+    Bool(bool),
+    Text(String),
+    /// The engine answers with its shared pattern handle.
+    Pattern,
+    /// `find`: the first match's span, if any.
+    OptSpan(Option<(usize, usize)>),
+    /// `captures`: per group, its span when the group matched.
+    OptGroups(Option<Vec<Option<(usize, usize)>>>),
+    /// `split`: the pieces as owned strings.
+    Pieces(Vec<String>),
+}
+
+/// The eager `Regex` methods. The `find_iter` and `captures_iter` forms stay
+/// engine side, the fast engine streams them lazily and the parallel engine
+/// collects them.
+pub(super) fn regex_core(
+    re: &regex::Regex,
+    name: &str,
+    source: &str,
+    replacement: &dyn Fn() -> String,
+) -> Option<RegexOut> {
+    use RegexOut as O;
+    Some(match name {
+        "is_match" => O::Bool(re.is_match(source)),
+        "find" => O::OptSpan(re.find(source).map(|m| (m.start(), m.end()))),
+        "captures" => O::OptGroups(re.captures(source).map(|c| {
+            (0..c.len())
+                .map(|i| c.get(i).map(|g| (g.start(), g.end())))
+                .collect()
+        })),
+        "replace" => O::Text(re.replacen(source, 1, replacement().as_str()).into_owned()),
+        "replace_all" => O::Text(re.replace_all(source, replacement().as_str()).into_owned()),
+        "split" => O::Pieces(re.split(source).map(str::to_string).collect()),
+        "as_str" => O::Pattern,
+        _ => return None,
+    })
+}
+
+/// A `Match` method over its span.
+pub(super) enum MatchOut {
+    Text(String),
+    Int(i64),
+}
+
+pub(super) fn match_core(name: &str, source: &str, start: usize, end: usize) -> Option<MatchOut> {
+    Some(match name {
+        "as_str" => MatchOut::Text(source[start..end].to_string()),
+        "start" => MatchOut::Int(start as i64),
+        "end" => MatchOut::Int(end as i64),
+        _ => return None,
+    })
+}
+
+/// A `Captures` method: a group lookup resolved to its span, or the count.
+pub(super) enum CapturesOut {
+    Int(i64),
+    /// The queried group's span, None when absent, out of range, or unmatched.
+    OptSpan(Option<(usize, usize)>),
+}
+
+pub(super) fn captures_core<'n>(
+    name: &str,
+    groups: &[Option<(usize, usize)>],
+    mut names: impl Iterator<Item = (&'n str, usize)>,
+    args: &impl Args,
+) -> Result<Option<CapturesOut>> {
+    use CapturesOut as O;
+    Ok(Some(match name {
+        "get" => {
+            let index = match args.int(0) {
+                Some(i) if i >= 0 => i as usize,
+                _ => bail!("captures get needs a non-negative index"),
+            };
+            O::OptSpan(groups.get(index).copied().flatten())
+        }
+        "name" => {
+            let wanted = args.text(0);
+            let index = names.find_map(|(n, i)| (n == wanted).then_some(i));
+            O::OptSpan(index.and_then(|i| groups.get(i).copied().flatten()))
+        }
+        "len" => O::Int(groups.len() as i64),
+        _ => return Ok(None),
+    }))
+}
+
+// -- duration --------------------------------------------------------------
+
+pub(super) enum DurOut {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+}
+
+/// `Duration` accessors over the real `secs` plus `nanos` split, exactly the
+/// std methods per name.
+pub(super) fn duration_core(name: &str, secs: u64, nanos: u32) -> Option<DurOut> {
+    use DurOut as O;
+    let total = u128::from(secs) * 1_000_000_000 + u128::from(nanos);
+    Some(match name {
+        "as_secs" => O::Int(secs as i64),
+        "as_millis" => O::Int((total / 1_000_000) as i64),
+        "as_micros" => O::Int((total / 1_000) as i64),
+        "as_nanos" => O::Int(total as i64),
+        "subsec_nanos" => O::Int(i64::from(nanos)),
+        "subsec_millis" => O::Int(i64::from(nanos / 1_000_000)),
+        "subsec_micros" => O::Int(i64::from(nanos / 1_000)),
+        "as_secs_f64" => O::Float(secs as f64 + f64::from(nanos) / 1e9),
+        "is_zero" => O::Bool(total == 0),
+        _ => return None,
+    })
+}
+
+// -- datetime ---------------------------------------------------------------
+
+pub(super) enum DateOut {
+    Int(i64),
+    Text(String),
+}
+
+/// `DateTime` accessors over the stored unix timestamp. `local` selects the
+/// local timezone for `format`, everything else reads the UTC view, exactly
+/// like the fast engine always did.
+pub(super) fn datetime_core(
+    name: &str,
+    secs: i64,
+    nanos: u32,
+    local: bool,
+    args: &impl Args,
+) -> Option<DateOut> {
+    use DateOut as O;
+    use chrono::{DateTime, Datelike, Local, Timelike, Utc};
+    let utc: DateTime<Utc> = DateTime::from_timestamp(secs, nanos).unwrap_or_default();
+    Some(match name {
+        "timestamp" => O::Int(secs),
+        "timestamp_millis" => O::Int(secs * 1000 + i64::from(nanos / 1_000_000)),
+        "to_rfc3339" => O::Text(utc.to_rfc3339()),
+        "format" => {
+            let fmt = args.text(0);
+            if local {
+                O::Text(utc.with_timezone(&Local).format(&fmt).to_string())
+            } else {
+                O::Text(utc.format(&fmt).to_string())
+            }
+        }
+        "year" => O::Int(i64::from(utc.year())),
+        "month" => O::Int(i64::from(utc.month())),
+        "day" => O::Int(i64::from(utc.day())),
+        "hour" => O::Int(i64::from(utc.hour())),
+        "minute" => O::Int(i64::from(utc.minute())),
+        "second" => O::Int(i64::from(utc.second())),
+        _ => return None,
+    })
+}
+
+// -- http and process scalars ----------------------------------------------
+
+/// `StatusCode` accessors over the numeric code.
+pub(super) enum StatusOut {
+    Int(i64),
+    Bool(bool),
+}
+
+pub(super) fn status_core(name: &str, code: i64) -> Option<StatusOut> {
+    use StatusOut as O;
+    Some(match name {
+        "as_u16" | "as_int" => O::Int(code),
+        "is_success" => O::Bool((200..300).contains(&code)),
+        "is_client_error" => O::Bool((400..500).contains(&code)),
+        "is_server_error" => O::Bool((500..600).contains(&code)),
+        _ => return None,
+    })
+}
+
+/// `HeaderValue` accessors over the header's text.
+pub(super) enum HeaderOut {
+    /// `to_str` answers `Ok(text)`, like the real fallible accessor.
+    Ok(String),
+    Text(String),
+}
+
+pub(super) fn header_value_core(name: &str, text: String) -> Option<HeaderOut> {
+    Some(match name {
+        "to_str" => HeaderOut::Ok(text),
+        "as_str" | "as_string" | "to_string" => HeaderOut::Text(text),
+        _ => return None,
+    })
+}
+
+/// `ExitStatus` accessors over the flag and the optional code.
+pub(super) enum ExitOut {
+    Bool(bool),
+    /// `code()`: `Some(code)` normally, `None` after death by signal.
+    OptInt(Option<i64>),
+}
+
+pub(super) fn exit_status_core(name: &str, success: bool, code: Option<i64>) -> Option<ExitOut> {
+    Some(match name {
+        "success" => ExitOut::Bool(success),
+        "code" => ExitOut::OptInt(code),
+        _ => return None,
+    })
+}
+
 /// The `colored` crate as string methods, shared so tokio scripts color their
 /// output the same way. Returns the styled text as a plain string carrying
 /// ANSI codes, so chaining and printing both work. Honors the crate's own

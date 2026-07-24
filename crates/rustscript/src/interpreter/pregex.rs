@@ -7,8 +7,10 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow, bail};
 use parking_lot::Mutex;
 
+use super::pbridge::PArgs;
 use super::pnative::PNative;
 use super::pvalue::PValue;
+use super::shared::{CapturesOut, MatchOut, RegexOut, captures_core, match_core, regex_core};
 
 type CaptureNames = Arc<Vec<(Arc<str>, usize)>>;
 
@@ -103,79 +105,71 @@ enum Kind {
 
 fn regex_method(regex: &PRegexValue, method: &str, args: &[PValue]) -> Result<PValue> {
     let source = text_arg(args, 0);
+    // The iterator forms are eager here, unlike the fast engine's lazy ones,
+    // so they stay out of the shared core on both sides.
+    match method {
+        "find_iter" => {
+            return Ok(PValue::vec(
+                regex
+                    .compiled
+                    .find_iter(&source)
+                    .map(|found| match_value(source.clone(), found.start(), found.end()))
+                    .collect(),
+            ));
+        }
+        "captures_iter" => {
+            return Ok(PValue::vec(
+                regex
+                    .compiled
+                    .captures_iter(&source)
+                    .map(|captures| captures_value(regex, source.clone(), &captures))
+                    .collect(),
+            ));
+        }
+        _ => {}
+    }
     let replacement = || args.get(1).map(PValue::display).unwrap_or_default();
-    Ok(match method {
-        "is_match" => PValue::Bool(regex.compiled.is_match(&source)),
-        "find" => regex
-            .compiled
-            .find(&source)
-            .map_or_else(PValue::none, |found| {
-                PValue::some(match_value(source.clone(), found.start(), found.end()))
-            }),
-        "captures" => regex
-            .compiled
-            .captures(&source)
-            .map_or_else(PValue::none, |captures| {
-                PValue::some(captures_value(regex, source.clone(), &captures))
-            }),
-        "find_iter" => PValue::vec(
-            regex
-                .compiled
-                .find_iter(&source)
-                .map(|found| match_value(source.clone(), found.start(), found.end()))
-                .collect(),
-        ),
-        "captures_iter" => PValue::vec(
-            regex
-                .compiled
-                .captures_iter(&source)
-                .map(|captures| captures_value(regex, source.clone(), &captures))
-                .collect(),
-        ),
-        "replace" => PValue::str(
-            regex
-                .compiled
-                .replacen(&source, 1, replacement().as_str())
-                .into_owned(),
-        ),
-        "replace_all" => PValue::str(
-            regex
-                .compiled
-                .replace_all(&source, replacement().as_str())
-                .into_owned(),
-        ),
-        "split" => PValue::vec(regex.compiled.split(&source).map(PValue::str).collect()),
-        "as_str" => PValue::Str(regex.pattern.clone()),
-        _ => bail!("method `{method}` on Regex is not supported in tokio mode"),
+    let Some(out) = regex_core(&regex.compiled, method, &source, &replacement) else {
+        bail!("method `{method}` on Regex is not supported in tokio mode");
+    };
+    Ok(match out {
+        RegexOut::Bool(b) => PValue::Bool(b),
+        RegexOut::Text(s) => PValue::str(s),
+        RegexOut::Pattern => PValue::Str(regex.pattern.clone()),
+        RegexOut::OptSpan(span) => span.map_or_else(PValue::none, |(start, end)| {
+            PValue::some(match_value(source.clone(), start, end))
+        }),
+        RegexOut::OptGroups(groups) => groups.map_or_else(PValue::none, |groups| {
+            PValue::some(
+                PNative::RegexCaptures(PCapturesValue {
+                    source: source.clone(),
+                    groups,
+                    names: regex.names.clone(),
+                })
+                .wrap(),
+            )
+        }),
+        RegexOut::Pieces(pieces) => PValue::vec(pieces.into_iter().map(PValue::str).collect()),
     })
 }
 
 fn match_method(found: &PMatchValue, method: &str) -> Result<PValue> {
-    Ok(match method {
-        "as_str" => PValue::str(&found.source[found.start..found.end]),
-        "start" => PValue::Int(found.start as i64),
-        "end" => PValue::Int(found.end as i64),
-        _ => bail!("method `{method}` on Match is not supported in tokio mode"),
-    })
+    match match_core(method, &found.source, found.start, found.end) {
+        Some(MatchOut::Text(s)) => Ok(PValue::str(s)),
+        Some(MatchOut::Int(i)) => Ok(PValue::Int(i)),
+        None => bail!("method `{method}` on Match is not supported in tokio mode"),
+    }
 }
 
 fn captures_method(captures: &PCapturesValue, method: &str, args: &[PValue]) -> Result<PValue> {
-    Ok(match method {
-        "get" => {
-            let index = match args.first() {
-                Some(PValue::Int(index)) if *index >= 0 => *index as usize,
-                _ => bail!("captures get needs a non-negative index"),
-            };
-            capture_group(captures, index)
-        }
-        "name" => {
-            let name = args.first().map(PValue::display).unwrap_or_default();
-            group_by_name(captures, &name)
-                .map_or_else(PValue::none, |index| capture_group(captures, index))
-        }
-        "len" => PValue::Int(captures.groups.len() as i64),
-        _ => bail!("method `{method}` on Captures is not supported in tokio mode"),
-    })
+    let names = captures.names.iter().map(|(n, i)| (n.as_ref(), *i));
+    match captures_core(method, &captures.groups, names, &PArgs(args))? {
+        Some(CapturesOut::Int(i)) => Ok(PValue::Int(i)),
+        Some(CapturesOut::OptSpan(span)) => Ok(span.map_or_else(PValue::none, |(start, end)| {
+            PValue::some(match_value(captures.source.clone(), start, end))
+        })),
+        None => bail!("method `{method}` on Captures is not supported in tokio mode"),
+    }
 }
 
 fn group_by_name(captures: &PCapturesValue, name: &str) -> Option<usize> {
@@ -183,17 +177,6 @@ fn group_by_name(captures: &PCapturesValue, name: &str) -> Option<usize> {
         .names
         .iter()
         .find_map(|(candidate, index)| (candidate.as_ref() == name).then_some(*index))
-}
-
-fn capture_group(captures: &PCapturesValue, index: usize) -> PValue {
-    captures
-        .groups
-        .get(index)
-        .copied()
-        .flatten()
-        .map_or_else(PValue::none, |(start, end)| {
-            PValue::some(match_value(captures.source.clone(), start, end))
-        })
 }
 
 /// `caps[1]` and `caps["name"]`, which panic in real Rust on a missing group.

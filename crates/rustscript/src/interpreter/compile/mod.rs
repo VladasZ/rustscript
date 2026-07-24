@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::{Result, bail};
 use syn::punctuated::Punctuated;
@@ -16,6 +17,7 @@ use super::bytecode::{
 };
 use super::numeric::IntWidth;
 use super::resolver::{Res, Resolver};
+use super::typeir::{CastIr, TypeIr, lower_cast, lower_type};
 
 /// Program level facts the compiler needs, filled before any body is compiled.
 pub struct Ctx<'r> {
@@ -42,8 +44,9 @@ struct FnState {
     fmts: Vec<FmtSpec>,
     struct_lits: Vec<StructLit>,
     enum_variants: Vec<EnumVariant>,
-    casts: Vec<Rc<syn::Type>>,
-    paths: Vec<(Vec<String>, Option<Rc<syn::Type>>)>,
+    casts: Vec<CastIr>,
+    coerces: Vec<TypeIr>,
+    paths: Vec<(Vec<String>, Option<TypeIr>)>,
     names: Vec<MethodName>,
     children: Vec<Rc<Chunk>>,
     child_caps: Vec<Vec<CapSource>>,
@@ -55,7 +58,7 @@ struct FnState {
     num_params: usize,
     name: String,
     generics: Vec<Rc<str>>,
-    call_type_args: Vec<Rc<[Rc<syn::Type>]>>,
+    call_type_args: Vec<Arc<[TypeIr]>>,
 }
 
 impl FnState {
@@ -70,6 +73,7 @@ impl FnState {
             struct_lits: Vec::new(),
             enum_variants: Vec::new(),
             casts: Vec::new(),
+            coerces: Vec::new(),
             paths: Vec::new(),
             names: Vec::new(),
             children: Vec::new(),
@@ -113,6 +117,7 @@ impl FnState {
             struct_lits: self.struct_lits,
             enum_variants: self.enum_variants,
             casts: self.casts,
+            coerces: self.coerces,
             paths: self.paths,
             names: self.names,
             children: self.children,
@@ -144,7 +149,7 @@ pub struct Compiler<'a> {
     /// exact `from_str` call, keyed by the call's address so a nested call
     /// inside its arguments cannot steal it. Lets the typed json path run
     /// without a turbofish.
-    pub(super) json_let: Option<(*const syn::ExprCall, Rc<syn::Type>)>,
+    pub(super) json_let: Option<(*const syn::ExprCall, TypeIr)>,
     /// A `let s: String = ...collect()` annotation waiting to attach to that
     /// exact `collect` call, keyed by the call's address like `json_let`.
     /// Lets an annotated let collect into a String without a turbofish.
@@ -290,10 +295,25 @@ impl<'a> Compiler<'a> {
         (f.members.len() - 1) as u16
     }
 
-    fn add_cast(&mut self, ty: syn::Type) -> u16 {
+    fn add_cast(&mut self, ty: &syn::Type) -> u16 {
         let f = self.cur();
-        f.casts.push(Rc::new(ty));
+        f.casts.push(lower_cast(ty));
         (f.casts.len() - 1) as u16
+    }
+
+    /// Lower an annotated or turbofish type against the module being compiled
+    /// and the generics of the function being compiled. A closure body has no
+    /// generics of its own, matching the empty type environment its frame
+    /// runs under.
+    pub(super) fn lower_ir(&self, ty: &syn::Type) -> TypeIr {
+        let generics = &self.frames.last().unwrap().generics;
+        lower_type(ty, self.ctx.resolver, self.ctx.module, generics)
+    }
+
+    fn add_coerce(&mut self, ir: TypeIr) -> u16 {
+        let f = self.cur();
+        f.coerces.push(ir);
+        (f.coerces.len() - 1) as u16
     }
 
     fn add_name(&mut self, name: String) -> u16 {
@@ -305,7 +325,7 @@ impl<'a> Compiler<'a> {
         (f.names.len() - 1) as u16
     }
 
-    fn add_path(&mut self, segs: Vec<String>, coerce: Option<Rc<syn::Type>>) -> u16 {
+    fn add_path(&mut self, segs: Vec<String>, coerce: Option<TypeIr>) -> u16 {
         let f = self.cur();
         f.paths.push((segs, coerce));
         (f.paths.len() - 1) as u16

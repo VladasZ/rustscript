@@ -12,13 +12,14 @@ use parking_lot::Mutex;
 use tokio::runtime::Handle;
 
 use super::bytecode::{BuiltinId, CapSource, MacroKind, MethodName, Op};
-use super::numeric::{IntWidth, float_to_int, truncate};
+use super::numeric::{float_to_int, truncate};
 use super::pchunk::{PChunk, PMember};
 use super::pnative::PNative;
 use super::pops::{
     self, apply_bin, apply_bin_imm, apply_un, cmp_test, cmp_test_imm, int_of, try_bind,
 };
 use super::pvalue::{PClosure, PStructShape, PUpvalue, PValue};
+use super::typeir::{CastIr, TypeIr};
 use super::vm_support::trace_error;
 
 const MAX_CALL_DEPTH: usize = 100_000;
@@ -51,7 +52,17 @@ pub struct PInterp {
     pub fn_index: HashMap<String, u32>,
     pub methods: HashMap<(String, String), Arc<PChunk>>,
     pub globals: Vec<Mutex<PGlobalSlot>>,
+    /// User struct layouts precomputed at load, for coercion and typed json.
+    pub structs: super::pjson::PStructs,
     pub rt: Handle,
+}
+
+/// A binding of a generic parameter name to the lowered concrete type a
+/// caller passed by turbofish, the parallel twin of `TypeEnv` in vm.rs.
+pub(super) type PTypeEnv = Arc<[(Arc<str>, TypeIr)]>;
+
+fn empty_ptype_env() -> PTypeEnv {
+    Arc::from(Vec::new())
 }
 
 struct Frame {
@@ -64,6 +75,7 @@ struct Frame {
     /// handed back on return for `&mut` argument writebacks.
     abase: u16,
     argc: u16,
+    type_env: PTypeEnv,
 }
 
 impl PInterp {
@@ -98,6 +110,7 @@ impl PInterp {
         let mut local_cells: HashMap<usize, Arc<Mutex<PValue>>> = HashMap::new();
         let mut cur = entry.clone();
         let mut cur_clo: Option<Arc<PClosure>> = None;
+        let mut cur_tenv: PTypeEnv = empty_ptype_env();
         let mut base = 0usize;
         let mut ip = 0usize;
 
@@ -118,6 +131,7 @@ impl PInterp {
                                 .retain(|slot, _| *slot < callee_base || *slot >= callee_end);
                             cur = f.chunk;
                             cur_clo = f.closure;
+                            cur_tenv = f.type_env;
                             ip = f.ip;
                             // The callee's final parameter values go back into the
                             // caller's arg window, where a `&mut` argument
@@ -135,7 +149,10 @@ impl PInterp {
             }
 
             macro_rules! call {
-                ($chunk:expr, $clo:expr, $dst:expr, $abase:expr, $argc:expr) => {{
+                ($chunk:expr, $clo:expr, $dst:expr, $abase:expr, $argc:expr) => {
+                    call!($chunk, $clo, $dst, $abase, $argc, empty_ptype_env())
+                };
+                ($chunk:expr, $clo:expr, $dst:expr, $abase:expr, $argc:expr, $tenv:expr) => {{
                     let callee: Arc<PChunk> = $chunk;
                     if $argc != callee.num_params {
                         bail!(
@@ -167,6 +184,7 @@ impl PInterp {
                         dst: $dst,
                         abase: $abase as u16,
                         argc: $argc as u16,
+                        type_env: replace(&mut cur_tenv, $tenv),
                     });
                     base = nbase;
                     ip = 0;
@@ -271,12 +289,25 @@ impl PInterp {
                         func,
                         base: abase,
                         argc,
-                        ..
+                        targ,
                     } => {
                         let (dst, func, abase, argc) =
                             (*dst, *func as usize, *abase as usize, *argc as usize);
                         let callee = self.functions[func].clone();
-                        call!(callee, None, dst, abase, argc);
+                        // Bind the call's turbofish type args to the callee's
+                        // generic parameters, mirroring the fast VM.
+                        let tenv: PTypeEnv = if *targ != u32::MAX {
+                            let targs = &cur.call_type_args[*targ as usize];
+                            callee
+                                .generics
+                                .iter()
+                                .zip(targs.iter())
+                                .map(|(name, ty)| (name.clone(), ty.clone()))
+                                .collect()
+                        } else {
+                            empty_ptype_env()
+                        };
+                        call!(callee, None, dst, abase, argc, tenv);
                     }
                     Op::CallValue {
                         dst,
@@ -300,13 +331,28 @@ impl PInterp {
                         argc,
                     } => {
                         let (abase, argc) = (*abase as usize, *argc as usize);
-                        let segs = &cur.paths[*path as usize];
+                        let (segs, coerce) = &cur.paths[*path as usize];
                         let args = take_range(stack, base + abase, argc);
-                        let v = self.dispatch_call(segs, args)?;
+                        // Typed json parses straight into the target structs,
+                        // mirroring the fast VM's `serde_json::from_str` path.
+                        if let Some(ty) = coerce
+                            && segs.len() >= 2
+                            && segs[segs.len() - 2] == "serde_json"
+                            && segs[segs.len() - 1] == "from_str"
+                        {
+                            let v = self.typed_from_str(&args, ty, &cur_tenv)?;
+                            stack[base + *dst as usize] = v;
+                            ip += 1;
+                            continue;
+                        }
+                        let mut v = self.dispatch_call(segs, args)?;
+                        if let Some(ty) = coerce {
+                            v = self.coerce_result(v, ty);
+                        }
                         stack[base + *dst as usize] = v;
                     }
                     Op::PathValue { dst, path } => {
-                        let segs = &cur.paths[*path as usize];
+                        let (segs, _) = &cur.paths[*path as usize];
                         stack[base + *dst as usize] = self.eval_path_value(segs)?;
                     }
                     Op::Method {
@@ -609,8 +655,12 @@ impl PInterp {
                         )?;
                         stack[base + *dst as usize] = v;
                     }
-                    Op::Coerce { dst, src, .. } => {
-                        stack[base + *dst as usize] = stack[base + *src as usize].clone();
+                    Op::Coerce { dst, src, ty } => {
+                        let v = self.coerce_value(
+                            stack[base + *src as usize].clone(),
+                            &cur.coerces[*ty as usize],
+                        );
+                        stack[base + *dst as usize] = v;
                     }
                     Op::TestBind { val, pat, dst } => {
                         let info = &cur.pats[*pat as usize];
@@ -818,39 +868,40 @@ fn take_range(stack: &mut [PValue], s: usize, count: usize) -> Vec<PValue> {
     (0..count).map(|i| take(&mut stack[s + i])).collect()
 }
 
-/// Apply an `as` cast to a value, keyed by the target type name, with the
-/// same width semantics as `cast_value` in eval.rs.
-fn eval_cast(target: &str, v: PValue) -> Result<PValue> {
-    if target == "f64" {
-        return Ok(PValue::Float(match v {
-            PValue::Int(i) => i as f64,
-            PValue::IntW(..) => v.int_parts().unwrap().0 as f64,
-            PValue::Float(f) => f,
-            PValue::F32(f) => f64::from(f),
-            other => bail!("cannot cast {} to float", other.type_name()),
-        }));
-    }
-    if target == "f32" {
-        return Ok(PValue::F32(match v {
-            PValue::Int(i) => i as f32,
-            PValue::IntW(..) => v.int_parts().unwrap().0 as f32,
-            PValue::Float(f) => f as f32,
-            PValue::F32(f) => f,
-            other => bail!("cannot cast {} to float", other.type_name()),
-        }));
-    }
-    if target == "char" {
-        return Ok(match v {
-            PValue::Int(i) => PValue::Char(
-                char::from_u32(i as u32).ok_or_else(|| anyhow::anyhow!("invalid char code {i}"))?,
-            ),
-            PValue::Char(c) => PValue::Char(c),
-            other => bail!("cannot cast {} to char", other.type_name()),
-        });
-    }
+/// Apply an `as` cast to a value, with the same width semantics as
+/// `eval_cast` in eval.rs.
+fn eval_cast(target: &CastIr, v: PValue) -> Result<PValue> {
     let width = match target {
-        "u128" | "i128" => IntWidth::I64,
-        _ => IntWidth::parse(target).ok_or_else(|| anyhow!("unsupported cast target: {target}"))?,
+        CastIr::F64 => {
+            return Ok(PValue::Float(match v {
+                PValue::Int(i) => i as f64,
+                PValue::IntW(..) => v.int_parts().unwrap().0 as f64,
+                PValue::Float(f) => f,
+                PValue::F32(f) => f64::from(f),
+                other => bail!("cannot cast {} to float", other.type_name()),
+            }));
+        }
+        CastIr::F32 => {
+            return Ok(PValue::F32(match v {
+                PValue::Int(i) => i as f32,
+                PValue::IntW(..) => v.int_parts().unwrap().0 as f32,
+                PValue::Float(f) => f as f32,
+                PValue::F32(f) => f,
+                other => bail!("cannot cast {} to float", other.type_name()),
+            }));
+        }
+        CastIr::Char => {
+            return Ok(match v {
+                PValue::Int(i) => PValue::Char(
+                    char::from_u32(i as u32)
+                        .ok_or_else(|| anyhow::anyhow!("invalid char code {i}"))?,
+                ),
+                PValue::Char(c) => PValue::Char(c),
+                other => bail!("cannot cast {} to char", other.type_name()),
+            });
+        }
+        CastIr::Unsupported(name) => bail!("unsupported cast target: {name}"),
+        CastIr::Int(width) => *width,
     };
     let value = match v {
         PValue::Int(i) => truncate(i128::from(i), width),

@@ -14,6 +14,7 @@ use anyhow::{Result, anyhow, bail};
 
 use super::Interp;
 use super::bytecode::{BuiltinId, CapSource, Chunk, DISCARD, MacroKind, MethodName, Op};
+use super::typeir::TypeIr;
 use super::value::{ClosureData, StructShape, Upvalue, Value};
 use super::vm_support::{int_of, set_reg, take_range, trace_error};
 
@@ -21,10 +22,10 @@ use super::vm_support::{int_of, set_reg, take_range, trace_error};
 /// native stack. Depth, not registers, so deep-but-narrow recursion still works.
 const MAX_CALL_DEPTH: usize = 100_000;
 
-/// A binding of a generic parameter name to the concrete type a caller passed
-/// by turbofish, plus the module that type was named in, so the callee can
-/// resolve `from_str::<T>` to the real struct. Empty for a non-generic call.
-pub(super) type TypeEnv = Rc<[(Rc<str>, Rc<syn::Type>, u16)]>;
+/// A binding of a generic parameter name to the lowered concrete type a caller
+/// passed by turbofish, so the callee can resolve `from_str::<T>` to the real
+/// struct. Empty for a non-generic call.
+pub(super) type TypeEnv = Rc<[(Rc<str>, TypeIr)]>;
 
 fn empty_type_env() -> TypeEnv {
     Rc::from(Vec::new())
@@ -268,12 +269,11 @@ impl Interp {
                         // generic parameters, resolved in this (caller) module.
                         let tenv: TypeEnv = if *targ != u32::MAX {
                             let targs = &cur.call_type_args[*targ as usize];
-                            let module = cur.module;
                             callee
                                 .generics
                                 .iter()
                                 .zip(targs.iter())
-                                .map(|(name, ty)| (name.clone(), ty.clone(), module))
+                                .map(|(name, ty)| (name.clone(), ty.clone()))
                                 .collect()
                         } else {
                             empty_type_env()
@@ -316,12 +316,7 @@ impl Interp {
                                     && canon[canon.len() - 2] == "serde_json"
                                     && canon[canon.len() - 1] == "from_str"
                                 {
-                                    let v = self.typed_from_str(
-                                        &args,
-                                        ty,
-                                        cur.module as usize,
-                                        &cur_tenv,
-                                    )?;
+                                    let v = self.typed_from_str(&args, ty, &cur_tenv)?;
                                     set_reg(&mut stack[base + dst as usize], v);
                                     ip += 1;
                                     continue;
@@ -329,7 +324,7 @@ impl Interp {
                             }
                             let mut v = self.dispatch_call(segs, args)?;
                             if let Some(ty) = coerce {
-                                v = self.coerce_result(v, ty, cur.module as usize);
+                                v = self.coerce_result(v, ty);
                             }
                             set_reg(&mut stack[base + dst as usize], v);
                         }
@@ -829,8 +824,7 @@ impl Interp {
                     Op::Coerce { dst, src, ty } => {
                         let v = self.coerce_value(
                             stack[base + *src as usize].clone(),
-                            &cur.casts[*ty as usize],
-                            cur.module as usize,
+                            &cur.coerces[*ty as usize],
                         );
                         set_reg(&mut stack[base + *dst as usize], v);
                     }

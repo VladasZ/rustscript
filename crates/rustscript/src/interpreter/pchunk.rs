@@ -4,18 +4,17 @@
 //! single threaded path pays nothing for this.
 //!
 //! syn AST nodes are not `Send` (proc-macro2 spans carry a compiler handle), so
-//! nothing here may hold a `syn::Type` or `syn::Pat`. Patterns are lowered to a
-//! plain `PPat` IR, and the type-only side tables the parallel VM does not use
-//! (casts, coercions, turbofish args) are dropped in the conversion.
+//! nothing here may hold a `syn::Type` or `syn::Pat`. Patterns arrive as the
+//! plain `PPat` IR, and cast, coercion, and turbofish tables as the shared
+//! `CastIr` and `TypeIr`, all already free of syn.
 
 use std::sync::Arc;
-
-use syn::Type;
 
 use super::bytecode::{
     CapSource, Chunk, Const, EnumVariant, FmtSpec, Member, MethodName, Op, PPat, PatInfo, StructLit,
 };
 use super::pvalue::PStructShape;
+use super::typeir::{CastIr, TypeIr};
 
 /// A field access, the `Arc` twin of `bytecode::Member`.
 #[derive(Clone)]
@@ -58,13 +57,19 @@ pub struct PChunk {
     pub fmts: Vec<FmtSpec>,
     pub struct_lits: Vec<PStructLit>,
     pub enum_variants: Vec<PEnumVariant>,
-    /// `as` cast targets, reduced to the target type name, e.g. `f64`, `usize`.
-    pub casts: Vec<String>,
-    /// Path calls, just the segments; the parallel VM resolves types at runtime.
-    pub paths: Vec<Vec<String>>,
+    /// `as` cast targets, shared with the fast engine.
+    pub casts: Vec<CastIr>,
+    /// Annotated `let` coercion targets, referenced by `Coerce`.
+    pub coerces: Vec<TypeIr>,
+    /// Path calls, the segments plus an optional turbofish coercion type.
+    pub paths: Vec<(Vec<String>, Option<TypeIr>)>,
     pub names: Vec<MethodName>,
     pub children: Vec<Arc<PChunk>>,
     pub child_caps: Vec<Vec<CapSource>>,
+    /// Generic parameter names, bound to a caller's turbofish types at calls.
+    pub generics: Vec<Arc<str>>,
+    /// Turbofish type args recorded at `CallFn` sites, referenced by `targ`.
+    pub call_type_args: Vec<Arc<[TypeIr]>>,
 }
 
 /// Convert a fast `Chunk` tree into an `Arc` based `PChunk` tree. Runs once per
@@ -87,11 +92,14 @@ pub fn convert(chunk: &Chunk) -> Arc<PChunk> {
             .iter()
             .map(convert_enum_variant)
             .collect(),
-        casts: chunk.casts.iter().map(|t| cast_target(t)).collect(),
-        paths: chunk.paths.iter().map(|(segs, _)| segs.clone()).collect(),
+        casts: chunk.casts.clone(),
+        coerces: chunk.coerces.clone(),
+        paths: chunk.paths.clone(),
         names: chunk.names.clone(),
         children: chunk.children.iter().map(|c| convert(c)).collect(),
         child_caps: chunk.child_caps.clone(),
+        generics: chunk.generics.iter().map(|g| Arc::from(&**g)).collect(),
+        call_type_args: chunk.call_type_args.clone(),
     })
 }
 
@@ -132,18 +140,5 @@ fn convert_pat_info(info: &PatInfo) -> PPatInfo {
     PPatInfo {
         pat: info.pat.clone(),
         binds: info.binds.clone(),
-    }
-}
-
-/// Reduce a cast target type to its type name, the only part the VM needs.
-fn cast_target(ty: &Type) -> String {
-    match ty {
-        Type::Path(p) => p
-            .path
-            .segments
-            .last()
-            .map(|s| s.ident.to_string())
-            .unwrap_or_default(),
-        _ => String::new(),
     }
 }

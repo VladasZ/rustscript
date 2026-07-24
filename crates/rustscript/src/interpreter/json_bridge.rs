@@ -9,6 +9,7 @@ use anyhow::{Result, bail};
 use rustc_hash::FxHashMap;
 
 use super::Interp;
+use super::typeir::{TypeIr, lower_type};
 use super::value::{MapKey, RStr, StructShape, Value, map_with_capacity};
 
 // -- serde_json bridge -----------------------------------------------------
@@ -219,72 +220,33 @@ fn is_option(ty: &syn::Type) -> bool {
 impl Interp {
     /// Lower a turbofish type into a parse plan. `building` guards against
     /// recursive struct definitions, which fall back to dynamic parsing.
-    /// `module` is where the type expression was written.
     pub(super) fn json_plan(
         &self,
-        ty: &syn::Type,
+        ty: &TypeIr,
         building: &mut Vec<String>,
-        module: usize,
-        tenv: &[(Rc<str>, Rc<syn::Type>, u16)],
+        tenv: &[(Rc<str>, TypeIr)],
     ) -> JsonPlan {
-        let syn::Type::Path(p) = ty else {
-            return JsonPlan::Dynamic;
-        };
-        // A bare generic parameter the caller bound by turbofish resolves to
-        // its concrete type, planned in the module that type was named in.
-        if p.qself.is_none()
-            && p.path.segments.len() == 1
-            && let Some((_, bound, bmod)) = tenv
-                .iter()
-                .find(|(n, _, _)| p.path.segments[0].ident == **n)
-        {
-            return self.json_plan(bound, building, *bmod as usize, tenv);
-        }
-        let Some(seg) = p.path.segments.last() else {
-            return JsonPlan::Dynamic;
-        };
-        let name = seg.ident.to_string();
-        let generic = |i: usize| -> Option<&syn::Type> {
-            match &seg.arguments {
-                syn::PathArguments::AngleBracketed(a) => a
-                    .args
-                    .iter()
-                    .filter_map(|g| match g {
-                        syn::GenericArgument::Type(t) => Some(t),
-                        _ => None,
-                    })
-                    .nth(i),
-                _ => None,
+        match ty {
+            TypeIr::Dynamic => JsonPlan::Dynamic,
+            // A generic parameter the caller bound by turbofish resolves to
+            // its concrete type, already lowered in the caller's module.
+            TypeIr::Generic(name) => match tenv.iter().find(|(n, _)| **n == **name) {
+                Some((_, bound)) => self.json_plan(bound, building, tenv),
+                None => JsonPlan::Dynamic,
+            },
+            TypeIr::Vec(inner) => JsonPlan::Vec(Box::new(self.json_plan(inner, building, tenv))),
+            TypeIr::Option(inner) => self.json_plan(inner, building, tenv),
+            TypeIr::MapValue(inner) => {
+                JsonPlan::Map(Box::new(self.json_plan(inner, building, tenv)))
             }
-        };
-        match name.as_str() {
-            "Vec" | "VecDeque" => match generic(0) {
-                Some(inner) => {
-                    JsonPlan::Vec(Box::new(self.json_plan(inner, building, module, tenv)))
+            TypeIr::Struct(canon) => {
+                if building.iter().any(|b| b.as_str() == &**canon) {
+                    return JsonPlan::Dynamic;
                 }
-                None => JsonPlan::Dynamic,
-            },
-            "Option" | "Box" | "Rc" | "Arc" => match generic(0) {
-                Some(inner) => self.json_plan(inner, building, module, tenv),
-                None => JsonPlan::Dynamic,
-            },
-            "HashMap" | "BTreeMap" => match generic(1) {
-                Some(inner) => {
-                    JsonPlan::Map(Box::new(self.json_plan(inner, building, module, tenv)))
-                }
-                None => JsonPlan::Dynamic,
-            },
-            _ => {
-                let Some(canon) = self.resolver().resolve_struct_key(module, &p.path) else {
+                let Some(shape) = self.struct_shape(canon) else {
                     return JsonPlan::Dynamic;
                 };
-                if building.iter().any(|b| b.as_str() == &*canon) {
-                    return JsonPlan::Dynamic;
-                }
-                let Some(shape) = self.struct_shape(&canon) else {
-                    return JsonPlan::Dynamic;
-                };
-                let Some(def) = self.structs().get(&canon) else {
+                let Some(def) = self.structs().get(&**canon) else {
                     return JsonPlan::Dynamic;
                 };
                 let def_module = def.module;
@@ -301,7 +263,8 @@ impl Interp {
                         };
                         // Field types resolve where the struct is declared and
                         // are concrete, so no caller type env applies here.
-                        fields.push(self.json_plan(&f.ty, building, def_module, &[]));
+                        let fir = lower_type(&f.ty, self.resolver(), def_module, &[]);
+                        fields.push(self.json_plan(&fir, building, &[]));
                         optional.push(is_option(&f.ty));
                         let key = serde_rename(f).unwrap_or_else(|| ident.to_string());
                         key_map.insert(key, slot);
@@ -324,9 +287,8 @@ impl Interp {
     pub(super) fn typed_from_str(
         &self,
         args: &[Value],
-        ty: &syn::Type,
-        module: usize,
-        tenv: &[(Rc<str>, Rc<syn::Type>, u16)],
+        ty: &TypeIr,
+        tenv: &[(Rc<str>, TypeIr)],
     ) -> Result<Value> {
         let owned;
         let text: &str = match args.first() {
@@ -337,7 +299,7 @@ impl Interp {
             }
             None => bail!("from_str needs a string"),
         };
-        let plan = self.json_plan(ty, &mut Vec::new(), module, tenv);
+        let plan = self.json_plan(ty, &mut Vec::new(), tenv);
         Ok(match parse_json_planned(text, &plan) {
             Ok(v) => Value::ok(v),
             Err(e) => Value::err(Value::str(e.to_string())),

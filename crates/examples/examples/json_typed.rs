@@ -35,5 +35,10 @@ fn main() -> Result<()> {
 
     let list: Vec<Owner> = serde_json::from_str(r#"[{"name":"bob","admin":false}]"#)?;
     println!("list len {} first {}", list.len(), list[0].name);
+
+    let owners: Owners = serde_json::from_str(r#"[{"name":"carol","admin":true}]"#)?;
+    println!("alias first {} admin={}", owners[0].name, owners[0].admin);
     Ok(())
 }
+
+type Owners = Vec<Owner>;

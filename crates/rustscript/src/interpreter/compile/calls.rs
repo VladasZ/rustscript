@@ -39,19 +39,17 @@ impl Compiler<'_> {
         let syn::PathArguments::AngleBracketed(ab) = &seg.arguments else {
             return u32::MAX;
         };
-        let types: Vec<Rc<syn::Type>> = ab
-            .args
-            .iter()
-            .filter_map(|a| match a {
-                syn::GenericArgument::Type(t) => Some(Rc::new(t.clone())),
-                _ => None,
-            })
-            .collect();
+        let mut types = Vec::new();
+        for a in &ab.args {
+            if let syn::GenericArgument::Type(t) = a {
+                types.push(self.lower_ir(t));
+            }
+        }
         if types.is_empty() {
             return u32::MAX;
         }
         let table = &mut self.cur().call_type_args;
-        table.push(Rc::from(types.into_boxed_slice()));
+        table.push(Arc::from(types.into_boxed_slice()));
         (table.len() - 1) as u32
     }
 
@@ -83,7 +81,7 @@ impl Compiler<'_> {
             .segments
             .last()
             .and_then(first_generic_type)
-            .map(|t| Rc::new(t.clone()));
+            .map(|t| self.lower_ir(t));
         // A pending `let` annotation attaches to exactly this call, see
         // `Compiler::json_let`.
         let coerce = match coerce {

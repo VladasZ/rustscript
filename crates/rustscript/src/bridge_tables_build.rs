@@ -54,6 +54,19 @@ pub const BRIDGES: &[Bridge] = &[
     b("shared.rs", "color_core", Engine::Both, "Str"),
     b("shared.rs", "num_core", Engine::Both, "*"),
     b("shared.rs", "char_method", Engine::Both, "Char"),
+    b("shared.rs", "regex_core", Engine::Both, "Regex"),
+    b("shared.rs", "match_core", Engine::Both, "Match"),
+    b("shared.rs", "captures_core", Engine::Both, "Captures"),
+    b("shared.rs", "duration_core", Engine::Both, "Duration"),
+    b("shared.rs", "datetime_core", Engine::Both, "DateTime"),
+    b("shared.rs", "status_core", Engine::Both, "Status"),
+    b(
+        "shared.rs",
+        "header_value_core",
+        Engine::Both,
+        "HeaderValue",
+    ),
+    b("shared.rs", "exit_status_core", Engine::Both, "ExitStatus"),
     // -- fast engine ------------------------------------------------------
     b("methods.rs", "str_method_slow", Engine::Fast, "Str"),
     b("methods.rs", "vec_method", Engine::Fast, "Vec"),
@@ -66,7 +79,6 @@ pub const BRIDGES: &[Bridge] = &[
     b("methods.rs", "json_type_test", Engine::Fast, "*"),
     b("methods.rs", "num_method", Engine::Fast, "*"),
     b("std_bridge.rs", "path_method", Engine::Fast, "Path"),
-    b("std_bridge.rs", "duration_method", Engine::Fast, "Duration"),
     b("std_bridge.rs", "metadata_method", Engine::Fast, "Metadata"),
     b(
         "std_bridge.rs",
@@ -95,14 +107,9 @@ pub const BRIDGES: &[Bridge] = &[
         "Element",
     ),
     b("process.rs", "command_method", Engine::Fast, "Command"),
+    // The lazy find_iter and captures_iter arms; the rest comes from the
+    // shared regex cores.
     b("regex_bridge.rs", "regex_method", Engine::Fast, "Regex"),
-    b("regex_bridge.rs", "match_method", Engine::Fast, "Match"),
-    b(
-        "regex_bridge.rs",
-        "captures_method",
-        Engine::Fast,
-        "Captures",
-    ),
     b("iterator.rs", "iterator_method", Engine::Fast, "Iterator"),
     b(
         "iterator.rs",
@@ -119,13 +126,6 @@ pub const BRIDGES: &[Bridge] = &[
     b("http.rs", "request_method", Engine::Fast, "Request"),
     b("http.rs", "builder_method", Engine::Fast, "Builder"),
     b("http.rs", "response_method", Engine::Fast, "Response"),
-    b("http.rs", "status_method", Engine::Fast, "Status"),
-    b(
-        "crates_bridge.rs",
-        "datetime_method",
-        Engine::Fast,
-        "DateTime",
-    ),
     b("crates_bridge.rs", "base64_method", Engine::Fast, "Base64"),
     b("crates_bridge.rs", "rng_method", Engine::Fast, "Rng"),
     b("crates_bridge.rs", "sha256_method", Engine::Fast, "Sha256"),
@@ -143,12 +143,6 @@ pub const BRIDGES: &[Bridge] = &[
         "ServiceManager",
     ),
     b("wmi_bridge.rs", "wmi_method", Engine::Fast, "WmiConnection"),
-    b(
-        "process.rs",
-        "exitstatus_method",
-        Engine::Fast,
-        "ExitStatus",
-    ),
     b("std_bridge.rs", "std_stream_method", Engine::Fast, "Native"),
     b(
         "std_bridge.rs",
@@ -157,12 +151,6 @@ pub const BRIDGES: &[Bridge] = &[
         "OpenOptions",
     ),
     b("http.rs", "header_map_method", Engine::Fast, "HeaderMap"),
-    b(
-        "http.rs",
-        "header_value_method",
-        Engine::Fast,
-        "HeaderValue",
-    ),
     b("higher_order.rs", "vec_higher_order", Engine::Fast, "Vec"),
     b(
         "higher_order.rs",
@@ -188,41 +176,22 @@ pub const BRIDGES: &[Bridge] = &[
     b("pbridge.rs", "higher_order", Engine::Parallel, "Vec"),
     b("pbridge.rs", "map_method", Engine::Parallel, "Map"),
     b("pbridge.rs", "enum_method", Engine::Parallel, "Enum"),
-    b(
-        "pbridge.rs",
-        "duration_method",
-        Engine::Parallel,
-        "Duration",
-    ),
     b("pbridge.rs", "scalar_method", Engine::Parallel, "*"),
     b("pprocess.rs", "command_method", Engine::Parallel, "Command"),
     b("pprocess.rs", "child_method", Engine::Parallel, "Child"),
     b("pprocess.rs", "native_method", Engine::Parallel, "Native"),
+    // The eager find_iter and captures_iter arms; the rest comes from the
+    // shared regex cores.
     b("pregex.rs", "regex_method", Engine::Parallel, "Regex"),
-    b("pregex.rs", "match_method", Engine::Parallel, "Match"),
-    b("pregex.rs", "captures_method", Engine::Parallel, "Captures"),
     b("phttp.rs", "request_method", Engine::Parallel, "Request"),
     b("phttp.rs", "client_method", Engine::Parallel, "Client"),
     b("phttp.rs", "builder_method", Engine::Parallel, "Builder"),
     b("phttp.rs", "response_method", Engine::Parallel, "Response"),
-    b("phttp.rs", "status_method", Engine::Parallel, "Status"),
     b(
         "phttp.rs",
         "header_map_method",
         Engine::Parallel,
         "HeaderMap",
-    ),
-    b(
-        "phttp.rs",
-        "header_value_method",
-        Engine::Parallel,
-        "HeaderValue",
-    ),
-    b(
-        "pbridge.rs",
-        "exitstatus_method",
-        Engine::Parallel,
-        "ExitStatus",
     ),
     b("pbridge.rs", "output_method", Engine::Parallel, "Output"),
     b("pbridge.rs", "eval_method", Engine::Parallel, "*"),
