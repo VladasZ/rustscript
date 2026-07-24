@@ -11,6 +11,7 @@ use rustc_hash::{FxBuildHasher, FxHasher};
 
 use super::bytecode::Const;
 use super::native::Native;
+use super::numeric::IntWidth;
 
 /// Interpreter string. The buffer is immutable while the `Rc` is shared, so
 /// clones and `to_string` are refcount bumps. Mutation goes through
@@ -216,6 +217,13 @@ pub enum Value {
     /// A live host resource: an open file, a child process, a socket, a
     /// buffered reader. Shared by `Rc` so the same handle can be passed around.
     Native(Rc<RefCell<Native>>),
+    /// An integer that carries a real width other than i64. The i64 holds the
+    /// storage form described in `numeric`, so u64 and usize keep their full
+    /// range. Values of width i64 always use the plain `Int` variant.
+    IntW(i64, IntWidth),
+    /// A real f32. Kept at f32 precision so arithmetic rounds per operation
+    /// and printing uses f32's shortest round-trip form.
+    F32(f32),
 }
 
 #[derive(Clone)]
@@ -355,11 +363,53 @@ impl Value {
     pub fn from_const(c: &Const) -> Value {
         match c {
             Const::Float(f) => Value::Float(*f),
+            Const::F32(f) => Value::F32(*f),
             Const::Char(ch) => Value::Char(*ch),
             Const::Str(s) => Value::str(&**s),
             Const::Bytes(bytes) => {
                 Value::vec(bytes.iter().map(|&b| Value::Int(b as i64)).collect())
             }
+        }
+    }
+
+    /// The value and width of an integer, tagged or plain. None otherwise.
+    pub(super) fn int_parts(&self) -> Option<(i128, IntWidth)> {
+        match self {
+            Value::Int(i) => Some((i128::from(*i), IntWidth::I64)),
+            Value::IntW(v, w) => Some((w.decode(*v), *w)),
+            _ => None,
+        }
+    }
+
+    /// Build an integer of the given width from an in-range value.
+    pub(super) fn int_of_width(value: i128, width: IntWidth) -> Value {
+        match width {
+            IntWidth::I64 => Value::Int(value as i64),
+            other => Value::IntW(other.encode(value), other),
+        }
+    }
+
+    /// A tagged integer's value as an i64 when it fits, so consumers that
+    /// only understand i64, indexes and bridges, accept width-tagged values.
+    pub(super) fn untag_int(&self) -> Option<i64> {
+        match self {
+            Value::IntW(v, w) => i64::try_from(w.decode(*v)).ok(),
+            _ => None,
+        }
+    }
+
+    /// The i64 or f64 image of a width-tagged number, for the method and
+    /// bridge surface that predates real widths. A u64 value past i64::MAX
+    /// saturates, the clamp sentinels like `usize::MAX` always had here.
+    /// None when the value is not tagged.
+    pub(super) fn bridge_image(&self) -> Option<Value> {
+        match self {
+            Value::IntW(v, w) => {
+                let value = w.decode(*v);
+                Some(Value::Int(i64::try_from(value).unwrap_or(i64::MAX)))
+            }
+            Value::F32(f) => Some(Value::Float(f64::from(*f))),
+            _ => None,
         }
     }
 
@@ -455,8 +505,8 @@ impl Value {
         match self {
             Value::Unit => "()",
             Value::Bool(_) => "bool",
-            Value::Int(_) => "integer",
-            Value::Float(_) => "float",
+            Value::Int(_) | Value::IntW(..) => "integer",
+            Value::Float(_) | Value::F32(_) => "float",
             Value::Char(_) => "char",
             Value::Str(_) => "String",
             Value::Vec(_) => "Vec",
@@ -477,6 +527,9 @@ impl Value {
         Some(match self {
             Value::Bool(b) => MapKey::Bool(*b),
             Value::Int(i) => MapKey::Int(*i),
+            // The storage form is unique per value within one width, and one
+            // real map never mixes key widths, so it hashes and compares fine.
+            Value::IntW(v, _) => MapKey::Int(*v),
             Value::Char(c) => MapKey::Char(*c),
             Value::Str(s) => MapKey::Str(s.clone()),
             _ => return None,
@@ -489,6 +542,7 @@ impl Value {
         Some(match self {
             Value::Bool(b) => MapKey::Bool(b),
             Value::Int(i) => MapKey::Int(i),
+            Value::IntW(v, _) => MapKey::Int(v),
             Value::Char(c) => MapKey::Char(c),
             Value::Str(s) => MapKey::Str(s),
             _ => return None,
@@ -501,6 +555,7 @@ impl Value {
         Some(match self {
             Value::Bool(b) => KeyRef::Bool(*b),
             Value::Int(i) => KeyRef::Int(*i),
+            Value::IntW(v, _) => KeyRef::Int(*v),
             Value::Char(c) => KeyRef::Char(*c),
             Value::Str(s) => KeyRef::Interned(s),
             _ => return None,
@@ -519,7 +574,15 @@ impl Value {
             (Value::Unit, Value::Unit) => true,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::IntW(..), Value::Int(_) | Value::IntW(..))
+            | (Value::Int(_), Value::IntW(..)) => {
+                self.int_parts().map(|(a, _)| a) == other.int_parts().map(|(b, _)| b)
+            }
             (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::F32(a), Value::F32(b)) => a == b,
+            // A bare float literal next to an f32 value is f32 in the source
+            // types, so it rounds to f32 before the comparison.
+            (Value::F32(a), Value::Float(b)) | (Value::Float(b), Value::F32(a)) => *a == *b as f32,
             (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => *a as f64 == *b,
             (Value::Char(a), Value::Char(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => Rc::ptr_eq(a, b) || a == b,
@@ -566,7 +629,9 @@ impl Value {
             Value::Unit => "()".into(),
             Value::Bool(b) => b.to_string(),
             Value::Int(i) => i.to_string(),
+            Value::IntW(v, w) => w.decode(*v).to_string(),
             Value::Float(f) => format_float(*f),
+            Value::F32(f) => f.to_string(),
             Value::Char(c) => c.to_string(),
             Value::Str(s) => s.s.as_str().to_string(),
             other => other.debug(),
@@ -585,7 +650,9 @@ impl Value {
             Value::Unit => out.push_str("()"),
             Value::Bool(b) => write!(out, "{b}").unwrap(),
             Value::Int(i) => write!(out, "{i}").unwrap(),
+            Value::IntW(v, w) => write!(out, "{}", w.decode(*v)).unwrap(),
             Value::Float(f) => out.push_str(&format_float_debug(*f)),
+            Value::F32(f) => write!(out, "{f:?}").unwrap(),
             Value::Char(c) => write!(out, "{c:?}").unwrap(),
             Value::Str(s) => write!(out, "{:?}", &**s).unwrap(),
             Value::Range {
@@ -721,20 +788,4 @@ fn format_float(f: f64) -> String {
 
 fn format_float_debug(f: f64) -> String {
     format!("{f:?}")
-}
-
-/// Narrow an i64 the way an `as` cast to a smaller integer type does, then
-/// widen the result back to the i64 the interpreter stores every integer in.
-/// Types that are already 64 bits wide, or wider than i64 can hold, pass
-/// through unchanged, since the store cannot represent more than that.
-pub(super) fn truncate_int(source: i64, target: &str) -> i64 {
-    match target {
-        "u8" => source as u8 as i64,
-        "u16" => source as u16 as i64,
-        "u32" => source as u32 as i64,
-        "i8" => source as i8 as i64,
-        "i16" => source as i16 as i64,
-        "i32" => source as i32 as i64,
-        _ => source,
-    }
 }

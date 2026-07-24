@@ -10,13 +10,13 @@ use rustscript_differential::artifact::Artifact;
 use rustscript_differential::generator::generate;
 use rustscript_differential::model::Program;
 use rustscript_differential::mutator::mutate;
-use rustscript_differential::quarantine::Quarantine;
 use rustscript_differential::reduce::{ReductionProgress, reduce_with_progress};
 use rustscript_differential::runner::{Classification, RunResult, Runner};
 use rustscript_differential::workspace_root;
 
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
 const CAMPAIGN_BATCH_SIZE: usize = 8;
+const DEFAULT_TIMEOUT_MS: u64 = 5_000;
 
 fn main() -> ExitCode {
     match real_main() {
@@ -55,10 +55,11 @@ struct CampaignOptions {
 }
 
 fn parse_campaign_options(args: &[String]) -> Result<CampaignOptions> {
+    // A u32 seed leaves room for the per-case offsets added on top.
     let mut options = CampaignOptions {
-        seed: 0,
+        seed: rand::random::<u32>().into(),
         cases: 100,
-        timeout_ms: 2_000,
+        timeout_ms: DEFAULT_TIMEOUT_MS,
         stop_on_first: false,
     };
     let mut index = 0;
@@ -89,13 +90,9 @@ type BatchOutcome = (Vec<Program>, Vec<String>, Result<Vec<RunResult>>);
 fn run_campaign(args: &[String]) -> Result<ExitCode> {
     let options = parse_campaign_options(args)?;
     let root = workspace_root();
-    let quarantine = Quarantine::load(&root)?;
     let runner = Runner::build(&root, options.timeout_ms)?;
     let started = Instant::now();
     println!("running {} cases from seed {}", options.cases, options.seed);
-    if !quarantine.known.is_empty() {
-        println!("{} known divergence(s) quarantined", quarantine.known.len());
-    }
 
     let batch_count = options.cases.div_ceil(CAMPAIGN_BATCH_SIZE);
     let workers = thread::available_parallelism()
@@ -176,12 +173,6 @@ fn run_campaign(args: &[String]) -> Result<ExitCode> {
                             report.record_gap(&result);
                         }
                         classification => {
-                            if let Some(entry) = quarantine.matches(&result) {
-                                report
-                                    .record_known(bucket_key(classification, &result), &entry.note);
-                                report.checked += 1;
-                                continue;
-                            }
                             if options.stop_on_first {
                                 stop.store(true, Ordering::Relaxed);
                                 stop_and_reduce(
@@ -239,13 +230,6 @@ struct CampaignReport {
     matched: usize,
     gaps: BTreeMap<String, usize>,
     bugs: BTreeMap<String, BugGroup>,
-    known: BTreeMap<String, KnownGroup>,
-}
-
-#[derive(Default)]
-struct KnownGroup {
-    count: usize,
-    note: String,
 }
 
 #[derive(Default)]
@@ -258,12 +242,6 @@ struct BugGroup {
 impl CampaignReport {
     fn record_gap(&mut self, result: &RunResult) {
         *self.gaps.entry(result.signature()).or_default() += 1;
-    }
-
-    fn record_known(&mut self, key: String, note: &str) {
-        let group = self.known.entry(key).or_default();
-        group.count += 1;
-        group.note = note.to_string();
     }
 
     fn should_save(&self, key: &str) -> bool {
@@ -286,13 +264,11 @@ impl CampaignReport {
     fn print(&self, elapsed: Duration) {
         let findings: usize = self.bugs.values().map(|group| group.count).sum();
         let gaps: usize = self.gaps.values().sum();
-        let known: usize = self.known.values().map(|group| group.count).sum();
         println!(
-            "\nchecked {}: {} matched, {} findings, {} known, {} gaps, {:.1}s",
+            "\nchecked {}: {} matched, {} findings, {} gaps, {:.1}s",
             self.checked,
             self.matched,
             findings,
-            known,
             gaps,
             elapsed.as_secs_f64()
         );
@@ -311,12 +287,6 @@ impl CampaignReport {
                         println!("    saved {}", dir.display());
                     }
                 }
-            }
-        }
-        if !self.known.is_empty() {
-            println!("\nknown divergences (quarantined, fix and delete the entry):");
-            for (kind, group) in &self.known {
-                println!("  {kind}: {} case(s), {}", group.count, group.note);
             }
         }
         if !self.gaps.is_empty() {
@@ -377,7 +347,7 @@ fn mutate_artifact(args: &[String]) -> Result<()> {
 fn replay(args: &[String]) -> Result<()> {
     let path = required_path(args, "replay")?;
     let artifact = Artifact::load(&path)?;
-    let runner = Runner::build(&workspace_root(), 2_000)?;
+    let runner = Runner::build(&workspace_root(), DEFAULT_TIMEOUT_MS)?;
     let result = runner.run_source(&artifact.source)?;
     println!("{:#?}", result.classification);
     print_outputs(&result);
@@ -387,7 +357,7 @@ fn replay(args: &[String]) -> Result<()> {
 fn reduce_artifact(args: &[String]) -> Result<()> {
     let path = required_path(args, "reduce")?;
     let artifact = Artifact::load(&path)?;
-    let runner = Runner::build(&workspace_root(), 2_000)?;
+    let runner = Runner::build(&workspace_root(), DEFAULT_TIMEOUT_MS)?;
     let current = runner.run_source(&artifact.source)?;
     if !current.same_failure(&artifact.result) {
         anyhow::bail!(
@@ -454,7 +424,7 @@ fn promote(args: &[String]) -> Result<()> {
     validate_name(name)?;
     let artifact = Artifact::load(&path)?;
     let root = workspace_root();
-    let runner = Runner::build(&root, 2_000)?;
+    let runner = Runner::build(&root, DEFAULT_TIMEOUT_MS)?;
     let current = runner.run_source(&artifact.source)?;
     if current.classification != Classification::Match {
         anyhow::bail!(

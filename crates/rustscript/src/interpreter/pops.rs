@@ -8,6 +8,7 @@ use anyhow::{Result, anyhow, bail};
 
 use super::bytecode::{BinKind, UnKind};
 use super::bytecode::{PLit, PPat};
+use super::numeric::{int_arith, int_bit, int_neg, int_not, int_shift, unify};
 use super::pvalue::PValue;
 
 pub(super) fn apply_bin(op: BinKind, l: &PValue, r: &PValue) -> Result<PValue> {
@@ -26,11 +27,8 @@ pub(super) fn apply_bin(op: BinKind, l: &PValue, r: &PValue) -> Result<PValue> {
             partial_compare(l, r)?,
             Some(Ordering::Greater | Ordering::Equal)
         )),
-        BitAnd => int_bin(l, r, |a, b| a & b)?,
-        BitOr => int_bin(l, r, |a, b| a | b)?,
-        BitXor => int_bin(l, r, |a, b| a ^ b)?,
-        Shl => int_bin(l, r, |a, b| a << b)?,
-        Shr => int_bin(l, r, |a, b| a >> b)?,
+        BitAnd | BitOr | BitXor => bit_bin(op, l, r)?,
+        Shl | Shr => shift_bin(op, l, r)?,
     })
 }
 
@@ -101,26 +99,80 @@ fn arith(op: BinKind, l: &PValue, r: &PValue) -> Result<PValue> {
             };
             Ok(PValue::Int(result))
         }
-        (a, b) => {
-            let (x, y) = (to_float(a)?, to_float(b)?);
-            Ok(PValue::Float(match op {
-                Add => x + y,
-                Sub => x - y,
-                Mul => x * y,
-                Div => x / y,
-                Rem => x % y,
-                _ => unreachable!(),
-            }))
+        _ => {
+            if let (Some((a, wa)), Some((b, wb))) = (l.int_parts(), r.int_parts()) {
+                let width = unify(wa, wb)?;
+                return Ok(PValue::int_of_width(int_arith(op, width, a, b)?, width));
+            }
+            match float_pair(l, r)? {
+                FloatPair::F64(x, y) => Ok(PValue::Float(match op {
+                    Add => x + y,
+                    Sub => x - y,
+                    Mul => x * y,
+                    Div => x / y,
+                    Rem => x % y,
+                    _ => unreachable!(),
+                })),
+                FloatPair::F32(x, y) => Ok(PValue::F32(match op {
+                    Add => x + y,
+                    Sub => x - y,
+                    Mul => x * y,
+                    Div => x / y,
+                    Rem => x % y,
+                    _ => unreachable!(),
+                })),
+            }
         }
     }
 }
 
-fn int_bin(l: &PValue, r: &PValue, f: impl Fn(i64, i64) -> i64) -> Result<PValue> {
-    match (l, r) {
-        (PValue::Int(a), PValue::Int(b)) => Ok(PValue::Int(f(*a, *b))),
-        (PValue::Bool(a), PValue::Bool(b)) => Ok(PValue::Bool(f(*a as i64, *b as i64) != 0)),
-        _ => bail!("bitwise operators need integers"),
+/// Same rule as the fast engine: an untagged f64 next to an f32 is a bare
+/// literal that is f32 in the source types.
+enum FloatPair {
+    F64(f64, f64),
+    F32(f32, f32),
+}
+
+fn float_pair(l: &PValue, r: &PValue) -> Result<FloatPair> {
+    Ok(match (l, r) {
+        (PValue::F32(a), PValue::F32(b)) => FloatPair::F32(*a, *b),
+        (PValue::F32(a), PValue::Float(b)) => FloatPair::F32(*a, *b as f32),
+        (PValue::Float(a), PValue::F32(b)) => FloatPair::F32(*a as f32, *b),
+        (a, b) => FloatPair::F64(to_float(a)?, to_float(b)?),
+    })
+}
+
+fn bit_bin(op: BinKind, l: &PValue, r: &PValue) -> Result<PValue> {
+    if let (PValue::Int(a), PValue::Int(b)) = (l, r) {
+        let f = bit_i64(op);
+        return Ok(PValue::Int(f(*a, *b)));
     }
+    if let (PValue::Bool(a), PValue::Bool(b)) = (l, r) {
+        let f = bit_i64(op);
+        return Ok(PValue::Bool(f(*a as i64, *b as i64) != 0));
+    }
+    if let (Some((a, wa)), Some((b, wb))) = (l.int_parts(), r.int_parts()) {
+        let width = unify(wa, wb)?;
+        return Ok(PValue::int_of_width(int_bit(op, a, b)?, width));
+    }
+    bail!("bitwise operators need integers")
+}
+
+fn bit_i64(op: BinKind) -> fn(i64, i64) -> i64 {
+    match op {
+        BinKind::BitAnd => |a, b| a & b,
+        BinKind::BitOr => |a, b| a | b,
+        _ => |a, b| a ^ b,
+    }
+}
+
+/// `<<` and `>>`, the amount only supplies the count and the result keeps
+/// the shifted side's width.
+fn shift_bin(op: BinKind, l: &PValue, r: &PValue) -> Result<PValue> {
+    let (Some((a, wa)), Some((b, _))) = (l.int_parts(), r.int_parts()) else {
+        bail!("shift operators need integers");
+    };
+    Ok(PValue::int_of_width(int_shift(op, wa, a, b)?, wa))
 }
 
 pub(super) fn compare_values(l: &PValue, r: &PValue) -> Result<Ordering> {
@@ -132,7 +184,16 @@ pub(super) fn compare_values(l: &PValue, r: &PValue) -> Result<Ordering> {
 fn partial_compare(l: &PValue, r: &PValue) -> Result<Option<Ordering>> {
     Ok(match (l, r) {
         (PValue::Int(a), PValue::Int(b)) => Some(a.cmp(b)),
+        (PValue::IntW(..), PValue::Int(_) | PValue::IntW(..))
+        | (PValue::Int(_), PValue::IntW(..)) => {
+            let (a, _) = l.int_parts().unwrap();
+            let (b, _) = r.int_parts().unwrap();
+            Some(a.cmp(&b))
+        }
         (PValue::Float(a), PValue::Float(b)) => a.partial_cmp(b),
+        (PValue::F32(a), PValue::F32(b)) => a.partial_cmp(b),
+        (PValue::F32(a), PValue::Float(b)) => a.partial_cmp(&(*b as f32)),
+        (PValue::Float(a), PValue::F32(b)) => (*a as f32).partial_cmp(b),
         (PValue::Int(a), PValue::Float(b)) => (*a as f64).partial_cmp(b),
         (PValue::Float(a), PValue::Int(b)) => a.partial_cmp(&(*b as f64)),
         (PValue::Str(a), PValue::Str(b)) => Some(a.as_ref().cmp(b.as_ref())),
@@ -152,10 +213,16 @@ fn to_float(v: &PValue) -> Result<f64> {
 
 pub(super) fn apply_un(op: UnKind, v: &PValue) -> Result<PValue> {
     Ok(match (op, v) {
-        (UnKind::Neg, PValue::Int(i)) => PValue::Int(-*i),
+        (UnKind::Neg, PValue::Int(i)) => PValue::Int(
+            i.checked_neg()
+                .ok_or_else(|| anyhow!("attempt to negate with overflow"))?,
+        ),
+        (UnKind::Neg, PValue::IntW(v, w)) => PValue::int_of_width(int_neg(*w, w.decode(*v))?, *w),
         (UnKind::Neg, PValue::Float(f)) => PValue::Float(-*f),
+        (UnKind::Neg, PValue::F32(f)) => PValue::F32(-*f),
         (UnKind::Not, PValue::Bool(b)) => PValue::Bool(!*b),
         (UnKind::Not, PValue::Int(i)) => PValue::Int(!*i),
+        (UnKind::Not, PValue::IntW(v, w)) => PValue::int_of_width(int_not(*w, w.decode(*v)), *w),
         (op, v) => bail!("cannot apply {:?} to {}", op, v.type_name()),
     })
 }
@@ -261,7 +328,12 @@ pub(super) fn try_bind(pat: &PPat, val: &PValue, define: &mut dyn FnMut(&str, PV
 fn endpoint_cmp(literal: &PLit, value: &PValue) -> Option<Ordering> {
     match (literal, value) {
         (PLit::Int(a), PValue::Int(b)) => Some(a.cmp(b)),
+        (PLit::Int(a), PValue::IntW(..)) => {
+            let (b, _) = value.int_parts()?;
+            Some(i128::from(*a).cmp(&b))
+        }
         (PLit::Float(a), PValue::Float(b)) => a.partial_cmp(b),
+        (PLit::Float(a), PValue::F32(b)) => (*a as f32).partial_cmp(b),
         (PLit::Char(a), PValue::Char(b)) => Some(a.cmp(b)),
         _ => None,
     }
@@ -292,7 +364,9 @@ fn bind_seq(pats: &[PPat], vals: &[PValue], define: &mut dyn FnMut(&str, PValue)
 fn plit_eq(l: &PLit, val: &PValue) -> bool {
     match (l, val) {
         (PLit::Int(a), PValue::Int(b)) => a == b,
+        (PLit::Int(a), PValue::IntW(..)) => val.int_parts().map(|(v, _)| v) == Some(i128::from(*a)),
         (PLit::Float(a), PValue::Float(b)) => a == b,
+        (PLit::Float(a), PValue::F32(b)) => *a as f32 == *b,
         (PLit::Bool(a), PValue::Bool(b)) => a == b,
         (PLit::Str(a), PValue::Str(b)) => a.as_str() == b.as_ref(),
         (PLit::Char(a), PValue::Char(b)) => a == b,
@@ -304,6 +378,9 @@ fn plit_eq(l: &PLit, val: &PValue) -> bool {
 pub(super) fn int_of(v: &PValue) -> Result<i64> {
     match v {
         PValue::Int(i) => Ok(*i),
+        PValue::IntW(..) => v
+            .untag_int()
+            .ok_or_else(|| anyhow!("integer out of the i64 range")),
         _ => bail!("range bound must be an integer"),
     }
 }

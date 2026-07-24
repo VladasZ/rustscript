@@ -698,6 +698,7 @@ impl Interp {
         let mut floats = 0f64;
         let mut has_float = false;
         while let Some(value) = self.iterator_next(iterator)? {
+            let value = value.bridge_image().unwrap_or(value);
             match value {
                 Value::Int(value) => {
                     integers = integers
@@ -723,6 +724,7 @@ impl Interp {
         let mut floats = 1f64;
         let mut has_float = false;
         while let Some(value) = self.iterator_next(iterator)? {
+            let value = value.bridge_image().unwrap_or(value);
             match value {
                 Value::Int(value) => {
                     integers = integers

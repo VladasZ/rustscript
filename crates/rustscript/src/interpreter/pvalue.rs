@@ -11,6 +11,7 @@ use indexmap::IndexMap;
 use parking_lot::Mutex;
 
 use super::bytecode::Const;
+use super::numeric::IntWidth;
 use super::pnative::PNative;
 
 /// Shared, growable list. `Arc` for cross thread sharing, `Mutex` for the
@@ -127,7 +128,12 @@ pub enum PValue {
     Unit,
     Bool(bool),
     Int(i64),
+    /// An integer with a real width other than i64, in the storage form
+    /// described in `numeric`, mirroring the fast engine's `Value::IntW`.
+    IntW(i64, IntWidth),
     Float(f64),
+    /// A real f32, kept at f32 precision, mirroring `Value::F32`.
+    F32(f32),
     Char(char),
     Str(Arc<str>),
     Vec(PList),
@@ -229,6 +235,7 @@ impl PValue {
     pub fn from_const(c: &Const) -> PValue {
         match c {
             Const::Float(f) => PValue::Float(*f),
+            Const::F32(f) => PValue::F32(*f),
             Const::Char(ch) => PValue::Char(*ch),
             Const::Str(s) => PValue::str(&**s),
             Const::Bytes(bytes) => {
@@ -237,12 +244,52 @@ impl PValue {
         }
     }
 
+    /// The value and width of an integer, tagged or plain. None otherwise.
+    pub(super) fn int_parts(&self) -> Option<(i128, IntWidth)> {
+        match self {
+            PValue::Int(i) => Some((i128::from(*i), IntWidth::I64)),
+            PValue::IntW(v, w) => Some((w.decode(*v), *w)),
+            _ => None,
+        }
+    }
+
+    /// Build an integer of the given width from an in-range value.
+    pub(super) fn int_of_width(value: i128, width: IntWidth) -> PValue {
+        match width {
+            IntWidth::I64 => PValue::Int(value as i64),
+            other => PValue::IntW(other.encode(value), other),
+        }
+    }
+
+    /// A tagged integer's value as an i64 when it fits.
+    pub(super) fn untag_int(&self) -> Option<i64> {
+        match self {
+            PValue::IntW(v, w) => i64::try_from(w.decode(*v)).ok(),
+            _ => None,
+        }
+    }
+
+    /// The i64 or f64 image of a width-tagged number, for the method and
+    /// bridge surface that predates real widths. A u64 value past i64::MAX
+    /// saturates, the clamp sentinels like `usize::MAX` always had here.
+    /// None when the value is not tagged.
+    pub(super) fn bridge_image(&self) -> Option<PValue> {
+        match self {
+            PValue::IntW(v, w) => {
+                let value = w.decode(*v);
+                Some(PValue::Int(i64::try_from(value).unwrap_or(i64::MAX)))
+            }
+            PValue::F32(f) => Some(PValue::Float(f64::from(*f))),
+            _ => None,
+        }
+    }
+
     pub fn type_name(&self) -> &'static str {
         match self {
             PValue::Unit => "()",
             PValue::Bool(_) => "bool",
-            PValue::Int(_) => "integer",
-            PValue::Float(_) => "float",
+            PValue::Int(_) | PValue::IntW(..) => "integer",
+            PValue::Float(_) | PValue::F32(_) => "float",
             PValue::Char(_) => "char",
             PValue::Str(_) => "String",
             PValue::Vec(_) => "Vec",
@@ -263,6 +310,9 @@ impl PValue {
         Some(match self {
             PValue::Bool(b) => PKey::Bool(*b),
             PValue::Int(i) => PKey::Int(*i),
+            // Unique per value within one width, and one real map never
+            // mixes key widths.
+            PValue::IntW(v, _) => PKey::Int(*v),
             PValue::Char(c) => PKey::Char(*c),
             PValue::Str(s) => PKey::Str(s.clone()),
             _ => return None,
@@ -280,7 +330,17 @@ impl PValue {
             (PValue::Unit, PValue::Unit) => true,
             (PValue::Bool(a), PValue::Bool(b)) => a == b,
             (PValue::Int(a), PValue::Int(b)) => a == b,
+            (PValue::IntW(..), PValue::Int(_) | PValue::IntW(..))
+            | (PValue::Int(_), PValue::IntW(..)) => {
+                self.int_parts().map(|(a, _)| a) == other.int_parts().map(|(b, _)| b)
+            }
             (PValue::Float(a), PValue::Float(b)) => a == b,
+            (PValue::F32(a), PValue::F32(b)) => a == b,
+            // A bare float literal next to an f32 value is f32 in the source
+            // types, so it rounds to f32 before the comparison.
+            (PValue::F32(a), PValue::Float(b)) | (PValue::Float(b), PValue::F32(a)) => {
+                *a == *b as f32
+            }
             (PValue::Int(a), PValue::Float(b)) | (PValue::Float(b), PValue::Int(a)) => {
                 *a as f64 == *b
             }
@@ -329,7 +389,9 @@ impl PValue {
             PValue::Unit => "()".into(),
             PValue::Bool(b) => b.to_string(),
             PValue::Int(i) => i.to_string(),
+            PValue::IntW(v, w) => w.decode(*v).to_string(),
             PValue::Float(f) => format_float(*f),
+            PValue::F32(f) => f.to_string(),
             PValue::Char(c) => c.to_string(),
             PValue::Str(s) => s.to_string(),
             other => other.debug(),
@@ -348,7 +410,9 @@ impl PValue {
             PValue::Unit => out.push_str("()"),
             PValue::Bool(b) => write!(out, "{b}").unwrap(),
             PValue::Int(i) => write!(out, "{i}").unwrap(),
+            PValue::IntW(v, w) => write!(out, "{}", w.decode(*v)).unwrap(),
             PValue::Float(f) => out.push_str(&format_float_debug(*f)),
+            PValue::F32(f) => write!(out, "{f:?}").unwrap(),
             PValue::Char(c) => write!(out, "{c:?}").unwrap(),
             PValue::Str(s) => write!(out, "{:?}", &**s).unwrap(),
             PValue::Range {

@@ -13,9 +13,7 @@ use std::rc::Rc;
 use anyhow::{Result, anyhow, bail};
 
 use super::Interp;
-use super::bytecode::{
-    BinKind, BuiltinId, CapSource, Chunk, DISCARD, MacroKind, MethodName, Op, overflow_message,
-};
+use super::bytecode::{BuiltinId, CapSource, Chunk, DISCARD, MacroKind, MethodName, Op};
 use super::value::{ClosureData, StructShape, Upvalue, Value};
 use super::vm_support::{int_of, set_reg, take_range, trace_error};
 
@@ -163,6 +161,9 @@ impl Interp {
                         set_reg(&mut stack[base + *dst as usize], v);
                     }
                     Op::LoadInt { dst, v } => stack[base + *dst as usize] = Value::Int(*v),
+                    Op::LoadIntW { dst, v, w } => {
+                        stack[base + *dst as usize] = Value::IntW(*v, *w);
+                    }
                     Op::LoadBool { dst, v } => stack[base + *dst as usize] = Value::Bool(*v),
                     Op::LoadUnit { dst } => stack[base + *dst as usize] = Value::Unit,
                     Op::LoadGlobal { dst, idx } => {
@@ -543,6 +544,10 @@ impl Interp {
                                 Value::Int(i) => usize::try_from(*i)
                                     .ok()
                                     .and_then(|i| items.borrow().get(i).cloned()),
+                                key @ Value::IntW(..) => key
+                                    .untag_int()
+                                    .and_then(|i| usize::try_from(i).ok())
+                                    .and_then(|i| items.borrow().get(i).cloned()),
                                 other => bail!("cannot index a vector with {}", other.type_name()),
                             },
                             _ => {
@@ -597,6 +602,7 @@ impl Interp {
                     Op::MakeArrayRepeat { dst, val, count } => {
                         let n = match &stack[base + *count as usize] {
                             Value::Int(n) => *n as usize,
+                            v if v.untag_int().is_some() => v.untag_int().unwrap() as usize,
                             _ => bail!("array repeat length must be an integer"),
                         };
                         let v = stack[base + *val as usize].clone();
@@ -819,24 +825,6 @@ impl Interp {
                             &cur.casts[*ty as usize],
                         )?;
                         set_reg(&mut stack[base + *dst as usize], v);
-                    }
-                    Op::NarrowGuard { src, ty, op } => {
-                        if let Value::Int(i) = &stack[base + *src as usize] {
-                            let (min, max) = ty.bounds();
-                            if *i < min || *i > max {
-                                bail!("{}", overflow_message(*op));
-                            }
-                        }
-                    }
-                    Op::NarrowRemGuard { left, right, ty } => {
-                        if let (Value::Int(l), Value::Int(r)) = (
-                            &stack[base + *left as usize],
-                            &stack[base + *right as usize],
-                        ) && *l == ty.bounds().0
-                            && *r == -1
-                        {
-                            bail!("{}", overflow_message(BinKind::Rem));
-                        }
                     }
                     Op::Coerce { dst, src, ty } => {
                         let v = self.coerce_value(

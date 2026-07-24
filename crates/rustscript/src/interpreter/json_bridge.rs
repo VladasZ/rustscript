@@ -585,7 +585,17 @@ pub(super) fn value_to_json(v: &Value) -> Result<serde_json::Value> {
         Value::Unit => J::Null,
         Value::Bool(b) => J::Bool(*b),
         Value::Int(i) => J::Number(serde_json::Number::from(*i)),
+        Value::IntW(..) => {
+            let (value, _) = v.int_parts().unwrap();
+            match i64::try_from(value) {
+                Ok(small) => J::Number(serde_json::Number::from(small)),
+                Err(_) => J::Number(serde_json::Number::from(value as u64)),
+            }
+        }
         Value::Float(f) => serde_json::Number::from_f64(*f)
+            .map(J::Number)
+            .unwrap_or(J::Null),
+        Value::F32(f) => serde_json::Number::from_f64(f64::from(*f))
             .map(J::Number)
             .unwrap_or(J::Null),
         Value::Char(c) => J::String(c.to_string()),

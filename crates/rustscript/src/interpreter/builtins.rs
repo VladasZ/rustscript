@@ -233,6 +233,15 @@ impl Interp {
                 "std::thread is not supported beyond sleep, use #[tokio::main] with tokio::spawn"
             );
         }
+        // From here on the call reaches native bridges that compute in i64
+        // and f64, so width-tagged numbers pass their plain image.
+        let args: Vec<Value> = args
+            .into_iter()
+            .map(|arg| match arg.bridge_image() {
+                Some(image) => image,
+                None => arg,
+            })
+            .collect();
         // reqwest paths need the whole canonical path, since a blocking call
         // has three or four segments, so route them before the two-segment
         // native dispatch.
@@ -327,6 +336,29 @@ impl Interp {
             None
         };
         let recv = dereferenced.as_ref().unwrap_or(recv);
+        // A width-tagged number renders from its real width, and everything
+        // else on it falls back to the i64/f64 image the method surface
+        // computes in.
+        if matches!(recv, Value::IntW(..) | Value::F32(_)) {
+            match name.id {
+                BuiltinId::ToString => return Ok(Value::str(recv.display())),
+                BuiltinId::Clone => return Ok(recv.clone()),
+                _ => {}
+            }
+        }
+        let widened;
+        let recv = match recv.bridge_image() {
+            Some(image) => {
+                widened = image;
+                &widened
+            }
+            None => recv,
+        };
+        for arg in args.iter_mut() {
+            if let Some(image) = arg.bridge_image() {
+                *arg = image;
+            }
+        }
         if let Value::Range {
             start,
             end,
@@ -451,42 +483,57 @@ pub(super) fn path_call_closure(segs: Vec<String>, num_params: usize) -> Value {
     }))
 }
 
-// `usize::MAX`, `i32::MIN` and friends. The 64 bit and wider limits are
-// clamped to what an i64 value can hold, which is enough for sentinels and
-// bounds. Returns None for anything that is not an integer limit path.
+// `usize::MAX`, `i32::MIN`, `f32::NAN` and friends, at their real width.
+// Returns None for anything that is not a numeric limit path.
 pub(super) fn int_limit(ty: &str, name: &str) -> Option<Value> {
     // The float limits first, `f64::EPSILON` guards float comparisons.
-    if ty == "f64" || ty == "f32" {
-        let v = match (ty, name) {
-            ("f64", "EPSILON") => f64::EPSILON,
-            ("f32", "EPSILON") => f64::from(f32::EPSILON),
-            ("f64", "MAX") => f64::MAX,
-            ("f32", "MAX") => f64::from(f32::MAX),
-            ("f64", "MIN") => f64::MIN,
-            ("f32", "MIN") => f64::from(f32::MIN),
-            ("f64", "MIN_POSITIVE") => f64::MIN_POSITIVE,
-            ("f32", "MIN_POSITIVE") => f64::from(f32::MIN_POSITIVE),
-            (_, "INFINITY") => f64::INFINITY,
-            (_, "NEG_INFINITY") => f64::NEG_INFINITY,
-            (_, "NAN") => f64::NAN,
+    if ty == "f64" {
+        let v = match name {
+            "EPSILON" => f64::EPSILON,
+            "MAX" => f64::MAX,
+            "MIN" => f64::MIN,
+            "MIN_POSITIVE" => f64::MIN_POSITIVE,
+            "INFINITY" => f64::INFINITY,
+            "NEG_INFINITY" => f64::NEG_INFINITY,
+            "NAN" => f64::NAN,
             _ => return None,
         };
         return Some(Value::Float(v));
     }
-    let (min, max): (i64, i64) = match ty {
-        "i8" => (i8::MIN as i64, i8::MAX as i64),
-        "i16" => (i16::MIN as i64, i16::MAX as i64),
-        "i32" => (i32::MIN as i64, i32::MAX as i64),
-        "i64" | "i128" | "isize" => (i64::MIN, i64::MAX),
-        "u8" => (0, u8::MAX as i64),
-        "u16" => (0, u16::MAX as i64),
-        "u32" => (0, u32::MAX as i64),
-        "u64" | "u128" | "usize" => (0, i64::MAX),
-        _ => return None,
+    if ty == "f32" {
+        let v = match name {
+            "EPSILON" => f32::EPSILON,
+            "MAX" => f32::MAX,
+            "MIN" => f32::MIN,
+            "MIN_POSITIVE" => f32::MIN_POSITIVE,
+            "INFINITY" => f32::INFINITY,
+            "NEG_INFINITY" => f32::NEG_INFINITY,
+            "NAN" => f32::NAN,
+            _ => return None,
+        };
+        return Some(Value::F32(v));
+    }
+    // u128 and i128 carry no runtime width and keep their old i64 clamp.
+    let width = match ty {
+        "i128" => Some((i64::MIN as i128, i64::MAX as i128)),
+        "u128" => Some((0, i64::MAX as i128)),
+        _ => None,
+    };
+    let (min, max) = match width {
+        Some(clamped) => clamped,
+        None => {
+            let w = super::numeric::IntWidth::parse(ty)?;
+            let value = match name {
+                "MAX" => w.max(),
+                "MIN" => w.min(),
+                _ => return None,
+            };
+            return Some(Value::int_of_width(value, w));
+        }
     };
     match name {
-        "MAX" => Some(Value::Int(max)),
-        "MIN" => Some(Value::Int(min)),
+        "MAX" => Some(Value::Int(max as i64)),
+        "MIN" => Some(Value::Int(min as i64)),
         _ => None,
     }
 }

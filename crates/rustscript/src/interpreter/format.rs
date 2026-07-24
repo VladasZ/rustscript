@@ -79,7 +79,12 @@ fn resolve_arg(
 fn format_value(value: &Value, spec: &str) -> Result<String> {
     let number = match value {
         Value::Float(f) => Some(SpecNumber::Float(*f)),
+        Value::F32(f) => Some(SpecNumber::F32(*f)),
         Value::Int(i) => Some(SpecNumber::Int(*i)),
+        Value::IntW(v, w) => Some(SpecNumber::Sized {
+            value: w.decode(*v),
+            bits: w.bits(),
+        }),
         _ => None,
     };
     Ok(apply_spec(spec, &value.display(), &value.debug(), number))
@@ -91,7 +96,21 @@ fn format_value(value: &Value, spec: &str) -> Result<String> {
 #[derive(Clone, Copy)]
 pub(super) enum SpecNumber {
     Int(i64),
+    /// A width-tagged integer. Radix forms print the two's complement image
+    /// at that width, `{:x}` of `-1i8` is `ff`, not 16 f's.
+    Sized {
+        value: i128,
+        bits: u32,
+    },
     Float(f64),
+    F32(f32),
+}
+
+impl SpecNumber {
+    /// The bits radix forms print, masked to the value's own width.
+    fn radix_bits(value: i128, bits: u32) -> u64 {
+        (value as u64) & (u64::MAX >> (64 - bits))
+    }
 }
 
 /// One parsed `{:...}` spec: `[[fill]align][+][#][0][width][.precision][type]`.
@@ -188,13 +207,17 @@ pub(super) fn apply_spec(
 
     // NaN ignores the sign flag entirely, `{:+}` of NaN is still `NaN`,
     // while infinities do take it.
-    let is_nan = matches!(number, Some(SpecNumber::Float(f)) if f.is_nan());
+    let is_nan = match number {
+        Some(SpecNumber::Float(f)) => f.is_nan(),
+        Some(SpecNumber::F32(f)) => f.is_nan(),
+        _ => false,
+    };
     if parsed.plus && number.is_some() && !is_nan && !base.starts_with('-') {
         base.insert(0, '+');
     }
     if parsed.alternate
         && let Some(ty @ ('x' | 'X' | 'o' | 'b')) = parsed.ty
-        && matches!(number, Some(SpecNumber::Int(_)))
+        && matches!(number, Some(SpecNumber::Int(_) | SpecNumber::Sized { .. }))
     {
         let prefix = match ty {
             'x' | 'X' => "0x",
@@ -259,11 +282,31 @@ fn render_base(
         (Some('X'), Some(SpecNumber::Int(i))) => format!("{i:X}"),
         (Some('o'), Some(SpecNumber::Int(i))) => format!("{i:o}"),
         (Some('b'), Some(SpecNumber::Int(i))) => format!("{i:b}"),
+        (Some('x'), Some(SpecNumber::Sized { value, bits })) => {
+            format!("{:x}", SpecNumber::radix_bits(value, bits))
+        }
+        (Some('X'), Some(SpecNumber::Sized { value, bits })) => {
+            format!("{:X}", SpecNumber::radix_bits(value, bits))
+        }
+        (Some('o'), Some(SpecNumber::Sized { value, bits })) => {
+            format!("{:o}", SpecNumber::radix_bits(value, bits))
+        }
+        (Some('b'), Some(SpecNumber::Sized { value, bits })) => {
+            format!("{:b}", SpecNumber::radix_bits(value, bits))
+        }
         (Some('e'), Some(SpecNumber::Int(i))) => match parsed.precision {
             Some(precision) => format!("{i:.precision$e}"),
             None => format!("{i:e}"),
         },
+        (Some('e'), Some(SpecNumber::Sized { value, .. })) => match parsed.precision {
+            Some(precision) => format!("{value:.precision$e}"),
+            None => format!("{value:e}"),
+        },
         (Some('e'), Some(SpecNumber::Float(f))) => match parsed.precision {
+            Some(precision) => format!("{f:.precision$e}"),
+            None => format!("{f:e}"),
+        },
+        (Some('e'), Some(SpecNumber::F32(f))) => match parsed.precision {
             Some(precision) => format!("{f:.precision$e}"),
             None => format!("{f:e}"),
         },
@@ -271,7 +314,15 @@ fn render_base(
             Some(precision) => format!("{i:.precision$E}"),
             None => format!("{i:E}"),
         },
+        (Some('E'), Some(SpecNumber::Sized { value, .. })) => match parsed.precision {
+            Some(precision) => format!("{value:.precision$E}"),
+            None => format!("{value:E}"),
+        },
         (Some('E'), Some(SpecNumber::Float(f))) => match parsed.precision {
+            Some(precision) => format!("{f:.precision$E}"),
+            None => format!("{f:E}"),
+        },
+        (Some('E'), Some(SpecNumber::F32(f))) => match parsed.precision {
             Some(precision) => format!("{f:.precision$E}"),
             None => format!("{f:E}"),
         },
@@ -279,8 +330,12 @@ fn render_base(
             Some(precision) => format!("{f:.precision$}"),
             None => display.to_string(),
         },
+        (_, Some(SpecNumber::F32(f))) => match parsed.precision {
+            Some(precision) => format!("{f:.precision$}"),
+            None => display.to_string(),
+        },
         // Integer Display ignores precision.
-        (_, Some(SpecNumber::Int(_))) => display.to_string(),
+        (_, Some(SpecNumber::Int(_) | SpecNumber::Sized { .. })) => display.to_string(),
         // String precision truncates to that many characters.
         (_, None) => match parsed.precision {
             Some(precision) => display.chars().take(precision).collect(),
@@ -360,6 +415,9 @@ fn width_arg(token: &str, positional: &[Value], named: &[(String, Value)]) -> Re
     };
     match value {
         Value::Int(i) => Ok(i),
+        Value::IntW(..) => value
+            .untag_int()
+            .ok_or_else(|| anyhow!("format width out of range")),
         other => Err(anyhow!(
             "format width must be an integer, got {}",
             other.type_name()

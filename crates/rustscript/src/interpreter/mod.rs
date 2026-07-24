@@ -13,6 +13,7 @@ mod json_bridge;
 mod jwt_bridge;
 mod methods;
 mod native;
+mod numeric;
 mod ops;
 mod pbridge;
 mod pchunk;

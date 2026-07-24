@@ -87,13 +87,13 @@ Failures behave like compiled Rust: a runtime abort prints a panic header
 with the failing file and line plus a script backtrace and exits 101, and an
 `Err` out of `main` prints `Error: ...` and exits 1.
 
-Runtime numerics match a default `cargo run`, which is debug Rust. Integer
-overflow on `+`, `-`, `*`, `/`, and `%` panics instead of wrapping, and a
-narrowing `as` cast truncates to the target type. This currently holds for
-i64 and f64. Narrower widths are not tracked yet, so u8 through u32
-arithmetic runs in i64, f32 runs as f64, and integer literals above i64::MAX
-are rejected. These open gaps are listed in the differential quarantine
-file, see Development below.
+Runtime numerics match a default `cargo run`, which is debug Rust. Values
+carry their real width at runtime, u8 through u64, usize, i8 through i64,
+f32, and f64, and u64 and usize keep their full range past i64::MAX.
+Integer overflow on arithmetic, shifts, and negation panics exactly where
+compiled Rust panics, a narrowing `as` cast truncates, a float to integer
+cast saturates with NaN going to zero, and f32 computes and prints at f32
+precision.
 
 ## Supported Rust
 
@@ -172,8 +172,7 @@ an interpreter bridge. `rust check` adds that coverage pass.
   supported.
 - `std::thread` is not supported; use Tokio tasks for parallel work.
 - `static mut` is rejected. Plain statics behave like constants.
-- Integer widths below 64 bits and `f32` carry no runtime meaning yet, values
-  compute in i64 and f64.
+- `u128` and `i128` carry no runtime width, their values compute in i64.
 - Lifetimes and generics are accepted but carry no runtime meaning.
 - Serde container attributes such as `rename_all` and `default` are not yet
   implemented by the reflection bridge.
@@ -237,22 +236,18 @@ stay runtime events. Some seeds splice same-typed expression subtrees from
 other programs through replayable structured mutation.
 
 The generator covers what the language supports, never only what the
-interpreter handles. Known divergences live in
-`crates/differential/quarantine.toml`, keyed by classification and a
-signature pattern where `*` matches any substring. The campaign prints them
-with their notes but stays green, and a finding outside the list still fails
-the run. Each entry is an open bug, fix the interpreter and delete the
-entry.
+interpreter handles. Every divergence is a finding: the campaign prints
+them after the run, grouped by bug with their seeds and saved artifacts,
+and exits nonzero when there are any.
 
 ```sh
 # Print one generated program.
 cargo run -p rustscript-differential -- generate --seed 42
 
 # Compare 10,000 programs and report every divergence, grouped by bug.
-cargo run --release -p rustscript-differential -- run \
-  --seed 0 \
-  --cases 10000 \
-  --timeout-ms 5000
+# The seed is random by default and printed at the start, pass --seed to
+# replay a range.
+cargo run --release -p rustscript-differential -- run --cases 10000
 ```
 
 The campaign runs batches on all cores and exits nonzero when it finds a real

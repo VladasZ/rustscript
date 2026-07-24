@@ -11,14 +11,14 @@ use anyhow::{Result, anyhow, bail};
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
 
-use super::bytecode::{BinKind, BuiltinId, CapSource, MacroKind, MethodName, Op, overflow_message};
+use super::bytecode::{BuiltinId, CapSource, MacroKind, MethodName, Op};
+use super::numeric::{IntWidth, float_to_int, truncate};
 use super::pchunk::{PChunk, PMember};
 use super::pnative::PNative;
 use super::pops::{
     self, apply_bin, apply_bin_imm, apply_un, cmp_test, cmp_test_imm, int_of, try_bind,
 };
 use super::pvalue::{PClosure, PStructShape, PUpvalue, PValue};
-use super::value::truncate_int;
 use super::vm_support::trace_error;
 
 const MAX_CALL_DEPTH: usize = 100_000;
@@ -183,6 +183,9 @@ impl PInterp {
                         stack[base + *dst as usize] = PValue::from_const(&cur.consts[*k as usize]);
                     }
                     Op::LoadInt { dst, v } => stack[base + *dst as usize] = PValue::Int(*v),
+                    Op::LoadIntW { dst, v, w } => {
+                        stack[base + *dst as usize] = PValue::IntW(*v, *w);
+                    }
                     Op::LoadBool { dst, v } => stack[base + *dst as usize] = PValue::Bool(*v),
                     Op::LoadUnit { dst } => stack[base + *dst as usize] = PValue::Unit,
                     Op::LoadGlobal { dst, idx } => {
@@ -606,24 +609,6 @@ impl PInterp {
                         )?;
                         stack[base + *dst as usize] = v;
                     }
-                    Op::NarrowGuard { src, ty, op } => {
-                        if let PValue::Int(i) = &stack[base + *src as usize] {
-                            let (min, max) = ty.bounds();
-                            if *i < min || *i > max {
-                                bail!("{}", overflow_message(*op));
-                            }
-                        }
-                    }
-                    Op::NarrowRemGuard { left, right, ty } => {
-                        if let (PValue::Int(l), PValue::Int(r)) = (
-                            &stack[base + *left as usize],
-                            &stack[base + *right as usize],
-                        ) && *l == ty.bounds().0
-                            && *r == -1
-                        {
-                            bail!("{}", overflow_message(BinKind::Rem));
-                        }
-                    }
                     Op::Coerce { dst, src, .. } => {
                         stack[base + *dst as usize] = stack[base + *src as usize].clone();
                     }
@@ -833,34 +818,50 @@ fn take_range(stack: &mut [PValue], s: usize, count: usize) -> Vec<PValue> {
     (0..count).map(|i| take(&mut stack[s + i])).collect()
 }
 
-/// Apply an `as` cast to a value, keyed by the target type name.
+/// Apply an `as` cast to a value, keyed by the target type name, with the
+/// same width semantics as `cast_value` in eval.rs.
 fn eval_cast(target: &str, v: PValue) -> Result<PValue> {
-    Ok(match target {
-        "f64" | "f32" => PValue::Float(match v {
+    if target == "f64" {
+        return Ok(PValue::Float(match v {
             PValue::Int(i) => i as f64,
+            PValue::IntW(..) => v.int_parts().unwrap().0 as f64,
             PValue::Float(f) => f,
+            PValue::F32(f) => f64::from(f),
             other => bail!("cannot cast {} to float", other.type_name()),
-        }),
-        "usize" | "u8" | "u16" | "u32" | "u64" | "u128" | "isize" | "i8" | "i16" | "i32"
-        | "i64" | "i128" => {
-            let source = match v {
-                PValue::Int(i) => i,
-                PValue::Float(f) => f as i64,
-                PValue::Char(c) => c as i64,
-                PValue::Bool(b) => b as i64,
-                other => bail!("cannot cast {} to integer", other.type_name()),
-            };
-            PValue::Int(truncate_int(source, target))
-        }
-        "char" => match v {
+        }));
+    }
+    if target == "f32" {
+        return Ok(PValue::F32(match v {
+            PValue::Int(i) => i as f32,
+            PValue::IntW(..) => v.int_parts().unwrap().0 as f32,
+            PValue::Float(f) => f as f32,
+            PValue::F32(f) => f,
+            other => bail!("cannot cast {} to float", other.type_name()),
+        }));
+    }
+    if target == "char" {
+        return Ok(match v {
             PValue::Int(i) => PValue::Char(
                 char::from_u32(i as u32).ok_or_else(|| anyhow::anyhow!("invalid char code {i}"))?,
             ),
             PValue::Char(c) => PValue::Char(c),
             other => bail!("cannot cast {} to char", other.type_name()),
-        },
-        other => bail!("unsupported cast target: {other}"),
-    })
+        });
+    }
+    let width = match target {
+        "u128" | "i128" => IntWidth::I64,
+        _ => IntWidth::parse(target).ok_or_else(|| anyhow!("unsupported cast target: {target}"))?,
+    };
+    let value = match v {
+        PValue::Int(i) => truncate(i128::from(i), width),
+        PValue::IntW(..) => truncate(v.int_parts().unwrap().0, width),
+        PValue::Float(f) => float_to_int(f, width),
+        PValue::F32(f) => float_to_int(f64::from(f), width),
+        PValue::Char(c) => truncate(i128::from(c as u32), width),
+        PValue::Bool(b) => i128::from(b),
+        other => bail!("cannot cast {} to integer", other.type_name()),
+    };
+    Ok(PValue::int_of_width(value, width))
 }
 
 /// A field access on a struct or tuple, the parallel twin of `get_field`.

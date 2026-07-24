@@ -7,8 +7,9 @@ use std::rc::Rc;
 use anyhow::{Result, anyhow, bail};
 
 use super::Interp;
+use super::numeric::{IntWidth, float_to_int, truncate};
 use super::resolver::Res;
-use super::value::{KeyRef, Map, StructShape, Value, truncate_int};
+use super::value::{KeyRef, Map, StructShape, Value};
 
 /// Field layout of a user struct, built once per struct and reused for every
 /// coerced instance so field names are shared instead of re-allocated.
@@ -241,38 +242,62 @@ impl Interp {
         }
     }
 
+    /// An `as` cast to a named primitive type, with real Rust semantics per
+    /// width: integer casts truncate, float to integer casts saturate, and
+    /// f32 becomes a real f32 value.
     pub(super) fn eval_cast(&self, v: Value, ty: &syn::Type) -> Result<Value> {
         let target = match ty {
             syn::Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
             _ => None,
         };
         let target = target.unwrap_or_default();
-        Ok(match target.as_str() {
-            "f64" | "f32" => Value::Float(match v {
+        let target = target.as_str();
+        if target == "f64" {
+            return Ok(Value::Float(match v {
                 Value::Int(i) => i as f64,
+                Value::IntW(..) => v.int_parts().unwrap().0 as f64,
                 Value::Float(f) => f,
+                Value::F32(f) => f64::from(f),
                 other => bail!("cannot cast {} to float", other.type_name()),
-            }),
-            "usize" | "u8" | "u16" | "u32" | "u64" | "u128" | "isize" | "i8" | "i16" | "i32"
-            | "i64" | "i128" => {
-                let source = match v {
-                    Value::Int(i) => i,
-                    Value::Float(f) => f as i64,
-                    Value::Char(c) => c as i64,
-                    Value::Bool(b) => b as i64,
-                    other => bail!("cannot cast {} to integer", other.type_name()),
-                };
-                Value::Int(truncate_int(source, target.as_str()))
-            }
-            "char" => match v {
+            }));
+        }
+        if target == "f32" {
+            return Ok(Value::F32(match v {
+                Value::Int(i) => i as f32,
+                Value::IntW(..) => v.int_parts().unwrap().0 as f32,
+                Value::Float(f) => f as f32,
+                Value::F32(f) => f,
+                other => bail!("cannot cast {} to float", other.type_name()),
+            }));
+        }
+        if target == "char" {
+            return Ok(match v {
                 Value::Int(i) => Value::Char(
                     char::from_u32(i as u32).ok_or_else(|| anyhow!("invalid char code {i}"))?,
                 ),
                 Value::Char(c) => Value::Char(c),
                 other => bail!("cannot cast {} to char", other.type_name()),
-            },
-            other => bail!("unsupported cast target: {other}"),
-        })
+            });
+        }
+        // u128 and i128 carry no runtime width yet and keep the old
+        // i64-passthrough.
+        let width = match target {
+            "u128" | "i128" => IntWidth::I64,
+            _ => IntWidth::parse(target)
+                .ok_or_else(|| anyhow!("unsupported cast target: {target}"))?,
+        };
+        let value = match v {
+            Value::Int(i) => truncate(i128::from(i), width),
+            Value::IntW(..) => truncate(v.int_parts().unwrap().0, width),
+            Value::Float(f) => float_to_int(f, width),
+            // The f64 image of an f32 is the same real number, so saturating
+            // through it is exact.
+            Value::F32(f) => float_to_int(f64::from(f), width),
+            Value::Char(c) => truncate(i128::from(c as u32), width),
+            Value::Bool(b) => i128::from(b),
+            other => bail!("cannot cast {} to integer", other.type_name()),
+        };
+        Ok(Value::int_of_width(value, width))
     }
 
     // -- indexing and fields ----------------------------------------------
@@ -401,6 +426,10 @@ fn as_index(key: &Value) -> Result<usize> {
     match key {
         Value::Int(i) if *i >= 0 => Ok(*i as usize),
         Value::Int(i) => bail!("negative index {i}"),
+        Value::IntW(..) => {
+            let (v, _) = key.int_parts().unwrap();
+            usize::try_from(v).map_err(|_| anyhow!("index {v} out of range"))
+        }
         other => bail!("index must be an integer, got {}", other.type_name()),
     }
 }
