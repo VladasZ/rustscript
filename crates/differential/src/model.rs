@@ -467,11 +467,11 @@ impl Program {
         {
             source.push_str(apply_helper());
         }
-        if self
-            .structural_features()
-            .iter()
-            .any(|feature| feature.starts_with("raw-") || feature.starts_with("narrow-"))
-        {
+        if self.structural_features().iter().any(|feature| {
+            feature.starts_with("raw-")
+                || *feature == "numeric-opaque"
+                || *feature == "numeric-shift-oversized"
+        }) {
             source.push_str(crate::typed::opaque_helper());
         }
         for structural_case in &self.structural_cases {

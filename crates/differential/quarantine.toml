@@ -1,0 +1,28 @@
+# Known interpreter divergences the differential campaign reports but does
+# not fail on. Every entry is an open bug. Fix the interpreter, rerun the
+# campaign, delete the entry. A finding that matches no entry still fails
+# the run. Signatures are digit-normalized and `*` matches any substring.
+
+[[known]]
+classification = "InterpreterCrash"
+signature = "rust error: number too large to fit in target type"
+date = "2026-07-24"
+note = "u64 and usize literals above i64::MAX are rejected at script load"
+
+[[known]]
+classification = "InterpreterMissingPanic"
+signature = "attempt to * with overflow"
+date = "2026-07-24"
+note = "narrow integer widths are not tracked, arithmetic runs in i64 and misses the panic"
+
+[[known]]
+classification = "PanicMessageMismatch"
+signature = "attempt to * <> *"
+date = "2026-07-24"
+note = "a missed narrow panic lets the run continue and panic later at a different site"
+
+[[known]]
+classification = "SemanticMismatch"
+signature = "generated-numeric-N-N"
+date = "2026-07-24"
+note = "narrow int and f32 values print from the interpreter's i64 and f64 internals"

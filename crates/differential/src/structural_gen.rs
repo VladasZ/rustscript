@@ -1,6 +1,7 @@
 use rand::RngExt;
 use rand::rngs::StdRng;
 
+use crate::numeric_gen::generate_numeric;
 use crate::structural::{
     DataflowCase, EnumCase, FlowStatement, FunctionCase, FunctionParameter, GeneratedBinding,
     GeneratedEnumVariant, MutableClosureCase, MutableClosureKind, StructuralCase,
@@ -12,14 +13,19 @@ pub fn generate_structural_cases(rng: &mut StdRng) -> Vec<StructuralCase> {
     let count = rng.random_range(3..=6);
     let mut cases = vec![StructuralCase::Dataflow(generate_dataflow(0, rng))];
     for id in 1..count {
-        let case = match rng.random_range(0..4) {
+        let case = match rng.random_range(0..5) {
             0 => StructuralCase::Dataflow(generate_dataflow(id, rng)),
             1 => StructuralCase::MutableClosure(generate_mutable_closure(id, rng)),
             2 => StructuralCase::Enum(Box::new(generate_enum(id, rng))),
-            _ => StructuralCase::Function(generate_function(id, rng)),
+            3 => StructuralCase::Function(generate_function(id, rng)),
+            _ => StructuralCase::Numeric(generate_numeric(id, rng)),
         };
         cases.push(case);
     }
+    // Every program carries at least one numeric case. Width tracking is the
+    // interpreter's largest divergence surface, so it is never left to
+    // chance.
+    cases.push(StructuralCase::Numeric(generate_numeric(count, rng)));
     cases
 }
 

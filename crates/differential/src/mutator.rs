@@ -258,6 +258,9 @@ fn case_slots(case: &mut StructuralCase) -> Vec<Slot<'_>> {
             }]
         }
         StructuralCase::Enum(enum_case) => enum_slots(enum_case),
+        // Numeric cases have their own statement language with no
+        // GeneratedExpr slots, so the splicer leaves them alone.
+        StructuralCase::Numeric(_) => Vec::new(),
         StructuralCase::Function(function) => {
             let environment: Vec<TypedBinding> = function
                 .parameters
@@ -346,6 +349,7 @@ fn donor_expressions(case: &StructuralCase) -> Vec<&GeneratedExpr> {
             exprs
         }
         StructuralCase::MutableClosure(closure) => vec![&closure.update],
+        StructuralCase::Numeric(_) => Vec::new(),
         StructuralCase::Enum(enum_case) => vec![
             &enum_case.unit_arm,
             &enum_case.number_arm,

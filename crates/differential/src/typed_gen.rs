@@ -1,7 +1,7 @@
 use rand::RngExt;
 use rand::rngs::StdRng;
 
-use crate::typed::{GeneratedExpr, GeneratedType, IntCast, NarrowOp};
+use crate::typed::{GeneratedExpr, GeneratedType, IntCast};
 
 #[derive(Clone)]
 pub struct TypedBinding {
@@ -36,7 +36,7 @@ fn i64_expression(
     next_name: &mut usize,
 ) -> GeneratedExpr {
     let child = depth - 1;
-    match rng.random_range(0..21) {
+    match rng.random_range(0..20) {
         0 => leaf(GeneratedType::I64, bindings, rng),
         1 => GeneratedExpr::Add(
             boxed(GeneratedType::I64, child, bindings, rng, next_name),
@@ -92,42 +92,7 @@ fn i64_expression(
         // The saturating and NaN-to-zero semantics of a float-to-int cast are
         // easy for an interpreter to get wrong, so the cast gets a wild float
         // operand often.
-        19 => GeneratedExpr::F64ToI64(boxed(GeneratedType::F64, child, bindings, rng, next_name)),
-        _ => narrow_arith(child, bindings, rng, next_name),
-    }
-}
-
-/// Arithmetic done in a narrow integer type between two casts. The operands go
-/// through `diff_opaque`, so the compiler cannot fold the narrow operation and
-/// reject the program for a constant overflow; the panic happens at runtime.
-fn narrow_arith(
-    depth: usize,
-    bindings: &[TypedBinding],
-    rng: &mut StdRng,
-    next_name: &mut usize,
-) -> GeneratedExpr {
-    let op = match rng.random_range(0..5) {
-        0 => NarrowOp::Add,
-        1 => NarrowOp::Sub,
-        2 => NarrowOp::Mul,
-        3 => NarrowOp::Div,
-        _ => NarrowOp::Rem,
-    };
-    // u64 and usize stay out: their range does not fit the i64 the
-    // interpreter computes in, so their overflow cannot be reproduced.
-    let target = match rng.random_range(0..6) {
-        0 => IntCast::U8,
-        1 => IntCast::U16,
-        2 => IntCast::U32,
-        3 => IntCast::I8,
-        4 => IntCast::I16,
-        _ => IntCast::I32,
-    };
-    GeneratedExpr::NarrowArith {
-        target,
-        op,
-        left: boxed(GeneratedType::I64, depth, bindings, rng, next_name),
-        right: boxed(GeneratedType::I64, depth, bindings, rng, next_name),
+        _ => GeneratedExpr::F64ToI64(boxed(GeneratedType::F64, child, bindings, rng, next_name)),
     }
 }
 

@@ -2374,6 +2374,7 @@ dependencies = [
  "serde_json",
  "syn",
  "tempfile",
+ "toml",
 ]
 
 [[package]]

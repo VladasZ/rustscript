@@ -170,21 +170,6 @@ impl GeneratedExpr {
             Self::F64ToI64(value) => format!("({} as i64)", grouped(value)),
             Self::FormatF64(value) => format!("format!(\"{{}}\", {})", value.render()),
             Self::DebugF64(value) => format!("format!(\"{{:?}}\", {})", value.render()),
-            // The casts sit inside `diff_opaque` shields so the narrow
-            // operation cannot be folded to a constant; its overflow or zero
-            // divisor then panics at runtime exactly like debug cargo.
-            Self::NarrowArith {
-                target,
-                op,
-                left,
-                right,
-            } => format!(
-                "(((diff_opaque({}) as {ty}) {op} (diff_opaque({}) as {ty})) as i64)",
-                left.render(),
-                right.render(),
-                ty = target.rust(),
-                op = op.token(),
-            ),
             Self::FormatSpec { spec, value } => {
                 format!("format!(\"{{{spec}}}\", {})", value.render())
             }
