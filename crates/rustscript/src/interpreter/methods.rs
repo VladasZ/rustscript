@@ -325,7 +325,11 @@ pub(super) fn vec_method(
             let mut is_float = false;
             for x in v.borrow().iter() {
                 match x {
-                    Value::Int(i) => acc_i += i,
+                    Value::Int(i) => {
+                        acc_i = acc_i
+                            .checked_add(*i)
+                            .ok_or_else(|| anyhow!("attempt to add with overflow"))?;
+                    }
                     Value::Float(f) => {
                         is_float = true;
                         acc_f += f;
@@ -335,6 +339,30 @@ pub(super) fn vec_method(
             }
             if is_float {
                 Value::Float(acc_f + acc_i as f64)
+            } else {
+                Value::Int(acc_i)
+            }
+        }
+        B::Product => {
+            let mut acc_i = 1i64;
+            let mut acc_f = 1f64;
+            let mut is_float = false;
+            for x in v.borrow().iter() {
+                match x {
+                    Value::Int(i) => {
+                        acc_i = acc_i
+                            .checked_mul(*i)
+                            .ok_or_else(|| anyhow!("attempt to multiply with overflow"))?;
+                    }
+                    Value::Float(f) => {
+                        is_float = true;
+                        acc_f *= f;
+                    }
+                    _ => bail!("product needs numbers"),
+                }
+            }
+            if is_float {
+                Value::Float(acc_f * acc_i as f64)
             } else {
                 Value::Int(acc_i)
             }

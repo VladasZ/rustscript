@@ -262,11 +262,12 @@ fn environment(name: String, ty: GeneratedType) -> Vec<TypedBinding> {
 }
 
 fn random_type(rng: &mut StdRng) -> GeneratedType {
-    match rng.random_range(0..5) {
+    match rng.random_range(0..6) {
         0 => GeneratedType::I64,
         1 => GeneratedType::Bool,
         2 => GeneratedType::String,
         3 => GeneratedType::VecI64,
+        4 => GeneratedType::F64,
         _ => GeneratedType::OptionI64,
     }
 }

@@ -2,6 +2,7 @@ use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 
 use crate::closure_case::ClosureCase;
+use crate::method_case::generate_method_cases;
 use crate::model::{Expr, Program, Stmt, Ty};
 use crate::rich::{RichCase, StateVariant};
 use crate::semantic_gen::generate_semantic_cases;
@@ -82,6 +83,7 @@ pub(crate) fn generate_base(seed: u64) -> Program {
         closure_cases: generate_closure_cases(&mut rng),
         structural_cases: generate_structural_cases(&mut rng),
         semantic_cases: generate_semantic_cases(&mut rng),
+        method_cases: generate_method_cases(&mut rng),
         mutation: None,
     }
 }

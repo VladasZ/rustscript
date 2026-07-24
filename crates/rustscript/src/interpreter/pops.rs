@@ -16,10 +16,16 @@ pub(super) fn apply_bin(op: BinKind, l: &PValue, r: &PValue) -> Result<PValue> {
         Add | Sub | Mul | Div | Rem => return arith(op, l, r),
         Eq => PValue::Bool(l.eq_value(r)),
         Ne => PValue::Bool(!l.eq_value(r)),
-        Lt => PValue::Bool(compare_values(l, r)? == Ordering::Less),
-        Le => PValue::Bool(compare_values(l, r)? != Ordering::Greater),
-        Gt => PValue::Bool(compare_values(l, r)? == Ordering::Greater),
-        Ge => PValue::Bool(compare_values(l, r)? != Ordering::Less),
+        Lt => PValue::Bool(partial_compare(l, r)? == Some(Ordering::Less)),
+        Le => PValue::Bool(matches!(
+            partial_compare(l, r)?,
+            Some(Ordering::Less | Ordering::Equal)
+        )),
+        Gt => PValue::Bool(partial_compare(l, r)? == Some(Ordering::Greater)),
+        Ge => PValue::Bool(matches!(
+            partial_compare(l, r)?,
+            Some(Ordering::Greater | Ordering::Equal)
+        )),
         BitAnd => int_bin(l, r, |a, b| a & b)?,
         BitOr => int_bin(l, r, |a, b| a | b)?,
         BitXor => int_bin(l, r, |a, b| a ^ b)?,
@@ -37,10 +43,16 @@ pub(super) fn cmp_test(op: BinKind, l: &PValue, r: &PValue) -> Result<bool> {
     Ok(match op {
         Eq => l.eq_value(r),
         Ne => !l.eq_value(r),
-        Lt => compare_values(l, r)? == Ordering::Less,
-        Le => compare_values(l, r)? != Ordering::Greater,
-        Gt => compare_values(l, r)? == Ordering::Greater,
-        Ge => compare_values(l, r)? != Ordering::Less,
+        Lt => partial_compare(l, r)? == Some(Ordering::Less),
+        Le => matches!(
+            partial_compare(l, r)?,
+            Some(Ordering::Less | Ordering::Equal)
+        ),
+        Gt => partial_compare(l, r)? == Some(Ordering::Greater),
+        Ge => matches!(
+            partial_compare(l, r)?,
+            Some(Ordering::Greater | Ordering::Equal)
+        ),
         _ => unreachable!("compare jump carries a non-comparison operator"),
     })
 }
@@ -112,20 +124,20 @@ fn int_bin(l: &PValue, r: &PValue, f: impl Fn(i64, i64) -> i64) -> Result<PValue
 }
 
 pub(super) fn compare_values(l: &PValue, r: &PValue) -> Result<Ordering> {
+    partial_compare(l, r)?.ok_or_else(|| anyhow!("cannot order NaN"))
+}
+
+/// PartialOrd semantics, mirroring the fast engine: a NaN operand makes every
+/// ordered comparison false instead of failing the run.
+fn partial_compare(l: &PValue, r: &PValue) -> Result<Option<Ordering>> {
     Ok(match (l, r) {
-        (PValue::Int(a), PValue::Int(b)) => a.cmp(b),
-        (PValue::Float(a), PValue::Float(b)) => a
-            .partial_cmp(b)
-            .ok_or_else(|| anyhow!("cannot order NaN"))?,
-        (PValue::Int(a), PValue::Float(b)) => (*a as f64)
-            .partial_cmp(b)
-            .ok_or_else(|| anyhow!("cannot order NaN"))?,
-        (PValue::Float(a), PValue::Int(b)) => a
-            .partial_cmp(&(*b as f64))
-            .ok_or_else(|| anyhow!("cannot order NaN"))?,
-        (PValue::Str(a), PValue::Str(b)) => a.as_ref().cmp(b.as_ref()),
-        (PValue::Char(a), PValue::Char(b)) => a.cmp(b),
-        (PValue::Bool(a), PValue::Bool(b)) => a.cmp(b),
+        (PValue::Int(a), PValue::Int(b)) => Some(a.cmp(b)),
+        (PValue::Float(a), PValue::Float(b)) => a.partial_cmp(b),
+        (PValue::Int(a), PValue::Float(b)) => (*a as f64).partial_cmp(b),
+        (PValue::Float(a), PValue::Int(b)) => a.partial_cmp(&(*b as f64)),
+        (PValue::Str(a), PValue::Str(b)) => Some(a.as_ref().cmp(b.as_ref())),
+        (PValue::Char(a), PValue::Char(b)) => Some(a.cmp(b)),
+        (PValue::Bool(a), PValue::Bool(b)) => Some(a.cmp(b)),
         (a, b) => bail!("cannot compare {} and {}", a.type_name(), b.type_name()),
     })
 }
@@ -414,8 +426,14 @@ pub(super) fn eval_try(v: PValue) -> Result<std::result::Result<PValue, PValue>>
                 data.first().cloned().unwrap_or(PValue::Unit),
             ))),
             ("Option", "None") => Ok(Err(PValue::none())),
-            _ => bail!("`?` on a non Result/Option value"),
+            // Any other value acts as its own Some, matching eval_try in
+            // eval.rs, see the comment there.
+            _ => Ok(Ok(PValue::Enum {
+                enum_name,
+                variant,
+                data,
+            })),
         },
-        _ => bail!("`?` on a {}", v.type_name()),
+        other => Ok(Ok(other)),
     }
 }

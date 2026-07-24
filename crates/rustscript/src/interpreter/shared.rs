@@ -202,8 +202,12 @@ pub(super) fn str_core(s: &str, name: &str, args: &impl Args) -> Result<Option<S
         "trim" => O::Owned(s.trim().to_string()),
         "trim_start" => O::Owned(s.trim_start().to_string()),
         "trim_end" => O::Owned(s.trim_end().to_string()),
-        "to_uppercase" | "to_ascii_uppercase" => O::Owned(s.to_uppercase()),
-        "to_lowercase" | "to_ascii_lowercase" => O::Owned(s.to_lowercase()),
+        "to_uppercase" => O::Owned(s.to_uppercase()),
+        "to_lowercase" => O::Owned(s.to_lowercase()),
+        // The ascii variants leave non-ascii characters alone, they are not
+        // aliases of the unicode ones.
+        "to_ascii_uppercase" => O::Owned(s.to_ascii_uppercase()),
+        "to_ascii_lowercase" => O::Owned(s.to_ascii_lowercase()),
         // A char-set pattern like `[':', '.']` replaces any of its members, matching real Rust. Without
         // this the array renders as text and matches nothing, silently leaving the string unchanged.
         "replace" => match args.pattern_chars(0) {

@@ -25,11 +25,21 @@ fn add_direct_reductions(expression: &GeneratedExpr, candidates: &mut Vec<Genera
         | GeneratedExpr::RawSub(left, right)
         | GeneratedExpr::RawMul(left, right)
         | GeneratedExpr::RawDiv(left, right)
-        | GeneratedExpr::RawRem(left, right) => {
+        | GeneratedExpr::RawRem(left, right)
+        | GeneratedExpr::FAdd(left, right)
+        | GeneratedExpr::FSub(left, right)
+        | GeneratedExpr::FMul(left, right)
+        | GeneratedExpr::FDiv(left, right)
+        | GeneratedExpr::FLess(left, right)
+        | GeneratedExpr::FEq(left, right)
+        | GeneratedExpr::NarrowArith { left, right, .. } => {
             push_same_type(candidates, expression.ty(), left);
             push_same_type(candidates, expression.ty(), right);
         }
         GeneratedExpr::Cast(value, _) => candidates.push((**value).clone()),
+        GeneratedExpr::FormatSpec { value, .. } => {
+            push_same_type(candidates, expression.ty(), value);
+        }
         GeneratedExpr::If {
             then_expr,
             else_expr,
@@ -53,11 +63,16 @@ fn add_direct_reductions(expression: &GeneratedExpr, candidates: &mut Vec<Genera
         GeneratedExpr::I64(_)
         | GeneratedExpr::Bool(_)
         | GeneratedExpr::Text(_)
+        | GeneratedExpr::F64(_)
         | GeneratedExpr::Variable { .. }
         | GeneratedExpr::Not(_)
         | GeneratedExpr::Uppercase(_)
         | GeneratedExpr::Replace { .. }
         | GeneratedExpr::FormatI64(_)
+        | GeneratedExpr::FormatF64(_)
+        | GeneratedExpr::DebugF64(_)
+        | GeneratedExpr::I64ToF64(_)
+        | GeneratedExpr::F64ToI64(_)
         | GeneratedExpr::DebugVec(_)
         | GeneratedExpr::VecLiteral(_)
         | GeneratedExpr::VecLen(_)
@@ -376,9 +391,70 @@ fn add_child_reductions(expression: &GeneratedExpr, candidates: &mut Vec<Generat
         GeneratedExpr::RawRem(left, right) => {
             shrink_binary(candidates, left, right, GeneratedExpr::RawRem);
         }
+        GeneratedExpr::FAdd(left, right) => {
+            shrink_binary(candidates, left, right, GeneratedExpr::FAdd);
+        }
+        GeneratedExpr::FSub(left, right) => {
+            shrink_binary(candidates, left, right, GeneratedExpr::FSub);
+        }
+        GeneratedExpr::FMul(left, right) => {
+            shrink_binary(candidates, left, right, GeneratedExpr::FMul);
+        }
+        GeneratedExpr::FDiv(left, right) => {
+            shrink_binary(candidates, left, right, GeneratedExpr::FDiv);
+        }
+        GeneratedExpr::FLess(left, right) => {
+            shrink_binary(candidates, left, right, GeneratedExpr::FLess);
+        }
+        GeneratedExpr::FEq(left, right) => {
+            shrink_binary(candidates, left, right, GeneratedExpr::FEq);
+        }
+        GeneratedExpr::NarrowArith {
+            target,
+            op,
+            left,
+            right,
+        } => {
+            for shrunk in left.shrinks() {
+                candidates.push(GeneratedExpr::NarrowArith {
+                    target: *target,
+                    op: *op,
+                    left: Box::new(shrunk),
+                    right: right.clone(),
+                });
+            }
+            for shrunk in right.shrinks() {
+                candidates.push(GeneratedExpr::NarrowArith {
+                    target: *target,
+                    op: *op,
+                    left: left.clone(),
+                    right: Box::new(shrunk),
+                });
+            }
+        }
         GeneratedExpr::Cast(value, target) => {
             for shrunk in value.shrinks() {
                 candidates.push(GeneratedExpr::Cast(Box::new(shrunk), *target));
+            }
+        }
+        GeneratedExpr::I64ToF64(value) => {
+            shrink_unary(candidates, value, GeneratedExpr::I64ToF64);
+        }
+        GeneratedExpr::F64ToI64(value) => {
+            shrink_unary(candidates, value, GeneratedExpr::F64ToI64);
+        }
+        GeneratedExpr::FormatF64(value) => {
+            shrink_unary(candidates, value, GeneratedExpr::FormatF64);
+        }
+        GeneratedExpr::DebugF64(value) => {
+            shrink_unary(candidates, value, GeneratedExpr::DebugF64);
+        }
+        GeneratedExpr::FormatSpec { spec, value } => {
+            for shrunk in value.shrinks() {
+                candidates.push(GeneratedExpr::FormatSpec {
+                    spec: spec.clone(),
+                    value: Box::new(shrunk),
+                });
             }
         }
         GeneratedExpr::Index { values, index } => {
@@ -395,6 +471,7 @@ fn add_child_reductions(expression: &GeneratedExpr, candidates: &mut Vec<Generat
         GeneratedExpr::I64(_)
         | GeneratedExpr::Bool(_)
         | GeneratedExpr::Text(_)
+        | GeneratedExpr::F64(_)
         | GeneratedExpr::Variable { .. }
         | GeneratedExpr::None => {}
     }
@@ -427,6 +504,7 @@ fn shrink_unary(
 fn minimal(ty: GeneratedType) -> GeneratedExpr {
     match ty {
         GeneratedType::I64 => GeneratedExpr::I64(0),
+        GeneratedType::F64 => GeneratedExpr::F64("0.0".to_string()),
         GeneratedType::Bool => GeneratedExpr::Bool(false),
         GeneratedType::String => GeneratedExpr::Text(String::new()),
         GeneratedType::VecI64 => GeneratedExpr::VecLiteral(Vec::new()),

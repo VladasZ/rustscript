@@ -36,10 +36,6 @@ pub enum Classification {
 }
 
 impl Classification {
-    pub fn same_failure(&self, other: &Self) -> bool {
-        self == other
-    }
-
     /// A real divergence worth saving and fixing. `Match` is agreement and
     /// `InterpreterUnsupported` is a known gap, so neither is hard.
     pub fn is_hard_failure(&self) -> bool {
@@ -77,24 +73,121 @@ pub struct RunResult {
     pub interpreted: ProcessOutput,
 }
 
+impl RunResult {
+    /// A short stable description of the concrete failure, so two different
+    /// bugs with the same classification land in different buckets and the
+    /// minimizer cannot drift from one bug to another. Digits are normalized
+    /// because the same bug shows up with different values across seeds and
+    /// across shrink steps.
+    pub fn signature(&self) -> String {
+        let raw = match &self.classification {
+            Classification::PanicMessageMismatch => format!(
+                "{} <> {}",
+                panic_payload(&self.native.stderr),
+                panic_payload(&self.interpreted.stderr)
+            ),
+            Classification::InterpreterMissingPanic => panic_payload(&self.native.stderr),
+            Classification::InterpreterSpuriousPanic => panic_payload(&self.interpreted.stderr),
+            Classification::SemanticMismatch => diff_site(&self.native, &self.interpreted),
+            Classification::InterpreterCrash | Classification::InterpreterUnsupported => {
+                first_meaningful_line(&self.interpreted.stderr)
+            }
+            _ => String::new(),
+        };
+        let mut signature = normalize_digits(&raw);
+        signature.truncate(160);
+        signature
+    }
+
+    /// The same bug for bucketing and reduction: classification and signature
+    /// both agree.
+    pub fn same_failure(&self, other: &Self) -> bool {
+        self.classification == other.classification && self.signature() == other.signature()
+    }
+}
+
+/// The label of the first output line that differs, which names the generated
+/// case section that produced it. The values inside the line change with every
+/// seed and every shrink step, so only the part before the first `:` is kept.
+fn diff_site(native: &ProcessOutput, interpreted: &ProcessOutput) -> String {
+    let streams = [
+        (&native.stdout, &interpreted.stdout),
+        (&native.stderr, &interpreted.stderr),
+    ];
+    for (native_stream, interpreted_stream) in streams {
+        let mut native_lines = native_stream.lines();
+        let mut interpreted_lines = interpreted_stream.lines();
+        loop {
+            match (native_lines.next(), interpreted_lines.next()) {
+                (None, None) => break,
+                (native_line, interpreted_line) => {
+                    if native_line != interpreted_line {
+                        let line = native_line.or(interpreted_line).unwrap_or_default();
+                        return line.split(':').next().unwrap_or_default().to_string();
+                    }
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+/// The first line of an error that carries information, used to group gaps and
+/// crashes by the missing feature rather than by the exact values around it.
+pub fn first_meaningful_line(stderr: &str) -> String {
+    stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && *line != "Error:")
+        .unwrap_or("unknown error")
+        .to_string()
+}
+
+fn normalize_digits(text: &str) -> String {
+    let mut normalized = String::with_capacity(text.len());
+    let mut in_number = false;
+    for character in text.chars() {
+        if character.is_ascii_digit() {
+            if !in_number {
+                normalized.push('N');
+                in_number = true;
+            }
+        } else {
+            in_number = false;
+            normalized.push(character);
+        }
+    }
+    normalized
+}
+
 pub struct Runner {
     interpreter: PathBuf,
-    timeout: Duration,
+    native_timeout: Duration,
+    /// The interpreter gets four times the native budget. It is expected to be
+    /// slower, and a shared budget would report near-boundary programs as
+    /// spurious `InterpreterTimeout` findings. The compiler shares this larger
+    /// budget because a cold rustc run is slow too.
+    interpreted_timeout: Duration,
 }
+
+const INTERPRETED_TIMEOUT_FACTOR: u32 = 4;
 
 impl Runner {
     pub fn build(workspace: &Path, timeout_ms: u64) -> Result<Self> {
         let interpreter = match std::env::var_os("RUSTSCRIPT_INTERPRETER") {
             Some(path) => PathBuf::from(path),
             None => {
+                // A release interpreter runs campaigns several times faster
+                // than the debug default. Point RUSTSCRIPT_INTERPRETER at a
+                // debug build when its assertions are wanted.
                 let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
                 let status = Command::new(cargo)
-                    .args(["build", "-p", "run-rs"])
+                    .args(["build", "--release", "-p", "run-rs"])
                     .current_dir(workspace)
                     .status()
                     .context("failed to build RustScript")?;
                 if !status.success() {
-                    bail!("cargo build -p run-rs failed");
+                    bail!("cargo build --release -p run-rs failed");
                 }
                 target_dir(workspace).join(executable_name("rust"))
             }
@@ -105,9 +198,11 @@ impl Runner {
         let interpreter = interpreter
             .canonicalize()
             .context("failed to resolve RustScript binary")?;
+        let native_timeout = Duration::from_millis(timeout_ms);
         Ok(Self {
             interpreter,
-            timeout: Duration::from_millis(timeout_ms),
+            native_timeout,
+            interpreted_timeout: native_timeout * INTERPRETED_TIMEOUT_FACTOR,
         })
     }
 
@@ -126,7 +221,7 @@ impl Runner {
                 .arg(&binary_path)
                 .arg(&source_path)
                 .current_dir(directory.path()),
-            self.timeout,
+            self.interpreted_timeout,
         )?;
         if compiler.timed_out {
             return Ok(incomplete(Classification::RustcTimeout, compiler));
@@ -137,16 +232,9 @@ impl Runner {
 
         let native = run_command(
             Command::new(&binary_path).current_dir(directory.path()),
-            self.timeout,
+            self.native_timeout,
         )?;
-        let interpreted = run_command(
-            Command::new(&self.interpreter)
-                .arg("run")
-                .arg(&source_path)
-                .env("RUSTSCRIPT_SKIP_CHECK", "1")
-                .current_dir(directory.path()),
-            self.timeout,
-        )?;
+        let interpreted = self.run_interpreted(&source_path, directory.path())?;
         let classification = classify(&native, &interpreted);
         Ok(RunResult {
             classification,
@@ -179,7 +267,7 @@ impl Runner {
                 .arg(&binary_path)
                 .arg(&bundle_path)
                 .current_dir(directory.path()),
-            self.timeout,
+            self.interpreted_timeout,
         )?;
         if compiler.timed_out || compiler.status != Some(0) {
             return sources
@@ -196,7 +284,7 @@ impl Runner {
                     Command::new(&binary_path)
                         .env("RUSTSCRIPT_DIFFERENTIAL_CASE", index.to_string())
                         .current_dir(directory.path()),
-                    self.timeout,
+                    self.native_timeout,
                 )?;
                 let interpreted = self.run_interpreted(source_path, directory.path())?;
                 let classification = classify(&native, &interpreted);
@@ -217,7 +305,7 @@ impl Runner {
                 .arg(source_path)
                 .env("RUSTSCRIPT_SKIP_CHECK", "1")
                 .current_dir(directory),
-            self.timeout,
+            self.interpreted_timeout,
         )
     }
 }
@@ -276,7 +364,7 @@ fn target_dir(workspace: &Path) -> PathBuf {
         }
         None => workspace.join("target"),
     }
-    .join("debug")
+    .join("release")
 }
 
 fn executable_name(name: &str) -> String {
@@ -325,7 +413,14 @@ fn classify(native: &ProcessOutput, interpreted: &ProcessOutput) -> Classificati
 
     // The real binary finished cleanly from here on.
     if interpreted_panicked {
-        return Classification::InterpreterSpuriousPanic;
+        // A runtime-discovered gap aborts like a panic but names the missing
+        // feature, `unknown method` or `unsupported constant`. That is a gap
+        // to close, not a spurious panic.
+        return if is_unsupported(&interpreted.stderr) {
+            Classification::InterpreterUnsupported
+        } else {
+            Classification::InterpreterSpuriousPanic
+        };
     }
     if interpreted.status != Some(0) {
         return if is_unsupported(&interpreted.stderr) {
@@ -363,16 +458,35 @@ fn classify_native_panic(
     }
     if panic_payload(&native.stderr) == panic_payload(&interpreted.stderr) {
         Classification::Match
+    } else if is_unsupported(&interpreted.stderr) {
+        // The interpreter aborted on a missing feature where the native run
+        // panicked for its own reason. Still a gap, not a message bug.
+        Classification::InterpreterUnsupported
     } else {
         Classification::PanicMessageMismatch
     }
 }
 
+/// The interpreter marks missing-feature errors with a stable first-line
+/// prefix. The loose substring check stays as a fallback for interpreter
+/// binaries from before the prefix existed, reached via
+/// `RUSTSCRIPT_INTERPRETER`.
 fn is_unsupported(stderr: &str) -> bool {
+    if stderr
+        .lines()
+        .any(|line| line.starts_with("rust unsupported:"))
+    {
+        return true;
+    }
     let error = stderr.to_ascii_lowercase();
     error.contains("unsupported")
         || error.contains("not supported")
         || error.contains("not implemented by the interpreter")
+        // Runtime bridge gaps abort mid-run with these wordings. Any program
+        // that reaches the interpreter already passed rustc, so an unknown
+        // name here is a missing bridge, not a generator bug.
+        || error.contains("unknown method")
+        || error.contains("unknown function")
 }
 
 /// The message a panic carries, without the location line or the backtrace
@@ -546,6 +660,24 @@ mod tests {
         assert_eq!(
             classify(&output(0, ""), &panic("attempt to divide by zero")),
             Classification::InterpreterSpuriousPanic
+        );
+    }
+
+    #[test]
+    fn a_runtime_gap_panic_is_a_gap() {
+        assert_eq!(
+            classify(
+                &output(0, ""),
+                &panic("unknown method `product` on Iterator")
+            ),
+            Classification::InterpreterUnsupported
+        );
+        assert_eq!(
+            classify(
+                &panic("attempt to add with overflow"),
+                &panic("unsupported constant `f64::LOG2_10`")
+            ),
+            Classification::InterpreterUnsupported
         );
     }
 

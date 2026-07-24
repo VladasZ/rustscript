@@ -143,6 +143,15 @@ impl Interp {
         {
             return Ok(path_call_closure(segs.to_vec(), chunk.num_params));
         }
+        // A SCREAMING_CASE tail is a constant, never a function, so wrapping
+        // it in the closure fallback would smuggle a closure value into
+        // arithmetic. `f64::MIN_POSITIVE` did exactly that before it was
+        // added above.
+        if last.chars().any(|c| c.is_ascii_uppercase())
+            && !last.chars().any(|c| c.is_ascii_lowercase())
+        {
+            bail!("unsupported constant `{function}`");
+        }
         Ok(path_call_closure(segs.to_vec(), 1))
     }
 
@@ -445,7 +454,7 @@ pub(super) fn path_call_closure(segs: Vec<String>, num_params: usize) -> Value {
 // `usize::MAX`, `i32::MIN` and friends. The 64 bit and wider limits are
 // clamped to what an i64 value can hold, which is enough for sentinels and
 // bounds. Returns None for anything that is not an integer limit path.
-fn int_limit(ty: &str, name: &str) -> Option<Value> {
+pub(super) fn int_limit(ty: &str, name: &str) -> Option<Value> {
     // The float limits first, `f64::EPSILON` guards float comparisons.
     if ty == "f64" || ty == "f32" {
         let v = match (ty, name) {
@@ -455,6 +464,8 @@ fn int_limit(ty: &str, name: &str) -> Option<Value> {
             ("f32", "MAX") => f64::from(f32::MAX),
             ("f64", "MIN") => f64::MIN,
             ("f32", "MIN") => f64::from(f32::MIN),
+            ("f64", "MIN_POSITIVE") => f64::MIN_POSITIVE,
+            ("f32", "MIN_POSITIVE") => f64::from(f32::MIN_POSITIVE),
             (_, "INFINITY") => f64::INFINITY,
             (_, "NEG_INFINITY") => f64::NEG_INFINITY,
             (_, "NAN") => f64::NAN,

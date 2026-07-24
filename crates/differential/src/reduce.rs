@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use anyhow::{Result, bail};
 
 use crate::model::Program;
-use crate::runner::{Classification, RunResult, Runner};
+use crate::runner::{RunResult, Runner};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ReductionProgress {
@@ -15,7 +15,7 @@ pub struct ReductionProgress {
 pub fn reduce(
     runner: &Runner,
     original: &Program,
-    target: &Classification,
+    target: &RunResult,
 ) -> Result<(Program, RunResult)> {
     reduce_with_progress(runner, original, target, |_| {})
 }
@@ -23,7 +23,7 @@ pub fn reduce(
 pub fn reduce_with_progress(
     runner: &Runner,
     original: &Program,
-    target: &Classification,
+    target: &RunResult,
     mut report: impl FnMut(ReductionProgress),
 ) -> Result<(Program, RunResult)> {
     let mut current = original.clone();
@@ -31,11 +31,11 @@ pub fn reduce_with_progress(
     let mut current_result = runner.run_source(&current_source)?;
     let mut cache = HashMap::from([(current_source, current_result.clone())]);
     let mut progress = ReductionProgress::default();
-    if !current_result.classification.same_failure(target) {
+    if !current_result.same_failure(target) {
         bail!(
             "program model produced {:?}, expected {:?}",
             current_result.classification,
-            target
+            target.classification
         );
     }
     loop {
@@ -51,7 +51,7 @@ pub fn reduce_with_progress(
                 result
             };
             progress.candidates_checked += 1;
-            if result.classification.same_failure(target) {
+            if result.same_failure(target) {
                 progress.reductions_kept += 1;
                 report(progress);
                 smaller = Some((candidate, result));

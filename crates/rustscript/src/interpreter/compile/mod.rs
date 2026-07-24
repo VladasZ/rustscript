@@ -11,8 +11,8 @@ use syn::punctuated::Punctuated;
 use syn::{BinOp, Block, Expr, FnArg, Lit, Pat, UnOp};
 
 use super::bytecode::{
-    BinKind, BuiltinId, CapSource, Chunk, Const, EnumVariant, FmtSpec, Member, MethodName, Op,
-    PatInfo, Reg, StructLit,
+    BinKind, BuiltinId, CapSource, Chunk, Const, EnumVariant, FmtSpec, Member, MethodName,
+    NarrowTy, Op, PatInfo, Reg, StructLit,
 };
 use super::resolver::{Res, Resolver};
 
@@ -576,6 +576,39 @@ fn bin_kind(op: &BinOp) -> Option<BinKind> {
 
 /// A plain integer literal usable as an instruction immediate, including a
 /// negated one, seen through parens.
+/// The narrow integer type an expression statically has, when that is
+/// knowable from its own syntax: a cast like `x as u8`, a suffixed literal
+/// like `5u8`, or arithmetic whose two sides agree on one. This drives the
+/// `NarrowGuard` op that reproduces debug-Rust overflow panics in widths the
+/// interpreter does not compute in.
+fn narrow_type_of(e: &Expr) -> Option<NarrowTy> {
+    match e {
+        Expr::Paren(p) => narrow_type_of(&p.expr),
+        Expr::Group(g) => narrow_type_of(&g.expr),
+        Expr::Cast(c) => match &*c.ty {
+            syn::Type::Path(p) => NarrowTy::parse(&p.path.segments.last()?.ident.to_string()),
+            _ => None,
+        },
+        Expr::Lit(l) => match &l.lit {
+            Lit::Int(i) => NarrowTy::parse(i.suffix()),
+            _ => None,
+        },
+        Expr::Binary(b) if bin_kind(&b.op).is_some_and(is_arith) => {
+            let left = narrow_type_of(&b.left)?;
+            let right = narrow_type_of(&b.right)?;
+            (left == right).then_some(left)
+        }
+        _ => None,
+    }
+}
+
+fn is_arith(op: BinKind) -> bool {
+    matches!(
+        op,
+        BinKind::Add | BinKind::Sub | BinKind::Mul | BinKind::Div | BinKind::Rem
+    )
+}
+
 fn int_literal(e: &Expr) -> Option<i64> {
     match e {
         Expr::Lit(l) => match &l.lit {

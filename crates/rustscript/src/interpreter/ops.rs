@@ -23,10 +23,16 @@ pub(super) fn apply_bin(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
         Add | Sub | Mul | Div | Rem => return arith(op, l, r),
         Eq => Value::Bool(l.eq_value(r)),
         Ne => Value::Bool(!l.eq_value(r)),
-        Lt => Value::Bool(compare_values(l, r)? == Ordering::Less),
-        Le => Value::Bool(compare_values(l, r)? != Ordering::Greater),
-        Gt => Value::Bool(compare_values(l, r)? == Ordering::Greater),
-        Ge => Value::Bool(compare_values(l, r)? != Ordering::Less),
+        Lt => Value::Bool(partial_compare(l, r)? == Some(Ordering::Less)),
+        Le => Value::Bool(matches!(
+            partial_compare(l, r)?,
+            Some(Ordering::Less | Ordering::Equal)
+        )),
+        Gt => Value::Bool(partial_compare(l, r)? == Some(Ordering::Greater)),
+        Ge => Value::Bool(matches!(
+            partial_compare(l, r)?,
+            Some(Ordering::Greater | Ordering::Equal)
+        )),
         BitAnd => int_bin(l, r, |a, b| a & b)?,
         BitOr => int_bin(l, r, |a, b| a | b)?,
         BitXor => int_bin(l, r, |a, b| a ^ b)?,
@@ -95,10 +101,16 @@ pub(super) fn cmp_test(op: BinKind, l: &Value, r: &Value) -> Result<bool> {
     Ok(match op {
         Eq => l.eq_value(r),
         Ne => !l.eq_value(r),
-        Lt => compare_values(l, r)? == Ordering::Less,
-        Le => compare_values(l, r)? != Ordering::Greater,
-        Gt => compare_values(l, r)? == Ordering::Greater,
-        Ge => compare_values(l, r)? != Ordering::Less,
+        Lt => partial_compare(l, r)? == Some(Ordering::Less),
+        Le => matches!(
+            partial_compare(l, r)?,
+            Some(Ordering::Less | Ordering::Equal)
+        ),
+        Gt => partial_compare(l, r)? == Some(Ordering::Greater),
+        Ge => matches!(
+            partial_compare(l, r)?,
+            Some(Ordering::Greater | Ordering::Equal)
+        ),
         _ => unreachable!("compare jump carries a non-comparison operator"),
     })
 }
@@ -183,20 +195,22 @@ fn int_bin(l: &Value, r: &Value, f: impl Fn(i64, i64) -> i64) -> Result<Value> {
 }
 
 pub(super) fn compare_values(l: &Value, r: &Value) -> Result<Ordering> {
+    partial_compare(l, r)?.ok_or_else(|| anyhow!("cannot order NaN"))
+}
+
+/// PartialOrd semantics: a NaN operand compares as `None`, which makes every
+/// ordered comparison operator false, exactly like compiled Rust. Contexts
+/// that need a total order, sorting for example, go through `compare_values`
+/// and keep rejecting NaN.
+fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
     Ok(match (l, r) {
-        (Value::Int(a), Value::Int(b)) => a.cmp(b),
-        (Value::Float(a), Value::Float(b)) => a
-            .partial_cmp(b)
-            .ok_or_else(|| anyhow!("cannot order NaN"))?,
-        (Value::Int(a), Value::Float(b)) => (*a as f64)
-            .partial_cmp(b)
-            .ok_or_else(|| anyhow!("cannot order NaN"))?,
-        (Value::Float(a), Value::Int(b)) => a
-            .partial_cmp(&(*b as f64))
-            .ok_or_else(|| anyhow!("cannot order NaN"))?,
-        (Value::Str(a), Value::Str(b)) => a.as_str().cmp(b.as_str()),
-        (Value::Char(a), Value::Char(b)) => a.cmp(b),
-        (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+        (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
+        (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
+        (Value::Int(a), Value::Float(b)) => (*a as f64).partial_cmp(b),
+        (Value::Float(a), Value::Int(b)) => a.partial_cmp(&(*b as f64)),
+        (Value::Str(a), Value::Str(b)) => Some(a.as_str().cmp(b.as_str())),
+        (Value::Char(a), Value::Char(b)) => Some(a.cmp(b)),
+        (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
         (a, b) => bail!("cannot compare {} and {}", a.type_name(), b.type_name()),
     })
 }

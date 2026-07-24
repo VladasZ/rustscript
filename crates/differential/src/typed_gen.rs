@@ -1,7 +1,7 @@
 use rand::RngExt;
 use rand::rngs::StdRng;
 
-use crate::typed::{GeneratedExpr, GeneratedType, IntCast};
+use crate::typed::{GeneratedExpr, GeneratedType, IntCast, NarrowOp};
 
 #[derive(Clone)]
 pub struct TypedBinding {
@@ -21,6 +21,7 @@ pub fn expression(
     }
     match ty {
         GeneratedType::I64 => i64_expression(depth, bindings, rng, next_name),
+        GeneratedType::F64 => f64_expression(depth, bindings, rng, next_name),
         GeneratedType::Bool => bool_expression(depth, bindings, rng, next_name),
         GeneratedType::String => string_expression(depth, bindings, rng, next_name),
         GeneratedType::VecI64 => vec_expression(depth, bindings, rng, next_name),
@@ -35,7 +36,7 @@ fn i64_expression(
     next_name: &mut usize,
 ) -> GeneratedExpr {
     let child = depth - 1;
-    match rng.random_range(0..19) {
+    match rng.random_range(0..21) {
         0 => leaf(GeneratedType::I64, bindings, rng),
         1 => GeneratedExpr::Add(
             boxed(GeneratedType::I64, child, bindings, rng, next_name),
@@ -81,13 +82,84 @@ fn i64_expression(
             values: boxed(GeneratedType::VecI64, child, bindings, rng, next_name),
             index: rng.random_range(0..=6),
         },
-        _ => GeneratedExpr::Unwrap(boxed(
+        18 => GeneratedExpr::Unwrap(boxed(
             GeneratedType::OptionI64,
             child,
             bindings,
             rng,
             next_name,
         )),
+        // The saturating and NaN-to-zero semantics of a float-to-int cast are
+        // easy for an interpreter to get wrong, so the cast gets a wild float
+        // operand often.
+        19 => GeneratedExpr::F64ToI64(boxed(GeneratedType::F64, child, bindings, rng, next_name)),
+        _ => narrow_arith(child, bindings, rng, next_name),
+    }
+}
+
+/// Arithmetic done in a narrow integer type between two casts. The operands go
+/// through `diff_opaque`, so the compiler cannot fold the narrow operation and
+/// reject the program for a constant overflow; the panic happens at runtime.
+fn narrow_arith(
+    depth: usize,
+    bindings: &[TypedBinding],
+    rng: &mut StdRng,
+    next_name: &mut usize,
+) -> GeneratedExpr {
+    let op = match rng.random_range(0..5) {
+        0 => NarrowOp::Add,
+        1 => NarrowOp::Sub,
+        2 => NarrowOp::Mul,
+        3 => NarrowOp::Div,
+        _ => NarrowOp::Rem,
+    };
+    // u64 and usize stay out: their range does not fit the i64 the
+    // interpreter computes in, so their overflow cannot be reproduced.
+    let target = match rng.random_range(0..6) {
+        0 => IntCast::U8,
+        1 => IntCast::U16,
+        2 => IntCast::U32,
+        3 => IntCast::I8,
+        4 => IntCast::I16,
+        _ => IntCast::I32,
+    };
+    GeneratedExpr::NarrowArith {
+        target,
+        op,
+        left: boxed(GeneratedType::I64, depth, bindings, rng, next_name),
+        right: boxed(GeneratedType::I64, depth, bindings, rng, next_name),
+    }
+}
+
+fn f64_expression(
+    depth: usize,
+    bindings: &[TypedBinding],
+    rng: &mut StdRng,
+    next_name: &mut usize,
+) -> GeneratedExpr {
+    let child = depth - 1;
+    match rng.random_range(0..9) {
+        0 => leaf(GeneratedType::F64, bindings, rng),
+        1 => GeneratedExpr::FAdd(
+            boxed(GeneratedType::F64, child, bindings, rng, next_name),
+            boxed(GeneratedType::F64, child, bindings, rng, next_name),
+        ),
+        2 => GeneratedExpr::FSub(
+            boxed(GeneratedType::F64, child, bindings, rng, next_name),
+            boxed(GeneratedType::F64, child, bindings, rng, next_name),
+        ),
+        3 => GeneratedExpr::FMul(
+            boxed(GeneratedType::F64, child, bindings, rng, next_name),
+            boxed(GeneratedType::F64, child, bindings, rng, next_name),
+        ),
+        4 => GeneratedExpr::FDiv(
+            boxed(GeneratedType::F64, child, bindings, rng, next_name),
+            boxed(GeneratedType::F64, child, bindings, rng, next_name),
+        ),
+        5 => if_expression(GeneratedType::F64, child, bindings, rng, next_name),
+        6 => GeneratedExpr::I64ToF64(boxed(GeneratedType::I64, child, bindings, rng, next_name)),
+        7 => match_option(GeneratedType::F64, child, bindings, rng, next_name),
+        _ => closure_call(GeneratedType::F64, child, bindings, rng, next_name),
     }
 }
 
@@ -177,6 +249,38 @@ fn wild_i64(rng: &mut StdRng) -> i64 {
     WILD[rng.random_range(0..WILD.len())]
 }
 
+/// Float literal tokens mixing tame values with the classic traps: negative
+/// zero, values that round under bankers rounding, non-representable integers
+/// past 2^53, extremes, subnormals, and the special constants.
+fn wild_f64(rng: &mut StdRng) -> &'static str {
+    const WILD: &[&str] = &[
+        "0.0",
+        "-0.0",
+        "1.0",
+        "-1.0",
+        "0.5",
+        "0.1",
+        "1.5",
+        "2.5",
+        "-2.5",
+        "10.25",
+        "3.141592653589793",
+        "0.30000000000000004",
+        "1e300",
+        "-1e300",
+        "1e-300",
+        "9007199254740993.0",
+        "1.7976931348623157e308",
+        "5e-324",
+        "f64::NAN",
+        "f64::INFINITY",
+        "f64::NEG_INFINITY",
+        "f64::EPSILON",
+        "f64::MIN_POSITIVE",
+    ];
+    WILD[rng.random_range(0..WILD.len())]
+}
+
 fn bool_expression(
     depth: usize,
     bindings: &[TypedBinding],
@@ -184,7 +288,7 @@ fn bool_expression(
     next_name: &mut usize,
 ) -> GeneratedExpr {
     let child = depth - 1;
-    match rng.random_range(0..10) {
+    match rng.random_range(0..12) {
         0 => leaf(GeneratedType::Bool, bindings, rng),
         1 => GeneratedExpr::Equal(
             boxed(GeneratedType::I64, child, bindings, rng, next_name),
@@ -212,7 +316,17 @@ fn bool_expression(
             next_name,
         )),
         8 => match_option(GeneratedType::Bool, child, bindings, rng, next_name),
-        _ => closure_call(GeneratedType::Bool, child, bindings, rng, next_name),
+        9 => closure_call(GeneratedType::Bool, child, bindings, rng, next_name),
+        // NaN makes every ordered comparison false and equality asymmetric,
+        // a classic interpreter trap.
+        10 => GeneratedExpr::FLess(
+            boxed(GeneratedType::F64, child, bindings, rng, next_name),
+            boxed(GeneratedType::F64, child, bindings, rng, next_name),
+        ),
+        _ => GeneratedExpr::FEq(
+            boxed(GeneratedType::F64, child, bindings, rng, next_name),
+            boxed(GeneratedType::F64, child, bindings, rng, next_name),
+        ),
     }
 }
 
@@ -223,7 +337,7 @@ fn string_expression(
     next_name: &mut usize,
 ) -> GeneratedExpr {
     let child = depth - 1;
-    match rng.random_range(0..10) {
+    match rng.random_range(0..13) {
         0 => leaf(GeneratedType::String, bindings, rng),
         1 => GeneratedExpr::Concat(
             boxed(GeneratedType::String, child, bindings, rng, next_name),
@@ -252,7 +366,7 @@ fn string_expression(
         6 => if_expression(GeneratedType::String, child, bindings, rng, next_name),
         7 => match_option(GeneratedType::String, child, bindings, rng, next_name),
         8 => closure_call(GeneratedType::String, child, bindings, rng, next_name),
-        _ => GeneratedExpr::Concat(
+        9 => GeneratedExpr::Concat(
             Box::new(GeneratedExpr::Text(word(rng).to_string())),
             Box::new(GeneratedExpr::FormatI64(boxed(
                 GeneratedType::I64,
@@ -262,6 +376,37 @@ fn string_expression(
                 next_name,
             ))),
         ),
+        10 => GeneratedExpr::FormatF64(boxed(GeneratedType::F64, child, bindings, rng, next_name)),
+        11 => GeneratedExpr::DebugF64(boxed(GeneratedType::F64, child, bindings, rng, next_name)),
+        _ => format_spec(child, bindings, rng, next_name),
+    }
+}
+
+/// Format specs the standard library documents and the README claims: width,
+/// fill, alignment, sign, zero padding, precision, radix, and exponent forms.
+const I64_SPECS: &[&str] = &[
+    ":>8", ":<8", ":^8", ":+", ":08", ":5", ":+09", ":x", ":X", ":#x", ":#X", ":o", ":#o", ":b",
+    ":#b", ":#010x", ":e", ":E", ":*>12", ":*^12", ":->6",
+];
+const F64_SPECS: &[&str] = &[
+    ":.3", ":.0", ":+.2", ":10.3", ":e", ":E", ":08.2", ":>12.4", ":+", ":.7",
+];
+const STRING_SPECS: &[&str] = &[":>10", ":<10", ":^10", ":.3", ":10.4", ":-^12", ":.0"];
+
+fn format_spec(
+    depth: usize,
+    bindings: &[TypedBinding],
+    rng: &mut StdRng,
+    next_name: &mut usize,
+) -> GeneratedExpr {
+    let (ty, specs) = match rng.random_range(0..3) {
+        0 => (GeneratedType::I64, I64_SPECS),
+        1 => (GeneratedType::F64, F64_SPECS),
+        _ => (GeneratedType::String, STRING_SPECS),
+    };
+    GeneratedExpr::FormatSpec {
+        spec: specs[rng.random_range(0..specs.len())].to_string(),
+        value: boxed(ty, depth, bindings, rng, next_name),
     }
 }
 
@@ -450,6 +595,7 @@ fn leaf(ty: GeneratedType, bindings: &[TypedBinding], rng: &mut StdRng) -> Gener
                 GeneratedExpr::I64(rng.random_range(-50..=50))
             }
         }
+        GeneratedType::F64 => GeneratedExpr::F64(wild_f64(rng).to_string()),
         GeneratedType::Bool => GeneratedExpr::Bool(rng.random_bool(0.5)),
         GeneratedType::String => GeneratedExpr::Text(word(rng).to_string()),
         GeneratedType::VecI64 => {

@@ -585,7 +585,7 @@ impl Value {
             Value::Unit => out.push_str("()"),
             Value::Bool(b) => write!(out, "{b}").unwrap(),
             Value::Int(i) => write!(out, "{i}").unwrap(),
-            Value::Float(f) => out.push_str(&format_float(*f)),
+            Value::Float(f) => out.push_str(&format_float_debug(*f)),
             Value::Char(c) => write!(out, "{c:?}").unwrap(),
             Value::Str(s) => write!(out, "{:?}", &**s).unwrap(),
             Value::Range {
@@ -710,12 +710,17 @@ impl MapKey {
     }
 }
 
+/// Floats format through the host's own Display and Debug. The native binary
+/// a script is compared against is built by the same rustc, so delegating is
+/// the only implementation that can never drift. A hand-rolled `{f:.0}` for
+/// whole floats printed the exact 300-digit expansion of `1e300` where real
+/// Display prints the shortest round-trip form.
 fn format_float(f: f64) -> String {
-    if f == f.trunc() && f.is_finite() {
-        format!("{f:.0}")
-    } else {
-        f.to_string()
-    }
+    f.to_string()
+}
+
+fn format_float_debug(f: f64) -> String {
+    format!("{f:?}")
 }
 
 /// Narrow an i64 the way an `as` cast to a smaller integer type does, then

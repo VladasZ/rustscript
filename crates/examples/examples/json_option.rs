@@ -3,7 +3,8 @@
 // The serde_json accessors that hand back an Option, and the json null value.
 // A json string is a plain String in the interpreter, so `as_str` gives it
 // back as an already unwrapped Some. These are the shapes that have to keep
-// behaving like a real Option anyway: match, if let, and or_else.
+// behaving like a real Option anyway: match, if let, or_else, and the `?`
+// operator, which passes an already unwrapped value through as its own Some.
 
 use serde_json::Value;
 
@@ -22,6 +23,12 @@ fn dir_of(data: &Value) -> String {
     }
 }
 
+// The `?` chain over json accessors, get and as_str each answer an Option in
+// real Rust while the interpreter sees plain values in the middle.
+fn tag_of(data: &Value) -> Option<String> {
+    Some(data.get("tag_name")?.as_str()?.to_string())
+}
+
 fn main() {
     let text = r#"{"workspace":{"current_dir":"/a/b"},"cwd":"/fallback"}"#;
     let full: Value = serde_json::from_str(text).unwrap();
@@ -35,6 +42,15 @@ fn main() {
     if let Some(dir) = full.get("cwd").and_then(Value::as_str) {
         println!("if let {dir}");
     }
+
+    let tagged: Value = serde_json::from_str(r#"{"tag_name":"fork-0.17.0-3"}"#).unwrap();
+    let untagged: Value = serde_json::from_str(r#"{"other":1}"#).unwrap();
+    let numbered: Value = serde_json::from_str(r#"{"tag_name":7}"#).unwrap();
+    let nulled: Value = serde_json::from_str(r#"{"tag_name":null}"#).unwrap();
+    println!("try tag  {:?}", tag_of(&tagged));
+    println!("try none {:?}", tag_of(&untagged));
+    println!("try num  {:?}", tag_of(&numbered));
+    println!("try null {:?}", tag_of(&nulled));
 
     let picked = bare
         .get("workspace")
