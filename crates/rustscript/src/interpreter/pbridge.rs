@@ -17,6 +17,7 @@ use super::pnative::PNative;
 use super::pvalue::{PClosure, PValue, PValueRef};
 use super::pvm::PInterp;
 use super::shared::{self, Args, CharOut, Num, NumOut, ParseNum, StrOut};
+use super::value::Value;
 
 impl PInterp {
     // -- format ------------------------------------------------------------
@@ -73,6 +74,15 @@ impl PInterp {
                 Ok(PValue::str(std::env::consts::ARCH))
             }
             Some(other) => {
+                // The numeric limit and float constants, `i32::MAX`,
+                // `f64::NAN`, shared with the fast engine.
+                if segs.len() >= 2 {
+                    match super::builtins::int_limit(&segs[segs.len() - 2], other) {
+                        Some(Value::Int(i)) => return Ok(PValue::Int(i)),
+                        Some(Value::Float(f)) => return Ok(PValue::Float(f)),
+                        _ => {}
+                    }
+                }
                 // A bare function name used as a value, `.map(strip_html)`. The
                 // closure forwards its arguments to the call, which the tokio
                 // `dispatch_call` resolves back to the user function.
@@ -442,6 +452,13 @@ impl PInterp {
                 let mut total = PValue::Int(0);
                 for v in items.lock().iter() {
                     total = super::pops::apply_bin(super::bytecode::BinKind::Add, &total, v)?;
+                }
+                total
+            }
+            "product" => {
+                let mut total = PValue::Int(1);
+                for v in items.lock().iter() {
+                    total = super::pops::apply_bin(super::bytecode::BinKind::Mul, &total, v)?;
                 }
                 total
             }
@@ -904,8 +921,8 @@ fn render_template(
                 };
                 let fmt = super::format::expand_widths_with(fmt, &mut lookup)?;
                 let number = match &value {
-                    PValue::Float(f) => Some(*f),
-                    PValue::Int(i) => Some(*i as f64),
+                    PValue::Float(f) => Some(super::format::SpecNumber::Float(*f)),
+                    PValue::Int(i) => Some(super::format::SpecNumber::Int(*i)),
                     _ => None,
                 };
                 out.push_str(&super::format::apply_spec(

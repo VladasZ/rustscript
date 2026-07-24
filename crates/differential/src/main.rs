@@ -1,6 +1,11 @@
+use std::collections::BTreeMap;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
+use anyhow::Result;
 use rustscript_differential::artifact::Artifact;
 use rustscript_differential::generator::generate;
 use rustscript_differential::model::Program;
@@ -14,7 +19,7 @@ const CAMPAIGN_BATCH_SIZE: usize = 8;
 
 fn main() -> ExitCode {
     match real_main() {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(error) => {
             eprintln!("differential error: {error:#}");
             ExitCode::FAILURE
@@ -22,37 +27,44 @@ fn main() -> ExitCode {
     }
 }
 
-fn real_main() -> anyhow::Result<()> {
+fn real_main() -> Result<ExitCode> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(command) = args.first().map(String::as_str) else {
         print_usage();
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     };
     match command {
-        "run" => run_campaign(&args[1..]),
-        "generate" => generate_one(&args[1..]),
-        "mutate" => mutate_artifact(&args[1..]),
-        "replay" => replay(&args[1..]),
-        "reduce" => reduce_artifact(&args[1..]),
-        "promote" => promote(&args[1..]),
-        "help" | "-h" | "--help" => {
-            print_usage();
-            Ok(())
-        }
+        "run" => return run_campaign(&args[1..]),
+        "generate" => generate_one(&args[1..])?,
+        "mutate" => mutate_artifact(&args[1..])?,
+        "replay" => replay(&args[1..])?,
+        "reduce" => reduce_artifact(&args[1..])?,
+        "promote" => promote(&args[1..])?,
+        "help" | "-h" | "--help" => print_usage(),
         other => anyhow::bail!("unknown command `{other}`"),
     }
+    Ok(ExitCode::SUCCESS)
 }
 
-fn run_campaign(args: &[String]) -> anyhow::Result<()> {
-    let mut seed = 0;
-    let mut cases = 100;
-    let mut timeout_ms = 2_000;
-    let mut stop_on_first = false;
+struct CampaignOptions {
+    seed: u64,
+    cases: usize,
+    timeout_ms: u64,
+    stop_on_first: bool,
+}
+
+fn parse_campaign_options(args: &[String]) -> Result<CampaignOptions> {
+    let mut options = CampaignOptions {
+        seed: 0,
+        cases: 100,
+        timeout_ms: 2_000,
+        stop_on_first: false,
+    };
     let mut index = 0;
     while index < args.len() {
         let option = &args[index];
         if option == "--stop-on-first" {
-            stop_on_first = true;
+            options.stop_on_first = true;
             index += 1;
             continue;
         }
@@ -60,75 +72,151 @@ fn run_campaign(args: &[String]) -> anyhow::Result<()> {
             .get(index + 1)
             .ok_or_else(|| anyhow::anyhow!("missing value after `{option}`"))?;
         match option.as_str() {
-            "--seed" => seed = value.parse()?,
-            "--cases" => cases = value.parse()?,
-            "--timeout-ms" => timeout_ms = value.parse()?,
+            "--seed" => options.seed = value.parse()?,
+            "--cases" => options.cases = value.parse()?,
+            "--timeout-ms" => options.timeout_ms = value.parse()?,
             other => anyhow::bail!("unknown run option `{other}`"),
         }
         index += 2;
     }
+    Ok(options)
+}
 
+/// One generated case that came back from a worker, ready for reporting.
+type BatchOutcome = (Vec<Program>, Vec<String>, Result<Vec<RunResult>>);
+
+fn run_campaign(args: &[String]) -> Result<ExitCode> {
+    let options = parse_campaign_options(args)?;
     let root = workspace_root();
-    let runner = Runner::build(&root, timeout_ms)?;
-    let mut report = CampaignReport::default();
+    let runner = Runner::build(&root, options.timeout_ms)?;
     let started = Instant::now();
-    let mut last_progress = started;
-    println!("running {cases} cases from seed {seed}");
+    println!("running {} cases from seed {}", options.cases, options.seed);
 
-    let mut offset = 0;
-    'campaign: while offset < cases {
-        let batch_size = CAMPAIGN_BATCH_SIZE.min(cases - offset);
-        let programs = (0..batch_size)
-            .map(|batch_offset| generate(seed + (offset + batch_offset) as u64))
-            .collect::<Vec<_>>();
-        let sources = programs.iter().map(Program::render).collect::<Vec<_>>();
-        let results = runner.run_sources(&sources)?;
+    let batch_count = options.cases.div_ceil(CAMPAIGN_BATCH_SIZE);
+    let workers = thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(4)
+        .min(batch_count.max(1));
+    let next_batch = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    let (sender, receiver) = mpsc::channel::<(usize, BatchOutcome)>();
 
-        for ((program, source), result) in programs.into_iter().zip(sources).zip(results) {
-            let case_seed = program.seed;
-            match &result.classification {
-                Classification::Match => {
-                    report.matched += 1;
-                    if report.matched % 100 == 0 || last_progress.elapsed() >= PROGRESS_INTERVAL {
-                        print_campaign_progress(
-                            report.matched,
-                            cases,
-                            case_seed,
-                            started.elapsed(),
-                        );
-                        last_progress = Instant::now();
+    let report = thread::scope(|scope| -> Result<CampaignReport> {
+        for _ in 0..workers {
+            let sender = sender.clone();
+            let runner = &runner;
+            let next_batch = &next_batch;
+            let stop = &stop;
+            let options = &options;
+            scope.spawn(move || {
+                loop {
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let batch = next_batch.fetch_add(1, Ordering::Relaxed);
+                    if batch >= batch_count {
+                        break;
+                    }
+                    let start = batch * CAMPAIGN_BATCH_SIZE;
+                    let size = CAMPAIGN_BATCH_SIZE.min(options.cases - start);
+                    let programs: Vec<Program> = (0..size)
+                        .map(|offset| generate(options.seed + (start + offset) as u64))
+                        .collect();
+                    let sources: Vec<String> = programs.iter().map(Program::render).collect();
+                    let results = runner.run_sources(&sources);
+                    if sender.send((batch, (programs, sources, results))).is_err() {
+                        break;
                     }
                 }
-                Classification::InterpreterUnsupported => {
-                    report.record_gap(&result);
-                }
-                classification => {
-                    if stop_on_first {
-                        return stop_and_reduce(&runner, &root, case_seed, program, source, result);
+            });
+        }
+        drop(sender);
+
+        // Workers finish batches out of order. Buffer and report strictly in
+        // batch order so progress, artifact saving, and stop-on-first behave
+        // the same as a sequential run.
+        let mut report = CampaignReport::default();
+        let mut last_progress = started;
+        let mut pending: BTreeMap<usize, BatchOutcome> = BTreeMap::new();
+        let mut next_expected = 0usize;
+        for (batch, outcome) in receiver {
+            pending.insert(batch, outcome);
+            while let Some((programs, sources, results)) = pending.remove(&next_expected) {
+                next_expected += 1;
+                let results = match results {
+                    Ok(results) => results,
+                    Err(error) => {
+                        stop.store(true, Ordering::Relaxed);
+                        return Err(error);
                     }
-                    let key = format!("{classification:?}");
-                    let saved = report.should_save(&key);
-                    let path = if saved {
-                        Some(
-                            Artifact::new(case_seed, program, source, result.clone())
-                                .save(&root)?,
-                        )
-                    } else {
-                        None
-                    };
-                    report.record_bug(key, case_seed, path);
+                };
+                for ((program, source), result) in programs.into_iter().zip(sources).zip(results) {
+                    let case_seed = program.seed;
+                    match &result.classification {
+                        Classification::Match => {
+                            report.matched += 1;
+                            if report.matched % 100 == 0
+                                || last_progress.elapsed() >= PROGRESS_INTERVAL
+                            {
+                                print_campaign_progress(
+                                    report.matched,
+                                    options.cases,
+                                    case_seed,
+                                    started.elapsed(),
+                                );
+                                last_progress = Instant::now();
+                            }
+                        }
+                        Classification::InterpreterUnsupported => {
+                            report.record_gap(&result);
+                        }
+                        classification => {
+                            if options.stop_on_first {
+                                stop.store(true, Ordering::Relaxed);
+                                stop_and_reduce(
+                                    &runner, &root, case_seed, program, source, result,
+                                )?;
+                                unreachable!("stop_and_reduce always fails");
+                            }
+                            let key = bucket_key(classification, &result);
+                            let saved = report.should_save(&key);
+                            let path = if saved {
+                                Some(
+                                    Artifact::new(case_seed, program, source, result.clone())
+                                        .save(&root)?,
+                                )
+                            } else {
+                                None
+                            };
+                            report.record_bug(key, case_seed, path);
+                        }
+                    }
+                    report.checked += 1;
                 }
-            }
-            report.checked += 1;
-            if report.checked >= cases {
-                break 'campaign;
             }
         }
-        offset += batch_size;
-    }
+        Ok(report)
+    })?;
 
     report.print(started.elapsed());
-    Ok(())
+    Ok(if report.bugs.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        // Real divergences fail the run so a scheduled campaign can gate on
+        // the exit code. Gaps alone stay green.
+        ExitCode::FAILURE
+    })
+}
+
+/// Buckets group findings by the concrete failure, not only its kind, so two
+/// different bugs with the same classification are reported separately.
+fn bucket_key(classification: &Classification, result: &RunResult) -> String {
+    let signature = result.signature();
+    if signature.is_empty() {
+        format!("{classification:?}")
+    } else {
+        format!("{classification:?} @ {signature}")
+    }
 }
 
 const MAX_SEEDS_PER_GROUP: usize = 8;
@@ -138,8 +226,8 @@ const MAX_ARTIFACTS_PER_GROUP: usize = 3;
 struct CampaignReport {
     checked: usize,
     matched: usize,
-    gaps: std::collections::BTreeMap<String, usize>,
-    bugs: std::collections::BTreeMap<String, BugGroup>,
+    gaps: BTreeMap<String, usize>,
+    bugs: BTreeMap<String, BugGroup>,
 }
 
 #[derive(Default)]
@@ -151,8 +239,7 @@ struct BugGroup {
 
 impl CampaignReport {
     fn record_gap(&mut self, result: &RunResult) {
-        let message = gap_message(&result.interpreted.stderr);
-        *self.gaps.entry(message).or_default() += 1;
+        *self.gaps.entry(result.signature()).or_default() += 1;
     }
 
     fn should_save(&self, key: &str) -> bool {
@@ -209,17 +296,6 @@ impl CampaignReport {
     }
 }
 
-/// The first meaningful line of an interpreter error, used to group gaps by the
-/// missing feature rather than by the exact values in the message.
-fn gap_message(stderr: &str) -> String {
-    stderr
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty() && *line != "Error:")
-        .unwrap_or("unknown gap")
-        .to_string()
-}
-
 fn stop_and_reduce(
     runner: &Runner,
     root: &std::path::Path,
@@ -227,12 +303,11 @@ fn stop_and_reduce(
     program: Program,
     source: String,
     result: RunResult,
-) -> anyhow::Result<()> {
+) -> Result<()> {
     let artifact = Artifact::new(case_seed, program, source, result);
     let path = artifact.save(root)?;
     println!("seed {case_seed} differs; minimizing the saved case");
-    let (program, result) =
-        reduce_with_cli_progress(runner, &artifact.program, &artifact.result.classification)?;
+    let (program, result) = reduce_with_cli_progress(runner, &artifact.program, &artifact.result)?;
     let reduced = Artifact::new(case_seed, program.clone(), program.render(), result);
     let artifact_dir = path
         .parent()
@@ -245,13 +320,13 @@ fn stop_and_reduce(
     );
 }
 
-fn generate_one(args: &[String]) -> anyhow::Result<()> {
+fn generate_one(args: &[String]) -> Result<()> {
     let seed = parse_seed(args)?;
     print!("{}", generate(seed).render());
     Ok(())
 }
 
-fn mutate_artifact(args: &[String]) -> anyhow::Result<()> {
+fn mutate_artifact(args: &[String]) -> Result<()> {
     let [path, option, seed] = args else {
         anyhow::bail!("usage: rustscript-differential mutate ARTIFACT --seed SEED");
     };
@@ -267,7 +342,7 @@ fn mutate_artifact(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn replay(args: &[String]) -> anyhow::Result<()> {
+fn replay(args: &[String]) -> Result<()> {
     let path = required_path(args, "replay")?;
     let artifact = Artifact::load(&path)?;
     let runner = Runner::build(&workspace_root(), 2_000)?;
@@ -277,23 +352,19 @@ fn replay(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn reduce_artifact(args: &[String]) -> anyhow::Result<()> {
+fn reduce_artifact(args: &[String]) -> Result<()> {
     let path = required_path(args, "reduce")?;
     let artifact = Artifact::load(&path)?;
     let runner = Runner::build(&workspace_root(), 2_000)?;
     let current = runner.run_source(&artifact.source)?;
-    if !current
-        .classification
-        .same_failure(&artifact.result.classification)
-    {
+    if !current.same_failure(&artifact.result) {
         anyhow::bail!(
             "failure changed from {:?} to {:?}",
             artifact.result.classification,
             current.classification
         );
     }
-    let (program, result) =
-        reduce_with_cli_progress(&runner, &artifact.program, &current.classification)?;
+    let (program, result) = reduce_with_cli_progress(&runner, &artifact.program, &current)?;
     let reduced = Artifact::new(artifact.seed, program.clone(), program.render(), result);
     let parent = path
         .parent()
@@ -314,8 +385,8 @@ fn print_campaign_progress(completed: usize, total: usize, seed: u64, elapsed: D
 fn reduce_with_cli_progress(
     runner: &Runner,
     program: &Program,
-    target: &Classification,
-) -> anyhow::Result<(Program, RunResult)> {
+    target: &RunResult,
+) -> Result<(Program, RunResult)> {
     let started = Instant::now();
     let mut last_progress = started;
     let mut final_progress = ReductionProgress::default();
@@ -342,7 +413,7 @@ fn reduce_with_cli_progress(
     Ok(result)
 }
 
-fn promote(args: &[String]) -> anyhow::Result<()> {
+fn promote(args: &[String]) -> Result<()> {
     if args.len() != 2 {
         anyhow::bail!("usage: rustscript-differential promote ARTIFACT NAME");
     }
@@ -359,9 +430,16 @@ fn promote(args: &[String]) -> anyhow::Result<()> {
             current.classification
         );
     }
-    let destination = root
-        .join("crates/examples/examples")
-        .join(format!("{name}.rs"));
+    // A case whose correct behavior is a panic cannot live under examples,
+    // the equivalence suite requires a clean exit there. It goes into the
+    // differential corpus, which compares panicking runs too.
+    let destination = if current.native.status == Some(0) {
+        root.join("crates/examples/examples")
+            .join(format!("{name}.rs"))
+    } else {
+        root.join("crates/differential/corpus")
+            .join(format!("{name}.rs"))
+    };
     if destination.exists() {
         anyhow::bail!("{} already exists", destination.display());
     }
@@ -370,21 +448,21 @@ fn promote(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn parse_seed(args: &[String]) -> anyhow::Result<u64> {
+fn parse_seed(args: &[String]) -> Result<u64> {
     match args {
         [option, seed] if option == "--seed" => Ok(seed.parse()?),
         _ => anyhow::bail!("usage: rustscript-differential generate --seed SEED"),
     }
 }
 
-fn required_path(args: &[String], command: &str) -> anyhow::Result<std::path::PathBuf> {
+fn required_path(args: &[String], command: &str) -> Result<std::path::PathBuf> {
     match args {
         [path] => Ok(std::path::PathBuf::from(path)),
         _ => anyhow::bail!("usage: rustscript-differential {command} ARTIFACT"),
     }
 }
 
-fn validate_name(name: &str) -> anyhow::Result<()> {
+fn validate_name(name: &str) -> Result<()> {
     let valid = !name.is_empty()
         && name
             .bytes()
@@ -396,7 +474,7 @@ fn validate_name(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn print_outputs(result: &rustscript_differential::runner::RunResult) {
+fn print_outputs(result: &RunResult) {
     println!("-- native stdout --\n{}", result.native.stdout);
     println!("-- native stderr --\n{}", result.native.stderr);
     println!("-- interpreted stdout --\n{}", result.interpreted.stdout);

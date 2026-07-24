@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::slice::from_ref;
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 
 use super::Interp;
 use super::builtins::{as_closure, option_inner};
@@ -503,6 +503,7 @@ impl Interp {
                 Value::Int(count)
             }
             B::Sum => self.iterator_sum(iterator)?,
+            B::Product => self.iterator_product(iterator)?,
             _ => match method.text.as_str() {
                 "next" => self
                     .iterator_next(iterator)?
@@ -698,7 +699,11 @@ impl Interp {
         let mut has_float = false;
         while let Some(value) = self.iterator_next(iterator)? {
             match value {
-                Value::Int(value) => integers += value,
+                Value::Int(value) => {
+                    integers = integers
+                        .checked_add(value)
+                        .ok_or_else(|| anyhow!("attempt to add with overflow"))?;
+                }
                 Value::Float(value) => {
                     floats += value;
                     has_float = true;
@@ -708,6 +713,31 @@ impl Interp {
         }
         Ok(if has_float {
             Value::Float(floats + integers as f64)
+        } else {
+            Value::Int(integers)
+        })
+    }
+
+    fn iterator_product(&self, iterator: &Handle) -> Result<Value> {
+        let mut integers = 1i64;
+        let mut floats = 1f64;
+        let mut has_float = false;
+        while let Some(value) = self.iterator_next(iterator)? {
+            match value {
+                Value::Int(value) => {
+                    integers = integers
+                        .checked_mul(value)
+                        .ok_or_else(|| anyhow!("attempt to multiply with overflow"))?;
+                }
+                Value::Float(value) => {
+                    floats *= value;
+                    has_float = true;
+                }
+                other => bail!("product needs numbers, got {}", other.type_name()),
+            }
+        }
+        Ok(if has_float {
+            Value::Float(floats * integers as f64)
         } else {
             Value::Int(integers)
         })

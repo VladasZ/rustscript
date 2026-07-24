@@ -1,0 +1,66 @@
+name: Differential
+
+# Nightly differential campaign. The base seed derives from the date, so
+# every night explores a fresh disjoint seed range with no state to track,
+# and each OS adds its own offset so three jobs cover three times the
+# programs. Rerunning a night reproduces the exact same cases, and any
+# finding replays locally with `generate --seed N`.
+
+on:
+  schedule:
+    - cron: "20 2 * * *"
+  workflow_dispatch:
+    inputs:
+      cases:
+        description: Cases per OS
+        default: "20000"
+      seed:
+        description: Base seed, empty derives it from the date
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  differential:
+    name: Differential ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            offset: 0
+          - os: macos-latest
+            offset: 100000
+          - os: windows-latest
+            offset: 200000
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      - name: Run campaign
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.seed }}" ]; then
+            base="${{ inputs.seed }}"
+          else
+            base=$(( $(date -u +%s) / 86400 * 1000000 ))
+          fi
+          seed=$(( base + ${{ matrix.offset }} ))
+          cases="${{ inputs.cases }}"
+          echo "running ${cases:-20000} cases from seed $seed"
+          cargo run --release -p rustscript-differential -- run \
+            --seed "$seed" \
+            --cases "${cases:-20000}" \
+            --timeout-ms 10000
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: differential-failures-${{ matrix.os }}
+          path: target/rustscript-differential/failures
+          if-no-files-found: ignore

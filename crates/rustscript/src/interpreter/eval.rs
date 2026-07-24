@@ -231,10 +231,13 @@ impl Interp {
                     Ok(Err(Value::none()))
                 }
             }
-            other => bail!(
-                "the `?` operator needs a Result or Option, got {}",
-                other.type_name()
-            ),
+            // A json accessor hands its value back already unwrapped, a json
+            // string is a plain String here. Let `?` pass it through as its
+            // own Some, the rule match, if let, and or_else already follow,
+            // see the json_option example. Scripts pass a real cargo check,
+            // so `?` never reaches a value that is not Option or Result in
+            // the source types.
+            other => Ok(Ok(other)),
         }
     }
 

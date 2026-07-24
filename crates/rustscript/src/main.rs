@@ -37,7 +37,20 @@ fn main() {
             eprintln!("Error: {}", r.0);
             exit(1);
         }
-        eprintln!("rust error: {e:#}");
+        // A missing-feature error gets a stable machine-readable prefix so
+        // tooling like the differential harness can separate interpreter
+        // gaps from real failures without guessing. The wording check lives
+        // here, next to the messages it matches, and both ship in one
+        // binary, so the contract cannot drift.
+        let rendered = format!("{e:#}");
+        if rendered.contains("unsupported")
+            || rendered.contains("not supported")
+            || rendered.contains("not implemented by")
+        {
+            eprintln!("rust unsupported: {rendered}");
+        } else {
+            eprintln!("rust error: {rendered}");
+        }
         exit(1);
     }
 }

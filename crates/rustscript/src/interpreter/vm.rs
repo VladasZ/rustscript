@@ -13,7 +13,9 @@ use std::rc::Rc;
 use anyhow::{Result, anyhow, bail};
 
 use super::Interp;
-use super::bytecode::{BuiltinId, CapSource, Chunk, DISCARD, MacroKind, MethodName, Op};
+use super::bytecode::{
+    BinKind, BuiltinId, CapSource, Chunk, DISCARD, MacroKind, MethodName, Op, overflow_message,
+};
 use super::value::{ClosureData, StructShape, Upvalue, Value};
 use super::vm_support::{int_of, set_reg, take_range, trace_error};
 
@@ -817,6 +819,24 @@ impl Interp {
                             &cur.casts[*ty as usize],
                         )?;
                         set_reg(&mut stack[base + *dst as usize], v);
+                    }
+                    Op::NarrowGuard { src, ty, op } => {
+                        if let Value::Int(i) = &stack[base + *src as usize] {
+                            let (min, max) = ty.bounds();
+                            if *i < min || *i > max {
+                                bail!("{}", overflow_message(*op));
+                            }
+                        }
+                    }
+                    Op::NarrowRemGuard { left, right, ty } => {
+                        if let (Value::Int(l), Value::Int(r)) = (
+                            &stack[base + *left as usize],
+                            &stack[base + *right as usize],
+                        ) && *l == ty.bounds().0
+                            && *r == -1
+                        {
+                            bail!("{}", overflow_message(BinKind::Rem));
+                        }
                     }
                     Op::Coerce { dst, src, ty } => {
                         let v = self.coerce_value(

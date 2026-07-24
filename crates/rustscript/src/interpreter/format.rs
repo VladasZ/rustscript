@@ -75,86 +75,217 @@ fn resolve_arg(
         .ok_or_else(|| anyhow!("`{arg_ref}` not found for format string"))
 }
 
-/// Apply a subset of the format spec: debug flag, precision, width, and fill.
+/// Apply the format spec to an already-evaluated value.
 fn format_value(value: &Value, spec: &str) -> Result<String> {
     let number = match value {
-        Value::Float(f) => Some(*f),
-        Value::Int(i) => Some(*i as f64),
+        Value::Float(f) => Some(SpecNumber::Float(*f)),
+        Value::Int(i) => Some(SpecNumber::Int(*i)),
         _ => None,
     };
     Ok(apply_spec(spec, &value.display(), &value.debug(), number))
 }
 
-/// Apply the precision, width, alignment and fill parts of a spec to a value
-/// that has already been rendered. Shared by both engines so a script formats
-/// the same whichever one runs it.
-pub(super) fn apply_spec(spec: &str, display: &str, debug: &str, number: Option<f64>) -> String {
-    let is_debug = spec.contains('?');
-    let spec = spec.replace(['#', '?'], "");
-
-    let mut base = if is_debug {
-        debug.to_string()
-    } else {
-        // Precision applies to numbers as decimal places.
-        match (spec.split_once('.'), number) {
-            (Some((_, prec)), Some(f)) => {
-                let prec: usize = prec
-                    .trim_end_matches(|c: char| !c.is_ascii_digit())
-                    .parse()
-                    .unwrap_or(0);
-                format!("{f:.prec$}")
-            }
-            _ => display.to_string(),
-        }
-    };
-    let value_is_numeric = number.is_some();
-
-    // Width and alignment, `{:>8}`, `{:<8}`, `{:^8}`, `{:08}`. Numbers default
-    // to right aligned and everything else to left, same as real Rust.
-    let numeric = value_is_numeric;
-    let width_part = spec.split('.').next().unwrap_or("");
-    let (align, rest) = split_align(width_part, numeric);
-    let zero = rest.starts_with('0');
-    let rest = rest.trim_start_matches('0');
-    if let Ok(width) = rest.parse::<usize>()
-        && base.len() < width
-    {
-        let pad = width - base.len();
-        let fill = if zero && align == '>' { '0' } else { ' ' };
-        match align {
-            '<' => base = format!("{base}{}", fill_str(fill, pad)),
-            '^' => {
-                let left = pad / 2;
-                base = format!(
-                    "{}{base}{}",
-                    fill_str(fill, left),
-                    fill_str(fill, pad - left)
-                );
-            }
-            _ => base = format!("{}{base}", fill_str(fill, pad)),
-        }
-    }
-    base
+/// The numeric identity of a formatted value. Radix forms need the exact
+/// integer, an f64 would lose the low bits past 2^53, and integers must
+/// ignore precision where floats round by it.
+#[derive(Clone, Copy)]
+pub(super) enum SpecNumber {
+    Int(i64),
+    Float(f64),
 }
 
-fn split_align(spec: &str, numeric: bool) -> (char, &str) {
-    let mut chars = spec.chars();
-    // An explicit fill character sits before the alignment, as in `{:*>8}`.
-    let rest = chars.as_str();
-    if let Some(a) = chars.clone().nth(1)
-        && matches!(a, '<' | '>' | '^')
-        && let Some(fill) = chars.next()
-        && fill != '<'
-        && fill != '>'
-        && fill != '^'
-    {
-        chars.next();
-        return (a, chars.as_str());
+/// One parsed `{:...}` spec: `[[fill]align][+][#][0][width][.precision][type]`.
+struct ParsedSpec {
+    fill: char,
+    align: Option<char>,
+    plus: bool,
+    alternate: bool,
+    zero: bool,
+    width: Option<usize>,
+    precision: Option<usize>,
+    debug: bool,
+    ty: Option<char>,
+}
+
+fn parse_spec(spec: &str) -> ParsedSpec {
+    let chars: Vec<char> = spec.chars().collect();
+    let mut parsed = ParsedSpec {
+        fill: ' ',
+        align: None,
+        plus: false,
+        alternate: false,
+        zero: false,
+        width: None,
+        precision: None,
+        debug: false,
+        ty: None,
+    };
+    let mut index = 0;
+    let is_align = |c: char| matches!(c, '<' | '>' | '^');
+    if chars.len() > index + 1 && is_align(chars[index + 1]) {
+        parsed.fill = chars[index];
+        parsed.align = Some(chars[index + 1]);
+        index += 2;
+    } else if chars.get(index).copied().is_some_and(is_align) {
+        parsed.align = Some(chars[index]);
+        index += 1;
     }
-    let mut chars = rest.chars();
-    match chars.next() {
-        Some(a @ ('<' | '>' | '^')) => (a, chars.as_str()),
-        _ => (if numeric { '>' } else { '<' }, rest),
+    if chars.get(index) == Some(&'+') {
+        parsed.plus = true;
+        index += 1;
+    }
+    // `-` is accepted by real Rust and does nothing.
+    if chars.get(index) == Some(&'-') {
+        index += 1;
+    }
+    if chars.get(index) == Some(&'#') {
+        parsed.alternate = true;
+        index += 1;
+    }
+    if chars.get(index) == Some(&'0') {
+        parsed.zero = true;
+        index += 1;
+    }
+    let mut width = String::new();
+    while chars.get(index).is_some_and(char::is_ascii_digit) {
+        width.push(chars[index]);
+        index += 1;
+    }
+    if !width.is_empty() {
+        parsed.width = width.parse().ok();
+    }
+    if chars.get(index) == Some(&'.') {
+        index += 1;
+        let mut precision = String::new();
+        while chars.get(index).is_some_and(char::is_ascii_digit) {
+            precision.push(chars[index]);
+            index += 1;
+        }
+        parsed.precision = Some(precision.parse().unwrap_or(0));
+    }
+    for &c in &chars[index.min(chars.len())..] {
+        match c {
+            '?' => parsed.debug = true,
+            'x' | 'X' | 'o' | 'b' | 'e' | 'E' => parsed.ty = Some(c),
+            _ => {}
+        }
+    }
+    parsed
+}
+
+/// Apply a spec to a value that has already been rendered. Shared by both
+/// engines so a script formats the same whichever one runs it. Covers debug,
+/// precision, width, fill, alignment, sign, sign-aware zero padding, radix
+/// and exponent types, and their `#` alternate forms.
+pub(super) fn apply_spec(
+    spec: &str,
+    display: &str,
+    debug: &str,
+    number: Option<SpecNumber>,
+) -> String {
+    let parsed = parse_spec(spec);
+    let mut base = render_base(&parsed, display, debug, number);
+
+    // NaN ignores the sign flag entirely, `{:+}` of NaN is still `NaN`,
+    // while infinities do take it.
+    let is_nan = matches!(number, Some(SpecNumber::Float(f)) if f.is_nan());
+    if parsed.plus && number.is_some() && !is_nan && !base.starts_with('-') {
+        base.insert(0, '+');
+    }
+    if parsed.alternate
+        && let Some(ty @ ('x' | 'X' | 'o' | 'b')) = parsed.ty
+        && matches!(number, Some(SpecNumber::Int(_)))
+    {
+        let prefix = match ty {
+            'x' | 'X' => "0x",
+            'o' => "0o",
+            _ => "0b",
+        };
+        let after_sign = usize::from(base.starts_with('+') || base.starts_with('-'));
+        base.insert_str(after_sign, prefix);
+    }
+
+    let Some(target) = parsed.width else {
+        return base;
+    };
+    let current = base.chars().count();
+    if current >= target {
+        return base;
+    }
+    let pad = target - current;
+    // The zero flag pads after the sign and radix prefix, `{:+06}` gives
+    // `+00013` and `{:#010x}` gives `0x000000ff`, unlike an explicit fill.
+    if parsed.zero && parsed.align.is_none() && number.is_some() {
+        let mut cut = usize::from(base.starts_with('+') || base.starts_with('-'));
+        if base[cut..].starts_with("0x")
+            || base[cut..].starts_with("0o")
+            || base[cut..].starts_with("0b")
+        {
+            cut += 2;
+        }
+        base.insert_str(cut, &fill_str('0', pad));
+        return base;
+    }
+    let align = parsed
+        .align
+        .unwrap_or(if number.is_some() { '>' } else { '<' });
+    let fill = parsed.fill;
+    match align {
+        '<' => format!("{base}{}", fill_str(fill, pad)),
+        '^' => {
+            let left = pad / 2;
+            format!(
+                "{}{base}{}",
+                fill_str(fill, left),
+                fill_str(fill, pad - left)
+            )
+        }
+        _ => format!("{}{base}", fill_str(fill, pad)),
+    }
+}
+
+/// The unpadded rendering: type conversion and precision, no width yet.
+fn render_base(
+    parsed: &ParsedSpec,
+    display: &str,
+    debug: &str,
+    number: Option<SpecNumber>,
+) -> String {
+    if parsed.debug {
+        return debug.to_string();
+    }
+    match (parsed.ty, number) {
+        (Some('x'), Some(SpecNumber::Int(i))) => format!("{i:x}"),
+        (Some('X'), Some(SpecNumber::Int(i))) => format!("{i:X}"),
+        (Some('o'), Some(SpecNumber::Int(i))) => format!("{i:o}"),
+        (Some('b'), Some(SpecNumber::Int(i))) => format!("{i:b}"),
+        (Some('e'), Some(SpecNumber::Int(i))) => match parsed.precision {
+            Some(precision) => format!("{i:.precision$e}"),
+            None => format!("{i:e}"),
+        },
+        (Some('e'), Some(SpecNumber::Float(f))) => match parsed.precision {
+            Some(precision) => format!("{f:.precision$e}"),
+            None => format!("{f:e}"),
+        },
+        (Some('E'), Some(SpecNumber::Int(i))) => match parsed.precision {
+            Some(precision) => format!("{i:.precision$E}"),
+            None => format!("{i:E}"),
+        },
+        (Some('E'), Some(SpecNumber::Float(f))) => match parsed.precision {
+            Some(precision) => format!("{f:.precision$E}"),
+            None => format!("{f:E}"),
+        },
+        (_, Some(SpecNumber::Float(f))) => match parsed.precision {
+            Some(precision) => format!("{f:.precision$}"),
+            None => display.to_string(),
+        },
+        // Integer Display ignores precision.
+        (_, Some(SpecNumber::Int(_))) => display.to_string(),
+        // String precision truncates to that many characters.
+        (_, None) => match parsed.precision {
+            Some(precision) => display.chars().take(precision).collect(),
+            None => display.to_string(),
+        },
     }
 }
 

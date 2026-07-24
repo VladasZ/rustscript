@@ -50,6 +50,56 @@ pub enum BinKind {
     Shr,
 }
 
+/// The narrow integer types whose debug-Rust arithmetic the interpreter can
+/// reproduce exactly with an i64 range check. u64 and usize are absent
+/// because their range does not fit an i64.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NarrowTy {
+    U8,
+    U16,
+    U32,
+    I8,
+    I16,
+    I32,
+}
+
+impl NarrowTy {
+    pub fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "u8" => Self::U8,
+            "u16" => Self::U16,
+            "u32" => Self::U32,
+            "i8" => Self::I8,
+            "i16" => Self::I16,
+            "i32" => Self::I32,
+            _ => return None,
+        })
+    }
+
+    pub fn bounds(self) -> (i64, i64) {
+        match self {
+            Self::U8 => (0, u8::MAX as i64),
+            Self::U16 => (0, u16::MAX as i64),
+            Self::U32 => (0, u32::MAX as i64),
+            Self::I8 => (i8::MIN as i64, i8::MAX as i64),
+            Self::I16 => (i16::MIN as i64, i16::MAX as i64),
+            Self::I32 => (i32::MIN as i64, i32::MAX as i64),
+        }
+    }
+}
+
+/// The verb real Rust uses in the overflow panic for each arithmetic op.
+pub fn overflow_message(op: BinKind) -> &'static str {
+    match op {
+        BinKind::Add => "attempt to add with overflow",
+        BinKind::Sub => "attempt to subtract with overflow",
+        BinKind::Mul => "attempt to multiply with overflow",
+        BinKind::Div => "attempt to divide with overflow",
+        BinKind::Rem => "attempt to calculate the remainder with overflow",
+        _ => "attempt to compute with overflow",
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum UnKind {
     Neg,
@@ -133,6 +183,7 @@ pub enum BuiltinId {
     Join,
     Concat,
     Sum,
+    Product,
     Enumerate,
     Rev,
     Count,
@@ -219,6 +270,7 @@ impl BuiltinId {
             "join" => Join,
             "concat" => Concat,
             "sum" => Sum,
+            "product" => Product,
             "enumerate" => Enumerate,
             "rev" => Rev,
             "count" => Count,
@@ -608,6 +660,23 @@ pub enum Op {
         dst: Reg,
         src: Reg,
         ty: u16,
+    },
+    /// Panic when an integer result left a narrow type's range. Emitted after
+    /// arithmetic whose operands are statically narrow, `(a as u8) + (b as
+    /// u8)`, where compiled Rust computes in u8 and panics on overflow while
+    /// the interpreter computes in i64 and would sail past it.
+    NarrowGuard {
+        src: Reg,
+        ty: NarrowTy,
+        op: BinKind,
+    },
+    /// Panic before a narrow `%` whose operands are `MIN` and `-1`. That pair
+    /// overflows in compiled Rust, but its i64 remainder is 0, inside every
+    /// range, so the result check above cannot see it.
+    NarrowRemGuard {
+        left: Reg,
+        right: Reg,
+        ty: NarrowTy,
     },
     /// Coerce a dynamic value into an annotated type, `let c: Config = ..`.
     Coerce {

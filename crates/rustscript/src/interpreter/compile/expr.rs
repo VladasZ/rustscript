@@ -449,15 +449,42 @@ impl Compiler<'_> {
             _ => {}
         }
         let op = bin_kind(&b.op).ok_or_else(|| anyhow!("unsupported operator {:?}", b.op))?;
+        let guard = matches!(
+            op,
+            BinKind::Add | BinKind::Sub | BinKind::Mul | BinKind::Div | BinKind::Rem
+        )
+        .then(|| narrow_type_of(&b.left).zip(narrow_type_of(&b.right)))
+        .flatten()
+        .and_then(|(left, right)| (left == right).then_some(left));
         let a = self.compile_expr(&b.left)?;
-        if let Some(imm) = int_literal(&b.right) {
+        if let Some(imm) = int_literal(&b.right)
+            && guard.is_none()
+        {
             self.emit(Op::BinImm { dst, a, imm, op });
             return Ok(());
         }
         let c = self.compile_expr(&b.right)?;
+        // A narrow `MIN % -1` overflows in compiled Rust but its i64 result
+        // is 0, inside every range, so the remainder checks its operands
+        // before the op runs.
+        if let (Some(ty), BinKind::Rem) = (guard, op) {
+            self.emit(Op::NarrowRemGuard {
+                left: a,
+                right: c,
+                ty,
+            });
+        }
         self.emit(Op::Bin { dst, a, b: c, op });
+        // Both operands are statically a narrow integer type, so compiled
+        // Rust computes in that width and panics when the result leaves it.
+        // The i64 result is range checked to reproduce that panic.
+        if let Some(ty) = guard {
+            self.emit(Op::NarrowGuard { src: dst, ty, op });
+        }
         Ok(())
     }
+
+    // -- statements ----------------------------------------------------------
 
     /// Compile a branch condition and emit the jump taken when it is false,
     /// returning the jump's index for patching. A plain comparison becomes a

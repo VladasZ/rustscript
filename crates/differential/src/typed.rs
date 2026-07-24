@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub enum GeneratedType {
     I64,
+    F64,
     Bool,
     String,
     VecI64,
@@ -15,6 +16,7 @@ impl GeneratedType {
     pub fn rust(self) -> &'static str {
         match self {
             Self::I64 => "i64",
+            Self::F64 => "f64",
             Self::Bool => "bool",
             Self::String => "String",
             Self::VecI64 => "Vec<i64>",
@@ -22,8 +24,33 @@ impl GeneratedType {
         }
     }
 
-    fn is_owned(self) -> bool {
+    pub(crate) fn is_owned(self) -> bool {
         matches!(self, Self::String | Self::VecI64)
+    }
+}
+
+/// Plain `+ - * / %` applied in a narrow integer type between two casts from
+/// i64. Overflow panics under the compiler's debug semantics and division by
+/// zero panics in any width, both places an interpreter that computes in i64
+/// can silently diverge.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum NarrowOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+}
+
+impl NarrowOp {
+    pub(crate) fn token(self) -> &'static str {
+        match self {
+            Self::Add => "+",
+            Self::Sub => "-",
+            Self::Mul => "*",
+            Self::Div => "/",
+            Self::Rem => "%",
+        }
     }
 }
 
@@ -43,7 +70,7 @@ pub enum IntCast {
 }
 
 impl IntCast {
-    fn rust(self) -> &'static str {
+    pub(crate) fn rust(self) -> &'static str {
         match self {
             Self::U8 => "u8",
             Self::U16 => "u16",
@@ -161,6 +188,39 @@ pub enum GeneratedExpr {
     },
     /// `option.unwrap()`, which panics on `None`.
     Unwrap(Box<Self>),
+    /// An f64 literal kept as its exact source token, so serialization and
+    /// equality stay simple and the rendered program reproduces the value bit
+    /// for bit. Tokens containing `::` are constants such as `f64::NAN`.
+    F64(String),
+    FAdd(Box<Self>, Box<Self>),
+    FSub(Box<Self>, Box<Self>),
+    FMul(Box<Self>, Box<Self>),
+    /// Float division never panics; a zero divisor gives infinity or NaN.
+    FDiv(Box<Self>, Box<Self>),
+    FLess(Box<Self>, Box<Self>),
+    FEq(Box<Self>, Box<Self>),
+    /// `(value as f64)`.
+    I64ToF64(Box<Self>),
+    /// `(value as i64)`, which saturates and maps NaN to zero in real Rust.
+    F64ToI64(Box<Self>),
+    /// `format!("{}", value)` over an f64, the Display path.
+    FormatF64(Box<Self>),
+    /// `format!("{:?}", value)` over an f64, the Debug path, where whole
+    /// numbers must keep their `.0`.
+    DebugF64(Box<Self>),
+    /// See [`NarrowOp`].
+    NarrowArith {
+        target: IntCast,
+        op: NarrowOp,
+        left: Box<Self>,
+        right: Box<Self>,
+    },
+    /// `format!("{SPEC}", value)` with a non-trivial format spec, width, fill,
+    /// alignment, sign, zero padding, precision, radix, or exponent.
+    FormatSpec {
+        spec: String,
+        value: Box<Self>,
+    },
 }
 
 impl GeneratedExpr {
@@ -187,19 +247,32 @@ impl GeneratedExpr {
             | Self::RawDiv(..)
             | Self::RawRem(..)
             | Self::Index { .. }
-            | Self::Unwrap(_) => GeneratedType::I64,
+            | Self::Unwrap(_)
+            | Self::F64ToI64(_)
+            | Self::NarrowArith { .. } => GeneratedType::I64,
+            Self::F64(_)
+            | Self::FAdd(..)
+            | Self::FSub(..)
+            | Self::FMul(..)
+            | Self::FDiv(..)
+            | Self::I64ToF64(_) => GeneratedType::F64,
             Self::Bool(_)
             | Self::Equal(..)
             | Self::Less(..)
             | Self::And(..)
             | Self::Or(..)
             | Self::Not(_)
+            | Self::FLess(..)
+            | Self::FEq(..)
             | Self::OptionIsSome(_) => GeneratedType::Bool,
             Self::Text(_)
             | Self::Concat(..)
             | Self::Uppercase(_)
             | Self::Replace { .. }
             | Self::FormatI64(_)
+            | Self::FormatF64(_)
+            | Self::DebugF64(_)
+            | Self::FormatSpec { .. }
             | Self::DebugVec(_) => GeneratedType::String,
             Self::VecLiteral(_)
             | Self::VecMap { .. }
@@ -213,161 +286,6 @@ impl GeneratedExpr {
             | Self::If { ty, .. }
             | Self::MatchOption { ty, .. }
             | Self::ClosureCall { ty, .. } => *ty,
-        }
-    }
-
-    pub fn render(&self) -> String {
-        match self {
-            // `-9223372036854775808i64` overflows the literal and will not
-            // parse, so the minimum is written through its associated constant.
-            Self::I64(i64::MIN) => "i64::MIN".to_string(),
-            Self::I64(value) => format!("{value}i64"),
-            Self::Bool(value) => value.to_string(),
-            Self::Text(value) => format!("{value:?}.to_string()"),
-            Self::Variable { name, ty } if ty.is_owned() => format!("{name}.clone()"),
-            Self::Variable { name, .. } => name.clone(),
-            Self::Add(left, right) => {
-                format!("{}.saturating_add({})", grouped(left), right.render())
-            }
-            Self::Subtract(left, right) => {
-                format!("{}.saturating_sub({})", grouped(left), right.render())
-            }
-            Self::Multiply(left, right) => {
-                format!("{}.saturating_mul({})", grouped(left), right.render())
-            }
-            Self::Equal(left, right) => format!("({} == {})", grouped(left), grouped(right)),
-            Self::Less(left, right) => format!("({} < {})", grouped(left), grouped(right)),
-            Self::And(left, right) => format!("({} && {})", left.render(), right.render()),
-            Self::Or(left, right) => format!("({} || {})", left.render(), right.render()),
-            Self::Not(value) => format!("!{}", grouped(value)),
-            Self::If {
-                condition,
-                then_expr,
-                else_expr,
-                ..
-            } => format!(
-                "if {} {{ {} }} else {{ {} }}",
-                condition.render(),
-                then_expr.render(),
-                else_expr.render()
-            ),
-            Self::Concat(left, right) => {
-                format!(
-                    "format!(\"{{}}{{}}\", {}, {})",
-                    left.render(),
-                    right.render()
-                )
-            }
-            Self::Uppercase(value) => format!("{}.to_uppercase()", grouped(value)),
-            Self::Replace { value, from, to } => {
-                format!("{}.replace({from:?}, {to:?})", grouped(value))
-            }
-            Self::FormatI64(value) => format!("format!(\"{{}}\", {})", value.render()),
-            Self::DebugVec(value) => format!("format!(\"{{:?}}\", {})", value.render()),
-            Self::VecLiteral(values) => {
-                if values.is_empty() {
-                    return "Vec::<i64>::new()".to_string();
-                }
-                let values = values
-                    .iter()
-                    .map(Self::render)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("vec![{values}]")
-            }
-            Self::VecMap {
-                values,
-                binding,
-                body,
-            } => format!(
-                "{}.into_iter().map(|{binding}: i64| {}).collect::<Vec<i64>>()",
-                grouped(values),
-                body.render()
-            ),
-            Self::VecFilter {
-                values,
-                binding,
-                predicate,
-            } => format!(
-                "{}.into_iter().filter(|generated_ref| {{ let {binding} = *generated_ref; {} }}).collect::<Vec<i64>>()",
-                grouped(values),
-                predicate.render()
-            ),
-            Self::VecReverse(values) => format!(
-                "{{ let mut generated_values = {}; generated_values.reverse(); generated_values }}",
-                values.render()
-            ),
-            Self::VecAppend { values, value } => format!(
-                "{{ let mut generated_values = {}; generated_values.push({}); generated_values }}",
-                values.render(),
-                value.render()
-            ),
-            Self::VecLen(values) => format!("{}.len() as i64", grouped(values)),
-            Self::VecGetOr {
-                values,
-                index,
-                default,
-            } => format!(
-                "{}.get({index}usize).copied().unwrap_or({})",
-                grouped(values),
-                default.render()
-            ),
-            Self::Some(value) => format!("Some({})", value.render()),
-            Self::None => "None::<i64>".to_string(),
-            Self::OptionMap {
-                option,
-                binding,
-                body,
-            } => format!(
-                "{}.map(|{binding}: i64| {})",
-                grouped(option),
-                body.render()
-            ),
-            Self::OptionFilter {
-                option,
-                binding,
-                predicate,
-            } => format!(
-                "{}.filter(|generated_ref| {{ let {binding} = *generated_ref; {} }})",
-                grouped(option),
-                predicate.render()
-            ),
-            Self::OptionUnwrapOr { option, default } => {
-                format!("{}.unwrap_or({})", grouped(option), default.render())
-            }
-            Self::OptionIsSome(option) => format!("{}.is_some()", grouped(option)),
-            Self::MatchOption {
-                option,
-                binding,
-                some,
-                none,
-                ..
-            } => format!(
-                "match {} {{ Some({binding}) => {}, None => {} }}",
-                option.render(),
-                some.render(),
-                none.render()
-            ),
-            Self::ClosureCall {
-                binding,
-                input,
-                body,
-                ..
-            } => format!("(|{binding}: i64| {})({})", body.render(), input.render()),
-            Self::Cast(value, target) => {
-                format!("(({} as {}) as i64)", value.render(), target.rust())
-            }
-            // Each operand goes through `diff_opaque`, a plain non-const
-            // function, so the compiler cannot fold the operation to a constant
-            // and reject it with the const-overflow lint. The overflow, divide
-            // by zero, or `i64::MIN / -1` then still happens at runtime.
-            Self::RawAdd(left, right) => raw_binary_source(left, "+", right),
-            Self::RawSub(left, right) => raw_binary_source(left, "-", right),
-            Self::RawMul(left, right) => raw_binary_source(left, "*", right),
-            Self::RawDiv(left, right) => raw_binary_source(left, "/", right),
-            Self::RawRem(left, right) => raw_binary_source(left, "%", right),
-            Self::Index { values, index } => format!("{}[{index}usize]", grouped(values)),
-            Self::Unwrap(value) => format!("{}.unwrap()", grouped(value)),
         }
     }
 
@@ -430,10 +348,23 @@ impl GeneratedExpr {
             | Self::RawSub(left, right)
             | Self::RawMul(left, right)
             | Self::RawDiv(left, right)
-            | Self::RawRem(left, right) => left.uses(name) || right.uses(name),
-            Self::Cast(value, _) | Self::Unwrap(value) => value.uses(name),
+            | Self::RawRem(left, right)
+            | Self::FAdd(left, right)
+            | Self::FSub(left, right)
+            | Self::FMul(left, right)
+            | Self::FDiv(left, right)
+            | Self::FLess(left, right)
+            | Self::FEq(left, right)
+            | Self::NarrowArith { left, right, .. } => left.uses(name) || right.uses(name),
+            Self::Cast(value, _)
+            | Self::Unwrap(value)
+            | Self::I64ToF64(value)
+            | Self::F64ToI64(value)
+            | Self::FormatF64(value)
+            | Self::DebugF64(value)
+            | Self::FormatSpec { value, .. } => value.uses(name),
             Self::Index { values, .. } => values.uses(name),
-            Self::I64(_) | Self::Bool(_) | Self::Text(_) | Self::None => false,
+            Self::I64(_) | Self::Bool(_) | Self::Text(_) | Self::F64(_) | Self::None => false,
         }
     }
 
@@ -465,6 +396,7 @@ impl GeneratedExpr {
             Self::Text(_) => "text",
             Self::Variable { ty, .. } => match ty {
                 GeneratedType::I64 => "var-i64",
+                GeneratedType::F64 => "var-f64",
                 GeneratedType::Bool => "var-bool",
                 GeneratedType::String => "var-string",
                 GeneratedType::VecI64 => "var-vec",
@@ -507,6 +439,138 @@ impl GeneratedExpr {
             Self::RawRem(..) => "raw-rem",
             Self::Index { .. } => "index",
             Self::Unwrap(_) => "unwrap",
+            Self::F64(_) => "f64",
+            Self::FAdd(..) => "f64-add",
+            Self::FSub(..) => "f64-sub",
+            Self::FMul(..) => "f64-mul",
+            Self::FDiv(..) => "f64-div",
+            Self::FLess(..) => "f64-less",
+            Self::FEq(..) => "f64-eq",
+            Self::I64ToF64(_) => "cast-i64-f64",
+            Self::F64ToI64(_) => "cast-f64-i64",
+            Self::FormatF64(_) => "format-f64",
+            Self::DebugF64(_) => "debug-f64",
+            Self::NarrowArith { op, .. } => match op {
+                NarrowOp::Add => "narrow-add",
+                NarrowOp::Sub => "narrow-sub",
+                NarrowOp::Mul => "narrow-mul",
+                NarrowOp::Div => "narrow-div",
+                NarrowOp::Rem => "narrow-rem",
+            },
+            Self::FormatSpec { .. } => "format-spec",
+        }
+    }
+
+    /// Every node of the tree in pre-order, itself included. The donor side
+    /// of a splice picks subtrees from this list.
+    pub fn nodes(&self) -> Vec<&Self> {
+        let mut nodes = vec![self];
+        let mut index = 0;
+        while index < nodes.len() {
+            let children = nodes[index].children();
+            nodes.extend(children);
+            index += 1;
+        }
+        nodes
+    }
+
+    /// The `n`th node in the same pre-order `nodes` uses, mutably, so a
+    /// splice can replace the subtree it picked by index.
+    pub fn nth_node_mut(&mut self, n: usize) -> Option<&mut Self> {
+        let mut remaining = n;
+        let mut stack = vec![self];
+        while let Some(node) = stack.pop() {
+            if remaining == 0 {
+                return Some(node);
+            }
+            remaining -= 1;
+            let mut children = node.children_mut();
+            children.reverse();
+            stack.extend(children);
+        }
+        None
+    }
+
+    pub fn children_mut(&mut self) -> Vec<&mut Self> {
+        match self {
+            Self::Add(left, right)
+            | Self::Subtract(left, right)
+            | Self::Multiply(left, right)
+            | Self::Equal(left, right)
+            | Self::Less(left, right)
+            | Self::And(left, right)
+            | Self::Or(left, right)
+            | Self::Concat(left, right)
+            | Self::RawAdd(left, right)
+            | Self::RawSub(left, right)
+            | Self::RawMul(left, right)
+            | Self::RawDiv(left, right)
+            | Self::RawRem(left, right)
+            | Self::FAdd(left, right)
+            | Self::FSub(left, right)
+            | Self::FMul(left, right)
+            | Self::FDiv(left, right)
+            | Self::FLess(left, right)
+            | Self::FEq(left, right)
+            | Self::NarrowArith { left, right, .. } => vec![left, right],
+            Self::Not(value)
+            | Self::Uppercase(value)
+            | Self::FormatI64(value)
+            | Self::DebugVec(value)
+            | Self::VecReverse(value)
+            | Self::VecLen(value)
+            | Self::Some(value)
+            | Self::OptionIsSome(value)
+            | Self::Cast(value, _)
+            | Self::Unwrap(value)
+            | Self::I64ToF64(value)
+            | Self::F64ToI64(value)
+            | Self::FormatF64(value)
+            | Self::DebugF64(value)
+            | Self::FormatSpec { value, .. }
+            | Self::Replace { value, .. } => vec![value],
+            Self::If {
+                condition,
+                then_expr,
+                else_expr,
+                ..
+            } => vec![condition, then_expr, else_expr],
+            Self::VecLiteral(values) => values.iter_mut().collect(),
+            Self::VecMap { values, body, .. }
+            | Self::VecFilter {
+                values,
+                predicate: body,
+                ..
+            }
+            | Self::OptionMap {
+                option: values,
+                body,
+                ..
+            }
+            | Self::OptionFilter {
+                option: values,
+                predicate: body,
+                ..
+            } => vec![values, body],
+            Self::VecAppend { values, value } => vec![values, value],
+            Self::VecGetOr {
+                values, default, ..
+            }
+            | Self::OptionUnwrapOr {
+                option: values,
+                default,
+            } => vec![values, default],
+            Self::MatchOption {
+                option, some, none, ..
+            } => vec![option, some, none],
+            Self::ClosureCall { input, body, .. } => vec![input, body],
+            Self::Index { values, .. } => vec![values],
+            Self::I64(_)
+            | Self::Bool(_)
+            | Self::Text(_)
+            | Self::F64(_)
+            | Self::Variable { .. }
+            | Self::None => Vec::new(),
         }
     }
 
@@ -568,26 +632,30 @@ impl GeneratedExpr {
             | Self::RawSub(left, right)
             | Self::RawMul(left, right)
             | Self::RawDiv(left, right)
-            | Self::RawRem(left, right) => vec![left, right],
-            Self::Cast(value, _) | Self::Unwrap(value) => vec![value],
+            | Self::RawRem(left, right)
+            | Self::FAdd(left, right)
+            | Self::FSub(left, right)
+            | Self::FMul(left, right)
+            | Self::FDiv(left, right)
+            | Self::FLess(left, right)
+            | Self::FEq(left, right)
+            | Self::NarrowArith { left, right, .. } => vec![left, right],
+            Self::Cast(value, _)
+            | Self::Unwrap(value)
+            | Self::I64ToF64(value)
+            | Self::F64ToI64(value)
+            | Self::FormatF64(value)
+            | Self::DebugF64(value)
+            | Self::FormatSpec { value, .. } => vec![value],
             Self::Index { values, .. } => vec![values],
-            Self::I64(_) | Self::Bool(_) | Self::Text(_) | Self::Variable { .. } | Self::None => {
-                Vec::new()
-            }
+            Self::I64(_)
+            | Self::Bool(_)
+            | Self::Text(_)
+            | Self::F64(_)
+            | Self::Variable { .. }
+            | Self::None => Vec::new(),
         }
     }
-}
-
-fn grouped(expr: &GeneratedExpr) -> String {
-    format!("({})", expr.render())
-}
-
-fn raw_binary_source(left: &GeneratedExpr, op: &str, right: &GeneratedExpr) -> String {
-    format!(
-        "(diff_opaque({}) {op} diff_opaque({}))",
-        left.render(),
-        right.render()
-    )
 }
 
 /// The identity helper the raw arithmetic operands pass through. It is a plain

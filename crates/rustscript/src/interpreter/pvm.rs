@@ -11,7 +11,7 @@ use anyhow::{Result, anyhow, bail};
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
 
-use super::bytecode::{BuiltinId, CapSource, MacroKind, MethodName, Op};
+use super::bytecode::{BinKind, BuiltinId, CapSource, MacroKind, MethodName, Op, overflow_message};
 use super::pchunk::{PChunk, PMember};
 use super::pnative::PNative;
 use super::pops::{
@@ -605,6 +605,24 @@ impl PInterp {
                             stack[base + *src as usize].clone(),
                         )?;
                         stack[base + *dst as usize] = v;
+                    }
+                    Op::NarrowGuard { src, ty, op } => {
+                        if let PValue::Int(i) = &stack[base + *src as usize] {
+                            let (min, max) = ty.bounds();
+                            if *i < min || *i > max {
+                                bail!("{}", overflow_message(*op));
+                            }
+                        }
+                    }
+                    Op::NarrowRemGuard { left, right, ty } => {
+                        if let (PValue::Int(l), PValue::Int(r)) = (
+                            &stack[base + *left as usize],
+                            &stack[base + *right as usize],
+                        ) && *l == ty.bounds().0
+                            && *r == -1
+                        {
+                            bail!("{}", overflow_message(BinKind::Rem));
+                        }
                     }
                     Op::Coerce { dst, src, .. } => {
                         stack[base + *dst as usize] = stack[base + *src as usize].clone();

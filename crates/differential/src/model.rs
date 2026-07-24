@@ -3,18 +3,16 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::closure_case::{ClosureCase, apply_helper};
+use crate::method_case::MethodsCase;
 use crate::rich::RichCase;
 use crate::semantic::SemanticCase;
 use crate::structural::StructuralCase;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum MutationOperation {
-    Adjustment,
-    Statements,
-    RichCases,
-    ClosureCases,
-    StructuralCases,
-    SemanticCases,
+    /// A same-typed donor subtree replaced a node in one of the parent's
+    /// expression trees, free variables rebound to the target scope.
+    Splice,
     CaseOrder,
 }
 
@@ -423,6 +421,8 @@ pub struct Program {
     #[serde(default)]
     pub semantic_cases: Vec<SemanticCase>,
     #[serde(default)]
+    pub method_cases: Vec<MethodsCase>,
+    #[serde(default)]
     pub mutation: Option<MutationOrigin>,
 }
 
@@ -470,7 +470,7 @@ impl Program {
         if self
             .structural_features()
             .iter()
-            .any(|feature| feature.starts_with("raw-"))
+            .any(|feature| feature.starts_with("raw-") || feature.starts_with("narrow-"))
         {
             source.push_str(crate::typed::opaque_helper());
         }
@@ -501,6 +501,9 @@ impl Program {
         }
         for semantic_case in &self.semantic_cases {
             source.push_str(&semantic_case.render());
+        }
+        for method_case in &self.method_cases {
+            source.push_str(&method_case.render());
         }
         let names: Vec<&str> = self
             .statements
@@ -583,6 +586,16 @@ impl Program {
                 candidates.push(candidate);
             }
         }
+        for index in 0..self.method_cases.len() {
+            let mut candidate = self.clone();
+            candidate.method_cases.remove(index);
+            candidates.push(candidate);
+            for method_case in self.method_cases[index].shrinks() {
+                let mut candidate = self.clone();
+                candidate.method_cases[index] = method_case;
+                candidates.push(candidate);
+            }
+        }
         candidates
     }
 
@@ -626,17 +639,16 @@ impl Program {
             semantic_case.shape(&mut signature);
             signature.push('|');
         }
+        for method_case in &self.method_cases {
+            method_case.shape(&mut signature);
+            signature.push('|');
+        }
         signature.push(']');
         if let Some(origin) = &self.mutation {
             signature.push_str("mutation[");
             for operation in &origin.operations {
                 signature.push_str(match operation {
-                    MutationOperation::Adjustment => "adjustment,",
-                    MutationOperation::Statements => "statements,",
-                    MutationOperation::RichCases => "rich,",
-                    MutationOperation::ClosureCases => "closures,",
-                    MutationOperation::StructuralCases => "structural,",
-                    MutationOperation::SemanticCases => "semantic,",
+                    MutationOperation::Splice => "splice,",
                     MutationOperation::CaseOrder => "order,",
                 });
             }
@@ -652,6 +664,9 @@ impl Program {
         }
         for semantic_case in &self.semantic_cases {
             semantic_case.features(&mut features);
+        }
+        for method_case in &self.method_cases {
+            method_case.features(&mut features);
         }
         features
     }
@@ -679,6 +694,7 @@ impl Program {
             closure_cases: self.closure_cases.clone(),
             structural_cases: self.structural_cases.clone(),
             semantic_cases: self.semantic_cases.clone(),
+            method_cases: self.method_cases.clone(),
             mutation: self.mutation.clone(),
         })
     }

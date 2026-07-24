@@ -190,3 +190,37 @@ fn err_from_main_exits_one_alike() {
         "interpreter must print the anyhow form exactly"
     );
 }
+
+/// A missing feature found at compile time reports with the stable
+/// machine-readable prefix and exit 1. The differential harness keys its
+/// gap-versus-bug split on this line.
+#[test]
+fn unsupported_errors_carry_the_stable_prefix() {
+    let path =
+        temp_script("static mut COUNTER: i64 = 0;\n\nfn main() {\n    println!(\"x\");\n}\n");
+    let interpreted = run_interpreted(&path);
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(interpreted.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&interpreted.stderr);
+    assert!(
+        stderr.starts_with("rust unsupported: "),
+        "missing prefix in: {stderr}"
+    );
+}
+
+/// A missing feature only discovered at runtime aborts like a panic, and its
+/// message names the gap, an unknown constant here, so tooling can still
+/// tell it apart from a genuine script panic.
+#[test]
+fn runtime_unsupported_constant_names_the_gap() {
+    let path =
+        temp_script("fn main() {\n    let x: f64 = f64::LOG2_10;\n    println!(\"{x}\");\n}\n");
+    let interpreted = run_interpreted(&path);
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(interpreted.status.code(), Some(101));
+    let stderr = String::from_utf8_lossy(&interpreted.stderr);
+    assert!(
+        stderr.contains("unsupported constant `f64::LOG2_10`"),
+        "missing gap name in: {stderr}"
+    );
+}

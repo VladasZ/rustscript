@@ -219,27 +219,44 @@ The differential harness generates deterministic, compile-valid Rust programs
 and compares native and interpreted runs, including panics. Native is built
 with overflow checks on, the debug default. Generated cases cover typed
 expressions, ownership and borrowing, collections, closures, structs, enums,
-patterns, iterators, loops, `Result`, narrowing casts, plain arithmetic that
-can overflow, division, indexing, and `unwrap`. Some seeds combine parts of
-other programs through replayable structured mutation.
+patterns, iterators, loops, `Result`, floats with their special values,
+narrowing casts, arithmetic done in narrow integer types, plain arithmetic
+that can overflow, division, indexing, `unwrap`, format specs, and a catalog
+of bridged `String`, `Vec`, and map methods. Some seeds splice same-typed
+expression subtrees from other programs through replayable structured
+mutation.
 
 ```sh
 # Print one generated program.
 cargo run -p rustscript-differential -- generate --seed 42
 
-# Compare 10,000 programs and report every divergence, grouped by kind.
+# Compare 10,000 programs and report every divergence, grouped by bug.
 cargo run --release -p rustscript-differential -- run \
   --seed 0 \
   --cases 10000 \
   --timeout-ms 5000
 ```
 
-Saved cases live under `target/rustscript-differential/failures`. A run groups
-findings by kind and keeps unsupported-feature gaps separate from real
-divergences; pass `--stop-on-first` to halt and minimize the first finding. The
-harness batches native compilation, reports progress during long runs, caches
-repeated reduction candidates, and stores enough program data to replay every
-result.
+The campaign runs batches on all cores and exits nonzero when it finds a real
+divergence, so a scheduled run can gate on it. Findings are grouped by
+classification plus a short failure signature, so two different bugs with the
+same classification stay apart, and unsupported-feature gaps are reported
+separately without failing the run. Saved cases live under
+`target/rustscript-differential/failures`; pass `--stop-on-first` to halt and
+minimize the first finding. The minimizer holds both the classification and
+the signature, so shrinking cannot drift to a different bug. The harness
+batches native compilation, caches repeated reduction candidates, and stores
+enough program data to replay every result.
+
+The `Differential` workflow runs a campaign nightly on Linux, macOS, and
+Windows. The base seed derives from the date and each OS adds its own offset,
+so every night explores fresh disjoint seed ranges with nothing to track, and
+failure artifacts are uploaded when a run finds something.
+
+Minimized findings whose correct behavior is a panic are kept under
+`crates/differential/corpus` and replayed by a test, since the equivalence
+suite only covers examples that exit cleanly. `promote` routes a fixed case
+to the corpus or to the examples automatically.
 
 Every bridge and language feature must have an example under
 `crates/examples/examples`. Examples build as real cargo binaries, and the

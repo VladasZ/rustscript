@@ -348,7 +348,7 @@ impl PValue {
             PValue::Unit => out.push_str("()"),
             PValue::Bool(b) => write!(out, "{b}").unwrap(),
             PValue::Int(i) => write!(out, "{i}").unwrap(),
-            PValue::Float(f) => out.push_str(&format_float(*f)),
+            PValue::Float(f) => out.push_str(&format_float_debug(*f)),
             PValue::Char(c) => write!(out, "{c:?}").unwrap(),
             PValue::Str(s) => write!(out, "{:?}", &**s).unwrap(),
             PValue::Range {
@@ -470,10 +470,12 @@ impl PKey {
     }
 }
 
+/// Same rule as the fast engine: the host's Display and Debug are the target
+/// semantics, so delegate instead of approximating them.
 fn format_float(f: f64) -> String {
-    if f == f.trunc() && f.is_finite() {
-        format!("{f:.0}")
-    } else {
-        f.to_string()
-    }
+    f.to_string()
+}
+
+fn format_float_debug(f: f64) -> String {
+    format!("{f:?}")
 }

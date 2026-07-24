@@ -213,6 +213,7 @@ impl DataflowCase {
         for binding in &self.bindings {
             output.insert(match binding.ty {
                 GeneratedType::I64 => "type-i64",
+                GeneratedType::F64 => "type-f64",
                 GeneratedType::Bool => "type-bool",
                 GeneratedType::String => "type-string",
                 GeneratedType::VecI64 => "type-vec",
