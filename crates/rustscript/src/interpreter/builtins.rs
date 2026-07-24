@@ -61,6 +61,12 @@ impl Interp {
             {
                 return self.eval_path_value(full);
             }
+            // A bare function name used as a value, `.map(strip_html)`, wrapped
+            // in a closure that forwards its arguments to the call. The
+            // path-qualified forms like `str::trim` resolve below already.
+            if let Some(chunk) = self.user_function(name) {
+                return Ok(path_call_closure(vec![name.clone()], chunk.num_params));
+            }
             bail!("unknown variable `{name}`");
         }
 
@@ -405,12 +411,11 @@ pub(super) fn option_inner(v: &Value) -> Option<Value> {
     }
 }
 
-/// A zero-argument closure that runs a constructor path like `Vec::new`, for
-/// use as a value handed to `or_insert_with`.
-// A path used as a function value, wrapped in a closure that forwards its
-// `num_params` arguments to the path call. `num_params` is 0 for a constructor
-// like `Vec::new` and 1 for a method reference or one-arg constructor.
-pub(super) fn path_call_closure(segs: Vec<String>, num_params: usize) -> Value {
+/// The chunk behind a path used as a function value. It forwards its
+/// `num_params` arguments to the path call. `num_params` is 0 for a constructor
+/// like `Vec::new` and 1 for a method reference or one-arg constructor. The
+/// parallel engine converts this same chunk, so both engines share one body.
+pub(super) fn path_call_chunk(segs: Vec<String>, num_params: usize) -> Chunk {
     let dst = num_params as u16;
     let mut chunk = Chunk::empty("<pathfn>");
     chunk.num_params = num_params;
@@ -424,8 +429,15 @@ pub(super) fn path_call_closure(segs: Vec<String>, num_params: usize) -> Value {
         argc: num_params as u16,
     });
     chunk.code.push(Op::Ret { src: dst });
+    chunk
+}
+
+/// A zero-argument closure that runs a constructor path like `Vec::new`, for
+/// use as a value handed to `or_insert_with`, or a one-arg closure wrapping a
+/// method reference like `str::trim` or a bare function name like `strip_html`.
+pub(super) fn path_call_closure(segs: Vec<String>, num_params: usize) -> Value {
     Value::Closure(Rc::new(ClosureData {
-        chunk: Rc::new(chunk),
+        chunk: Rc::new(path_call_chunk(segs, num_params)),
         captured: Vec::new(),
     }))
 }

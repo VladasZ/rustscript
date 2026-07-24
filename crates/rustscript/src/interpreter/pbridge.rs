@@ -10,10 +10,11 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, bail};
 use parking_lot::Mutex;
 
+use super::builtins::path_call_chunk;
 use super::bytecode::MethodName;
-use super::pchunk::PChunk;
+use super::pchunk::{PChunk, convert};
 use super::pnative::PNative;
-use super::pvalue::{PValue, PValueRef};
+use super::pvalue::{PClosure, PValue, PValueRef};
 use super::pvm::PInterp;
 use super::shared::{self, Args, CharOut, Num, NumOut, ParseNum, StrOut};
 
@@ -71,7 +72,21 @@ impl PInterp {
             Some("ARCH") if segs.iter().any(|segment| segment == "consts") => {
                 Ok(PValue::str(std::env::consts::ARCH))
             }
-            Some(other) => bail!("unsupported path value `{other}` in tokio mode"),
+            Some(other) => {
+                // A bare function name used as a value, `.map(strip_html)`. The
+                // closure forwards its arguments to the call, which the tokio
+                // `dispatch_call` resolves back to the user function.
+                if segs.len() == 1
+                    && let Some(chunk) = self.user_function(other)
+                {
+                    let inline = path_call_chunk(segs.to_vec(), chunk.num_params);
+                    return Ok(PValue::Closure(Arc::new(PClosure {
+                        chunk: convert(&inline),
+                        captured: Vec::new(),
+                    })));
+                }
+                bail!("unsupported path value `{other}` in tokio mode")
+            }
             None => bail!("empty path"),
         }
     }
@@ -217,6 +232,19 @@ impl PInterp {
             PValue::Str(s) => str_method(s, m, args),
             PValue::Vec(_) => self.vec_method(recv, m, args),
             PValue::Map(_) => map_method(recv, m, args),
+            // Option's closure-taking methods, `map` and friends, need the
+            // interpreter to invoke a closure, so they route through `self`
+            // here. Everything else on an enum falls to the plain `enum_method`.
+            PValue::Enum {
+                enum_name,
+                variant,
+                data,
+            } if &**enum_name == "Option" => {
+                match self.option_higher_order(variant, data, m, args)? {
+                    Some(v) => Ok(v),
+                    None => enum_method(recv, m, args),
+                }
+            }
             PValue::Enum { .. } => enum_method(recv, m, args),
             PValue::Struct(st) if &**st.name() == "Command" => {
                 super::pprocess::command_method(recv, m, args)
@@ -976,5 +1004,89 @@ impl PInterp {
             "for_each" => PValue::Unit,
             _ => PValue::vec(out),
         })
+    }
+
+    /// Closure-taking methods on Option, the parallel-engine twin of
+    /// `option_higher_order` in higher_order.rs. Returns None when `m` is not one
+    /// of these, so the caller falls through to the non-closure `enum_method`.
+    fn option_higher_order(
+        self: &Arc<Self>,
+        variant: &str,
+        data: &Arc<[PValue]>,
+        m: &str,
+        args: &[PValue],
+    ) -> Result<Option<PValue>> {
+        let is_some = variant == "Some";
+        let inner = || data.first().cloned().unwrap_or(PValue::Unit);
+        let clo = |i: usize| -> Result<PValue> {
+            match args.get(i) {
+                Some(closure @ PValue::Closure(_)) => Ok(closure.clone()),
+                _ => bail!("this method expects a closure argument"),
+            }
+        };
+        let out = match m {
+            "is_some_and" => {
+                PValue::Bool(is_some && self.call_closure(&clo(0)?, &[inner()])?.is_truthy())
+            }
+            "map" => {
+                if is_some {
+                    PValue::some(self.call_closure(&clo(0)?, &[inner()])?)
+                } else {
+                    PValue::none()
+                }
+            }
+            "and_then" => {
+                if is_some {
+                    self.call_closure(&clo(0)?, &[inner()])?
+                } else {
+                    PValue::none()
+                }
+            }
+            "filter" => {
+                if is_some && self.call_closure(&clo(0)?, &[inner()])?.is_truthy() {
+                    PValue::some(inner())
+                } else {
+                    PValue::none()
+                }
+            }
+            "map_or" => {
+                let default = args.first().cloned().unwrap_or(PValue::Unit);
+                if is_some {
+                    self.call_closure(&clo(1)?, &[inner()])?
+                } else {
+                    default
+                }
+            }
+            "map_or_else" => {
+                if is_some {
+                    self.call_closure(&clo(1)?, &[inner()])?
+                } else {
+                    self.call_closure(&clo(0)?, &[])?
+                }
+            }
+            "unwrap_or_else" => {
+                if is_some {
+                    inner()
+                } else {
+                    self.call_closure(&clo(0)?, &[])?
+                }
+            }
+            "ok_or_else" | "with_context" => {
+                if is_some {
+                    PValue::ok(inner())
+                } else {
+                    PValue::err(self.call_closure(&clo(0)?, &[])?)
+                }
+            }
+            "or_else" => {
+                if is_some {
+                    PValue::some(inner())
+                } else {
+                    self.call_closure(&clo(0)?, &[])?
+                }
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(out))
     }
 }

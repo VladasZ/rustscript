@@ -221,6 +221,21 @@ pub(super) fn apply_un(op: UnKind, v: &Value) -> Result<Value> {
 
 // -- patterns --------------------------------------------------------------
 
+/// True when a serde_json `Value` variant name matches the native value that a
+/// parsed json holds. A json string is a `Str`, a number an `Int` or `Float`, an
+/// array a `Vec`, an object a `Map`. `Null` is handled separately as a unit
+/// variant because a json null is `Option::None` here.
+fn json_variant_kind_matches(name: Option<&str>, val: &Value) -> bool {
+    matches!(
+        (name, val),
+        (Some("String"), Value::Str(_))
+            | (Some("Number"), Value::Int(_) | Value::Float(_))
+            | (Some("Bool"), Value::Bool(_))
+            | (Some("Array"), Value::Vec(_))
+            | (Some("Object"), Value::Map(_))
+    )
+}
+
 /// Match `pat` against `val`, calling `define` for each bound name. Returns
 /// false without fully binding when the pattern does not match.
 pub(super) fn try_bind(pat: &PPat, val: &Value, define: &mut dyn FnMut(&str, Value)) -> bool {
@@ -254,10 +269,28 @@ pub(super) fn try_bind(pat: &PPat, val: &Value, define: &mut dyn FnMut(&str, Val
             // out because it is also this interpreter's filler for a missing
             // value.
             Value::Unit => false,
-            other => name.as_deref() == Some("Some") && bind_seq(elems, from_ref(other), define),
+            other => {
+                // A serde_json Value variant pattern, `Value::String(s)` and
+                // friends, matched against the native value a parsed json holds.
+                // The single field binds to the value itself, the same shape as
+                // the pre-unwrapped Some rule below.
+                if json_variant_kind_matches(name.as_deref(), other) {
+                    bind_seq(elems, from_ref(other), define)
+                } else {
+                    name.as_deref() == Some("Some") && bind_seq(elems, from_ref(other), define)
+                }
+            }
         },
         PPat::Path { name } => match val {
-            Value::Enum { variant, .. } => name.as_deref() == Some(&**variant),
+            Value::Enum {
+                enum_name, variant, ..
+            } => {
+                name.as_deref() == Some(&**variant)
+                    // A json null is Option::None here, so `Value::Null` matches it.
+                    || (name.as_deref() == Some("Null")
+                        && &**enum_name == "Option"
+                        && &**variant == "None")
+            }
             _ => false,
         },
         PPat::Struct { name, fields } => {
