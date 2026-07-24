@@ -19,6 +19,7 @@ mod pbridge;
 mod pchunk;
 mod pdf_bridge;
 mod phttp;
+mod pjson;
 mod pnative;
 mod pops;
 mod pprocess;
@@ -33,6 +34,7 @@ mod runner;
 mod service_bridge;
 mod shared;
 mod std_bridge;
+mod typeir;
 mod value;
 mod vm;
 mod vm_support;
@@ -305,6 +307,7 @@ impl Interp {
             fn_index: self.fn_index.clone(),
             methods,
             globals,
+            structs: self.build_pstructs(),
             rt: rt.handle().clone(),
         });
         let idx = self

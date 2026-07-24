@@ -8,7 +8,9 @@
 //! the raw bits, reinterpreted through `u64` on decode. `I64` never appears
 //! in a tag, a plain i64 stays the engine's untagged integer value.
 
-use anyhow::{Result, bail};
+use std::ops::{Add, Div, Mul, Rem, Sub};
+
+use anyhow::{Result, anyhow, bail};
 
 use super::bytecode::{BinKind, overflow_message};
 
@@ -137,6 +139,55 @@ pub fn int_arith(op: BinKind, width: IntWidth, a: i128, b: i128) -> Result<i128>
         bail!("{}", overflow_message(op));
     }
     Ok(result)
+}
+
+/// `+ - * / %` on untagged i64 values, panicking exactly like debug Rust.
+/// The hot fast path of both engines, so it stays checked native arithmetic
+/// with no i128 widening.
+#[inline(always)]
+pub fn i64_arith(op: BinKind, a: i64, b: i64) -> Result<i64> {
+    Ok(match op {
+        BinKind::Add => a
+            .checked_add(b)
+            .ok_or_else(|| anyhow!("attempt to add with overflow"))?,
+        BinKind::Sub => a
+            .checked_sub(b)
+            .ok_or_else(|| anyhow!("attempt to subtract with overflow"))?,
+        BinKind::Mul => a
+            .checked_mul(b)
+            .ok_or_else(|| anyhow!("attempt to multiply with overflow"))?,
+        BinKind::Div => {
+            if b == 0 {
+                bail!("attempt to divide by zero");
+            }
+            a.checked_div(b)
+                .ok_or_else(|| anyhow!("attempt to divide with overflow"))?
+        }
+        BinKind::Rem => {
+            if b == 0 {
+                bail!("attempt to calculate the remainder with a divisor of zero");
+            }
+            a.checked_rem(b)
+                .ok_or_else(|| anyhow!("attempt to calculate the remainder with overflow"))?
+        }
+        _ => unreachable!(),
+    })
+}
+
+/// `+ - * / %` at one float width. Rust float arithmetic never panics.
+#[inline(always)]
+pub fn float_arith<T>(op: BinKind, x: T, y: T) -> T
+where
+    T: Add<Output = T> + Sub<Output = T> + Mul<Output = T> + Div<Output = T> + Rem<Output = T>,
+{
+    match op {
+        BinKind::Add => x + y,
+        BinKind::Sub => x - y,
+        BinKind::Mul => x * y,
+        BinKind::Div => x / y,
+        BinKind::Rem => x % y,
+        _ => unreachable!(),
+    }
 }
 
 /// `<<` and `>>`. The amount carries its own width and never unifies with

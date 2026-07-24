@@ -8,7 +8,9 @@ use anyhow::{Result, anyhow, bail};
 
 use super::bytecode::{BinKind, UnKind};
 use super::bytecode::{PLit, PPat};
-use super::numeric::{int_arith, int_bit, int_neg, int_not, int_shift, unify};
+use super::numeric::{
+    float_arith, i64_arith, int_arith, int_bit, int_neg, int_not, int_shift, unify,
+};
 use super::pvalue::PValue;
 
 pub(super) fn apply_bin(op: BinKind, l: &PValue, r: &PValue) -> Result<PValue> {
@@ -60,69 +62,22 @@ pub(super) fn cmp_test_imm(op: BinKind, l: &PValue, imm: i64) -> Result<bool> {
 }
 
 fn arith(op: BinKind, l: &PValue, r: &PValue) -> Result<PValue> {
-    use BinKind::*;
-    if let (Add, PValue::Str(a), PValue::Str(b)) = (op, l, r) {
+    if let (BinKind::Add, PValue::Str(a), PValue::Str(b)) = (op, l, r) {
         let mut out = String::with_capacity(a.len() + b.len());
         out.push_str(a);
         out.push_str(b);
         return Ok(PValue::str(out));
     }
-    match (l, r) {
-        (PValue::Int(a), PValue::Int(b)) => {
-            let (a, b) = (*a, *b);
-            let result = match op {
-                Add => a
-                    .checked_add(b)
-                    .ok_or_else(|| anyhow!("attempt to add with overflow"))?,
-                Sub => a
-                    .checked_sub(b)
-                    .ok_or_else(|| anyhow!("attempt to subtract with overflow"))?,
-                Mul => a
-                    .checked_mul(b)
-                    .ok_or_else(|| anyhow!("attempt to multiply with overflow"))?,
-                Div => {
-                    if b == 0 {
-                        bail!("attempt to divide by zero");
-                    }
-                    a.checked_div(b)
-                        .ok_or_else(|| anyhow!("attempt to divide with overflow"))?
-                }
-                Rem => {
-                    if b == 0 {
-                        bail!("attempt to calculate the remainder with a divisor of zero");
-                    }
-                    a.checked_rem(b).ok_or_else(|| {
-                        anyhow!("attempt to calculate the remainder with overflow")
-                    })?
-                }
-                _ => unreachable!(),
-            };
-            Ok(PValue::Int(result))
-        }
-        _ => {
-            if let (Some((a, wa)), Some((b, wb))) = (l.int_parts(), r.int_parts()) {
-                let width = unify(wa, wb)?;
-                return Ok(PValue::int_of_width(int_arith(op, width, a, b)?, width));
-            }
-            match float_pair(l, r)? {
-                FloatPair::F64(x, y) => Ok(PValue::Float(match op {
-                    Add => x + y,
-                    Sub => x - y,
-                    Mul => x * y,
-                    Div => x / y,
-                    Rem => x % y,
-                    _ => unreachable!(),
-                })),
-                FloatPair::F32(x, y) => Ok(PValue::F32(match op {
-                    Add => x + y,
-                    Sub => x - y,
-                    Mul => x * y,
-                    Div => x / y,
-                    Rem => x % y,
-                    _ => unreachable!(),
-                })),
-            }
-        }
+    if let (PValue::Int(a), PValue::Int(b)) = (l, r) {
+        return Ok(PValue::Int(i64_arith(op, *a, *b)?));
+    }
+    if let (Some((a, wa)), Some((b, wb))) = (l.int_parts(), r.int_parts()) {
+        let width = unify(wa, wb)?;
+        return Ok(PValue::int_of_width(int_arith(op, width, a, b)?, width));
+    }
+    match float_pair(l, r)? {
+        FloatPair::F64(x, y) => Ok(PValue::Float(float_arith(op, x, y))),
+        FloatPair::F32(x, y) => Ok(PValue::F32(float_arith(op, x, y))),
     }
 }
 

@@ -426,10 +426,10 @@ fn header_map_method(s: &PStructData, method: &str, args: &[PValue]) -> PValue {
 
 fn header_value_method(s: &PStructData, method: &str) -> PValue {
     let text = s.get("text").map(|v| v.display()).unwrap_or_default();
-    match method {
-        "to_str" => PValue::ok(PValue::str(text)),
-        "as_str" | "to_string" => PValue::str(text),
-        _ => PValue::Unit,
+    match super::shared::header_value_core(method, text) {
+        Some(super::shared::HeaderOut::Ok(t)) => PValue::ok(PValue::str(t)),
+        Some(super::shared::HeaderOut::Text(t)) => PValue::str(t),
+        None => PValue::Unit,
     }
 }
 
@@ -438,12 +438,10 @@ fn status_method(s: &PStructData, method: &str) -> PValue {
         Some(PValue::Int(c)) => c,
         _ => 0,
     };
-    match method {
-        "as_u16" | "as_int" => PValue::Int(code),
-        "is_success" => PValue::Bool((200..300).contains(&code)),
-        "is_client_error" => PValue::Bool((400..500).contains(&code)),
-        "is_server_error" => PValue::Bool((500..600).contains(&code)),
-        _ => PValue::Unit,
+    match super::shared::status_core(method, code) {
+        Some(super::shared::StatusOut::Int(i)) => PValue::Int(i),
+        Some(super::shared::StatusOut::Bool(b)) => PValue::Bool(b),
+        None => PValue::Unit,
     }
 }
 

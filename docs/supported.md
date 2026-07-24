@@ -42,7 +42,7 @@ selects. Unmarked methods run on both.
 
 ## DateTime
 
-`day` (fast), `format` (fast), `hour` (fast), `local` (fast), `minute` (fast), `month` (fast), `nanos` (fast), `second` (fast), `secs` (fast), `timestamp` (fast), `timestamp_millis` (fast), `to_rfc3339` (fast), `year` (fast)
+`day`, `format`, `hour`, `minute`, `month`, `second`, `timestamp`, `timestamp_millis`, `to_rfc3339`, `year`
 
 ## DirEntry
 
@@ -54,7 +54,7 @@ selects. Unmarked methods run on both.
 
 ## Duration
 
-`as_micros`, `as_millis`, `as_nanos`, `as_secs`, `as_secs_f64` (fast), `is_zero` (fast), `nanos`, `secs` (fast), `subsec_micros` (fast), `subsec_millis` (fast), `subsec_nanos` (fast)
+`as_micros`, `as_millis`, `as_nanos`, `as_secs`, `as_secs_f64`, `is_zero`, `subsec_micros`, `subsec_millis`, `subsec_nanos`
 
 ## Element
 
@@ -82,7 +82,7 @@ selects. Unmarked methods run on both.
 
 ## HeaderValue
 
-`as_str`, `as_string` (fast), `text`, `to_str`, `to_string`
+`as_str`, `as_string`, `to_str`, `to_string`
 
 ## Iterator
 
@@ -162,7 +162,7 @@ selects. Unmarked methods run on both.
 
 ## Status
 
-`as_int`, `as_u16`, `code`, `is_client_error`, `is_server_error`, `is_success`
+`as_int`, `as_u16`, `is_client_error`, `is_server_error`, `is_success`
 
 ## String and str
 

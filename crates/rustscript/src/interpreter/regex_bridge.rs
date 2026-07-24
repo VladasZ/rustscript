@@ -4,7 +4,9 @@ use std::rc::Rc;
 use anyhow::{Result, anyhow, bail};
 
 use super::iterator::{regex_captures, regex_find};
+use super::methods::VArgs;
 use super::native::Native;
+use super::shared::{CapturesOut, MatchOut, RegexOut, captures_core, match_core, regex_core};
 use super::value::{RStr, Value};
 
 type CaptureNames = Rc<Vec<(Rc<str>, usize)>>;
@@ -60,22 +62,6 @@ fn match_value(source: Rc<RStr>, start: usize, end: usize) -> Value {
     Native::RegexMatch(MatchValue { source, start, end }).wrap()
 }
 
-fn captures_value(regex: &RegexValue, source: Rc<RStr>, captures: &regex::Captures) -> Value {
-    let groups = (0..captures.len())
-        .map(|index| {
-            captures
-                .get(index)
-                .map(|found| (found.start(), found.end()))
-        })
-        .collect();
-    Native::RegexCaptures(CapturesValue {
-        source,
-        groups,
-        names: regex.names.clone(),
-    })
-    .wrap()
-}
-
 pub(super) fn regex_native_method(
     handle: &Rc<RefCell<Native>>,
     method: &str,
@@ -106,81 +92,56 @@ enum RegexKind {
 
 fn regex_method(regex: &RegexValue, method: &str, args: &[Value]) -> Result<Value> {
     let source = text_arg(args, 0);
-    Ok(match method {
-        "is_match" => Value::Bool(regex.compiled.is_match(&source)),
-        "find" => regex
-            .compiled
-            .find(&source)
-            .map(|found| match_value(source.clone(), found.start(), found.end()))
-            .map(Value::some)
+    // The lazy iterator forms cannot come out of the eager shared core.
+    match method {
+        "find_iter" => return Ok(regex_find(regex.clone(), source)),
+        "captures_iter" => return Ok(regex_captures(regex.clone(), source)),
+        _ => {}
+    }
+    let replacement = || replacement_arg(args);
+    let Some(out) = regex_core(&regex.compiled, method, &source, &replacement) else {
+        bail!("unknown method `{method}` on Regex");
+    };
+    Ok(match out {
+        RegexOut::Bool(b) => Value::Bool(b),
+        RegexOut::Text(s) => Value::str(s),
+        RegexOut::Pattern => Value::Str(regex.pattern.clone()),
+        RegexOut::OptSpan(span) => span
+            .map(|(start, end)| Value::some(match_value(source.clone(), start, end)))
             .unwrap_or_else(Value::none),
-        "find_iter" => regex_find(regex.clone(), source),
-        "captures" => regex
-            .compiled
-            .captures(&source)
-            .map(|captures| captures_value(regex, source.clone(), &captures))
-            .map(Value::some)
+        RegexOut::OptGroups(groups) => groups
+            .map(|groups| {
+                Value::some(
+                    Native::RegexCaptures(CapturesValue {
+                        source: source.clone(),
+                        groups,
+                        names: regex.names.clone(),
+                    })
+                    .wrap(),
+                )
+            })
             .unwrap_or_else(Value::none),
-        "captures_iter" => regex_captures(regex.clone(), source),
-        "replace" => Value::str(
-            regex
-                .compiled
-                .replacen(&source, 1, replacement_arg(args).as_str())
-                .into_owned(),
-        ),
-        "replace_all" => Value::str(
-            regex
-                .compiled
-                .replace_all(&source, replacement_arg(args).as_str())
-                .into_owned(),
-        ),
-        "split" => Value::vec(regex.compiled.split(&source).map(Value::str).collect()),
-        "as_str" => Value::Str(regex.pattern.clone()),
-        _ => bail!("unknown method `{method}` on Regex"),
+        RegexOut::Pieces(pieces) => Value::vec(pieces.into_iter().map(Value::str).collect()),
     })
 }
 
 fn match_method(found: &MatchValue, method: &str) -> Result<Value> {
-    Ok(match method {
-        "as_str" => Value::str(&found.source[found.start..found.end]),
-        "start" => Value::Int(found.start as i64),
-        "end" => Value::Int(found.end as i64),
-        _ => bail!("unknown method `{method}` on Match"),
-    })
+    match match_core(method, &found.source, found.start, found.end) {
+        Some(MatchOut::Text(s)) => Ok(Value::str(s)),
+        Some(MatchOut::Int(i)) => Ok(Value::Int(i)),
+        None => bail!("unknown method `{method}` on Match"),
+    }
 }
 
 fn captures_method(captures: &CapturesValue, method: &str, args: &[Value]) -> Result<Value> {
-    Ok(match method {
-        "get" => {
-            let index = match args.first() {
-                Some(Value::Int(index)) if *index >= 0 => *index as usize,
-                _ => bail!("captures get needs a non-negative index"),
-            };
-            capture_group(captures, index)
-        }
-        "name" => {
-            let name = args.first().map(Value::display).unwrap_or_default();
-            captures
-                .names
-                .iter()
-                .find_map(|(candidate, index)| (candidate.as_ref() == name).then_some(*index))
-                .map(|index| capture_group(captures, index))
-                .unwrap_or_else(Value::none)
-        }
-        "len" => Value::Int(captures.groups.len() as i64),
-        _ => bail!("unknown method `{method}` on Captures"),
-    })
-}
-
-fn capture_group(captures: &CapturesValue, index: usize) -> Value {
-    captures
-        .groups
-        .get(index)
-        .copied()
-        .flatten()
-        .map(|(start, end)| match_value(captures.source.clone(), start, end))
-        .map(Value::some)
-        .unwrap_or_else(Value::none)
+    let names = captures.names.iter().map(|(n, i)| (n.as_ref(), *i));
+    match captures_core(method, &captures.groups, names, &VArgs(args))? {
+        Some(CapturesOut::Int(i)) => Ok(Value::Int(i)),
+        Some(CapturesOut::OptSpan(span)) => Ok(span
+            .map(|(start, end)| Value::some(match_value(captures.source.clone(), start, end)))
+            .unwrap_or_else(Value::none)),
+        None => bail!("unknown method `{method}` on Captures"),
+    }
 }
 
 pub(super) fn capture_index(handle: &Rc<RefCell<Native>>, key: &Value) -> Result<Value> {

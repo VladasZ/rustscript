@@ -4,7 +4,6 @@ use anyhow::{Result, anyhow, bail};
 use syn::spanned::Spanned;
 use syn::{BinOp, Block, Expr, Lit, Pat, Stmt, UnOp};
 
-use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::interpreter::bytecode::{BinKind, Const, DISCARD, Op, Reg, UnKind};
@@ -137,7 +136,7 @@ impl Compiler<'_> {
                         && let Some(init) = &local.init
                     {
                         if let Some(call) = from_str_root(&init.expr) {
-                            self.json_let = Some((call as *const _, Rc::new((*t.ty).clone())));
+                            self.json_let = Some((call as *const _, self.lower_ir(&t.ty)));
                             offered = true;
                         } else if is_string_type(&t.ty)
                             && let Some(mc) = collect_root(&init.expr)
@@ -220,7 +219,7 @@ impl Compiler<'_> {
     /// annotated type. Everything else goes through the struct coercion.
     fn emit_annotation(&mut self, reg: Reg, ty: &syn::Type) {
         if numeric_annotation(ty).is_some() {
-            let idx = self.add_cast(ty.clone());
+            let idx = self.add_cast(ty);
             self.emit(Op::Cast {
                 dst: reg,
                 src: reg,
@@ -232,34 +231,15 @@ impl Compiler<'_> {
     }
 
     /// Emit a coercion of `reg` into the annotated type when it names a struct,
-    /// `Vec<T>`, or `Option<T>`. Falls back to a no-op path the VM understands.
+    /// `Vec<T>`, or `Option<T>`. A type coercion can never change, `f64` or
+    /// `HashMap<K, V>`, emits nothing, so annotated lets in hot loops carry no
+    /// runtime work at all.
     pub(super) fn emit_coerce(&mut self, reg: Reg, ty: &syn::Type) {
-        // A plain type that is not a user struct or alias, `f64` or `usize`,
-        // can never coerce. Skipping the op here keeps annotated lets in hot
-        // loops free of runtime type resolution.
-        let syn::Type::Path(p) = ty else {
-            // Coercion only ever acts on path types.
+        let ir = self.lower_ir(ty);
+        if !ir.is_active() {
             return;
-        };
-        if let Some(seg) = p.path.segments.last()
-            && !matches!(seg.arguments, syn::PathArguments::AngleBracketed(_))
-            && self
-                .ctx
-                .resolver
-                .resolve_struct_key(self.ctx.module, &p.path)
-                .is_none()
-        {
-            let segs: Vec<String> = p
-                .path
-                .segments
-                .iter()
-                .map(|s| s.ident.to_string())
-                .collect();
-            if !matches!(self.resolve_path_res(&segs), Ok(Res::Alias(..))) {
-                return;
-            }
         }
-        let idx = self.add_cast(ty.clone());
+        let idx = self.add_coerce(ir);
         self.emit(Op::Coerce {
             dst: reg,
             src: reg,
@@ -371,7 +351,7 @@ impl Compiler<'_> {
             }
             Expr::Cast(c) => {
                 let src = self.compile_expr(&c.expr)?;
-                let ty = self.add_cast((*c.ty).clone());
+                let ty = self.add_cast(&c.ty);
                 self.emit(Op::Cast { dst, src, ty });
             }
             Expr::Closure(c) => self.compile_closure(dst, c)?,

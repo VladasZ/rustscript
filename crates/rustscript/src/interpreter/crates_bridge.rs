@@ -177,31 +177,15 @@ pub(super) fn now_datetime(local: bool) -> Value {
 }
 
 pub(super) fn datetime_method(s: &StructData, name: &str, args: &[Value]) -> Result<Value> {
-    use chrono::{DateTime, Local, Utc};
     let secs = field_int(s, "secs");
     let nanos = field_int(s, "nanos") as u32;
     let local = matches!(s.get("local"), Some(Value::Bool(true)));
-    let utc: DateTime<Utc> = DateTime::from_timestamp(secs, nanos).unwrap_or_default();
-    Ok(match name {
-        "timestamp" => Value::Int(secs),
-        "timestamp_millis" => Value::Int(secs * 1000 + (nanos / 1_000_000) as i64),
-        "to_rfc3339" => Value::str(utc.to_rfc3339()),
-        "format" => {
-            let fmt = args.first().map(|v| v.display()).unwrap_or_default();
-            if local {
-                Value::str(utc.with_timezone(&Local).format(&fmt).to_string())
-            } else {
-                Value::str(utc.format(&fmt).to_string())
-            }
-        }
-        "year" => Value::Int(chrono::Datelike::year(&utc) as i64),
-        "month" => Value::Int(chrono::Datelike::month(&utc) as i64),
-        "day" => Value::Int(chrono::Datelike::day(&utc) as i64),
-        "hour" => Value::Int(chrono::Timelike::hour(&utc) as i64),
-        "minute" => Value::Int(chrono::Timelike::minute(&utc) as i64),
-        "second" => Value::Int(chrono::Timelike::second(&utc) as i64),
-        _ => bail!("unknown method `{name}` on DateTime"),
-    })
+    let args = super::methods::VArgs(args);
+    match super::shared::datetime_core(name, secs, nanos, local, &args) {
+        Some(super::shared::DateOut::Int(i)) => Ok(Value::Int(i)),
+        Some(super::shared::DateOut::Text(t)) => Ok(Value::str(t)),
+        None => bail!("unknown method `{name}` on DateTime"),
+    }
 }
 
 pub(super) fn rng_method(name: &str, args: &[Value]) -> Result<Value> {

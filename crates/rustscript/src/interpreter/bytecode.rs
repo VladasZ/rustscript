@@ -6,6 +6,8 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
+use super::typeir::{CastIr, TypeIr};
+
 pub type Reg = u16;
 
 /// A literal constant baked into a chunk, value model neutral so both the fast
@@ -702,9 +704,11 @@ pub struct Chunk {
     pub fmts: Vec<FmtSpec>,
     pub struct_lits: Vec<StructLit>,
     pub enum_variants: Vec<EnumVariant>,
-    pub casts: Vec<Rc<syn::Type>>,
+    pub casts: Vec<CastIr>,
+    /// Annotated `let` coercion targets, referenced by `Coerce`.
+    pub coerces: Vec<TypeIr>,
     /// Path calls, the segments plus an optional turbofish coercion type.
-    pub paths: Vec<(Vec<String>, Option<Rc<syn::Type>>)>,
+    pub paths: Vec<(Vec<String>, Option<TypeIr>)>,
     pub names: Vec<MethodName>,
     /// Nested closure bodies, referenced by `MakeClosure`.
     pub children: Vec<Rc<Chunk>>,
@@ -714,7 +718,7 @@ pub struct Chunk {
     /// to bind a caller's turbofish type args when the body resolves them.
     pub generics: Vec<Rc<str>>,
     /// Turbofish type args recorded at `CallFn` sites, referenced by `targ`.
-    pub call_type_args: Vec<Rc<[Rc<syn::Type>]>>,
+    pub call_type_args: Vec<Arc<[TypeIr]>>,
 }
 
 impl Chunk {
@@ -734,6 +738,7 @@ impl Chunk {
             struct_lits: Vec::new(),
             enum_variants: Vec::new(),
             casts: Vec::new(),
+            coerces: Vec::new(),
             paths: Vec::new(),
             names: Vec::new(),
             children: Vec::new(),

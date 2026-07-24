@@ -768,19 +768,12 @@ pub(super) fn bytes_to_vec(b: &[u8]) -> Value {
 pub(super) fn duration_method(s: &StructData, name: &str) -> Result<Value> {
     let secs = field_int(s, "secs") as u64;
     let nanos = field_int(s, "nanos") as u32;
-    let total_nanos = secs as u128 * 1_000_000_000 + nanos as u128;
-    Ok(match name {
-        "as_secs" => Value::Int(secs as i64),
-        "as_millis" => Value::Int((total_nanos / 1_000_000) as i64),
-        "as_micros" => Value::Int((total_nanos / 1_000) as i64),
-        "as_nanos" => Value::Int(total_nanos as i64),
-        "subsec_nanos" => Value::Int(nanos as i64),
-        "subsec_millis" => Value::Int((nanos / 1_000_000) as i64),
-        "subsec_micros" => Value::Int((nanos / 1_000) as i64),
-        "as_secs_f64" => Value::Float(secs as f64 + nanos as f64 / 1e9),
-        "is_zero" => Value::Bool(total_nanos == 0),
-        _ => bail!("unknown method `{name}` on Duration"),
-    })
+    match super::shared::duration_core(name, secs, nanos) {
+        Some(super::shared::DurOut::Int(i)) => Ok(Value::Int(i)),
+        Some(super::shared::DurOut::Float(f)) => Ok(Value::Float(f)),
+        Some(super::shared::DurOut::Bool(b)) => Ok(Value::Bool(b)),
+        None => bail!("unknown method `{name}` on Duration"),
+    }
 }
 
 pub(super) fn metadata_method(s: &StructData, name: &str, _args: &[Value]) -> Result<Value> {

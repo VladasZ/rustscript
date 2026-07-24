@@ -108,6 +108,7 @@ Supported language features include:
 - formatting, named arguments, width, precision, and common macros
 - modules, imports, re-exports, constants, statics, and local path crates
 - `#[tokio::main]`, spawned tasks, joins, yielding, timers, and async HTTP
+- typed and dynamic `serde_json`, `regex`, and `chrono` in tokio mode too
 
 The standard-library bridge covers files, directories, paths, stdin and stdout,
 buffered I/O, processes, TCP sockets, environment variables, arguments, time,

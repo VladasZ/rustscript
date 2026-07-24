@@ -12,7 +12,9 @@ use std::cmp::Ordering;
 use std::slice::from_ref;
 
 use super::bytecode::{BinKind, PLit, PPat, UnKind};
-use super::numeric::{IntWidth, int_arith, int_bit, int_neg, int_not, int_shift, unify};
+use super::numeric::{
+    IntWidth, float_arith, i64_arith, int_arith, int_bit, int_neg, int_not, int_shift, unify,
+};
 use super::value::Value;
 use anyhow::{Result, anyhow, bail};
 
@@ -88,38 +90,14 @@ pub(super) fn apply_bin_imm(op: BinKind, l: &Value, imm: i64) -> Result<Value> {
     use BinKind::*;
     if let Value::Int(a) = l {
         let a = *a;
+        // One `i64_arith` call per arm keeps `op` constant inside each, so
+        // the inlined inner match folds away and dispatch stays one match.
         return Ok(match op {
-            Add => Value::Int(
-                a.checked_add(imm)
-                    .ok_or_else(|| anyhow!("attempt to add with overflow"))?,
-            ),
-            Sub => Value::Int(
-                a.checked_sub(imm)
-                    .ok_or_else(|| anyhow!("attempt to subtract with overflow"))?,
-            ),
-            Mul => Value::Int(
-                a.checked_mul(imm)
-                    .ok_or_else(|| anyhow!("attempt to multiply with overflow"))?,
-            ),
-            Div => {
-                if imm == 0 {
-                    bail!("attempt to divide by zero");
-                }
-                Value::Int(
-                    a.checked_div(imm)
-                        .ok_or_else(|| anyhow!("attempt to divide with overflow"))?,
-                )
-            }
-            Rem => {
-                if imm == 0 {
-                    bail!("attempt to calculate the remainder with a divisor of zero");
-                }
-                Value::Int(
-                    a.checked_rem(imm).ok_or_else(|| {
-                        anyhow!("attempt to calculate the remainder with overflow")
-                    })?,
-                )
-            }
+            Add => Value::Int(i64_arith(Add, a, imm)?),
+            Sub => Value::Int(i64_arith(Sub, a, imm)?),
+            Mul => Value::Int(i64_arith(Mul, a, imm)?),
+            Div => Value::Int(i64_arith(Div, a, imm)?),
+            Rem => Value::Int(i64_arith(Rem, a, imm)?),
             Eq => Value::Bool(a == imm),
             Ne => Value::Bool(a != imm),
             Lt => Value::Bool(a < imm),
@@ -211,36 +189,8 @@ pub(super) fn cmp_test_imm(op: BinKind, l: &Value, imm: i64) -> Result<bool> {
 /// floats, lives in the outlined general path.
 #[inline]
 fn arith(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
-    use BinKind::*;
     if let (Value::Int(a), Value::Int(b)) = (l, r) {
-        let (a, b) = (*a, *b);
-        let result = match op {
-            Add => a
-                .checked_add(b)
-                .ok_or_else(|| anyhow!("attempt to add with overflow"))?,
-            Sub => a
-                .checked_sub(b)
-                .ok_or_else(|| anyhow!("attempt to subtract with overflow"))?,
-            Mul => a
-                .checked_mul(b)
-                .ok_or_else(|| anyhow!("attempt to multiply with overflow"))?,
-            Div => {
-                if b == 0 {
-                    bail!("attempt to divide by zero");
-                }
-                a.checked_div(b)
-                    .ok_or_else(|| anyhow!("attempt to divide with overflow"))?
-            }
-            Rem => {
-                if b == 0 {
-                    bail!("attempt to calculate the remainder with a divisor of zero");
-                }
-                a.checked_rem(b)
-                    .ok_or_else(|| anyhow!("attempt to calculate the remainder with overflow"))?
-            }
-            _ => unreachable!(),
-        };
-        return Ok(Value::Int(result));
+        return Ok(Value::Int(i64_arith(op, *a, *b)?));
     }
     if let (Some((a, w)), Some((b, _))) = (as_u64(l), as_u64(r)) {
         return u64_arith(op, a, b, w);
@@ -250,8 +200,7 @@ fn arith(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
 
 #[inline(never)]
 fn arith_general(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
-    use BinKind::*;
-    if let (Add, Value::Str(a), Value::Str(b)) = (op, l, r) {
+    if let (BinKind::Add, Value::Str(a), Value::Str(b)) = (op, l, r) {
         let mut out = String::with_capacity(a.len() + b.len());
         out.push_str(a);
         out.push_str(b);
@@ -262,22 +211,8 @@ fn arith_general(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
         return Ok(Value::int_of_width(int_arith(op, width, a, b)?, width));
     }
     match float_pair(l, r)? {
-        FloatPair::F64(x, y) => Ok(Value::Float(match op {
-            Add => x + y,
-            Sub => x - y,
-            Mul => x * y,
-            Div => x / y,
-            Rem => x % y,
-            _ => unreachable!(),
-        })),
-        FloatPair::F32(x, y) => Ok(Value::F32(match op {
-            Add => x + y,
-            Sub => x - y,
-            Mul => x * y,
-            Div => x / y,
-            Rem => x % y,
-            _ => unreachable!(),
-        })),
+        FloatPair::F64(x, y) => Ok(Value::Float(float_arith(op, x, y))),
+        FloatPair::F32(x, y) => Ok(Value::F32(float_arith(op, x, y))),
     }
 }
 

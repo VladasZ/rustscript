@@ -323,12 +323,15 @@ pub(super) fn drain_child_pipe(s: &StructData, key: &str) -> String {
 /// The `HashMap::entry` slot, without closures. Returns the stored value; for
 /// container values that Rc-share, mutating the result mutates the map, so
 pub(super) fn exitstatus_method(s: &StructData, name: &str) -> Result<Value> {
-    Ok(match name {
-        "success" => s.get("success").unwrap_or(Value::Bool(false)),
-        "code" => match s.get("code") {
-            Some(v) => Value::some(v),
-            None => Value::none(),
-        },
-        _ => bail!("unknown method `{name}` on ExitStatus"),
-    })
+    let success = matches!(s.get("success"), Some(Value::Bool(true)));
+    let code = match s.get("code") {
+        Some(Value::Int(c)) => Some(c),
+        _ => None,
+    };
+    match super::shared::exit_status_core(name, success, code) {
+        Some(super::shared::ExitOut::Bool(b)) => Ok(Value::Bool(b)),
+        Some(super::shared::ExitOut::OptInt(Some(c))) => Ok(Value::some(Value::Int(c))),
+        Some(super::shared::ExitOut::OptInt(None)) => Ok(Value::none()),
+        None => bail!("unknown method `{name}` on ExitStatus"),
+    }
 }

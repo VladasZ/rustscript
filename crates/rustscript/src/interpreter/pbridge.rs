@@ -137,6 +137,7 @@ impl PInterp {
             })
             .collect();
         match (ns, last) {
+            ("serde_json", _) => super::pjson::bridge_serde_json(last, &args),
             ("env", "args") => Ok(PValue::vec(
                 super::script_args().into_iter().map(PValue::str).collect(),
             )),
@@ -167,6 +168,7 @@ impl PInterp {
             ("String", "new") => Ok(PValue::str("")),
             ("String", "from") => Ok(PValue::str(arg0(&args).display())),
             ("Instant", "now") => Ok(PNative::Instant(Instant::now()).wrap()),
+            ("Utc", "now") | ("Local", "now") => Ok(now_datetime(ns == "Local")),
             ("Duration", "from_millis") => Ok(duration_value(int_arg(&args))),
             ("Duration", "from_secs") => Ok(duration_value(int_arg(&args).saturating_mul(1000))),
             ("process", "exit") => {
@@ -287,6 +289,7 @@ impl PInterp {
             PValue::Struct(st) if &**st.name() == "ExitStatus" => exitstatus_method(st, m),
             PValue::Struct(st) if &**st.name() == "Output" => output_method(st, m),
             PValue::Struct(st) if &**st.name() == "Duration" => duration_method(st, m),
+            PValue::Struct(st) if &**st.name() == "DateTime" => datetime_method(st, m, args),
             PValue::Struct(st) if matches!(&**st.name(), "Path" | "PathBuf") => {
                 super::pstd::path_method(st, m, args)
             }
@@ -541,14 +544,17 @@ fn command_new(program: PValue) -> PValue {
 }
 
 fn exitstatus_method(s: &Arc<super::pvalue::PStructData>, m: &str) -> Result<PValue> {
-    Ok(match m {
-        "success" => s.get("success").unwrap_or(PValue::Bool(false)),
-        "code" => match s.get("code") {
-            Some(PValue::Int(c)) => PValue::some(PValue::Int(c)),
-            _ => PValue::none(),
-        },
-        _ => bail!("method `{m}` on ExitStatus is not supported in tokio mode"),
-    })
+    let success = matches!(s.get("success"), Some(PValue::Bool(true)));
+    let code = match s.get("code") {
+        Some(PValue::Int(c)) => Some(c),
+        _ => None,
+    };
+    match shared::exit_status_core(m, success, code) {
+        Some(shared::ExitOut::Bool(b)) => Ok(PValue::Bool(b)),
+        Some(shared::ExitOut::OptInt(Some(c))) => Ok(PValue::some(PValue::Int(c))),
+        Some(shared::ExitOut::OptInt(None)) => Ok(PValue::none()),
+        None => bail!("method `{m}` on ExitStatus is not supported in tokio mode"),
+    }
 }
 
 fn output_method(s: &Arc<super::pvalue::PStructData>, m: &str) -> Result<PValue> {
@@ -608,18 +614,58 @@ fn duration_millis(v: Option<&PValue>) -> u64 {
     }
 }
 
-fn duration_method(s: &Arc<super::pvalue::PStructData>, m: &str) -> Result<PValue> {
-    let nanos = match s.get("nanos") {
-        Some(PValue::Int(nanos)) => nanos,
+/// Build a `DateTime` value for `Utc::now()` / `Local::now()`, storing the
+/// unix timestamp exactly like the fast engine's `now_datetime`.
+fn now_datetime(local: bool) -> PValue {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    PValue::struct_of(
+        "DateTime",
+        [
+            ("secs".into(), PValue::Int(now.as_secs() as i64)),
+            ("nanos".into(), PValue::Int(i64::from(now.subsec_nanos()))),
+            ("local".into(), PValue::Bool(local)),
+        ],
+    )
+}
+
+fn datetime_method(
+    s: &Arc<super::pvalue::PStructData>,
+    m: &str,
+    args: &[PValue],
+) -> Result<PValue> {
+    let secs = match s.get("secs") {
+        Some(PValue::Int(v)) => v,
         _ => 0,
     };
-    Ok(match m {
-        "as_nanos" => PValue::Int(nanos),
-        "as_micros" => PValue::Int(nanos / 1_000),
-        "as_millis" => PValue::Int(nanos / 1_000_000),
-        "as_secs" => PValue::Int(nanos / 1_000_000_000),
-        _ => bail!("method `{m}` on Duration is not supported in tokio mode"),
-    })
+    let nanos = match s.get("nanos") {
+        Some(PValue::Int(v)) => v as u32,
+        _ => 0,
+    };
+    let local = matches!(s.get("local"), Some(PValue::Bool(true)));
+    match shared::datetime_core(m, secs, nanos, local, &PArgs(args)) {
+        Some(shared::DateOut::Int(i)) => Ok(PValue::Int(i)),
+        Some(shared::DateOut::Text(t)) => Ok(PValue::str(t)),
+        None => bail!("method `{m}` on DateTime is not supported in tokio mode"),
+    }
+}
+
+fn duration_method(s: &Arc<super::pvalue::PStructData>, m: &str) -> Result<PValue> {
+    // This engine's Duration struct stores total nanos, so split it into the
+    // secs plus nanos view the shared core computes over.
+    let total = match s.get("nanos") {
+        Some(PValue::Int(nanos)) => nanos.max(0) as u64,
+        _ => 0,
+    };
+    let secs = total / 1_000_000_000;
+    let nanos = (total % 1_000_000_000) as u32;
+    match shared::duration_core(m, secs, nanos) {
+        Some(shared::DurOut::Int(i)) => Ok(PValue::Int(i)),
+        Some(shared::DurOut::Float(f)) => Ok(PValue::Float(f)),
+        Some(shared::DurOut::Bool(b)) => Ok(PValue::Bool(b)),
+        None => bail!("method `{m}` on Duration is not supported in tokio mode"),
+    }
 }
 
 fn native_method(native: &Arc<Mutex<PNative>>, m: &str, args: &mut [PValue]) -> Result<PValue> {
@@ -862,7 +908,7 @@ fn str_out(s: &Arc<str>, out: StrOut) -> PValue {
 }
 
 /// The parallel engine's argument view for the shared cores.
-struct PArgs<'a>(&'a [PValue]);
+pub(super) struct PArgs<'a>(pub(super) &'a [PValue]);
 
 impl Args for PArgs<'_> {
     fn text(&self, i: usize) -> String {
