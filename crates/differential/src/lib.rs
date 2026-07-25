@@ -1,6 +1,7 @@
 pub mod artifact;
 pub mod closure_case;
 pub mod generator;
+pub mod lang;
 pub mod method_case;
 pub mod model;
 pub mod mutator;

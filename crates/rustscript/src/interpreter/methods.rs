@@ -7,13 +7,13 @@ use std::rc::Rc;
 
 use anyhow::{Result, anyhow, bail};
 
-use super::bytecode::{BuiltinId, MethodName};
+use super::bytecode::{BuiltinId, MethodName, ScalarTy};
 
 use super::value::{Map, RStr, StructData, Value};
 
 use super::builtins::*;
 use super::ops::compare_values;
-use super::shared::{self, Args, CharOut, Num, NumOut, ParseNum, StrOut};
+use super::shared::{self, Args, CharOut, Num, NumOut, Parsed, StrOut};
 
 /// `map.entry(k).or_insert_with(Vec::new).push(x)` accumulates in place.
 pub(super) fn entry_method(s: &StructData, name: &str, args: &[Value]) -> Result<Value> {
@@ -91,6 +91,20 @@ pub(super) fn generic_method(recv: &Value, name: &str, args: &[Value]) -> Result
         (_, "as_str" | "as_i64" | "as_u64" | "as_f64" | "as_bool" | "as_array" | "as_object") => {
             Ok(Value::none())
         }
+        // `Ord` is derived for every type built out of ordered parts, so these
+        // work on an Option or a tuple as much as on a number. This is the
+        // last resort dispatch, so a receiver with its own `max` or `min`,
+        // a Vec or an integer, never reaches here.
+        (_, "max" | "min" | "cmp") if args.len() == 1 => {
+            let other = &args[0];
+            let ordering = compare_values(recv, other)?;
+            Ok(match name {
+                "cmp" => make_ordering(ordering),
+                "max" if ordering.is_ge() => recv.clone(),
+                "min" if ordering.is_le() => recv.clone(),
+                _ => other.clone(),
+            })
+        }
         // An enum names itself, so an unknown method on an Option says Option
         // and not the bare word enum. A struct names itself the same way.
         (Value::Enum { enum_name, .. }, _) => {
@@ -123,20 +137,43 @@ pub(super) fn str_method(s: &Rc<RStr>, method: &MethodName, args: &[Value]) -> R
         B::Split => split_value(s, args.first()),
         B::SplitWhitespace => super::iterator::split_whitespace(s.clone()),
         B::Count => Value::Int(s.chars().count() as i64),
-        B::Parse => {
-            let t = s.trim();
-            if let Ok(i) = t.parse::<i64>() {
-                Value::ok(Value::Int(i))
-            } else if let Ok(f) = t.parse::<f64>() {
-                Value::ok(Value::Float(f))
-            } else if let Ok(b) = t.parse::<bool>() {
-                Value::ok(Value::Bool(b))
-            } else {
-                Value::err(Value::str(format!("cannot parse `{t}`")))
-            }
-        }
+        B::Parse => parse_value(s.as_str(), method.scalar.as_ref()),
         _ => return str_method_slow(s, &method.text, args),
     })
+}
+
+/// `Default::default()` for the payload type of an `Option` or `Result`.
+///
+/// The type is only known when the call site wrote it down, as `None::<u64>`
+/// does. Without it there is no runtime type to build a default from, so this
+/// keeps the empty string the bridge has always answered with, which is what
+/// the common `env::var(..).unwrap_or_default()` shape wants.
+fn default_of(target: Option<&ScalarTy>) -> Value {
+    match target {
+        Some(ScalarTy::Int(width)) => Value::int_of_width(0, *width),
+        Some(ScalarTy::F32) => Value::F32(0.0),
+        Some(ScalarTy::F64) => Value::Float(0.0),
+        Some(ScalarTy::Bool) => Value::Bool(false),
+        Some(ScalarTy::Char) => Value::Char('\0'),
+        Some(ScalarTy::Opt(_)) => Value::none(),
+        Some(ScalarTy::List(_)) => Value::vec(Vec::new()),
+        // `Other` is a type this model does not describe, so it is no better
+        // informed than no type at all and keeps the same fallback.
+        Some(ScalarTy::Str | ScalarTy::Other) | None => Value::str(String::new()),
+    }
+}
+
+/// Materialize the engine neutral parse answer as a fast engine value.
+pub(super) fn parse_value(text: &str, target: Option<&ScalarTy>) -> Value {
+    match shared::parse_core(text, target) {
+        Parsed::Int(value, width) => Value::ok(Value::int_of_width(value, width)),
+        Parsed::F32(value) => Value::ok(Value::F32(value)),
+        Parsed::F64(value) => Value::ok(Value::Float(value)),
+        Parsed::Bool(value) => Value::ok(Value::Bool(value)),
+        Parsed::Char(value) => Value::ok(Value::Char(value)),
+        Parsed::Str(value) => Value::ok(Value::str(value)),
+        Parsed::Fail(message) => Value::err(Value::str(message)),
+    }
 }
 
 pub(super) fn str_method_slow(s: &Rc<RStr>, name: &str, args: &[Value]) -> Result<Value> {
@@ -182,12 +219,6 @@ fn str_out(s: &Rc<RStr>, out: StrOut) -> Value {
             None => Value::none(),
         },
         StrOut::Ordering(o) => make_ordering(o),
-        StrOut::Parse(p) => match p {
-            ParseNum::Int(i) => Value::ok(Value::Int(i)),
-            ParseNum::Float(f) => Value::ok(Value::Float(f)),
-            ParseNum::Bool(b) => Value::ok(Value::Bool(b)),
-            ParseNum::Fail(m) => Value::err(Value::str(m)),
-        },
     }
 }
 
@@ -321,7 +352,9 @@ pub(super) fn vec_method(
         }
         B::Sum => {
             let mut acc_i = 0i64;
-            let mut acc_f = 0f64;
+            // `Sum` for floats starts at -0.0 so summing negative zeros keeps
+            // the sign, matching std.
+            let mut acc_f = -0.0f64;
             let mut is_float = false;
             for x in v.borrow().iter() {
                 match &x.bridge_image().unwrap_or_else(|| x.clone()) {
@@ -329,6 +362,12 @@ pub(super) fn vec_method(
                         acc_i = acc_i
                             .checked_add(*i)
                             .ok_or_else(|| anyhow!("attempt to add with overflow"))?;
+                        // A `sum::<u8>()` overflows at 255, not at `i64::MAX`.
+                        if let Some(ScalarTy::Int(width)) = &method.scalar
+                            && (i128::from(acc_i) < width.min() || i128::from(acc_i) > width.max())
+                        {
+                            bail!("attempt to add with overflow");
+                        }
                     }
                     Value::Float(f) => {
                         is_float = true;
@@ -337,8 +376,27 @@ pub(super) fn vec_method(
                     _ => bail!("sum needs numbers"),
                 }
             }
-            if is_float {
-                Value::Float(acc_f + acc_i as f64)
+            // An empty vec carries no element to say whether the sum is an
+            // integer or a float one, so a `sum::<f64>()` turbofish is the
+            // only thing that can tell them apart.
+            let float_target = matches!(method.scalar, Some(ScalarTy::F32 | ScalarTy::F64));
+            if is_float || (float_target && acc_i == 0) {
+                // The integer side only joins when it carries a value, so it
+                // cannot cancel the -0.0 identity with a +0.0.
+                let total = if acc_i == 0 {
+                    acc_f
+                } else {
+                    acc_f + acc_i as f64
+                };
+                if matches!(method.scalar, Some(ScalarTy::F32)) {
+                    Value::F32(total as f32)
+                } else {
+                    Value::Float(total)
+                }
+            } else if let Some(ScalarTy::Int(width)) = &method.scalar {
+                // The sum carries the element width, so a later `!` or shift on
+                // it computes at that width, not at i64's.
+                Value::int_of_width(i128::from(acc_i), *width)
             } else {
                 Value::Int(acc_i)
             }
@@ -483,7 +541,20 @@ pub(super) fn vec_method(
                 .cloned()
                 .map(Value::some)
                 .unwrap_or_else(Value::none),
+            // With an argument this is `Ord::max` on two whole vecs, which
+            // orders them lexicographically and hands one back. Only the
+            // no-argument form is the iterator reduction over the elements.
             "max" | "min" => {
+                if let Some(other) = args.first() {
+                    let recv = Value::Vec(v.clone());
+                    let ord = compare_values(&recv, other)?;
+                    let take_recv = if method.text == "max" {
+                        ord.is_ge()
+                    } else {
+                        ord.is_le()
+                    };
+                    return Ok(if take_recv { recv } else { other.clone() });
+                }
                 let items = v.borrow();
                 let mut best: Option<&Value> = None;
                 for item in items.iter() {
@@ -589,6 +660,36 @@ pub(super) fn map_pairs(m: &Rc<RefCell<Map>>) -> Value {
     )
 }
 
+/// Answer a width-aware integer method, or `None` when the receiver is not an
+/// integer or the name is not one of them, so dispatch falls through.
+pub(super) fn int_method(recv: &Value, name: &str, args: &[Value]) -> Option<Result<Value>> {
+    let (value, width) = recv.int_parts()?;
+    let mut decoded = Vec::with_capacity(args.len());
+    for arg in args {
+        // Every argument of these methods is an integer in real Rust, so a
+        // non-integer here means this is not the method it looks like.
+        decoded.push(arg.int_parts()?.0);
+    }
+    Some(
+        match super::int_methods::int_method(name, width, value, &decoded)? {
+            Ok(out) => Ok(int_out(out, width)),
+            Err(error) => Err(error),
+        },
+    )
+}
+
+fn int_out(out: super::int_methods::IntOut, width: super::numeric::IntWidth) -> Value {
+    use super::int_methods::IntOut;
+    match out {
+        IntOut::Same(value) => Value::int_of_width(value, width),
+        IntOut::Count(count) => Value::Int(i64::from(count)),
+        IntOut::Bool(value) => Value::Bool(value),
+        IntOut::Checked(Some(value)) => Value::some(Value::int_of_width(value, width)),
+        IntOut::Checked(None) => Value::none(),
+        IntOut::Ordering(ordering) => make_ordering(ordering),
+    }
+}
+
 pub(super) fn num_method(recv: &Value, name: &str, args: &[Value]) -> Result<Value> {
     match name {
         "to_string" => return Ok(Value::str(recv.display())),
@@ -598,11 +699,11 @@ pub(super) fn num_method(recv: &Value, name: &str, args: &[Value]) -> Result<Val
     let n = match recv {
         Value::Int(i) => Num::Int(*i),
         Value::Float(f) => Num::Float(*f),
-        _ => bail!("unknown numeric method `{name}`"),
+        _ => bail!("unknown method `{name}` on a number"),
     };
     match shared::num_core(n, name, &VArgs(args))? {
         Some(out) => Ok(num_out(out)),
-        None => bail!("unknown numeric method `{name}`"),
+        None => bail!("unknown method `{name}` on a number"),
     }
 }
 
@@ -650,7 +751,7 @@ pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
         // built. Scripts use this almost only on string results such as
         // read_to_string and env::var, so an empty string is the practical
         // default. For another type use unwrap_or with an explicit value.
-        "unwrap_or_default" => inner.unwrap_or_else(|| Value::str(String::new())),
+        "unwrap_or_default" => inner.unwrap_or_else(|| default_of(method.scalar.as_ref())),
         "as_ref" | "as_deref" | "take" | "as_mut" => recv.clone(),
         // A json null parses to None here, so a serde lookup into a value that
         // turned out to be null is None rather than an unknown method error.
@@ -713,12 +814,13 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
                 args.first().cloned().unwrap_or(Value::Unit)
             }
         }
-        // Same string-default reasoning as Option::unwrap_or_default above.
+        // The Ok payload type, from wherever the call site stated it, exactly
+        // as Option::unwrap_or_default above.
         "unwrap_or_default" => {
             if is_ok {
-                inner.unwrap_or_else(|| Value::str(String::new()))
+                inner.unwrap_or_else(|| default_of(method.scalar.as_ref()))
             } else {
-                Value::str(String::new())
+                default_of(method.scalar.as_ref())
             }
         }
         "ok" => {

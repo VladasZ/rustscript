@@ -3,8 +3,9 @@
 //! `rust check` command, never when a script runs. Results cache by source
 //! hash, so an unchanged script rechecks instantly.
 
+use hex::encode;
+use sha2::{Digest, Sha256};
 use std::fs::File;
-use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -16,12 +17,20 @@ use crate::loader::CrateDep;
 
 fn cache_root() -> PathBuf {
     if let Some(dir) = std::env::var_os("XDG_CACHE_HOME") {
-        PathBuf::from(dir).join("rustscript")
-    } else if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".cache/rustscript")
-    } else {
-        std::env::temp_dir().join("rustscript")
+        return PathBuf::from(dir).join("rustscript");
     }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home).join(".cache/rustscript");
+    }
+    // `dirs` knows each platform's real per-user cache directory, which
+    // matters most on Windows where `HOME` is normally unset. The old
+    // fallback went straight to the temp dir, and on Linux that is the shared
+    // world writable `/tmp`, so `rust FILE.rs cmp` would exec a binary from a
+    // predictable path any other user on the box could create first.
+    if let Some(dir) = dirs::cache_dir() {
+        return dir.join("rustscript");
+    }
+    std::env::temp_dir().join("rustscript")
 }
 
 /// Compiled script binaries, one per source hash. Kept so an unchanged script
@@ -155,7 +164,7 @@ pub fn check(
         return Ok(());
     }
     let hash = hash_files(files, crate_deps);
-    let project = cache_root().join(format!("{hash:016x}"));
+    let project = cache_root().join(hash.clone());
     let stamp = project.join(".checked");
     if stamp.exists() {
         touch(&stamp);
@@ -225,14 +234,14 @@ pub fn build(
     crate_deps: &[CrateDep],
 ) -> Result<PathBuf> {
     let hash = hash_files(files, crate_deps);
-    let bin = bin_cache().join(format!("{hash:016x}{}", std::env::consts::EXE_SUFFIX));
+    let bin = bin_cache().join(format!("{hash}{}", std::env::consts::EXE_SUFFIX));
     if bin.exists() {
         touch(&bin);
         sweep();
         return Ok(bin);
     }
 
-    let project = cache_root().join(format!("{hash:016x}"));
+    let project = cache_root().join(hash.clone());
     write_project(&project, files, crate_deps)?;
 
     let target = cache_root().join("target");
@@ -256,7 +265,7 @@ pub fn build(
     std::fs::create_dir_all(bin_cache())?;
     // Copy to a per-process temp path then rename, so a concurrent run never
     // execs a half-written binary. copy carries the executable bit over.
-    let tmp = bin_cache().join(format!(".{hash:016x}.{}", std::process::id()));
+    let tmp = bin_cache().join(format!(".{hash}.{}", std::process::id()));
     std::fs::copy(&built, &tmp)
         .map_err(|e| anyhow!("cannot copy built binary {}: {e}", built.display()))?;
     match std::fs::rename(&tmp, &bin) {
@@ -341,21 +350,37 @@ path = {root:?}
     out
 }
 
-fn hash_files(files: &[(PathBuf, String)], crate_deps: &[CrateDep]) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+/// The cache key for a script.
+///
+/// It covers more than the sources. A `.checked` stamp claims "this is valid
+/// Rust", and that claim depends on the dependency set in `MANIFEST` and on
+/// the compiler that judged it. Neither used to be in the key, so after a
+/// `rust update` that changed a dependency version the old stamps still
+/// vouched for sources the new set might reject, and a cached binary built by
+/// the previous toolchain kept being served.
+///
+/// Sha256 rather than `DefaultHasher`, whose output std explicitly does not
+/// promise to keep stable across releases, and which is a 64 bit digest for
+/// what is a content addressed executable cache.
+fn hash_files(files: &[(PathBuf, String)], crate_deps: &[CrateDep]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(MANIFEST.as_bytes());
+    hasher.update(crate::build_info::version().as_bytes());
     for (rel, source) in files {
-        rel.hash(&mut hasher);
-        source.hash(&mut hasher);
+        hasher.update(rel.to_string_lossy().as_bytes());
+        hasher.update(source.as_bytes());
     }
     // A change in any grafted crate must re-trigger the check for its users.
     for dep in crate_deps {
-        dep.name.hash(&mut hasher);
+        hasher.update(dep.name.as_bytes());
         for (rel, source) in &dep.files {
-            rel.hash(&mut hasher);
-            source.hash(&mut hasher);
+            hasher.update(rel.to_string_lossy().as_bytes());
+            hasher.update(source.as_bytes());
         }
     }
-    hasher.finish()
+    // Half of the digest is still 128 bits, far past any collision concern,
+    // and keeps the cache directory names readable.
+    encode(&hasher.finalize()[..16])
 }
 
 #[cfg(test)]
@@ -396,6 +421,42 @@ mod tests {
             !windows_only,
             "shared must not be a Windows only dependency:\n{text}"
         );
+    }
+
+    fn source(name: &str, body: &str) -> Vec<(PathBuf, String)> {
+        vec![(PathBuf::from(name), body.to_string())]
+    }
+
+    /// The key has to separate different sources, different file names, and
+    /// different grafted crates. A `.checked` stamp is a claim that cargo
+    /// accepted exactly this input, so anything that could change that answer
+    /// belongs in the key.
+    #[test]
+    fn the_cache_key_separates_different_inputs() {
+        let base = hash_files(&source("a.rs", "fn main() {}"), &[]);
+        assert_eq!(base.len(), 32, "128 bits rendered as hex");
+        assert!(base.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(base, hash_files(&source("a.rs", "fn main() {}"), &[]));
+
+        assert_ne!(base, hash_files(&source("a.rs", "fn main() { }"), &[]));
+        assert_ne!(base, hash_files(&source("b.rs", "fn main() {}"), &[]));
+
+        let dep = CrateDep {
+            name: "shared".to_string(),
+            dir: PathBuf::from("/tmp/shared"),
+            files: source("lib.rs", "pub fn helper() {}"),
+        };
+        let with_dep = hash_files(&source("a.rs", "fn main() {}"), &[dep]);
+        assert_ne!(base, with_dep);
+
+        // A change inside a grafted crate must re-trigger its users' check.
+        let changed_dep = CrateDep {
+            name: "shared".to_string(),
+            dir: PathBuf::from("/tmp/shared"),
+            files: source("lib.rs", "pub fn helper() -> u8 { 0 }"),
+        };
+        let with_changed = hash_files(&source("a.rs", "fn main() {}"), &[changed_dep]);
+        assert_ne!(with_dep, with_changed);
     }
 
     fn set_mtime(path: &Path, to: SystemTime) {

@@ -275,6 +275,7 @@ impl Interp {
             let name = MethodName {
                 id: BuiltinId::resolve(last),
                 text: last.clone(),
+                scalar: None,
             };
             return self.eval_method(&recv, &name, &mut rest);
         }
@@ -345,6 +346,12 @@ impl Interp {
                 BuiltinId::Clone => return Ok(recv.clone()),
                 _ => {}
             }
+        }
+        // Integer methods answer from the real width, before `bridge_image`
+        // below flattens the receiver to an i64 that saturates at `i64::MAX`
+        // and forgets whether it was a u8 or a u64.
+        if let Some(result) = super::methods::int_method(recv, &name.text, args) {
+            return result;
         }
         let widened;
         let recv = match recv.bridge_image() {

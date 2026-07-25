@@ -470,17 +470,21 @@ fn classify_native_panic(
             Classification::InterpreterMissingPanic
         };
     }
-    // Both aborted. Output printed before the abort must still agree, and the
-    // panic message the interpreter renders must match the real compiler.
+    // Both aborted. A gap is checked first: hitting a missing feature stops
+    // the interpreter wherever it stops, usually earlier than the panic the
+    // native run aborts at, so the output printed up to that point is shorter
+    // for a reason that is not a semantic bug. Comparing stdout first reported
+    // those as `SemanticMismatch`, which is a false finding.
+    if is_unsupported(&interpreted.stderr) {
+        return Classification::InterpreterUnsupported;
+    }
+    // Output printed before the abort must agree, and the panic message the
+    // interpreter renders must match the real compiler.
     if native.stdout != interpreted.stdout {
         return Classification::SemanticMismatch;
     }
     if panic_payload(&native.stderr) == panic_payload(&interpreted.stderr) {
         Classification::Match
-    } else if is_unsupported(&interpreted.stderr) {
-        // The interpreter aborted on a missing feature where the native run
-        // panicked for its own reason. Still a gap, not a message bug.
-        Classification::InterpreterUnsupported
     } else {
         Classification::PanicMessageMismatch
     }

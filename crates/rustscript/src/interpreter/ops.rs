@@ -291,6 +291,65 @@ fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
         (Value::Str(a), Value::Str(b)) => Some(a.as_str().cmp(b.as_str())),
         (Value::Char(a), Value::Char(b)) => Some(a.cmp(b)),
         (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
+        // Sequences order lexicographically, the first differing element
+        // deciding and a prefix ordering before what extends it. Tuples order
+        // the same way, field by field.
+        (Value::Vec(a), Value::Vec(b)) | (Value::Tuple(a), Value::Tuple(b)) => {
+            let (a, b) = (a.borrow(), b.borrow());
+            let mut order = None;
+            for (left, right) in a.iter().zip(b.iter()) {
+                match partial_compare(left, right)? {
+                    Some(Ordering::Equal) => {}
+                    other => {
+                        order = Some(other);
+                        break;
+                    }
+                }
+            }
+            match order {
+                Some(decided) => decided,
+                None => Some(a.len().cmp(&b.len())),
+            }
+        }
+        // `Option` and `Result` derive their order from the variant order in
+        // the declaration, so `None` sorts before any `Some` and `Ok` before
+        // any `Err`, and two of the same variant compare by payload.
+        (
+            Value::Enum {
+                enum_name: left_enum,
+                variant: left_variant,
+                data: left_data,
+            },
+            Value::Enum {
+                enum_name: right_enum,
+                variant: right_variant,
+                data: right_data,
+            },
+        ) if left_enum == right_enum => {
+            let rank = |variant: &str| match variant {
+                "None" | "Ok" => 0,
+                _ => 1,
+            };
+            match rank(left_variant).cmp(&rank(right_variant)) {
+                Ordering::Equal => {
+                    let mut order = None;
+                    for (left, right) in left_data.iter().zip(right_data.iter()) {
+                        match partial_compare(left, right)? {
+                            Some(Ordering::Equal) => {}
+                            other => {
+                                order = Some(other);
+                                break;
+                            }
+                        }
+                    }
+                    match order {
+                        Some(decided) => decided,
+                        None => Some(left_data.len().cmp(&right_data.len())),
+                    }
+                }
+                decided => Some(decided),
+            }
+        }
         (a, b) => bail!("cannot compare {} and {}", a.type_name(), b.type_name()),
     })
 }

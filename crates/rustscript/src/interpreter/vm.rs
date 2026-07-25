@@ -550,17 +550,20 @@ impl Interp {
                                 let get = MethodName {
                                     text: "get".into(),
                                     id: BuiltinId::Get,
+                                    scalar: None,
                                 };
                                 let opt =
                                     self.eval_method(&recv_v, &get, &mut [stack[k].clone()])?;
                                 let copied = MethodName {
                                     text: "copied".into(),
                                     id: BuiltinId::Copied,
+                                    scalar: None,
                                 };
                                 let opt = self.eval_method(&opt, &copied, &mut [])?;
                                 let uo = MethodName {
                                     text: "unwrap_or".into(),
                                     id: BuiltinId::UnwrapOr,
+                                    scalar: None,
                                 };
                                 Some(self.eval_method(&opt, &uo, &mut [stack[df].clone()])?)
                             }

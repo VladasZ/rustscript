@@ -13,7 +13,7 @@ use syn::{BinOp, Block, Expr, FnArg, Lit, Pat, UnOp};
 
 use super::bytecode::{
     BinKind, BuiltinId, CapSource, Chunk, Const, EnumVariant, FmtSpec, Member, MethodName, Op,
-    PatInfo, Reg, StructLit,
+    PatInfo, Reg, ScalarTy, StructLit,
 };
 use super::numeric::IntWidth;
 use super::resolver::{Res, Resolver};
@@ -154,6 +154,17 @@ pub struct Compiler<'a> {
     /// exact `collect` call, keyed by the call's address like `json_let`.
     /// Lets an annotated let collect into a String without a turbofish.
     pub(super) string_let: Option<*const syn::ExprMethodCall>,
+    /// An `unwrap_or_default` call whose result is unwrapped again, so it
+    /// produced an `Option` and its own default is `None`. Keyed by address
+    /// like the two above.
+    pub(super) option_result: Option<*const syn::ExprMethodCall>,
+    /// A `let x: T = ...unwrap_or_default()` annotation waiting to attach to
+    /// that exact call, naming the payload the default is built from.
+    pub(super) default_let: Option<(*const syn::ExprMethodCall, ScalarTy)>,
+    /// Payload types of locals declared as `Option<T>` or `Result<T, _>`, so
+    /// `opt.unwrap_or_default()` can build the right default from the type the
+    /// binding was declared with. Only ever read to pick a `Default`.
+    pub(super) option_locals: HashMap<String, ScalarTy>,
 }
 
 /// Where a referenced name lives.
@@ -175,6 +186,9 @@ impl<'a> Compiler<'a> {
             cur_line: 0,
             json_let: None,
             string_let: None,
+            option_result: None,
+            default_let: None,
+            option_locals: HashMap::new(),
         }
     }
 
@@ -317,10 +331,15 @@ impl<'a> Compiler<'a> {
     }
 
     fn add_name(&mut self, name: String) -> u16 {
+        self.add_name_with(name, None)
+    }
+
+    fn add_name_with(&mut self, name: String, scalar: Option<ScalarTy>) -> u16 {
         let f = self.cur();
         f.names.push(MethodName {
             id: BuiltinId::resolve(&name),
             text: name,
+            scalar,
         });
         (f.names.len() - 1) as u16
     }

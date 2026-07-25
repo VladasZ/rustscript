@@ -415,6 +415,7 @@ impl PInterp {
                         let get = MethodName {
                             text: "get".into(),
                             id: super::bytecode::BuiltinId::Get,
+                            scalar: None,
                         };
                         let opt = self.eval_method(&recv_v, &get, &mut [key_v])?;
                         let v = match opt {

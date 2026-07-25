@@ -152,6 +152,10 @@ fn item_attrs(item: &Item) -> &[syn::Attribute] {
     }
 }
 
+/// How deep `mod` nesting may go before the loader calls it a cycle. Real
+/// module trees are a handful of levels, so this only ever catches a loop.
+const MAX_MODULE_DEPTH: usize = 64;
+
 /// Walk one module's items, loading `mod name;` files and expanding inline
 /// `mod name { .. }` blocks. `children_dir` is where this module's child
 /// files live. Returns this module with its `mod` items stripped; discovered
@@ -165,6 +169,17 @@ fn collect(
     file: Arc<str>,
     items: Vec<Item>,
 ) -> Result<ModuleSrc> {
+    // A `#[path]` that points back at its own file recurses forever. Without
+    // this the loader overflowed the native stack and the process died with a
+    // bare "fatal runtime error", naming neither the script nor the module.
+    if path.len() > MAX_MODULE_DEPTH {
+        // Only the tail is named. The full path at this depth is the same
+        // segment repeated sixty times, which tells the reader nothing.
+        bail!(
+            "module `{}` nests deeper than {MAX_MODULE_DEPTH} levels, which usually means a `#[path]` points back at its own file",
+            path.last().map_or("", String::as_str)
+        );
+    }
     let mut kept = Vec::with_capacity(items.len());
     let mut seen: Vec<String> = Vec::new();
     for item in items {

@@ -6,7 +6,7 @@ use anyhow::{Result, bail};
 use syn::{Expr, Lit, Pat, UnOp};
 
 use crate::interpreter::bytecode::{
-    BinKind, CapSource, DISCARD, Member, Op, PLit, PPat, PatInfo, Reg, StructLit,
+    BinKind, CapSource, DISCARD, Member, Op, PLit, PPat, PatInfo, Reg, ScalarTy, StructLit,
 };
 use crate::interpreter::json_bridge::serde_rename;
 use crate::interpreter::value::StructShape;
@@ -277,7 +277,20 @@ impl Compiler<'_> {
             });
             return Ok(());
         }
+        // An `unwrap_or_default` whose own result is unwrapped again must have
+        // produced an `Option`, so its default is `None`. That is a fact about
+        // the shape of the chain, not a guess about the type, and it is the
+        // only thing that can type the inner call of
+        // `x.unwrap_or_default().unwrap_or_default()`.
+        let outer_option_hint = self.option_result.take();
+        if m.method == "unwrap_or_default"
+            && let Expr::MethodCall(inner) = &*m.receiver
+            && inner.method == "unwrap_or_default"
+        {
+            self.option_result = Some(std::ptr::from_ref(inner));
+        }
         let recv = self.compile_expr(&m.receiver)?;
+        self.option_result = outer_option_hint;
         let base = self.compile_args(m.args.iter())?;
         // `collect` is type driven in real Rust. The interpreter has no types,
         // so the two places the target is knowable lower to their own method
@@ -292,7 +305,33 @@ impl Compiler<'_> {
                 method = "collect_string".to_string();
             }
         }
-        let name = self.add_name(method);
+        // An explicit turbofish is the only place a method's result type is
+        // written down, so it rides on the name for the methods that need it.
+        let mut scalar = turbofish_scalar(m.turbofish.as_ref());
+        // `unwrap_or_default` carries no turbofish of its own, its type is the
+        // payload of the Option it is called on. Wherever the source states
+        // that payload, as `None::<u64>` or `then_some(1u8)` do, the receiver
+        // is where it appears, and without it the default fell back to an
+        // empty string whatever the real type was.
+        if scalar.is_none() && m.method == "unwrap_or_default" {
+            scalar = option_payload(&m.receiver, &self.option_locals);
+        }
+        // A pending `let x: T = ...unwrap_or_default()` annotation names the
+        // payload of the outermost call in the chain.
+        if scalar.is_none()
+            && let Some((ptr, ty)) = &self.default_let
+            && std::ptr::eq(*ptr, m)
+        {
+            scalar = Some(ty.clone());
+            self.default_let = None;
+        }
+        // Failing all of that, this call's own result is unwrapped again, so
+        // whatever it holds, it produced an Option and defaults to None.
+        if matches!(self.option_result, Some(ptr) if std::ptr::eq(ptr, m)) {
+            self.option_result = None;
+            scalar = scalar.or(Some(ScalarTy::Opt(Box::new(ScalarTy::Other))));
+        }
+        let name = self.add_name_with(method, scalar);
         // A multiline chain compiles its receiver and args first, so restamp
         // with the method's own line before the op lands, the line rustc
         // would name for this call.
@@ -889,4 +928,114 @@ fn names_string(tf: &syn::AngleBracketedGenericArguments) -> bool {
         matches!(arg, syn::GenericArgument::Type(syn::Type::Path(p))
             if p.path.segments.last().is_some_and(|s| s.ident == "String"))
     })
+}
+
+/// The payload type of an expression that syntactically builds an `Option`,
+/// for the cases where the source states it outright. Only a `Default` is ever
+/// built from this, so a container answers with the kind of default it has
+/// rather than with its element type.
+///
+/// This is not type inference. Every arm reads a type the program wrote down,
+/// and anything else answers `None` so the caller keeps its old behavior.
+fn option_payload(expr: &Expr, locals: &HashMap<String, ScalarTy>) -> Option<ScalarTy> {
+    match expr {
+        Expr::Paren(inner) => option_payload(&inner.expr, locals),
+        Expr::Group(inner) => option_payload(&inner.expr, locals),
+        Expr::Path(path) => {
+            let segment = path.path.segments.last()?;
+            // `None::<T>`, the payload is the turbofish.
+            if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                return turbofish_scalar(Some(args));
+            }
+            // A bare name the program declared as `let opt: Option<T>`.
+            locals.get(&segment.ident.to_string()).cloned()
+        }
+        // `Some(x)`, the payload is whatever `x` is.
+        Expr::Call(call) => {
+            let Expr::Path(path) = &*call.func else {
+                return None;
+            };
+            let last = path.path.segments.last()?;
+            (last.ident == "Some")
+                .then(|| call.args.first().and_then(|a| written_ty(a, locals)))
+                .flatten()
+        }
+        Expr::MethodCall(call) => match call.method.to_string().as_str() {
+            // `flag.then_some(x)` is an `Option` of whatever `x` is.
+            "then_some" => call.args.first().and_then(|a| written_ty(a, locals)),
+            // `a.or(b)` keeps the payload both sides share, so either side
+            // that states it answers for both.
+            "or" => call
+                .args
+                .first()
+                .and_then(|a| option_payload(a, locals))
+                .or_else(|| option_payload(&call.receiver, locals)),
+            // These hand the same payload through untouched.
+            "cloned" | "copied" | "take" | "as_ref" | "as_mut" => {
+                option_payload(&call.receiver, locals)
+            }
+            // `x.unwrap_or_default()` peels one layer, so its own payload is
+            // one layer further in than the receiver's.
+            "unwrap_or_default" => option_payload(&call.receiver, locals)?.payload().cloned(),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The type an expression states about itself, for the same narrow purpose.
+fn written_ty(expr: &Expr, locals: &HashMap<String, ScalarTy>) -> Option<ScalarTy> {
+    match expr {
+        Expr::Paren(inner) => written_ty(&inner.expr, locals),
+        Expr::Group(inner) => written_ty(&inner.expr, locals),
+        // `value as u8` names the type at the cast.
+        Expr::Cast(cast) => ScalarTy::lower(&cast.ty),
+        Expr::Lit(lit) => match &lit.lit {
+            Lit::Str(_) => Some(ScalarTy::Str),
+            Lit::Bool(_) => Some(ScalarTy::Bool),
+            Lit::Char(_) => Some(ScalarTy::Char),
+            Lit::Int(int) => {
+                crate::interpreter::numeric::IntWidth::parse(int.suffix()).map(ScalarTy::Int)
+            }
+            Lit::Float(float) => match float.suffix() {
+                "f32" => Some(ScalarTy::F32),
+                "f64" => Some(ScalarTy::F64),
+                _ => None,
+            },
+            _ => None,
+        },
+        // Anything that is itself an `Option` is one layer deeper, keeping
+        // what it wraps so a further unwrap can still read it.
+        Expr::Call(_) | Expr::Path(_) | Expr::MethodCall(_) => {
+            if let Some(payload) = option_payload(expr, locals) {
+                Some(ScalarTy::Opt(Box::new(payload)))
+            } else if is_none_path(expr) {
+                Some(ScalarTy::Opt(Box::new(ScalarTy::Other)))
+            } else {
+                None
+            }
+        }
+        Expr::Macro(mac) if mac.mac.path.is_ident("vec") => {
+            Some(ScalarTy::List(Box::new(ScalarTy::Other)))
+        }
+        _ => None,
+    }
+}
+
+/// A bare `None`, with or without a turbofish.
+fn is_none_path(expr: &Expr) -> bool {
+    matches!(expr, Expr::Path(path)
+        if path.path.segments.last().is_some_and(|s| s.ident == "None"))
+}
+
+/// The first concrete scalar named by a turbofish argument list.
+fn turbofish_scalar(args: Option<&syn::AngleBracketedGenericArguments>) -> Option<ScalarTy> {
+    args?
+        .args
+        .iter()
+        .find_map(|arg| match arg {
+            syn::GenericArgument::Type(ty) => Some(ty),
+            _ => None,
+        })
+        .and_then(ScalarTy::lower)
 }

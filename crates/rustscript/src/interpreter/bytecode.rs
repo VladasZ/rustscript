@@ -121,6 +121,79 @@ pub struct EnumVariant {
 pub struct MethodName {
     pub text: String,
     pub id: BuiltinId,
+    /// The scalar type of an explicit turbofish, `s.parse::<u8>()` for one.
+    /// Names are allocated per call site, so this rides along without an
+    /// extra operand. Without it `parse` had to guess its target from the
+    /// text, which made `"300".parse::<u8>()` an `Ok(300)`.
+    pub scalar: Option<ScalarTy>,
+}
+
+/// A concrete type a turbofish can name, for the methods whose result type is
+/// chosen by the caller rather than by the receiver. The containers nest so a
+/// payload stays readable through more than one layer, which is what
+/// `Some(None::<f64>).unwrap_or_default().unwrap_or_default()` needs.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum ScalarTy {
+    Int(super::numeric::IntWidth),
+    F32,
+    F64,
+    Bool,
+    Char,
+    Str,
+    /// `Option<T>`. Its own `Default` is `None`, and `T` is what one more
+    /// unwrap answers with.
+    Opt(Box<ScalarTy>),
+    /// `Vec<T>`, whose `Default` is the empty vec.
+    List(Box<ScalarTy>),
+    /// A type the source named but this model does not describe, a user
+    /// struct for one. Only its presence matters, never its identity.
+    Other,
+}
+
+impl ScalarTy {
+    /// Lower a turbofish type argument, or `None` for anything that is not one
+    /// of these scalars.
+    pub fn lower(ty: &syn::Type) -> Option<Self> {
+        let syn::Type::Path(path) = ty else {
+            return None;
+        };
+        let segment = path.path.segments.last()?;
+        if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+            // A container knows its own `Default` whatever it holds, and the
+            // element type is still carried so one more unwrap can read it.
+            let inner = || Box::new(Self::first_arg(args).unwrap_or(Self::Other));
+            return match segment.ident.to_string().as_str() {
+                "Option" => Some(Self::Opt(inner())),
+                "Vec" | "VecDeque" => Some(Self::List(inner())),
+                _ => None,
+            };
+        }
+        Some(match segment.ident.to_string().as_str() {
+            "f32" => Self::F32,
+            "f64" => Self::F64,
+            "bool" => Self::Bool,
+            "char" => Self::Char,
+            "String" | "str" => Self::Str,
+            name => Self::Int(super::numeric::IntWidth::parse(name)?),
+        })
+    }
+
+    /// The first type argument of a generic path segment.
+    fn first_arg(args: &syn::AngleBracketedGenericArguments) -> Option<Self> {
+        args.args.iter().find_map(|arg| match arg {
+            syn::GenericArgument::Type(ty) => Self::lower(ty),
+            _ => None,
+        })
+    }
+
+    /// What one more unwrap of this type answers with, for a chain like
+    /// `Some(None::<f64>).unwrap_or_default().unwrap_or_default()`.
+    pub fn payload(&self) -> Option<&ScalarTy> {
+        match self {
+            Self::Opt(inner) | Self::List(inner) => Some(inner),
+            _ => None,
+        }
+    }
 }
 
 /// Ids for the builtin and higher-order methods the dispatcher special-cases.
