@@ -8,6 +8,7 @@ mod eval;
 mod format;
 mod higher_order;
 mod http;
+mod int_methods;
 mod iterator;
 mod json_bridge;
 mod jwt_bridge;

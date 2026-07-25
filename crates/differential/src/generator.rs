@@ -84,8 +84,20 @@ pub(crate) fn generate_base(seed: u64) -> Program {
         structural_cases: generate_structural_cases(&mut rng),
         semantic_cases: generate_semantic_cases(&mut rng),
         method_cases: generate_method_cases(&mut rng),
+        blocks: generate_blocks(&mut rng),
         mutation: None,
     }
+}
+
+/// Bodies from the type directed generator. Every program gets at least one,
+/// because this is the only part of the grammar that can name a `u8`, an
+/// `f32`, a `char`, or a `Vec<u16>`, and a dimension the generator cannot name
+/// is a bug it cannot find.
+fn generate_blocks(rng: &mut StdRng) -> Vec<crate::lang::Block> {
+    let count = rng.random_range(1..=2);
+    (0..count)
+        .map(|_| crate::lang::generate_block(rng))
+        .collect()
 }
 
 fn generate_closure_cases(rng: &mut StdRng) -> Vec<ClosureCase> {

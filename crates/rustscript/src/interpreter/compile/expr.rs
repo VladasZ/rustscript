@@ -143,6 +143,24 @@ impl Compiler<'_> {
                         {
                             self.string_let = Some(mc as *const _);
                         }
+                        // `let x: T = ...unwrap_or_default()` is the only place
+                        // that names the payload the default is built from,
+                        // since the method takes no turbofish of its own.
+                        if let Expr::MethodCall(mc) = &*init.expr
+                            && mc.method == "unwrap_or_default"
+                            && let Some(ty) = ScalarTy::lower(&t.ty)
+                        {
+                            self.default_let = Some((std::ptr::from_ref(mc), ty));
+                        }
+                    }
+                    // `let opt: Option<T> = ..` records T, so a later
+                    // `opt.unwrap_or_default()` builds the right default from
+                    // the type the binding was declared with.
+                    if let Pat::Type(t) = &local.pat
+                        && let Pat::Ident(ident) = &*t.pat
+                        && let Some(payload) = annotation_payload(&t.ty)
+                    {
+                        self.option_locals.insert(ident.ident.to_string(), payload);
                     }
                     // A numeric annotation types a bare literal init at
                     // compile time, so the value never exists at the wrong
@@ -931,4 +949,23 @@ impl Compiler<'_> {
     }
 
     // -- calls -------------------------------------------------------------
+}
+
+/// The payload of an `Option<T>` or `Result<T, _>` annotation, for building a
+/// `Default` when the value turns out to be absent.
+pub(super) fn annotation_payload(ty: &syn::Type) -> Option<ScalarTy> {
+    let syn::Type::Path(path) = ty else {
+        return None;
+    };
+    let segment = path.path.segments.last()?;
+    if segment.ident != "Option" && segment.ident != "Result" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return None;
+    };
+    args.args.iter().find_map(|arg| match arg {
+        syn::GenericArgument::Type(inner) => ScalarTy::lower(inner),
+        _ => None,
+    })
 }

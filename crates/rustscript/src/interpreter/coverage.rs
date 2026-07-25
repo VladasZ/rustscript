@@ -95,16 +95,29 @@ fn applies(table: &BridgeTable, engine: Engine) -> bool {
     table.engine == engine || table.engine == Engine::Both
 }
 
-/// Every name any bridge in this engine implements.
+/// Every name any bridge in this engine implements. `BUILTIN_IDS` is harvested
+/// from the shared id resolver, so it says a name has a fast dispatch id, not
+/// which engine implements it. The parallel engine dispatches by name only, so
+/// its tables are its whole surface and the id list must not vouch for it.
 fn any_name(engine: Engine, method: &str) -> bool {
-    BUILTIN_IDS.contains(&method)
+    (engine == Engine::Fast && BUILTIN_IDS.contains(&method))
+        || VM_BUILTINS.contains(&method)
         || BRIDGE_TABLES
             .iter()
             .any(|t| applies(t, engine) && t.names.contains(&method))
 }
 
+/// Methods both VMs answer themselves, before any bridge is reached, because
+/// they rewrite the receiver register rather than return a value. They are
+/// dispatched by `BuiltinId` rather than by name, so the harvest cannot see
+/// them in either engine's tables and they are listed here instead.
+const VM_BUILTINS: &[&str] = &["clone_from", "push", "push_str"];
+
 /// Whether the bridge for this receiver implements the method.
 fn on_recv(engine: Engine, recv: &str, method: &str) -> bool {
+    if VM_BUILTINS.contains(&method) {
+        return true;
+    }
     let mut saw_table = false;
     for table in BRIDGE_TABLES.iter().filter(|t| applies(t, engine)) {
         if table.recv == recv {
@@ -124,7 +137,17 @@ fn on_recv(engine: Engine, recv: &str, method: &str) -> bool {
     if !saw_table {
         return any_name(engine, method);
     }
-    BUILTIN_IDS.contains(&method)
+    // This engine has a table for the receiver and the method is not in it.
+    //
+    // `BUILTIN_IDS` used to rescue it here, but that list is harvested from
+    // the shared id resolver and says nothing about which engine implements a
+    // name. The parallel engine dispatches entirely by name, so its tables are
+    // its real surface, and letting an id rescue a miss made `rust check`
+    // answer ok for `#[tokio::main]` scripts calling `sort_by_key`, `fold`,
+    // `retain` or `map_err`, which then aborted at runtime. The fast engine
+    // does resolve many of these through the id path outside the string
+    // tables, so the rescue still stands there.
+    engine == Engine::Fast && BUILTIN_IDS.contains(&method)
 }
 
 /// Methods every value carries, handled before bridge dispatch.
@@ -289,6 +312,48 @@ mod tests {
             .collect()
     }
 
+    /// A method the fast engine reaches through its builtin id table but the
+    /// parallel engine does not implement must be reported for the parallel
+    /// engine. `BUILTIN_IDS` used to vouch for both engines, so `rust check`
+    /// answered ok for a `#[tokio::main]` script calling `sort_by_key`, which
+    /// then aborted at runtime with the exact message the check exists to
+    /// deliver ahead of time.
+    #[test]
+    fn a_fast_only_builtin_is_reported_for_the_parallel_engine() {
+        for method in ["sort_by_key", "retain", "fold", "map_err", "reduce"] {
+            assert!(
+                any_name(Engine::Fast, method),
+                "`{method}` must stay available on the fast engine"
+            );
+            assert!(
+                !any_name(Engine::Parallel, method),
+                "`{method}` is not implemented in tokio mode and must be reported"
+            );
+        }
+        assert!(on_recv(Engine::Fast, "Vec", "sort_by_key"));
+        assert!(!on_recv(Engine::Parallel, "Vec", "sort_by_key"));
+        // The VM answers these itself on both engines, so they stay known even
+        // though no bridge table can name them.
+        for method in VM_BUILTINS {
+            assert!(on_recv(Engine::Parallel, "Str", method));
+            assert!(any_name(Engine::Parallel, method));
+        }
+    }
+
+    /// Methods the parallel engine really does implement must not be reported.
+    /// These come from tables the harvest was not reading, and the engine
+    /// agnostic id list was the only thing keeping working scripts from being
+    /// rejected once that rescue was removed.
+    #[test]
+    fn parallel_methods_outside_the_id_table_are_not_reported() {
+        for method in ["and_then", "is_some_and", "elapsed", "map_or", "or_else"] {
+            assert!(
+                any_name(Engine::Parallel, method),
+                "`{method}` runs in tokio mode and must not be reported"
+            );
+        }
+    }
+
     /// Every method the fast engine bridges and the parallel engine lacks.
     /// The gap may only shrink, or grow by a conscious entry in `KNOWN_GAP`.
     /// A new fast-only method fails this test, so drift between the engines
@@ -320,7 +385,6 @@ mod tests {
         "account_name",
         "ancestors",
         "and_modify",
-        "and_then",
         "append",
         "as_deref_mut",
         "as_os_str",
@@ -348,7 +412,6 @@ mod tests {
         "display_name",
         "drain",
         "duration_since",
-        "elapsed",
         "encode",
         "enum_keys",
         "enum_values",
@@ -393,7 +456,6 @@ mod tests {
         "is_number",
         "is_object",
         "is_ok_and",
-        "is_some_and",
         "is_string",
         "is_symlink",
         "is_terminal",
@@ -404,8 +466,6 @@ mod tests {
         "lock",
         "manager_access",
         "map_err",
-        "map_or",
-        "map_or_else",
         "max_by_key",
         "metadata",
         "min_by_key",
@@ -414,14 +474,12 @@ mod tests {
         "mtime",
         "namespace",
         "ok_or",
-        "ok_or_else",
         "open",
         "open_service",
         "open_subkey",
         "open_subkey_with_flags",
         "or",
         "or_default",
-        "or_else",
         "or_insert",
         "or_insert_with",
         "or_insert_with_key",

@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::closure_case::{ClosureCase, apply_helper};
+use crate::lang::Block;
 use crate::method_case::MethodsCase;
 use crate::rich::RichCase;
 use crate::semantic::SemanticCase;
@@ -422,6 +423,11 @@ pub struct Program {
     pub semantic_cases: Vec<SemanticCase>,
     #[serde(default)]
     pub method_cases: Vec<MethodsCase>,
+    /// Bodies from the type directed generator. Unlike the case lists above,
+    /// these are whole program bodies with their own bindings and control
+    /// flow, generated over the real type universe.
+    #[serde(default)]
+    pub blocks: Vec<Block>,
     #[serde(default)]
     pub mutation: Option<MutationOrigin>,
 }
@@ -486,6 +492,13 @@ impl Program {
                 self.adjustment, self.adjustment
             ));
         }
+        let mut helpers = BTreeSet::new();
+        for block in &self.blocks {
+            helpers.extend(block.helpers());
+        }
+        for helper in helpers {
+            source.push_str(helper.definition());
+        }
         source.push_str("fn main() {\n");
         for statement in &self.statements {
             source.push_str(&statement.render(&mutable));
@@ -504,6 +517,9 @@ impl Program {
         }
         for method_case in &self.method_cases {
             source.push_str(&method_case.render());
+        }
+        for block in &self.blocks {
+            source.push_str(&block.render());
         }
         let names: Vec<&str> = self
             .statements
@@ -596,6 +612,16 @@ impl Program {
                 candidates.push(candidate);
             }
         }
+        for index in 0..self.blocks.len() {
+            let mut candidate = self.clone();
+            candidate.blocks.remove(index);
+            candidates.push(candidate);
+            for block in self.blocks[index].shrinks() {
+                let mut candidate = self.clone();
+                candidate.blocks[index] = block;
+                candidates.push(candidate);
+            }
+        }
         candidates
     }
 
@@ -643,6 +669,10 @@ impl Program {
             method_case.shape(&mut signature);
             signature.push('|');
         }
+        for block in &self.blocks {
+            block.shape(&mut signature);
+            signature.push('|');
+        }
         signature.push(']');
         if let Some(origin) = &self.mutation {
             signature.push_str("mutation[");
@@ -667,6 +697,9 @@ impl Program {
         }
         for method_case in &self.method_cases {
             method_case.features(&mut features);
+        }
+        for block in &self.blocks {
+            block.features(&mut features);
         }
         features
     }
@@ -695,6 +728,7 @@ impl Program {
             structural_cases: self.structural_cases.clone(),
             semantic_cases: self.semantic_cases.clone(),
             method_cases: self.method_cases.clone(),
+            blocks: self.blocks.clone(),
             mutation: self.mutation.clone(),
         })
     }

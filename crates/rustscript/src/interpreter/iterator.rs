@@ -6,7 +6,7 @@ use anyhow::{Result, anyhow, bail};
 
 use super::Interp;
 use super::builtins::{as_closure, option_inner};
-use super::bytecode::{BuiltinId, MethodName};
+use super::bytecode::{BuiltinId, MethodName, ScalarTy};
 use super::native::{Native, lines_next};
 use super::ops::compare_values;
 use super::regex_bridge::{CapturesValue, MatchValue, RegexValue};
@@ -502,7 +502,7 @@ impl Interp {
                 }
                 Value::Int(count)
             }
-            B::Sum => self.iterator_sum(iterator)?,
+            B::Sum => self.iterator_sum(iterator, method.scalar.as_ref())?,
             B::Product => self.iterator_product(iterator)?,
             _ => match method.text.as_str() {
                 "next" => self
@@ -693,18 +693,35 @@ impl Interp {
         Ok(values)
     }
 
-    fn iterator_sum(&self, iterator: &Handle) -> Result<Value> {
-        let mut integers = 0i64;
-        let mut floats = 0f64;
+    fn iterator_sum(&self, iterator: &Handle, target: Option<&ScalarTy>) -> Result<Value> {
+        // The accumulator is an i128 so a `u64` element past `i64::MAX` keeps
+        // its value. Reading elements through `bridge_image` clamped them to
+        // `i64::MAX` before they were even added.
+        let mut integers = 0i128;
+        // `Sum` for floats starts at -0.0, not 0.0, so that summing negative
+        // zeros keeps the sign. Starting at 0.0 turned `[-0.0].sum()` into
+        // `0.0`, because `0.0 + -0.0` is `0.0`.
+        let mut floats = -0.0f64;
         let mut has_float = false;
+        // Without a target the sum is a plain i64 and overflows at its bounds,
+        // which is what an untyped `sum()` has always done.
+        let (low, high) = match target {
+            Some(ScalarTy::Int(width)) => (width.min(), width.max()),
+            _ => (i128::from(i64::MIN), i128::from(i64::MAX)),
+        };
         while let Some(value) = self.iterator_next(iterator)? {
-            let value = value.bridge_image().unwrap_or(value);
-            match value {
-                Value::Int(value) => {
-                    integers = integers
-                        .checked_add(value)
-                        .ok_or_else(|| anyhow!("attempt to add with overflow"))?;
+            if let Some((value, _)) = value.int_parts() {
+                integers = integers
+                    .checked_add(value)
+                    .ok_or_else(|| anyhow!("attempt to add with overflow"))?;
+                // A `sum::<u8>()` overflows at 255, not at `i64::MAX`, so the
+                // target width is what says where the panic belongs.
+                if integers < low || integers > high {
+                    bail!("attempt to add with overflow");
                 }
+                continue;
+            }
+            match value.bridge_image().unwrap_or(value) {
                 Value::Float(value) => {
                     floats += value;
                     has_float = true;
@@ -712,10 +729,32 @@ impl Interp {
                 other => bail!("sum needs numbers, got {}", other.type_name()),
             }
         }
-        Ok(if has_float {
-            Value::Float(floats + integers as f64)
+        // An empty sequence carries no element to tell an integer sum from a
+        // float one, so a `sum::<f64>()` turbofish is the only thing that can.
+        // Without it an empty float sum answered `0`, which prints `0.0` after
+        // the annotation coerces it, where real Rust prints `-0.0`.
+        let float_target = matches!(target, Some(ScalarTy::F32 | ScalarTy::F64));
+        Ok(if has_float || (float_target && integers == 0) {
+            // Folding the integer side back in would add a +0.0 that cancels
+            // the -0.0 identity, so it only joins when it carries a value. A
+            // real sum has one element type anyway, the split accumulator is
+            // only here because the interpreter cannot see which.
+            let total = if integers == 0 {
+                floats
+            } else {
+                floats + integers as f64
+            };
+            if matches!(target, Some(ScalarTy::F32)) {
+                Value::F32(total as f32)
+            } else {
+                Value::Float(total)
+            }
+        } else if let Some(ScalarTy::Int(width)) = target {
+            // The sum carries the element width, so a later `!` or shift on it
+            // computes at that width. An untagged zero made `!0u16` answer -1.
+            Value::int_of_width(integers, *width)
         } else {
-            Value::Int(integers)
+            Value::Int(integers as i64)
         })
     }
 

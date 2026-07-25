@@ -16,6 +16,9 @@ use std::cmp::Ordering;
 
 use anyhow::{Result, bail};
 
+use super::bytecode::ScalarTy;
+use super::numeric::IntWidth;
+
 /// Engine neutral view of a method's arguments. Each engine adapts its own
 /// value slice; the cores monomorphize over this, so the view costs nothing.
 pub(super) trait Args {
@@ -177,17 +180,9 @@ pub(super) enum StrOut {
     OptInt(Option<i64>),
     OptPair(Option<(String, String)>),
     Ordering(Ordering),
-    Parse(ParseNum),
 }
 
 /// The untyped `parse` guess: int first, then float, then bool.
-pub(super) enum ParseNum {
-    Int(i64),
-    Float(f64),
-    Bool(bool),
-    Fail(String),
-}
-
 pub(super) fn str_core(s: &str, name: &str, args: &impl Args) -> Result<Option<StrOut>> {
     use StrOut as O;
     let a = |i: usize| args.text(i);
@@ -289,20 +284,59 @@ pub(super) fn str_core(s: &str, name: &str, args: &impl Args) -> Result<Option<S
             O::Owned(out.to_string())
         }
         "cmp" => O::Ordering(s.cmp(a(0).as_str())),
-        "parse" => {
-            let t = s.trim();
-            if let Ok(i) = t.parse::<i64>() {
-                O::Parse(ParseNum::Int(i))
-            } else if let Ok(f) = t.parse::<f64>() {
-                O::Parse(ParseNum::Float(f))
-            } else if let Ok(b) = t.parse::<bool>() {
-                O::Parse(ParseNum::Bool(b))
-            } else {
-                O::Parse(ParseNum::Fail(format!("cannot parse `{t}`")))
-            }
-        }
+        // `parse` without a turbofish is answered by the engines through
+        // `parse_core`, which is the only place that sees the target type.
         _ => return Ok(None),
     }))
+}
+
+/// What `str::parse` produced, before either engine wraps it in an `Ok`.
+pub(super) enum Parsed {
+    Int(i128, IntWidth),
+    F32(f32),
+    F64(f64),
+    Bool(bool),
+    Char(char),
+    Str(String),
+    Fail(String),
+}
+
+/// `str::parse`, honoring the target type when the call wrote one down.
+///
+/// Real Rust decides this entirely by the target: the text must be the whole
+/// value with no surrounding whitespace, and an integer target rejects
+/// anything outside its own range. Guessing instead made `"300".parse::<u8>()`
+/// an `Ok(300)` and `" 5 ".parse::<i64>()` an `Ok(5)`, both of which real Rust
+/// rejects. Without a turbofish there is no type to honor, so the old guess
+/// stays, which is what a plain `let n: u8 = s.parse()?` still lands on.
+pub(super) fn parse_core(text: &str, target: Option<&ScalarTy>) -> Parsed {
+    let fail = || Parsed::Fail(format!("cannot parse `{text}`"));
+    let Some(target) = target else {
+        let trimmed = text.trim();
+        return if let Ok(value) = trimmed.parse::<i64>() {
+            Parsed::Int(i128::from(value), IntWidth::I64)
+        } else if let Ok(value) = trimmed.parse::<f64>() {
+            Parsed::F64(value)
+        } else if let Ok(value) = trimmed.parse::<bool>() {
+            Parsed::Bool(value)
+        } else {
+            Parsed::Fail(format!("cannot parse `{trimmed}`"))
+        };
+    };
+    match target {
+        ScalarTy::Int(width) => match text.parse::<i128>() {
+            Ok(value) if value >= width.min() && value <= width.max() => Parsed::Int(value, *width),
+            _ => fail(),
+        },
+        ScalarTy::F32 => text.parse::<f32>().map_or_else(|_| fail(), Parsed::F32),
+        ScalarTy::F64 => text.parse::<f64>().map_or_else(|_| fail(), Parsed::F64),
+        ScalarTy::Bool => text.parse::<bool>().map_or_else(|_| fail(), Parsed::Bool),
+        ScalarTy::Char => text.parse::<char>().map_or_else(|_| fail(), Parsed::Char),
+        ScalarTy::Str => Parsed::Str(text.to_string()),
+        // No container implements `FromStr`, so these never name a parse
+        // target. They exist only to describe a `Default`.
+        ScalarTy::Opt(_) | ScalarTy::List(_) | ScalarTy::Other => fail(),
+    }
 }
 
 // -- regex -----------------------------------------------------------------

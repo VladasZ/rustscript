@@ -95,6 +95,20 @@ compiled Rust panics, a narrowing `as` cast truncates, a float to integer
 cast saturates with NaN going to zero, and f32 computes and prints at f32
 precision.
 
+Integer methods answer in the receiver's own width too, so `saturating_add`
+stops at that width's bound, `wrapping_add` wraps at it, `checked_add` reports
+overflow against it, and `pow` and `abs` panic where debug Rust panics. The bit
+methods count over the real width rather than over an i64.
+
+Where a method's result type is chosen by the caller rather than by the
+receiver, the interpreter honors what the source states. `parse` takes its
+target from the turbofish, so `"300".parse::<u8>()` is an `Err` and a trailing
+space is not part of a number. `sum` takes its element type the same way, which
+is what tells an empty `sum::<f64>()` from an empty `sum::<i32>()`.
+`unwrap_or_default` builds its default from the payload the call site names,
+whether that is a `None::<T>`, the binding's own annotation, or the argument
+that built the Option.
+
 ## Supported Rust
 
 Supported language features include:
@@ -169,8 +183,7 @@ an interpreter bridge. `rust check` adds that coverage pass.
 - Crates without a native bridge stop with an `unsupported crate` error.
 - Coverage currently checks methods, not path calls such as
   `std::process::exit`.
-- `#[path]` module declarations and glob imports from script modules are not
-  supported.
+- Glob imports from script modules are not supported.
 - `std::thread` is not supported; use Tokio tasks for parallel work.
 - `static mut` is rejected. Plain statics behave like constants.
 - `u128` and `i128` carry no runtime width, their values compute in i64.
@@ -181,9 +194,12 @@ an interpreter bridge. `rust check` adds that coverage pass.
 ## Caching
 
 Checks, compiled binaries, and shared Cargo dependencies live under
-`~/.cache/rustscript`. Interpreted runs do not touch the cache. Entries unused
-for 30 days are swept automatically on every check and build, and `rust clean`
-removes everything at once.
+`~/.cache/rustscript`, or the platform's own per-user cache directory when
+`HOME` and `XDG_CACHE_HOME` are both unset. Interpreted runs do not touch the
+cache. A cache entry is keyed by the sources, the bundled dependency set, and
+the interpreter version, so an update never serves an answer the previous build
+gave. Entries unused for 30 days are swept automatically on every check and
+build, and `rust clean` removes everything at once.
 
 ## GitHub Actions
 
@@ -223,18 +239,30 @@ same for a deep module tree.
 
 The differential harness generates deterministic, compile-valid Rust programs
 and compares native and interpreted runs, including panics. Native is built
-with overflow checks on, the debug default. Generated cases cover typed
-expressions, ownership and borrowing, collections, closures, structs, enums,
+with overflow checks on, the debug default.
+
+Its core is a type directed generator over the real type universe: all nine
+integer widths, both floats, `bool`, `char`, `String`, `Vec<T>`, and
+`Option<T>`. Generation is driven by types rather than by hand written cases,
+so asking for a `u8` offers every literal, operator, cast, branch and bridged
+method that can produce one, at any depth. Bridged methods live in one typed
+catalog where a row states its receiver class, argument patterns and result
+pattern, so a method added there immediately composes everywhere: inside a
+condition, as the receiver of another call, or in a loop body. That matters
+because a dimension the generator cannot name is a bug it cannot find, and the
+older per-method case lists could only name `i64`, `bool` and `String`, which
+is why a width bug in `saturating_add` survived every campaign that ran before
+them.
+
+Generated cases also cover ownership and borrowing, closures, structs, enums,
 patterns, iterators, loops, `Result`, floats with their special values,
-plain arithmetic that can overflow, division, indexing, `unwrap`, format
-specs, and a catalog of bridged `String`, `Vec`, and map methods. Every
-program also carries a numeric case that computes in real integer and float
-widths, u8 through u64, usize, f32, and f64. Width flows through annotated
-and suffixed bindings, inference, casts, compound assignment, shifts, and
-negation across statements, the shapes a per-expression check cannot see.
-Values the overflow lint would fold pass through an opaque helper, so panics
-stay runtime events. Some seeds splice same-typed expression subtrees from
-other programs through replayable structured mutation.
+division, indexing, `unwrap`, and format specs. Numeric cases carry width
+through annotated and suffixed bindings, inference, casts, compound assignment,
+shifts, and negation across statements, the shapes a per-expression check
+cannot see. Values the overflow lint would fold pass through an opaque helper,
+so panics stay runtime events rather than compile errors. Some seeds splice
+same-typed expression subtrees from other programs through replayable
+structured mutation.
 
 The generator covers what the language supports, never only what the
 interpreter handles. Every divergence is a finding: the campaign prints

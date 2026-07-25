@@ -10,7 +10,7 @@ selects. Unmarked methods run on both.
 
 ## any value
 
-`abs`, `as_array`, `as_bool`, `as_f64`, `as_i128`, `as_i64`, `as_object`, `as_str`, `as_u64`, `as_usize`, `ceil`, `clamp`, `clone`, `cmp`, `floor`, `into` (fast), `is_array` (fast), `is_boolean` (fast), `is_f64` (fast), `is_i64` (fast), `is_multiple_of`, `is_null` (fast), `is_number` (fast), `is_object` (fast), `is_sign_positive`, `is_string` (fast), `is_u64` (fast), `max`, `min`, `mode` (fast), `partial_cmp`, `pow`, `powf`, `powi`, `readonly` (fast), `round`, `saturating_add`, `saturating_mul`, `saturating_sub`, `set_readonly` (fast), `sqrt`, `then_some` (fast), `to_string`, `trunc`
+`abs`, `as_array`, `as_bool`, `as_f64`, `as_i128`, `as_i64`, `as_object`, `as_str`, `as_u64`, `as_usize`, `ceil`, `checked_add`, `checked_div`, `checked_mul`, `checked_neg`, `checked_rem`, `checked_sub`, `clamp`, `clone`, `cmp`, `count_ones`, `count_zeros`, `div_euclid`, `floor`, `into` (fast), `is_array` (fast), `is_boolean` (fast), `is_f64` (fast), `is_i64` (fast), `is_multiple_of`, `is_null` (fast), `is_number` (fast), `is_object` (fast), `is_sign_positive`, `is_string` (fast), `is_u64` (fast), `isqrt`, `leading_zeros`, `max`, `min`, `mode` (fast), `partial_cmp`, `pow`, `powf`, `powi`, `readonly` (fast), `rem_euclid`, `reverse_bits`, `rotate_left`, `rotate_right`, `round`, `saturating_add`, `saturating_mul`, `saturating_sub`, `set_readonly` (fast), `signum`, `sqrt`, `swap_bytes`, `then_some` (fast), `to_string`, `trailing_zeros`, `trunc`, `wrapping_add`, `wrapping_mul`, `wrapping_neg`, `wrapping_sub`
 
 ## Base64
 
@@ -102,7 +102,7 @@ selects. Unmarked methods run on both.
 
 ## native handles (files, sockets, readers, processes)
 
-`accept` (fast), `by_ref` (fast), `close` (fast), `collect` (fast), `connect` (fast), `delete` (fast), `duration_since` (fast), `elapsed` (fast), `flush`, `get` (fast), `head` (fast), `id` (fast), `incoming` (fast), `inner` (fast), `is_terminal` (fast), `kill` (fast), `kind` (fast), `lines`, `local_addr` (fast), `lock` (fast), `metadata` (fast), `next`, `patch` (fast), `path` (fast), `peer_addr` (fast), `post` (fast), `put` (fast), `read` (fast), `read_line`, `read_to_end` (fast), `read_to_string`, `seek` (fast), `send` (fast), `send_to` (fast), `set_broadcast` (fast), `set_len` (fast), `set_modified` (fast), `shutdown` (fast), `stderr` (fast), `stdin` (fast), `sync_all` (fast), `sync_data` (fast), `try_clone` (fast), `try_wait` (fast), `wait` (fast), `wait_with_output` (fast), `write`, `write_all`
+`accept` (fast), `by_ref` (fast), `close` (fast), `collect` (fast), `connect` (fast), `delete` (fast), `duration_since` (fast), `elapsed`, `flush`, `get` (fast), `head` (fast), `id` (fast), `incoming` (fast), `inner` (fast), `is_terminal` (fast), `kill` (fast), `kind` (fast), `lines`, `local_addr` (fast), `lock` (fast), `metadata` (fast), `next`, `patch` (fast), `path` (fast), `peer_addr` (fast), `post` (fast), `put` (fast), `read` (fast), `read_line`, `read_to_end` (fast), `read_to_string`, `seek` (fast), `send` (fast), `send_to` (fast), `set_broadcast` (fast), `set_len` (fast), `set_modified` (fast), `shutdown` (fast), `stderr` (fast), `stdin` (fast), `sync_all` (fast), `sync_data` (fast), `try_clone` (fast), `try_wait` (fast), `wait` (fast), `wait_with_output` (fast), `write`, `write_all`
 
 ## OpenOptions
 
@@ -110,7 +110,7 @@ selects. Unmarked methods run on both.
 
 ## Option
 
-`and_then` (fast), `as_deref` (fast), `as_mut` (fast), `as_ref` (fast), `context` (fast), `expect` (fast), `filter` (fast), `get` (fast), `is_none` (fast), `is_some` (fast), `is_some_and` (fast), `map` (fast), `map_or` (fast), `map_or_else` (fast), `ok_or` (fast), `ok_or_else` (fast), `or` (fast), `or_else` (fast), `take` (fast), `unwrap_or_default` (fast), `unwrap_or_else` (fast), `with_context` (fast)
+`and_then`, `as_deref` (fast), `as_mut` (fast), `as_ref` (fast), `context` (fast), `expect` (fast), `filter`, `get` (fast), `is_none` (fast), `is_some` (fast), `is_some_and`, `map`, `map_or`, `map_or_else`, `ok_or` (fast), `ok_or_else`, `or` (fast), `or_else`, `take` (fast), `unwrap_or_default` (fast), `unwrap_or_else`, `with_context`
 
 ## OsString
 
@@ -166,7 +166,7 @@ selects. Unmarked methods run on both.
 
 ## String and str
 
-`as_bytes`, `as_str`, `as_string`, `black`, `blue`, `bold`, `bright_blue`, `bright_cyan`, `bright_green`, `bright_red`, `bright_yellow`, `bytes`, `char_indices`, `chars` (tokio), `clear`, `cmp`, `contains`, `context`, `count`, `cyan`, `dimmed`, `encode_utf16`, `ends_with`, `eq_ignore_ascii_case`, `expect`, `find`, `green`, `into_bytes`, `into_owned`, `into_string`, `is_empty`, `is_none`, `is_some`, `italic`, `len`, `lines` (tokio), `magenta`, `matches`, `normal`, `on_blue`, `on_green`, `on_red`, `parse`, `purple`, `red`, `repeat`, `replace`, `replacen`, `reversed`, `rfind`, `rsplit`, `rsplit_once`, `rsplitn`, `split`, `split_once`, `split_whitespace` (tokio), `splitn`, `starts_with`, `strip_prefix`, `strip_suffix`, `to_ascii_lowercase`, `to_ascii_uppercase`, `to_lowercase`, `to_owned`, `to_uppercase`, `trim`, `trim_end`, `trim_end_matches`, `trim_matches`, `trim_start`, `trim_start_matches`, `trim_string`, `underline`, `unwrap`, `unwrap_or`, `unwrap_or_default`, `unwrap_or_else`, `white`, `with_context`, `yellow`
+`as_bytes`, `as_str`, `as_string`, `black`, `blue`, `bold`, `bright_blue`, `bright_cyan`, `bright_green`, `bright_red`, `bright_yellow`, `bytes`, `char_indices`, `chars` (tokio), `clear`, `cmp`, `contains`, `context`, `count`, `cyan`, `dimmed`, `encode_utf16`, `ends_with`, `eq_ignore_ascii_case`, `expect`, `find`, `green`, `into_bytes`, `into_owned`, `into_string`, `is_empty`, `is_none`, `is_some`, `italic`, `len`, `lines` (tokio), `magenta`, `matches`, `normal`, `on_blue`, `on_green`, `on_red`, `purple`, `red`, `repeat`, `replace`, `replacen`, `reversed`, `rfind`, `rsplit`, `rsplit_once`, `rsplitn`, `split`, `split_once`, `split_whitespace` (tokio), `splitn`, `starts_with`, `strip_prefix`, `strip_suffix`, `to_ascii_lowercase`, `to_ascii_uppercase`, `to_lowercase`, `to_owned`, `to_uppercase`, `trim`, `trim_end`, `trim_end_matches`, `trim_matches`, `trim_start`, `trim_start_matches`, `trim_string`, `underline`, `unwrap`, `unwrap_or`, `unwrap_or_default`, `unwrap_or_else`, `white`, `with_context`, `yellow`
 
 ## Vec
 

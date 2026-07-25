@@ -67,6 +67,7 @@ pub const BRIDGES: &[Bridge] = &[
         "HeaderValue",
     ),
     b("shared.rs", "exit_status_core", Engine::Both, "ExitStatus"),
+    b("int_methods.rs", "int_method", Engine::Both, "*"),
     // -- fast engine ------------------------------------------------------
     b("methods.rs", "str_method_slow", Engine::Fast, "Str"),
     b("methods.rs", "vec_method", Engine::Fast, "Vec"),
@@ -195,6 +196,17 @@ pub const BRIDGES: &[Bridge] = &[
     ),
     b("pbridge.rs", "output_method", Engine::Parallel, "Output"),
     b("pbridge.rs", "eval_method", Engine::Parallel, "*"),
+    // The parallel engine's own native handle and closure-taking dispatch.
+    // These were never harvested, so `rust check` could not tell that the
+    // engine implements `elapsed`, `and_then` or `is_some_and`, and only the
+    // engine-agnostic builtin id list kept it from rejecting working scripts.
+    b("pbridge.rs", "native_method", Engine::Parallel, "Native"),
+    b(
+        "pbridge.rs",
+        "option_higher_order",
+        Engine::Parallel,
+        "Option",
+    ),
 ];
 
 const fn b(file: &'static str, func: &'static str, engine: Engine, recv: &'static str) -> Bridge {

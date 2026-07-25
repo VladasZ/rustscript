@@ -16,7 +16,7 @@ use super::pchunk::{PChunk, convert};
 use super::pnative::PNative;
 use super::pvalue::{PClosure, PValue, PValueRef};
 use super::pvm::PInterp;
-use super::shared::{self, Args, CharOut, Num, NumOut, ParseNum, StrOut};
+use super::shared::{self, Args, CharOut, Num, NumOut, Parsed, StrOut};
 use super::value::Value;
 
 impl PInterp {
@@ -198,6 +198,7 @@ impl PInterp {
                     let name = MethodName {
                         id: super::bytecode::BuiltinId::resolve(last),
                         text: last.to_string(),
+                        scalar: None,
                     };
                     return self.eval_method(&recv, &name, &mut rest);
                 }
@@ -224,6 +225,25 @@ impl PInterp {
         };
         let recv = dereferenced.as_ref().unwrap_or(recv);
         let m = name.text.as_str();
+        // `parse` is the one method whose result type the caller writes down,
+        // so it is answered from the turbofish before the name-only dispatch
+        // below, exactly as the fast engine does.
+        // Matched by id, not by the name text: a bare "parse" literal here
+        // would be harvested as a tokio-only method and the supported page
+        // would then claim `parse` does not run on the fast engine.
+        if name.id == super::bytecode::BuiltinId::Parse
+            && let PValue::Str(text) = recv
+        {
+            return Ok(match shared::parse_core(text, name.scalar.as_ref()) {
+                Parsed::Int(value, width) => PValue::ok(PValue::int_of_width(value, width)),
+                Parsed::F32(value) => PValue::ok(PValue::F32(value)),
+                Parsed::F64(value) => PValue::ok(PValue::Float(value)),
+                Parsed::Bool(value) => PValue::ok(PValue::Bool(value)),
+                Parsed::Char(value) => PValue::ok(PValue::Char(value)),
+                Parsed::Str(value) => PValue::ok(PValue::str(value)),
+                Parsed::Fail(message) => PValue::err(PValue::str(message)),
+            });
+        }
         // A user defined `impl` method takes priority on a struct or enum, so a
         // script's own method is not shadowed by a builtin of the same name.
         let type_key = match recv {
@@ -244,6 +264,11 @@ impl PInterp {
             "clone" => return Ok(recv.clone()),
             "to_string" => return Ok(PValue::str(recv.display())),
             _ => {}
+        }
+        // Integer methods answer from the real width first, since the image
+        // below saturates a u64 past `i64::MAX` and forgets the width.
+        if let Some(result) = int_method(recv, m, args) {
+            return result;
         }
         // Everything below computes in i64 and f64, so width-tagged numbers
         // pass their plain image.
@@ -727,6 +752,34 @@ fn map_method(recv: &PValue, m: &str, args: &mut [PValue]) -> Result<PValue> {
     })
 }
 
+/// Width-aware integer methods, the same core the fast engine uses, so the
+/// two engines cannot drift on integer semantics.
+fn int_method(recv: &PValue, m: &str, args: &[PValue]) -> Option<Result<PValue>> {
+    let (value, width) = recv.int_parts()?;
+    let mut decoded = Vec::with_capacity(args.len());
+    for arg in args {
+        decoded.push(arg.int_parts()?.0);
+    }
+    Some(
+        match super::int_methods::int_method(m, width, value, &decoded)? {
+            Ok(out) => Ok(int_out(out, width)),
+            Err(error) => Err(error),
+        },
+    )
+}
+
+fn int_out(out: super::int_methods::IntOut, width: super::numeric::IntWidth) -> PValue {
+    use super::int_methods::IntOut;
+    match out {
+        IntOut::Same(value) => PValue::int_of_width(value, width),
+        IntOut::Count(count) => PValue::Int(i64::from(count)),
+        IntOut::Bool(value) => PValue::Bool(value),
+        IntOut::Checked(Some(value)) => PValue::some(PValue::int_of_width(value, width)),
+        IntOut::Checked(None) => PValue::none(),
+        IntOut::Ordering(ordering) => p_ordering(ordering),
+    }
+}
+
 fn scalar_method(recv: &PValue, m: &str, args: &[PValue]) -> Result<PValue> {
     let n = match recv {
         PValue::Int(i) => Some(Num::Int(*i)),
@@ -898,12 +951,6 @@ fn str_out(s: &Arc<str>, out: StrOut) -> PValue {
             None => PValue::none(),
         },
         StrOut::Ordering(o) => p_ordering(o),
-        StrOut::Parse(p) => match p {
-            ParseNum::Int(i) => PValue::ok(PValue::Int(i)),
-            ParseNum::Float(f) => PValue::ok(PValue::Float(f)),
-            ParseNum::Bool(b) => PValue::ok(PValue::Bool(b)),
-            ParseNum::Fail(msg) => PValue::err(PValue::str(msg)),
-        },
     }
 }
 
