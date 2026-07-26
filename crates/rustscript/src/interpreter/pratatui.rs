@@ -146,11 +146,9 @@ fn to_value(p: &PValue) -> Value {
         PValue::Char(c) => Value::Char(*c),
         PValue::Str(s) => Value::str(s.to_string()),
         PValue::Vec(items) => Value::vec(items.lock().iter().map(to_value).collect()),
-        PValue::Tuple(items) => {
-            Value::Tuple(std::rc::Rc::new(std::cell::RefCell::new(
-                items.lock().iter().map(to_value).collect(),
-            )))
-        }
+        PValue::Tuple(items) => Value::Tuple(std::rc::Rc::new(std::cell::RefCell::new(
+            items.lock().iter().map(to_value).collect(),
+        ))),
         PValue::Struct(st) => {
             let pairs: Vec<(std::rc::Rc<str>, Value)> = st
                 .shape

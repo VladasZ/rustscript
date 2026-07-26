@@ -71,7 +71,10 @@ pub(super) fn ratatui_assoc(ty: &str, func: &str, args: &[Value]) -> Option<Valu
         ("Padding", "zero" | "ZERO") => padding_value(ratatui::widgets::Padding::ZERO),
         ("Span", "raw") => Value::struct_of(
             "Span",
-            [("content".into(), arg(0)), ("style".into(), style_value(Style::new()))],
+            [
+                ("content".into(), arg(0)),
+                ("style".into(), style_value(Style::new())),
+            ],
         ),
         ("Span", "styled") => Value::struct_of(
             "Span",
@@ -116,7 +119,10 @@ pub(super) fn ratatui_assoc(ty: &str, func: &str, args: &[Value]) -> Option<Valu
         ),
         ("Buffer", "empty") => Value::struct_of(
             "Buffer",
-            [("area".into(), arg(0)), ("content".into(), Value::vec(Vec::new()))],
+            [
+                ("area".into(), arg(0)),
+                ("content".into(), Value::vec(Vec::new())),
+            ],
         ),
         ("Widget", "render") => return render_into(&arg(0), &arg(1), &arg(2)).ok(),
         _ => return None,
@@ -129,9 +135,15 @@ fn block_value(bordered: bool) -> Value {
         [
             ("title".into(), Value::none()),
             ("bordered".into(), Value::Bool(bordered)),
-            ("border_type".into(), border_type_value(ratatui::widgets::BorderType::Plain)),
+            (
+                "border_type".into(),
+                border_type_value(ratatui::widgets::BorderType::Plain),
+            ),
             ("border_style".into(), style_value(Style::new())),
-            ("padding".into(), padding_value(ratatui::widgets::Padding::ZERO)),
+            (
+                "padding".into(),
+                padding_value(ratatui::widgets::Padding::ZERO),
+            ),
             ("style".into(), style_value(Style::new())),
         ],
     )
@@ -168,10 +180,10 @@ pub(super) fn style_method(s: &StructData, name: &str, args: &[Value]) -> Result
 }
 
 fn add_modifier(s: &StructData, m: ratatui::style::Modifier) -> Value {
-    let current = s.get("add_modifier").as_ref().map_or_else(
-        ratatui::style::Modifier::empty,
-        value_modifier,
-    );
+    let current = s
+        .get("add_modifier")
+        .as_ref()
+        .map_or_else(ratatui::style::Modifier::empty, value_modifier);
     with(s, "add_modifier", modifier_value(current | m))
 }
 
@@ -180,7 +192,9 @@ pub(super) fn modifier_method(s: &StructData, name: &str, args: &[Value]) -> Res
         shape: Rc::clone(&s.shape),
         values: std::cell::RefCell::new(s.values.borrow().clone()),
     })));
-    let other = args.first().map_or_else(ratatui::style::Modifier::empty, value_modifier);
+    let other = args
+        .first()
+        .map_or_else(ratatui::style::Modifier::empty, value_modifier);
     Ok(match name {
         "contains" => Value::Bool(mine.contains(other)),
         "intersects" => Value::Bool(mine.intersects(other)),
@@ -271,7 +285,10 @@ pub(super) fn buffer_method(s: &StructData, name: &str, args: &[Value]) -> Resul
         // makes drawing quadratic, and a full frame reads every cell.
         "cell" => {
             let (x, y) = coords(args.first());
-            let area = s.get("area").as_ref().map_or(Rect::new(0, 0, 0, 0), value_rect);
+            let area = s
+                .get("area")
+                .as_ref()
+                .map_or(Rect::new(0, 0, 0, 0), value_rect);
             match (cell_index(area, x, y), s.get("content")) {
                 (Some(index), Some(Value::Vec(cells))) => {
                     let cells = cells.borrow();
@@ -283,7 +300,9 @@ pub(super) fn buffer_method(s: &StructData, name: &str, args: &[Value]) -> Resul
                 _ => Value::none(),
             }
         }
-        "area" => s.get("area").unwrap_or_else(|| rect_value(Rect::new(0, 0, 0, 0))),
+        "area" => s
+            .get("area")
+            .unwrap_or_else(|| rect_value(Rect::new(0, 0, 0, 0))),
         _ => bail!("unknown method `{name}` on Buffer"),
     })
 }
@@ -298,7 +317,9 @@ pub(super) fn buffer_cell_method(s: &StructData, name: &str) -> Result<Value> {
 fn coords(v: Option<&Value>) -> (u16, u16) {
     let parts = v.map(items).unwrap_or_default();
     let at = |i: usize| -> u16 {
-        parts.get(i).map_or(0, |v| u16::try_from(int_of(v)).unwrap_or(0))
+        parts
+            .get(i)
+            .map_or(0, |v| u16::try_from(int_of(v)).unwrap_or(0))
     };
     (at(0), at(1))
 }
@@ -323,10 +344,11 @@ fn build_block(v: &Value) -> Option<Block<'static>> {
     } else {
         Block::new()
     };
-    block = block.border_type(s.get("border_type").as_ref().map_or(
-        ratatui::widgets::BorderType::Plain,
-        value_border_type,
-    ));
+    block = block.border_type(
+        s.get("border_type")
+            .as_ref()
+            .map_or(ratatui::widgets::BorderType::Plain, value_border_type),
+    );
     if let Some(style) = s.get("border_style") {
         block = block.border_style(value_style(&style));
     }
@@ -365,8 +387,10 @@ fn build_cell(v: &Value) -> Cell<'static> {
     let Value::Struct(s) = v else {
         return Cell::from(Text::from(text_of(v)));
     };
-    let line: Line<'static> =
-        s.get("content").as_ref().map_or_else(|| Line::from(""), value_line);
+    let line: Line<'static> = s
+        .get("content")
+        .as_ref()
+        .map_or_else(|| Line::from(""), value_line);
     let mut cell = Cell::from(Text::from(line));
     if let Some(style) = s.get("style") {
         cell = cell.style(value_style(&style));
@@ -392,7 +416,10 @@ fn build_table(s: &StructData) -> Table<'static> {
     if let Some(style) = s.get("style") {
         table = table.style(value_style(&style));
     }
-    if let Some(block) = option_inner(s.get("block").as_ref()).as_ref().and_then(build_block) {
+    if let Some(block) = option_inner(s.get("block").as_ref())
+        .as_ref()
+        .and_then(build_block)
+    {
         table = table.block(block);
     }
     table
@@ -420,7 +447,10 @@ fn render_into(widget: &Value, area: &Value, target: &Value) -> Result<Value> {
     let Value::Struct(buffer) = target else {
         bail!("Widget::render expects a Buffer");
     };
-    let buffer_area = buffer.get("area").as_ref().map_or(Rect::new(0, 0, 0, 0), value_rect);
+    let buffer_area = buffer
+        .get("area")
+        .as_ref()
+        .map_or(Rect::new(0, 0, 0, 0), value_rect);
     let mut real = Buffer::empty(buffer_area);
     restore(&mut real, buffer_area, buffer.get("content").as_ref());
 
@@ -446,12 +476,16 @@ fn render_into(widget: &Value, area: &Value, target: &Value) -> Result<Value> {
 /// Cells the script already holds, so a second render draws over the first
 /// instead of starting from a blank buffer.
 fn restore(real: &mut Buffer, area: Rect, content: Option<&Value>) {
-    let Some(cells) = content.map(items) else { return };
+    let Some(cells) = content.map(items) else {
+        return;
+    };
     for (index, value) in cells.iter().enumerate() {
         let Value::Struct(s) = value else { continue };
         let x = area.x + u16::try_from(index % usize::from(area.width.max(1))).unwrap_or(0);
         let y = area.y + u16::try_from(index / usize::from(area.width.max(1))).unwrap_or(0);
-        let Some(cell) = real.cell_mut((x, y)) else { continue };
+        let Some(cell) = real.cell_mut((x, y)) else {
+            continue;
+        };
         if let Some(symbol) = s.get("symbol") {
             cell.set_symbol(&text_of(&symbol));
         }
@@ -471,7 +505,9 @@ fn dump(real: &Buffer, area: Rect) -> Vec<Value> {
     let mut out = Vec::with_capacity(usize::from(area.width) * usize::from(area.height));
     for y in area.y..area.bottom() {
         for x in area.x..area.right() {
-            let Some(cell) = real.cell((x, y)) else { continue };
+            let Some(cell) = real.cell((x, y)) else {
+                continue;
+            };
             out.push(Value::struct_of(
                 "BufferCell",
                 [
@@ -514,7 +550,10 @@ pub(super) fn color_variant(ty: &str, func: &str, args: &[Value]) -> Option<Valu
     if ty != "Color" {
         return None;
     }
-    let at = |i: usize| -> u8 { args.get(i).map_or(0, |v| u8::try_from(int_of(v)).unwrap_or(0)) };
+    let at = |i: usize| -> u8 {
+        args.get(i)
+            .map_or(0, |v| u8::try_from(int_of(v)).unwrap_or(0))
+    };
     match func {
         "Rgb" => Some(color_value(ratatui::style::Color::Rgb(at(0), at(1), at(2)))),
         "Indexed" => Some(color_value(ratatui::style::Color::Indexed(at(0)))),
