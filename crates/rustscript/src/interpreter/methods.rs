@@ -313,6 +313,12 @@ pub(super) fn vec_method(
             .cloned()
             .map(Value::some)
             .unwrap_or_else(Value::none),
+        B::SplitFirst => match v.borrow().split_first() {
+            Some((head, rest)) => {
+                Value::some(Value::tuple(vec![head.clone(), Value::vec(rest.to_vec())]))
+            }
+            None => Value::none(),
+        },
         B::Contains => {
             let needle = args.first().cloned().unwrap_or(Value::Unit);
             Value::Bool(v.borrow().iter().any(|x| x.eq_value(&needle)))
@@ -506,10 +512,16 @@ pub(super) fn vec_method(
                 v.borrow_mut().truncate(n);
                 Value::Unit
             }
+            // A lazy iterator argument is drained into a vec before it gets
+            // here, see `builtin_method`'s caller. Anything else that is not a
+            // vec is an error rather than a silent no-op: extending by nothing
+            // and reporting success hides the bug in the caller's data.
             "extend" | "append" | "extend_from_slice" => {
-                if let Some(Value::Vec(other)) = args.first() {
-                    v.borrow_mut().extend(other.borrow().iter().cloned());
-                }
+                let Some(Value::Vec(other)) = args.first() else {
+                    bail!("`{}` needs something iterable", method.text);
+                };
+                let appended: Vec<Value> = other.borrow().clone();
+                v.borrow_mut().extend(appended);
                 Value::Unit
             }
             // Flattens one level: nested vectors spill their items, and Ok/Some

@@ -438,6 +438,21 @@ impl Interp {
         {
             return Ok(v);
         }
+        // Vec::extend takes any IntoIterator, so a lazy argument such as
+        // `.iter().map(..)` has to be drained here, where the interpreter is in
+        // reach. The vec method itself cannot read one.
+        //
+        // The receiver has to be a vec. Other types carry an unrelated method
+        // of the same name, `OpenOptions::append(true)` among them, whose
+        // argument is not iterable at all.
+        if matches!(recv, Value::Vec(_))
+            && matches!(name.text.as_str(), "extend" | "extend_from_slice")
+            && let Some(first) = args.first()
+            && !matches!(first, Value::Vec(_))
+        {
+            let items = self.iter_items(first.clone())?;
+            args[0] = Value::vec(items);
+        }
         builtin_method(recv, name, args)
     }
 }

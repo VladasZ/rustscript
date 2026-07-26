@@ -82,9 +82,7 @@ impl PInterp {
                         Some(Value::Float(f)) => return Ok(PValue::Float(f)),
                         _ => {}
                     }
-                    if let Some(v) =
-                        super::pratatui::ratatui_const(&segs[segs.len() - 2], other)
-                    {
+                    if let Some(v) = super::pratatui::ratatui_const(&segs[segs.len() - 2], other) {
                         return Ok(v);
                     }
                     // A json null is None here, the same mapping the parser
@@ -427,6 +425,16 @@ impl PInterp {
                 .last()
                 .cloned()
                 .map_or_else(PValue::none, PValue::some),
+            "split_first" => {
+                let items = items.lock();
+                match items.split_first() {
+                    Some((head, rest)) => PValue::some(PValue::tuple(vec![
+                        head.clone(),
+                        PValue::vec(rest.to_vec()),
+                    ])),
+                    None => PValue::none(),
+                }
+            }
             "contains" => {
                 let needle = args.first().cloned().unwrap_or(PValue::Unit);
                 PValue::Bool(items.lock().iter().any(|v| v.eq_value(&needle)))
@@ -445,12 +453,17 @@ impl PInterp {
                 )
             }
             "extend" | "extend_from_slice" => {
-                // Clone the source first, so extending a vec with itself does
-                // not deadlock on the same mutex.
-                if let Some(PValue::Vec(other)) = args.first() {
-                    let vals = other.lock().clone();
-                    items.lock().extend(vals);
-                }
+                // Anything iterable is allowed, so a lazy argument is drained
+                // first. Extending by nothing and reporting success would hide
+                // the bug in the caller's data.
+                let source = match args.first() {
+                    // Cloned before the extend, so extending a vec with itself
+                    // does not deadlock on the same mutex.
+                    Some(PValue::Vec(other)) => other.lock().clone(),
+                    Some(other) => self.iter_items(other.clone())?,
+                    None => bail!("`{m}` needs something iterable"),
+                };
+                items.lock().extend(source);
                 PValue::Unit
             }
             "nth" => {

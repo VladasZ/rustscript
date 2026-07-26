@@ -20,7 +20,9 @@ use ratatui::widgets::Widget;
 
 fn main() {
     let label = Style::new().fg(Color::Gray);
-    let value = Style::new().fg(Color::Rgb(20, 200, 90)).add_modifier(Modifier::BOLD);
+    let value = Style::new()
+        .fg(Color::Rgb(20, 200, 90))
+        .add_modifier(Modifier::BOLD);
 
     let rows = vec![
         Row::new(vec![
@@ -64,9 +66,17 @@ fn main() {
     }
 
     if let Some(cell) = buf.cell((3, 1)) {
-        println!("cell fg {:?} bold {}", cell.fg, cell.modifier.contains(Modifier::BOLD));
+        println!(
+            "cell fg {:?} bold {}",
+            cell.fg,
+            cell.modifier.contains(Modifier::BOLD)
+        );
     }
     if let Some(cell) = buf.cell((10, 1)) {
-        println!("value fg {:?} bold {}", cell.fg, cell.modifier.contains(Modifier::BOLD));
+        println!(
+            "value fg {:?} bold {}",
+            cell.fg,
+            cell.modifier.contains(Modifier::BOLD)
+        );
     }
 }

@@ -102,7 +102,10 @@ fn border_type_name(b: BorderType) -> &'static str {
 }
 
 pub(super) fn modifier_value(m: Modifier) -> Value {
-    Value::struct_of("Modifier", [("bits".into(), Value::Int(i64::from(m.bits())))])
+    Value::struct_of(
+        "Modifier",
+        [("bits".into(), Value::Int(i64::from(m.bits())))],
+    )
 }
 
 pub(super) fn value_modifier(v: &Value) -> Modifier {
@@ -110,7 +113,10 @@ pub(super) fn value_modifier(v: &Value) -> Modifier {
         Value::Struct(s) => s.get("bits").as_ref().map_or(0, int_of),
         other => int_of(other),
     };
-    u16::try_from(bits).ok().and_then(Modifier::from_bits).unwrap_or_else(Modifier::empty)
+    u16::try_from(bits)
+        .ok()
+        .and_then(Modifier::from_bits)
+        .unwrap_or_else(Modifier::empty)
 }
 
 pub(super) fn color_value(c: Color) -> Value {
@@ -134,7 +140,11 @@ pub(super) fn color_value(c: Color) -> Value {
         Color::White => ("White", Vec::new()),
         Color::Rgb(r, g, b) => (
             "Rgb",
-            vec![Value::Int(i64::from(r)), Value::Int(i64::from(g)), Value::Int(i64::from(b))],
+            vec![
+                Value::Int(i64::from(r)),
+                Value::Int(i64::from(g)),
+                Value::Int(i64::from(b)),
+            ],
         ),
         Color::Indexed(i) => ("Indexed", vec![Value::Int(i64::from(i))]),
     };
@@ -149,7 +159,10 @@ pub(super) fn value_color(v: &Value) -> Color {
     let Value::Enum { variant, data, .. } = v else {
         return Color::Reset;
     };
-    let at = |i: usize| -> u8 { data.get(i).map_or(0, |v| u8::try_from(int_of(v)).unwrap_or(0)) };
+    let at = |i: usize| -> u8 {
+        data.get(i)
+            .map_or(0, |v| u8::try_from(int_of(v)).unwrap_or(0))
+    };
     match &**variant {
         "Rgb" => Color::Rgb(at(0), at(1), at(2)),
         "Indexed" => Color::Indexed(at(0)),
@@ -161,8 +174,14 @@ pub(super) fn style_value(s: Style) -> Value {
     Value::struct_of(
         "Style",
         [
-            ("fg".into(), s.fg.map_or_else(Value::none, |c| Value::some(color_value(c)))),
-            ("bg".into(), s.bg.map_or_else(Value::none, |c| Value::some(color_value(c)))),
+            (
+                "fg".into(),
+                s.fg.map_or_else(Value::none, |c| Value::some(color_value(c))),
+            ),
+            (
+                "bg".into(),
+                s.bg.map_or_else(Value::none, |c| Value::some(color_value(c))),
+            ),
             ("add_modifier".into(), modifier_value(s.add_modifier)),
             ("sub_modifier".into(), modifier_value(s.sub_modifier)),
         ],
@@ -206,7 +225,9 @@ pub(super) fn value_rect(v: &Value) -> Rect {
         return Rect::new(0, 0, 0, 0);
     };
     let field = |name: &str| -> u16 {
-        s.get(name).as_ref().map_or(0, |v| u16::try_from(int_of(v)).unwrap_or(0))
+        s.get(name)
+            .as_ref()
+            .map_or(0, |v| u16::try_from(int_of(v)).unwrap_or(0))
     };
     Rect::new(field("x"), field("y"), field("width"), field("height"))
 }
@@ -236,7 +257,10 @@ pub(super) fn line_value(line: &Line) -> Value {
     let spans: Vec<Value> = line.spans.iter().map(span_value).collect();
     Value::struct_of(
         "Line",
-        [("spans".into(), Value::vec(spans)), ("style".into(), style_value(line.style))],
+        [
+            ("spans".into(), Value::vec(spans)),
+            ("style".into(), style_value(line.style)),
+        ],
     )
 }
 
@@ -246,7 +270,12 @@ pub(super) fn value_line(v: &Value) -> Line<'static> {
             let spans = s
                 .get("spans")
                 .as_ref()
-                .map(|v| items(v).iter().map(value_span).collect::<Vec<Span<'static>>>())
+                .map(|v| {
+                    items(v)
+                        .iter()
+                        .map(value_span)
+                        .collect::<Vec<Span<'static>>>()
+                })
                 .unwrap_or_default();
             let style = s.get("style").as_ref().map_or_else(Style::new, value_style);
             Line::from(spans).style(style)
@@ -279,7 +308,10 @@ pub(super) fn value_constraint(v: &Value) -> Constraint {
     let Value::Enum { variant, data, .. } = v else {
         return Constraint::Min(0);
     };
-    let at = |i: usize| -> u16 { data.get(i).map_or(0, |v| u16::try_from(int_of(v)).unwrap_or(0)) };
+    let at = |i: usize| -> u16 {
+        data.get(i)
+            .map_or(0, |v| u16::try_from(int_of(v)).unwrap_or(0))
+    };
     match &**variant {
         "Length" => Constraint::Length(at(0)),
         "Max" => Constraint::Max(at(0)),
@@ -322,7 +354,9 @@ pub(super) fn value_padding(v: &Value) -> Padding {
         return Padding::ZERO;
     };
     let field = |name: &str| -> u16 {
-        s.get(name).as_ref().map_or(0, |v| u16::try_from(int_of(v)).unwrap_or(0))
+        s.get(name)
+            .as_ref()
+            .map_or(0, |v| u16::try_from(int_of(v)).unwrap_or(0))
     };
     Padding::new(field("left"), field("right"), field("top"), field("bottom"))
 }
