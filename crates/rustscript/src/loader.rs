@@ -69,7 +69,7 @@ pub fn load(script_path: &Path, root_source: &str) -> Result<Program> {
     )?;
     modules.insert(0, root);
     let tokio_main = detect_tokio_main(&modules[0].items)?;
-    let crate_deps = graft_crate_deps(&mut modules, script_path)?;
+    let crate_deps = graft_crate_deps(&mut modules, &files, script_path)?;
     Ok(Program {
         modules,
         files,
@@ -322,7 +322,20 @@ fn load_file_at(
 /// after the crate, loading its `src/lib.rs` and the module tree below it. The
 /// runtime then resolves `use crate_name::..` against the grafted modules, and
 /// the returned deps tell the checker to add them as path dependencies.
-fn graft_crate_deps(modules: &mut Vec<ModuleSrc>, script_path: &Path) -> Result<Vec<CrateDep>> {
+/// Whether any of the script's own sources names this crate. Grafting one the
+/// script never mentions would pull its whole surface into `rust check`, so a
+/// `#[tokio::main]` script sharing a crate with a big helper library was
+/// rejected for methods that only the helper calls and it never reaches.
+fn uses_crate(files: &[(PathBuf, String)], module_name: &str) -> bool {
+    let needle = format!("{module_name}::");
+    files.iter().any(|(_, source)| source.contains(&needle))
+}
+
+fn graft_crate_deps(
+    modules: &mut Vec<ModuleSrc>,
+    files: &[(PathBuf, String)],
+    script_path: &Path,
+) -> Result<Vec<CrateDep>> {
     let mut deps = Vec::new();
     for (name, dir) in local_path_deps(script_path) {
         let src_dir = dir.join("src");
@@ -330,19 +343,23 @@ fn graft_crate_deps(modules: &mut Vec<ModuleSrc>, script_path: &Path) -> Result<
         if !lib.is_file() {
             continue;
         }
+        // Rust code refers to a crate by its identifier, so a hyphenated
+        // package name like `verify-common` is `verify_common` in `use`. Cargo
+        // does this mapping for the checker's real path dependency; the grafted
+        // module must match it or `use verify_common::..` resolves against
+        // nothing at runtime.
+        let module_name = name.replace('-', "_");
+        if !uses_crate(files, &module_name) {
+            continue;
+        }
         let source = std::fs::read_to_string(&lib)
             .map_err(|e| anyhow!("cannot read {}: {e}", lib.display()))?;
         let ast = syn::parse_file(&source)
             .map_err(|e| anyhow!("parse error in {}: {e}", lib.display()))?;
-        let mut files: Vec<(PathBuf, String)> = vec![(PathBuf::from("lib.rs"), source)];
-        // Rust code refers to a crate by its identifier, so a hyphenated package
-        // name like `verify-common` is `verify_common` in `use`. Cargo does this
-        // mapping for the checker's real path dependency; the grafted module must
-        // match it or `use verify_common::..` resolves against nothing at runtime.
-        let module_name = name.replace('-', "_");
+        let mut crate_files: Vec<(PathBuf, String)> = vec![(PathBuf::from("lib.rs"), source)];
         let root = collect(
             modules,
-            &mut files,
+            &mut crate_files,
             &src_dir,
             &src_dir,
             vec![module_name],
@@ -350,7 +367,11 @@ fn graft_crate_deps(modules: &mut Vec<ModuleSrc>, script_path: &Path) -> Result<
             ast.items,
         )?;
         modules.push(root);
-        deps.push(CrateDep { name, dir, files });
+        deps.push(CrateDep {
+            name,
+            dir,
+            files: crate_files,
+        });
     }
     Ok(deps)
 }

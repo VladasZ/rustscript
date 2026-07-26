@@ -40,6 +40,10 @@ pub enum PNative {
     /// A lazy line iterator, so `for line in reader.lines()` streams a pipe
     /// instead of buffering all of it first.
     Lines(LineIter),
+    /// A response body still in its wire form. Kept undecoded so a script that
+    /// only wants the byte count never pays for a UTF-8 conversion, which on a
+    /// binary payload both costs time and inflates the result.
+    Body(Vec<u8>),
     /// A compiled pattern, shared across tasks so it compiles once.
     Regex(super::pregex::PRegexValue),
     /// A single match, holding its source and byte range.
@@ -62,6 +66,7 @@ impl PNative {
             PNative::ChildStdin(_) => "ChildStdin",
             PNative::Reader(_) => "Reader",
             PNative::Lines(_) => "Lines",
+            PNative::Body(_) => "Body",
             PNative::Regex(_) => "Regex",
             PNative::RegexMatch(_) => "Match",
             PNative::RegexCaptures(_) => "Captures",

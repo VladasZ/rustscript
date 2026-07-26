@@ -82,6 +82,17 @@ impl PInterp {
                         Some(Value::Float(f)) => return Ok(PValue::Float(f)),
                         _ => {}
                     }
+                    if let Some(v) =
+                        super::pratatui::ratatui_const(&segs[segs.len() - 2], other)
+                    {
+                        return Ok(v);
+                    }
+                    // A json null is None here, the same mapping the parser
+                    // uses, so `Value::Null` written in a script lands on the
+                    // same value the fast engine gives it.
+                    if segs[segs.len() - 2] == "Value" && other == "Null" {
+                        return Ok(PValue::none());
+                    }
                 }
                 // A bare function name used as a value, `.map(strip_html)`. The
                 // closure forwards its arguments to the call, which the tokio
@@ -136,6 +147,11 @@ impl PInterp {
                 None => arg,
             })
             .collect();
+        // Ahead of the match because `Widget::render` mutates the buffer it is
+        // given, so it must run exactly once.
+        if let Some(v) = super::pratatui::ratatui_assoc(ns, last, &args) {
+            return Ok(v);
+        }
         match (ns, last) {
             ("serde_json", _) => super::pjson::bridge_serde_json(last, &args),
             ("env", "args") => Ok(PValue::vec(
@@ -307,6 +323,9 @@ impl PInterp {
                 }
             }
             PValue::Enum { .. } => enum_method(recv, m, args),
+            PValue::Struct(st) if super::pratatui::is_ratatui_struct(st.name()) => {
+                super::pratatui::struct_method(st, m, args)
+            }
             PValue::Struct(st) if &**st.name() == "Command" => {
                 super::pprocess::command_method(recv, m, args)
             }
@@ -490,6 +509,18 @@ impl PInterp {
                 let mut out = items.lock().clone();
                 out.reverse();
                 PValue::vec(out)
+            }
+            // A json array is already a Vec here, so the serde accessor hands
+            // the same list back rather than converting anything.
+            "as_array" => PValue::some(PValue::vec(items.lock().clone())),
+            "as_object" => PValue::none(),
+            "skip" => {
+                let n = usize::try_from(int_arg(args)).unwrap_or(0);
+                PValue::vec(items.lock().iter().skip(n).cloned().collect())
+            }
+            "take" => {
+                let n = usize::try_from(int_arg(args)).unwrap_or(0);
+                PValue::vec(items.lock().iter().take(n).cloned().collect())
             }
             "enumerate" => PValue::vec(
                 items
@@ -781,6 +812,30 @@ fn int_out(out: super::int_methods::IntOut, width: super::numeric::IntWidth) -> 
 }
 
 fn scalar_method(recv: &PValue, m: &str, args: &[PValue]) -> Result<PValue> {
+    // Serde accessors on an already decoded scalar. A json bool arrives as a
+    // plain Bool here, so `as_bool` has to answer on it, and an accessor for
+    // the wrong type is None rather than an error, matching serde.
+    if matches!(
+        m,
+        "as_str" | "as_i64" | "as_u64" | "as_f64" | "as_bool" | "as_array" | "as_object"
+    ) {
+        let matched = match (recv, m) {
+            (PValue::Bool(_), "as_bool")
+            | (PValue::Str(_), "as_str")
+            | (PValue::Int(_), "as_i64" | "as_u64")
+            | (PValue::IntW(_, _), "as_i64" | "as_u64")
+            | (PValue::Float(_), "as_f64") => true,
+            (PValue::Int(i), "as_f64") => {
+                return Ok(PValue::some(PValue::Float(*i as f64)));
+            }
+            _ => false,
+        };
+        return Ok(if matched {
+            PValue::some(recv.clone())
+        } else {
+            PValue::none()
+        });
+    }
     let n = match recv {
         PValue::Int(i) => Some(Num::Int(*i)),
         PValue::Float(f) => Some(Num::Float(*f)),

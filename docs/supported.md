@@ -16,6 +16,18 @@ selects. Unmarked methods run on both.
 
 `decode` (fast), `encode` (fast), `kind` (fast), `standard_no_pad` (fast), `url_safe` (fast), `url_safe_no_pad` (fast)
 
+## Block
+
+`border_style`, `border_type`, `bordered`, `borders`, `padding`, `style`, `title`
+
+## Buffer
+
+`area`, `cell`, `content`
+
+## BufferCell
+
+`symbol`
+
 ## Builder
 
 `build`, `cookie_store`, `redirect` (fast), `timeout`, `user_agent`
@@ -23,6 +35,10 @@ selects. Unmarked methods run on both.
 ## Captures
 
 `get`, `len`, `name`
+
+## Cell
+
+`style`
 
 ## Char
 
@@ -88,6 +104,10 @@ selects. Unmarked methods run on both.
 
 `all` (fast), `any` (fast), `as_str` (fast), `cloned` (fast), `collect` (fast), `collect_string` (fast), `copied` (fast), `filter` (fast), `filter_map` (fast), `find` (fast), `flat_map` (fast), `fold` (fast), `for_each` (fast), `last` (fast), `map` (fast), `max` (fast), `max_by_key` (fast), `min` (fast), `min_by_key` (fast), `next` (fast), `partition` (fast), `peek` (fast), `peekable` (fast), `position` (fast), `reduce` (fast), `rev` (fast), `skip_while` (fast), `take_while` (fast), `to_vec` (fast)
 
+## Line
+
+`style`, `width`
+
 ## Map
 
 `as_array` (fast), `as_object` (fast), `contains_key` (tokio), `drain` (fast), `get` (tokio), `insert` (tokio), `is_empty` (tokio), `key` (fast), `keys` (tokio), `len` (tokio), `map` (fast), `remove` (tokio), `values` (tokio), `values_mut` (fast)
@@ -100,9 +120,13 @@ selects. Unmarked methods run on both.
 
 `accessed` (fast), `created` (fast), `dev` (fast), `gid` (fast), `ino` (fast), `is_dir` (fast), `is_file` (fast), `is_symlink` (fast), `len` (fast), `mode` (fast), `modified` (fast), `mtime` (fast), `permissions` (fast), `readonly` (fast), `uid` (fast)
 
+## Modifier
+
+`bits`, `contains`, `difference`, `intersects`, `is_empty`, `union`
+
 ## native handles (files, sockets, readers, processes)
 
-`accept` (fast), `by_ref` (fast), `close` (fast), `collect` (fast), `connect` (fast), `delete` (fast), `duration_since` (fast), `elapsed`, `flush`, `get` (fast), `head` (fast), `id` (fast), `incoming` (fast), `inner` (fast), `is_terminal` (fast), `kill` (fast), `kind` (fast), `lines`, `local_addr` (fast), `lock` (fast), `metadata` (fast), `next`, `patch` (fast), `path` (fast), `peer_addr` (fast), `post` (fast), `put` (fast), `read` (fast), `read_line`, `read_to_end` (fast), `read_to_string`, `seek` (fast), `send` (fast), `send_to` (fast), `set_broadcast` (fast), `set_len` (fast), `set_modified` (fast), `shutdown` (fast), `stderr` (fast), `stdin` (fast), `sync_all` (fast), `sync_data` (fast), `try_clone` (fast), `try_wait` (fast), `wait` (fast), `wait_with_output` (fast), `write`, `write_all`
+`accept` (fast), `by_ref`, `close` (fast), `collect` (fast), `connect` (fast), `delete` (fast), `duration_since` (fast), `elapsed`, `flush`, `get` (fast), `head` (fast), `id` (fast), `incoming` (fast), `inner` (fast), `is_terminal`, `kill` (fast), `kind`, `lines`, `local_addr` (fast), `lock`, `metadata` (fast), `next`, `patch` (fast), `path` (fast), `peer_addr` (fast), `post` (fast), `put` (fast), `read` (fast), `read_line`, `read_to_end` (fast), `read_to_string`, `seek` (fast), `send` (fast), `send_to` (fast), `set_broadcast` (fast), `set_len` (fast), `set_modified` (fast), `shutdown` (fast), `stderr`, `stdin`, `sync_all` (fast), `sync_data` (fast), `try_clone` (fast), `try_wait` (fast), `wait` (fast), `wait_with_output` (fast), `write`, `write_all`
 
 ## OpenOptions
 
@@ -138,7 +162,7 @@ selects. Unmarked methods run on both.
 
 ## Response
 
-`body`, `code`, `error_for_status`, `headers`, `json`, `map`, `status`, `text`
+`body` (fast), `code`, `content_length`, `error_for_status`, `headers`, `json`, `map`, `status`, `text`
 
 ## Result
 
@@ -147,6 +171,10 @@ selects. Unmarked methods run on both.
 ## Rng
 
 `fill` (fast), `fill_bytes` (fast), `gen` (fast), `gen_bool` (fast), `gen_range` (fast), `random` (fast), `random_bool` (fast), `random_range` (fast)
+
+## Row
+
+`height`, `style`
 
 ## Service
 
@@ -160,6 +188,14 @@ selects. Unmarked methods run on both.
 
 `chain_update` (fast), `finalize` (fast), `update` (fast)
 
+## Span
+
+`content`, `style`, `width`
+
+## Sparkline
+
+`data`, `max`, `style`
+
 ## Status
 
 `as_int`, `as_u16`, `is_client_error`, `is_server_error`, `is_success`
@@ -168,9 +204,17 @@ selects. Unmarked methods run on both.
 
 `as_bytes`, `as_str`, `as_string`, `black`, `blue`, `bold`, `bright_blue`, `bright_cyan`, `bright_green`, `bright_red`, `bright_yellow`, `bytes`, `char_indices`, `chars` (tokio), `clear`, `cmp`, `contains`, `context`, `count`, `cyan`, `dimmed`, `encode_utf16`, `ends_with`, `eq_ignore_ascii_case`, `expect`, `find`, `green`, `into_bytes`, `into_owned`, `into_string`, `is_empty`, `is_none`, `is_some`, `italic`, `len`, `lines` (tokio), `magenta`, `matches`, `normal`, `on_blue`, `on_green`, `on_red`, `purple`, `red`, `repeat`, `replace`, `replacen`, `reversed`, `rfind`, `rsplit`, `rsplit_once`, `rsplitn`, `split`, `split_once`, `split_whitespace` (tokio), `splitn`, `starts_with`, `strip_prefix`, `strip_suffix`, `to_ascii_lowercase`, `to_ascii_uppercase`, `to_lowercase`, `to_owned`, `to_uppercase`, `trim`, `trim_end`, `trim_end_matches`, `trim_matches`, `trim_start`, `trim_start_matches`, `trim_string`, `underline`, `unwrap`, `unwrap_or`, `unwrap_or_default`, `unwrap_or_else`, `white`, `with_context`, `yellow`
 
+## Style
+
+`add_modifier`, `bg`, `bold`, `dim`, `fg`, `italic`, `remove_modifier`, `reversed`, `sub_modifier`, `underlined`
+
+## Table
+
+`block`, `column_spacing`, `style`, `widths`
+
 ## Vec
 
-`all`, `any`, `append` (fast), `as_array` (fast), `as_object` (fast), `clear`, `cloned` (fast), `collect`, `collect_string`, `concat` (tokio), `contains` (tokio), `copied`, `copy_from_slice`, `count` (tokio), `dedup` (fast), `enumerate` (tokio), `extend`, `extend_from_slice`, `filter`, `filter_map`, `find`, `first` (tokio), `flat_map`, `flatten` (fast), `fold` (fast), `for_each`, `into_iter` (tokio), `is_empty` (tokio), `iter` (tokio), `iter_mut` (tokio), `join` (tokio), `last` (tokio), `len` (tokio), `map`, `max`, `max_by_key` (fast), `min`, `min_by_key` (fast), `next` (fast), `nth`, `partition` (fast), `pop` (tokio), `position`, `product` (tokio), `push` (tokio), `reduce` (fast), `retain` (fast), `rev` (tokio), `reverse` (fast), `skip_while` (fast), `sort` (tokio), `sort_by` (fast), `sort_by_cached_key` (fast), `sort_by_key` (fast), `sum` (tokio), `take_while` (fast), `to_vec`, `truncate` (fast)
+`all`, `any`, `append` (fast), `as_array`, `as_object`, `clear`, `cloned` (fast), `collect`, `collect_string`, `concat` (tokio), `contains` (tokio), `copied`, `copy_from_slice`, `count` (tokio), `dedup` (fast), `enumerate` (tokio), `extend`, `extend_from_slice`, `filter`, `filter_map`, `find`, `first` (tokio), `flat_map`, `flatten` (fast), `fold` (fast), `for_each`, `into_iter` (tokio), `is_empty` (tokio), `iter` (tokio), `iter_mut` (tokio), `join` (tokio), `last` (tokio), `len` (tokio), `map`, `max`, `max_by_key` (fast), `min`, `min_by_key` (fast), `next` (fast), `nth`, `partition` (fast), `pop` (tokio), `position`, `product` (tokio), `push` (tokio), `reduce` (fast), `retain` (fast), `rev` (tokio), `reverse` (fast), `skip` (tokio), `skip_while` (fast), `sort` (tokio), `sort_by` (fast), `sort_by_cached_key` (fast), `sort_by_key` (fast), `sum` (tokio), `take` (tokio), `take_while` (fast), `to_vec`, `truncate` (fast)
 
 ## WmiConnection
 

@@ -254,6 +254,21 @@ pub(super) fn std_stream_method(st: &Arc<PStructData>, m: &str) -> Result<PValue
             })
         }
         "lock" | "by_ref" => PValue::Struct(st.clone()),
+        // A redraw loop prints without a newline and then flushes, so without
+        // this the frame sits in the buffer and the screen never updates.
+        "flush" => {
+            use std::io::Write;
+            let kind = st.get("kind").map(|v| v.display()).unwrap_or_default();
+            let flushed = if kind == "stderr" {
+                std::io::stderr().flush()
+            } else {
+                std::io::stdout().flush()
+            };
+            match flushed {
+                Ok(()) => PValue::ok(PValue::Unit),
+                Err(e) => PValue::err(PValue::str(e.to_string())),
+            }
+        }
         _ => bail!("method `{m}` on a std stream is not supported in tokio mode"),
     })
 }

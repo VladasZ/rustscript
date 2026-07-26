@@ -107,6 +107,32 @@ pub const BRIDGES: &[Bridge] = &[
         Engine::Fast,
         "Element",
     ),
+    b("ratatui_render.rs", "style_method", Engine::Both, "Style"),
+    b(
+        "ratatui_render.rs",
+        "modifier_method",
+        Engine::Both,
+        "Modifier",
+    ),
+    b("ratatui_render.rs", "span_method", Engine::Both, "Span"),
+    b("ratatui_render.rs", "line_method", Engine::Both, "Line"),
+    b("ratatui_render.rs", "cell_method", Engine::Both, "Cell"),
+    b("ratatui_render.rs", "row_method", Engine::Both, "Row"),
+    b("ratatui_render.rs", "table_method", Engine::Both, "Table"),
+    b("ratatui_render.rs", "block_method", Engine::Both, "Block"),
+    b(
+        "ratatui_render.rs",
+        "sparkline_method",
+        Engine::Both,
+        "Sparkline",
+    ),
+    b("ratatui_render.rs", "buffer_method", Engine::Both, "Buffer"),
+    b(
+        "ratatui_render.rs",
+        "buffer_cell_method",
+        Engine::Both,
+        "BufferCell",
+    ),
     b("process.rs", "command_method", Engine::Fast, "Command"),
     // The lazy find_iter and captures_iter arms; the rest comes from the
     // shared regex cores.
@@ -207,6 +233,9 @@ pub const BRIDGES: &[Bridge] = &[
         Engine::Parallel,
         "Option",
     ),
+    // The std handle arms, `is_terminal` and `flush` on stdout. Without this
+    // the engine implemented them but `rust check` did not know.
+    b("pstd.rs", "std_stream_method", Engine::Parallel, "Native"),
 ];
 
 const fn b(file: &'static str, func: &'static str, engine: Engine, recv: &'static str) -> Bridge {

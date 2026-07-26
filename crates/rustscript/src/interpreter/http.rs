@@ -16,7 +16,7 @@ use super::value::{StructData, Value};
 use super::json_bridge::*;
 use super::std_bridge::*;
 
-type ResponseParts = (u16, String, Vec<(String, String)>);
+type ResponseParts = (u16, String, Vec<(String, String)>, Option<u64>);
 
 // -- client construction ---------------------------------------------------
 
@@ -319,12 +319,19 @@ fn duration_arg(v: Option<&Value>) -> Option<Value> {
 
 fn run_request(s: &StructData) -> Value {
     match execute(s) {
-        Ok((status, text, headers)) => Value::ok(Value::struct_of(
+        Ok((status, text, headers, length)) => Value::ok(Value::struct_of(
             "ReqwestResponse",
             [
                 ("status".into(), Value::Int(status as i64)),
                 ("body".into(), Value::str(text)),
                 ("headers".into(), header_pairs(headers)),
+                (
+                    "content_length".into(),
+                    match length {
+                        Some(n) => Value::some(Value::Int(i64::try_from(n).unwrap_or(0))),
+                        None => Value::none(),
+                    },
+                ),
             ],
         )),
         Err(e) => Value::err(Value::str(e.to_string())),
@@ -370,8 +377,10 @@ fn execute(s: &StructData) -> Result<ResponseParts> {
         .iter()
         .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
         .collect();
+    // Taken before the body is read, because reading it consumes the response.
+    let length = resp.content_length();
     let text = resp.text()?;
-    Ok((status, text, out_headers))
+    Ok((status, text, out_headers, length))
 }
 
 fn tuple_pairs(items: &[Value]) -> Vec<(String, String)> {
@@ -407,6 +416,7 @@ pub(super) fn response_method(s: &Rc<StructData>, method: &str) -> Result<Value>
             [("code".into(), s.get("status").unwrap_or(Value::Int(0)))],
         ),
         "text" => Value::ok(Value::str(body())),
+        "content_length" => s.get("content_length").unwrap_or_else(Value::none),
         "json" => match parse_json(&body()) {
             Ok(v) => Value::ok(v),
             Err(e) => Value::err(Value::str(e.to_string())),
