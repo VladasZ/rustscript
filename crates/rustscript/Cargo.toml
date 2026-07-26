@@ -47,6 +47,7 @@ flate2 = { workspace = true }
 tar = { workspace = true }
 indicatif = { workspace = true }
 zip = { workspace = true }
+ratatui = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

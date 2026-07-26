@@ -301,13 +301,26 @@ async fn run_plan(plan: Plan) -> Result<PValue> {
         .iter()
         .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
         .collect();
-    let text = resp.text().await?;
+    // Taken before the body is read, because reading it consumes the response.
+    // A speed test counts these instead of the decoded text, whose length is
+    // not the number of bytes that crossed the wire.
+    let length = resp.content_length();
+    // Kept in wire form. Decoding happens in `text` and `json`, so a script
+    // that only reads `content_length` never pays for a UTF-8 conversion.
+    let raw = resp.bytes().await?.to_vec();
     Ok(PValue::struct_of(
         "ReqwestResponse",
         [
             ("status".into(), PValue::Int(status as i64)),
-            ("body".into(), PValue::str(text)),
+            ("body".into(), PNative::Body(raw).wrap()),
             ("headers".into(), header_pairs(headers)),
+            (
+                "content_length".into(),
+                match length {
+                    Some(n) => PValue::some(PValue::Int(i64::try_from(n).unwrap_or(0))),
+                    None => PValue::none(),
+                },
+            ),
         ],
     ))
 }
@@ -353,7 +366,7 @@ fn duration_field(s: &PStructData, field: &str) -> Option<Duration> {
 
 fn response_method(s: &Arc<PStructData>, method: &str) -> Result<PValue> {
     let this = || PValue::Struct(s.clone());
-    let body = || s.get("body").map(|v| v.display()).unwrap_or_default();
+    let body = || body_bytes(s);
     Ok(match method {
         "status" => PValue::struct_of(
             "StatusCode",
@@ -361,6 +374,7 @@ fn response_method(s: &Arc<PStructData>, method: &str) -> Result<PValue> {
         ),
         "text" => text_future(body()),
         "json" => json_future(body()),
+        "content_length" => s.get("content_length").unwrap_or_else(PValue::none),
         "headers" => PValue::struct_of(
             "HeaderMap",
             [(
@@ -383,13 +397,28 @@ fn response_method(s: &Arc<PStructData>, method: &str) -> Result<PValue> {
     })
 }
 
-fn text_future(body: String) -> PValue {
-    PNative::Future(Box::pin(async move { PValue::ok(PValue::str(body)) })).wrap()
+/// The undecoded body of a response value.
+fn body_bytes(s: &PStructData) -> Vec<u8> {
+    match s.get("body") {
+        Some(PValue::Native(n)) => match &*n.lock() {
+            PNative::Body(raw) => raw.clone(),
+            _ => Vec::new(),
+        },
+        Some(other) => other.display().into_bytes(),
+        None => Vec::new(),
+    }
 }
 
-fn json_future(body: String) -> PValue {
+fn text_future(body: Vec<u8>) -> PValue {
     PNative::Future(Box::pin(async move {
-        match serde_json::from_str::<serde_json::Value>(&body) {
+        PValue::ok(PValue::str(String::from_utf8_lossy(&body).into_owned()))
+    }))
+    .wrap()
+}
+
+fn json_future(body: Vec<u8>) -> PValue {
+    PNative::Future(Box::pin(async move {
+        match serde_json::from_slice::<serde_json::Value>(&body) {
             Ok(v) => PValue::ok(json_to_pvalue(v)),
             Err(e) => PValue::err(PValue::str(e.to_string())),
         }

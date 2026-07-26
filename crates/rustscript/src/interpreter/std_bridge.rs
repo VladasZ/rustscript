@@ -436,6 +436,12 @@ pub(super) fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Va
     if matches!(ty, "Header" | "EncodingKey") {
         return jwt_assoc(ty, func, args);
     }
+    if let Some(v) = super::ratatui_render::ratatui_assoc(ty, func, args)
+        .or_else(|| super::ratatui_render::constraint_variant(ty, func, args))
+        .or_else(|| super::ratatui_render::color_variant(ty, func, args))
+    {
+        return Ok(Some(v));
+    }
     Ok(Some(match (ty, func) {
         ("Permissions", "from_mode") => {
             let mode = args.first().and_then(as_i64).unwrap_or(0o644);

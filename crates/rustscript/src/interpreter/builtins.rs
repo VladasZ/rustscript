@@ -94,6 +94,9 @@ impl Interp {
         if let Some(v) = int_limit(ty, last) {
             return Ok(v);
         }
+        if let Some(v) = super::ratatui_bridge::ratatui_const(ty, last) {
+            return Ok(v);
+        }
         if let Some(v) = base64_engine(last) {
             return Ok(v);
         }
@@ -652,6 +655,17 @@ pub(super) fn builtin_method(
             "Base64Engine" => base64_method(s, name, &*args),
             "Entry" => entry_method(s, name, &*args),
             "Element" => super::xmltree_bridge::element_method(s, name, &*args),
+            "Style" => super::ratatui_render::style_method(s, name, &*args),
+            "Modifier" => super::ratatui_render::modifier_method(s, name, &*args),
+            "Span" => super::ratatui_render::span_method(s, name, &*args),
+            "Line" => super::ratatui_render::line_method(s, name, &*args),
+            "Cell" => super::ratatui_render::cell_method(s, name, &*args),
+            "Row" => super::ratatui_render::row_method(s, name, &*args),
+            "Table" => super::ratatui_render::table_method(s, name, &*args),
+            "Block" => super::ratatui_render::block_method(s, name, &*args),
+            "Sparkline" => super::ratatui_render::sparkline_method(s, name, &*args),
+            "Buffer" => super::ratatui_render::buffer_method(s, name, &*args),
+            "BufferCell" => super::ratatui_render::buffer_cell_method(s, name),
             "Child" => child_method(s, name, args),
             "Path" => path_method(s, name, &*args),
             "OsString" => os_string_method(s, name),

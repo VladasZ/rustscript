@@ -308,6 +308,7 @@ tempfile = "3"
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 lopdf = "0.44"
 xmltree = { version = "0.12", features = ["attribute-order"] }
+ratatui = { version = "0.30", default-features = false }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking", "cookies"], default-features = false }
 

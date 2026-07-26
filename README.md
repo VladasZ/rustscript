@@ -151,6 +151,10 @@ The following crates have native interpreter bridges:
   [`tempfile`](https://github.com/Stebalien/tempfile)
 - [`lopdf`](https://github.com/J-F-Liu/lopdf) and
   [`xmltree`](https://github.com/eminence/xmltree-rs)
+- [`ratatui`](https://github.com/ratatui/ratatui), the widget and buffer side.
+  A script builds a `Table`, `Block` or `Sparkline`, renders it into a
+  `Buffer`, and reads the cells back. There is no backend and no `Terminal`,
+  so drawing works in a pipe and in CI.
 
 Windows builds also bridge
 [`winreg`](https://github.com/gentoo90/winreg-rs),
