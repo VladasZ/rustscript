@@ -32,6 +32,8 @@ jsonwebtoken = { workspace = true }
 tokio = { workspace = true }
 lopdf = { workspace = true }
 xmltree = { workspace = true }
+crossterm = { workspace = true }
+terminal-light = { workspace = true }
 
 [target."cfg(windows)".dev-dependencies]
 winreg = { workspace = true }

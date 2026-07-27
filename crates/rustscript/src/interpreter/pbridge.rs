@@ -836,6 +836,12 @@ fn int_out(out: super::int_methods::IntOut, width: super::numeric::IntWidth) -> 
         IntOut::Checked(Some(value)) => PValue::some(PValue::int_of_width(value, width)),
         IntOut::Checked(None) => PValue::none(),
         IntOut::Ordering(ordering) => p_ordering(ordering),
+        IntOut::Bytes(bytes) => PValue::vec(
+            bytes
+                .into_iter()
+                .map(|byte| PValue::Int(i64::from(byte)))
+                .collect(),
+        ),
     }
 }
 

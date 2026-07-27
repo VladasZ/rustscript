@@ -48,6 +48,8 @@ tar = { workspace = true }
 indicatif = { workspace = true }
 zip = { workspace = true }
 ratatui = { workspace = true }
+crossterm = { workspace = true }
+terminal-light = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

@@ -155,6 +155,13 @@ The following crates have native interpreter bridges:
   A script builds a `Table`, `Block` or `Sparkline`, renders it into a
   `Buffer`, and reads the cells back. There is no backend and no `Terminal`,
   so drawing works in a pipe and in CI.
+- [`crossterm`](https://github.com/crossterm-rs/crossterm) for
+  `terminal::size`, and
+  [`terminal-light`](https://github.com/Canop/terminal-light) for `luma`, the
+  brightness of the terminal background from 0 for black to 1 for white. A
+  script that draws needs both, one to know whether its drawing fits the
+  window, the other to pick colors the terminal can actually show. Neither
+  answer is available in a pipe or in CI, so both report an error there.
 
 Windows builds also bridge
 [`winreg`](https://github.com/gentoo90/winreg-rs),

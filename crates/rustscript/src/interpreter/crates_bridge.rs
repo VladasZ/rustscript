@@ -113,8 +113,34 @@ pub(super) fn crate_bridge(module: &str, func: &str, args: &[Value]) -> Result<O
         // wmi ---------------------------------------------------------------
         ("WMIConnection", "new") => super::wmi_bridge::connection(args, true),
         ("WMIConnection", "with_namespace_path") => super::wmi_bridge::connection(args, false),
+        // crossterm ----------------------------------------------------------
+        ("terminal", "size") => terminal_size(),
+        // terminal-light -----------------------------------------------------
+        ("terminal_light", "luma") => terminal_luma(),
         _ => return Ok(None),
     }))
+}
+
+/// `crossterm::terminal::size`. The pair is columns then rows, the order the
+/// real call returns, which is the opposite of how a `Rect` is written.
+fn terminal_size() -> Value {
+    match crossterm::terminal::size() {
+        Ok((cols, rows)) => Value::ok(Value::tuple(vec![
+            Value::Int(i64::from(cols)),
+            Value::Int(i64::from(rows)),
+        ])),
+        Err(e) => Value::err(Value::str(e.to_string())),
+    }
+}
+
+/// `terminal_light::luma`, the background brightness from 0 for black to 1 for
+/// white. The crate asks the terminal over an escape sequence and falls back to
+/// `$COLORFGBG`, so an error means neither source answered.
+fn terminal_luma() -> Value {
+    match terminal_light::luma() {
+        Ok(luma) => Value::ok(Value::F32(luma)),
+        Err(e) => Value::err(Value::str(e.to_string())),
+    }
 }
 
 /// Recognize a base64 engine constant name and build a marker value carrying

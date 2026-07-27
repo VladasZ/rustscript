@@ -47,6 +47,22 @@ impl IntWidth {
         })
     }
 
+    /// The type name this width is written as in a script. `I64` also covers
+    /// isize and `USize` also covers u64, so a name here is the canonical one.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::U8 => "u8",
+            Self::U16 => "u16",
+            Self::U32 => "u32",
+            Self::U64 => "u64",
+            Self::USize => "usize",
+            Self::I8 => "i8",
+            Self::I16 => "i16",
+            Self::I32 => "i32",
+            Self::I64 => "i64",
+        }
+    }
+
     pub fn is_signed(self) -> bool {
         matches!(self, Self::I8 | Self::I16 | Self::I32 | Self::I64)
     }
