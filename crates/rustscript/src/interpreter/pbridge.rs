@@ -206,6 +206,14 @@ impl PInterp {
                 if let Some(chunk) = self.user_function(last) {
                     return self.run_chunk(&chunk, &args, &[]);
                 }
+                // A json value written out in a script, `Value::String(s)`. A
+                // parsed json is held as native values here, so each variant is
+                // exactly its own payload, the same as on the fast engine.
+                if ns == "Value"
+                    && matches!(last, "String" | "Bool" | "Number" | "Array" | "Object")
+                {
+                    return one(args);
+                }
                 if let Some((recv, rest)) = args.split_first() {
                     let recv = recv.clone();
                     let mut rest = rest.to_vec();
@@ -524,9 +532,12 @@ impl PInterp {
                 PValue::vec(out)
             }
             // A json array is already a Vec here, so the serde accessor hands
-            // the same list back rather than converting anything.
+            // the same list back rather than converting anything. The mut
+            // accessor keeps the shared handle, so a push through it reaches
+            // the value it was taken from.
             "as_array" => PValue::some(PValue::vec(items.lock().clone())),
-            "as_object" => PValue::none(),
+            "as_array_mut" => PValue::some(recv.clone()),
+            "as_object" | "as_object_mut" => PValue::none(),
             "skip" => {
                 let n = usize::try_from(int_arg(args)).unwrap_or(0);
                 PValue::vec(items.lock().iter().skip(n).cloned().collect())
@@ -792,6 +803,10 @@ fn map_method(recv: &PValue, m: &str, args: &mut [PValue]) -> Result<PValue> {
         "is_empty" => PValue::Bool(map.lock().is_empty()),
         "keys" => PValue::vec(map.lock().keys().map(|k| k.to_value()).collect()),
         "values" => PValue::vec(map.lock().values().cloned().collect()),
+        // A json object is a Map here, and the handle is shared, so both the
+        // plain and the mut serde accessor hand the same map back.
+        "as_object" | "as_object_mut" => PValue::some(recv.clone()),
+        "as_array" | "as_array_mut" => PValue::none(),
         _ => bail!("method `{m}` on HashMap is not supported in tokio mode"),
     })
 }
@@ -825,12 +840,25 @@ fn int_out(out: super::int_methods::IntOut, width: super::numeric::IntWidth) -> 
 }
 
 fn scalar_method(recv: &PValue, m: &str, args: &[PValue]) -> Result<PValue> {
+    // A conversion that only changes the static type is a no-op on a scalar,
+    // and a number never reaches a generic dispatch, so it is answered here.
+    if m == "into" {
+        return Ok(recv.clone());
+    }
     // Serde accessors on an already decoded scalar. A json bool arrives as a
     // plain Bool here, so `as_bool` has to answer on it, and an accessor for
     // the wrong type is None rather than an error, matching serde.
     if matches!(
         m,
-        "as_str" | "as_i64" | "as_u64" | "as_f64" | "as_bool" | "as_array" | "as_object"
+        "as_str"
+            | "as_i64"
+            | "as_u64"
+            | "as_f64"
+            | "as_bool"
+            | "as_array"
+            | "as_array_mut"
+            | "as_object"
+            | "as_object_mut"
     ) {
         let matched = match (recv, m) {
             (PValue::Bool(_), "as_bool")

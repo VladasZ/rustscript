@@ -268,6 +268,18 @@ impl Interp {
         if let Some(v) = self.make_tuple_variant(Some(ns), last, &args) {
             return v;
         }
+        // A json value written out in a script, `Value::String(s)`. A parsed
+        // json is held as native values here, a Str for a string and a Map for
+        // an object, so each of these variants is exactly its own payload.
+        // `Value::Null` carries none and is handled with the other constants.
+        if ns == "Value"
+            && matches!(
+                last.as_str(),
+                "String" | "Bool" | "Number" | "Array" | "Object"
+            )
+        {
+            return one(args);
+        }
         // UFCS fallback: `Type::method(recv, ..)` dispatches `method` on the
         // receiver. This is what makes a method reference used as a value, like
         // `str::trim` handed to `map`, callable, since the path call forwards

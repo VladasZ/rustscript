@@ -10,7 +10,7 @@ selects. Unmarked methods run on both.
 
 ## any value
 
-`abs`, `as_array`, `as_bool`, `as_f64`, `as_i128`, `as_i64`, `as_object`, `as_str`, `as_u64`, `as_usize`, `ceil`, `checked_add`, `checked_div`, `checked_mul`, `checked_neg`, `checked_rem`, `checked_sub`, `clamp`, `clone`, `cmp`, `count_ones`, `count_zeros`, `div_euclid`, `floor`, `into` (fast), `is_array` (fast), `is_boolean` (fast), `is_f64` (fast), `is_i64` (fast), `is_multiple_of`, `is_null` (fast), `is_number` (fast), `is_object` (fast), `is_sign_positive`, `is_string` (fast), `is_u64` (fast), `isqrt`, `leading_zeros`, `max`, `min`, `mode` (fast), `partial_cmp`, `pow`, `powf`, `powi`, `readonly` (fast), `rem_euclid`, `reverse_bits`, `rotate_left`, `rotate_right`, `round`, `saturating_add`, `saturating_mul`, `saturating_sub`, `set_readonly` (fast), `signum`, `sqrt`, `swap_bytes`, `then_some` (fast), `to_string`, `trailing_zeros`, `trunc`, `wrapping_add`, `wrapping_mul`, `wrapping_neg`, `wrapping_sub`
+`abs`, `as_array`, `as_array_mut`, `as_bool`, `as_f64`, `as_i128`, `as_i64`, `as_object`, `as_object_mut`, `as_str`, `as_u64`, `as_usize`, `ceil`, `checked_add`, `checked_div`, `checked_mul`, `checked_neg`, `checked_rem`, `checked_sub`, `clamp`, `clone`, `cmp`, `count_ones`, `count_zeros`, `div_euclid`, `floor`, `into`, `is_array` (fast), `is_boolean` (fast), `is_f64` (fast), `is_i64` (fast), `is_multiple_of`, `is_null` (fast), `is_number` (fast), `is_object` (fast), `is_sign_positive`, `is_string` (fast), `is_u64` (fast), `isqrt`, `leading_zeros`, `max`, `min`, `mode` (fast), `partial_cmp`, `pow`, `powf`, `powi`, `readonly` (fast), `rem_euclid`, `reverse_bits`, `rotate_left`, `rotate_right`, `round`, `saturating_add`, `saturating_mul`, `saturating_sub`, `set_readonly` (fast), `signum`, `sqrt`, `swap_bytes`, `then_some` (fast), `to_string`, `trailing_zeros`, `trunc`, `wrapping_add`, `wrapping_mul`, `wrapping_neg`, `wrapping_sub`
 
 ## Base64
 
@@ -110,7 +110,7 @@ selects. Unmarked methods run on both.
 
 ## Map
 
-`as_array` (fast), `as_object` (fast), `contains_key` (tokio), `drain` (fast), `get` (tokio), `insert` (tokio), `is_empty` (tokio), `key` (fast), `keys` (tokio), `len` (tokio), `map` (fast), `remove` (tokio), `values` (tokio), `values_mut` (fast)
+`as_array`, `as_array_mut`, `as_object`, `as_object_mut`, `contains_key` (tokio), `drain` (fast), `get` (tokio), `insert` (tokio), `is_empty` (tokio), `key` (fast), `keys` (tokio), `len` (tokio), `map` (fast), `remove` (tokio), `values` (tokio), `values_mut` (fast)
 
 ## Match
 
@@ -214,7 +214,7 @@ selects. Unmarked methods run on both.
 
 ## Vec
 
-`all`, `any`, `append` (fast), `as_array`, `as_object`, `clear`, `cloned` (fast), `collect`, `collect_string`, `concat` (tokio), `contains` (tokio), `copied`, `copy_from_slice`, `count` (tokio), `dedup` (fast), `enumerate` (tokio), `extend`, `extend_from_slice`, `filter`, `filter_map`, `find`, `first` (tokio), `flat_map`, `flatten` (fast), `fold` (fast), `for_each`, `into_iter` (tokio), `is_empty` (tokio), `iter` (tokio), `iter_mut` (tokio), `join` (tokio), `last` (tokio), `len` (tokio), `map`, `max`, `max_by_key` (fast), `min`, `min_by_key` (fast), `next` (fast), `nth`, `partition` (fast), `pop` (tokio), `position`, `product` (tokio), `push` (tokio), `reduce` (fast), `retain` (fast), `rev` (tokio), `reverse` (fast), `skip` (tokio), `skip_while` (fast), `sort` (tokio), `sort_by` (fast), `sort_by_cached_key` (fast), `sort_by_key` (fast), `split_first` (tokio), `sum` (tokio), `take` (tokio), `take_while` (fast), `to_vec`, `truncate` (fast)
+`all`, `any`, `append` (fast), `as_array`, `as_array_mut`, `as_object`, `as_object_mut`, `clear`, `cloned` (fast), `collect`, `collect_string`, `concat` (tokio), `contains` (tokio), `copied`, `copy_from_slice`, `count` (tokio), `dedup` (fast), `enumerate` (tokio), `extend`, `extend_from_slice`, `filter`, `filter_map`, `find`, `first` (tokio), `flat_map`, `flatten` (fast), `fold` (fast), `for_each`, `into_iter` (tokio), `is_empty` (tokio), `iter` (tokio), `iter_mut` (tokio), `join` (tokio), `last` (tokio), `len` (tokio), `map`, `max`, `max_by_key` (fast), `min`, `min_by_key` (fast), `next` (fast), `nth`, `partition` (fast), `pop` (tokio), `position`, `product` (tokio), `push` (tokio), `reduce` (fast), `retain` (fast), `rev` (tokio), `reverse` (fast), `skip` (tokio), `skip_while` (fast), `sort` (tokio), `sort_by` (fast), `sort_by_cached_key` (fast), `sort_by_key` (fast), `split_first` (tokio), `sum` (tokio), `take` (tokio), `take_while` (fast), `to_vec`, `truncate` (fast)
 
 ## WmiConnection
 

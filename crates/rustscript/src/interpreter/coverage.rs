@@ -441,7 +441,6 @@ mod tests {
         "incoming",
         "inner",
         "ino",
-        "into",
         "into_os_string",
         "is_absolute",
         "is_array",
