@@ -81,7 +81,9 @@ pub(super) fn num_core(recv: Num, name: &str, args: &impl Args) -> Result<Option
         (Float(_), "as_i64" | "as_u64" | "as_i128" | "as_usize") => O::Nothing,
         (_, "as_f64") => O::SomeFloat(as_f()),
         // A number is not these serde types, so the accessor is None.
-        (_, "as_str" | "as_bool" | "as_array" | "as_object") => O::Nothing,
+        (_, "as_str" | "as_bool" | "as_array" | "as_array_mut" | "as_object" | "as_object_mut") => {
+            O::Nothing
+        }
         (Int(i), "abs") => O::Int(i.abs()),
         (Float(f), "abs") => O::Float(f.abs()),
         (Int(i), "pow") => O::Int(i.pow(int_arg(args, 0)? as u32)),

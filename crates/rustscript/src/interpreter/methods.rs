@@ -86,11 +86,14 @@ pub(super) fn generic_method(recv: &Value, name: &str, args: &[Value]) -> Result
             Value::none()
         }),
         (Value::Vec(v), "as_array") => Ok(Value::some(Value::vec(v.borrow().clone()))),
+        (Value::Vec(v), "as_array_mut") => Ok(Value::some(Value::Vec(v.clone()))),
         // Serde accessors on a value that is not the matching type, for example
         // as_str on Null, are None rather than an error.
-        (_, "as_str" | "as_i64" | "as_u64" | "as_f64" | "as_bool" | "as_array" | "as_object") => {
-            Ok(Value::none())
-        }
+        (
+            _,
+            "as_str" | "as_i64" | "as_u64" | "as_f64" | "as_bool" | "as_array" | "as_array_mut"
+            | "as_object" | "as_object_mut",
+        ) => Ok(Value::none()),
         // `Ord` is derived for every type built out of ordered parts, so these
         // work on an Option or a tuple as much as on a number. This is the
         // last resort dispatch, so a receiver with its own `max` or `min`,
@@ -591,7 +594,10 @@ pub(super) fn vec_method(
             // serde_json accessors resolve against it here.
             _ => match method.text.as_str() {
                 "as_array" => Value::some(Value::vec(v.borrow().clone())),
-                "as_object" => Value::none(),
+                // The mut accessor has to hand back the same list, not a copy,
+                // so a push through it reaches the value it was taken from.
+                "as_array_mut" => Value::some(Value::Vec(v.clone())),
+                "as_object" | "as_object_mut" => Value::none(),
                 // Names that apply to any receiver, `clone` and `into` and the
                 // rest, live in one place instead of being repeated per type.
                 other => return generic_method(&Value::Vec(v.clone()), other, args),
@@ -655,9 +661,11 @@ pub(super) fn map_method(
             "values_mut" => Value::vec(m.borrow().values().cloned().collect()),
             "drain" => map_pairs(m),
             // A JSON object parsed by the interpreter is a Map, so the
-            // serde_json accessors resolve against it here.
-            "as_object" => Value::some(Value::Map(m.clone())),
-            "as_array" => Value::none(),
+            // serde_json accessors resolve against it here. A Map is Rc shared,
+            // so the mut accessor is the same call: what it hands back is the
+            // same map, and an insert through it reaches the original value.
+            "as_object" | "as_object_mut" => Value::some(Value::Map(m.clone())),
+            "as_array" | "as_array_mut" => Value::none(),
             name => return generic_method(&Value::Map(m.clone()), name, &*args),
         },
     })
@@ -705,7 +713,10 @@ fn int_out(out: super::int_methods::IntOut, width: super::numeric::IntWidth) -> 
 pub(super) fn num_method(recv: &Value, name: &str, args: &[Value]) -> Result<Value> {
     match name {
         "to_string" => return Ok(Value::str(recv.display())),
-        "clone" => return Ok(recv.clone()),
+        // A number never reaches the generic dispatch below, so the conversion
+        // that only changes the static type is answered here. `2.into()` for a
+        // `serde_json::Number` is the same 2.
+        "clone" | "into" => return Ok(recv.clone()),
         _ => {}
     }
     let n = match recv {
