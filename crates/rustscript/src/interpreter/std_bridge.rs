@@ -6,7 +6,9 @@ use std::rc::Rc;
 
 use anyhow::{Result, anyhow, bail};
 
+use super::int_methods::{from_bytes, from_bytes_order};
 use super::native::{self, Native};
+use super::numeric::IntWidth;
 
 use super::value::{Map, StructData, Value};
 
@@ -519,6 +521,13 @@ pub(super) fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Va
                 ))
             }
         }
+        // `T::from_le_bytes` and its be and ne siblings. The result carries the
+        // named width, so a `u32` read stays a u32 and an `i32` read of the
+        // same four bytes is negative where the top bit is set.
+        (
+            "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize",
+            "from_le_bytes" | "from_be_bytes" | "from_ne_bytes",
+        ) => int_from_bytes(ty, func, args)?,
         ("String", "from_utf8") => Value::ok(Value::str(bytes_to_string(args.first()))),
         // The shape carries every field a later builder call can set, since a
         // shape cannot grow after the instance exists.
@@ -673,6 +682,36 @@ fn int_from_arg(ty: &str, v: Option<&Value>) -> Result<i64> {
         Some(Value::Char(c)) => Ok(*c as i64),
         _ => bail!("`{ty}` conversion needs an integer"),
     }
+}
+
+/// `T::from_le_bytes([..])` and its be and ne siblings, over the same shared
+/// core the `to_*_bytes` methods use.
+fn int_from_bytes(ty: &str, func: &str, args: &[Value]) -> Result<Value> {
+    let (Some(width), Some(order)) = (IntWidth::parse(ty), from_bytes_order(func)) else {
+        bail!("`{ty}::{func}` is not a byte conversion");
+    };
+    let bytes = byte_array(ty, func, args.first())?;
+    Ok(Value::int_of_width(
+        from_bytes(width, order, &bytes)?,
+        width,
+    ))
+}
+
+/// The `[u8; N]` argument of a byte conversion. An array literal is a vec at
+/// runtime, so the shape real Rust guarantees in its type is read back here.
+fn byte_array(ty: &str, func: &str, arg: Option<&Value>) -> Result<Vec<i128>> {
+    let Some(Value::Vec(items)) = arg else {
+        bail!("`{ty}::{func}` needs a byte array");
+    };
+    let items = items.borrow();
+    let mut out = Vec::with_capacity(items.len());
+    for item in items.iter() {
+        let Some((value, _)) = item.int_parts() else {
+            bail!("`{ty}::{func}` needs a byte array");
+        };
+        out.push(value);
+    }
+    Ok(out)
 }
 
 /// Whether `n` lands inside the target integer type range.

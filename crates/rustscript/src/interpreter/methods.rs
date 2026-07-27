@@ -707,6 +707,15 @@ fn int_out(out: super::int_methods::IntOut, width: super::numeric::IntWidth) -> 
         IntOut::Checked(Some(value)) => Value::some(Value::int_of_width(value, width)),
         IntOut::Checked(None) => Value::none(),
         IntOut::Ordering(ordering) => make_ordering(ordering),
+        // A byte array is a plain vec of untagged ints, the same shape
+        // `as_bytes` and `fs::read` produce, so every bridge that eats bytes
+        // eats these too.
+        IntOut::Bytes(bytes) => Value::vec(
+            bytes
+                .into_iter()
+                .map(|byte| Value::Int(i64::from(byte)))
+                .collect(),
+        ),
     }
 }
 

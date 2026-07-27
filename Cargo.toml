@@ -11,6 +11,8 @@ serde_json = "1.0"
 syn = { version = "2.0", features = ["full", "extra-traits"] }
 proc-macro2 = { version = "1.0", features = ["span-locations"] }
 ratatui = { version = "0.30", default-features = false }
+crossterm = "0.29"
+terminal-light = "1.9"
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking", "cookies"], default-features = false }
 tokio = { version = "1", features = ["full"] }
 parking_lot = "0.12"

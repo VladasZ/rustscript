@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 
+use super::int_methods::{from_bytes, from_bytes_order};
+use super::numeric::IntWidth;
 use super::pvalue::{PStructData, PValue};
 
 /// Native implementations of the supported std subset, dispatched by the last
@@ -108,8 +110,38 @@ pub(super) fn native_call(module: &str, func: &str, args: &[PValue]) -> Result<O
                 ))
             }
         }
+        // `T::from_le_bytes` and its be and ne siblings, over the same shared
+        // core the fast engine and the `to_*_bytes` methods use.
+        (
+            "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize",
+            "from_le_bytes" | "from_be_bytes" | "from_ne_bytes",
+        ) => int_from_bytes(module, func, args)?,
+        ("terminal", "size") => terminal_size(),
+        ("terminal_light", "luma") => terminal_luma(),
         _ => return Ok(None),
     }))
+}
+
+/// `crossterm::terminal::size`. The pair is columns then rows, the order the
+/// real call returns, which is the opposite of how a `Rect` is written.
+fn terminal_size() -> PValue {
+    match crossterm::terminal::size() {
+        Ok((cols, rows)) => PValue::ok(PValue::tuple(vec![
+            PValue::Int(i64::from(cols)),
+            PValue::Int(i64::from(rows)),
+        ])),
+        Err(e) => PValue::err(PValue::str(e.to_string())),
+    }
+}
+
+/// `terminal_light::luma`, the background brightness from 0 for black to 1 for
+/// white. The crate asks the terminal over an escape sequence and falls back to
+/// `$COLORFGBG`, so an error means neither source answered.
+fn terminal_luma() -> PValue {
+    match terminal_light::luma() {
+        Ok(luma) => PValue::ok(PValue::F32(luma)),
+        Err(e) => PValue::err(PValue::str(e.to_string())),
+    }
 }
 
 // -- path, directory entry, file type, metadata, streams --------------------
@@ -337,6 +369,35 @@ fn int_from_arg(ty: &str, v: Option<&PValue>) -> Result<i64> {
         Some(PValue::Char(c)) => Ok(*c as i64),
         _ => bail!("`{ty}` conversion needs an integer"),
     }
+}
+
+/// `T::from_le_bytes([..])` and its be and ne siblings.
+fn int_from_bytes(ty: &str, func: &str, args: &[PValue]) -> Result<PValue> {
+    let (Some(width), Some(order)) = (IntWidth::parse(ty), from_bytes_order(func)) else {
+        bail!("`{ty}::{func}` is not a byte conversion");
+    };
+    let bytes = byte_array(ty, func, args.first())?;
+    Ok(PValue::int_of_width(
+        from_bytes(width, order, &bytes)?,
+        width,
+    ))
+}
+
+/// The `[u8; N]` argument of a byte conversion. An array literal is a vec at
+/// runtime, so the shape real Rust guarantees in its type is read back here.
+fn byte_array(ty: &str, func: &str, arg: Option<&PValue>) -> Result<Vec<i128>> {
+    let Some(PValue::Vec(items)) = arg else {
+        bail!("`{ty}::{func}` needs a byte array");
+    };
+    let items = items.lock();
+    let mut out = Vec::with_capacity(items.len());
+    for item in items.iter() {
+        let Some((value, _)) = item.int_parts() else {
+            bail!("`{ty}::{func}` needs a byte array");
+        };
+        out.push(value);
+    }
+    Ok(out)
 }
 
 /// Whether `n` lands inside the target integer type range.

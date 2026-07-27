@@ -26,6 +26,97 @@ pub enum IntOut {
     /// `checked_*`, `Some` in the receiver's width or `None` on overflow.
     Checked(Option<i128>),
     Ordering(Ordering),
+    /// `to_le_bytes` and its siblings, one byte per byte of the width.
+    Bytes(Vec<u8>),
+}
+
+/// Byte order of an integer byte conversion. `Ne` is the target's own order,
+/// read from the host the interpreter runs on, so a script answers what
+/// compiled Rust on the same machine answers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ByteOrder {
+    Le,
+    Be,
+    Ne,
+}
+
+impl ByteOrder {
+    fn little(self) -> bool {
+        match self {
+            Self::Le => true,
+            Self::Be => false,
+            Self::Ne => cfg!(target_endian = "little"),
+        }
+    }
+
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Le => "le",
+            Self::Be => "be",
+            Self::Ne => "ne",
+        }
+    }
+}
+
+/// The order a `T::from_le_bytes` style associated function names, or `None`
+/// when the name is not one of the three byte conversions.
+pub fn from_bytes_order(name: &str) -> Option<ByteOrder> {
+    Some(match name {
+        "from_le_bytes" => ByteOrder::Le,
+        "from_be_bytes" => ByteOrder::Be,
+        "from_ne_bytes" => ByteOrder::Ne,
+        _ => return None,
+    })
+}
+
+/// `T::from_le_bytes` and its siblings. Real Rust takes an exact `[u8; N]`, so
+/// a wrong length or an element outside a byte only reaches here from a script
+/// that never passed the check gate, and it is an error rather than a guess.
+pub fn from_bytes(width: IntWidth, order: ByteOrder, bytes: &[i128]) -> Result<i128> {
+    let count = byte_count(width);
+    if bytes.len() != count {
+        bail!(
+            "`{}::from_{}_bytes` needs {count} bytes, got {}",
+            width.name(),
+            order.tag(),
+            bytes.len()
+        );
+    }
+    let mut bits: u128 = 0;
+    for (index, byte) in bytes.iter().enumerate() {
+        let Ok(byte) = u8::try_from(*byte) else {
+            bail!(
+                "`{}::from_{}_bytes` needs bytes, got {byte}",
+                width.name(),
+                order.tag()
+            );
+        };
+        let place = if order.little() {
+            index
+        } else {
+            count - 1 - index
+        };
+        bits |= u128::from(byte) << (place * 8);
+    }
+    Ok(from_raw(width, bits))
+}
+
+fn byte_count(width: IntWidth) -> usize {
+    (width.bits() / 8) as usize
+}
+
+/// `x.to_le_bytes()` and its siblings, over the receiver's real width, so a
+/// signed value writes its two's complement bytes.
+fn to_bytes(width: IntWidth, value: i128, order: ByteOrder) -> Vec<u8> {
+    let count = byte_count(width);
+    let bits = raw(width, value);
+    let mut out: Vec<u8> = (0..count)
+        .map(|index| ((bits >> (index * 8)) & 0xff) as u8)
+        .collect();
+    if !order.little() {
+        out.reverse();
+    }
+    out
 }
 
 /// Raw bits of a value in its width, for the bit twiddling methods.
@@ -221,6 +312,9 @@ pub fn int_method(
         "rotate_left" => count_arg(args, 0).map(|n| IntOut::Same(rotate(width, recv, n, true))),
         "rotate_right" => count_arg(args, 0).map(|n| IntOut::Same(rotate(width, recv, n, false))),
         "swap_bytes" => Ok(IntOut::Same(from_raw(width, swap_bytes(width, recv)))),
+        "to_le_bytes" => Ok(IntOut::Bytes(to_bytes(width, recv, ByteOrder::Le))),
+        "to_be_bytes" => Ok(IntOut::Bytes(to_bytes(width, recv, ByteOrder::Be))),
+        "to_ne_bytes" => Ok(IntOut::Bytes(to_bytes(width, recv, ByteOrder::Ne))),
         "reverse_bits" => {
             let value = raw(width, recv).reverse_bits() >> (128 - bits);
             Ok(IntOut::Same(from_raw(width, value)))
@@ -348,6 +442,57 @@ mod tests {
         assert_eq!(same("swap_bytes", IntWidth::U16, 0x1234, &[]), 0x3412);
         assert_eq!(same("reverse_bits", IntWidth::U8, 0b1000_0000, &[]), 1);
         assert_eq!(same("rotate_left", IntWidth::U8, 0b1000_0001, &[1]), 0b11);
+    }
+
+    fn bytes(name: &str, width: IntWidth, recv: i128) -> Vec<u8> {
+        match int_method(name, width, recv, &[]).expect("known method") {
+            Ok(IntOut::Bytes(out)) => out,
+            Ok(_) => panic!("{name} did not answer bytes"),
+            Err(error) => panic!("{name} failed: {error}"),
+        }
+    }
+
+    /// The two orders must disagree, or an endianness bug reads as correct.
+    #[test]
+    fn byte_conversions_keep_their_order() {
+        assert_eq!(
+            bytes("to_le_bytes", IntWidth::U32, 0x1234_5678),
+            [0x78, 0x56, 0x34, 0x12]
+        );
+        assert_eq!(
+            bytes("to_be_bytes", IntWidth::U32, 0x1234_5678),
+            [0x12, 0x34, 0x56, 0x78]
+        );
+        assert_eq!(bytes("to_le_bytes", IntWidth::U8, 0xab), [0xab]);
+        assert_eq!(
+            bytes("to_be_bytes", IntWidth::U64, 1),
+            [0, 0, 0, 0, 0, 0, 0, 1]
+        );
+        let le = from_bytes(IntWidth::U32, ByteOrder::Le, &[0x78, 0x56, 0x34, 0x12]).unwrap();
+        let be = from_bytes(IntWidth::U32, ByteOrder::Be, &[0x78, 0x56, 0x34, 0x12]).unwrap();
+        assert_eq!(le, 0x1234_5678);
+        assert_eq!(be, 0x7856_3412);
+    }
+
+    /// A signed width writes and reads two's complement, an unsigned one of the
+    /// same size reads the very same bytes as a positive number.
+    #[test]
+    fn byte_conversions_respect_the_sign() {
+        assert_eq!(bytes("to_be_bytes", IntWidth::I16, -2), [0xff, 0xfe]);
+        assert_eq!(bytes("to_le_bytes", IntWidth::I16, -2), [0xfe, 0xff]);
+        let signed = from_bytes(IntWidth::I32, ByteOrder::Le, &[0xff, 0xff, 0xff, 0xff]).unwrap();
+        let unsigned = from_bytes(IntWidth::U32, ByteOrder::Le, &[0xff, 0xff, 0xff, 0xff]).unwrap();
+        assert_eq!(signed, -1);
+        assert_eq!(unsigned, 0xffff_ffff);
+        let low = from_bytes(IntWidth::I8, ByteOrder::Be, &[0x80]).unwrap();
+        assert_eq!(low, -128);
+    }
+
+    #[test]
+    fn from_bytes_rejects_a_shape_the_type_checker_would_have() {
+        assert!(from_bytes(IntWidth::U32, ByteOrder::Le, &[1, 2, 3]).is_err());
+        assert!(from_bytes(IntWidth::U16, ByteOrder::Le, &[1, 256]).is_err());
+        assert!(from_bytes(IntWidth::U16, ByteOrder::Le, &[1, -1]).is_err());
     }
 
     #[test]
