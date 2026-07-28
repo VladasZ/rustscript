@@ -42,23 +42,27 @@ pub(super) fn entry_method(s: &StructData, name: &str, args: &[Value]) -> Result
 }
 
 /// The serde_json `is_*` family. A json value is a plain interpreter value
-/// here, so each one is a type test. These apply to every receiver, so they are
-/// answered before the per type dispatch, which returns early for the hot
-/// receivers and would otherwise never reach them.
+/// here, so each one is a type test, answered from the shared table so the
+/// parallel engine cannot drift from this one.
 pub(super) fn json_type_test(recv: &Value, name: &str) -> Option<Value> {
-    let is = |b: bool| Some(Value::Bool(b));
-    match name {
-        "is_object" => is(matches!(recv, Value::Map(_))),
-        "is_array" => is(matches!(recv, Value::Vec(_))),
-        "is_string" => is(matches!(recv, Value::Str(_))),
-        "is_boolean" => is(matches!(recv, Value::Bool(_))),
-        "is_number" => is(matches!(recv, Value::Int(_) | Value::Float(_))),
-        "is_i64" | "is_u64" => is(matches!(recv, Value::Int(_))),
-        "is_f64" => is(matches!(recv, Value::Float(_))),
+    shared::json_type_test(json_kind(recv), name).map(Value::Bool)
+}
+
+/// The json shape of a fast engine value.
+fn json_kind(recv: &Value) -> shared::JsonKind {
+    use shared::JsonKind as K;
+    match recv {
+        Value::Map(_) => K::Object,
+        Value::Vec(_) => K::Array,
+        Value::Str(_) => K::Str,
+        Value::Bool(_) => K::Bool,
+        Value::Int(_) | Value::IntW(..) => K::Int,
+        Value::Float(_) | Value::F32(_) => K::Float,
         // The parser maps a json null to None, so that is what is_null has to
         // answer for. Unit counts too, it is the interpreter's own empty value.
-        "is_null" => is(recv.is_none_value() || matches!(recv, Value::Unit)),
-        _ => None,
+        Value::Unit => K::Null,
+        _ if recv.is_none_value() => K::Null,
+        _ => K::Other,
     }
 }
 
@@ -89,11 +93,7 @@ pub(super) fn generic_method(recv: &Value, name: &str, args: &[Value]) -> Result
         (Value::Vec(v), "as_array_mut") => Ok(Value::some(Value::Vec(v.clone()))),
         // Serde accessors on a value that is not the matching type, for example
         // as_str on Null, are None rather than an error.
-        (
-            _,
-            "as_str" | "as_i64" | "as_u64" | "as_f64" | "as_bool" | "as_array" | "as_array_mut"
-            | "as_object" | "as_object_mut",
-        ) => Ok(Value::none()),
+        (_, name) if shared::json_accessor(name) => Ok(Value::none()),
         // `Ord` is derived for every type built out of ordered parts, so these
         // work on an Option or a tuple as much as on a number. This is the
         // last resort dispatch, so a receiver with its own `max` or `min`,

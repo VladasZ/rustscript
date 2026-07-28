@@ -124,6 +124,60 @@ pub(super) fn num_core(recv: Num, name: &str, args: &impl Args) -> Result<Option
     }))
 }
 
+// -- json ------------------------------------------------------------------
+
+/// The shape a decoded json value has once it is an interpreter value. A
+/// parsed json is held as plain values, an object as a map and a string as a
+/// string, so the serde type tests are shape tests. Each engine maps its own
+/// value onto this and both then answer from the same table.
+#[derive(Clone, Copy)]
+pub(super) enum JsonKind {
+    Object,
+    Array,
+    Str,
+    Bool,
+    Int,
+    Float,
+    Null,
+    Other,
+}
+
+/// The serde_json `is_*` family. These apply to every receiver, so an engine
+/// answers them before its per type dispatch, which returns early for the hot
+/// receivers and would otherwise never reach them.
+pub(super) fn json_type_test(kind: JsonKind, name: &str) -> Option<bool> {
+    use JsonKind as K;
+    Some(match name {
+        "is_object" => matches!(kind, K::Object),
+        "is_array" => matches!(kind, K::Array),
+        "is_string" => matches!(kind, K::Str),
+        "is_boolean" => matches!(kind, K::Bool),
+        "is_number" => matches!(kind, K::Int | K::Float),
+        "is_i64" | "is_u64" => matches!(kind, K::Int),
+        "is_f64" => matches!(kind, K::Float),
+        "is_null" => matches!(kind, K::Null),
+        _ => return None,
+    })
+}
+
+/// The serde_json `as_*` family, by name only. A receiver of the wrong shape
+/// answers None rather than erroring, so an engine tests the name here and
+/// then decides whether its receiver matches.
+pub(super) fn json_accessor(name: &str) -> bool {
+    matches!(
+        name,
+        "as_str"
+            | "as_i64"
+            | "as_u64"
+            | "as_f64"
+            | "as_bool"
+            | "as_array"
+            | "as_array_mut"
+            | "as_object"
+            | "as_object_mut"
+    )
+}
+
 // -- chars -----------------------------------------------------------------
 
 /// The result of a `char` method, in a form either engine can turn into its
