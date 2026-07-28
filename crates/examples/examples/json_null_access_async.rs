@@ -95,4 +95,65 @@ async fn main() {
         list.get(1).and_then(Value::as_str).unwrap_or("none")
     );
     println!("index 9     {}", list.get(9).is_none());
+
+    // serde answers the integer tests by range, not by "it is an integer", so
+    // a negative number is not a u64 and one past i64::MAX is not an i64.
+    let nums: Value =
+        serde_json::from_str(r#"{"neg":-3,"pos":7,"big":18446744073709551615}"#).unwrap();
+    let neg = nums.get("neg").unwrap();
+    let big = nums.get("big").unwrap();
+    println!("kind neg    {}", kind_of(neg));
+    println!("kind pos    {}", kind_of(nums.get("pos").unwrap()));
+    println!("kind big    {}", kind_of(big));
+    println!("neg as_u64  {}", neg.as_u64().is_none());
+    println!("neg as_i64  {}", neg.as_i64().unwrap_or(0));
+    println!("big as_i64  {}", big.as_i64().is_none());
+    println!("big as_u64  {}", big.as_u64().unwrap_or(0));
+    println!("big as_f64  {}", big.as_f64().unwrap_or(0.0));
+
+    // Json pointer, RFC 6901. A key with a slash or a tilde is escaped, an
+    // index with a leading zero is not an index, and a pointer that leaves
+    // the tree is None rather than an error.
+    let tree: Value =
+        serde_json::from_str(r#"{"a":{"b c":[10,{"d":"deep"}]},"e/f":1,"g~h":2}"#).unwrap();
+    println!(
+        "ptr deep    {}",
+        tree.pointer("/a/b c/1/d")
+            .and_then(Value::as_str)
+            .unwrap_or("none")
+    );
+    println!(
+        "ptr index   {}",
+        tree.pointer("/a/b c/0")
+            .and_then(Value::as_i64)
+            .unwrap_or(-1)
+    );
+    println!(
+        "ptr escape  {}",
+        tree.pointer("/e~1f").and_then(Value::as_i64).unwrap_or(-1)
+    );
+    println!(
+        "ptr tilde   {}",
+        tree.pointer("/g~0h").and_then(Value::as_i64).unwrap_or(-1)
+    );
+    println!("ptr whole   {}", tree.pointer("").is_some());
+    println!("ptr no slash {}", tree.pointer("a/b").is_none());
+    println!("ptr missing {}", tree.pointer("/a/zz").is_none());
+    println!("ptr past end {}", tree.pointer("/a/b c/9").is_none());
+    println!("ptr zeroed  {}", tree.pointer("/a/b c/01").is_none());
+    println!("ptr on null {}", dead.pointer("/a").is_none());
+
+    let mut owned: Value = serde_json::from_str(r#"{"a":{"n":1}}"#).unwrap();
+    if let Some(found) = owned.pointer_mut("/a")
+        && let Some(object) = found.as_object_mut()
+    {
+        object.insert("added".to_string(), Value::Bool(true));
+    }
+    println!(
+        "ptr mut     {}",
+        owned
+            .pointer("/a/added")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    );
 }

@@ -14,6 +14,7 @@ use anyhow::{Result, bail};
 use rustc_hash::FxHashMap;
 
 use super::Interp;
+use super::numeric::IntWidth;
 use super::pvalue::{PKey, PStructShape, PValue};
 use super::pvm::PInterp;
 use super::typeir::{TypeIr, lower_type};
@@ -414,9 +415,11 @@ impl<'de> serde::de::Visitor<'de> for PlanVisitor<'_> {
     }
 
     fn visit_u64<E>(self, u: u64) -> std::result::Result<PValue, E> {
+        // A u64 past `i64::MAX` is an exact json integer, so it keeps its
+        // width instead of turning into a float that cannot hold it.
         Ok(match i64::try_from(u) {
             Ok(i) => PValue::Int(i),
-            Err(_) => PValue::Float(u as f64),
+            Err(_) => PValue::int_of_width(i128::from(u), IntWidth::U64),
         })
     }
 

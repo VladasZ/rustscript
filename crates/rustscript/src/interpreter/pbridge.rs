@@ -315,6 +315,9 @@ impl PInterp {
         if let Some(answer) = shared::json_type_test(json_kind(recv), m) {
             return Ok(PValue::Bool(answer));
         }
+        if let Some(found) = json_pointer(recv, m, args) {
+            return Ok(found);
+        }
         // Integer methods answer from the real width first, since the image
         // below saturates a u64 past `i64::MAX` and forgets the width.
         if let Some(result) = int_method(recv, m, args) {
@@ -867,6 +870,7 @@ fn int_out(out: super::int_methods::IntOut, width: super::numeric::IntWidth) -> 
         IntOut::Bool(value) => PValue::Bool(value),
         IntOut::Checked(Some(value)) => PValue::some(PValue::int_of_width(value, width)),
         IntOut::Checked(None) => PValue::none(),
+        IntOut::SomeFloat(value) => PValue::some(PValue::Float(value)),
         IntOut::Ordering(ordering) => p_ordering(ordering),
         IntOut::Bytes(bytes) => PValue::vec(
             bytes
@@ -980,6 +984,36 @@ fn path_closure(segs: Vec<String>, num_params: usize) -> PValue {
     }))
 }
 
+/// `Value::pointer` and `pointer_mut`, the RFC 6901 lookup. These apply to
+/// every receiver like the type tests do, and a pointer that leaves the tree
+/// answers None instead of failing. The interpreter shares its containers, so
+/// the mut form hands back the same value the plain one does.
+fn json_pointer(recv: &PValue, m: &str, args: &[PValue]) -> Option<PValue> {
+    if !matches!(m, "pointer" | "pointer_mut") {
+        return None;
+    }
+    let path = args.first().map(PValue::display).unwrap_or_default();
+    let Some(tokens) = shared::json_pointer_tokens(&path) else {
+        return Some(PValue::none());
+    };
+    let mut here = recv.clone();
+    for token in tokens {
+        let next = match &here {
+            PValue::Map(map) => PValue::str(token)
+                .as_key()
+                .and_then(|key| map.lock().get(&key).cloned()),
+            PValue::Vec(items) => shared::json_pointer_index(&token)
+                .and_then(|index| items.lock().get(index).cloned()),
+            _ => None,
+        };
+        match next {
+            Some(value) => here = value,
+            None => return Some(PValue::none()),
+        }
+    }
+    Some(PValue::some(here))
+}
+
 /// The json shape of a parallel engine value.
 fn json_kind(recv: &PValue) -> shared::JsonKind {
     use shared::JsonKind as K;
@@ -988,7 +1022,10 @@ fn json_kind(recv: &PValue) -> shared::JsonKind {
         PValue::Vec(_) => K::Array,
         PValue::Str(_) => K::Str,
         PValue::Bool(_) => K::Bool,
-        PValue::Int(_) | PValue::IntW(..) => K::Int,
+        PValue::Int(_) | PValue::IntW(..) => match recv.int_parts() {
+            Some((value, _)) => K::Int(value),
+            None => K::Other,
+        },
         PValue::Float(_) | PValue::F32(_) => K::Float,
         // The parser maps a json null to None, so that is what is_null has to
         // answer for. Unit counts too, it is the interpreter's own empty value.

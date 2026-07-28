@@ -24,7 +24,11 @@ pub enum IntOut {
     Count(u32),
     Bool(bool),
     /// `checked_*`, `Some` in the receiver's width or `None` on overflow.
+    /// The serde `as_i64` and `as_u64` answer through this too, they are the
+    /// same shape, a value only when it fits.
     Checked(Option<i128>),
+    /// `as_f64`, which is always a `Some` in serde.
+    SomeFloat(f64),
     Ordering(Ordering),
     /// `to_le_bytes` and its siblings, one byte per byte of the width.
     Bytes(Vec<u8>),
@@ -248,6 +252,13 @@ pub fn int_method(
             }
             Ok(IntOut::Same(recv.signum()))
         }
+        // The serde_json integer accessors, answered from the real value
+        // rather than the saturated i64 image. serde answers these by range,
+        // so a negative number is not a u64 and one past `i64::MAX` is not an
+        // i64. The saturated image made both of those answer the wrong thing.
+        "as_i64" => Ok(IntOut::Checked(i64::try_from(recv).ok().map(i128::from))),
+        "as_u64" => Ok(IntOut::Checked(u64::try_from(recv).ok().map(i128::from))),
+        "as_f64" => Ok(IntOut::SomeFloat(recv as f64)),
         "min" => arg(args, 0).map(|b| IntOut::Same(recv.min(b))),
         "max" => arg(args, 0).map(|b| IntOut::Same(recv.max(b))),
         "clamp" => arg(args, 0).and_then(|low| {

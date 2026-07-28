@@ -13,6 +13,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use reqwest::{Client, Method};
 
+use super::numeric::IntWidth;
 use super::pnative::PNative;
 use super::pvalue::{PStructData, PValue};
 
@@ -480,9 +481,11 @@ fn json_to_pvalue(v: serde_json::Value) -> PValue {
     match v {
         serde_json::Value::Null => PValue::Unit,
         serde_json::Value::Bool(b) => PValue::Bool(b),
-        serde_json::Value::Number(n) => match n.as_i64() {
-            Some(i) => PValue::Int(i),
-            None => PValue::Float(n.as_f64().unwrap_or(0.0)),
+        serde_json::Value::Number(n) => match (n.as_i64(), n.as_u64()) {
+            (Some(i), _) => PValue::Int(i),
+            // A u64 past `i64::MAX` keeps its width, a float cannot hold it.
+            (None, Some(u)) => PValue::int_of_width(i128::from(u), IntWidth::U64),
+            _ => PValue::Float(n.as_f64().unwrap_or(0.0)),
         },
         serde_json::Value::String(s) => PValue::str(s),
         serde_json::Value::Array(items) => {
