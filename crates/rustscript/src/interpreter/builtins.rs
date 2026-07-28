@@ -362,6 +362,17 @@ impl Interp {
                 _ => {}
             }
         }
+        // The serde type tests and the pointer lookup apply to any receiver,
+        // so they are answered before the per type dispatch below, which
+        // returns early and would never reach them. Before `bridge_image` too,
+        // since a u64 past `i64::MAX` saturates there and would then claim to
+        // be an i64.
+        if let Some(v) = super::methods::json_type_test(recv, &name.text) {
+            return Ok(v);
+        }
+        if let Some(v) = super::methods::json_pointer(recv, &name.text, &*args) {
+            return Ok(v);
+        }
         // Integer methods answer from the real width, before `bridge_image`
         // below flattens the receiver to an i64 that saturates at `i64::MAX`
         // and forgets whether it was a u8 or a u64.
@@ -622,11 +633,6 @@ pub(super) fn builtin_method(
     method: &MethodName,
     args: &mut [Value],
 ) -> Result<Value> {
-    // Type tests apply to any receiver, so they are answered before the per
-    // type dispatch below, which returns early and would never reach them.
-    if let Some(v) = json_type_test(recv, method.text.as_str()) {
-        return Ok(v);
-    }
     // The hot receivers dispatch on the precompiled id, no string compares.
     match recv {
         Value::Str(s) => return str_method(s, method, &*args),

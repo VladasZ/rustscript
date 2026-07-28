@@ -9,6 +9,7 @@ use anyhow::{Result, bail};
 use rustc_hash::FxHashMap;
 
 use super::Interp;
+use super::numeric::IntWidth;
 use super::typeir::{TypeIr, lower_type};
 use super::value::{MapKey, RStr, StructShape, Value, map_with_capacity};
 
@@ -108,9 +109,11 @@ impl<'de> serde::de::Visitor<'de> for JsonVisitor<'_> {
     }
 
     fn visit_u64<E>(self, u: u64) -> std::result::Result<Value, E> {
+        // A u64 past `i64::MAX` is an exact json integer, so it keeps its
+        // width instead of turning into a float that cannot hold it.
         Ok(match i64::try_from(u) {
             Ok(i) => Value::Int(i),
-            Err(_) => Value::Float(u as f64),
+            Err(_) => Value::int_of_width(i128::from(u), IntWidth::U64),
         })
     }
 
@@ -388,9 +391,11 @@ impl<'de> serde::de::Visitor<'de> for PlanVisitor<'_> {
     }
 
     fn visit_u64<E>(self, u: u64) -> std::result::Result<Value, E> {
+        // A u64 past `i64::MAX` is an exact json integer, so it keeps its
+        // width instead of turning into a float that cannot hold it.
         Ok(match i64::try_from(u) {
             Ok(i) => Value::Int(i),
-            Err(_) => Value::Float(u as f64),
+            Err(_) => Value::int_of_width(i128::from(u), IntWidth::U64),
         })
     }
 
@@ -522,13 +527,12 @@ pub(super) fn json_to_value(j: serde_json::Value) -> Value {
     match j {
         serde_json::Value::Null => Value::none(),
         serde_json::Value::Bool(b) => Value::Bool(b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Value::Int(i)
-            } else {
-                Value::Float(n.as_f64().unwrap_or(0.0))
-            }
-        }
+        serde_json::Value::Number(n) => match (n.as_i64(), n.as_u64()) {
+            (Some(i), _) => Value::Int(i),
+            // A u64 past `i64::MAX` keeps its width, a float cannot hold it.
+            (None, Some(u)) => Value::int_of_width(i128::from(u), IntWidth::U64),
+            _ => Value::Float(n.as_f64().unwrap_or(0.0)),
+        },
         serde_json::Value::String(s) => Value::str(s),
         serde_json::Value::Array(a) => Value::vec(a.into_iter().map(json_to_value).collect()),
         serde_json::Value::Object(o) => {

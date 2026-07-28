@@ -75,11 +75,13 @@ pub(super) fn num_core(recv: Num, name: &str, args: &impl Args) -> Result<Option
         Float(f) => f,
     };
     Ok(Some(match (recv, name) {
-        (Int(i), "as_i64" | "as_u64" | "as_i128" | "as_usize") => O::SomeInt(i),
+        // `as_i64`, `as_u64` and `as_f64` on an integer are range checked in
+        // `int_methods`, which sees the real width, and never reach here.
+        (Int(i), "as_i128" | "as_usize") => O::SomeInt(i),
         // serde_json keeps every json float as f64 and its integer accessors
         // answer None on it, even for a whole value like 5.0.
         (Float(_), "as_i64" | "as_u64" | "as_i128" | "as_usize") => O::Nothing,
-        (_, "as_f64") => O::SomeFloat(as_f()),
+        (Float(f), "as_f64") => O::SomeFloat(f),
         // A number is not these serde types, so the accessor is None.
         (_, "as_str" | "as_bool" | "as_array" | "as_array_mut" | "as_object" | "as_object_mut") => {
             O::Nothing
@@ -136,7 +138,8 @@ pub(super) enum JsonKind {
     Array,
     Str,
     Bool,
-    Int,
+    /// An integer at its real value, so the range tests can answer on it.
+    Int(i128),
     Float,
     Null,
     Other,
@@ -152,8 +155,11 @@ pub(super) fn json_type_test(kind: JsonKind, name: &str) -> Option<bool> {
         "is_array" => matches!(kind, K::Array),
         "is_string" => matches!(kind, K::Str),
         "is_boolean" => matches!(kind, K::Bool),
-        "is_number" => matches!(kind, K::Int | K::Float),
-        "is_i64" | "is_u64" => matches!(kind, K::Int),
+        "is_number" => matches!(kind, K::Int(_) | K::Float),
+        // serde answers these by range, not by "it is an integer". A negative
+        // number is not a u64, and one past `i64::MAX` is not an i64.
+        "is_i64" => matches!(kind, K::Int(v) if i64::try_from(v).is_ok()),
+        "is_u64" => matches!(kind, K::Int(v) if u64::try_from(v).is_ok()),
         "is_f64" => matches!(kind, K::Float),
         "is_null" => matches!(kind, K::Null),
         _ => return None,
@@ -176,6 +182,34 @@ pub(super) fn json_accessor(name: &str) -> bool {
             | "as_object"
             | "as_object_mut"
     )
+}
+
+/// The tokens of a json pointer, RFC 6901, or None when the text is not a
+/// pointer at all. An empty pointer selects the whole value, so it yields no
+/// tokens. `~1` and `~0` are the escapes for a slash and a tilde in a key.
+pub(super) fn json_pointer_tokens(pointer: &str) -> Option<Vec<String>> {
+    if pointer.is_empty() {
+        return Some(Vec::new());
+    }
+    if !pointer.starts_with('/') {
+        return None;
+    }
+    Some(
+        pointer
+            .split('/')
+            .skip(1)
+            .map(|token| token.replace("~1", "/").replace("~0", "~"))
+            .collect(),
+    )
+}
+
+/// A pointer token as an array index. serde rejects a leading plus and a
+/// leading zero, so "01" is not index one.
+pub(super) fn json_pointer_index(token: &str) -> Option<usize> {
+    if token.starts_with('+') || (token.starts_with('0') && token.len() != 1) {
+        return None;
+    }
+    token.parse().ok()
 }
 
 // -- chars -----------------------------------------------------------------

@@ -48,6 +48,36 @@ pub(super) fn json_type_test(recv: &Value, name: &str) -> Option<Value> {
     shared::json_type_test(json_kind(recv), name).map(Value::Bool)
 }
 
+/// `Value::pointer` and `pointer_mut`, the RFC 6901 lookup. These apply to
+/// every receiver like the type tests do, and a pointer that leaves the tree
+/// answers None instead of failing. The interpreter shares its containers, so
+/// the mut form hands back the same value the plain one does.
+pub(super) fn json_pointer(recv: &Value, name: &str, args: &[Value]) -> Option<Value> {
+    if !matches!(name, "pointer" | "pointer_mut") {
+        return None;
+    }
+    let path = args.first().map(Value::display).unwrap_or_default();
+    let Some(tokens) = shared::json_pointer_tokens(&path) else {
+        return Some(Value::none());
+    };
+    let mut here = recv.clone();
+    for token in tokens {
+        let next = match &here {
+            Value::Map(map) => Value::str(token)
+                .as_key()
+                .and_then(|key| map.borrow().get(&key).cloned()),
+            Value::Vec(items) => shared::json_pointer_index(&token)
+                .and_then(|index| items.borrow().get(index).cloned()),
+            _ => None,
+        };
+        match next {
+            Some(value) => here = value,
+            None => return Some(Value::none()),
+        }
+    }
+    Some(Value::some(here))
+}
+
 /// The json shape of a fast engine value.
 fn json_kind(recv: &Value) -> shared::JsonKind {
     use shared::JsonKind as K;
@@ -56,7 +86,10 @@ fn json_kind(recv: &Value) -> shared::JsonKind {
         Value::Vec(_) => K::Array,
         Value::Str(_) => K::Str,
         Value::Bool(_) => K::Bool,
-        Value::Int(_) | Value::IntW(..) => K::Int,
+        Value::Int(_) | Value::IntW(..) => match recv.int_parts() {
+            Some((value, _)) => K::Int(value),
+            None => K::Other,
+        },
         Value::Float(_) | Value::F32(_) => K::Float,
         // The parser maps a json null to None, so that is what is_null has to
         // answer for. Unit counts too, it is the interpreter's own empty value.
@@ -706,6 +739,7 @@ fn int_out(out: super::int_methods::IntOut, width: super::numeric::IntWidth) -> 
         IntOut::Bool(value) => Value::Bool(value),
         IntOut::Checked(Some(value)) => Value::some(Value::int_of_width(value, width)),
         IntOut::Checked(None) => Value::none(),
+        IntOut::SomeFloat(value) => Value::some(Value::Float(value)),
         IntOut::Ordering(ordering) => make_ordering(ordering),
         // A byte array is a plain vec of untagged ints, the same shape
         // `as_bytes` and `fs::read` produce, so every bridge that eats bytes
