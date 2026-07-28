@@ -67,6 +67,7 @@ pub const BRIDGES: &[Bridge] = &[
         "HeaderValue",
     ),
     b("shared.rs", "exit_status_core", Engine::Both, "ExitStatus"),
+    b("shared.rs", "json_type_test", Engine::Both, "*"),
     b("int_methods.rs", "int_method", Engine::Both, "*"),
     // -- fast engine ------------------------------------------------------
     b("methods.rs", "str_method_slow", Engine::Fast, "Str"),
@@ -77,7 +78,6 @@ pub const BRIDGES: &[Bridge] = &[
     b("methods.rs", "entry_method", Engine::Fast, "Entry"),
     b("builtins.rs", "builtin_method", Engine::Fast, "*"),
     b("methods.rs", "generic_method", Engine::Fast, "*"),
-    b("methods.rs", "json_type_test", Engine::Fast, "*"),
     b("methods.rs", "num_method", Engine::Fast, "*"),
     b("std_bridge.rs", "path_method", Engine::Fast, "Path"),
     b("std_bridge.rs", "metadata_method", Engine::Fast, "Metadata"),

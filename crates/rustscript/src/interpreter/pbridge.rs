@@ -98,13 +98,35 @@ impl PInterp {
                 if segs.len() == 1
                     && let Some(chunk) = self.user_function(other)
                 {
-                    let inline = path_call_chunk(segs.to_vec(), chunk.num_params);
-                    return Ok(PValue::Closure(Arc::new(PClosure {
-                        chunk: convert(&inline),
-                        captured: Vec::new(),
-                    })));
+                    return Ok(path_closure(segs.to_vec(), chunk.num_params));
                 }
-                bail!("unsupported path value `{other}` in tokio mode")
+                // A path used as a function value, the same fallback the fast
+                // engine takes. A zero-arg constructor like `Vec::new` handed
+                // to `or_insert_with` becomes a nullary closure. Anything else,
+                // a method reference like `Value::as_str` handed to `and_then`,
+                // becomes a one-arg closure, and `dispatch_call` resolves it as
+                // a UFCS method call on that argument.
+                if matches!(other, "new" | "default") {
+                    return Ok(path_closure(segs.to_vec(), 0));
+                }
+                let function = segs.join("::");
+                if segs.len() >= 2
+                    && let Some(chunk) = self
+                        .user_method(&segs[segs.len() - 2], other)
+                        .or_else(|| self.user_function(&function))
+                        .or_else(|| self.user_function(other))
+                {
+                    return Ok(path_closure(segs.to_vec(), chunk.num_params));
+                }
+                // A SCREAMING_CASE tail is a constant, never a function, so
+                // wrapping it in the closure fallback would smuggle a closure
+                // value into arithmetic.
+                if other.chars().any(|c| c.is_ascii_uppercase())
+                    && !other.chars().any(|c| c.is_ascii_lowercase())
+                {
+                    bail!("unsupported constant `{function}`");
+                }
+                Ok(path_closure(segs.to_vec(), 1))
             }
             None => bail!("empty path"),
         }
@@ -287,6 +309,12 @@ impl PInterp {
             "to_string" => return Ok(PValue::str(recv.display())),
             _ => {}
         }
+        // The serde type tests apply to any receiver too, so they are answered
+        // before the per type dispatch below, which returns early for the hot
+        // receivers and would otherwise never reach them.
+        if let Some(answer) = shared::json_type_test(json_kind(recv), m) {
+            return Ok(PValue::Bool(answer));
+        }
         // Integer methods answer from the real width first, since the image
         // below saturates a u64 past `i64::MAX` and forgets the width.
         if let Some(result) = int_method(recv, m, args) {
@@ -432,6 +460,10 @@ impl PInterp {
                 .lock()
                 .last()
                 .cloned()
+                .map_or_else(PValue::none, PValue::some),
+            "get" => usize::try_from(int_arg(args))
+                .ok()
+                .and_then(|index| items.lock().get(index).cloned())
                 .map_or_else(PValue::none, PValue::some),
             "split_first" => {
                 let items = items.lock();
@@ -938,6 +970,34 @@ fn p_ordering(o: std::cmp::Ordering) -> PValue {
     }
 }
 
+/// A closure that forwards its arguments to a path call, so a path written as
+/// a value can be handed to `map` or `and_then`.
+fn path_closure(segs: Vec<String>, num_params: usize) -> PValue {
+    let inline = path_call_chunk(segs, num_params);
+    PValue::Closure(Arc::new(PClosure {
+        chunk: convert(&inline),
+        captured: Vec::new(),
+    }))
+}
+
+/// The json shape of a parallel engine value.
+fn json_kind(recv: &PValue) -> shared::JsonKind {
+    use shared::JsonKind as K;
+    match recv {
+        PValue::Map(_) => K::Object,
+        PValue::Vec(_) => K::Array,
+        PValue::Str(_) => K::Str,
+        PValue::Bool(_) => K::Bool,
+        PValue::Int(_) | PValue::IntW(..) => K::Int,
+        PValue::Float(_) | PValue::F32(_) => K::Float,
+        // The parser maps a json null to None, so that is what is_null has to
+        // answer for. Unit counts too, it is the interpreter's own empty value.
+        PValue::Unit => K::Null,
+        _ if recv.is_none_value() => K::Null,
+        _ => K::Other,
+    }
+}
+
 fn enum_method(recv: &PValue, m: &str, args: &mut [PValue]) -> Result<PValue> {
     let PValue::Enum {
         enum_name,
@@ -1003,6 +1063,11 @@ fn enum_method(recv: &PValue, m: &str, args: &mut [PValue]) -> Result<PValue> {
                 PValue::none()
             }
         }
+        // A json null parses to None here, so a serde lookup into a value that
+        // turned out to be null is None rather than an unknown method error.
+        // Same for the accessors, an as_str on a null is None like serde.
+        "get" if &**enum_name == "Option" => PValue::none(),
+        _ if shared::json_accessor(m) => PValue::none(),
         _ => bail!("method `{m}` on {enum_name} is not supported in tokio mode"),
     })
 }
