@@ -370,7 +370,7 @@ impl Interp {
         if let Some(v) = super::methods::json_type_test(recv, &name.text) {
             return Ok(v);
         }
-        if let Some(v) = super::methods::json_pointer(recv, &name.text, &*args) {
+        if let Some(v) = super::methods::json_value_method(recv, &name.text, &*args) {
             return Ok(v);
         }
         // Integer methods answer from the real width, before `bridge_image`

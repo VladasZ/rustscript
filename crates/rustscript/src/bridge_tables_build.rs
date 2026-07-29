@@ -68,8 +68,8 @@ pub const BRIDGES: &[Bridge] = &[
     ),
     b("shared.rs", "exit_status_core", Engine::Both, "ExitStatus"),
     b("shared.rs", "json_type_test", Engine::Both, "*"),
-    b("methods.rs", "json_pointer", Engine::Fast, "*"),
-    b("pbridge.rs", "json_pointer", Engine::Parallel, "*"),
+    b("methods.rs", "json_value_method", Engine::Fast, "*"),
+    b("pbridge.rs", "json_value_method", Engine::Parallel, "*"),
     b("int_methods.rs", "int_method", Engine::Both, "*"),
     // -- fast engine ------------------------------------------------------
     b("methods.rs", "str_method_slow", Engine::Fast, "Str"),
