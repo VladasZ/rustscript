@@ -391,6 +391,24 @@ pub(super) enum Parsed {
     Fail(String),
 }
 
+/// The two `ParseIntError` range messages, written out because std exposes no
+/// way to build that error from outside the standard library. Every other parse
+/// failure carries the real error, so only these two are mirrored by hand.
+fn out_of_range(too_small: bool) -> String {
+    if too_small {
+        "number too small to fit in target type".to_string()
+    } else {
+        "number too large to fit in target type".to_string()
+    }
+}
+
+/// What a `text.parse::<i64>()` would report for text that is not a number.
+fn int_error(text: &str) -> String {
+    text.parse::<i64>()
+        .err()
+        .map_or_else(|| format!("cannot parse `{text}`"), |e| e.to_string())
+}
+
 /// `str::parse`, honoring the target type when the call wrote one down.
 ///
 /// Real Rust decides this entirely by the target: the text must be the whole
@@ -400,7 +418,7 @@ pub(super) enum Parsed {
 /// rejects. Without a turbofish there is no type to honor, so the old guess
 /// stays, which is what a plain `let n: u8 = s.parse()?` still lands on.
 pub(super) fn parse_core(text: &str, target: Option<&ScalarTy>) -> Parsed {
-    let fail = || Parsed::Fail(format!("cannot parse `{text}`"));
+    let fail = |e: &dyn std::fmt::Display| Parsed::Fail(e.to_string());
     let Some(target) = target else {
         let trimmed = text.trim();
         return if let Ok(value) = trimmed.parse::<i64>() {
@@ -410,22 +428,30 @@ pub(super) fn parse_core(text: &str, target: Option<&ScalarTy>) -> Parsed {
         } else if let Ok(value) = trimmed.parse::<bool>() {
             Parsed::Bool(value)
         } else {
-            Parsed::Fail(format!("cannot parse `{trimmed}`"))
+            // All three failed, so report what an integer parse would have
+            // said. That is the common intent and it is a real std message.
+            Parsed::Fail(int_error(trimmed))
         };
     };
     match target {
         ScalarTy::Int(width) => match text.parse::<i128>() {
             Ok(value) if value >= width.min() && value <= width.max() => Parsed::Int(value, *width),
-            _ => fail(),
+            Ok(value) => Parsed::Fail(out_of_range(value < width.min())),
+            // i128 is wider than every target, so a failure here is the text
+            // being unparseable rather than the target being too narrow, and
+            // the message reads the same for any width.
+            Err(e) => fail(&e),
         },
-        ScalarTy::F32 => text.parse::<f32>().map_or_else(|_| fail(), Parsed::F32),
-        ScalarTy::F64 => text.parse::<f64>().map_or_else(|_| fail(), Parsed::F64),
-        ScalarTy::Bool => text.parse::<bool>().map_or_else(|_| fail(), Parsed::Bool),
-        ScalarTy::Char => text.parse::<char>().map_or_else(|_| fail(), Parsed::Char),
+        ScalarTy::F32 => text.parse::<f32>().map_or_else(|e| fail(&e), Parsed::F32),
+        ScalarTy::F64 => text.parse::<f64>().map_or_else(|e| fail(&e), Parsed::F64),
+        ScalarTy::Bool => text.parse::<bool>().map_or_else(|e| fail(&e), Parsed::Bool),
+        ScalarTy::Char => text.parse::<char>().map_or_else(|e| fail(&e), Parsed::Char),
         ScalarTy::Str => Parsed::Str(text.to_string()),
         // No container implements `FromStr`, so these never name a parse
         // target. They exist only to describe a `Default`.
-        ScalarTy::Opt(_) | ScalarTy::List(_) | ScalarTy::Other => fail(),
+        ScalarTy::Opt(_) | ScalarTy::List(_) | ScalarTy::Other => {
+            Parsed::Fail(format!("cannot parse `{text}`"))
+        }
     }
 }
 
@@ -553,37 +579,56 @@ pub(super) enum DateOut {
     Text(String),
 }
 
+/// `DateTime::parse_from_rfc3339` reduced to the three numbers both engines
+/// store for a datetime, the unix seconds, the sub second nanos, and the
+/// seconds east of UTC the text carried. The error is the real chrono
+/// `ParseError` rendered as text, so a script sees the same message it would
+/// get compiled.
+pub(super) fn parse_rfc3339(text: &str) -> Result<(i64, u32, i32), String> {
+    use chrono::{DateTime, Offset, Timelike};
+    match DateTime::parse_from_rfc3339(text) {
+        Ok(dt) => Ok((
+            dt.timestamp(),
+            dt.nanosecond(),
+            dt.offset().fix().local_minus_utc(),
+        )),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// `DateTime` accessors over the stored unix timestamp. `local` selects the
-/// local timezone for `format`, everything else reads the UTC view, exactly
-/// like the fast engine always did.
+/// machine timezone, otherwise the value is read through `offset`, the seconds
+/// east of UTC that a parsed timestamp carried. `Utc::now` stores a zero
+/// offset, so it still reads as UTC. Every accessor goes through one fixed
+/// offset view, which is what real chrono does, a calendar field is read in the
+/// zone the value carries and not in UTC.
 pub(super) fn datetime_core(
     name: &str,
     secs: i64,
     nanos: u32,
     local: bool,
+    offset: i32,
     args: &impl Args,
 ) -> Option<DateOut> {
     use DateOut as O;
-    use chrono::{DateTime, Datelike, Local, Timelike, Utc};
+    use chrono::{DateTime, Datelike, FixedOffset, Local, Offset, Timelike, Utc};
     let utc: DateTime<Utc> = DateTime::from_timestamp(secs, nanos).unwrap_or_default();
+    let view = if local {
+        utc.with_timezone(&Local).fixed_offset()
+    } else {
+        utc.with_timezone(&FixedOffset::east_opt(offset).unwrap_or(Utc.fix()))
+    };
     Some(match name {
         "timestamp" => O::Int(secs),
         "timestamp_millis" => O::Int(secs * 1000 + i64::from(nanos / 1_000_000)),
-        "to_rfc3339" => O::Text(utc.to_rfc3339()),
-        "format" => {
-            let fmt = args.text(0);
-            if local {
-                O::Text(utc.with_timezone(&Local).format(&fmt).to_string())
-            } else {
-                O::Text(utc.format(&fmt).to_string())
-            }
-        }
-        "year" => O::Int(i64::from(utc.year())),
-        "month" => O::Int(i64::from(utc.month())),
-        "day" => O::Int(i64::from(utc.day())),
-        "hour" => O::Int(i64::from(utc.hour())),
-        "minute" => O::Int(i64::from(utc.minute())),
-        "second" => O::Int(i64::from(utc.second())),
+        "to_rfc3339" => O::Text(view.to_rfc3339()),
+        "format" => O::Text(view.format(&args.text(0)).to_string()),
+        "year" => O::Int(i64::from(view.year())),
+        "month" => O::Int(i64::from(view.month())),
+        "day" => O::Int(i64::from(view.day())),
+        "hour" => O::Int(i64::from(view.hour())),
+        "minute" => O::Int(i64::from(view.minute())),
+        "second" => O::Int(i64::from(view.second())),
         _ => return None,
     })
 }

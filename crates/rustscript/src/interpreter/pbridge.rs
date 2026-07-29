@@ -16,7 +16,7 @@ use super::pchunk::{PChunk, convert};
 use super::pnative::PNative;
 use super::pvalue::{PClosure, PValue, PValueRef};
 use super::pvm::PInterp;
-use super::shared::{self, Args, CharOut, Num, NumOut, Parsed, StrOut};
+use super::shared::{self, Args, CharOut, Num, NumOut, Parsed, StrOut, parse_rfc3339};
 use super::value::Value;
 
 impl PInterp {
@@ -205,6 +205,10 @@ impl PInterp {
             ("String", "from") => Ok(PValue::str(arg0(&args).display())),
             ("Instant", "now") => Ok(PNative::Instant(Instant::now()).wrap()),
             ("Utc", "now") | ("Local", "now") => Ok(now_datetime(ns == "Local")),
+            ("DateTime", "parse_from_rfc3339") => Ok(match parse_rfc3339(&arg0(&args).display()) {
+                Ok((secs, nanos, offset)) => PValue::ok(datetime_value(secs, nanos, false, offset)),
+                Err(e) => PValue::err(PValue::str(e)),
+            }),
             ("Duration", "from_millis") => Ok(duration_value(int_arg(&args))),
             ("Duration", "from_secs") => Ok(duration_value(int_arg(&args).saturating_mul(1000))),
             ("process", "exit") => {
@@ -735,20 +739,27 @@ fn duration_millis(v: Option<&PValue>) -> u64 {
     }
 }
 
+/// Build a `DateTime` value carrying its zone, exactly like the fast engine's
+/// `datetime_value`.
+fn datetime_value(secs: i64, nanos: u32, local: bool, offset: i32) -> PValue {
+    PValue::struct_of(
+        "DateTime",
+        [
+            ("secs".into(), PValue::Int(secs)),
+            ("nanos".into(), PValue::Int(i64::from(nanos))),
+            ("local".into(), PValue::Bool(local)),
+            ("offset".into(), PValue::Int(i64::from(offset))),
+        ],
+    )
+}
+
 /// Build a `DateTime` value for `Utc::now()` / `Local::now()`, storing the
 /// unix timestamp exactly like the fast engine's `now_datetime`.
 fn now_datetime(local: bool) -> PValue {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
-    PValue::struct_of(
-        "DateTime",
-        [
-            ("secs".into(), PValue::Int(now.as_secs() as i64)),
-            ("nanos".into(), PValue::Int(i64::from(now.subsec_nanos()))),
-            ("local".into(), PValue::Bool(local)),
-        ],
-    )
+    datetime_value(now.as_secs() as i64, now.subsec_nanos(), local, 0)
 }
 
 fn datetime_method(
@@ -765,7 +776,11 @@ fn datetime_method(
         _ => 0,
     };
     let local = matches!(s.get("local"), Some(PValue::Bool(true)));
-    match shared::datetime_core(m, secs, nanos, local, &PArgs(args)) {
+    let offset = match s.get("offset") {
+        Some(PValue::Int(v)) => v as i32,
+        _ => 0,
+    };
+    match shared::datetime_core(m, secs, nanos, local, offset, &PArgs(args)) {
         Some(shared::DateOut::Int(i)) => Ok(PValue::Int(i)),
         Some(shared::DateOut::Text(t)) => Ok(PValue::str(t)),
         None => bail!("method `{m}` on DateTime is not supported in tokio mode"),

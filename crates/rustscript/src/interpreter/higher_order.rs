@@ -468,6 +468,23 @@ impl Interp {
                     Value::err(inner())
                 }
             }
+            "map_or" => {
+                let default = args.first().cloned().unwrap_or(Value::Unit);
+                if is_ok {
+                    self.call_closure(&*clo(1)?, &[inner()])?
+                } else {
+                    default
+                }
+            }
+            // Unlike the Option form, the fallback here is handed the error,
+            // which is what real `Result::map_or_else` does.
+            "map_or_else" => {
+                if is_ok {
+                    self.call_closure(&*clo(1)?, &[inner()])?
+                } else {
+                    self.call_closure(&*clo(0)?, &[inner()])?
+                }
+            }
             "unwrap_or_else" => {
                 if is_ok {
                     inner()

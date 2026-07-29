@@ -83,7 +83,9 @@ impl Compiler<'_> {
             .and_then(first_generic_type)
             .map(|t| self.lower_ir(t));
         // A pending `let` annotation attaches to exactly this call, see
-        // `Compiler::json_let`.
+        // `Compiler::json_let`. Failing that, the enclosing signature may name
+        // the target because the function hands this parse back, see
+        // `Compiler::json_tails`.
         let coerce = match coerce {
             Some(ty) => Some(ty),
             None => match &self.json_let {
@@ -92,7 +94,7 @@ impl Compiler<'_> {
                     self.json_let = None;
                     Some(ty)
                 }
-                _ => None,
+                _ => self.json_tails.get(&std::ptr::from_ref(c)).cloned(),
             },
         };
         let argc = c.args.len() as u16;
