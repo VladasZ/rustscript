@@ -18,6 +18,7 @@ use super::bytecode::{
 use super::numeric::IntWidth;
 use super::resolver::{Res, Resolver};
 use super::typeir::{CastIr, TypeIr, lower_cast, lower_type};
+use expr::{returned_collects, returns_string};
 
 /// Program level facts the compiler needs, filled before any body is compiled.
 pub struct Ctx<'r> {
@@ -154,6 +155,12 @@ pub struct Compiler<'a> {
     /// exact `collect` call, keyed by the call's address like `json_let`.
     /// Lets an annotated let collect into a String without a turbofish.
     pub(super) string_let: Option<*const syn::ExprMethodCall>,
+    /// Every `collect` in the current function whose value the function hands
+    /// back, when that function is declared `-> String`. A set rather than one
+    /// slot because an `if` or a `match` in tail position returns from several
+    /// call sites. Keyed by address like the hints above, so only those exact
+    /// calls collect into a String.
+    pub(super) string_tails: HashSet<*const syn::ExprMethodCall>,
     /// An `unwrap_or_default` call whose result is unwrapped again, so it
     /// produced an `Option` and its own default is `None`. Keyed by address
     /// like the two above.
@@ -186,6 +193,7 @@ impl<'a> Compiler<'a> {
             cur_line: 0,
             json_let: None,
             string_let: None,
+            string_tails: HashSet::new(),
             option_result: None,
             default_let: None,
             option_locals: HashMap::new(),
@@ -233,8 +241,18 @@ impl<'a> Compiler<'a> {
                 Some(pat) => self.bind_pattern_irrefutable(pat, reg)?,
             }
         }
+        // A `-> String` signature names the target of every `collect` this body
+        // returns, which is the third place that target is knowable after a
+        // turbofish and an annotated `let`. Saved and restored so a nested item
+        // fn or a method compiled inside this one cannot inherit the hints.
+        let outer_string_tails = std::mem::take(&mut self.string_tails);
+        if returns_string(&sig.output) {
+            self.string_tails = returned_collects(block).into_iter().collect();
+        }
         let ret = self.alloc();
-        self.compile_block(block, ret)?;
+        let res = self.compile_block(block, ret);
+        self.string_tails = outer_string_tails;
+        res?;
         self.emit(Op::Ret { src: ret });
         Ok(self.finish_chunk())
     }
