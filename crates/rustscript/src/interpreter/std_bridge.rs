@@ -669,6 +669,27 @@ pub(super) fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Va
         ("Stdio", "piped") | ("Stdio", "inherit") | ("Stdio", "null") => {
             Value::struct_of("Stdio", [("kind".into(), Value::str(func))])
         }
+        // `Stdio::from(file)` sends a child's stream straight to an open file. The marker carries the
+        // file, and the handle is cloned when the command is built so the script keeps its own copy.
+        //
+        // This is what makes a progress heartbeat possible. Polling a child with `try_wait` while it
+        // runs means nobody is draining its pipe, which deadlocks the moment the child outgrows the pipe
+        // buffer, so a long silent command that wants a heartbeat has to write to a file instead.
+        ("Stdio", "from") => {
+            let Some(file @ Value::Native(_)) = args.first() else {
+                bail!(
+                    "Stdio::from takes an open File, got {}",
+                    args.first().map_or("nothing", Value::type_name)
+                );
+            };
+            Value::struct_of(
+                "Stdio",
+                [
+                    ("kind".into(), Value::str("file")),
+                    ("file".into(), file.clone()),
+                ],
+            )
+        }
         _ => return Ok(None),
     }))
 }
