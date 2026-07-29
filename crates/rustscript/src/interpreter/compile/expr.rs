@@ -69,6 +69,105 @@ fn is_string_type(ty: &syn::Type) -> bool {
         if p.path.segments.last().is_some_and(|s| s.ident == "String"))
 }
 
+/// Whether a signature returns a plain `String`, so the return type names the
+/// target of a `collect` whose value the function hands back.
+pub(super) fn returns_string(output: &syn::ReturnType) -> bool {
+    matches!(output, syn::ReturnType::Type(_, ty) if is_string_type(ty))
+}
+
+/// Bare `collect` calls in tail position of an expression, so the value the
+/// expression produces is the value of one of them. Walks only the shapes whose
+/// own value is a sub-expression's value: parens, a block's trailing
+/// expression, both branches of an `if`, and every arm of a `match`.
+fn tail_collects<'a>(e: &'a Expr, out: &mut Vec<&'a syn::ExprMethodCall>) {
+    match e {
+        Expr::MethodCall(m) if m.method == "collect" && m.turbofish.is_none() => out.push(m),
+        Expr::Paren(p) => tail_collects(&p.expr, out),
+        Expr::Group(g) => tail_collects(&g.expr, out),
+        Expr::Block(b) => tail_block_collects(&b.block, out),
+        Expr::If(i) => {
+            tail_block_collects(&i.then_branch, out);
+            if let Some((_, alt)) = &i.else_branch {
+                tail_collects(alt, out);
+            }
+        }
+        Expr::Match(m) => {
+            for arm in &m.arms {
+                tail_collects(&arm.body, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The trailing expression of a block, which is the block's own value.
+fn tail_block_collects<'a>(block: &'a Block, out: &mut Vec<&'a syn::ExprMethodCall>) {
+    if let Some(Stmt::Expr(e, None)) = block.stmts.last() {
+        tail_collects(e, out);
+    }
+}
+
+/// Every bare `collect` whose value this function body hands back, from its
+/// trailing expression and from a `return`. A closure body is skipped, because
+/// its `return` leaves the closure rather than this function, so the function's
+/// return type says nothing about it.
+pub(super) fn returned_collects(block: &Block) -> Vec<*const syn::ExprMethodCall> {
+    let mut found: Vec<&syn::ExprMethodCall> = Vec::new();
+    tail_block_collects(block, &mut found);
+    walk_returns(block, &mut found);
+    let mut ptrs: Vec<*const syn::ExprMethodCall> = Vec::new();
+    for call in found {
+        ptrs.push(std::ptr::from_ref(call));
+    }
+    ptrs
+}
+
+/// Statement level `return`s, following the constructs that carry a block.
+fn walk_returns<'a>(block: &'a Block, out: &mut Vec<&'a syn::ExprMethodCall>) {
+    for stmt in &block.stmts {
+        match stmt {
+            Stmt::Expr(e, _) => walk_returns_expr(e, out),
+            // The only expression a `let` carries that is not part of its value
+            // is the `else` block of a let-else, which commonly returns.
+            Stmt::Local(local) => {
+                if let Some(init) = &local.init
+                    && let Some(diverge) = &init.diverge
+                {
+                    walk_returns_expr(&diverge.1, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn walk_returns_expr<'a>(e: &'a Expr, out: &mut Vec<&'a syn::ExprMethodCall>) {
+    match e {
+        Expr::Return(r) => {
+            if let Some(value) = &r.expr {
+                tail_collects(value, out);
+            }
+        }
+        Expr::Block(b) => walk_returns(&b.block, out),
+        Expr::Unsafe(u) => walk_returns(&u.block, out),
+        Expr::If(i) => {
+            walk_returns(&i.then_branch, out);
+            if let Some((_, alt)) = &i.else_branch {
+                walk_returns_expr(alt, out);
+            }
+        }
+        Expr::Match(m) => {
+            for arm in &m.arms {
+                walk_returns_expr(&arm.body, out);
+            }
+        }
+        Expr::ForLoop(f) => walk_returns(&f.body, out),
+        Expr::While(w) => walk_returns(&w.body, out),
+        Expr::Loop(l) => walk_returns(&l.body, out),
+        _ => {}
+    }
+}
+
 impl Compiler<'_> {
     pub(super) fn compile_block(&mut self, block: &Block, dst: Reg) -> Result<()> {
         self.push_scope();

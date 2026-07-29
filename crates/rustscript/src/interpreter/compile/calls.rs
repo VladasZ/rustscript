@@ -293,14 +293,17 @@ impl Compiler<'_> {
         self.option_result = outer_option_hint;
         let base = self.compile_args(m.args.iter())?;
         // `collect` is type driven in real Rust. The interpreter has no types,
-        // so the two places the target is knowable lower to their own method
-        // here, a turbofish asking for a String and a pending `let s: String`
-        // annotation attached to exactly this call, see `Compiler::string_let`.
+        // so the three places the target is knowable lower to their own method
+        // here: a turbofish asking for a String, a pending `let s: String`
+        // annotation attached to exactly this call, and a `-> String` signature
+        // on the function whose returned value this call produces. See
+        // `Compiler::string_let` and `Compiler::string_tails`.
         let mut method = m.method.to_string();
         if method == "collect" {
             let turbofish_string = m.turbofish.as_ref().is_some_and(names_string);
             let let_string = matches!(self.string_let, Some(ptr) if std::ptr::eq(ptr, m));
-            if turbofish_string || let_string {
+            let tail_string = self.string_tails.contains(&std::ptr::from_ref(m));
+            if turbofish_string || let_string || tail_string {
                 self.string_let = None;
                 method = "collect_string".to_string();
             }
