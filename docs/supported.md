@@ -102,7 +102,7 @@ selects. Unmarked methods run on both.
 
 ## Iterator
 
-`all` (fast), `any` (fast), `as_str` (fast), `cloned` (fast), `collect` (fast), `collect_string` (fast), `copied` (fast), `filter` (fast), `filter_map` (fast), `find` (fast), `flat_map` (fast), `fold` (fast), `for_each` (fast), `last` (fast), `map` (fast), `max` (fast), `max_by_key` (fast), `min` (fast), `min_by_key` (fast), `next` (fast), `partition` (fast), `peek` (fast), `peekable` (fast), `position` (fast), `reduce` (fast), `rev` (fast), `skip_while` (fast), `take_while` (fast), `to_vec` (fast)
+`all` (fast), `any` (fast), `as_str` (fast), `by_ref` (fast), `cloned` (fast), `collect` (fast), `collect_string` (fast), `copied` (fast), `filter` (fast), `filter_map` (fast), `find` (fast), `flat_map` (fast), `fold` (fast), `for_each` (fast), `last` (fast), `map` (fast), `max` (fast), `max_by_key` (fast), `min` (fast), `min_by_key` (fast), `next` (fast), `partition` (fast), `peek` (fast), `peekable` (fast), `position` (fast), `reduce` (fast), `rev` (fast), `skip_while` (fast), `take_while` (fast), `to_vec` (fast)
 
 ## Line
 
@@ -166,7 +166,7 @@ selects. Unmarked methods run on both.
 
 ## Result
 
-`and_then` (fast), `as_deref` (fast), `as_deref_mut` (fast), `as_mut` (fast), `as_ref` (fast), `clone` (fast), `context` (fast), `err` (fast), `expect` (fast), `is_err` (fast), `is_err_and` (fast), `is_ok` (fast), `is_ok_and` (fast), `map` (fast), `map_err` (fast), `ok` (fast), `unwrap` (fast), `unwrap_err` (fast), `unwrap_or` (fast), `unwrap_or_default` (fast), `unwrap_or_else` (fast), `with_context` (fast)
+`and_then` (fast), `as_deref` (fast), `as_deref_mut` (fast), `as_mut` (fast), `as_ref` (fast), `clone` (fast), `context` (fast), `err` (fast), `expect` (fast), `is_err` (fast), `is_err_and` (fast), `is_ok` (fast), `is_ok_and` (fast), `map` (fast), `map_err` (fast), `map_or` (fast), `map_or_else` (fast), `ok` (fast), `unwrap` (fast), `unwrap_err` (fast), `unwrap_or` (fast), `unwrap_or_default` (fast), `unwrap_or_else` (fast), `with_context` (fast)
 
 ## Rng
 
@@ -214,7 +214,7 @@ selects. Unmarked methods run on both.
 
 ## Vec
 
-`all`, `any`, `append` (fast), `as_array`, `as_array_mut`, `as_object`, `as_object_mut`, `clear`, `cloned` (fast), `collect`, `collect_string`, `concat` (tokio), `contains` (tokio), `copied`, `copy_from_slice`, `count` (tokio), `dedup` (fast), `enumerate` (tokio), `extend`, `extend_from_slice`, `filter`, `filter_map`, `find`, `first` (tokio), `flat_map`, `flatten` (fast), `fold` (fast), `for_each`, `get` (tokio), `into_iter` (tokio), `is_empty` (tokio), `iter` (tokio), `iter_mut` (tokio), `join` (tokio), `last` (tokio), `len` (tokio), `map`, `max`, `max_by_key` (fast), `min`, `min_by_key` (fast), `next` (fast), `nth`, `partition` (fast), `pop` (tokio), `position`, `product` (tokio), `push` (tokio), `reduce` (fast), `retain` (fast), `rev` (tokio), `reverse` (fast), `skip` (tokio), `skip_while` (fast), `sort` (tokio), `sort_by` (fast), `sort_by_cached_key` (fast), `sort_by_key` (fast), `split_first` (tokio), `sum` (tokio), `take` (tokio), `take_while` (fast), `to_vec`, `truncate` (fast)
+`all`, `any`, `append` (fast), `as_array`, `as_array_mut`, `as_object`, `as_object_mut`, `by_ref` (fast), `clear`, `cloned` (fast), `collect`, `collect_string`, `concat` (tokio), `contains` (tokio), `copied`, `copy_from_slice`, `count` (tokio), `dedup` (fast), `enumerate` (tokio), `extend`, `extend_from_slice`, `filter`, `filter_map`, `find`, `first` (tokio), `flat_map`, `flatten` (fast), `fold` (fast), `for_each`, `get` (tokio), `into_iter` (tokio), `is_empty` (tokio), `iter` (tokio), `iter_mut` (tokio), `join` (tokio), `last` (tokio), `len` (tokio), `map`, `max`, `max_by_key` (fast), `min`, `min_by_key` (fast), `next` (fast), `nth`, `partition` (fast), `pop` (tokio), `position`, `product` (tokio), `push` (tokio), `reduce` (fast), `retain` (fast), `rev` (tokio), `reverse` (fast), `skip` (tokio), `skip_while` (fast), `sort` (tokio), `sort_by` (fast), `sort_by_cached_key` (fast), `sort_by_key` (fast), `split_first` (tokio), `sum` (tokio), `take` (tokio), `take_while` (fast), `to_vec`, `truncate` (fast)
 
 ## WmiConnection
 

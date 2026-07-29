@@ -33,6 +33,20 @@ fn flatten_and(cond: &Expr) -> Vec<&Expr> {
 /// The `from_str` call at the root of a `let` init chain, looking through
 /// `?`, `unwrap`, and `expect`. Only a call without its own turbofish counts.
 fn from_str_root(e: &Expr) -> Option<&syn::ExprCall> {
+    from_str_chain(e, false)
+}
+
+/// Methods that rewrite only the error of a Result and hand the parsed value
+/// through untouched, so the annotation still names what the parse must build.
+fn maps_only_the_error(method: &syn::Ident) -> bool {
+    method == "map_err" || method == "context" || method == "with_context"
+}
+
+/// `unwrapped` says whether a `?`, `unwrap` or `expect` sits above this point
+/// in the chain. The error mapping methods are only followed under one, because
+/// without it the annotation names a `Result` rather than the parsed payload,
+/// and handing that to the planner would parse into the wrong shape.
+fn from_str_chain(e: &Expr, unwrapped: bool) -> Option<&syn::ExprCall> {
     match e {
         Expr::Call(c) => {
             let Expr::Path(p) = &*c.func else { return None };
@@ -42,11 +56,14 @@ fn from_str_root(e: &Expr) -> Option<&syn::ExprCall> {
             }
             Some(c)
         }
-        Expr::Try(t) => from_str_root(&t.expr),
-        Expr::Paren(p) => from_str_root(&p.expr),
-        Expr::Group(g) => from_str_root(&g.expr),
+        Expr::Try(t) => from_str_chain(&t.expr, true),
+        Expr::Paren(p) => from_str_chain(&p.expr, unwrapped),
+        Expr::Group(g) => from_str_chain(&g.expr, unwrapped),
         Expr::MethodCall(m) if m.method == "unwrap" || m.method == "expect" => {
-            from_str_root(&m.receiver)
+            from_str_chain(&m.receiver, true)
+        }
+        Expr::MethodCall(m) if unwrapped && maps_only_the_error(&m.method) => {
+            from_str_chain(&m.receiver, unwrapped)
         }
         _ => None,
     }
@@ -75,55 +92,94 @@ pub(super) fn returns_string(output: &syn::ReturnType) -> bool {
     matches!(output, syn::ReturnType::Type(_, ty) if is_string_type(ty))
 }
 
-/// Bare `collect` calls in tail position of an expression, so the value the
-/// expression produces is the value of one of them. Walks only the shapes whose
-/// own value is a sub-expression's value: parens, a block's trailing
-/// expression, both branches of an `if`, and every arm of a `match`.
-fn tail_collects<'a>(e: &'a Expr, out: &mut Vec<&'a syn::ExprMethodCall>) {
+/// The payload a signature hands back, looking inside a `Result`. That is the
+/// type a `from_str` in tail position has to parse into, the fourth place the
+/// target is knowable after a turbofish, an annotated `let`, and a `-> String`.
+pub(super) fn returned_json_type(output: &syn::ReturnType) -> Option<&syn::Type> {
+    let syn::ReturnType::Type(_, ty) = output else {
+        return None;
+    };
+    Some(result_ok_type(ty).unwrap_or(ty))
+}
+
+/// The `T` of a `Result<T, E>` annotation.
+fn result_ok_type(ty: &syn::Type) -> Option<&syn::Type> {
+    let syn::Type::Path(p) = ty else { return None };
+    let seg = p.path.segments.last()?;
+    if seg.ident != "Result" {
+        return None;
+    }
+    first_generic_type(seg)
+}
+
+/// Expressions in tail position, so the value the expression produces is the
+/// value of one of them. Walks only the shapes whose own value is a
+/// sub-expression's value: parens, a block's trailing expression, both branches
+/// of an `if`, and every arm of a `match`.
+fn tail_exprs<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
     match e {
-        Expr::MethodCall(m) if m.method == "collect" && m.turbofish.is_none() => out.push(m),
-        Expr::Paren(p) => tail_collects(&p.expr, out),
-        Expr::Group(g) => tail_collects(&g.expr, out),
-        Expr::Block(b) => tail_block_collects(&b.block, out),
+        Expr::Paren(p) => tail_exprs(&p.expr, out),
+        Expr::Group(g) => tail_exprs(&g.expr, out),
+        Expr::Block(b) => tail_block_exprs(&b.block, out),
         Expr::If(i) => {
-            tail_block_collects(&i.then_branch, out);
+            tail_block_exprs(&i.then_branch, out);
             if let Some((_, alt)) = &i.else_branch {
-                tail_collects(alt, out);
+                tail_exprs(alt, out);
             }
         }
         Expr::Match(m) => {
             for arm in &m.arms {
-                tail_collects(&arm.body, out);
+                tail_exprs(&arm.body, out);
             }
         }
-        _ => {}
+        other => out.push(other),
     }
 }
 
 /// The trailing expression of a block, which is the block's own value.
-fn tail_block_collects<'a>(block: &'a Block, out: &mut Vec<&'a syn::ExprMethodCall>) {
+fn tail_block_exprs<'a>(block: &'a Block, out: &mut Vec<&'a Expr>) {
     if let Some(Stmt::Expr(e, None)) = block.stmts.last() {
-        tail_collects(e, out);
+        tail_exprs(e, out);
     }
 }
 
-/// Every bare `collect` whose value this function body hands back, from its
+/// Every expression whose value this function body hands back, from its
 /// trailing expression and from a `return`. A closure body is skipped, because
 /// its `return` leaves the closure rather than this function, so the function's
 /// return type says nothing about it.
-pub(super) fn returned_collects(block: &Block) -> Vec<*const syn::ExprMethodCall> {
-    let mut found: Vec<&syn::ExprMethodCall> = Vec::new();
-    tail_block_collects(block, &mut found);
+fn returned_exprs(block: &Block) -> Vec<&Expr> {
+    let mut found = Vec::new();
+    tail_block_exprs(block, &mut found);
     walk_returns(block, &mut found);
-    let mut ptrs: Vec<*const syn::ExprMethodCall> = Vec::new();
-    for call in found {
-        ptrs.push(std::ptr::from_ref(call));
-    }
-    ptrs
+    found
+}
+
+/// Every bare `collect` whose value this function body hands back.
+pub(super) fn returned_collects(block: &Block) -> Vec<*const syn::ExprMethodCall> {
+    returned_exprs(block)
+        .into_iter()
+        .filter_map(|e| match e {
+            Expr::MethodCall(m) if m.method == "collect" && m.turbofish.is_none() => {
+                Some(std::ptr::from_ref(m))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every `from_str` whose parsed value this function body hands back. The
+/// chain is walked as already unwrapped, because the signature's payload type
+/// is read from inside its `Result`, so a plain `.map_err(..)` tail names the
+/// parse target just as much as a `?` does.
+pub(super) fn returned_from_strs(block: &Block) -> Vec<*const syn::ExprCall> {
+    returned_exprs(block)
+        .into_iter()
+        .filter_map(|e| from_str_chain(e, true).map(std::ptr::from_ref))
+        .collect()
 }
 
 /// Statement level `return`s, following the constructs that carry a block.
-fn walk_returns<'a>(block: &'a Block, out: &mut Vec<&'a syn::ExprMethodCall>) {
+fn walk_returns<'a>(block: &'a Block, out: &mut Vec<&'a Expr>) {
     for stmt in &block.stmts {
         match stmt {
             Stmt::Expr(e, _) => walk_returns_expr(e, out),
@@ -141,11 +197,11 @@ fn walk_returns<'a>(block: &'a Block, out: &mut Vec<&'a syn::ExprMethodCall>) {
     }
 }
 
-fn walk_returns_expr<'a>(e: &'a Expr, out: &mut Vec<&'a syn::ExprMethodCall>) {
+fn walk_returns_expr<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
     match e {
         Expr::Return(r) => {
             if let Some(value) = &r.expr {
-                tail_collects(value, out);
+                tail_exprs(value, out);
             }
         }
         Expr::Block(b) => walk_returns(&b.block, out),

@@ -12,6 +12,7 @@ use super::value::{StructData, Value};
 
 use super::json_bridge::*;
 use super::jwt_bridge::*;
+use super::shared::parse_rfc3339;
 use super::std_bridge::*;
 
 /// `module::func` call is not a plain std bridge.
@@ -91,6 +92,10 @@ pub(super) fn crate_bridge(module: &str, func: &str, args: &[Value]) -> Result<O
         ("rand", "random") => Value::Float(rand::random::<f64>()),
         // chrono -----------------------------------------------------------
         ("Utc", "now") | ("Local", "now") => now_datetime(module == "Local"),
+        ("DateTime", "parse_from_rfc3339") => match parse_rfc3339(&s0()) {
+            Ok((secs, nanos, offset)) => Value::ok(datetime_value(secs, nanos, false, offset)),
+            Err(e) => Value::err(Value::str(e)),
+        },
         // jsonwebtoken -------------------------------------------------------
         ("jsonwebtoken", "encode") => jwt_encode(args)?,
         // tempfile ---------------------------------------------------------
@@ -186,28 +191,37 @@ pub(super) fn base64_method(s: &StructData, method: &str, args: &[Value]) -> Res
     })
 }
 
-/// Build a `DateTime` value for `Utc::now()` / `Local::now()`, storing the unix
-/// timestamp so `format` can reconstruct a real chrono value.
+/// Build a `DateTime` value, storing the unix timestamp so the accessors can
+/// reconstruct a real chrono value. `offset` is the seconds east of UTC the
+/// value carries, zero for `Utc::now()` and whatever the text held for a
+/// parsed one.
+pub(super) fn datetime_value(secs: i64, nanos: u32, local: bool, offset: i32) -> Value {
+    Value::struct_of(
+        "DateTime",
+        [
+            ("secs".into(), Value::Int(secs)),
+            ("nanos".into(), Value::Int(i64::from(nanos))),
+            ("local".into(), Value::Bool(local)),
+            ("offset".into(), Value::Int(i64::from(offset))),
+        ],
+    )
+}
+
+/// Build a `DateTime` value for `Utc::now()` / `Local::now()`.
 pub(super) fn now_datetime(local: bool) -> Value {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
-    Value::struct_of(
-        "DateTime",
-        [
-            ("secs".into(), Value::Int(now.as_secs() as i64)),
-            ("nanos".into(), Value::Int(now.subsec_nanos() as i64)),
-            ("local".into(), Value::Bool(local)),
-        ],
-    )
+    datetime_value(now.as_secs() as i64, now.subsec_nanos(), local, 0)
 }
 
 pub(super) fn datetime_method(s: &StructData, name: &str, args: &[Value]) -> Result<Value> {
     let secs = field_int(s, "secs");
     let nanos = field_int(s, "nanos") as u32;
     let local = matches!(s.get("local"), Some(Value::Bool(true)));
+    let offset = field_int(s, "offset") as i32;
     let args = super::methods::VArgs(args);
-    match super::shared::datetime_core(name, secs, nanos, local, &args) {
+    match super::shared::datetime_core(name, secs, nanos, local, offset, &args) {
         Some(super::shared::DateOut::Int(i)) => Ok(Value::Int(i)),
         Some(super::shared::DateOut::Text(t)) => Ok(Value::str(t)),
         None => bail!("unknown method `{name}` on DateTime"),

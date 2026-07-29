@@ -536,6 +536,10 @@ pub(super) fn vec_method(
         }
         _ => match method.text.as_str() {
             "to_vec" | "collect" | "cloned" | "copied" => Value::vec(v.borrow().clone()),
+            // `by_ref` lends the iterator out, so whatever the borrow hands on
+            // is gone from this one too. A draining view over the same vector
+            // is that borrow.
+            "by_ref" => super::iterator::draining_iter(v.clone()),
             "nth" => match v.borrow().get(int_arg(args, 0)? as usize) {
                 Some(item) => Value::some(item.clone()),
                 None => Value::none(),
@@ -628,14 +632,22 @@ pub(super) fn vec_method(
                 }
                 Value::vec(out)
             }
-            // Iterators are eager vectors here, so `next` is the first item.
-            // The check gate keeps it off real vectors, where it won't compile.
-            "next" => v
-                .borrow()
-                .first()
-                .cloned()
-                .map(Value::some)
-                .unwrap_or_else(Value::none),
+            // Iterators are eager vectors here, so `next` takes the front item
+            // and leaves the rest behind. Handing back the first item without
+            // removing it read correctly on its own but left the iterator
+            // unconsumed, so a following `collect` saw the item again and
+            // `split(..).next()` then `collect()` returned the whole text.
+            // Taking from the front shifts the rest, which is nothing at the
+            // sizes a script splits, and the check gate keeps this off real
+            // vectors, where it would not compile anyway.
+            "next" => {
+                let mut items = v.borrow_mut();
+                if items.is_empty() {
+                    Value::none()
+                } else {
+                    Value::some(items.remove(0))
+                }
+            }
             // With an argument this is `Ord::max` on two whole vecs, which
             // orders them lexicographically and hands one back. Only the
             // no-argument form is the iterator reduction over the elements.

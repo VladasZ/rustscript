@@ -18,7 +18,7 @@ use super::bytecode::{
 use super::numeric::IntWidth;
 use super::resolver::{Res, Resolver};
 use super::typeir::{CastIr, TypeIr, lower_cast, lower_type};
-use expr::{returned_collects, returns_string};
+use expr::{returned_collects, returned_from_strs, returned_json_type, returns_string};
 
 /// Program level facts the compiler needs, filled before any body is compiled.
 pub struct Ctx<'r> {
@@ -164,6 +164,10 @@ pub struct Compiler<'a> {
     /// call sites. Keyed by address like the hints above, so only those exact
     /// calls collect into a String.
     pub(super) string_tails: HashSet<*const syn::ExprMethodCall>,
+    /// Every `from_str` in the current function whose parsed value the function
+    /// hands back, mapped to the payload type its signature names. The same
+    /// idea as `string_tails`, for the typed json path rather than `collect`.
+    pub(super) json_tails: HashMap<*const syn::ExprCall, TypeIr>,
     /// An `unwrap_or_default` call whose result is unwrapped again, so it
     /// produced an `Option` and its own default is `None`. Keyed by address
     /// like the two above.
@@ -197,6 +201,7 @@ impl<'a> Compiler<'a> {
             json_let: None,
             string_let: None,
             string_tails: HashSet::new(),
+            json_tails: HashMap::new(),
             option_result: None,
             default_let: None,
             option_locals: HashMap::new(),
@@ -260,9 +265,20 @@ impl<'a> Compiler<'a> {
         if returns_string(&sig.output) {
             self.string_tails = returned_collects(block).into_iter().collect();
         }
+        // The same for a `from_str` the body hands back, whose target is the
+        // payload of the return type rather than a `let` annotation.
+        let outer_json_tails = std::mem::take(&mut self.json_tails);
+        if let Some(ty) = returned_json_type(&sig.output) {
+            let ir = self.lower_ir(ty);
+            self.json_tails = returned_from_strs(block)
+                .into_iter()
+                .map(|call| (call, ir.clone()))
+                .collect();
+        }
         let ret = self.alloc();
         let res = self.compile_block(block, ret);
         self.string_tails = outer_string_tails;
+        self.json_tails = outer_json_tails;
         res?;
         self.emit(Op::Ret { src: ret });
         Ok(self.finish_chunk())

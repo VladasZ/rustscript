@@ -23,6 +23,14 @@ pub enum IteratorState {
         values: Rc<RefCell<Vec<Value>>>,
         index: usize,
     },
+    /// A borrow of an eager vector taken with `by_ref`. It takes from the front
+    /// of the shared vector rather than walking an index of its own, so
+    /// whatever it hands out is gone from the borrowed iterator too. That is
+    /// the whole point of `by_ref`, and a cursor could not do it, since the
+    /// cursor would die with the borrow and leave the source untouched.
+    DrainingValues {
+        values: Rc<RefCell<Vec<Value>>>,
+    },
     Owned {
         values: Vec<Value>,
         index: usize,
@@ -130,6 +138,10 @@ pub(super) fn value_iter_mut(items: Rc<RefCell<Vec<Value>>>) -> Value {
     })
 }
 
+pub(super) fn draining_iter(items: Rc<RefCell<Vec<Value>>>) -> Value {
+    wrap(IteratorState::DrainingValues { values: items })
+}
+
 pub(super) fn bytes(source: Rc<RStr>) -> Value {
     wrap(IteratorState::Bytes { source, index: 0 })
 }
@@ -213,6 +225,15 @@ impl IteratorState {
                 let value = exists
                     .then(|| Value::Ref(Rc::new(ValueRef::vec_element(values.clone(), *index))));
                 *index += usize::from(exists);
+                Step::Ready(value)
+            }
+            IteratorState::DrainingValues { values } => {
+                let mut items = values.borrow_mut();
+                let value = if items.is_empty() {
+                    None
+                } else {
+                    Some(items.remove(0))
+                };
                 Step::Ready(value)
             }
             IteratorState::Owned { values, index } => {
@@ -523,7 +544,10 @@ impl Interp {
                         .map(Value::display)
                         .collect::<String>(),
                 ),
-                "cloned" | "copied" => Value::Native(iterator.clone()),
+                // `by_ref` borrows the iterator so the caller keeps it after
+                // the adaptor is done with it. Iterators are shared handles
+                // here, so handing the same one back is that borrow.
+                "cloned" | "copied" | "by_ref" => Value::Native(iterator.clone()),
                 "peekable" => wrap(IteratorState::Peekable {
                     source: iterator.clone(),
                     buffered: None,
