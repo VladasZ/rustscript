@@ -82,11 +82,31 @@ fn stdio_or(s: &StructData, key: &str, default: std::process::Stdio) -> std::pro
             match m.get("kind").map(|v| v.display()).as_deref() {
                 Some("piped") => std::process::Stdio::piped(),
                 Some("null") => std::process::Stdio::null(),
+                Some("file") => {
+                    stdio_from_file(m.get("file")).unwrap_or_else(std::process::Stdio::null)
+                }
                 _ => std::process::Stdio::inherit(),
             }
         }
         _ => default,
     }
+}
+
+/// The real `Stdio` behind an `Stdio::from(file)` marker. The handle is cloned, so the script's own
+/// `File` value stays usable after the child takes its copy.
+fn stdio_from_file(file: Option<Value>) -> Option<std::process::Stdio> {
+    let Some(Value::Native(handle)) = file else {
+        return None;
+    };
+    let borrowed = handle.borrow();
+    let Native::File(reader) = &*borrowed else {
+        return None;
+    };
+    reader
+        .get_ref()
+        .try_clone()
+        .ok()
+        .map(std::process::Stdio::from)
 }
 
 /// Spawn a `Command`, returning a `Child` value whose stdin/stdout/stderr
@@ -206,8 +226,20 @@ pub(super) fn command_method(s: &Rc<StructData>, name: &str, args: &[Value]) -> 
                 .insert(MapKey::Str(RStr::new(key)), Value::Unit);
             cmd_value()
         }
+        // Rejected rather than stored when it is not an Stdio, because a value this does not understand
+        // used to be kept and then quietly ignored when the command was built. `File::create(p).into()`
+        // took that path: the redirect never happened, the output went to the terminal, and the file was
+        // left empty with nothing to say why.
         "stdin" | "stdout" | "stderr" => {
-            s.set(name, args.first().cloned().unwrap_or(Value::Unit));
+            let arg = args.first().cloned().unwrap_or(Value::Unit);
+            match &arg {
+                Value::Struct(m) if &**m.name() == "Stdio" => {}
+                other => bail!(
+                    "Command::{name} takes an Stdio, got {}. Use Stdio::piped(), Stdio::null(), Stdio::inherit(), or Stdio::from(file).",
+                    other.type_name()
+                ),
+            }
+            s.set(name, arg);
             cmd_value()
         }
         "spawn" => return Ok(spawn_command(s)),

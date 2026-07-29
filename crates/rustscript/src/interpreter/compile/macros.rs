@@ -49,6 +49,30 @@ impl Compiler<'_> {
                 let spec = self.build_fmt_spec(mac)?;
                 self.emit(Op::Fmt { dst, spec });
             }
+            // `write!(dest, ..)` formats then writes, so it lowers to the two things it means: build the
+            // string, then call the writer's own `write_all` with it. That keeps every destination the
+            // writer bridge already supports, a File, a TcpStream, a child's stdin, and returns the
+            // io::Result those give back, so `?` and `expect` behave as they do in real Rust.
+            "write" | "writeln" => {
+                let args =
+                    mac.parse_body_with(Punctuated::<Expr, syn::Token![,]>::parse_terminated)?;
+                let mut iter = args.iter();
+                let Some(target) = iter.next() else {
+                    bail!("{name}! needs a destination as its first argument");
+                };
+                let recv = self.compile_expr(target)?;
+                let spec = self.build_fmt_spec_from(iter, name == "writeln")?;
+                let text = self.alloc();
+                self.emit(Op::Fmt { dst: text, spec });
+                let write_all = self.add_name("write_all".to_string());
+                self.emit(Op::Method {
+                    dst,
+                    recv,
+                    name: write_all,
+                    base: text,
+                    argc: 1,
+                });
+            }
             "vec" => self.compile_vec_macro(dst, mac)?,
             "assert" => {
                 let args = parse_exprs(mac)?;
@@ -233,8 +257,18 @@ impl Compiler<'_> {
 
     pub(super) fn build_fmt_spec(&mut self, mac: &syn::Macro) -> Result<u16> {
         let args = mac.parse_body_with(Punctuated::<Expr, syn::Token![,]>::parse_terminated)?;
-        let mut iter = args.iter();
-        let template = match iter.next() {
+        self.build_fmt_spec_from(args.iter(), false)
+    }
+
+    /// The same spec builder over an argument iterator, so `write!` can hand it everything after the
+    /// destination. `newline` extends the template rather than the formatted value, which is what lets
+    /// `writeln!` share this code and keeps a bare `writeln!(f)` a lone newline.
+    pub(super) fn build_fmt_spec_from<'a>(
+        &mut self,
+        mut iter: impl Iterator<Item = &'a Expr>,
+        newline: bool,
+    ) -> Result<u16> {
+        let mut template = match iter.next() {
             Some(Expr::Lit(l)) => match &l.lit {
                 Lit::Str(s) => s.value(),
                 _ => bail!("format template must be a string literal"),
@@ -242,6 +276,9 @@ impl Compiler<'_> {
             Some(_) => bail!("format template must be a string literal"),
             None => String::new(),
         };
+        if newline {
+            template.push('\n');
+        }
         let mut positional = Vec::new();
         let mut named: Vec<(String, Reg)> = Vec::new();
         for arg in iter {
