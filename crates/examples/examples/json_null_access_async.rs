@@ -156,4 +156,23 @@ async fn main() {
             .and_then(Value::as_bool)
             .unwrap_or(false)
     );
+
+    // `get` on a value that turned out to be a scalar answers None like serde,
+    // instead of failing the way an unknown method would. Every shape a json
+    // value can be has to answer, which is the whole point of the check that
+    // now guards this.
+    for text in ["\"hi\"", "5", "4.5", "true", "null", "{}", "[1,2]"] {
+        let shape: Value = serde_json::from_str(text).unwrap_or(Value::Null);
+        println!("shape {text} get {}", text_of(&shape, "k").is_empty());
+    }
+    let pair: Value = serde_json::from_str("[1,2]").unwrap();
+    println!("arr by index {:?}", pair.get(1).and_then(Value::as_i64));
+    println!("arr by key   {}", pair.get("k").is_none());
+
+    // `str::get` is the real slice method and keeps its own meaning, it is not
+    // the json lookup.
+    let word = "hello".to_string();
+    println!("str slice    {:?}", word.get(0..2));
+    println!("str past end {:?}", word.get(0..99));
+    println!("str inclusive {:?}", word.get(0..=1));
 }

@@ -479,7 +479,10 @@ fn status_method(s: &PStructData, method: &str) -> PValue {
 
 fn json_to_pvalue(v: serde_json::Value) -> PValue {
     match v {
-        serde_json::Value::Null => PValue::Unit,
+        // A json null is None, the same mapping the two json parsers use. This
+        // one used to answer Unit, so the same null had two shapes depending
+        // on which door it came through.
+        serde_json::Value::Null => PValue::none(),
         serde_json::Value::Bool(b) => PValue::Bool(b),
         serde_json::Value::Number(n) => match (n.as_i64(), n.as_u64()) {
             (Some(i), _) => PValue::Int(i),
@@ -542,4 +545,18 @@ fn pvalue_to_json(v: &PValue) -> Result<serde_json::Value> {
         }
         other => bail!("cannot serialize a {} to json", other.type_name()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A json null from a response body has to be the same None the two json
+    /// parsers make. This one answered Unit, and a `Value::Null` pattern only
+    /// matches None, so the same null matched or did not depending on whether
+    /// it came from `from_str` or from `resp.json()`.
+    #[test]
+    fn a_response_null_is_the_none_the_parsers_make() {
+        assert!(json_to_pvalue(serde_json::Value::Null).is_none_value());
+    }
 }

@@ -48,11 +48,29 @@ pub(super) fn json_type_test(recv: &Value, name: &str) -> Option<Value> {
     shared::json_type_test(json_kind(recv), name).map(Value::Bool)
 }
 
-/// `Value::pointer` and `pointer_mut`, the RFC 6901 lookup. These apply to
-/// every receiver like the type tests do, and a pointer that leaves the tree
-/// answers None instead of failing. The interpreter shares its containers, so
-/// the mut form hands back the same value the plain one does.
-pub(super) fn json_pointer(recv: &Value, name: &str, args: &[Value]) -> Option<Value> {
+/// The serde_json methods that apply to a whole `Value` whatever shape it
+/// turned out to be, so they are answered before the per type dispatch.
+///
+/// `pointer` and `pointer_mut` are the RFC 6901 lookup, and a pointer that
+/// leaves the tree answers None instead of failing. The interpreter shares its
+/// containers, so the mut form hands back the same value the plain one does.
+///
+/// `get` reaches here only on a shape with no lookup of its own, a string, a
+/// number or a bool, where serde answers None rather than failing. A map, a
+/// vec and an Option each have their own `get` and never reach this. A range
+/// argument on a string is `str::get`, a different method, so that one is left
+/// alone rather than silently answered None.
+pub(super) fn json_value_method(recv: &Value, name: &str, args: &[Value]) -> Option<Value> {
+    if name == "get" {
+        return match recv {
+            Value::Str(_) if matches!(args.first(), Some(Value::Range { .. })) => None,
+            Value::Str(_) | Value::Int(_) | Value::IntW(..) | Value::Float(_) | Value::F32(_) => {
+                Some(Value::none())
+            }
+            Value::Bool(_) | Value::Unit => Some(Value::none()),
+            _ => None,
+        };
+    }
     if !matches!(name, "pointer" | "pointer_mut") {
         return None;
     }
@@ -153,6 +171,14 @@ pub(super) fn generic_method(recv: &Value, name: &str, args: &[Value]) -> Result
     }
 }
 
+/// A `str::get(range)` slice, None when the bounds are out of range or land
+/// inside a character, exactly what the real method answers.
+fn str_slice(s: &str, start: i64, end: i64) -> Option<&str> {
+    let start = usize::try_from(start).ok()?;
+    let end = usize::try_from(end).ok()?;
+    s.get(start..end)
+}
+
 pub(super) fn str_method(s: &Rc<RStr>, method: &MethodName, args: &[Value]) -> Result<Value> {
     use BuiltinId as B;
     let arg_str = |i: usize| -> String { args.get(i).map(|v| v.display()).unwrap_or_default() };
@@ -168,6 +194,22 @@ pub(super) fn str_method(s: &Rc<RStr>, method: &MethodName, args: &[Value]) -> R
         B::Contains => Value::Bool(s.contains(&arg_str(0))),
         B::StartsWith => Value::Bool(s.starts_with(&arg_str(0))),
         B::EndsWith => Value::Bool(s.ends_with(&arg_str(0))),
+        // `str::get(range)`, the real slice method. A json `get` on a string
+        // is answered before the per type dispatch and never reaches here.
+        B::Get => match args.first() {
+            Some(Value::Range {
+                start,
+                end,
+                inclusive,
+            }) => {
+                let end = if *inclusive { end + 1 } else { *end };
+                match str_slice(s, *start, end) {
+                    Some(part) => Value::some(Value::str(part)),
+                    None => Value::none(),
+                }
+            }
+            _ => Value::none(),
+        },
         B::Chars => super::iterator::chars(s.clone()),
         B::Lines => super::iterator::lines(s.clone()),
         B::Split => split_value(s, args.first()),
@@ -330,13 +372,18 @@ pub(super) fn vec_method(
             let i = int_arg(args, 0)? as usize;
             v.borrow_mut().remove(i)
         }
-        B::Get => {
-            let i = int_arg(args, 0)? as usize;
-            match v.borrow().get(i) {
-                Some(x) => Value::some(x.clone()),
+        // A json array reads by index, and serde answers None for a key that
+        // is not one rather than failing, so a non-integer argument is None.
+        B::Get => match args.first().and_then(|a| a.int_parts()) {
+            Some((index, _)) => match usize::try_from(index)
+                .ok()
+                .and_then(|i| v.borrow().get(i).cloned())
+            {
+                Some(x) => Value::some(x),
                 None => Value::none(),
-            }
-        }
+            },
+            None => Value::none(),
+        },
         B::First => v
             .borrow()
             .first()

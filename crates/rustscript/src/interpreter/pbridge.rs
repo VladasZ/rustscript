@@ -315,7 +315,7 @@ impl PInterp {
         if let Some(answer) = shared::json_type_test(json_kind(recv), m) {
             return Ok(PValue::Bool(answer));
         }
-        if let Some(found) = json_pointer(recv, m, args) {
+        if let Some(found) = json_value_method(recv, m, args) {
             return Ok(found);
         }
         // Integer methods answer from the real width first, since the image
@@ -464,10 +464,16 @@ impl PInterp {
                 .last()
                 .cloned()
                 .map_or_else(PValue::none, PValue::some),
-            "get" => usize::try_from(int_arg(args))
-                .ok()
-                .and_then(|index| items.lock().get(index).cloned())
-                .map_or_else(PValue::none, PValue::some),
+            // A json array reads by index, and serde answers None for a key
+            // that is not one rather than failing, so a non-integer argument
+            // is None.
+            "get" => match args.first().and_then(PValue::int_parts) {
+                Some((index, _)) => usize::try_from(index)
+                    .ok()
+                    .and_then(|i| items.lock().get(i).cloned())
+                    .map_or_else(PValue::none, PValue::some),
+                None => PValue::none(),
+            },
             "split_first" => {
                 let items = items.lock();
                 match items.split_first() {
@@ -984,11 +990,20 @@ fn path_closure(segs: Vec<String>, num_params: usize) -> PValue {
     }))
 }
 
-/// `Value::pointer` and `pointer_mut`, the RFC 6901 lookup. These apply to
-/// every receiver like the type tests do, and a pointer that leaves the tree
-/// answers None instead of failing. The interpreter shares its containers, so
-/// the mut form hands back the same value the plain one does.
-fn json_pointer(recv: &PValue, m: &str, args: &[PValue]) -> Option<PValue> {
+/// The serde_json methods that apply to a whole `Value` whatever shape it
+/// turned out to be, the parallel twin of the fast engine's function of the
+/// same name. See that one for what each answers and why.
+fn json_value_method(recv: &PValue, m: &str, args: &[PValue]) -> Option<PValue> {
+    if m == "get" {
+        return match recv {
+            PValue::Str(_) if matches!(args.first(), Some(PValue::Range { .. })) => None,
+            PValue::Str(_) | PValue::Int(_) | PValue::IntW(..) | PValue::Float(_) => {
+                Some(PValue::none())
+            }
+            PValue::F32(_) | PValue::Bool(_) | PValue::Unit => Some(PValue::none()),
+            _ => None,
+        };
+    }
     if !matches!(m, "pointer" | "pointer_mut") {
         return None;
     }
@@ -1109,6 +1124,14 @@ fn enum_method(recv: &PValue, m: &str, args: &mut [PValue]) -> Result<PValue> {
     })
 }
 
+/// A `str::get(range)` slice, None when the bounds are out of range or land
+/// inside a character, exactly what the real method answers.
+fn str_slice(s: &str, start: i64, end: i64) -> Option<&str> {
+    let start = usize::try_from(start).ok()?;
+    let end = usize::try_from(end).ok()?;
+    s.get(start..end)
+}
+
 fn str_method(s: &Arc<str>, m: &str, args: &mut [PValue]) -> Result<PValue> {
     if let Some(out) = shared::str_core(s, m, &PArgs(args))? {
         return Ok(str_out(s, out));
@@ -1121,6 +1144,22 @@ fn str_method(s: &Arc<str>, m: &str, args: &mut [PValue]) -> Result<PValue> {
         "split_whitespace" => PValue::vec(s.split_whitespace().map(PValue::str).collect()),
         "lines" => PValue::vec(s.lines().map(PValue::str).collect()),
         "chars" => PValue::vec(s.chars().map(PValue::Char).collect()),
+        // `str::get(range)`, the real slice method. A json `get` on a string
+        // is answered before the per type dispatch and never reaches here.
+        "get" => match args.first() {
+            Some(PValue::Range {
+                start,
+                end,
+                inclusive,
+            }) => {
+                let end = if *inclusive { end + 1 } else { *end };
+                match str_slice(s, *start, end) {
+                    Some(part) => PValue::some(PValue::str(part)),
+                    None => PValue::none(),
+                }
+            }
+            _ => PValue::none(),
+        },
         "bytes" => PValue::vec(s.bytes().map(|b| PValue::Int(i64::from(b))).collect()),
         _ => bail!("method `{m}` on String is not supported in tokio mode"),
     })

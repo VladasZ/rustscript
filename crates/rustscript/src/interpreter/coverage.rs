@@ -18,10 +18,18 @@
 //! check, so path calls are left out until their tables are mapped properly.
 //!
 //! Where the receiver type is knowable it is used, so a `Vec` calling a `String`
-//! method is still caught. Where it is not, the check falls back to asking
-//! whether any bridge in this engine implements that name at all. That
-//! direction is deliberate: an unknown receiver reports nothing rather than
-//! guessing, so the check never invents a problem.
+//! method is still caught. That includes the type the author wrote on a
+//! parameter, which is a fact rather than a guess. A `serde_json::Value` is
+//! checked against every shape it can be at runtime, because the value that
+//! reaches the call could be any of them. That is what a name-only answer
+//! missed: `get` was implemented on a map, so `rust check` passed a script
+//! whose json turned out to be null, and the run then aborted on the method
+//! the check had just vouched for.
+//!
+//! Where the type is not knowable, the check falls back to asking whether any
+//! bridge in this engine implements that name at all. That direction is
+//! deliberate: an unknown receiver reports nothing rather than guessing, so
+//! the check never invents a problem.
 
 use std::collections::BTreeSet;
 
@@ -75,6 +83,9 @@ enum Ty {
     Bool,
     Char,
     Vec,
+    Map,
+    /// A `serde_json::Value`, which is any json shape at runtime.
+    Json,
     Unknown,
 }
 
@@ -83,10 +94,38 @@ impl Ty {
         match self {
             Ty::Str => Some("Str"),
             Ty::Vec => Some("Vec"),
+            Ty::Map => Some("Map"),
+            Ty::Json => Some("Value"),
             // The scalar bridges share one table, so they are checked by name
             // rather than per type.
             Ty::Int | Ty::Float | Ty::Bool | Ty::Char | Ty::Unknown => None,
         }
+    }
+
+    /// The type a written annotation names, for the parameters whose type the
+    /// author spelled out. Only the shapes the tables can check are mapped,
+    /// everything else stays Unknown and is checked by name alone.
+    fn from_annotation(name: &str) -> Ty {
+        match name {
+            "Value" => Ty::Json,
+            "String" | "str" => Ty::Str,
+            "Vec" | "VecDeque" => Ty::Vec,
+            "HashMap" | "BTreeMap" | "IndexMap" => Ty::Map,
+            _ => Ty::Unknown,
+        }
+    }
+}
+
+/// The shapes a `serde_json::Value` can be at runtime. A method called on one
+/// has to work on every shape, since the check cannot know which it will be.
+/// This is what a name-only answer missed: a map has `get`, a json null is an
+/// Option and did not, so `rust check` passed a script that then aborted.
+fn json_shapes(engine: Engine) -> &'static [&'static str] {
+    match engine {
+        // The parallel engine keeps one table for every enum, the fast engine
+        // splits Option and Result.
+        Engine::Parallel => &["Map", "Vec", "Str", "Enum"],
+        _ => &["Map", "Vec", "Str", "Option"],
     }
 }
 
@@ -111,7 +150,11 @@ fn any_name(engine: Engine, method: &str) -> bool {
 /// they rewrite the receiver register rather than return a value. They are
 /// dispatched by `BuiltinId` rather than by name, so the harvest cannot see
 /// them in either engine's tables and they are listed here instead.
-const VM_BUILTINS: &[&str] = &["clone_from", "push", "push_str"];
+/// `parse` is here for the same reason. Both engines answer it from the
+/// turbofish before name dispatch, and neither writes the name as a literal on
+/// purpose, since a literal in the parallel bridge would make the supported
+/// page claim `parse` is tokio only.
+const VM_BUILTINS: &[&str] = &["clone_from", "push", "push_str", "parse"];
 
 /// Whether the bridge for this receiver implements the method.
 fn on_recv(engine: Engine, recv: &str, method: &str) -> bool {
@@ -208,9 +251,14 @@ fn walk(chunk: &Chunk, engine: Engine, user: &BTreeSet<String>, out: &mut Vec<Fi
                 continue;
             }
             let ty = infer(chunk, index, *recv);
-            let known = match ty.name() {
-                Some(recv_name) => on_recv(engine, recv_name, method),
-                None => any_name(engine, method),
+            let known = match ty {
+                Ty::Json => json_shapes(engine)
+                    .iter()
+                    .all(|shape| on_recv(engine, shape, method)),
+                _ => match ty.name() {
+                    Some(recv_name) => on_recv(engine, recv_name, method),
+                    None => any_name(engine, method),
+                },
             };
             if !known {
                 out.push(Finding {
@@ -226,9 +274,10 @@ fn walk(chunk: &Chunk, engine: Engine, user: &BTreeSet<String>, out: &mut Vec<Fi
     }
 }
 
-/// The type of a register, from the nearest earlier op that wrote it. Anything
-/// less direct is `Unknown`, which makes the check fall back to name only
-/// rather than guess.
+/// The type of a register, from the nearest earlier op that wrote it. A
+/// parameter register nothing has written yet is the type the author wrote in
+/// the signature. Anything less direct is `Unknown`, which makes the check
+/// fall back to name only rather than guess.
 fn infer(chunk: &Chunk, before: usize, reg: u16) -> Ty {
     for op in chunk.code[..before].iter().rev() {
         match op {
@@ -252,7 +301,12 @@ fn infer(chunk: &Chunk, before: usize, reg: u16) -> Ty {
             }
         }
     }
-    Ty::Unknown
+    // Nothing wrote it, so a register inside the parameter block still holds
+    // the argument, whose type is written down in the signature.
+    match chunk.param_types.get(reg as usize) {
+        Some(Some(name)) => Ty::from_annotation(name),
+        _ => Ty::Unknown,
+    }
 }
 
 /// The register an op writes, when it has a single obvious destination.
@@ -337,6 +391,39 @@ mod tests {
         for method in VM_BUILTINS {
             assert!(on_recv(Engine::Parallel, "Str", method));
             assert!(any_name(Engine::Parallel, method));
+        }
+    }
+
+    /// A `serde_json::Value` receiver is checked against every shape it can
+    /// be, not just the one that happens to carry the method. `keys` stands in
+    /// for the original miss: a map has it, the other shapes do not, so a call
+    /// on a `Value` must not be waved through.
+    ///
+    /// Asserted on the parallel engine, which is where the tables are the whole
+    /// surface and where the crash happened. The fast engine keeps its
+    /// `BUILTIN_IDS` rescue, so a name with a dispatch id still passes there
+    /// whatever the receiver, which is the same looseness it has always had.
+    #[test]
+    fn a_json_value_is_checked_against_every_shape() {
+        assert!(on_recv(Engine::Parallel, "Map", "keys"));
+        assert!(
+            !json_shapes(Engine::Parallel).iter().all(|shape| on_recv(
+                Engine::Parallel,
+                shape,
+                "keys"
+            )),
+            "a map-only method must not pass for a json Value"
+        );
+        // `get` is the method that actually broke. It has to be on every shape
+        // of both engines now, so a lookup into a json value that turned out
+        // to be a null, a string or a number answers rather than aborting.
+        for engine in [Engine::Fast, Engine::Parallel] {
+            assert!(
+                json_shapes(engine)
+                    .iter()
+                    .all(|shape| on_recv(engine, shape, "get")),
+                "`get` has to work on every json shape"
+            );
         }
     }
 

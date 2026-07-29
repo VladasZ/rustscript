@@ -57,6 +57,7 @@ struct FnState {
     reg_top: Reg,
     max_reg: Reg,
     num_params: usize,
+    param_types: Vec<Option<String>>,
     name: String,
     generics: Vec<Rc<str>>,
     call_type_args: Vec<Arc<[TypeIr]>>,
@@ -85,6 +86,7 @@ impl FnState {
             reg_top: 0,
             max_reg: 0,
             num_params: 0,
+            param_types: Vec::new(),
             name,
             generics: Vec::new(),
             call_type_args: Vec::new(),
@@ -109,6 +111,7 @@ impl FnState {
             file,
             num_regs: self.max_reg as usize,
             num_params: self.num_params,
+            param_types: self.param_types,
             name: self.name,
             module: 0,
             consts: self.consts,
@@ -223,13 +226,21 @@ impl<'a> Compiler<'a> {
         self.cur().generics = generics;
         // Parameters occupy the first registers, self first if present.
         let mut params: Vec<Option<&Pat>> = Vec::new();
+        let mut types: Vec<Option<String>> = Vec::new();
         for input in &sig.inputs {
             match input {
-                FnArg::Receiver(_) => params.push(None),
-                FnArg::Typed(t) => params.push(Some(&t.pat)),
+                FnArg::Receiver(_) => {
+                    params.push(None);
+                    types.push(None);
+                }
+                FnArg::Typed(t) => {
+                    params.push(Some(&t.pat));
+                    types.push(type_head(&t.ty));
+                }
             }
         }
         self.cur().num_params = params.len();
+        self.cur().param_types = types;
         for (i, p) in params.iter().enumerate() {
             let reg = self.alloc();
             debug_assert_eq!(reg as usize, i);
@@ -820,6 +831,21 @@ fn parse_matches(mac: &syn::Macro) -> Result<(Expr, syn::Pat, Option<Expr>)> {
         Ok((expr, pat, guard))
     }
     Ok(mac.parse_body_with(inner)?)
+}
+
+/// The head name of a written type, references and slices peeled off, so
+/// `&serde_json::Value` is `Value` and `&[String]` is `Vec`. Only the head
+/// matters to the coverage check, which asks what the receiver is, not what it
+/// holds. None for anything that is not a plain path.
+fn type_head(ty: &syn::Type) -> Option<String> {
+    match ty {
+        syn::Type::Reference(r) => type_head(&r.elem),
+        syn::Type::Paren(p) => type_head(&p.elem),
+        syn::Type::Group(g) => type_head(&g.elem),
+        syn::Type::Slice(_) | syn::Type::Array(_) => Some("Vec".to_string()),
+        syn::Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
+        _ => None,
+    }
 }
 
 fn expr_kind(expr: &Expr) -> &'static str {

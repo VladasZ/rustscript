@@ -768,6 +768,12 @@ pub struct Chunk {
     pub file: Arc<str>,
     pub num_regs: usize,
     pub num_params: usize,
+    /// The written type of each parameter, last path segment only, for example
+    /// `Value` for a `&serde_json::Value`. None where the parameter is `self`
+    /// or its type is not a plain path. The coverage check reads these, so a
+    /// method called on a parameter is checked against the type the author
+    /// wrote rather than falling back to a name-only answer.
+    pub param_types: Vec<Option<String>>,
     pub name: String,
     /// Module this body was written in, for runtime type resolution.
     pub module: u16,
@@ -804,6 +810,7 @@ impl Chunk {
             file: Arc::from(""),
             num_regs: 0,
             num_params: 0,
+            param_types: Vec::new(),
             name: name.into(),
             module: 0,
             consts: Vec::new(),
