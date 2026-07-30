@@ -11,7 +11,9 @@ use super::bytecode::{PLit, PPat};
 use super::numeric::{
     float_arith, i64_arith, int_arith, int_bit, int_neg, int_not, int_shift, unify,
 };
+use super::pbridge::{duration_from_std, duration_of};
 use super::pvalue::PValue;
+use super::shared::duration_arith;
 
 pub(super) fn apply_bin(op: BinKind, l: &PValue, r: &PValue) -> Result<PValue> {
     use BinKind::*;
@@ -67,6 +69,9 @@ fn arith(op: BinKind, l: &PValue, r: &PValue) -> Result<PValue> {
         out.push_str(a);
         out.push_str(b);
         return Ok(PValue::str(out));
+    }
+    if let (Some(a), Some(b)) = (duration_of(l), duration_of(r)) {
+        return Ok(duration_from_std(duration_arith(op, a, b)?));
     }
     if let (PValue::Int(a), PValue::Int(b)) = (l, r) {
         return Ok(PValue::Int(i64_arith(op, *a, *b)?));

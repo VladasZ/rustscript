@@ -75,11 +75,15 @@ impl PInterp {
             }
             Some(other) => {
                 // The numeric limit and float constants, `i32::MAX`,
-                // `f64::NAN`, shared with the fast engine.
+                // `f64::NAN`, shared with the fast engine. The widths that
+                // tag their values, `u16::MAX`, carry the tag across so the
+                // constant keeps its real width here too.
                 if segs.len() >= 2 {
                     match super::builtins::int_limit(&segs[segs.len() - 2], other) {
                         Some(Value::Int(i)) => return Ok(PValue::Int(i)),
+                        Some(Value::IntW(v, w)) => return Ok(PValue::IntW(v, w)),
                         Some(Value::Float(f)) => return Ok(PValue::Float(f)),
+                        Some(Value::F32(f)) => return Ok(PValue::F32(f)),
                         _ => {}
                     }
                     if let Some(v) = super::pratatui::ratatui_const(&segs[segs.len() - 2], other) {
@@ -700,7 +704,7 @@ fn duration_value(millis: i64) -> PValue {
     duration_from_std(Duration::from_millis(millis as u64))
 }
 
-fn duration_from_std(duration: Duration) -> PValue {
+pub(super) fn duration_from_std(duration: Duration) -> PValue {
     PValue::struct_of(
         "Duration",
         [
@@ -708,6 +712,18 @@ fn duration_from_std(duration: Duration) -> PValue {
             ("nanos".into(), PValue::Int(duration.as_nanos() as i64)),
         ],
     )
+}
+
+/// A script `Duration` back as the real std value, read from the total nanos
+/// the struct carries.
+pub(super) fn duration_of(v: &PValue) -> Option<Duration> {
+    if let PValue::Struct(s) = v
+        && &**s.name() == "Duration"
+        && let Some(PValue::Int(nanos)) = s.get("nanos")
+    {
+        return Some(Duration::from_nanos(nanos.max(0) as u64));
+    }
+    None
 }
 
 fn sleep_future(args: &[PValue]) -> PValue {

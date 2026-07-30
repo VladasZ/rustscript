@@ -15,6 +15,8 @@ use super::bytecode::{BinKind, PLit, PPat, UnKind};
 use super::numeric::{
     IntWidth, float_arith, i64_arith, int_arith, int_bit, int_neg, int_not, int_shift, unify,
 };
+use super::shared::duration_arith;
+use super::std_bridge::{duration_from_value, make_duration};
 use super::value::Value;
 use anyhow::{Result, anyhow, bail};
 
@@ -205,6 +207,9 @@ fn arith_general(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
         out.push_str(a);
         out.push_str(b);
         return Ok(Value::str(out));
+    }
+    if let (Some(a), Some(b)) = (duration_from_value(l), duration_from_value(r)) {
+        return Ok(make_duration(duration_arith(op, a, b)?));
     }
     if let (Some((a, wa)), Some((b, wb))) = (l.int_parts(), r.int_parts()) {
         let width = unify(wa, wb)?;
