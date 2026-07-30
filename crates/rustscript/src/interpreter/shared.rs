@@ -13,10 +13,11 @@
 //! cell types per engine.
 
 use std::cmp::Ordering;
+use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 
-use super::bytecode::ScalarTy;
+use super::bytecode::{BinKind, ScalarTy};
 use super::numeric::IntWidth;
 
 /// Engine neutral view of a method's arguments. Each engine adapts its own
@@ -551,6 +552,21 @@ pub(super) enum DurOut {
     Int(i64),
     Float(f64),
     Bool(bool),
+}
+
+/// `Duration + Duration` and `Duration - Duration`, the checked std ops with
+/// the real panic messages as the errors. Any other operator on two durations
+/// does not exist in std either.
+pub(super) fn duration_arith(op: BinKind, a: Duration, b: Duration) -> Result<Duration> {
+    match op {
+        BinKind::Add => a
+            .checked_add(b)
+            .ok_or_else(|| anyhow!("overflow when adding durations")),
+        BinKind::Sub => a
+            .checked_sub(b)
+            .ok_or_else(|| anyhow!("overflow when subtracting durations")),
+        _ => bail!("cannot apply that operator to two durations"),
+    }
 }
 
 /// `Duration` accessors over the real `secs` plus `nanos` split, exactly the
