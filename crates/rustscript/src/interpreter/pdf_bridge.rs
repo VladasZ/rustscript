@@ -4,9 +4,6 @@
 //! `get_page_content`, `change_page_content`, and `save`. An `ObjectId` is the
 //! `(u32, u16)` tuple lopdf defines, carried here as a plain tuple value.
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
 use anyhow::{Result, bail};
 use lopdf::{Document, ObjectId};
 
@@ -36,7 +33,7 @@ pub(super) fn document_method(
                     .expect("an int is always a valid map key");
                 map.insert(key, object_id_value(id));
             }
-            Value::Map(Rc::new(RefCell::new(map)))
+            Value::map_of(map)
         }
         "get_page_content" => {
             let id = object_id_arg(args, 0)?;

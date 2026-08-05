@@ -9,7 +9,7 @@ use anyhow::{Result, anyhow, bail};
 use super::Interp;
 use super::numeric::{float_to_int, truncate};
 use super::typeir::{CastIr, TypeIr, lower_type};
-use super::value::{KeyRef, Map, StructShape, Value};
+use super::value::{KeyRef, Map, MapKind, StructShape, Value};
 
 /// Field layout of a user struct, built once per struct and reused for every
 /// coerced instance so field names are shared instead of re-allocated.
@@ -46,14 +46,14 @@ impl Interp {
                                 .borrow()
                                 .iter()
                                 .map(|v| match v {
-                                    Value::Map(m) => self.struct_from_map(&shape, &m.borrow()),
+                                    Value::Map(m, _) => self.struct_from_map(&shape, &m.borrow()),
                                     other => other.clone(),
                                 })
                                 .collect(),
                         ),
                         None => value,
                     },
-                    TypeIr::Vec(_) | TypeIr::Option(_) => Value::vec(
+                    TypeIr::Vec(_) | TypeIr::Option(_) | TypeIr::Set(_) => Value::vec(
                         items
                             .borrow()
                             .iter()
@@ -62,6 +62,26 @@ impl Interp {
                     ),
                     TypeIr::Dynamic | TypeIr::Generic(_) | TypeIr::MapValue(_) => value,
                 }
+            }
+            TypeIr::Set(inner) => {
+                // A map-shaped value only needs the set tag. A `collect()`
+                // lands here as a Vec and packs into the shared map storage.
+                if let Value::Map(m, _) = &value {
+                    return Value::Map(m.clone(), MapKind::Set);
+                }
+                let Value::Vec(items) = &value else {
+                    return value;
+                };
+                let mut set = Map::default();
+                for v in items.borrow().iter() {
+                    // An element that cannot be a key leaves the value alone,
+                    // the give-up path every other coercion takes.
+                    let Some(key) = self.coerce_value(v.clone(), inner).into_key() else {
+                        return value.clone();
+                    };
+                    set.insert(key, Value::Unit);
+                }
+                Value::set_of(set)
             }
             TypeIr::Option(inner) => {
                 if let Value::Enum {
@@ -79,7 +99,7 @@ impl Interp {
                 value
             }
             TypeIr::Struct(canon) => {
-                if let Value::Map(map) = &value
+                if let Value::Map(map, _) = &value
                     && let Some(shape) = self.struct_shape(canon)
                 {
                     return self.struct_from_map(&shape, &map.borrow());
@@ -117,11 +137,17 @@ impl Interp {
         let mut fields: Vec<Rc<str>> = Vec::new();
         let mut renames: Vec<Option<Rc<str>>> = Vec::new();
         let mut coerce = Vec::new();
+        let rule = super::json_bridge::serde_rename_all(&def.attrs);
         if let syn::Fields::Named(named) = &def.fields {
             for f in &named.named {
                 let Some(ident) = &f.ident else { continue };
                 fields.push(ident.to_string().into());
-                renames.push(super::json_bridge::serde_rename(f).map(Rc::from));
+                // A field's own rename wins over the container rule.
+                renames.push(
+                    super::json_bridge::serde_rename(f)
+                        .or_else(|| rule.map(|r| r.apply(&ident.to_string())))
+                        .map(Rc::from),
+                );
                 // Field types resolve where the struct is declared, with no
                 // function generics in scope.
                 let ir = lower_type(&f.ty, self.resolver(), module, &[]);
@@ -266,7 +292,7 @@ impl Interp {
                 let items = items.borrow();
                 items.get(i).cloned().ok_or_else(|| oob(items.len(), i))?
             }
-            Value::Map(map) => {
+            Value::Map(map, _) => {
                 let k = key
                     .key_ref()
                     .ok_or_else(|| anyhow!("{} is not a valid map key", key.type_name()))?;
@@ -294,7 +320,7 @@ impl Interp {
                 }
                 items[i] = val;
             }
-            Value::Map(map) => {
+            Value::Map(map, _) => {
                 let k = key
                     .as_key()
                     .ok_or_else(|| anyhow!("{} is not a valid map key", key.type_name()))?;

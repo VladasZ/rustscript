@@ -9,7 +9,7 @@ use anyhow::{Result, anyhow, bail};
 
 use super::bytecode::{BuiltinId, MethodName, ScalarTy};
 
-use super::value::{Map, RStr, StructData, Value};
+use super::value::{Map, MapKind, RStr, StructData, Value};
 
 use super::builtins::*;
 use super::ops::compare_values;
@@ -21,7 +21,7 @@ pub(super) fn entry_method(s: &StructData, name: &str, args: &[Value]) -> Result
         .get("key")
         .and_then(|k| k.as_key())
         .ok_or_else(|| anyhow!("invalid entry key"))?;
-    let Some(Value::Map(m)) = s.get("map") else {
+    let Some(Value::Map(m, _)) = s.get("map") else {
         bail!("entry lost its map");
     };
     Ok(match name {
@@ -81,7 +81,7 @@ pub(super) fn json_value_method(recv: &Value, name: &str, args: &[Value]) -> Opt
     let mut here = recv.clone();
     for token in tokens {
         let next = match &here {
-            Value::Map(map) => Value::str(token)
+            Value::Map(map, _) => Value::str(token)
                 .as_key()
                 .and_then(|key| map.borrow().get(&key).cloned()),
             Value::Vec(items) => shared::json_pointer_index(&token)
@@ -100,7 +100,7 @@ pub(super) fn json_value_method(recv: &Value, name: &str, args: &[Value]) -> Opt
 fn json_kind(recv: &Value) -> shared::JsonKind {
     use shared::JsonKind as K;
     match recv {
-        Value::Map(_) => K::Object,
+        Value::Map(..) => K::Object,
         Value::Vec(_) => K::Array,
         Value::Str(_) => K::Str,
         Value::Bool(_) => K::Bool,
@@ -700,6 +700,7 @@ pub(super) fn vec_method(
 
 pub(super) fn map_method(
     m: &Rc<RefCell<Map>>,
+    kind: MapKind,
     method: &MethodName,
     args: &mut [Value],
 ) -> Result<Value> {
@@ -713,11 +714,17 @@ pub(super) fn map_method(
     Ok(match method.id {
         B::Len | B::Count => Value::Int(m.borrow().len() as i64),
         B::IsEmpty => Value::Bool(m.borrow().is_empty()),
-        B::Clone => Value::Map(Rc::new(RefCell::new(m.borrow().clone()))),
+        B::Clone => Value::Map(Rc::new(RefCell::new(m.borrow().clone())), kind),
         B::Insert => {
             let k = take(&mut args[0])
                 .into_key()
                 .ok_or_else(|| anyhow!("invalid map key"))?;
+            // A set's insert takes only the element and answers whether it
+            // was new, a map's takes a value and answers the old one.
+            if kind == MapKind::Set {
+                let old = m.borrow_mut().insert(k, Value::Unit);
+                return Ok(Value::Bool(old.is_none()));
+            }
             let val = args.get_mut(1).map(take).unwrap_or(Value::Unit);
             let old = m.borrow_mut().insert(k, val);
             match old {
@@ -725,15 +732,30 @@ pub(super) fn map_method(
                 None => Value::none(),
             }
         }
+        // A set's get answers the stored element itself, not the Unit value
+        // that backs it.
+        B::Get if kind == MapKind::Set => {
+            let arg = args.first().ok_or_else(|| anyhow!("invalid map key"))?;
+            let k = arg.key_ref().ok_or_else(|| anyhow!("invalid map key"))?;
+            match m.borrow().get_key_value(&k) {
+                Some((key, _)) => Value::some(key.to_value()),
+                None => Value::none(),
+            }
+        }
         B::Get => lookup(0, &|v| match v {
             Some(v) => Value::some(v.clone()),
             None => Value::none(),
         })?,
+        B::Contains if kind == MapKind::Set => lookup(0, &|v| Value::Bool(v.is_some()))?,
         B::ContainsKey => lookup(0, &|v| Value::Bool(v.is_some()))?,
         B::Remove => {
             let arg = args.first().ok_or_else(|| anyhow!("invalid map key"))?;
             let k = arg.key_ref().ok_or_else(|| anyhow!("invalid map key"))?;
             let removed = m.borrow_mut().shift_remove(&k);
+            // A set's remove answers whether the element was there.
+            if kind == MapKind::Set {
+                return Ok(Value::Bool(removed.is_some()));
+            }
             match removed {
                 Some(v) => Value::some(v),
                 None => Value::none(),
@@ -744,23 +766,30 @@ pub(super) fn map_method(
         B::Entry => Value::struct_of(
             "Entry",
             [
-                ("map".into(), Value::Map(m.clone())),
+                ("map".into(), Value::Map(m.clone(), kind)),
                 ("key".into(), args.first().cloned().unwrap_or(Value::Unit)),
             ],
         ),
+        B::Iter if kind == MapKind::Set => set_items(m),
         B::Iter => map_pairs(m),
         _ => match method.text.as_str() {
             "values_mut" => Value::vec(m.borrow().values().cloned().collect()),
+            "drain" if kind == MapKind::Set => set_items(m),
             "drain" => map_pairs(m),
             // A JSON object parsed by the interpreter is a Map, so the
             // serde_json accessors resolve against it here. A Map is Rc shared,
             // so the mut accessor is the same call: what it hands back is the
             // same map, and an insert through it reaches the original value.
-            "as_object" | "as_object_mut" => Value::some(Value::Map(m.clone())),
+            "as_object" | "as_object_mut" => Value::some(Value::Map(m.clone(), kind)),
             "as_array" | "as_array_mut" => Value::none(),
-            name => return generic_method(&Value::Map(m.clone()), name, &*args),
+            name => return generic_method(&Value::Map(m.clone(), kind), name, &*args),
         },
     })
+}
+
+/// The elements of a set, for `iter` and `into_iter` and `drain`.
+fn set_items(m: &Rc<RefCell<Map>>) -> Value {
+    Value::vec(m.borrow().keys().map(|k| k.to_value()).collect())
 }
 
 pub(super) fn map_pairs(m: &Rc<RefCell<Map>>) -> Value {

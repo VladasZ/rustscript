@@ -237,6 +237,31 @@ impl Compiler<'_> {
             self.emit(Op::LoadUnit { dst });
             return Ok(());
         }
+        // Block-level consts and statics bind up front, so a use earlier in
+        // the block still resolves, the way item hoisting works in real Rust.
+        // Their init expressions are const-evaluable, so evaluation order
+        // against the other statements is unobservable.
+        for stmt in &block.stmts {
+            let Stmt::Item(item) = stmt else { continue };
+            match item {
+                syn::Item::Const(c) => {
+                    self.set_line(c.span());
+                    let val = self.alloc();
+                    self.compile_into(val, &c.expr)?;
+                    self.define(&c.ident.to_string(), val);
+                }
+                syn::Item::Static(s) => {
+                    if matches!(s.mutability, syn::StaticMutability::Mut(_)) {
+                        bail!("unsupported feature: `static mut`");
+                    }
+                    self.set_line(s.span());
+                    let val = self.alloc();
+                    self.compile_into(val, &s.expr)?;
+                    self.define(&s.ident.to_string(), val);
+                }
+                _ => {}
+            }
+        }
         let last = block.stmts.len() - 1;
         for (i, stmt) in block.stmts.iter().enumerate() {
             let is_last = i == last;

@@ -637,7 +637,7 @@ pub(super) fn builtin_method(
     match recv {
         Value::Str(s) => return str_method(s, method, &*args),
         Value::Vec(v) => return vec_method(v, method, args),
-        Value::Map(m) => return map_method(m, method, args),
+        Value::Map(m, kind) => return map_method(m, *kind, method, args),
         _ => {}
     }
     let name = method.text.as_str();

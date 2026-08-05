@@ -110,7 +110,7 @@ fn node_to_value(node: &XMLNode) -> Value {
 fn value_to_element(s: &super::value::StructData) -> Result<Element> {
     let namespaces = match s.get("namespaces") {
         Some(v) => match option_value(&v) {
-            Some(Value::Map(m)) => {
+            Some(Value::Map(m, _)) => {
                 let map = m
                     .borrow()
                     .iter()
@@ -123,7 +123,7 @@ fn value_to_element(s: &super::value::StructData) -> Result<Element> {
         None => None,
     };
     let mut attributes = xmltree::AttributeMap::new();
-    if let Some(Value::Map(m)) = s.get("attributes") {
+    if let Some(Value::Map(m, _)) = s.get("attributes") {
         for (k, v) in m.borrow().iter() {
             attributes.insert(k.to_value().display(), v.display());
         }
@@ -192,15 +192,13 @@ fn option_value(v: &Value) -> Option<Value> {
 }
 
 fn map_value(pairs: impl IntoIterator<Item = (Value, Value)>) -> Value {
-    use std::cell::RefCell;
-    use std::rc::Rc;
     let mut map = super::value::Map::default();
     for (k, v) in pairs {
         if let Some(key) = k.into_key() {
             map.insert(key, v);
         }
     }
-    Value::Map(Rc::new(RefCell::new(map)))
+    Value::map_of(map)
 }
 
 /// Bytes from either a `Vec<u8>` of ints or a string argument.

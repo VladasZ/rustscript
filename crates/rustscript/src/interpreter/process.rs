@@ -8,7 +8,7 @@ use anyhow::{Result, bail};
 
 use super::native::{self, Native};
 use super::std_bridge::path_like;
-use super::value::{Map, MapKey, RStr, StructData, Value};
+use super::value::{Map, MapKey, MapKind, RStr, StructData, Value};
 
 /// Build a real `Command` from a script `Command` value's fields. Every field
 /// that becomes an OS string goes through `path_like`, so a `Path` or `PathBuf`
@@ -29,7 +29,7 @@ pub(super) fn build_command(s: &StructData) -> std::process::Command {
             cmd.current_dir(path_like(&cwd));
         }
     }
-    if let Some(Value::Map(envs)) = s.get("envs") {
+    if let Some(Value::Map(envs, _)) = s.get("envs") {
         for (k, v) in envs.borrow().iter() {
             let key = path_like(&k.to_value());
             if matches!(v, Value::Unit) {
@@ -251,10 +251,10 @@ pub(super) fn command_method(s: &Rc<StructData>, name: &str, args: &[Value]) -> 
 
 fn command_envs(s: &StructData) -> Rc<RefCell<Map>> {
     match s.get("envs") {
-        Some(Value::Map(envs)) => envs,
+        Some(Value::Map(envs, _)) => envs,
         _ => {
             let envs = Rc::new(RefCell::new(Map::default()));
-            s.set("envs", Value::Map(envs.clone()));
+            s.set("envs", Value::Map(envs.clone(), MapKind::Map));
             envs
         }
     }
