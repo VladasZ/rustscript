@@ -92,7 +92,7 @@ mod imp {
             let Some(v) = row.get(name) else { continue };
             map.insert(MapKey::Str(RStr::new(name.clone())), from_variant(v));
         }
-        Value::Map(Rc::new(RefCell::new(map)))
+        Value::map_of(map)
     }
 
     pub(super) fn wmi_method(s: &StructData, name: &str, args: &[Value]) -> Result<Value> {

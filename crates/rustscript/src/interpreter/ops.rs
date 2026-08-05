@@ -396,7 +396,7 @@ fn json_variant_kind_matches(name: Option<&str>, val: &Value) -> bool {
             | (Some("Number"), Value::Int(_) | Value::Float(_))
             | (Some("Bool"), Value::Bool(_))
             | (Some("Array"), Value::Vec(_))
-            | (Some("Object"), Value::Map(_))
+            | (Some("Object"), Value::Map(..))
     )
 }
 

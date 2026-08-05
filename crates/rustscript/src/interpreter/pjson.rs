@@ -51,12 +51,15 @@ impl Interp {
             let mut json = Vec::new();
             let mut optional = Vec::new();
             let mut key_map = FxHashMap::default();
+            let rule = super::json_bridge::serde_rename_all(&ast.attrs);
             if let syn::Fields::Named(named) = &ast.fields {
                 let mut slot = 0;
                 for f in &named.named {
                     let Some(ident) = &f.ident else { continue };
                     let name = ident.to_string();
-                    let rename = super::json_bridge::serde_rename(f);
+                    // A field's own rename wins over the container rule.
+                    let rename = super::json_bridge::serde_rename(f)
+                        .or_else(|| rule.map(|r| r.apply(&name)));
                     fields.push(Arc::from(name.as_str()));
                     renames.push(rename.as_deref().map(Arc::from));
                     let ir = lower_type(&f.ty, self.resolver(), module, &[]);
@@ -99,7 +102,9 @@ impl PInterp {
     /// eval.rs.
     pub(super) fn coerce_value(&self, value: PValue, ty: &TypeIr) -> PValue {
         match ty {
-            TypeIr::Dynamic | TypeIr::Generic(_) | TypeIr::MapValue(_) => value,
+            // No set representation in this engine, sets already fail loudly
+            // at `HashSet::new` in tokio mode, so a set annotation is inert.
+            TypeIr::Dynamic | TypeIr::Generic(_) | TypeIr::MapValue(_) | TypeIr::Set(_) => value,
             TypeIr::Vec(inner) => {
                 let PValue::Vec(items) = &value else {
                     return value;
@@ -128,7 +133,9 @@ impl PInterp {
                             .collect();
                         PValue::vec(out)
                     }
-                    TypeIr::Dynamic | TypeIr::Generic(_) | TypeIr::MapValue(_) => value,
+                    TypeIr::Dynamic | TypeIr::Generic(_) | TypeIr::MapValue(_) | TypeIr::Set(_) => {
+                        value
+                    }
                 }
             }
             TypeIr::Option(inner) => {
@@ -212,6 +219,10 @@ impl PInterp {
             TypeIr::MapValue(inner) => {
                 PJsonPlan::Map(Box::new(self.json_plan(inner, building, tenv)))
             }
+            // The parallel engine has no set representation yet, sets already
+            // fail loudly at `HashSet::new` in tokio mode. The elements still
+            // parse with their own plan.
+            TypeIr::Set(inner) => PJsonPlan::Vec(Box::new(self.json_plan(inner, building, tenv))),
             TypeIr::Struct(canon) => {
                 if building.iter().any(|b| b.as_str() == &**canon) {
                     return PJsonPlan::Dynamic;
@@ -463,10 +474,10 @@ impl<'de> serde::de::Visitor<'de> for PlanVisitor<'_> {
     ) -> std::result::Result<PValue, A::Error> {
         match self.plan {
             PJsonPlan::Struct(sp) => {
-                // Missing fields become None, like the coercion pass did.
                 let mut values: Vec<PValue> = (0..sp.info.shape.fields.len())
                     .map(|_| PValue::none())
                     .collect();
+                let mut filled = vec![false; values.len()];
                 while let Some(slot) = access.next_key_seed(FieldSeed {
                     key_map: &sp.info.key_map,
                 })? {
@@ -483,12 +494,17 @@ impl<'de> serde::de::Visitor<'de> for PlanVisitor<'_> {
                             } else {
                                 v
                             };
+                            filled[i] = true;
                         }
                         None => {
                             access.next_value::<serde::de::IgnoredAny>()?;
                         }
                     }
                 }
+                // A required field with no key in the json fails the parse,
+                // like real serde, instead of binding a hole that only
+                // explodes later. Option fields stay None.
+                super::json_bridge::missing_field(&filled, &sp.info.optional, &sp.info.key_map)?;
                 Ok(PValue::structure(sp.info.shape.clone(), values))
             }
             plan => {

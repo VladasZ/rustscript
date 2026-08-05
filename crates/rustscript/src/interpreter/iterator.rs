@@ -10,7 +10,7 @@ use super::bytecode::{BuiltinId, MethodName, ScalarTy};
 use super::native::{Native, lines_next};
 use super::ops::compare_values;
 use super::regex_bridge::{CapturesValue, MatchValue, RegexValue};
-use super::value::{ClosureData, Map, RStr, Value, ValueRef};
+use super::value::{ClosureData, Map, MapKey, MapKind, RStr, Value, ValueRef};
 
 type Handle = Rc<RefCell<Native>>;
 
@@ -381,8 +381,13 @@ impl Interp {
                 Value::Native(native)
             }
             Value::Vec(values) | Value::Tuple(values) => value_iter(values),
-            Value::Map(map) => {
-                let owned = map_items(&map.borrow());
+            Value::Map(map, kind) => {
+                let map = map.borrow();
+                // A set iterates its elements, a map its (key, value) pairs.
+                let owned = match kind {
+                    MapKind::Map => map_items(&map),
+                    MapKind::Set => map.keys().map(MapKey::to_value).collect(),
+                };
                 wrap(IteratorState::Owned {
                     values: owned,
                     index: 0,

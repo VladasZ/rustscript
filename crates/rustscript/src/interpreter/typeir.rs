@@ -57,6 +57,10 @@ pub enum TypeIr {
     /// The value type of `HashMap<K, V>` or `BTreeMap<K, V>`. Coercion leaves
     /// maps untouched, typed json uses it for the entry values.
     MapValue(Arc<TypeIr>),
+    /// The element type of `HashSet<T>` or `BTreeSet<T>`. Coercion turns a
+    /// collected Vec into a set, so an annotated `collect()` builds the real
+    /// container and not a Vec wearing the wrong type.
+    Set(Arc<TypeIr>),
     Option(Arc<TypeIr>),
     /// A user struct, by canonical name.
     Struct(Arc<str>),
@@ -70,7 +74,7 @@ impl TypeIr {
     pub fn is_active(&self) -> bool {
         match self {
             TypeIr::Dynamic | TypeIr::Generic(_) | TypeIr::MapValue(_) => false,
-            TypeIr::Struct(_) => true,
+            TypeIr::Struct(_) | TypeIr::Set(_) => true,
             TypeIr::Vec(inner) | TypeIr::Option(inner) => inner.is_active(),
         }
     }
@@ -127,6 +131,7 @@ fn lower(
             None => TypeIr::Dynamic,
         },
         "HashMap" | "BTreeMap" => arg(1).map(TypeIr::MapValue).unwrap_or(TypeIr::Dynamic),
+        "HashSet" | "BTreeSet" => arg(0).map(TypeIr::Set).unwrap_or(TypeIr::Dynamic),
         _ => {
             if let Some(canon) = resolver.resolve_struct_key(module, &p.path) {
                 return TypeIr::Struct(Arc::from(&*canon));

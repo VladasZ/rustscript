@@ -72,7 +72,7 @@ impl Interp {
             .get("key")
             .and_then(|k| k.as_key())
             .ok_or_else(|| anyhow!("invalid entry key"))?;
-        let Some(Value::Map(map)) = entry.get("map") else {
+        let Some(Value::Map(map, _)) = entry.get("map") else {
             bail!("entry lost its map");
         };
         match name {

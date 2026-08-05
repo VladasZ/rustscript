@@ -11,7 +11,7 @@ use rustc_hash::FxHashMap;
 use super::Interp;
 use super::numeric::IntWidth;
 use super::typeir::{TypeIr, lower_type};
-use super::value::{MapKey, RStr, StructShape, Value, map_with_capacity};
+use super::value::{MapKey, MapKind, RStr, StructShape, Value, map_with_capacity};
 
 // -- serde_json bridge -----------------------------------------------------
 
@@ -155,7 +155,7 @@ impl<'de> serde::de::Visitor<'de> for JsonVisitor<'_> {
                 access.next_value_seed(JsonSeed { keys: self.keys })?,
             );
         }
-        Ok(Value::Map(Rc::new(RefCell::new(map))))
+        Ok(Value::map_of(map))
     }
 }
 
@@ -169,6 +169,8 @@ pub(super) enum JsonPlan {
     Dynamic,
     Vec(Box<JsonPlan>),
     Map(Box<JsonPlan>),
+    /// A json array of elements deserialized into a set.
+    Set(Box<JsonPlan>),
     Struct(Rc<StructPlan>),
 }
 
@@ -210,6 +212,86 @@ pub(super) fn serde_rename(field: &syn::Field) -> Option<String> {
     renamed
 }
 
+/// A container-level `#[serde(rename_all = "..")]` casing rule.
+#[derive(Clone, Copy)]
+pub(super) enum RenameRule {
+    Lower,
+    Upper,
+    Pascal,
+    Camel,
+    Snake,
+    ScreamingSnake,
+    Kebab,
+    ScreamingKebab,
+}
+
+/// Read a struct's `#[serde(rename_all = "..")]` rule, if present.
+pub(super) fn serde_rename_all(attrs: &[syn::Attribute]) -> Option<RenameRule> {
+    let mut rule = None;
+    for attr in attrs {
+        if !attr.path().is_ident("serde") {
+            continue;
+        }
+        if attr
+            .parse_nested_meta(|meta| {
+                if meta.path.is_ident("rename_all")
+                    && let Ok(value) = meta.value()
+                    && let Ok(lit) = value.parse::<syn::LitStr>()
+                {
+                    rule = RenameRule::parse(&lit.value());
+                }
+                Ok(())
+            })
+            .is_err()
+        {
+            return None;
+        }
+    }
+    rule
+}
+
+impl RenameRule {
+    fn parse(name: &str) -> Option<RenameRule> {
+        Some(match name {
+            "lowercase" => RenameRule::Lower,
+            "UPPERCASE" => RenameRule::Upper,
+            "PascalCase" => RenameRule::Pascal,
+            "camelCase" => RenameRule::Camel,
+            "snake_case" => RenameRule::Snake,
+            "SCREAMING_SNAKE_CASE" => RenameRule::ScreamingSnake,
+            "kebab-case" => RenameRule::Kebab,
+            "SCREAMING-KEBAB-CASE" => RenameRule::ScreamingKebab,
+            _ => return None,
+        })
+    }
+
+    /// Apply to a field name, which is snake_case in the source, following
+    /// serde's field rules.
+    pub(super) fn apply(self, field: &str) -> String {
+        match self {
+            RenameRule::Lower | RenameRule::Snake => field.to_string(),
+            RenameRule::Upper | RenameRule::ScreamingSnake => field.to_ascii_uppercase(),
+            RenameRule::Kebab => field.replace('_', "-"),
+            RenameRule::ScreamingKebab => field.to_ascii_uppercase().replace('_', "-"),
+            RenameRule::Pascal | RenameRule::Camel => {
+                let mut out = String::with_capacity(field.len());
+                let mut upper = matches!(self, RenameRule::Pascal);
+                for ch in field.chars() {
+                    if ch == '_' {
+                        upper = true;
+                    } else if upper {
+                        out.extend(ch.to_uppercase());
+                        upper = false;
+                    } else {
+                        out.push(ch);
+                    }
+                }
+                out
+            }
+        }
+    }
+}
+
 /// Whether a type is spelled `Option<..>` at the top level.
 fn is_option(ty: &syn::Type) -> bool {
     if let syn::Type::Path(p) = ty
@@ -242,6 +324,7 @@ impl Interp {
             TypeIr::MapValue(inner) => {
                 JsonPlan::Map(Box::new(self.json_plan(inner, building, tenv)))
             }
+            TypeIr::Set(inner) => JsonPlan::Set(Box::new(self.json_plan(inner, building, tenv))),
             TypeIr::Struct(canon) => {
                 if building.iter().any(|b| b.as_str() == &**canon) {
                     return JsonPlan::Dynamic;
@@ -258,6 +341,7 @@ impl Interp {
                 let mut fields = Vec::with_capacity(shape.runtime.fields.len());
                 let mut optional = Vec::with_capacity(shape.runtime.fields.len());
                 let mut key_map = FxHashMap::default();
+                let rule = serde_rename_all(&def.attrs);
                 if let syn::Fields::Named(named) = &def.fields {
                     let mut slot = 0;
                     for f in &named.named {
@@ -269,7 +353,10 @@ impl Interp {
                         let fir = lower_type(&f.ty, self.resolver(), def_module, &[]);
                         fields.push(self.json_plan(&fir, building, &[]));
                         optional.push(is_option(&f.ty));
-                        let key = serde_rename(f).unwrap_or_else(|| ident.to_string());
+                        // A field's own rename wins over the container rule.
+                        let key = serde_rename(f)
+                            .or_else(|| rule.map(|r| r.apply(&ident.to_string())))
+                            .unwrap_or_else(|| ident.to_string());
                         key_map.insert(key, slot);
                         slot += 1;
                     }
@@ -419,6 +506,19 @@ impl<'de> serde::de::Visitor<'de> for PlanVisitor<'_> {
         self,
         mut seq: A,
     ) -> std::result::Result<Value, A::Error> {
+        if let JsonPlan::Set(elem) = self.plan {
+            let mut set = super::value::Map::default();
+            while let Some(v) = seq.next_element_seed(PlanSeed {
+                plan: elem,
+                keys: self.keys,
+            })? {
+                let Some(key) = v.into_key() else {
+                    return Err(serde::de::Error::custom("invalid set element"));
+                };
+                set.insert(key, Value::Unit);
+            }
+            return Ok(Value::set_of(set));
+        }
         let elem = match self.plan {
             JsonPlan::Vec(p) => &**p,
             _ => &JsonPlan::Dynamic,
@@ -439,9 +539,9 @@ impl<'de> serde::de::Visitor<'de> for PlanVisitor<'_> {
     ) -> std::result::Result<Value, A::Error> {
         match self.plan {
             JsonPlan::Struct(sp) => {
-                // Missing fields become None, like the coercion pass did.
                 let mut values: Vec<Value> =
                     (0..sp.shape.fields.len()).map(|_| Value::none()).collect();
+                let mut filled = vec![false; values.len()];
                 while let Some(slot) = access.next_key_seed(FieldSeed {
                     key_map: &sp.key_map,
                 })? {
@@ -458,12 +558,17 @@ impl<'de> serde::de::Visitor<'de> for PlanVisitor<'_> {
                             } else {
                                 v
                             };
+                            filled[i] = true;
                         }
                         None => {
                             access.next_value::<serde::de::IgnoredAny>()?;
                         }
                     }
                 }
+                // A required field with no key in the json fails the parse,
+                // like real serde, instead of binding a hole that only
+                // explodes later. Option fields stay None.
+                missing_field(&filled, &sp.optional, &sp.key_map)?;
                 Ok(Value::structure(sp.shape.clone(), values))
             }
             plan => {
@@ -481,10 +586,31 @@ impl<'de> serde::de::Visitor<'de> for PlanVisitor<'_> {
                         })?,
                     );
                 }
-                Ok(Value::Map(Rc::new(RefCell::new(map))))
+                Ok(Value::map_of(map))
             }
         }
     }
+}
+
+/// Error on the first required field the json never set. Shared shape logic
+/// for both engines' typed parsers.
+pub(super) fn missing_field<E: serde::de::Error>(
+    filled: &[bool],
+    optional: &[bool],
+    key_map: &FxHashMap<String, usize>,
+) -> std::result::Result<(), E> {
+    for (i, done) in filled.iter().enumerate() {
+        if *done || optional.get(i).copied().unwrap_or(false) {
+            continue;
+        }
+        let key = key_map
+            .iter()
+            .find(|(_, slot)| **slot == i)
+            .map(|(k, _)| k.as_str())
+            .unwrap_or("?");
+        return Err(E::custom(format!("missing field `{key}`")));
+    }
+    Ok(())
 }
 
 pub(super) fn bridge_serde_json(func: &str, args: &[Value]) -> Result<Value> {
@@ -540,7 +666,7 @@ pub(super) fn json_to_value(j: serde_json::Value) -> Value {
             for (k, v) in o {
                 map.insert(MapKey::Str(RStr::new(k)), json_to_value(v));
             }
-            Value::Map(Rc::new(RefCell::new(map)))
+            Value::map_of(map)
         }
     }
 }
@@ -573,7 +699,14 @@ pub(super) fn value_to_json(v: &Value) -> Result<serde_json::Value> {
                 .map(value_to_json)
                 .collect::<Result<_>>()?,
         ),
-        Value::Map(map) => {
+        // serde serializes a set as a json array of its elements.
+        Value::Map(map, MapKind::Set) => J::Array(
+            map.borrow()
+                .keys()
+                .map(|k| value_to_json(&k.to_value()))
+                .collect::<Result<_>>()?,
+        ),
+        Value::Map(map, MapKind::Map) => {
             let mut obj = serde_json::Map::default();
             for (k, val) in map.borrow().iter() {
                 obj.insert(k.to_value().display(), value_to_json(val)?);

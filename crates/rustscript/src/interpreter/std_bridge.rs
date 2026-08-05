@@ -1,7 +1,6 @@
 //! Bridges for `std` paths a script calls: fs, io, env, paths,
 //! metadata, streams. Split from `builtins.rs`.
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use anyhow::{Result, anyhow, bail};
@@ -552,11 +551,12 @@ pub(super) fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Va
             Some(other) => Value::vec(vec![other.clone()]),
             None => Value::vec(vec![]),
         },
-        ("HashMap", "new")
-        | ("BTreeMap", "new")
-        | ("HashMap", "with_capacity")
-        | ("HashSet", "new")
-        | ("BTreeSet", "new") => Value::Map(Rc::new(RefCell::new(Map::default()))),
+        ("HashMap", "new") | ("BTreeMap", "new") | ("HashMap", "with_capacity") => {
+            Value::map_of(Map::default())
+        }
+        ("HashSet", "new") | ("BTreeSet", "new") | ("HashSet", "with_capacity") => {
+            Value::set_of(Map::default())
+        }
         ("Box" | "Rc" | "Arc" | "RefCell" | "Cell", "new") => {
             args.first().cloned().unwrap_or(Value::Unit)
         }

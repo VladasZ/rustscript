@@ -15,7 +15,7 @@ use anyhow::{Result, anyhow, bail};
 use super::Interp;
 use super::bytecode::{BuiltinId, CapSource, Chunk, DISCARD, MacroKind, MethodName, Op};
 use super::typeir::TypeIr;
-use super::value::{ClosureData, StructShape, Upvalue, Value};
+use super::value::{ClosureData, MapKind, StructShape, Upvalue, Value};
 use super::vm_support::{int_of, set_reg, take_range, trace_error};
 
 /// Guard against runaway recursion, since script calls no longer consume the
@@ -454,12 +454,12 @@ impl Interp {
                         if matches!(
                             name.id,
                             BuiltinId::Get | BuiltinId::Insert | BuiltinId::ContainsKey
-                        ) && matches!(stack[base + recv], Value::Map(_))
+                        ) && matches!(stack[base + recv], Value::Map(_, MapKind::Map))
                             && argc >= 1
                             && base + recv < s
                         {
                             let (lo, hi) = stack.split_at_mut(s);
-                            let Value::Map(m) = &lo[base + recv] else {
+                            let Value::Map(m, _) = &lo[base + recv] else {
                                 unreachable!()
                             };
                             let v = match name.id {
@@ -529,7 +529,7 @@ impl Interp {
                         // Key and default may live in variable registers, so they
                         // are cloned, never taken.
                         let v = match &stack[r] {
-                            Value::Map(m) => {
+                            Value::Map(m, _) => {
                                 let Some(kr) = stack[k].key_ref() else {
                                     bail!("invalid map key")
                                 };

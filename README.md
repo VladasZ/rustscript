@@ -199,8 +199,8 @@ an interpreter bridge. `rust check` adds that coverage pass.
 - `static mut` is rejected. Plain statics behave like constants.
 - `u128` and `i128` carry no runtime width, their values compute in i64.
 - Lifetimes and generics are accepted but carry no runtime meaning.
-- Serde container attributes such as `rename_all` and `default` are not yet
-  implemented by the reflection bridge.
+- Serde container attributes beyond `rename_all`, such as `default`, are not
+  yet implemented by the reflection bridge.
 
 ## Caching
 

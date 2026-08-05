@@ -161,6 +161,15 @@ impl StructData {
 /// Lookups by a borrowed key go through `KeyRef` so they never clone the key.
 pub type Map = IndexMap<MapKey, Value, FxBuildHasher>;
 
+/// A set shares the map storage, each element stored as key -> Unit. The kind
+/// is what makes iteration yield elements instead of pairs and routes the set
+/// halves of `insert`, `remove`, and `contains`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum MapKind {
+    Map,
+    Set,
+}
+
 pub struct ValueRef {
     values: Rc<RefCell<Vec<Value>>>,
     index: usize,
@@ -196,7 +205,7 @@ pub enum Value {
     Char(char),
     Str(Rc<RStr>),
     Vec(Rc<RefCell<Vec<Value>>>),
-    Map(Rc<RefCell<Map>>),
+    Map(Rc<RefCell<Map>>, MapKind),
     Tuple(Rc<RefCell<Vec<Value>>>),
     /// Struct instance. Named fields, or positional for tuple structs.
     Struct(Rc<StructData>),
@@ -433,6 +442,14 @@ impl Value {
         Value::Tuple(Rc::new(RefCell::new(items)))
     }
 
+    pub fn map_of(map: Map) -> Value {
+        Value::Map(Rc::new(RefCell::new(map)), MapKind::Map)
+    }
+
+    pub fn set_of(map: Map) -> Value {
+        Value::Map(Rc::new(RefCell::new(map)), MapKind::Set)
+    }
+
     pub fn structure(shape: Rc<StructShape>, values: Vec<Value>) -> Value {
         Value::Struct(Rc::new(StructData {
             shape,
@@ -510,7 +527,8 @@ impl Value {
             Value::Char(_) => "char",
             Value::Str(_) => "String",
             Value::Vec(_) => "Vec",
-            Value::Map(_) => "HashMap",
+            Value::Map(_, MapKind::Map) => "HashMap",
+            Value::Map(_, MapKind::Set) => "HashSet",
             Value::Tuple(_) => "tuple",
             Value::Struct(_) => "struct",
             Value::Enum { .. } => "enum",
@@ -687,15 +705,17 @@ impl Value {
                 }
                 out.push(')');
             }
-            Value::Map(map) => {
+            Value::Map(map, kind) => {
                 out.push('{');
                 for (i, (k, v)) in map.borrow().iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");
                     }
                     k.write_debug(out);
-                    out.push_str(": ");
-                    v.write_debug(out);
+                    if *kind == MapKind::Map {
+                        out.push_str(": ");
+                        v.write_debug(out);
+                    }
                 }
                 out.push('}');
             }
