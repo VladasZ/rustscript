@@ -202,7 +202,15 @@ pub(super) fn str_method(s: &Rc<RStr>, method: &MethodName, args: &[Value]) -> R
                 end,
                 inclusive,
             }) => {
-                let end = if *inclusive { end + 1 } else { *end };
+                // An i64::MAX end is the open-end sentinel compile_range emits
+                // for `s.get(3..)`, read as len like the slicing op does.
+                let end = if *end == i64::MAX {
+                    s.len() as i64
+                } else if *inclusive {
+                    end + 1
+                } else {
+                    *end
+                };
                 match str_slice(s, *start, end) {
                     Some(part) => Value::some(Value::str(part)),
                     None => Value::none(),
