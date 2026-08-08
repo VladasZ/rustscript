@@ -993,6 +993,8 @@ fn option_payload(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
         Expr::MethodCall(call) => match call.method.to_string().as_str() {
             // `flag.then_some(x)` is an `Option` of whatever `x` is.
             "then_some" => call.args.first().and_then(|a| written_ty(a, env)),
+            // `text.parse::<T>()` states its payload in its own turbofish.
+            "parse" => turbofish_scalar(call.turbofish.as_ref()),
             // `a.or(b)` keeps the payload both sides share, so either side
             // that states it answers for both.
             "or" => call
@@ -1050,6 +1052,14 @@ fn element_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
         Expr::Paren(inner) => element_ty(&inner.expr, env),
         Expr::Group(inner) => element_ty(&inner.expr, env),
         Expr::Block(block) => block_tail(&block.block).and_then(|e| element_ty(e, env)),
+        // An if-else answers through whichever branch states its element.
+        Expr::If(sel) => block_tail(&sel.then_branch)
+            .and_then(|e| element_ty(e, env))
+            .or_else(|| {
+                sel.else_branch
+                    .as_ref()
+                    .and_then(|(_, e)| element_ty(e, env))
+            }),
         // A bare name the program declared as `let v: Vec<T>`.
         Expr::Path(path) => {
             let segment = path.path.segments.last()?;

@@ -18,6 +18,10 @@ fn diff_opaque_u64(value: u64) -> u64 {
     value
 }
 
+fn diff_opaque_i64(value: i64) -> i64 {
+    value
+}
+
 fn main() {
     let record = GeneratedRecord0 { values: vec![1i64, 2i64] };
     println!("score: {}", record.score());
@@ -33,4 +37,10 @@ fn main() {
 
     // The counting family answers u32, so `!` wraps at 32 bits.
     println!("not_ones: {:?}", (!((diff_opaque_u64(0) as u16) >> (diff_opaque_u64(3) as u32)).count_ones()));
+
+    // `then_some` on a bool hands its argument through with the width tag
+    // intact, so a u64 past `i64::MAX` and a sign-extended negative survive.
+    // From seeds 20673218374 and 20673012633.
+    println!("then_some_not: {:?}", true.then_some((!None::<u64>.unwrap_or((diff_opaque_u64(0) as u64)))));
+    println!("then_some_wide: {:?}", true.then_some(((diff_opaque_i64(-2147483648) as i32) as usize)));
 }
