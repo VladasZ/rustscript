@@ -1004,7 +1004,7 @@ fn option_payload(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                 .or_else(|| option_payload(&call.receiver, env)),
             // These hand the same payload through untouched. `ok` moves a
             // `Result` payload into an `Option`, the same layer.
-            "cloned" | "copied" | "take" | "as_ref" | "as_mut" | "filter" | "ok" => {
+            "clone" | "cloned" | "copied" | "take" | "as_ref" | "as_mut" | "filter" | "ok" => {
                 option_payload(&call.receiver, env)
             }
             // `x.unwrap_or_default()` peels one layer, so its own payload is
@@ -1150,6 +1150,8 @@ fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
             },
             _ => None,
         },
+        // `clone` hands the receiver's type through untouched.
+        Expr::MethodCall(call) if call.method == "clone" => written_ty(&call.receiver, env),
         // An unwrap's own value is the receiver's payload, so
         // `Some('\n').unwrap_or_default()` is a char, not an Option.
         Expr::MethodCall(call)

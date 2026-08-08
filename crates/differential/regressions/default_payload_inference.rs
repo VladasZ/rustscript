@@ -78,4 +78,9 @@ fn main() {
     // built from. From seed 20673211807.
     let scalar_local: u16 = (diff_opaque_u64(9) as u16);
     println!("{:?}", scalar_local.checked_rem((diff_opaque_u64(0) as u16)).unwrap_or_default());
+
+    // `clone` hands a declared local's type through, so the vec literal
+    // knows its element is a Vec<i8>. From seed 20673216305.
+    let cloned_vec: Vec<i8> = vec![(diff_opaque_i64(-127) as i8)];
+    println!("{:?}", vec![cloned_vec.clone()].get((diff_opaque_u64(2) as usize)).cloned().unwrap_or_default());
 }
