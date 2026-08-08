@@ -480,6 +480,13 @@ impl PInterp {
                 .first()
                 .cloned()
                 .map_or_else(PValue::none, PValue::some),
+            // Iterators are eager Vecs on this engine, so `next` answers the
+            // first element. Scripts only use it to peel the head off a split.
+            "next" => items
+                .lock()
+                .first()
+                .cloned()
+                .map_or_else(PValue::none, PValue::some),
             "last" => items
                 .lock()
                 .last()
