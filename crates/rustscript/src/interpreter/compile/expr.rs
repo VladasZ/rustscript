@@ -9,7 +9,10 @@ use std::sync::Arc;
 use crate::interpreter::bytecode::{BinKind, Const, DISCARD, Op, Reg, UnKind};
 use crate::interpreter::numeric::{IntWidth, truncate};
 
-use super::*;
+use super::{
+    Compiler, FloatTy, LoopCtx, NameLoc, NumericTy, ScalarTy, bin_kind, expr_kind,
+    first_generic_type, int_literal, is_assign_op, macro_yields_value, numeric_annotation,
+};
 
 /// Flatten a left-nested `&&` chain into its terms, in source order. A cond
 /// that is not an `&&` is returned as a single term. Used to compile let-chains
@@ -274,106 +277,10 @@ impl Compiler<'_> {
                         .and_then(|i| i.diverge.as_ref())
                         .is_some() =>
                 {
-                    // `let PAT = EXPR else { .. }`. Test the refutable pattern,
-                    // and run the diverging else block when it does not match.
-                    // Bindings land in the current scope, visible afterwards.
-                    let init = local.init.as_ref().unwrap();
-                    let else_expr = &init.diverge.as_ref().unwrap().1;
-                    let val = self.alloc();
-                    self.compile_into(val, &init.expr)?;
-                    let matched = self.alloc();
-                    let pidx = self.pattern_info(&local.pat)?;
-                    self.emit(Op::TestBind {
-                        val,
-                        pat: pidx,
-                        dst: matched,
-                    });
-                    let jmp_ok = self.here();
-                    self.emit(Op::JumpIfTrue {
-                        cond: matched,
-                        to: 0,
-                    });
-                    let else_dst = self.alloc();
-                    self.compile_into(else_dst, else_expr)?;
-                    let ok_at = self.here() as u32;
-                    self.patch_jump(jmp_ok, ok_at);
-                    if is_last {
-                        self.emit(Op::LoadUnit { dst });
-                    }
+                    self.compile_let_else(local, dst, is_last)?;
                 }
                 Stmt::Local(local) => {
-                    let val = self.alloc();
-                    // An annotated `let` whose init chain roots in a
-                    // `from_str` call hands its type to that call, so the
-                    // parse is typed at the source and no coerce op is
-                    // needed afterwards.
-                    let mut offered = false;
-                    // A let nested in the init chain, say in a closure body,
-                    // runs this code again before the outer collect consumes
-                    // its hint, so the outer hint is restored, not cleared.
-                    let outer_string_let = self.string_let.take();
-                    if let Pat::Type(t) = &local.pat
-                        && let Some(init) = &local.init
-                    {
-                        if let Some(call) = from_str_root(&init.expr) {
-                            self.json_let = Some((call as *const _, self.lower_ir(&t.ty)));
-                            offered = true;
-                        } else if is_string_type(&t.ty)
-                            && let Some(mc) = collect_root(&init.expr)
-                        {
-                            self.string_let = Some(mc as *const _);
-                        }
-                        // `let x: T = ...unwrap_or_default()` is the only place
-                        // that names the payload the default is built from,
-                        // since the method takes no turbofish of its own.
-                        if let Expr::MethodCall(mc) = &*init.expr
-                            && mc.method == "unwrap_or_default"
-                            && let Some(ty) = ScalarTy::lower(&t.ty)
-                        {
-                            self.default_let = Some((std::ptr::from_ref(mc), ty));
-                        }
-                    }
-                    // `let opt: Option<T> = ..` and `let v: Vec<T> = ..`
-                    // record the declared type, so a later
-                    // `opt.unwrap_or_default()` or `v.get(i).cloned()
-                    // .unwrap_or_default()` builds the right default from it.
-                    if let Pat::Type(t) = &local.pat
-                        && let Pat::Ident(ident) = &*t.pat
-                        && let Some(declared) = annotation_scalar(&t.ty)
-                    {
-                        self.typed_locals.insert(ident.ident.to_string(), declared);
-                    }
-                    // A numeric annotation types a bare literal init at
-                    // compile time, so the value never exists at the wrong
-                    // width.
-                    let mut typed_literal = false;
-                    if let Pat::Type(t) = &local.pat
-                        && let Some(init) = &local.init
-                        && let Some(target) = numeric_annotation(&t.ty)
-                    {
-                        typed_literal = self.compile_numeric_annotated(val, &init.expr, target)?;
-                    }
-                    if !typed_literal {
-                        match &local.init {
-                            Some(init) => self.compile_into(val, &init.expr)?,
-                            None => self.emit(Op::LoadUnit { dst: val }),
-                        }
-                    }
-                    let consumed = offered && self.json_let.is_none();
-                    self.json_let = None;
-                    self.string_let = outer_string_let;
-                    // A type annotation coerces a dynamic value into that type.
-                    if let Pat::Type(t) = &local.pat {
-                        if !consumed && !typed_literal {
-                            self.emit_annotation(val, &t.ty);
-                        }
-                        self.bind_pattern_irrefutable(&t.pat, val)?;
-                    } else {
-                        self.bind_pattern_irrefutable(&local.pat, val)?;
-                    }
-                    if is_last {
-                        self.emit(Op::LoadUnit { dst });
-                    }
+                    self.compile_let(local, dst, is_last)?;
                 }
                 Stmt::Expr(expr, semi) => {
                     if is_last && semi.is_none() {
@@ -408,6 +315,114 @@ impl Compiler<'_> {
                     }
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// `let PAT = EXPR else { .. }`. Test the refutable pattern, and run the
+    /// diverging else block when it does not match. Bindings land in the
+    /// current scope, visible afterwards.
+    fn compile_let_else(&mut self, local: &syn::Local, dst: Reg, is_last: bool) -> Result<()> {
+        let init = local.init.as_ref().unwrap();
+        let else_expr = &init.diverge.as_ref().unwrap().1;
+        let val = self.alloc();
+        self.compile_into(val, &init.expr)?;
+        let matched = self.alloc();
+        let pidx = self.pattern_info(&local.pat)?;
+        self.emit(Op::TestBind {
+            val,
+            pat: pidx,
+            dst: matched,
+        });
+        let jmp_ok = self.here();
+        self.emit(Op::JumpIfTrue {
+            cond: matched,
+            to: 0,
+        });
+        let else_dst = self.alloc();
+        self.compile_into(else_dst, else_expr)?;
+        let ok_at = self.mark()?;
+        self.patch_jump(jmp_ok, ok_at);
+        if is_last {
+            self.emit(Op::LoadUnit { dst });
+        }
+        Ok(())
+    }
+
+    /// A plain `let`, with the annotation-driven typing hints the comments
+    /// inside explain.
+    fn compile_let(&mut self, local: &syn::Local, dst: Reg, is_last: bool) -> Result<()> {
+        let val = self.alloc();
+        // An annotated `let` whose init chain roots in a
+        // `from_str` call hands its type to that call, so the
+        // parse is typed at the source and no coerce op is
+        // needed afterwards.
+        let mut offered = false;
+        // A let nested in the init chain, say in a closure body,
+        // runs this code again before the outer collect consumes
+        // its hint, so the outer hint is restored, not cleared.
+        let outer_string_let = self.string_let.take();
+        if let Pat::Type(t) = &local.pat
+            && let Some(init) = &local.init
+        {
+            if let Some(call) = from_str_root(&init.expr) {
+                self.json_let = Some((std::ptr::from_ref(call), self.lower_ir(&t.ty)));
+                offered = true;
+            } else if is_string_type(&t.ty)
+                && let Some(mc) = collect_root(&init.expr)
+            {
+                self.string_let = Some(std::ptr::from_ref(mc));
+            }
+            // `let x: T = ...unwrap_or_default()` is the only place
+            // that names the payload the default is built from,
+            // since the method takes no turbofish of its own.
+            if let Expr::MethodCall(mc) = &*init.expr
+                && mc.method == "unwrap_or_default"
+                && let Some(ty) = ScalarTy::lower(&t.ty)
+            {
+                self.default_let = Some((std::ptr::from_ref(mc), ty));
+            }
+        }
+        // `let opt: Option<T> = ..` and `let v: Vec<T> = ..`
+        // record the declared type, so a later
+        // `opt.unwrap_or_default()` or `v.get(i).cloned()
+        // .unwrap_or_default()` builds the right default from it.
+        if let Pat::Type(t) = &local.pat
+            && let Pat::Ident(ident) = &*t.pat
+            && let Some(declared) = annotation_scalar(&t.ty)
+        {
+            self.typed_locals.insert(ident.ident.to_string(), declared);
+        }
+        // A numeric annotation types a bare literal init at
+        // compile time, so the value never exists at the wrong
+        // width.
+        let mut typed_literal = false;
+        if let Pat::Type(t) = &local.pat
+            && let Some(init) = &local.init
+            && let Some(target) = numeric_annotation(&t.ty)
+        {
+            typed_literal = self.compile_numeric_annotated(val, &init.expr, target)?;
+        }
+        if !typed_literal {
+            match &local.init {
+                Some(init) => self.compile_into(val, &init.expr)?,
+                None => self.emit(Op::LoadUnit { dst: val }),
+            }
+        }
+        let consumed = offered && self.json_let.is_none();
+        self.json_let = None;
+        self.string_let = outer_string_let;
+        // A type annotation coerces a dynamic value into that type.
+        if let Pat::Type(t) = &local.pat {
+            if !consumed && !typed_literal {
+                self.emit_annotation(val, &t.ty);
+            }
+            self.bind_pattern_irrefutable(&t.pat, val)?;
+        } else {
+            self.bind_pattern_irrefutable(&local.pat, val)?;
+        }
+        if is_last {
+            self.emit(Op::LoadUnit { dst });
         }
         Ok(())
     }
@@ -487,13 +502,12 @@ impl Compiler<'_> {
             Expr::Loop(l) => self.compile_loop(dst, l)?,
             Expr::Match(m) => self.compile_match(dst, m)?,
             Expr::Return(r) => {
-                let src = match &r.expr {
-                    Some(e) => self.compile_expr(e)?,
-                    None => {
-                        let u = self.alloc();
-                        self.emit(Op::LoadUnit { dst: u });
-                        u
-                    }
+                let src = if let Some(e) = &r.expr {
+                    self.compile_expr(e)?
+                } else {
+                    let u = self.alloc();
+                    self.emit(Op::LoadUnit { dst: u });
+                    u
                 };
                 self.emit(Op::Ret { src });
             }
@@ -507,7 +521,7 @@ impl Compiler<'_> {
                 self.emit(Op::MakeTuple {
                     dst,
                     base,
-                    count: t.elems.len() as u16,
+                    count: u16::try_from(t.elems.len())?,
                 });
             }
             Expr::Array(a) => {
@@ -515,7 +529,7 @@ impl Compiler<'_> {
                 self.emit(Op::MakeVec {
                     dst,
                     base,
-                    count: a.elems.len() as u16,
+                    count: u16::try_from(a.elems.len())?,
                 });
             }
             Expr::Repeat(r) => {
@@ -575,7 +589,7 @@ impl Compiler<'_> {
             }
             Lit::Byte(b) => self.emit(Op::LoadInt {
                 dst,
-                v: b.value() as i64,
+                v: i64::from(b.value()),
             }),
             Lit::ByteStr(bs) => {
                 let k = self.add_const(Const::Bytes(Arc::from(bs.value().as_slice())));
@@ -588,7 +602,7 @@ impl Compiler<'_> {
 
     /// An integer literal with its real width: from its suffix first, else
     /// from an annotation the caller saw, else untyped. Parses through u128
-    /// so a bare literal past i64::MAX, which real Rust types as u64 or
+    /// so a bare literal past `i64::MAX`, which real Rust types as u64 or
     /// usize, still loads with its full value. The sign of an enclosing
     /// negation comes in as `negated` so `-128i8` and `-9223372036854775808`
     /// type before they could overflow.
@@ -603,7 +617,7 @@ impl Compiler<'_> {
         if raw > u128::from(u64::MAX) {
             bail!("integer literal does not fit any supported width");
         }
-        let mut value = raw as i128;
+        let mut value = i128::try_from(raw)?;
         if negated {
             value = -value;
         }
@@ -626,7 +640,7 @@ impl Compiler<'_> {
         match width {
             IntWidth::I64 => self.emit(Op::LoadInt {
                 dst,
-                v: value as i64,
+                v: i64::try_from(value)?,
             }),
             w => self.emit(Op::LoadIntW {
                 dst,
@@ -763,7 +777,7 @@ impl Compiler<'_> {
                 let jmp = self.here();
                 self.emit(Op::JumpIfFalse { cond: dst, to: 0 });
                 self.compile_into(dst, &b.right)?;
-                let end = self.here() as u32;
+                let end = self.mark()?;
                 self.patch_jump(jmp, end);
                 return Ok(());
             }
@@ -772,7 +786,7 @@ impl Compiler<'_> {
                 let jmp = self.here();
                 self.emit(Op::JumpIfTrue { cond: dst, to: 0 });
                 self.compile_into(dst, &b.right)?;
-                let end = self.here() as u32;
+                let end = self.mark()?;
                 self.patch_jump(jmp, end);
                 return Ok(());
             }
@@ -795,7 +809,7 @@ impl Compiler<'_> {
 
     /// Compile a branch condition and emit the jump taken when it is false,
     /// returning the jump's index for patching. A plain comparison becomes a
-    /// fused compare-and-branch instead of a Bin plus JumpIfFalse pair.
+    /// fused compare-and-branch instead of a Bin plus `JumpIfFalse` pair.
     pub(super) fn emit_cond_jump(&mut self, cond: &Expr) -> Result<usize> {
         if let Expr::Binary(b) = cond
             && let Some(op) = bin_kind(&b.op)
@@ -822,28 +836,26 @@ impl Compiler<'_> {
         Ok(at)
     }
 
-    /// An open end becomes an i64::MAX sentinel that every range consumer,
+    /// An open end becomes an `i64::MAX` sentinel that every range consumer,
     /// the slicing op and `str::get`, reads as "to the end". One shape for
     /// every position, so `s.get(3..)` works the same as `s[3..]`.
     pub(super) fn compile_range(&mut self, dst: Reg, r: &syn::ExprRange) -> Result<()> {
-        let start = match &r.start {
-            Some(e) => self.compile_expr(e)?,
-            None => {
-                let z = self.alloc();
-                self.emit(Op::LoadInt { dst: z, v: 0 });
-                z
-            }
+        let start = if let Some(e) = &r.start {
+            self.compile_expr(e)?
+        } else {
+            let z = self.alloc();
+            self.emit(Op::LoadInt { dst: z, v: 0 });
+            z
         };
-        let end = match &r.end {
-            Some(e) => self.compile_expr(e)?,
-            None => {
-                let z = self.alloc();
-                self.emit(Op::LoadInt {
-                    dst: z,
-                    v: i64::MAX,
-                });
-                z
-            }
+        let end = if let Some(e) = &r.end {
+            self.compile_expr(e)?
+        } else {
+            let z = self.alloc();
+            self.emit(Op::LoadInt {
+                dst: z,
+                v: i64::MAX,
+            });
+            z
         };
         let inclusive = matches!(r.limits, syn::RangeLimits::Closed(_));
         self.emit(Op::MakeRange {
@@ -892,7 +904,7 @@ impl Compiler<'_> {
             self.pop_scope();
             let jmp_end = self.here();
             self.emit(Op::Jump { to: 0 });
-            let else_at = self.here() as u32;
+            let else_at = self.mark()?;
             for j in else_jumps {
                 self.patch_jump(j, else_at);
             }
@@ -900,7 +912,7 @@ impl Compiler<'_> {
                 Some((_, e)) => self.compile_into(dst, e)?,
                 None => self.emit(Op::LoadUnit { dst }),
             }
-            let end = self.here() as u32;
+            let end = self.mark()?;
             self.patch_jump(jmp_end, end);
             return Ok(());
         }
@@ -908,13 +920,13 @@ impl Compiler<'_> {
         self.compile_block(&if_expr.then_branch, dst)?;
         let jmp_end = self.here();
         self.emit(Op::Jump { to: 0 });
-        let else_at = self.here() as u32;
+        let else_at = self.mark()?;
         self.patch_jump(jmp_else, else_at);
         match &if_expr.else_branch {
             Some((_, e)) => self.compile_into(dst, e)?,
             None => self.emit(Op::LoadUnit { dst }),
         }
-        let end = self.here() as u32;
+        let end = self.mark()?;
         self.patch_jump(jmp_end, end);
         Ok(())
     }
@@ -945,8 +957,10 @@ impl Compiler<'_> {
             let body = self.alloc();
             self.compile_block_inner(&w.body, body)?;
             self.pop_scope();
-            self.emit(Op::Jump { to: head as u32 });
-            let end = self.here() as u32;
+            self.emit(Op::Jump {
+                to: u32::try_from(head)?,
+            });
+            let end = self.mark()?;
             let lc = self.loops.pop().unwrap();
             for b in lc.breaks {
                 self.patch_jump(b, end);
@@ -962,8 +976,10 @@ impl Compiler<'_> {
         });
         let body = self.alloc();
         self.compile_block(&w.body, body)?;
-        self.emit(Op::Jump { to: head as u32 });
-        let end = self.here() as u32;
+        self.emit(Op::Jump {
+            to: u32::try_from(head)?,
+        });
+        let end = self.mark()?;
         let lc = self.loops.pop().unwrap();
         for b in lc.breaks {
             self.patch_jump(b, end);
@@ -982,8 +998,10 @@ impl Compiler<'_> {
         });
         let body = self.alloc();
         self.compile_block(&l.body, body)?;
-        self.emit(Op::Jump { to: head as u32 });
-        let end = self.here() as u32;
+        self.emit(Op::Jump {
+            to: u32::try_from(head)?,
+        });
+        let end = self.mark()?;
         let lc = self.loops.pop().unwrap();
         for b in lc.breaks {
             self.patch_jump(b, end);
@@ -1016,8 +1034,10 @@ impl Compiler<'_> {
         let body = self.alloc();
         self.compile_block_inner(&f.body, body)?;
         self.pop_scope();
-        self.emit(Op::Jump { to: head as u32 });
-        let end = self.here() as u32;
+        self.emit(Op::Jump {
+            to: u32::try_from(head)?,
+        });
+        let end = self.mark()?;
         let lc = self.loops.pop().unwrap();
         for b in lc.breaks {
             self.patch_jump(b, end);
@@ -1047,7 +1067,9 @@ impl Compiler<'_> {
             .last()
             .map(|l| l.continue_to)
             .ok_or_else(|| anyhow!("continue outside a loop"))?;
-        self.emit(Op::Jump { to: to as u32 });
+        self.emit(Op::Jump {
+            to: u32::try_from(to)?,
+        });
         Ok(())
     }
 
@@ -1057,7 +1079,12 @@ impl Compiler<'_> {
         for arm in &m.arms {
             self.push_scope();
             let matched = self.alloc();
-            let pat = self.pattern_info(&arm.pat)?;
+            // syn 3 parses `pat if cond` as Pat::Guard wrapping the pattern.
+            let (arm_pat, arm_guard) = match &arm.pat {
+                Pat::Guard(g) => (&*g.pat, Some(&*g.guard)),
+                p => (p, None),
+            };
+            let pat = self.pattern_info(arm_pat)?;
             self.emit(Op::TestBind {
                 val: scrut,
                 pat,
@@ -1070,7 +1097,7 @@ impl Compiler<'_> {
             });
             // Guard.
             let mut guard_skip = None;
-            if let Some((_, guard)) = &arm.guard {
+            if let Some(guard) = arm_guard {
                 let g = self.compile_expr(guard)?;
                 let gs = self.here();
                 self.emit(Op::JumpIfFalse { cond: g, to: 0 });
@@ -1081,7 +1108,7 @@ impl Compiler<'_> {
             self.emit(Op::Jump { to: 0 });
             end_jumps.push(je);
             self.pop_scope();
-            let next = self.here() as u32;
+            let next = self.mark()?;
             self.patch_jump(skip, next);
             if let Some(gs) = guard_skip {
                 self.patch_jump(gs, next);
@@ -1095,7 +1122,7 @@ impl Compiler<'_> {
             base: dst,
             argc: 0,
         });
-        let end = self.here() as u32;
+        let end = self.mark()?;
         for j in end_jumps {
             self.patch_jump(j, end);
         }

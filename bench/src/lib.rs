@@ -117,10 +117,10 @@ pub struct Report {
 pub fn median_f64(samples: &[f64]) -> f64 {
     assert!(!samples.is_empty(), "median needs samples");
     let mut sorted = samples.to_vec();
-    sorted.sort_by(|left, right| left.total_cmp(right));
+    sorted.sort_by(f64::total_cmp);
     let middle = sorted.len() / 2;
     if sorted.len().is_multiple_of(2) {
-        (sorted[middle - 1] + sorted[middle]) / 2.0
+        f64::midpoint(sorted[middle - 1], sorted[middle])
     } else {
         sorted[middle]
     }
@@ -134,7 +134,7 @@ pub fn median_u64(samples: &[u64]) -> u64 {
     if sorted.len().is_multiple_of(2) {
         sorted[middle - 1] / 2
             + sorted[middle] / 2
-            + (sorted[middle - 1] % 2 + sorted[middle] % 2) / 2
+            + u64::midpoint(sorted[middle - 1] % 2, sorted[middle] % 2)
     } else {
         sorted[middle]
     }

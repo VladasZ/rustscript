@@ -1,6 +1,7 @@
 //! Bridges for `std` paths a script calls: fs, io, env, paths,
 //! metadata, streams. Split from `builtins.rs`.
 
+use num_traits::AsPrimitive;
 use std::rc::Rc;
 
 use anyhow::{Result, anyhow, bail};
@@ -11,41 +12,39 @@ use super::numeric::IntWidth;
 
 use super::value::{Map, StructData, Value};
 
-use super::crates_bridge::*;
-use super::json_bridge::*;
-use super::jwt_bridge::*;
-use super::regex_bridge::*;
+use super::crates_bridge::crate_bridge;
+use super::json_bridge::bridge_serde_json;
+use super::jwt_bridge::jwt_assoc;
+use super::regex_bridge::make_regex;
 
 // -- std bridges -----------------------------------------------------------
 
-/// Native implementations of the supported subset of std and serde_json,
+/// Native implementations of the supported subset of std and `serde_json`,
 /// dispatched by the last two path segments as `module::func`. Returns None
 /// when the namespace is not native, so callers can try other handlers.
-pub(super) fn native_call(module: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
-    if module == "serde_json" {
-        return bridge_serde_json(func, args).map(Some);
-    }
+/// The `std::fs` free functions.
+fn fs_native_call(func: &str, args: &[Value]) -> Result<Option<Value>> {
     let s = |i: usize| -> Result<String> {
         match args.get(i) {
             Some(v) => Ok(path_like(v)),
-            None => bail!("missing argument {i} for {module}::{func}"),
+            None => bail!("missing argument {i} for fs::{func}"),
         }
     };
-    Ok(Some(match (module, func) {
-        ("fs", "read_to_string") => wrap_io(std::fs::read_to_string(s(0)?)),
-        ("fs", "read") => wrap_bytes(std::fs::read(s(0)?)),
-        ("fs", "write") => wrap_unit(std::fs::write(s(0)?, s(1)?)),
-        ("fs", "create_dir_all") => wrap_unit(std::fs::create_dir_all(s(0)?)),
-        ("fs", "create_dir") => wrap_unit(std::fs::create_dir(s(0)?)),
-        ("fs", "remove_file") => wrap_unit(std::fs::remove_file(s(0)?)),
-        ("fs", "remove_dir_all") => wrap_unit(std::fs::remove_dir_all(s(0)?)),
-        ("fs", "remove_dir") => wrap_unit(std::fs::remove_dir(s(0)?)),
-        ("fs", "copy") => match std::fs::copy(s(0)?, s(1)?) {
-            Ok(n) => Value::ok(Value::Int(n as i64)),
+    Ok(Some(match func {
+        "read_to_string" => wrap_io(std::fs::read_to_string(s(0)?)),
+        "read" => wrap_bytes(std::fs::read(s(0)?)),
+        "write" => wrap_unit(std::fs::write(s(0)?, s(1)?)),
+        "create_dir_all" => wrap_unit(std::fs::create_dir_all(s(0)?)),
+        "create_dir" => wrap_unit(std::fs::create_dir(s(0)?)),
+        "remove_file" => wrap_unit(std::fs::remove_file(s(0)?)),
+        "remove_dir_all" => wrap_unit(std::fs::remove_dir_all(s(0)?)),
+        "remove_dir" => wrap_unit(std::fs::remove_dir(s(0)?)),
+        "copy" => match std::fs::copy(s(0)?, s(1)?) {
+            Ok(n) => Value::ok(Value::Int(i64::try_from(n).unwrap_or(i64::MAX))),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
-        ("fs", "rename") => wrap_unit(std::fs::rename(s(0)?, s(1)?)),
-        ("fs", "read_dir") => match std::fs::read_dir(s(0)?) {
+        "rename" => wrap_unit(std::fs::rename(s(0)?, s(1)?)),
+        "read_dir" => match std::fs::read_dir(s(0)?) {
             Ok(rd) => {
                 let mut items = Vec::new();
                 for e in rd {
@@ -58,10 +57,50 @@ pub(super) fn native_call(module: &str, func: &str, args: &[Value]) -> Result<Op
             }
             Err(e) => Value::err(Value::str(e.to_string())),
         },
-        ("fs", "canonicalize") => match std::fs::canonicalize(s(0)?) {
+        "canonicalize" => match std::fs::canonicalize(s(0)?) {
             Ok(p) => Value::ok(make_path(p.display().to_string())),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
+        "metadata" => match std::fs::metadata(s(0)?) {
+            Ok(m) => Value::ok(make_metadata(&m)),
+            Err(e) => Value::err(Value::str(e.to_string())),
+        },
+        "symlink_metadata" => match std::fs::symlink_metadata(s(0)?) {
+            Ok(m) => Value::ok(make_metadata(&m)),
+            Err(e) => Value::err(Value::str(e.to_string())),
+        },
+        "read_link" => match std::fs::read_link(s(0)?) {
+            Ok(p) => Value::ok(make_path(p.display().to_string())),
+            Err(e) => Value::err(Value::str(e.to_string())),
+        },
+        "hard_link" => wrap_unit(std::fs::hard_link(s(0)?, s(1)?)),
+        // The platform specific names are aliased to one cross-platform
+        // helper, so the cfg gated `use` a script needs to type-check on
+        // each os all dispatch here at runtime.
+        "symlink" | "symlink_file" | "symlink_dir" => wrap_unit(make_symlink(&s(0)?, &s(1)?)),
+        "set_permissions" => wrap_unit(set_permissions_impl(
+            &s(0)?,
+            args.get(1).and_then(perm_mode),
+        )),
+
+        _ => return crate_bridge("fs", func, args),
+    }))
+}
+
+pub(super) fn native_call(module: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
+    if module == "serde_json" {
+        return bridge_serde_json(func, args).map(Some);
+    }
+    if module == "fs" {
+        return fs_native_call(func, args);
+    }
+    let s = |i: usize| -> Result<String> {
+        match args.get(i) {
+            Some(v) => Ok(path_like(v)),
+            None => bail!("missing argument {i} for {module}::{func}"),
+        }
+    };
+    Ok(Some(match (module, func) {
         ("env", "args") => Value::vec(super::script_args().into_iter().map(Value::str).collect()),
         ("env", "var") => match std::env::var(s(0)?) {
             Ok(v) => Value::ok(Value::str(v)),
@@ -84,7 +123,7 @@ pub(super) fn native_call(module: &str, func: &str, args: &[Value]) -> Result<Op
             Some(v) => Value::some(make_os_string(v.to_string_lossy().into_owned())),
             None => Value::none(),
         },
-        ("env", "vars") | ("env", "vars_os") => Value::vec(
+        ("env", "vars" | "vars_os") => Value::vec(
             std::env::vars()
                 .map(|(k, v)| Value::tuple(vec![Value::str(k), Value::str(v)]))
                 .collect(),
@@ -92,7 +131,11 @@ pub(super) fn native_call(module: &str, func: &str, args: &[Value]) -> Result<Op
         ("env", "set_current_dir") => wrap_unit(std::env::set_current_dir(s(0)?)),
         ("env", "temp_dir") => make_path(std::env::temp_dir().display().to_string()),
         ("process", "exit") => {
-            let code = args.first().and_then(as_i64).unwrap_or(0) as i32;
+            let code = args
+                .first()
+                .and_then(as_i64)
+                .and_then(|c| i32::try_from(c).ok())
+                .unwrap_or(0);
             std::process::exit(code);
         }
         ("process", "abort") => std::process::abort(),
@@ -105,29 +148,6 @@ pub(super) fn native_call(module: &str, func: &str, args: &[Value]) -> Result<Op
         ("io", "stdout") => make_std_stream("stdout", Native::Writer(Box::new(std::io::stdout()))),
         ("io", "stderr") => make_std_stream("stderr", Native::Writer(Box::new(std::io::stderr()))),
         // -- fs metadata & links -------------------------------------
-        ("fs", "metadata") => match std::fs::metadata(s(0)?) {
-            Ok(m) => Value::ok(make_metadata(&m)),
-            Err(e) => Value::err(Value::str(e.to_string())),
-        },
-        ("fs", "symlink_metadata") => match std::fs::symlink_metadata(s(0)?) {
-            Ok(m) => Value::ok(make_metadata(&m)),
-            Err(e) => Value::err(Value::str(e.to_string())),
-        },
-        ("fs", "read_link") => match std::fs::read_link(s(0)?) {
-            Ok(p) => Value::ok(make_path(p.display().to_string())),
-            Err(e) => Value::err(Value::str(e.to_string())),
-        },
-        ("fs", "hard_link") => wrap_unit(std::fs::hard_link(s(0)?, s(1)?)),
-        // The platform specific names are aliased to one cross-platform
-        // helper, so the cfg gated `use` a script needs to type-check on
-        // each os all dispatch here at runtime.
-        ("fs", "symlink") | ("fs", "symlink_file") | ("fs", "symlink_dir") => {
-            wrap_unit(make_symlink(&s(0)?, &s(1)?))
-        }
-        ("fs", "set_permissions") => wrap_unit(set_permissions_impl(
-            &s(0)?,
-            args.get(1).and_then(perm_mode),
-        )),
         _ => return crate_bridge(module, func, args),
     }))
 }
@@ -154,7 +174,10 @@ fn perm_mode(v: &Value) -> Option<u32> {
     if let Value::Struct(st) = v
         && &**st.name() == "Permissions"
     {
-        return st.get("mode").and_then(|m| as_i64(&m)).map(|m| m as u32);
+        return st
+            .get("mode")
+            .and_then(|m| as_i64(&m))
+            .and_then(|m| u32::try_from(m).ok());
     }
     None
 }
@@ -239,8 +262,8 @@ pub(super) fn duration_from_value(v: &Value) -> Option<std::time::Duration> {
     if let Value::Struct(s) = v
         && &**s.name() == "Duration"
     {
-        let secs = field_int(s, "secs") as u64;
-        let nanos = field_int(s, "nanos") as u32;
+        let secs = u64::try_from(field_int(s, "secs")).unwrap_or_default();
+        let nanos = u32::try_from(field_int(s, "nanos")).unwrap_or_default();
         return Some(std::time::Duration::new(secs, nanos));
     }
     None
@@ -251,8 +274,11 @@ pub(super) fn make_duration(d: std::time::Duration) -> Value {
     Value::struct_of(
         "Duration",
         [
-            ("secs".into(), Value::Int(d.as_secs() as i64)),
-            ("nanos".into(), Value::Int(d.subsec_nanos() as i64)),
+            (
+                "secs".into(),
+                Value::Int(i64::try_from(d.as_secs()).unwrap_or(i64::MAX)),
+            ),
+            ("nanos".into(), Value::Int(i64::from(d.subsec_nanos()))),
         ],
     )
 }
@@ -262,7 +288,10 @@ pub(super) fn make_duration(d: std::time::Duration) -> Value {
 /// Windows, where a script would use different accessors.
 pub(super) fn make_metadata(m: &std::fs::Metadata) -> Value {
     let mut f: Vec<(Rc<str>, Value)> = vec![
-        ("len".into(), Value::Int(m.len() as i64)),
+        (
+            "len".into(),
+            Value::Int(i64::try_from(m.len()).unwrap_or(i64::MAX)),
+        ),
         ("is_dir".into(), Value::Bool(m.is_dir())),
         ("is_file".into(), Value::Bool(m.is_file())),
         ("is_symlink".into(), Value::Bool(m.is_symlink())),
@@ -272,11 +301,11 @@ pub(super) fn make_metadata(m: &std::fs::Metadata) -> Value {
     {
         use std::os::unix::fs::MetadataExt;
         use std::os::unix::fs::PermissionsExt;
-        f.push(("mode".into(), Value::Int(m.permissions().mode() as i64)));
-        f.push(("dev".into(), Value::Int(m.dev() as i64)));
-        f.push(("ino".into(), Value::Int(m.ino() as i64)));
-        f.push(("uid".into(), Value::Int(m.uid() as i64)));
-        f.push(("gid".into(), Value::Int(m.gid() as i64)));
+        f.push(("mode".into(), Value::Int(i64::from(m.permissions().mode()))));
+        f.push(("dev".into(), Value::Int(m.dev().cast_signed())));
+        f.push(("ino".into(), Value::Int(m.ino().cast_signed())));
+        f.push(("uid".into(), Value::Int(i64::from(m.uid()))));
+        f.push(("gid".into(), Value::Int(i64::from(m.gid()))));
         f.push(("mtime".into(), Value::Int(m.mtime())));
     }
     if let Ok(t) = m.modified() {
@@ -327,8 +356,7 @@ pub(super) fn make_file_type(path: &std::path::Path) -> Value {
     // DirEntry::file_type does not follow symlinks, so a symlink to a dir
     // reports is_symlink, not is_dir, same as the real std.
     let ft = path.symlink_metadata().map(|m| m.file_type());
-    let is =
-        |f: &dyn Fn(&std::fs::FileType) -> bool| Value::Bool(ft.as_ref().map(f).unwrap_or(false));
+    let is = |f: &dyn Fn(&std::fs::FileType) -> bool| Value::Bool(ft.as_ref().is_ok_and(f));
     Value::struct_of(
         "FileType",
         [
@@ -376,7 +404,11 @@ pub(super) fn path_method(st: &StructData, method: &str, args: &[Value]) -> Resu
                 .collect(),
         ),
         "join" | "push" => {
-            let joined = p.join(args.first().map(|v| v.display()).unwrap_or_default());
+            let joined = p.join(
+                args.first()
+                    .map(super::value::Value::display)
+                    .unwrap_or_default(),
+            );
             make_path(joined.display().to_string())
         }
         _ => bail!("unknown method `{method}` on Path"),
@@ -413,7 +445,10 @@ pub(super) fn wrap_io(r: std::io::Result<String>) -> Value {
 pub(super) fn wrap_bytes(r: std::io::Result<Vec<u8>>) -> Value {
     match r {
         Ok(bytes) => Value::ok(Value::vec(
-            bytes.into_iter().map(|b| Value::Int(b as i64)).collect(),
+            bytes
+                .into_iter()
+                .map(|b| Value::Int(i64::from(b)))
+                .collect(),
         )),
         Err(e) => Value::err(Value::str(e.to_string())),
     }
@@ -443,23 +478,42 @@ pub(super) fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Va
     {
         return Ok(Some(v));
     }
+    // The groups use disjoint type and name pairs, so the first helper that
+    // recognizes the pair answers.
+    if let Some(v) = conversion_assoc(ty, func, args)? {
+        return Ok(Some(v));
+    }
+    if let Some(v) = container_assoc(ty, func, args)? {
+        return Ok(Some(v));
+    }
+    if let Some(v) = fs_process_assoc(ty, func, args)? {
+        return Ok(Some(v));
+    }
+    misc_assoc(ty, func, args)
+}
+
+/// String, char, and numeric constructors and conversions.
+fn conversion_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
     Ok(Some(match (ty, func) {
-        ("Permissions", "from_mode") => {
-            let mode = args.first().and_then(as_i64).unwrap_or(0o644);
-            Value::struct_of("Permissions", vec![("mode".into(), Value::Int(mode))])
-        }
-        ("String", "new") | ("String", "with_capacity") => Value::str(""),
-        ("String", "from") => Value::str(args.first().map(|v| v.display()).unwrap_or_default()),
+        ("String", "new" | "with_capacity") => Value::str(""),
+        ("String", "from") => Value::str(
+            args.first()
+                .map(super::value::Value::display)
+                .unwrap_or_default(),
+        ),
         ("String", "from_utf8_lossy") => Value::str(bytes_to_string(args.first())),
         // `char::from` only converts a u8 in real Rust, so the byte range is
         // enforced even though every integer is an i64 here.
         ("char", "from") => match args.first() {
             Some(Value::Char(c)) => Value::Char(*c),
-            Some(Value::Int(n)) if (0..=255).contains(n) => Value::Char(char::from(*n as u8)),
+            Some(Value::Int(n)) => match u8::try_from(*n) {
+                Ok(b) => Value::Char(char::from(b)),
+                Err(_) => bail!("`char::from` needs a u8"),
+            },
             _ => bail!("`char::from` needs a u8"),
         },
         ("char", "from_u32") => match args.first().and_then(as_i64) {
-            Some(n) if (0..=0x10FFFF).contains(&n) => match char::from_u32(n as u32) {
+            Some(n) => match u32::try_from(n).ok().and_then(char::from_u32) {
                 Some(c) => Value::some(Value::Char(c)),
                 None => Value::none(),
             },
@@ -482,8 +536,15 @@ pub(super) fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Va
             | "usize",
             "from_str_radix",
         ) => {
-            let text = args.first().map(|v| v.display()).unwrap_or_default();
-            let radix = args.get(1).and_then(as_i64).unwrap_or(10) as u32;
+            let text = args
+                .first()
+                .map(super::value::Value::display)
+                .unwrap_or_default();
+            let radix = args
+                .get(1)
+                .and_then(as_i64)
+                .and_then(|r| u32::try_from(r).ok())
+                .unwrap_or(10);
             match i64::from_str_radix(text.trim(), radix) {
                 Ok(n) => Value::ok(Value::Int(n)),
                 Err(e) => Value::err(Value::str(e.to_string())),
@@ -499,7 +560,7 @@ pub(super) fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Va
         ) => Value::Int(int_from_arg(ty, args.first())?),
         ("f32" | "f64", "from") => match args.first() {
             Some(Value::Float(f)) => Value::Float(*f),
-            Some(Value::Int(n)) => Value::Float(*n as f64),
+            Some(Value::Int(n)) => Value::Float(AsPrimitive::<f64>::as_(*n)),
             Some(Value::Bool(b)) => Value::Float(if *b { 1.0 } else { 0.0 }),
             _ => bail!("`{ty}::from` needs a number"),
         },
@@ -528,6 +589,13 @@ pub(super) fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Va
             "from_le_bytes" | "from_be_bytes" | "from_ne_bytes",
         ) => int_from_bytes(ty, func, args)?,
         ("String", "from_utf8") => Value::ok(Value::str(bytes_to_string(args.first()))),
+        _ => return Ok(None),
+    }))
+}
+
+/// Containers, wrappers, paths, regex, and the option and result names.
+fn container_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
+    Ok(Some(match (ty, func) {
         // The shape carries every field a later builder call can set, since a
         // shape cannot grow after the instance exists.
         ("Command", "new") => Value::struct_of(
@@ -545,16 +613,16 @@ pub(super) fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Va
                 ("stderr".into(), Value::Unit),
             ],
         ),
-        ("Vec", "new") | ("Vec", "with_capacity") => Value::vec(vec![]),
+        ("Vec", "new" | "with_capacity") => Value::vec(vec![]),
         ("Vec", "from") => match args.first() {
             Some(Value::Vec(v)) => Value::vec(v.borrow().clone()),
             Some(other) => Value::vec(vec![other.clone()]),
             None => Value::vec(vec![]),
         },
-        ("HashMap", "new") | ("BTreeMap", "new") | ("HashMap", "with_capacity") => {
+        ("HashMap" | "BTreeMap", "new") | ("HashMap", "with_capacity") => {
             Value::map_of(Map::default())
         }
-        ("HashSet", "new") | ("BTreeSet", "new") | ("HashSet", "with_capacity") => {
+        ("HashSet" | "BTreeSet", "new") | ("HashSet", "with_capacity") => {
             Value::set_of(Map::default())
         }
         ("Box" | "Rc" | "Arc" | "RefCell" | "Cell", "new") => {
@@ -578,19 +646,35 @@ pub(super) fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Va
             other => other.cloned().unwrap_or(Value::Unit),
         },
         ("PathBuf", "new") => make_path(""),
-        ("PathBuf" | "Path", "from") => make_path(args.first().map(path_like).unwrap_or_default()),
-        ("Path", "new") => make_path(args.first().map(path_like).unwrap_or_default()),
+        ("PathBuf" | "Path", "from") | ("Path", "new") => {
+            make_path(args.first().map(path_like).unwrap_or_default())
+        }
         ("Regex", "new") => {
-            let pat = args.first().map(|v| v.display()).unwrap_or_default();
+            let pat = args
+                .first()
+                .map(super::value::Value::display)
+                .unwrap_or_default();
             match regex::Regex::new(&pat) {
                 Ok(compiled) => Value::ok(make_regex(compiled, pat)),
                 Err(e) => Value::err(Value::str(e.to_string())),
             }
         }
-        ("Some", _) => Value::some(args.first().cloned().unwrap_or(Value::Unit)),
-        ("Option", "Some") => Value::some(args.first().cloned().unwrap_or(Value::Unit)),
+        ("Some", _) | ("Option", "Some") => {
+            Value::some(args.first().cloned().unwrap_or(Value::Unit))
+        }
         ("Result", "Ok") => Value::ok(args.first().cloned().unwrap_or(Value::Unit)),
         ("Result", "Err") => Value::err(args.first().cloned().unwrap_or(Value::Unit)),
+        _ => return Ok(None),
+    }))
+}
+
+/// Files, permissions, and process stream markers.
+fn fs_process_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
+    Ok(Some(match (ty, func) {
+        ("Permissions", "from_mode") => {
+            let mode = args.first().and_then(as_i64).unwrap_or(0o644);
+            Value::struct_of("Permissions", vec![("mode".into(), Value::Int(mode))])
+        }
         // -- files -----------------------------------------------------
         ("File", "open") => open_file(&arg_str(args, 0), std::fs::OpenOptions::new().read(true)),
         ("File", "create") => open_file(
@@ -617,24 +701,55 @@ pub(super) fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Va
             .into_iter()
             .map(|k| (k.into(), Value::Bool(false))),
         ),
+        ("Stdio", "piped" | "inherit" | "null") => {
+            Value::struct_of("Stdio", [("kind".into(), Value::str(func))])
+        }
+        // `Stdio::from(file)` sends a child's stream straight to an open file. The marker carries the
+        // file, and the handle is cloned when the command is built so the script keeps its own copy.
+        //
+        // This is what makes a progress heartbeat possible. Polling a child with `try_wait` while it
+        // runs means nobody is draining its pipe, which deadlocks the moment the child outgrows the pipe
+        // buffer, so a long silent command that wants a heartbeat has to write to a file instead.
+        ("Stdio", "from") => {
+            let Some(file @ Value::Native(_)) = args.first() else {
+                bail!(
+                    "Stdio::from takes an open File, got {}",
+                    args.first().map_or("nothing", Value::type_name)
+                );
+            };
+            Value::struct_of(
+                "Stdio",
+                [
+                    ("kind".into(), Value::str("file")),
+                    ("file".into(), file.clone()),
+                ],
+            )
+        }
+        _ => return Ok(None),
+    }))
+}
+
+/// Time, net, pdf, xml, and the seek positions.
+fn misc_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
+    Ok(Some(match (ty, func) {
         // -- time ------------------------------------------------------
         ("Instant", "now") => Native::Instant(std::time::Instant::now()).wrap(),
         ("SystemTime", "now") => Native::SystemTime(std::time::SystemTime::now()).wrap(),
-        ("Duration", "from_secs") => {
-            make_duration(std::time::Duration::from_secs(arg_int(args, 0) as u64))
-        }
-        ("Duration", "from_millis") => {
-            make_duration(std::time::Duration::from_millis(arg_int(args, 0) as u64))
-        }
-        ("Duration", "from_micros") => {
-            make_duration(std::time::Duration::from_micros(arg_int(args, 0) as u64))
-        }
-        ("Duration", "from_nanos") => {
-            make_duration(std::time::Duration::from_nanos(arg_int(args, 0) as u64))
-        }
+        ("Duration", "from_secs") => make_duration(std::time::Duration::from_secs(
+            u64::try_from(arg_int(args, 0)).unwrap_or_default(),
+        )),
+        ("Duration", "from_millis") => make_duration(std::time::Duration::from_millis(
+            u64::try_from(arg_int(args, 0)).unwrap_or_default(),
+        )),
+        ("Duration", "from_micros") => make_duration(std::time::Duration::from_micros(
+            u64::try_from(arg_int(args, 0)).unwrap_or_default(),
+        )),
+        ("Duration", "from_nanos") => make_duration(std::time::Duration::from_nanos(
+            u64::try_from(arg_int(args, 0)).unwrap_or_default(),
+        )),
         ("Duration", "new") => make_duration(std::time::Duration::new(
-            arg_int(args, 0) as u64,
-            arg_int(args, 1) as u32,
+            u64::try_from(arg_int(args, 0)).unwrap_or_default(),
+            u32::try_from(arg_int(args, 1)).unwrap_or_default(),
         )),
         // -- net -------------------------------------------------------
         ("TcpListener", "bind") => match std::net::TcpListener::bind(arg_str(args, 0)) {
@@ -666,30 +781,6 @@ pub(super) fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Va
             variant: func.into(),
             data: Value::one_data(args.first().cloned().unwrap_or(Value::Int(0))),
         },
-        ("Stdio", "piped") | ("Stdio", "inherit") | ("Stdio", "null") => {
-            Value::struct_of("Stdio", [("kind".into(), Value::str(func))])
-        }
-        // `Stdio::from(file)` sends a child's stream straight to an open file. The marker carries the
-        // file, and the handle is cloned when the command is built so the script keeps its own copy.
-        //
-        // This is what makes a progress heartbeat possible. Polling a child with `try_wait` while it
-        // runs means nobody is draining its pipe, which deadlocks the moment the child outgrows the pipe
-        // buffer, so a long silent command that wants a heartbeat has to write to a file instead.
-        ("Stdio", "from") => {
-            let Some(file @ Value::Native(_)) = args.first() else {
-                bail!(
-                    "Stdio::from takes an open File, got {}",
-                    args.first().map_or("nothing", Value::type_name)
-                );
-            };
-            Value::struct_of(
-                "Stdio",
-                [
-                    ("kind".into(), Value::str("file")),
-                    ("file".into(), file.clone()),
-                ],
-            )
-        }
         _ => return Ok(None),
     }))
 }
@@ -819,7 +910,7 @@ pub(super) fn bytes_arg(v: Option<&Value>) -> Vec<u8> {
             .borrow()
             .iter()
             .filter_map(|x| match x {
-                Value::Int(i) => Some(*i as u8),
+                Value::Int(i) => u8::try_from(*i).ok(),
                 _ => None,
             })
             .collect(),
@@ -829,11 +920,22 @@ pub(super) fn bytes_arg(v: Option<&Value>) -> Vec<u8> {
 }
 
 pub(super) fn bytes_to_vec(b: &[u8]) -> Value {
-    Value::vec(b.iter().map(|x| Value::Int(*x as i64)).collect())
+    Value::vec(b.iter().map(|x| Value::Int(i64::from(*x))).collect())
 }
-pub(super) fn duration_method(s: &StructData, name: &str) -> Result<Value> {
-    let secs = field_int(s, "secs") as u64;
-    let nanos = field_int(s, "nanos") as u32;
+pub(super) fn duration_method(s: &StructData, name: &str, args: &[Value]) -> Result<Value> {
+    let secs = u64::try_from(field_int(s, "secs")).unwrap_or_default();
+    let nanos = u32::try_from(field_int(s, "nanos")).unwrap_or_default();
+    if let "checked_add" | "checked_sub" = name {
+        let own = std::time::Duration::new(secs, nanos);
+        let Some(other) = args.first().and_then(duration_from_value) else {
+            bail!("`{name}` on Duration takes a Duration argument");
+        };
+        let out = match name {
+            "checked_add" => own.checked_add(other),
+            _ => own.checked_sub(other),
+        };
+        return Ok(out.map_or_else(Value::none, |d| Value::some(make_duration(d))));
+    }
     match super::shared::duration_core(name, secs, nanos) {
         Some(super::shared::DurOut::Int(i)) => Ok(Value::Int(i)),
         Some(super::shared::DurOut::Float(f)) => Ok(Value::Float(f)),
@@ -880,7 +982,7 @@ pub(super) fn bytes_to_string(arg: Option<&Value>) -> String {
                 .borrow()
                 .iter()
                 .filter_map(|x| match x {
-                    Value::Int(i) => Some(*i as u8),
+                    Value::Int(i) => u8::try_from(*i).ok(),
                     _ => None,
                 })
                 .collect();

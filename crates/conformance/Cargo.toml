@@ -6,3 +6,6 @@ edition = "2024"
 [[bin]]
 name = "conformance"
 path = "src/main.rs"
+
+[lints]
+workspace = true

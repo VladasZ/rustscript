@@ -64,8 +64,7 @@ fn buffer_cell(st: &PStructData, args: &[PValue]) -> Option<PValue> {
     let coord = |name: &str| -> u16 {
         area.get(name)
             .map(|v| match v {
-                PValue::Int(i) => i,
-                PValue::IntW(i, _) => i,
+                PValue::Int(i) | PValue::IntW(i, _) => i,
                 _ => 0,
             })
             .and_then(|i| u16::try_from(i).ok())
@@ -79,8 +78,7 @@ fn buffer_cell(st: &PStructData, args: &[PValue]) -> Option<PValue> {
         point
             .get(i)
             .map(|v| match v {
-                PValue::Int(n) => *n,
-                PValue::IntW(n, _) => *n,
+                PValue::Int(n) | PValue::IntW(n, _) => *n,
                 _ => 0,
             })
             .and_then(|n| u16::try_from(n).ok())
@@ -137,7 +135,6 @@ pub(super) fn struct_method(st: &PStructData, m: &str, args: &[PValue]) -> Resul
 /// Parallel value to fast value, for the plain data the widgets are made of.
 fn to_value(p: &PValue) -> Value {
     match p {
-        PValue::Unit => Value::Unit,
         PValue::Bool(b) => Value::Bool(*b),
         PValue::Int(i) => Value::Int(*i),
         PValue::IntW(i, w) => Value::IntW(*i, *w),
@@ -155,7 +152,7 @@ fn to_value(p: &PValue) -> Value {
                 .fields
                 .iter()
                 .map(|f| {
-                    let v = st.get(f).map(|v| to_value(&v)).unwrap_or(Value::Unit);
+                    let v = st.get(f).map_or(Value::Unit, |v| to_value(&v));
                     (std::rc::Rc::from(&**f), v)
                 })
                 .collect();
@@ -177,7 +174,6 @@ fn to_value(p: &PValue) -> Value {
 /// Fast value back to parallel value.
 fn from_value(v: &Value) -> PValue {
     match v {
-        Value::Unit => PValue::Unit,
         Value::Bool(b) => PValue::Bool(*b),
         Value::Int(i) => PValue::Int(*i),
         Value::IntW(i, w) => PValue::IntW(*i, *w),
@@ -195,7 +191,7 @@ fn from_value(v: &Value) -> PValue {
                 .fields
                 .iter()
                 .map(|f| {
-                    let value = st.get(f).map(|v| from_value(&v)).unwrap_or(PValue::Unit);
+                    let value = st.get(f).map_or(PValue::Unit, |v| from_value(&v));
                     (std::sync::Arc::from(&**f), value)
                 })
                 .collect();

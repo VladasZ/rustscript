@@ -2,6 +2,12 @@ use crate::typed::GeneratedExpr;
 
 impl GeneratedExpr {
     pub fn render(&self) -> String {
+        if let Some(text) = self.render_vec() {
+            return text;
+        }
+        if let Some(text) = self.render_option() {
+            return text;
+        }
         match self {
             // `-9223372036854775808i64` overflows the literal and will not
             // parse, so the minimum is written through its associated constant.
@@ -20,8 +26,12 @@ impl GeneratedExpr {
             Self::Multiply(left, right) => {
                 format!("{}.saturating_mul({})", grouped(left), right.render())
             }
-            Self::Equal(left, right) => format!("({} == {})", grouped(left), grouped(right)),
-            Self::Less(left, right) => format!("({} < {})", grouped(left), grouped(right)),
+            Self::Equal(left, right) | Self::FEq(left, right) => {
+                format!("({} == {})", grouped(left), grouped(right))
+            }
+            Self::Less(left, right) | Self::FLess(left, right) => {
+                format!("({} < {})", grouped(left), grouped(right))
+            }
             Self::And(left, right) => format!("({} && {})", left.render(), right.render()),
             Self::Or(left, right) => format!("({} || {})", left.render(), right.render()),
             Self::Not(value) => format!("!{}", grouped(value)),
@@ -47,11 +57,51 @@ impl GeneratedExpr {
             Self::Replace { value, from, to } => {
                 format!("{}.replace({from:?}, {to:?})", grouped(value))
             }
-            Self::FormatI64(value) => format!("format!(\"{{}}\", {})", value.render()),
-            Self::DebugVec(value) => format!("format!(\"{{:?}}\", {})", value.render()),
+            Self::FormatI64(value) | Self::FormatF64(value) => {
+                format!("format!(\"{{}}\", {})", value.render())
+            }
+            Self::DebugVec(value) | Self::DebugF64(value) => {
+                format!("format!(\"{{:?}}\", {})", value.render())
+            }
+            Self::Cast(value, target) => {
+                format!("(({} as {}) as i64)", value.render(), target.rust())
+            }
+            // Each operand goes through `diff_opaque`, a plain non-const
+            // function, so the compiler cannot fold the operation to a constant
+            // and reject it with the const-overflow lint. The overflow, divide
+            // by zero, or `i64::MIN / -1` then still happens at runtime.
+            Self::RawAdd(left, right) => raw_binary_source(left, "+", right),
+            Self::RawSub(left, right) => raw_binary_source(left, "-", right),
+            Self::RawMul(left, right) => raw_binary_source(left, "*", right),
+            Self::RawDiv(left, right) => raw_binary_source(left, "/", right),
+            Self::RawRem(left, right) => raw_binary_source(left, "%", right),
+            Self::F64(token) => {
+                if token.contains("::") {
+                    token.clone()
+                } else {
+                    format!("{token}f64")
+                }
+            }
+            Self::FAdd(left, right) => format!("({} + {})", left.render(), right.render()),
+            Self::FSub(left, right) => format!("({} - {})", left.render(), right.render()),
+            Self::FMul(left, right) => format!("({} * {})", left.render(), right.render()),
+            Self::FDiv(left, right) => format!("({} / {})", left.render(), right.render()),
+            Self::I64ToF64(value) => format!("({} as f64)", grouped(value)),
+            Self::F64ToI64(value) => format!("({} as i64)", grouped(value)),
+            Self::FormatSpec { spec, value } => {
+                format!("format!(\"{{{spec}}}\", {})", value.render())
+            }
+            // The vec and option shapes returned above.
+            _ => unreachable!("render_vec and render_option cover the rest"),
+        }
+    }
+
+    /// The vec-shaped variants, `None` when the variant is something else.
+    fn render_vec(&self) -> Option<String> {
+        Some(match self {
             Self::VecLiteral(values) => {
                 if values.is_empty() {
-                    return "Vec::<i64>::new()".to_string();
+                    return Some("Vec::<i64>::new()".to_string());
                 }
                 let values = values
                     .iter()
@@ -97,6 +147,13 @@ impl GeneratedExpr {
                 grouped(values),
                 default.render()
             ),
+            _ => return None,
+        })
+    }
+
+    /// The option-shaped variants plus indexing, `None` otherwise.
+    fn render_option(&self) -> Option<String> {
+        Some(match self {
             Self::Some(value) => format!("Some({})", value.render()),
             Self::None => "None::<i64>".to_string(),
             Self::OptionMap {
@@ -139,41 +196,10 @@ impl GeneratedExpr {
                 body,
                 ..
             } => format!("(|{binding}: i64| {})({})", body.render(), input.render()),
-            Self::Cast(value, target) => {
-                format!("(({} as {}) as i64)", value.render(), target.rust())
-            }
-            // Each operand goes through `diff_opaque`, a plain non-const
-            // function, so the compiler cannot fold the operation to a constant
-            // and reject it with the const-overflow lint. The overflow, divide
-            // by zero, or `i64::MIN / -1` then still happens at runtime.
-            Self::RawAdd(left, right) => raw_binary_source(left, "+", right),
-            Self::RawSub(left, right) => raw_binary_source(left, "-", right),
-            Self::RawMul(left, right) => raw_binary_source(left, "*", right),
-            Self::RawDiv(left, right) => raw_binary_source(left, "/", right),
-            Self::RawRem(left, right) => raw_binary_source(left, "%", right),
             Self::Index { values, index } => format!("{}[{index}usize]", grouped(values)),
             Self::Unwrap(value) => format!("{}.unwrap()", grouped(value)),
-            Self::F64(token) => {
-                if token.contains("::") {
-                    token.clone()
-                } else {
-                    format!("{token}f64")
-                }
-            }
-            Self::FAdd(left, right) => format!("({} + {})", left.render(), right.render()),
-            Self::FSub(left, right) => format!("({} - {})", left.render(), right.render()),
-            Self::FMul(left, right) => format!("({} * {})", left.render(), right.render()),
-            Self::FDiv(left, right) => format!("({} / {})", left.render(), right.render()),
-            Self::FLess(left, right) => format!("({} < {})", grouped(left), grouped(right)),
-            Self::FEq(left, right) => format!("({} == {})", grouped(left), grouped(right)),
-            Self::I64ToF64(value) => format!("({} as f64)", grouped(value)),
-            Self::F64ToI64(value) => format!("({} as i64)", grouped(value)),
-            Self::FormatF64(value) => format!("format!(\"{{}}\", {})", value.render()),
-            Self::DebugF64(value) => format!("format!(\"{{:?}}\", {})", value.render()),
-            Self::FormatSpec { spec, value } => {
-                format!("format!(\"{{{spec}}}\", {})", value.render())
-            }
-        }
+            _ => return None,
+        })
     }
 }
 

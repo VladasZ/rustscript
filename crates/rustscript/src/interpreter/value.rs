@@ -1,3 +1,4 @@
+use num_traits::AsPrimitive;
 use std::cell::{Cell, RefCell};
 use std::fmt::{self, Write};
 use std::hash::{Hash, Hasher};
@@ -18,7 +19,7 @@ use super::numeric::IntWidth;
 /// `Value::str_make_mut`, which copies first when another handle exists. That
 /// matches real `String` semantics, where a clone never sees later edits to
 /// the original. The hash of the bytes is cached after the first map use,
-/// the same trick CPython uses for str objects.
+/// the same trick `CPython` uses for str objects.
 pub struct RStr {
     /// Cached key hash of the bytes. 0 means not computed yet.
     hash: Cell<u64>,
@@ -157,7 +158,7 @@ impl StructData {
     }
 }
 
-/// Script HashMap storage. Hashed lookups, insertion ordered iteration.
+/// Script `HashMap` storage. Hashed lookups, insertion ordered iteration.
 /// Lookups by a borrowed key go through `KeyRef` so they never clone the key.
 pub type Map = IndexMap<MapKey, Value, FxBuildHasher>;
 
@@ -210,7 +211,7 @@ pub enum Value {
     /// Struct instance. Named fields, or positional for tuple structs.
     Struct(Rc<StructData>),
     /// Enum value, including the builtin Option and Result. The payload is
-    /// immutable once built, so it is a plain shared slice, not a RefCell.
+    /// immutable once built, so it is a plain shared slice, not a `RefCell`.
     Enum {
         enum_name: Rc<str>,
         variant: Rc<str>,
@@ -376,7 +377,7 @@ impl Value {
             Const::Char(ch) => Value::Char(*ch),
             Const::Str(s) => Value::str(&**s),
             Const::Bytes(bytes) => {
-                Value::vec(bytes.iter().map(|&b| Value::Int(b as i64)).collect())
+                Value::vec(bytes.iter().map(|&b| Value::Int(i64::from(b))).collect())
             }
         }
     }
@@ -393,7 +394,7 @@ impl Value {
     /// Build an integer of the given width from an in-range value.
     pub(super) fn int_of_width(value: i128, width: IntWidth) -> Value {
         match width {
-            IntWidth::I64 => Value::Int(value as i64),
+            IntWidth::I64 => Value::Int(i64::try_from(value).expect("truncated to width")),
             other => Value::IntW(other.encode(value), other),
         }
     }
@@ -408,7 +409,7 @@ impl Value {
     }
 
     /// The i64 or f64 image of a width-tagged number, for the method and
-    /// bridge surface that predates real widths. A u64 value past i64::MAX
+    /// bridge surface that predates real widths. A u64 value past `i64::MAX`
     /// saturates, the clamp sentinels like `usize::MAX` always had here.
     /// None when the value is not tagged.
     pub(super) fn bridge_image(&self) -> Option<Value> {
@@ -600,8 +601,8 @@ impl Value {
             (Value::F32(a), Value::F32(b)) => a == b,
             // A bare float literal next to an f32 value is f32 in the source
             // types, so it rounds to f32 before the comparison.
-            (Value::F32(a), Value::Float(b)) | (Value::Float(b), Value::F32(a)) => *a == *b as f32,
-            (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => *a as f64 == *b,
+            (Value::F32(a), Value::Float(b)) | (Value::Float(b), Value::F32(a)) => *a == AsPrimitive::<f32>::as_(*b),
+            (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => AsPrimitive::<f64>::as_(*a) == *b,
             (Value::Char(a), Value::Char(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => Rc::ptr_eq(a, b) || a == b,
             (Value::Vec(a), Value::Vec(b)) | (Value::Tuple(a), Value::Tuple(b)) => {
@@ -633,7 +634,7 @@ impl Value {
                             .fields
                             .iter()
                             .zip(va.iter())
-                            .all(|(k, v)| b.get(k).map(|o| v.eq_value(&o)).unwrap_or(false))
+                            .all(|(k, v)| b.get(k).is_some_and(|o| v.eq_value(&o)))
                 }
             }
             (Value::Native(a), Value::Native(b)) => Rc::ptr_eq(a, b),
@@ -719,41 +720,7 @@ impl Value {
                 }
                 out.push('}');
             }
-            Value::Struct(s) => {
-                // Canonical names print bare, like the compiler's Debug derive.
-                write!(out, "{}", super::resolver::bare(s.name())).unwrap();
-                let values = s.values.borrow();
-                if values.is_empty() {
-                    return;
-                }
-                // Tuple structs carry positional field names and print in
-                // paren form, matching the derived Debug output.
-                if s.shape
-                    .fields
-                    .iter()
-                    .enumerate()
-                    .all(|(i, f)| **f == i.to_string())
-                {
-                    out.push('(');
-                    for (i, v) in values.iter().enumerate() {
-                        if i > 0 {
-                            out.push_str(", ");
-                        }
-                        v.write_debug(out);
-                    }
-                    out.push(')');
-                    return;
-                }
-                out.push_str(" { ");
-                for (i, (k, v)) in s.shape.fields.iter().zip(values.iter()).enumerate() {
-                    if i > 0 {
-                        out.push_str(", ");
-                    }
-                    write!(out, "{k}: ").unwrap();
-                    v.write_debug(out);
-                }
-                out.push_str(" }");
-            }
+            Value::Struct(s) => write_struct_debug(s, out),
             Value::Closure(_) => out.push_str("<closure>"),
             Value::Ref(reference) => match reference.get() {
                 Some(value) => value.write_debug(out),
@@ -775,6 +742,44 @@ impl Value {
             }
         }
     }
+}
+
+/// The derived-Debug form of a struct: bare canonical name, paren form for
+/// tuple structs, brace form with field names otherwise.
+fn write_struct_debug(s: &StructData, out: &mut String) {
+    // Canonical names print bare, like the compiler's Debug derive.
+    write!(out, "{}", super::resolver::bare(s.name())).unwrap();
+    let values = s.values.borrow();
+    if values.is_empty() {
+        return;
+    }
+    // Tuple structs carry positional field names and print in
+    // paren form, matching the derived Debug output.
+    if s.shape
+        .fields
+        .iter()
+        .enumerate()
+        .all(|(i, f)| **f == i.to_string())
+    {
+        out.push('(');
+        for (i, v) in values.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            v.write_debug(out);
+        }
+        out.push(')');
+        return;
+    }
+    out.push_str(" { ");
+    for (i, (k, v)) in s.shape.fields.iter().zip(values.iter()).enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        write!(out, "{k}: ").unwrap();
+        v.write_debug(out);
+    }
+    out.push_str(" }");
 }
 
 impl MapKey {

@@ -9,6 +9,7 @@
 //! So the receiver arrives here as its true value and its true width, and each
 //! method computes in that width and panics exactly where debug Rust panics.
 
+use num_traits::AsPrimitive;
 use std::cmp::Ordering;
 
 use anyhow::{Result, bail};
@@ -127,7 +128,7 @@ fn to_bytes(width: IntWidth, value: i128, order: ByteOrder) -> Vec<u8> {
 fn raw(width: IntWidth, value: i128) -> u128 {
     let bits = width.bits();
     let mask = (1u128 << bits) - 1;
-    (value as u128) & mask
+    AsPrimitive::<u128>::as_(value) & mask
 }
 
 /// Reinterpret raw bits back as a value of the width, sign extending when the
@@ -138,9 +139,9 @@ fn from_raw(width: IntWidth, bits_value: u128) -> i128 {
     let mask = (1u128 << bits) - 1;
     let truncated = bits_value & mask;
     if width.is_signed() && truncated >> (bits - 1) & 1 == 1 {
-        truncated as i128 - (1i128 << bits)
+        AsPrimitive::<i128>::as_(truncated) - (1i128 << bits)
     } else {
-        truncated as i128
+        AsPrimitive::<i128>::as_(truncated)
     }
 }
 
@@ -203,6 +204,16 @@ pub fn int_method(
     recv: i128,
     args: &[i128],
 ) -> Option<Result<IntOut>> {
+    int_arith_method(name, width, recv, args).or_else(|| int_query_method(name, width, recv, args))
+}
+
+/// The arithmetic families: saturating, wrapping, checked, pow, abs, signum.
+fn int_arith_method(
+    name: &str,
+    width: IntWidth,
+    recv: i128,
+    args: &[i128],
+) -> Option<Result<IntOut>> {
     let bits = width.bits();
     let out = match name {
         "saturating_add" => {
@@ -215,15 +226,15 @@ pub fn int_method(
             arg(args, 0).map(|b| IntOut::Same(saturate(width, recv.saturating_mul(b))))
         }
         "wrapping_add" => {
-            arg(args, 0).map(|b| IntOut::Same(from_raw(width, recv.wrapping_add(b) as u128)))
+            arg(args, 0).map(|b| IntOut::Same(from_raw(width, AsPrimitive::<u128>::as_(recv.wrapping_add(b)))))
         }
         "wrapping_sub" => {
-            arg(args, 0).map(|b| IntOut::Same(from_raw(width, recv.wrapping_sub(b) as u128)))
+            arg(args, 0).map(|b| IntOut::Same(from_raw(width, AsPrimitive::<u128>::as_(recv.wrapping_sub(b)))))
         }
         "wrapping_mul" => {
-            arg(args, 0).map(|b| IntOut::Same(from_raw(width, recv.wrapping_mul(b) as u128)))
+            arg(args, 0).map(|b| IntOut::Same(from_raw(width, AsPrimitive::<u128>::as_(recv.wrapping_mul(b)))))
         }
-        "wrapping_neg" => Ok(IntOut::Same(from_raw(width, (-recv) as u128))),
+        "wrapping_neg" => Ok(IntOut::Same(from_raw(width, AsPrimitive::<u128>::as_(-recv)))),
         "checked_add" => arg(args, 0)
             .map(|b| IntOut::Checked(recv.checked_add(b).and_then(|v| in_range(width, v)))),
         "checked_sub" => arg(args, 0)
@@ -275,13 +286,27 @@ pub fn int_method(
             }
             Ok(IntOut::Same(recv.signum()))
         }
+        _ => return None,
+    };
+    Some(out)
+}
+
+/// Accessors, comparisons, euclid forms, and the bit and byte views.
+fn int_query_method(
+    name: &str,
+    width: IntWidth,
+    recv: i128,
+    args: &[i128],
+) -> Option<Result<IntOut>> {
+    let bits = width.bits();
+    let out = match name {
         // The serde_json integer accessors, answered from the real value
         // rather than the saturated i64 image. serde answers these by range,
         // so a negative number is not a u64 and one past `i64::MAX` is not an
         // i64. The saturated image made both of those answer the wrong thing.
         "as_i64" => Ok(IntOut::Checked(i64::try_from(recv).ok().map(i128::from))),
         "as_u64" => Ok(IntOut::Checked(u64::try_from(recv).ok().map(i128::from))),
-        "as_f64" => Ok(IntOut::SomeFloat(recv as f64)),
+        "as_f64" => Ok(IntOut::SomeFloat(AsPrimitive::<f64>::as_(recv))),
         "min" => arg(args, 0).map(|b| IntOut::Same(recv.min(b))),
         "max" => arg(args, 0).map(|b| IntOut::Same(recv.max(b))),
         "clamp" => arg(args, 0).and_then(|low| {
@@ -367,9 +392,9 @@ fn isqrt(value: i128) -> i128 {
     while low < high {
         let mid = (low + high + 1) / 2;
         if mid <= value / mid {
-            low = mid
+            low = mid;
         } else {
-            high = mid - 1
+            high = mid - 1;
         }
     }
     low
@@ -418,7 +443,7 @@ mod tests {
     /// before the method ever saw it.
     #[test]
     fn a_u64_past_i64_max_keeps_its_value() {
-        let big = u64::MAX as i128;
+        let big = i128::from(u64::MAX);
         assert_eq!(same("max", IntWidth::U64, big, &[0]), big);
         assert_eq!(same("min", IntWidth::U64, big, &[big]), big);
         assert_eq!(same("saturating_add", IntWidth::U64, big, &[0]), big);

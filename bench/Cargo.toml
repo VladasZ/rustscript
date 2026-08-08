@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 anyhow = { workspace = true }
+num-traits = { workspace = true }
 hex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -133,3 +134,6 @@ path = "cases/http_local/case.rs"
 [[bin]]
 name = "automation"
 path = "cases/automation/case.rs"
+
+[lints]
+workspace = true

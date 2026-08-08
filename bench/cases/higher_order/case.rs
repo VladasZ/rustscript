@@ -12,7 +12,7 @@ fn main() {
     let mut x: i64 = 12345;
     let mut v: Vec<i64> = Vec::new();
     for _ in 0..n {
-        x = x * 48271 % 2147483647;
+        x = x * 48271 % 2_147_483_647;
         v.push(x % 1000);
     }
     let sum: i64 = v.iter().map(|a| a * 3 + 1).filter(|a| a % 2 == 0).sum();

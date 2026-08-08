@@ -12,6 +12,7 @@
 //! be expressed as a finished value, and containers live behind different
 //! cell types per engine.
 
+use num_traits::AsPrimitive;
 use std::cmp::Ordering;
 use std::time::Duration;
 
@@ -39,6 +40,20 @@ fn int_arg(args: &impl Args, i: usize) -> Result<i64> {
         Some(n) => Ok(n),
         None => bail!("expected an integer argument"),
     }
+}
+
+/// An argument the script's own types constrain to usize, so a negative or
+/// oversized value can only come from an interpreter bug or an invalid
+/// program, and errors instead of wrapping.
+fn usize_arg(args: &impl Args, i: usize) -> Result<usize> {
+    let n = int_arg(args, i)?;
+    usize::try_from(n).map_err(|_| anyhow!("`{n}` is not a valid count"))
+}
+
+/// A length or byte offset as the integer scripts see. These fit i64 on every
+/// supported platform, the expect documents the impossible case.
+pub(super) fn usize_i64(i: usize) -> i64 {
+    i64::try_from(i).expect("value exceeds i64")
 }
 
 fn float_arg(args: &impl Args, i: usize) -> Result<f64> {
@@ -72,7 +87,7 @@ pub(super) fn num_core(recv: Num, name: &str, args: &impl Args) -> Result<Option
     use Num::{Float, Int};
     use NumOut as O;
     let as_f = || match recv {
-        Int(i) => i as f64,
+        Int(i) => AsPrimitive::<f64>::as_(i),
         Float(f) => f,
     };
     Ok(Some(match (recv, name) {
@@ -89,8 +104,8 @@ pub(super) fn num_core(recv: Num, name: &str, args: &impl Args) -> Result<Option
         }
         (Int(i), "abs") => O::Int(i.abs()),
         (Float(f), "abs") => O::Float(f.abs()),
-        (Int(i), "pow") => O::Int(i.pow(int_arg(args, 0)? as u32)),
-        (Float(f), "powi") => O::Float(f.powi(int_arg(args, 0)? as i32)),
+        (Int(i), "pow") => O::Int(i.pow(u32::try_from(int_arg(args, 0)?)?)),
+        (Float(f), "powi") => O::Float(f.powi(i32::try_from(int_arg(args, 0)?)?)),
         (Float(f), "powf") => O::Float(f.powf(float_arg(args, 0)?)),
         (Float(f), "sqrt") => O::Float(f.sqrt()),
         (Float(f), "floor") => O::Float(f.floor()),
@@ -101,7 +116,7 @@ pub(super) fn num_core(recv: Num, name: &str, args: &impl Args) -> Result<Option
         // and the rest compute through the float view.
         (Int(i), "trunc" | "floor" | "ceil" | "round") => O::Int(i),
         (Int(_), "sqrt") => O::Float(as_f().sqrt()),
-        (Int(_), "powi") => O::Float(as_f().powi(int_arg(args, 0)? as i32)),
+        (Int(_), "powi") => O::Float(as_f().powi(i32::try_from(int_arg(args, 0)?)?)),
         (Int(_), "powf") => O::Float(as_f().powf(float_arg(args, 0)?)),
         (Int(i), "is_sign_positive") => O::Bool(i >= 0),
         (Float(f), "ceil") => O::Float(f.ceil()),
@@ -118,11 +133,10 @@ pub(super) fn num_core(recv: Num, name: &str, args: &impl Args) -> Result<Option
         (Float(f), "mul_add") => O::Float(f.mul_add(float_arg(args, 0)?, float_arg(args, 1)?)),
         (Int(_), "mul_add") => O::Float(as_f().mul_add(float_arg(args, 0)?, float_arg(args, 1)?)),
         (Float(f), "is_nan") => O::Bool(f.is_nan()),
-        (Int(_), "is_nan") => O::Bool(false),
         (Float(f), "is_finite") => O::Bool(f.is_finite()),
         (Int(_), "is_finite") => O::Bool(true),
         (Float(f), "is_infinite") => O::Bool(f.is_infinite()),
-        (Int(_), "is_infinite") => O::Bool(false),
+        (Int(_), "is_nan" | "is_infinite") => O::Bool(false),
         (Float(f), "is_sign_negative") => O::Bool(f.is_sign_negative()),
         (Int(i), "is_sign_negative") => O::Bool(i < 0),
         (Int(a), "min") => O::Int(a.min(int_arg(args, 0)?)),
@@ -159,10 +173,10 @@ pub(super) enum F32Out {
 /// for `f32::MAX`.
 pub(super) fn f32_core(recv: f32, name: &str, args: &impl Args) -> Result<Option<F32Out>> {
     use F32Out as O;
-    let arg = |i: usize| -> Result<f32> { float_arg(args, i).map(|f| f as f32) };
+    let arg = |i: usize| -> Result<f32> { float_arg(args, i).map(AsPrimitive::<f32>::as_) };
     Ok(Some(match name {
         "abs" => O::Val(recv.abs()),
-        "powi" => O::Val(recv.powi(int_arg(args, 0)? as i32)),
+        "powi" => O::Val(recv.powi(i32::try_from(int_arg(args, 0)?)?)),
         "powf" => O::Val(recv.powf(arg(0)?)),
         "sqrt" => O::Val(recv.sqrt()),
         "floor" => O::Val(recv.floor()),
@@ -206,7 +220,7 @@ pub(super) enum JsonKind {
     Other,
 }
 
-/// The serde_json `is_*` family. These apply to every receiver, so an engine
+/// The `serde_json` `is_*` family. These apply to every receiver, so an engine
 /// answers them before its per type dispatch, which returns early for the hot
 /// receivers and would otherwise never reach them.
 pub(super) fn json_type_test(kind: JsonKind, name: &str) -> Option<bool> {
@@ -227,7 +241,7 @@ pub(super) fn json_type_test(kind: JsonKind, name: &str) -> Option<bool> {
     })
 }
 
-/// The serde_json `as_*` family, by name only. A receiver of the wrong shape
+/// The `serde_json` `as_*` family, by name only. A receiver of the wrong shape
 /// answers None rather than erroring, so an engine tests the name here and
 /// then decides whether its receiver matches.
 pub(super) fn json_accessor(name: &str) -> bool {
@@ -300,7 +314,9 @@ pub(super) fn char_method(ch: char, name: &str, args: &impl Args) -> Option<Resu
                     "to_digit: invalid radix -- radix must be in the range 2 to 36 inclusive"
                 )));
             }
-            Some(Ok(CharOut::OptU32(ch.to_digit(radix as u32))))
+            Some(Ok(CharOut::OptU32(
+                u32::try_from(radix).ok().and_then(|r| ch.to_digit(r)),
+            )))
         }
         "is_ascii_digit" => b(ch.is_ascii_digit()),
         "is_ascii_alphabetic" => b(ch.is_ascii_alphabetic()),
@@ -352,9 +368,9 @@ pub(super) fn str_core(s: &str, name: &str, args: &impl Args) -> Result<Option<S
     use StrOut as O;
     let a = |i: usize| args.text(i);
     Ok(Some(match name {
-        "len" => O::Int(s.len() as i64),
+        "len" => O::Int(usize_i64(s.len())),
         "is_empty" => O::Bool(s.is_empty()),
-        "count" => O::Int(s.chars().count() as i64),
+        "count" => O::Int(usize_i64(s.chars().count())),
         "contains" => O::Bool(s.contains(&a(0))),
         "eq_ignore_ascii_case" => O::Bool(s.eq_ignore_ascii_case(&a(0))),
         "starts_with" => O::Bool(s.starts_with(&a(0))),
@@ -375,8 +391,8 @@ pub(super) fn str_core(s: &str, name: &str, args: &impl Args) -> Result<Option<S
             None => O::Owned(s.replace(&a(0), &a(1))),
         },
         "replacen" => match args.pattern_chars(0) {
-            Some(cs) => O::Owned(s.replacen(cs.as_slice(), &a(1), int_arg(args, 2)? as usize)),
-            None => O::Owned(s.replacen(&a(0), &a(1), int_arg(args, 2)? as usize)),
+            Some(cs) => O::Owned(s.replacen(cs.as_slice(), &a(1), usize_arg(args, 2)?)),
+            None => O::Owned(s.replacen(&a(0), &a(1), usize_arg(args, 2)?)),
         },
         "repeat" => {
             let n = args
@@ -388,10 +404,9 @@ pub(super) fn str_core(s: &str, name: &str, args: &impl Args) -> Result<Option<S
         // String::as_str gives the string back. serde_json::Value::as_str
         // gives an Option, and a json string is a plain Str here, so unwrap
         // and expect on a string are identity to keep serde chains working.
-        "to_owned" | "trim_string" | "as_str" | "as_string" | "unwrap" | "expect" => O::Keep,
-        "unwrap_or" | "unwrap_or_else" | "unwrap_or_default" => O::Keep,
         // A String or a Cow that already owns its data, into_owned is self.
-        "into_owned" | "into_string" => O::Keep,
+        "to_owned" | "trim_string" | "as_str" | "as_string" | "unwrap" | "expect" | "unwrap_or"
+        | "unwrap_or_else" | "unwrap_or_default" | "into_owned" | "into_string" => O::Keep,
         // `Option::context` returns a Result, so the pre-unwrapped string has
         // to come back wrapped or a following `?` would have nothing to unwrap.
         "context" | "with_context" => O::OkKeep,
@@ -404,8 +419,8 @@ pub(super) fn str_core(s: &str, name: &str, args: &impl Args) -> Result<Option<S
         "strip_suffix" => O::OptOwned(s.strip_suffix(&a(0)).map(str::to_string)),
         // Byte offsets, same as the real std, and slicing is byte based too,
         // so `&s[..s.find(x).unwrap()]` behaves right.
-        "find" => O::OptInt(s.find(&a(0)).map(|i| i as i64)),
-        "rfind" => O::OptInt(s.rfind(&a(0)).map(|i| i as i64)),
+        "find" => O::OptInt(s.find(&a(0)).map(usize_i64)),
+        "rfind" => O::OptInt(s.rfind(&a(0)).map(usize_i64)),
         "split_once" => O::OptPair(
             s.split_once(&a(0))
                 .map(|(x, y)| (x.to_string(), y.to_string())),
@@ -426,15 +441,15 @@ pub(super) fn str_core(s: &str, name: &str, args: &impl Args) -> Result<Option<S
         },
         "rsplit" => O::Strs(s.rsplit(&a(0)).map(str::to_string).collect()),
         "splitn" => {
-            let n = int_arg(args, 0)? as usize;
+            let n = usize_arg(args, 0)?;
             O::Strs(s.splitn(n, &a(1)).map(str::to_string).collect())
         }
         "rsplitn" => {
-            let n = int_arg(args, 0)? as usize;
+            let n = usize_arg(args, 0)?;
             O::Strs(s.rsplitn(n, &a(1)).map(str::to_string).collect())
         }
         "matches" => O::Strs(s.matches(&a(0)).map(str::to_string).collect()),
-        "char_indices" => O::CharIdx(s.char_indices().map(|(i, c)| (i as i64, c)).collect()),
+        "char_indices" => O::CharIdx(s.char_indices().map(|(i, c)| (usize_i64(i), c)).collect()),
         "trim_matches" | "trim_start_matches" | "trim_end_matches" => {
             let pat = a(0);
             let out = match name {
@@ -582,8 +597,8 @@ pub(super) enum MatchOut {
 pub(super) fn match_core(name: &str, source: &str, start: usize, end: usize) -> Option<MatchOut> {
     Some(match name {
         "as_str" => MatchOut::Text(source[start..end].to_string()),
-        "start" => MatchOut::Int(start as i64),
-        "end" => MatchOut::Int(end as i64),
+        "start" => MatchOut::Int(usize_i64(start)),
+        "end" => MatchOut::Int(usize_i64(end)),
         _ => return None,
     })
 }
@@ -604,9 +619,8 @@ pub(super) fn captures_core<'n>(
     use CapturesOut as O;
     Ok(Some(match name {
         "get" => {
-            let index = match args.int(0) {
-                Some(i) if i >= 0 => i as usize,
-                _ => bail!("captures get needs a non-negative index"),
+            let Some(index) = args.int(0).and_then(|i| usize::try_from(i).ok()) else {
+                bail!("captures get needs a non-negative index");
             };
             O::OptSpan(groups.get(index).copied().flatten())
         }
@@ -615,7 +629,7 @@ pub(super) fn captures_core<'n>(
             let index = names.find_map(|(n, i)| (n == wanted).then_some(i));
             O::OptSpan(index.and_then(|i| groups.get(i).copied().flatten()))
         }
-        "len" => O::Int(groups.len() as i64),
+        "len" => O::Int(usize_i64(groups.len())),
         _ => return Ok(None),
     }))
 }
@@ -649,14 +663,14 @@ pub(super) fn duration_core(name: &str, secs: u64, nanos: u32) -> Option<DurOut>
     use DurOut as O;
     let total = u128::from(secs) * 1_000_000_000 + u128::from(nanos);
     Some(match name {
-        "as_secs" => O::Int(secs as i64),
-        "as_millis" => O::Int((total / 1_000_000) as i64),
-        "as_micros" => O::Int((total / 1_000) as i64),
-        "as_nanos" => O::Int(total as i64),
+        "as_secs" => O::Int(i64::try_from(secs).unwrap_or(i64::MAX)),
+        "as_millis" => O::Int(i64::try_from(total / 1_000_000).unwrap_or(i64::MAX)),
+        "as_micros" => O::Int(i64::try_from(total / 1_000).unwrap_or(i64::MAX)),
+        "as_nanos" => O::Int(i64::try_from(total).unwrap_or(i64::MAX)),
         "subsec_nanos" => O::Int(i64::from(nanos)),
         "subsec_millis" => O::Int(i64::from(nanos / 1_000_000)),
         "subsec_micros" => O::Int(i64::from(nanos / 1_000)),
-        "as_secs_f64" => O::Float(secs as f64 + f64::from(nanos) / 1e9),
+        "as_secs_f64" => O::Float(AsPrimitive::<f64>::as_(secs) + f64::from(nanos) / 1e9),
         "is_zero" => O::Bool(total == 0),
         _ => return None,
     })
@@ -775,7 +789,7 @@ pub(super) fn exit_status_core(name: &str, success: bool, code: Option<i64>) -> 
 /// The `colored` crate as string methods, shared so tokio scripts color their
 /// output the same way. Returns the styled text as a plain string carrying
 /// ANSI codes, so chaining and printing both work. Honors the crate's own
-/// NO_COLOR and terminal detection.
+/// `NO_COLOR` and terminal detection.
 pub(super) fn color_core(s: &str, name: &str) -> Option<String> {
     use colored::Colorize;
     let out = match name {

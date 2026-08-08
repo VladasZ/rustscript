@@ -20,11 +20,11 @@ fn main() {
 
     println!(
         "map_or_else ok: {}",
-        parse("42").map_or_else(|e| e.len() as i64, |n| n * 2)
+        parse("42").map_or_else(|e| i64::try_from(e.len()).unwrap(), |n| n * 2)
     );
     println!(
         "map_or_else err: {}",
-        parse("x").map_or_else(|e| e.len() as i64, |n| n * 2)
+        parse("x").map_or_else(|e| i64::try_from(e.len()).unwrap(), |n| n * 2)
     );
 
     println!(
@@ -34,11 +34,11 @@ fn main() {
 
     println!(
         "unwrap_or_else ok: {}",
-        parse("7").unwrap_or_else(|e| e.len() as i64)
+        parse("7").unwrap_or_else(|e| i64::try_from(e.len()).unwrap())
     );
     println!(
         "unwrap_or_else err: {}",
-        parse("x").unwrap_or_else(|e| e.len() as i64)
+        parse("x").unwrap_or_else(|e| i64::try_from(e.len()).unwrap())
     );
 
     let chained = parse("21").and_then(|n| parse(&(n * 2).to_string()));

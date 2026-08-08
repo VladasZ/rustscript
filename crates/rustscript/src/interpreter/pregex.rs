@@ -189,7 +189,7 @@ pub(super) fn capture_index(handle: &Arc<Mutex<PNative>>, key: &PValue) -> Resul
         captures.clone()
     };
     let index = match key {
-        PValue::Int(index) if *index >= 0 => *index as usize,
+        PValue::Int(index) if *index >= 0 => usize::try_from(*index)?,
         PValue::Str(name) => group_by_name(&captures, name)
             .ok_or_else(|| anyhow!("no capture group named `{name}`"))?,
         _ => bail!("invalid capture index"),

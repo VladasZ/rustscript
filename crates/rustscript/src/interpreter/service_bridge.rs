@@ -26,14 +26,10 @@ use super::value::{StructData, Value};
 /// works on these directly.
 pub(super) fn service_const(name: &str) -> Option<Value> {
     let n: i64 = match name {
-        // ServiceManagerAccess
-        "CONNECT" => 0x0001,
-        "CREATE_SERVICE" => 0x0002,
-        "ENUMERATE_SERVICE" => 0x0004,
-        // ServiceAccess
-        "QUERY_CONFIG" => 0x0001,
-        "CHANGE_CONFIG" => 0x0002,
-        "QUERY_STATUS" => 0x0004,
+        // ServiceManagerAccess and ServiceAccess share the low bit values.
+        "CONNECT" | "QUERY_CONFIG" => 0x0001,
+        "CREATE_SERVICE" | "CHANGE_CONFIG" => 0x0002,
+        "ENUMERATE_SERVICE" | "QUERY_STATUS" => 0x0004,
         "START" => 0x0010,
         "STOP" => 0x0020,
         "DELETE" => 0x0001_0000,

@@ -281,7 +281,16 @@ pub enum BuiltinId {
 
 impl BuiltinId {
     pub fn resolve(name: &str) -> BuiltinId {
-        use BuiltinId::*;
+        use BuiltinId::{
+            All, AndModify, AndThen, Any, Chars, Clone, CloneFrom, Concat, Contains, ContainsKey,
+            Copied, Count, EndsWith, Entry, Enumerate, Filter, FilterMap, Find, First, FlatMap,
+            Fold, ForEach, Get, Insert, IsEmpty, Iter, IterMut, Join, Keys, Last, Len, Lines, Map,
+            MapErr, MapOr, MaxByKey, MinByKey, OkOrElse, OrInsertWith, OrInsertWithKey, Other,
+            Parse, Partition, Pop, Position, Product, Push, PushStr, Reduce, Remove, Retain, Rev,
+            Skip, SkipWhile, Sort, SortBy, SortByCachedKey, SortByKey, Split, SplitFirst,
+            SplitWhitespace, StartsWith, Sum, Take, TakeWhile, Then, ToString, Trim, Unwrap,
+            UnwrapOr, UnwrapOrElse, Values, WithContext,
+        };
         match name {
             "len" => Len,
             "is_empty" => IsEmpty,
@@ -308,7 +317,7 @@ impl BuiltinId {
             "last" => Last,
             "split_first" => SplitFirst,
             "contains" => Contains,
-            "sort" => Sort,
+            "sort" | "sort_unstable" => Sort,
             "join" => Join,
             "concat" => Concat,
             "sum" => Sum,
@@ -366,7 +375,12 @@ impl BuiltinId {
     /// Whether this method takes a closure and must run through the
     /// interpreter's higher-order dispatch.
     pub fn is_higher_order(self) -> bool {
-        use BuiltinId::*;
+        use BuiltinId::{
+            All, AndModify, AndThen, Any, Filter, FilterMap, Find, FlatMap, Fold, ForEach, Map,
+            MapErr, MapOr, MaxByKey, MinByKey, OkOrElse, OrInsertWith, OrInsertWithKey, Other,
+            Partition, Position, Reduce, Retain, SkipWhile, SortBy, SortByCachedKey, SortByKey,
+            TakeWhile, Then, UnwrapOrElse, WithContext,
+        };
         matches!(
             self,
             Then | Map
@@ -483,7 +497,7 @@ pub enum Op {
         v: i64,
     },
     /// A width-tagged integer literal: a suffixed one, an annotated one, or a
-    /// bare literal past i64::MAX, which real Rust can only type as u64 or
+    /// bare literal past `i64::MAX`, which real Rust can only type as u64 or
     /// usize. `v` is the storage form of `super::numeric::IntWidth`.
     LoadIntW {
         dst: Reg,
@@ -744,13 +758,13 @@ pub enum Op {
         argc: u16,
     },
 
-    /// Spawn child closure `child` as a tokio task, writing a JoinHandle into
+    /// Spawn child closure `child` as a tokio task, writing a `JoinHandle` into
     /// `dst`. Emitted only for `#[tokio::main]` scripts, run by the parallel VM.
     Spawn {
         dst: Reg,
         child: u16,
     },
-    /// Await the future or JoinHandle in `src`, writing its result into `dst`.
+    /// Await the future or `JoinHandle` in `src`, writing its result into `dst`.
     /// Parallel VM only.
     Await {
         dst: Reg,

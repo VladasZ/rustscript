@@ -110,6 +110,11 @@ pub fn drain_lines(handle: &Rc<RefCell<Native>>) -> Vec<Value> {
     out
 }
 
+/// A byte count as the integer scripts see. Fits i64 on every supported
+/// platform, the expect documents the impossible case.
+fn int_len(n: usize) -> i64 {
+    i64::try_from(n).expect("length exceeds i64")
+}
 fn io_err<T>(r: std::io::Result<T>, on_ok: impl FnOnce(T) -> Value) -> Value {
     match r {
         Ok(v) => Value::ok(on_ok(v)),
@@ -139,7 +144,7 @@ fn append_string(target: &mut Value, text: &str) {
 fn append_bytes(target: &Value, bytes: &[u8]) {
     if let Value::Vec(v) = target {
         v.borrow_mut()
-            .extend(bytes.iter().map(|b| Value::Int(*b as i64)));
+            .extend(bytes.iter().map(|b| Value::Int(i64::from(*b))));
     }
 }
 
@@ -161,8 +166,42 @@ pub fn native_method(
             return Ok(Some(v));
         }
     }
-    // Handles that consume self or hand out sub-handles need to move out of the
-    // RefCell, so they are matched first with a dedicated borrow.
+    // The families use disjoint method names, so the first helper that
+    // recognizes the name answers. Handles that consume self or hand out
+    // sub-handles move out of the RefCell inside their family helper.
+    if let Some(v) = reader_native_method(handle, method, args)? {
+        return Ok(Some(v));
+    }
+    if let Some(v) = writer_native_method(handle, method, args) {
+        return Ok(Some(v));
+    }
+    if let Some(v) = file_native_method(handle, method, args)? {
+        return Ok(Some(v));
+    }
+    if let Some(v) = child_native_method(handle, method)? {
+        return Ok(Some(v));
+    }
+    if let Some(v) = net_native_method(handle, method)? {
+        return Ok(Some(v));
+    }
+    if let Some(v) = udp_native_method(handle, method, args)? {
+        return Ok(Some(v));
+    }
+    if let Some(v) = time_native_method(handle, method, args)? {
+        return Ok(Some(v));
+    }
+    if let Some(v) = temp_native_method(handle, method)? {
+        return Ok(Some(v));
+    }
+    Ok(http_native_method(handle, method, args))
+}
+
+/// Readers: files, socket readers, and lazy line iterators.
+fn reader_native_method(
+    handle: &Rc<RefCell<Native>>,
+    method: &str,
+    args: &mut [Value],
+) -> Result<Option<Value>> {
     match method {
         // Reader side ------------------------------------------------------
         "read_line" => {
@@ -175,7 +214,7 @@ pub fn native_method(
                 if let Some(t) = args.first_mut() {
                     append_string(t, &buf);
                 }
-                Value::Int(n as i64)
+                Value::Int(int_len(n))
             })));
         }
         "read_to_string" => {
@@ -188,7 +227,7 @@ pub fn native_method(
                 if let Some(t) = args.first_mut() {
                     append_string(t, &buf);
                 }
-                Value::Int(n as i64)
+                Value::Int(int_len(n))
             })));
         }
         "read" => {
@@ -207,10 +246,10 @@ pub fn native_method(
                 if let Some(Value::Vec(v)) = args.first() {
                     let mut items = v.borrow_mut();
                     for (i, byte) in buf.iter().take(n).enumerate() {
-                        items[i] = Value::Int(*byte as i64);
+                        items[i] = Value::Int(i64::from(*byte));
                     }
                 }
-                Value::Int(n as i64)
+                Value::Int(int_len(n))
             })));
         }
         "read_to_end" => {
@@ -223,7 +262,7 @@ pub fn native_method(
                 if let Some(t) = args.first() {
                     append_bytes(t, &buf);
                 }
-                Value::Int(n as i64)
+                Value::Int(int_len(n))
             })));
         }
         "lines" => {
@@ -254,6 +293,18 @@ pub fn native_method(
                 return Ok(Some(Value::vec(drain_lines(handle))));
             }
         }
+        _ => {}
+    }
+    Ok(None)
+}
+
+/// Writers shared by files, sockets, and process stdin.
+fn writer_native_method(
+    handle: &Rc<RefCell<Native>>,
+    method: &str,
+    args: &mut [Value],
+) -> Option<Value> {
+    match method {
         // Writer side ------------------------------------------------------
         "write_all" | "write" => {
             let bytes = value_to_bytes(args.first());
@@ -261,25 +312,39 @@ pub fn native_method(
             let n = bytes.len();
             let r = write_bytes(&mut h, &bytes);
             let is_write = method == "write";
-            return Ok(Some(io_err(r, |()| {
+            return Some(io_err(r, |()| {
                 if is_write {
-                    Value::Int(n as i64)
+                    Value::Int(int_len(n))
                 } else {
                     Value::Unit
                 }
-            })));
+            }));
         }
         "flush" => {
             let mut h = handle.borrow_mut();
             let r = flush_writer(&mut h);
-            return Ok(Some(io_err(r, |()| Value::Unit)));
+            return Some(io_err(r, |()| Value::Unit));
         }
+        _ => {}
+    }
+    None
+}
+
+/// File-only extras beyond plain reads and writes.
+fn file_native_method(
+    handle: &Rc<RefCell<Native>>,
+    method: &str,
+    args: &mut [Value],
+) -> Result<Option<Value>> {
+    match method {
         // File extras ------------------------------------------------------
         "seek" => {
             let pos = seek_from(args.first());
             let mut h = handle.borrow_mut();
             if let Native::File(r) = &mut *h {
-                return Ok(Some(io_err(r.seek(pos), |n| Value::Int(n as i64))));
+                return Ok(Some(io_err(r.seek(pos), |n| {
+                    Value::Int(i64::try_from(n).unwrap_or(i64::MAX))
+                })));
             }
             bail!("seek on non-file {}", h.type_name());
         }
@@ -291,7 +356,9 @@ pub fn native_method(
             bail!("sync on non-file {}", h.type_name());
         }
         "set_len" => {
-            let n = as_int(args.first()).unwrap_or(0) as u64;
+            let n = as_int(args.first())
+                .and_then(|n| u64::try_from(n).ok())
+                .unwrap_or(0);
             let mut h = handle.borrow_mut();
             if let Native::File(r) = &mut *h {
                 return Ok(Some(io_err(r.get_ref().set_len(n), |()| Value::Unit)));
@@ -323,6 +390,14 @@ pub fn native_method(
             }
             bail!("metadata on non-file {}", h.type_name());
         }
+        _ => {}
+    }
+    Ok(None)
+}
+
+/// A spawned child process.
+fn child_native_method(handle: &Rc<RefCell<Native>>, method: &str) -> Result<Option<Value>> {
+    match method {
         // Child ------------------------------------------------------------
         "wait" => {
             let mut h = handle.borrow_mut();
@@ -354,7 +429,7 @@ pub fn native_method(
         "id" => {
             let h = handle.borrow();
             if let Native::Child(c) = &*h {
-                return Ok(Some(Value::Int(c.id() as i64)));
+                return Ok(Some(Value::Int(i64::from(c.id()))));
             }
         }
         "wait_with_output" => {
@@ -370,6 +445,14 @@ pub fn native_method(
             }
             bail!("wait_with_output on non-child");
         }
+        _ => {}
+    }
+    Ok(None)
+}
+
+/// TCP listeners and streams.
+fn net_native_method(handle: &Rc<RefCell<Native>>, method: &str) -> Result<Option<Value>> {
+    match method {
         // TcpListener ------------------------------------------------------
         "accept" => {
             let h = handle.borrow();
@@ -428,6 +511,18 @@ pub fn native_method(
                 _ => bail!("try_clone on {}", h.type_name()),
             }
         }
+        _ => {}
+    }
+    Ok(None)
+}
+
+/// UDP sockets.
+fn udp_native_method(
+    handle: &Rc<RefCell<Native>>,
+    method: &str,
+    args: &mut [Value],
+) -> Result<Option<Value>> {
+    match method {
         // UdpSocket --------------------------------------------------------
         "set_broadcast" => {
             let on = matches!(args.first(), Some(Value::Bool(true)));
@@ -439,11 +534,14 @@ pub fn native_method(
         }
         "send_to" => {
             let bytes = value_to_bytes(args.first());
-            let addr = args.get(1).map(|v| v.display()).unwrap_or_default();
+            let addr = args
+                .get(1)
+                .map(super::value::Value::display)
+                .unwrap_or_default();
             let h = handle.borrow();
             if let Native::Udp(s) = &*h {
                 return Ok(Some(io_err(s.send_to(&bytes, addr), |n| {
-                    Value::Int(n as i64)
+                    Value::Int(int_len(n))
                 })));
             }
             bail!("send_to on {}", h.type_name());
@@ -452,18 +550,33 @@ pub fn native_method(
             let bytes = value_to_bytes(args.first());
             let h = handle.borrow();
             if let Native::Udp(s) = &*h {
-                return Ok(Some(io_err(s.send(&bytes), |n| Value::Int(n as i64))));
+                return Ok(Some(io_err(s.send(&bytes), |n| Value::Int(int_len(n)))));
             }
             bail!("send on {}", h.type_name());
         }
         "connect" => {
-            let addr = args.first().map(|v| v.display()).unwrap_or_default();
+            let addr = args
+                .first()
+                .map(super::value::Value::display)
+                .unwrap_or_default();
             let h = handle.borrow();
             if let Native::Udp(s) = &*h {
                 return Ok(Some(io_err(s.connect(addr), |()| Value::Unit)));
             }
             bail!("connect on {}", h.type_name());
         }
+        _ => {}
+    }
+    Ok(None)
+}
+
+/// `Instant` and `SystemTime`.
+fn time_native_method(
+    handle: &Rc<RefCell<Native>>,
+    method: &str,
+    args: &mut [Value],
+) -> Result<Option<Value>> {
+    match method {
         // Instant / SystemTime --------------------------------------------
         "elapsed" => {
             let h = handle.borrow();
@@ -500,6 +613,14 @@ pub fn native_method(
             }
             bail!("duration_since arguments mismatch");
         }
+        _ => {}
+    }
+    Ok(None)
+}
+
+/// Temp dirs and named temp files.
+fn temp_native_method(handle: &Rc<RefCell<Native>>, method: &str) -> Result<Option<Value>> {
+    match method {
         // TempDir ----------------------------------------------------------
         "path" => {
             let h = handle.borrow();
@@ -527,21 +648,33 @@ pub fn native_method(
             }
             bail!("close on non-tempdir");
         }
+        _ => {}
+    }
+    Ok(None)
+}
+
+/// The blocking HTTP client, a verb starts a request builder.
+fn http_native_method(
+    handle: &Rc<RefCell<Native>>,
+    method: &str,
+    args: &mut [Value],
+) -> Option<Value> {
+    match method {
         // Client request builders -----------------------------------------
         "get" | "post" | "put" | "delete" | "patch" | "head" => {
             if matches!(&*handle.borrow(), Native::HttpClient(_)) {
                 let verb = method.to_ascii_uppercase();
                 let client = Value::Native(handle.clone());
-                return Ok(Some(super::http::build_reqwest_request(
+                return Some(super::http::build_reqwest_request(
                     &verb,
                     args.first(),
                     client,
-                )));
+                ));
             }
         }
         _ => {}
     }
-    Ok(None)
+    None
 }
 
 fn write_bytes(h: &mut Native, bytes: &[u8]) -> std::io::Result<()> {
@@ -574,7 +707,7 @@ fn value_to_bytes(v: Option<&Value>) -> Vec<u8> {
             .borrow()
             .iter()
             .filter_map(|x| match x {
-                Value::Int(i) => Some(*i as u8),
+                Value::Int(i) => u8::try_from(*i).ok(),
                 _ => None,
             })
             .collect(),
@@ -599,7 +732,7 @@ fn seek_from(v: Option<&Value>) -> SeekFrom {
             _ => None,
         });
         match (&**variant, n) {
-            ("Start", Some(n)) => return SeekFrom::Start(n as u64),
+            ("Start", Some(n)) => return SeekFrom::Start(u64::try_from(n).unwrap_or_default()),
             ("End", Some(n)) => return SeekFrom::End(n),
             ("Current", Some(n)) => return SeekFrom::Current(n),
             _ => {}

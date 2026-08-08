@@ -330,15 +330,16 @@ impl Expr {
             | Self::FloatLit { .. }
             | Self::BoolLit(_)
             | Self::CharLit(_)
-            | Self::StrLit(_) => false,
-            Self::VecLit { items, .. } => items.iter().any(|item| item.uses_any(names)),
+            | Self::StrLit(_)
+            | Self::FnCall { .. } => false,
+            Self::VecLit { items, .. } | Self::SetLit { items, .. } => {
+                items.iter().any(|item| item.uses_any(names))
+            }
             Self::OptLit { value, .. } => value.as_ref().is_some_and(|inner| inner.uses_any(names)),
             Self::MapLit { items, .. } => items
                 .iter()
                 .any(|(key, value)| key.uses_any(names) || value.uses_any(names)),
-            Self::SetLit { items, .. } => items.iter().any(|item| item.uses_any(names)),
             Self::Pipe(pipe) => pipe.uses_any(names),
-            Self::FnCall { .. } => false,
             Self::Bin { left, right, .. } => left.uses_any(names) || right.uses_any(names),
             Self::Unary { value, .. } | Self::Cast { value, .. } => value.uses_any(names),
             Self::Call { recv, args, .. } => {
@@ -364,14 +365,15 @@ impl Expr {
             } => op.is_fallible() || left.has_fallible_op() || right.has_fallible_op(),
             Self::Unary { op, value, .. } => matches!(op, UnOp::Neg) || value.has_fallible_op(),
             Self::Cast { value, .. } => value.has_fallible_op(),
-            Self::VecLit { items, .. } => items.iter().any(Expr::has_fallible_op),
+            Self::VecLit { items, .. } | Self::SetLit { items, .. } => {
+                items.iter().any(Expr::has_fallible_op)
+            }
             Self::OptLit { value, .. } => {
                 value.as_ref().is_some_and(|inner| inner.has_fallible_op())
             }
             Self::MapLit { items, .. } => items
                 .iter()
                 .any(|(key, value)| key.has_fallible_op() || value.has_fallible_op()),
-            Self::SetLit { items, .. } => items.iter().any(Expr::has_fallible_op),
             // Every catalog call reaches std code the const propagator can look
             // through, `pow` and `sum` among them, so a call counts as fallible.
             // A pipe carries `sum` and `fold`, a helper body is out of sight,
@@ -395,15 +397,20 @@ impl Expr {
     pub fn make_opaque(&mut self) {
         match self {
             Self::IntLit { opaque, .. } | Self::FloatLit { opaque, .. } => *opaque = true,
-            Self::VecLit { items, .. } => items.iter_mut().for_each(Expr::make_opaque),
+            Self::VecLit { items, .. } | Self::SetLit { items, .. } => {
+                for item in items {
+                    item.make_opaque();
+                }
+            }
             Self::OptLit {
                 value: Some(inner), ..
             } => inner.make_opaque(),
-            Self::MapLit { items, .. } => items.iter_mut().for_each(|(key, value)| {
-                key.make_opaque();
-                value.make_opaque();
-            }),
-            Self::SetLit { items, .. } => items.iter_mut().for_each(Expr::make_opaque),
+            Self::MapLit { items, .. } => {
+                for (key, value) in items {
+                    key.make_opaque();
+                    value.make_opaque();
+                }
+            }
             Self::Pipe(pipe) => pipe.make_opaque(),
             Self::Bin { left, right, .. } => {
                 left.make_opaque();
@@ -412,7 +419,9 @@ impl Expr {
             Self::Unary { value, .. } | Self::Cast { value, .. } => value.make_opaque(),
             Self::Call { recv, args, .. } => {
                 recv.make_opaque();
-                args.iter_mut().for_each(Expr::make_opaque);
+                for arg in args {
+                    arg.make_opaque();
+                }
             }
             Self::If {
                 condition,
@@ -452,15 +461,20 @@ impl Expr {
                     FloatWidth::F64 => Helper::F64,
                 });
             }
-            Self::VecLit { items, .. } => items.iter().for_each(|item| item.helpers(out)),
+            Self::VecLit { items, .. } | Self::SetLit { items, .. } => {
+                for item in items {
+                    item.helpers(out);
+                }
+            }
             Self::OptLit {
                 value: Some(inner), ..
             } => inner.helpers(out),
-            Self::MapLit { items, .. } => items.iter().for_each(|(key, value)| {
-                key.helpers(out);
-                value.helpers(out);
-            }),
-            Self::SetLit { items, .. } => items.iter().for_each(|item| item.helpers(out)),
+            Self::MapLit { items, .. } => {
+                for (key, value) in items {
+                    key.helpers(out);
+                    value.helpers(out);
+                }
+            }
             Self::Pipe(pipe) => pipe.helpers(out),
             Self::Bin { left, right, .. } => {
                 left.helpers(out);
@@ -469,7 +483,9 @@ impl Expr {
             Self::Unary { value, .. } | Self::Cast { value, .. } => value.helpers(out),
             Self::Call { recv, args, .. } => {
                 recv.helpers(out);
-                args.iter().for_each(|arg| arg.helpers(out));
+                for arg in args {
+                    arg.helpers(out);
+                }
             }
             Self::If {
                 condition,
@@ -511,7 +527,9 @@ impl Expr {
                     out.insert(entry.name);
                 }
                 recv.features(out);
-                args.iter().for_each(|arg| arg.features(out));
+                for arg in args {
+                    arg.features(out);
+                }
             }
             Self::If {
                 condition,
@@ -524,15 +542,20 @@ impl Expr {
                 then_expr.features(out);
                 else_expr.features(out);
             }
-            Self::VecLit { items, .. } => items.iter().for_each(|item| item.features(out)),
+            Self::VecLit { items, .. } | Self::SetLit { items, .. } => {
+                for item in items {
+                    item.features(out);
+                }
+            }
             Self::OptLit {
                 value: Some(inner), ..
             } => inner.features(out),
-            Self::MapLit { items, .. } => items.iter().for_each(|(key, value)| {
-                key.features(out);
-                value.features(out);
-            }),
-            Self::SetLit { items, .. } => items.iter().for_each(|item| item.features(out)),
+            Self::MapLit { items, .. } => {
+                for (key, value) in items {
+                    key.features(out);
+                    value.features(out);
+                }
+            }
             Self::Pipe(pipe) => pipe.features(out),
             Self::FnCall { .. } => {
                 out.insert("lang-fn-call");
@@ -567,12 +590,11 @@ impl Expr {
                 else_expr,
                 ..
             } => vec![condition, then_expr, else_expr],
-            Self::VecLit { items, .. } => items.iter().collect(),
+            Self::VecLit { items, .. } | Self::SetLit { items, .. } => items.iter().collect(),
             Self::OptLit { value, .. } => value.iter().map(|inner| &**inner).collect(),
             Self::MapLit { items, .. } => {
                 items.iter().flat_map(|(key, value)| [key, value]).collect()
             }
-            Self::SetLit { items, .. } => items.iter().collect(),
             Self::Pipe(pipe) => pipe.exprs(),
             _ => Vec::new(),
         }

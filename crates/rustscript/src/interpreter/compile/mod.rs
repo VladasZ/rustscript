@@ -103,10 +103,7 @@ impl FnState {
     }
 
     fn upvalue_index(&self, name: &str) -> Option<u16> {
-        self.upvalues
-            .iter()
-            .position(|(n, _)| n == name)
-            .map(|i| i as u16)
+        self.upvalues.iter().position(|(n, _)| n == name).map(idx16)
     }
 
     fn into_chunk(self, file: std::sync::Arc<str>) -> Chunk {
@@ -217,7 +214,7 @@ impl<'a> Compiler<'a> {
 
     /// Remember the line an AST node starts on, for the ops it lowers to.
     pub(super) fn set_line(&mut self, span: proc_macro2::Span) {
-        self.cur_line = span.start().line as u32;
+        self.cur_line = u32::try_from(span.start().line).unwrap_or(u32::MAX);
     }
 
     /// Resolve a path against the module being compiled.
@@ -302,7 +299,7 @@ impl<'a> Compiler<'a> {
 
     fn finish_chunk(&mut self) -> Chunk {
         let mut chunk = self.frames.pop().unwrap().into_chunk(self.ctx.file.clone());
-        chunk.module = self.ctx.module as u16;
+        chunk.module = idx16(self.ctx.module);
         chunk
     }
 
@@ -321,6 +318,12 @@ impl<'a> Compiler<'a> {
 
     fn here(&mut self) -> usize {
         self.cur().code.len()
+    }
+
+    /// The current position as a jump target. Errors when a function grows
+    /// past the op count the bytecode's u32 targets can address.
+    fn mark(&mut self) -> Result<u32> {
+        Ok(u32::try_from(self.here())?)
     }
 
     fn alloc(&mut self) -> Reg {
@@ -352,19 +355,19 @@ impl<'a> Compiler<'a> {
     fn add_const(&mut self, c: Const) -> u16 {
         let f = self.cur();
         f.consts.push(c);
-        (f.consts.len() - 1) as u16
+        idx16(f.consts.len() - 1)
     }
 
     fn add_member(&mut self, m: Member) -> u16 {
         let f = self.cur();
         f.members.push(m);
-        (f.members.len() - 1) as u16
+        idx16(f.members.len() - 1)
     }
 
     fn add_cast(&mut self, ty: &syn::Type) -> u16 {
         let f = self.cur();
         f.casts.push(lower_cast(ty));
-        (f.casts.len() - 1) as u16
+        idx16(f.casts.len() - 1)
     }
 
     /// Lower an annotated or turbofish type against the module being compiled
@@ -379,7 +382,7 @@ impl<'a> Compiler<'a> {
     fn add_coerce(&mut self, ir: TypeIr) -> u16 {
         let f = self.cur();
         f.coerces.push(ir);
-        (f.coerces.len() - 1) as u16
+        idx16(f.coerces.len() - 1)
     }
 
     fn add_name(&mut self, name: String) -> u16 {
@@ -393,13 +396,13 @@ impl<'a> Compiler<'a> {
             text: name,
             scalar,
         });
-        (f.names.len() - 1) as u16
+        idx16(f.names.len() - 1)
     }
 
     fn add_path(&mut self, segs: Vec<String>, coerce: Option<TypeIr>) -> u16 {
         let f = self.cur();
         f.paths.push((segs, coerce));
-        (f.paths.len() - 1) as u16
+        idx16(f.paths.len() - 1)
     }
 
     fn add_enum_variant(&mut self, variant: EnumVariant) -> u16 {
@@ -407,10 +410,10 @@ impl<'a> Compiler<'a> {
         if let Some(index) = variants.iter().position(|known| {
             known.enum_name == variant.enum_name && known.variant == variant.variant
         }) {
-            return index as u16;
+            return idx16(index);
         }
         variants.push(variant);
-        (variants.len() - 1) as u16
+        idx16(variants.len() - 1)
     }
 
     fn enum_variant(
@@ -539,7 +542,7 @@ impl<'a> Compiler<'a> {
             return i;
         }
         self.frames[depth].upvalues.push((name.to_string(), src));
-        (self.frames[depth].upvalues.len() - 1) as u16
+        idx16(self.frames[depth].upvalues.len() - 1)
     }
 
     /// Load a variable reference into a register, reading upvalues as needed.
@@ -577,8 +580,7 @@ impl<'a> Compiler<'a> {
                 self.emit(Op::LoadGlobal { dst, idx });
                 return Ok(());
             }
-            Res::Struct(c) => vec![c.to_string()],
-            Res::Enum(c) => vec![c.to_string()],
+            Res::Struct(c) | Res::Enum(c) => vec![c.to_string()],
             Res::TypeMember(c, rest) => {
                 if let Some(variant) =
                     self.enum_variant(&c, &rest, |fields| matches!(fields, syn::Fields::Unit))
@@ -627,7 +629,10 @@ impl<'a> Compiler<'a> {
 // -- free helpers ----------------------------------------------------------
 
 fn is_assign_op(op: &BinOp) -> bool {
-    use BinOp::*;
+    use BinOp::{
+        AddAssign, BitAndAssign, BitOrAssign, BitXorAssign, DivAssign, MulAssign, RemAssign,
+        ShlAssign, ShrAssign, SubAssign,
+    };
     matches!(
         op,
         AddAssign(_)
@@ -644,7 +649,11 @@ fn is_assign_op(op: &BinOp) -> bool {
 }
 
 fn bin_kind(op: &BinOp) -> Option<BinKind> {
-    use BinOp::*;
+    use BinOp::{
+        Add, AddAssign, BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Div,
+        DivAssign, Eq, Ge, Gt, Le, Lt, Mul, MulAssign, Ne, Rem, RemAssign, Shl, ShlAssign, Shr,
+        ShrAssign, Sub, SubAssign,
+    };
     Some(match op {
         Add(_) | AddAssign(_) => BinKind::Add,
         Sub(_) | SubAssign(_) => BinKind::Sub,
@@ -704,7 +713,7 @@ fn int_literal(e: &Expr) -> Option<i64> {
     match e {
         Expr::Lit(l) => match &l.lit {
             Lit::Int(i) => i.base10_parse::<i64>().ok(),
-            Lit::Byte(b) => Some(b.value() as i64),
+            Lit::Byte(b) => Some(i64::from(b.value())),
             _ => None,
         },
         Expr::Unary(u) if matches!(u.op, UnOp::Neg(_)) => match &*u.expr {
@@ -886,3 +895,10 @@ fn expr_kind(expr: &Expr) -> &'static str {
 mod calls;
 mod expr;
 mod macros;
+
+/// A table index as the u16 the bytecode stores. Every compiler table is
+/// interned under that limit, so blowing past it is a compiler bug and an
+/// immediate abort beats silently wrapped indices.
+pub(super) fn idx16(i: usize) -> u16 {
+    u16::try_from(i).expect("bytecode table exceeds u16 indices")
+}

@@ -1,4 +1,4 @@
-//! serde_json for the parallel engine: dynamic and typed parsing straight
+//! `serde_json` for the parallel engine: dynamic and typed parsing straight
 //! into `PValue`, serialization back to json text, and the coercion pass for
 //! annotated lets. The `PValue` twin of `json_bridge.rs` and the coercion
 //! half of `eval.rs`.
@@ -201,7 +201,7 @@ impl PInterp {
     }
 
     /// Lower a turbofish type into a parse plan, the `PValue` twin of
-    /// `json_plan` in json_bridge.rs. `building` guards recursive structs.
+    /// `json_plan` in `json_bridge.rs`. `building` guards recursive structs.
     pub(super) fn json_plan(
         &self,
         ty: &TypeIr,
@@ -214,15 +214,16 @@ impl PInterp {
                 Some((_, bound)) => self.json_plan(bound, building, tenv),
                 None => PJsonPlan::Dynamic,
             },
-            TypeIr::Vec(inner) => PJsonPlan::Vec(Box::new(self.json_plan(inner, building, tenv))),
+            // The parallel engine has no set representation yet, sets already
+            // fail loudly at `HashSet::new` in tokio mode. The elements still
+            // parse with their own plan.
+            TypeIr::Vec(inner) | TypeIr::Set(inner) => {
+                PJsonPlan::Vec(Box::new(self.json_plan(inner, building, tenv)))
+            }
             TypeIr::Option(inner) => self.json_plan(inner, building, tenv),
             TypeIr::MapValue(inner) => {
                 PJsonPlan::Map(Box::new(self.json_plan(inner, building, tenv)))
             }
-            // The parallel engine has no set representation yet, sets already
-            // fail loudly at `HashSet::new` in tokio mode. The elements still
-            // parse with their own plan.
-            TypeIr::Set(inner) => PJsonPlan::Vec(Box::new(self.json_plan(inner, building, tenv))),
             TypeIr::Struct(canon) => {
                 if building.iter().any(|b| b.as_str() == &**canon) {
                     return PJsonPlan::Dynamic;
@@ -286,7 +287,7 @@ pub(super) struct PStructPlan {
 }
 
 /// Object keys repeat for every array element, so each parse interns them,
-/// mirroring `JsonKeys` in json_bridge.rs. The parse runs on one thread, so
+/// mirroring `JsonKeys` in `json_bridge.rs`. The parse runs on one thread, so
 /// a `RefCell` is fine even though the values are `Send`.
 type PJsonKeys = RefCell<FxHashMap<String, Arc<str>>>;
 
@@ -360,7 +361,7 @@ impl<'de> serde::de::DeserializeSeed<'de> for KeySeed<'_> {
     }
 }
 
-impl<'de> serde::de::Visitor<'de> for KeySeed<'_> {
+impl serde::de::Visitor<'_> for KeySeed<'_> {
     type Value = Arc<str>;
 
     fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -393,7 +394,7 @@ impl<'de> serde::de::DeserializeSeed<'de> for FieldSeed<'_> {
     }
 }
 
-impl<'de> serde::de::Visitor<'de> for FieldSeed<'_> {
+impl serde::de::Visitor<'_> for FieldSeed<'_> {
     type Value = Option<usize>;
 
     fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -540,15 +541,13 @@ pub(super) fn pvalue_to_json(v: &PValue) -> Result<serde_json::Value> {
             let (value, _) = v.int_parts().unwrap();
             match i64::try_from(value) {
                 Ok(small) => J::Number(serde_json::Number::from(small)),
-                Err(_) => J::Number(serde_json::Number::from(value as u64)),
+                Err(_) => J::Number(serde_json::Number::from(
+                    u64::try_from(value).expect("width-tagged value fits u64"),
+                )),
             }
         }
-        PValue::Float(f) => serde_json::Number::from_f64(*f)
-            .map(J::Number)
-            .unwrap_or(J::Null),
-        PValue::F32(f) => serde_json::Number::from_f64(f64::from(*f))
-            .map(J::Number)
-            .unwrap_or(J::Null),
+        PValue::Float(f) => serde_json::Number::from_f64(*f).map_or(J::Null, J::Number),
+        PValue::F32(f) => serde_json::Number::from_f64(f64::from(*f)).map_or(J::Null, J::Number),
         PValue::Char(c) => J::String(c.to_string()),
         PValue::Str(s) => J::String(s.to_string()),
         PValue::Vec(items) | PValue::Tuple(items) => J::Array(

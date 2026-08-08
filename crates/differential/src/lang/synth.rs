@@ -169,24 +169,26 @@ impl<'a> Generator<'a> {
                     expr: self.expr(&ty, MAX_EXPR_DEPTH - 1),
                 }
             }
-            4 => match self.collection_mutation() {
-                Some(stmt) => stmt,
-                None => {
+            4 => {
+                if let Some(stmt) = self.collection_mutation() {
+                    stmt
+                } else {
                     let ty = self.any_ty();
                     let expr = self.expr(&ty, MAX_EXPR_DEPTH);
                     let label = self.next_label();
                     Stmt::Print { label, expr }
                 }
-            },
-            5 => match self.accumulation_loop() {
-                Some(stmt) => stmt,
-                None => {
+            }
+            5 => {
+                if let Some(stmt) = self.accumulation_loop() {
+                    stmt
+                } else {
                     let ty = self.any_ty();
                     let expr = self.expr(&ty, MAX_EXPR_DEPTH);
                     let label = self.next_label();
                     Stmt::Print { label, expr }
                 }
-            },
+            }
             1 => {
                 let condition = self.expr(&Ty::Bool, 2);
                 let then_body = self.nested_body();
@@ -441,7 +443,7 @@ impl<'a> Generator<'a> {
                 65..=82 => self.binary(want, depth),
                 83..=88 => self.cast(want, depth),
                 89..=93 => self.unary(want, depth),
-                _ => self.branch(want, depth),
+                _ => Some(self.branch(want, depth)),
             };
             if let Some(expr) = attempt {
                 return expr;
@@ -646,12 +648,11 @@ impl<'a> Generator<'a> {
             let mut args = Vec::with_capacity(method.args.len());
             let mut usable = true;
             for pattern in method.args {
-                match self.argument(pattern, &recv_ty, fish.as_ref(), depth) {
-                    Some(arg) => args.push(arg),
-                    None => {
-                        usable = false;
-                        break;
-                    }
+                if let Some(arg) = self.argument(pattern, &recv_ty, fish.as_ref(), depth) {
+                    args.push(arg);
+                } else {
+                    usable = false;
+                    break;
                 }
             }
             if !usable {
@@ -679,9 +680,9 @@ impl<'a> Generator<'a> {
         // would let `repeat` or `pow` build something the harness spends its
         // whole timeout on instead of finding a bug.
         let small = match pattern {
-            TyPat::SmallU32 => Some((IntWidth::U32, self.rng.random_range(0..=9) as i128)),
-            TyPat::SmallI32 => Some((IntWidth::I32, self.rng.random_range(-3..=5) as i128)),
-            TyPat::SmallUsize => Some((IntWidth::USize, self.rng.random_range(0..=5) as i128)),
+            TyPat::SmallU32 => Some((IntWidth::U32, i128::from(self.rng.random_range(0..=9)))),
+            TyPat::SmallI32 => Some((IntWidth::I32, i128::from(self.rng.random_range(-3..=5)))),
+            TyPat::SmallUsize => Some((IntWidth::USize, i128::from(self.rng.random_range(0..=5)))),
             _ => None,
         };
         if let Some((width, value)) = small {
@@ -856,9 +857,8 @@ impl<'a> Generator<'a> {
                     UnOp::Not
                 }
             }
-            Ty::Int(_) => UnOp::Not,
+            Ty::Int(_) | Ty::Bool => UnOp::Not,
             Ty::Float(_) => UnOp::Neg,
-            Ty::Bool => UnOp::Not,
             _ => return None,
         };
         let value = self.expr(want, depth - 1);
@@ -869,16 +869,16 @@ impl<'a> Generator<'a> {
         })
     }
 
-    fn branch(&mut self, want: &Ty, depth: usize) -> Option<Expr> {
+    fn branch(&mut self, want: &Ty, depth: usize) -> Expr {
         let condition = self.expr(&Ty::Bool, depth - 1);
         let then_expr = self.expr(want, depth - 1);
         let else_expr = self.expr(want, depth - 1);
-        Some(Expr::If {
+        Expr::If {
             condition: Box::new(condition),
             then_expr: Box::new(then_expr),
             else_expr: Box::new(else_expr),
             ty: want.clone(),
-        })
+        }
     }
 
     // -- pipelines -----------------------------------------------------------
@@ -891,9 +891,10 @@ impl<'a> Generator<'a> {
             return None;
         }
         let pipe = match want {
-            Ty::Vec(elem) => self.pipe_to_scalar_collect(elem, want.clone(), site, depth)?,
-            Ty::Set(elem) => self.pipe_to_scalar_collect(elem, want.clone(), site, depth)?,
-            Ty::Map(key, value) => self.pipe_to_map(key, value, site, depth)?,
+            Ty::Vec(elem) | Ty::Set(elem) => {
+                self.pipe_to_scalar_collect(elem, want.clone(), site, depth)?
+            }
+            Ty::Map(key, value) => self.pipe_to_map(key, value, site, depth),
             Ty::Int(_) => self.pipe_to_int(want, depth)?,
             Ty::Bool => self.pipe_any(depth)?,
             Ty::Opt(inner) => self.pipe_to_opt(inner, depth)?,
@@ -1029,7 +1030,7 @@ impl<'a> Generator<'a> {
     /// Pair items collected into a map. Three roads to a pair: a map source
     /// iterated whole, a scalar source paired with a computed value, or an
     /// ordered scalar source enumerated when the key is i64.
-    fn pipe_to_map(&mut self, key: &Ty, value: &Ty, site: Site, depth: usize) -> Option<Pipe> {
+    fn pipe_to_map(&mut self, key: &Ty, value: &Ty, site: Site, depth: usize) -> Pipe {
         let target = Ty::map_of(key.clone(), value.clone());
         let choice = self.rng.random_range(0..3);
         if choice == 0 {
@@ -1054,31 +1055,31 @@ impl<'a> Generator<'a> {
                     pred,
                 });
             }
-            return Some(Pipe {
+            return Pipe {
                 source: Source::Coll {
                     expr,
                     access: Access::MapPairs,
                 },
                 stages,
                 term: Term::Collect { target, site },
-            });
+            };
         }
         if choice == 1 && *key == Ty::I64 {
             // Enumerate is order sensitive, so the source must be a vec.
             let expr = self.expr(&Ty::vec_of(value.clone()), depth - 1);
-            return Some(Pipe {
+            return Pipe {
                 source: Source::Coll {
                     expr,
                     access: Access::VecInto,
                 },
                 stages: vec![Stage::Enumerate],
                 term: Term::Collect { target, site },
-            });
+            };
         }
         let expr = self.expr(&Ty::vec_of(key.clone()), depth - 1);
         let bind = self.fresh_bind();
         let body = self.body_with(&bind, key, value, depth - 1);
-        Some(Pipe {
+        Pipe {
             source: Source::Coll {
                 expr,
                 access: Access::VecInto,
@@ -1088,7 +1089,7 @@ impl<'a> Generator<'a> {
                 body,
             }],
             term: Term::Collect { target, site },
-        })
+        }
     }
 
     /// `sum`, `count`, or `fold` down to an integer.

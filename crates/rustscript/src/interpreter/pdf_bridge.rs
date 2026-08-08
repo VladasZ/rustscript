@@ -55,7 +55,10 @@ pub(super) fn document_method(
         }
         // The real save returns the created File; scripts drop it, so Unit.
         "save" => {
-            let path = args.first().map(|v| v.display()).unwrap_or_default();
+            let path = args
+                .first()
+                .map(super::value::Value::display)
+                .unwrap_or_default();
             match doc.save(&path) {
                 Ok(_) => Value::ok(Value::Unit),
                 Err(e) => Value::err(Value::str(e.to_string())),
@@ -77,7 +80,7 @@ fn object_id_arg(args: &[Value], i: usize) -> Result<ObjectId> {
     if let Some(Value::Tuple(items)) = args.get(i) {
         let items = items.borrow();
         if let (Some(Value::Int(a)), Some(Value::Int(b))) = (items.first(), items.get(1)) {
-            return Ok((*a as u32, *b as u16));
+            return Ok((u32::try_from(*a)?, u16::try_from(*b)?));
         }
     }
     bail!("expected a page ObjectId tuple like the ones get_pages returns");
@@ -92,7 +95,7 @@ fn bytes_arg(args: &[Value], i: usize) -> Vec<u8> {
         .borrow()
         .iter()
         .filter_map(|v| match v {
-            Value::Int(n) => Some(*n as u8),
+            Value::Int(n) => u8::try_from(*n).ok(),
             _ => None,
         })
         .collect()

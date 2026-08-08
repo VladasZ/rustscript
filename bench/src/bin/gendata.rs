@@ -93,10 +93,10 @@ fn big_script(dir: &Path) -> Result<()> {
 "#,
     );
     typescript.push_str(
-        r#"const ns = Math.round((performance.now() - t) * 1e6);
+        r"const ns = Math.round((performance.now() - t) * 1e6);
 console.log(`acc = ${acc}`);
 console.error(`COMPUTE_NS ${ns}`);
-"#,
+",
     );
     python.push_str(
         r#"ns = time.perf_counter_ns() - t

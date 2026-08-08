@@ -10,8 +10,7 @@ enum State {
 fn next(s: State) -> State {
     match s {
         State::Todo => State::Doing,
-        State::Doing => State::Done,
-        State::Done => State::Done,
+        State::Doing | State::Done => State::Done,
     }
 }
 

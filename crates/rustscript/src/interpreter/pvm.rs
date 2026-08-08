@@ -3,6 +3,7 @@
 //! of the fast VM are dropped here for clarity; the parallel engine optimizes
 //! for correctness and real concurrency, not single thread microspeed.
 
+use num_traits::AsPrimitive;
 use std::collections::HashMap;
 use std::mem::{replace, take};
 use std::sync::Arc;
@@ -182,8 +183,8 @@ impl PInterp {
                         ip: ip + 1,
                         base,
                         dst: $dst,
-                        abase: $abase as u16,
-                        argc: $argc as u16,
+                        abase: u16::try_from($abase).expect("register index fits u16"),
+                        argc: u16::try_from($argc).expect("argument count fits u16"),
                         type_env: replace(&mut cur_tenv, $tenv),
                     });
                     base = nbase;
@@ -296,7 +297,9 @@ impl PInterp {
                         let callee = self.functions[func].clone();
                         // Bind the call's turbofish type args to the callee's
                         // generic parameters, mirroring the fast VM.
-                        let tenv: PTypeEnv = if *targ != u32::MAX {
+                        let tenv: PTypeEnv = if *targ == u32::MAX {
+                            empty_ptype_env()
+                        } else {
                             let targs = &cur.call_type_args[*targ as usize];
                             callee
                                 .generics
@@ -304,8 +307,6 @@ impl PInterp {
                                 .zip(targs.iter())
                                 .map(|(name, ty)| (name.clone(), ty.clone()))
                                 .collect()
-                        } else {
-                            empty_ptype_env()
                         };
                         call!(callee, None, dst, abase, argc, tenv);
                     }
@@ -332,7 +333,7 @@ impl PInterp {
                     } => {
                         let (abase, argc) = (*abase as usize, *argc as usize);
                         let (segs, coerce) = &cur.paths[*path as usize];
-                        let args = take_range(stack, base + abase, argc);
+                        let call_args = take_range(stack, base + abase, argc);
                         // Typed json parses straight into the target structs,
                         // mirroring the fast VM's `serde_json::from_str` path.
                         if let Some(ty) = coerce
@@ -340,12 +341,12 @@ impl PInterp {
                             && segs[segs.len() - 2] == "serde_json"
                             && segs[segs.len() - 1] == "from_str"
                         {
-                            let v = self.typed_from_str(&args, ty, &cur_tenv)?;
+                            let v = self.typed_from_str(&call_args, ty, &cur_tenv)?;
                             stack[base + *dst as usize] = v;
                             ip += 1;
                             continue;
                         }
-                        let mut v = self.dispatch_call(segs, args)?;
+                        let mut v = self.dispatch_call(segs, call_args)?;
                         if let Some(ty) = coerce {
                             v = self.coerce_result(v, ty);
                         }
@@ -448,7 +449,7 @@ impl PInterp {
                     }
                     Op::MakeArrayRepeat { dst, val, count } => {
                         let n = match &stack[base + *count as usize] {
-                            PValue::Int(n) => *n as usize,
+                            PValue::Int(n) => usize::try_from(*n)?,
                             _ => bail!("array repeat length must be an integer"),
                         };
                         let v = stack[base + *val as usize].clone();
@@ -476,7 +477,7 @@ impl PInterp {
                             // over a child's pipe streams instead of buffering the
                             // whole output before the first line runs.
                             PValue::Range { .. } | PValue::Native(_) => src_v,
-                            other => PValue::vec(self.iter_items(other)?),
+                            other => PValue::vec(Self::iter_items(other)?),
                         };
                         stack[base + *dst as usize] = it;
                     }
@@ -486,7 +487,9 @@ impl PInterp {
                             _ => unreachable!("for index is an integer"),
                         };
                         let item = match &stack[base + *iter as usize] {
-                            PValue::Vec(items) => items.lock().get(i as usize).cloned(),
+                            PValue::Vec(items) => usize::try_from(i)
+                                .ok()
+                                .and_then(|i| items.lock().get(i).cloned()),
                             PValue::Range {
                                 start,
                                 end,
@@ -506,15 +509,12 @@ impl PInterp {
                             },
                             _ => None,
                         };
-                        match item {
-                            Some(v) => {
-                                stack[base + *val as usize] = v;
-                                stack[base + *idx as usize] = PValue::Int(i + 1);
-                            }
-                            None => {
-                                ip = *to as usize;
-                                continue;
-                            }
+                        if let Some(v) = item {
+                            stack[base + *val as usize] = v;
+                            stack[base + *idx as usize] = PValue::Int(i + 1);
+                        } else {
+                            ip = *to as usize;
+                            continue;
                         }
                     }
                     Op::MakeStruct {
@@ -587,7 +587,7 @@ impl PInterp {
                             *child,
                             stack,
                             base,
-                            &cur_clo,
+                            cur_clo.as_ref(),
                             entry_upvalues,
                             &mut local_cells,
                         );
@@ -626,7 +626,7 @@ impl PInterp {
                         base: b,
                         member,
                     } => {
-                        let v = self.get_field(
+                        let v = Self::get_field(
                             &stack[base + *b as usize],
                             &cur.members[*member as usize],
                         )?;
@@ -637,14 +637,14 @@ impl PInterp {
                         member,
                         val,
                     } => {
-                        self.set_field(
+                        Self::set_field(
                             &stack[base + *b as usize],
                             &cur.members[*member as usize],
                             stack[base + *val as usize].clone(),
                         )?;
                     }
                     Op::Try { dst, src } => {
-                        match pops::eval_try(stack[base + *src as usize].clone())? {
+                        match pops::eval_try(stack[base + *src as usize].clone()) {
                             Ok(v) => stack[base + *dst as usize] = v,
                             Err(early) => ret!(early),
                         }
@@ -682,11 +682,11 @@ impl PInterp {
                         stack[base + *dst as usize] = PValue::Bool(matched);
                     }
                     Op::Fmt { dst, spec } => {
-                        let text = self.render_fmt(&cur, *spec, &stack[base..])?;
+                        let text = Self::render_fmt(&cur, *spec, &stack[base..])?;
                         stack[base + *dst as usize] = PValue::str(text);
                     }
                     Op::MacroCall { kind, dst, spec } => {
-                        let text = self.render_fmt(&cur, *spec, &stack[base..])?;
+                        let text = Self::render_fmt(&cur, *spec, &stack[base..])?;
                         match kind {
                             MacroKind::Println => println!("{text}"),
                             MacroKind::Print => print!("{text}"),
@@ -721,7 +721,7 @@ impl PInterp {
                             *child,
                             stack,
                             base,
-                            &cur_clo,
+                            cur_clo.as_ref(),
                             entry_upvalues,
                             &mut local_cells,
                         );
@@ -757,7 +757,7 @@ impl PInterp {
         child: u16,
         stack: &[PValue],
         base: usize,
-        cur_clo: &Option<Arc<PClosure>>,
+        cur_clo: Option<&Arc<PClosure>>,
         entry_upvalues: &[PUpvalue],
         local_cells: &mut HashMap<usize, Arc<Mutex<PValue>>>,
     ) -> Arc<PClosure> {
@@ -800,7 +800,7 @@ impl PInterp {
         self.run_chunk(&chunk, args, &clo.captured)
     }
 
-    /// Drive an awaited value to its result. A JoinHandle joins, a future is
+    /// Drive an awaited value to its result. A `JoinHandle` joins, a future is
     /// run to completion, anything else is already a value.
     fn await_value(&self, v: PValue) -> Result<PValue> {
         let PValue::Native(n) = v else { return Ok(v) };
@@ -875,8 +875,8 @@ fn eval_cast(target: &CastIr, v: PValue) -> Result<PValue> {
     let width = match target {
         CastIr::F64 => {
             return Ok(PValue::Float(match v {
-                PValue::Int(i) => i as f64,
-                PValue::IntW(..) => v.int_parts().unwrap().0 as f64,
+                PValue::Int(i) => AsPrimitive::<f64>::as_(i),
+                PValue::IntW(..) => AsPrimitive::<f64>::as_(v.int_parts().unwrap().0),
                 PValue::Float(f) => f,
                 PValue::F32(f) => f64::from(f),
                 other => bail!("cannot cast {} to float", other.type_name()),
@@ -884,9 +884,9 @@ fn eval_cast(target: &CastIr, v: PValue) -> Result<PValue> {
         }
         CastIr::F32 => {
             return Ok(PValue::F32(match v {
-                PValue::Int(i) => i as f32,
-                PValue::IntW(..) => v.int_parts().unwrap().0 as f32,
-                PValue::Float(f) => f as f32,
+                PValue::Int(i) => AsPrimitive::<f32>::as_(i),
+                PValue::IntW(..) => AsPrimitive::<f32>::as_(v.int_parts().unwrap().0),
+                PValue::Float(f) => AsPrimitive::<f32>::as_(f),
                 PValue::F32(f) => f,
                 other => bail!("cannot cast {} to float", other.type_name()),
             }));
@@ -894,7 +894,9 @@ fn eval_cast(target: &CastIr, v: PValue) -> Result<PValue> {
         CastIr::Char => {
             return Ok(match v {
                 PValue::Int(i) => PValue::Char(
-                    char::from_u32(i as u32)
+                    u32::try_from(i)
+                        .ok()
+                        .and_then(char::from_u32)
                         .ok_or_else(|| anyhow::anyhow!("invalid char code {i}"))?,
                 ),
                 PValue::Char(c) => PValue::Char(c),
@@ -918,7 +920,7 @@ fn eval_cast(target: &CastIr, v: PValue) -> Result<PValue> {
 
 /// A field access on a struct or tuple, the parallel twin of `get_field`.
 impl PInterp {
-    pub(super) fn get_field(&self, recv: &PValue, member: &PMember) -> Result<PValue> {
+    pub(super) fn get_field(recv: &PValue, member: &PMember) -> Result<PValue> {
         match (recv, member) {
             (PValue::Struct(s), PMember::Named(n)) => {
                 s.get(n).ok_or_else(|| anyhow::anyhow!("no field `{n}`"))
@@ -938,7 +940,7 @@ impl PInterp {
         }
     }
 
-    pub(super) fn set_field(&self, recv: &PValue, member: &PMember, v: PValue) -> Result<()> {
+    pub(super) fn set_field(recv: &PValue, member: &PMember, v: PValue) -> Result<()> {
         match (recv, member) {
             (PValue::Struct(s), PMember::Named(n)) => {
                 if !s.set(n, v) {

@@ -11,6 +11,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
+use base64::Engine;
 use reqwest::{Client, Method};
 
 use super::numeric::IntWidth;
@@ -32,7 +33,7 @@ fn client_value(c: Client) -> PValue {
 
 /// Handle a call whose canonical path starts with `reqwest`.
 pub(super) fn reqwest_call(segs: &[String], args: &[PValue]) -> Result<PValue> {
-    let last = segs.last().map(String::as_str).unwrap_or("");
+    let last = segs.last().map_or("", String::as_str);
     if segs.iter().any(|s| s == "blocking") {
         bail!("use the async reqwest API under #[tokio::main], not reqwest::blocking");
     }
@@ -187,7 +188,6 @@ fn request_method(s: &Arc<PStructData>, method: &str, args: &[PValue]) -> Result
                 Some(other) => other.display(),
                 None => String::new(),
             };
-            use base64::Engine;
             let token = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
             add_header(s, "Authorization", &format!("Basic {token}"));
             Ok(this())
@@ -247,8 +247,7 @@ struct Plan {
 fn build_plan(s: &PStructData) -> Plan {
     let method = s
         .get("method")
-        .map(|v| v.display())
-        .unwrap_or_else(|| "GET".into());
+        .map_or_else(|| "GET".into(), |v| v.display());
     let client = match s.get("client") {
         Some(PValue::Native(n)) => match &*n.lock() {
             PNative::HttpClient(c) => c.clone(),
@@ -312,7 +311,7 @@ async fn run_plan(plan: Plan) -> Result<PValue> {
     Ok(PValue::struct_of(
         "ReqwestResponse",
         [
-            ("status".into(), PValue::Int(status as i64)),
+            ("status".into(), PValue::Int(i64::from(status))),
             ("body".into(), PNative::Body(raw).wrap()),
             ("headers".into(), header_pairs(headers)),
             (
@@ -356,7 +355,7 @@ fn header_pairs(pairs: Vec<(String, String)>) -> PValue {
 fn duration_field(s: &PStructData, field: &str) -> Option<Duration> {
     match s.get(field) {
         Some(PValue::Struct(d)) => match d.get("millis") {
-            Some(PValue::Int(m)) if m > 0 => Some(Duration::from_millis(m as u64)),
+            Some(PValue::Int(m)) if m > 0 => Some(Duration::from_millis(m.cast_unsigned())),
             _ => None,
         },
         _ => None,
@@ -516,8 +515,7 @@ fn pvalue_to_json(v: &PValue) -> Result<serde_json::Value> {
         PValue::Bool(b) => serde_json::Value::Bool(*b),
         PValue::Int(i) => serde_json::Value::Number((*i).into()),
         PValue::Float(f) => serde_json::Number::from_f64(*f)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null),
+            .map_or(serde_json::Value::Null, serde_json::Value::Number),
         PValue::Str(s) => serde_json::Value::String(s.to_string()),
         PValue::Vec(items) => {
             let items = items.lock();

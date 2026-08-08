@@ -1,3 +1,4 @@
+use num_traits::AsPrimitive;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::slice::from_ref;
@@ -10,6 +11,7 @@ use super::bytecode::{BuiltinId, MethodName, ScalarTy};
 use super::native::{Native, lines_next};
 use super::ops::compare_values;
 use super::regex_bridge::{CapturesValue, MatchValue, RegexValue};
+use super::shared::usize_i64;
 use super::value::{ClosureData, Map, MapKey, MapKind, RStr, Value, ValueRef};
 
 type Handle = Rc<RefCell<Native>>;
@@ -205,11 +207,7 @@ fn next_regex_offset(source: &str, start: usize, end: usize) -> usize {
     if end == source.len() {
         return source.len() + 1;
     }
-    end + source[end..]
-        .chars()
-        .next()
-        .map(char::len_utf8)
-        .unwrap_or(1)
+    end + source[end..].chars().next().map_or(1, char::len_utf8)
 }
 
 impl IteratorState {
@@ -245,32 +243,9 @@ impl IteratorState {
                 next,
                 end,
                 inclusive,
-            } => {
-                let done = if *inclusive {
-                    *next > *end
-                } else {
-                    *next >= *end
-                };
-                if done {
-                    Step::Ready(None)
-                } else {
-                    let value = *next;
-                    *next += 1;
-                    Step::Ready(Some(Value::Int(value)))
-                }
-            }
-            IteratorState::Bytes { source, index } => {
-                let value = source.as_bytes().get(*index).copied();
-                *index += usize::from(value.is_some());
-                Step::Ready(value.map(|byte| Value::Int(i64::from(byte))))
-            }
-            IteratorState::Chars { source, offset } => {
-                let value = source[*offset..].chars().next();
-                if let Some(ch) = value {
-                    *offset += ch.len_utf8();
-                }
-                Step::Ready(value.map(Value::Char))
-            }
+            } => range_step(next, *end, *inclusive),
+            IteratorState::Bytes { source, index } => bytes_step(source, index),
+            IteratorState::Chars { source, offset } => chars_step(source, offset),
             IteratorState::Lines { source, offset } => Step::Ready(next_line(source, offset)),
             IteratorState::SplitWhitespace { source, offset } => {
                 Step::Ready(next_word(source, offset))
@@ -279,50 +254,12 @@ impl IteratorState {
                 regex,
                 source,
                 offset,
-            } => {
-                if *offset > source.len() {
-                    return Step::Ready(None);
-                }
-                let Some(found) = regex.compiled.find_at(source, *offset) else {
-                    return Step::Ready(None);
-                };
-                *offset = next_regex_offset(source, found.start(), found.end());
-                Step::Ready(Some(
-                    Native::RegexMatch(MatchValue {
-                        source: source.clone(),
-                        start: found.start(),
-                        end: found.end(),
-                    })
-                    .wrap(),
-                ))
-            }
+            } => regex_find_step(regex, source, offset),
             IteratorState::RegexCaptures {
                 regex,
                 source,
                 offset,
-            } => {
-                if *offset > source.len() {
-                    return Step::Ready(None);
-                }
-                let Some(captures) = regex.compiled.captures_at(source, *offset) else {
-                    return Step::Ready(None);
-                };
-                let Some(found) = captures.get(0) else {
-                    return Step::Ready(None);
-                };
-                *offset = next_regex_offset(source, found.start(), found.end());
-                let groups = (0..captures.len())
-                    .map(|index| captures.get(index).map(|m| (m.start(), m.end())))
-                    .collect();
-                Step::Ready(Some(
-                    Native::RegexCaptures(CapturesValue {
-                        source: source.clone(),
-                        groups,
-                        names: regex.names.clone(),
-                    })
-                    .wrap(),
-                ))
-            }
+            } => regex_captures_step(regex, source, offset),
             IteratorState::Map { source, closure } => Step::Map(source.clone(), closure.clone()),
             IteratorState::Filter { source, closure } => {
                 Step::Filter(source.clone(), closure.clone())
@@ -372,8 +309,80 @@ impl IteratorState {
     }
 }
 
+/// One step over a string's bytes.
+fn bytes_step(source: &RStr, index: &mut usize) -> Step {
+    let value = source.as_bytes().get(*index).copied();
+    *index += usize::from(value.is_some());
+    Step::Ready(value.map(|byte| Value::Int(i64::from(byte))))
+}
+
+/// One step over a string's chars, advancing by the char's own width.
+fn chars_step(source: &RStr, offset: &mut usize) -> Step {
+    let value = source[*offset..].chars().next();
+    if let Some(ch) = value {
+        *offset += ch.len_utf8();
+    }
+    Step::Ready(value.map(Value::Char))
+}
+
+/// One step of an integer range, exclusive or inclusive.
+fn range_step(next: &mut i64, end: i64, inclusive: bool) -> Step {
+    let done = if inclusive { *next > end } else { *next >= end };
+    if done {
+        Step::Ready(None)
+    } else {
+        let value = *next;
+        *next += 1;
+        Step::Ready(Some(Value::Int(value)))
+    }
+}
+
+/// One `find_iter` step, advancing past the match or an empty match's char.
+fn regex_find_step(regex: &RegexValue, source: &Rc<RStr>, offset: &mut usize) -> Step {
+    if *offset > source.len() {
+        return Step::Ready(None);
+    }
+    let Some(found) = regex.compiled.find_at(source, *offset) else {
+        return Step::Ready(None);
+    };
+    *offset = next_regex_offset(source, found.start(), found.end());
+    Step::Ready(Some(
+        Native::RegexMatch(MatchValue {
+            source: source.clone(),
+            start: found.start(),
+            end: found.end(),
+        })
+        .wrap(),
+    ))
+}
+
+/// One `captures_iter` step, the groups as spans over the same source.
+fn regex_captures_step(regex: &RegexValue, source: &Rc<RStr>, offset: &mut usize) -> Step {
+    if *offset > source.len() {
+        return Step::Ready(None);
+    }
+    let Some(captures) = regex.compiled.captures_at(source, *offset) else {
+        return Step::Ready(None);
+    };
+    let Some(found) = captures.get(0) else {
+        return Step::Ready(None);
+    };
+    *offset = next_regex_offset(source, found.start(), found.end());
+    let groups = (0..captures.len())
+        .map(|index| captures.get(index).map(|m| (m.start(), m.end())))
+        .collect();
+    Step::Ready(Some(
+        Native::RegexCaptures(CapturesValue {
+            source: source.clone(),
+            groups,
+            names: regex.names.clone(),
+        })
+        .wrap(),
+    ))
+}
+
 impl Interp {
-    pub(super) fn iterator_value(&self, value: Value) -> Result<Value> {
+    pub(super) fn iterator_value(value: Value) -> Result<Value> {
         Ok(match value {
             Value::Native(native)
                 if matches!(&*native.borrow(), Native::Iterator(_) | Native::Lines(_)) =>
@@ -441,7 +450,10 @@ impl Interp {
                 }
             },
             Step::Enumerate(source, index) => Ok(self.iterator_next(&source)?.map(|value| {
-                Value::Tuple(Rc::new(RefCell::new(vec![Value::Int(index as i64), value])))
+                Value::Tuple(Rc::new(RefCell::new(vec![
+                    Value::Int(usize_i64(index)),
+                    value,
+                ])))
             })),
             Step::Take(source) => self.iterator_next(&source),
             Step::Skip(source, count) => {
@@ -491,7 +503,7 @@ impl Interp {
     }
 
     pub(super) fn iter_items(&self, value: Value) -> Result<Vec<Value>> {
-        let Value::Native(iterator) = self.iterator_value(value)? else {
+        let Value::Native(iterator) = Self::iterator_value(value)? else {
             unreachable!();
         };
         let mut items = Vec::new();
@@ -515,11 +527,11 @@ impl Interp {
             }),
             B::Take => wrap(IteratorState::Take {
                 source: iterator.clone(),
-                remaining: int_arg(args)? as usize,
+                remaining: usize::try_from(int_arg(args)?)?,
             }),
             B::Skip => wrap(IteratorState::Skip {
                 source: iterator.clone(),
-                remaining: int_arg(args)? as usize,
+                remaining: usize::try_from(int_arg(args)?)?,
             }),
             B::Count => {
                 let mut count = 0;
@@ -533,14 +545,13 @@ impl Interp {
             _ => match method.text.as_str() {
                 "next" => self
                     .iterator_next(iterator)?
-                    .map(Value::some)
-                    .unwrap_or_else(Value::none),
+                    .map_or_else(Value::none, Value::some),
                 "last" => {
                     let mut last = None;
                     while let Some(item) = self.iterator_next(iterator)? {
                         last = Some(item);
                     }
-                    last.map(Value::some).unwrap_or_else(Value::none)
+                    last.map_or_else(Value::none, Value::some)
                 }
                 "collect" | "to_vec" => Value::vec(self.drain_iterator(iterator)?),
                 "collect_string" => Value::str(
@@ -706,8 +717,7 @@ impl Interp {
                         best = Some((key, value));
                     }
                 }
-                best.map(|(_, value)| Value::some(value))
-                    .unwrap_or_else(Value::none)
+                best.map_or_else(Value::none, |(_, value)| Value::some(value))
             }
             _ => return Ok(None),
         };
@@ -771,10 +781,10 @@ impl Interp {
             let total = if integers == 0 {
                 floats
             } else {
-                floats + integers as f64
+                floats + AsPrimitive::<f64>::as_(integers)
             };
             if matches!(target, Some(ScalarTy::F32)) {
-                Value::F32(total as f32)
+                Value::F32(AsPrimitive::<f32>::as_(total))
             } else {
                 Value::Float(total)
             }
@@ -783,7 +793,7 @@ impl Interp {
             // computes at that width. An untagged zero made `!0u16` answer -1.
             Value::int_of_width(integers, *width)
         } else {
-            Value::Int(integers as i64)
+            Value::Int(i64::try_from(integers).expect("sum is range-checked per step"))
         })
     }
 
@@ -807,7 +817,7 @@ impl Interp {
             }
         }
         Ok(if has_float {
-            Value::Float(floats * integers as f64)
+            Value::Float(floats * AsPrimitive::<f64>::as_(integers))
         } else {
             Value::Int(integers)
         })
@@ -831,7 +841,7 @@ impl Interp {
                 best = Some(value);
             }
         }
-        Ok(best.map(Value::some).unwrap_or_else(Value::none))
+        Ok(best.map_or_else(Value::none, Value::some))
     }
 
     fn iterator_predicate(

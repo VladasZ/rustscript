@@ -20,7 +20,7 @@ fn main() {
     let mut x: i64 = 12345;
     let mut items: Vec<Item> = Vec::new();
     for i in 0..n {
-        x = x * 48271 % 2147483647;
+        x = x * 48271 % 2_147_483_647;
         items.push(Item {
             id: i,
             value: x % 1000,

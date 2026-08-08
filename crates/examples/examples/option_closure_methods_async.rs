@@ -15,8 +15,8 @@ async fn main() {
     let s: Option<i64> = Some(4);
     let n = none_i64();
 
-    println!("{}", s.map(triple).unwrap_or(0));
-    println!("{}", n.map(triple).unwrap_or(-1));
+    println!("{}", s.map_or(0, triple));
+    println!("{}", n.map_or(-1, triple));
     println!("{}", s.map_or(100, triple));
     println!("{}", n.map_or(100, triple));
     println!(

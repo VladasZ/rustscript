@@ -1,4 +1,6 @@
+use num_traits::AsPrimitive;
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -87,6 +89,74 @@ fn parse_campaign_options(args: &[String]) -> Result<CampaignOptions> {
 /// One generated case that came back from a worker, ready for reporting.
 type BatchOutcome = (Vec<Program>, Vec<String>, Result<Vec<RunResult>>);
 
+/// The campaign-wide state a finished case folds into.
+struct CaseContext<'a> {
+    report: &'a mut CampaignReport,
+    options: &'a CampaignOptions,
+    runner: &'a Runner,
+    root: &'a Path,
+    stop: &'a AtomicBool,
+    started: Instant,
+    last_progress: &'a mut Instant,
+}
+
+/// Fold one finished case into the ctx.report: progress on a match, gap and bug
+/// bucketing with artifact saving, and the stop-on-first reduction path.
+fn record_case(
+    ctx: &mut CaseContext,
+    program: Program,
+    source: String,
+    result: RunResult,
+) -> Result<()> {
+    let case_seed = program.seed;
+    match &result.classification {
+        Classification::Match => {
+            ctx.report.matched += 1;
+            if ctx.report.matched.is_multiple_of(100)
+                || ctx.last_progress.elapsed() >= PROGRESS_INTERVAL
+            {
+                print_campaign_progress(
+                    ctx.report.matched,
+                    ctx.options.cases,
+                    case_seed,
+                    ctx.started.elapsed(),
+                );
+                *ctx.last_progress = Instant::now();
+            }
+        }
+        Classification::NativeNondeterministic => {
+            ctx.report.record_nondeterministic(case_seed);
+        }
+        Classification::InterpreterUnsupported => {
+            let key = result.signature();
+            let path = if ctx.report.should_save_gap(&key) {
+                Some(Artifact::new(case_seed, program, source, result.clone()).save(ctx.root)?)
+            } else {
+                None
+            };
+            ctx.report.record_gap(key, case_seed, path);
+        }
+        classification => {
+            if ctx.options.stop_on_first {
+                ctx.stop.store(true, Ordering::Relaxed);
+                stop_and_reduce(ctx.runner, ctx.root, case_seed, program, source, result)?;
+                unreachable!("stop_and_reduce always fails");
+            }
+            let key = bucket_key(classification, &result);
+            let saved = ctx.report.should_save(&key);
+            let path = if saved {
+                Some(Artifact::new(case_seed, program, source, result.clone()).save(ctx.root)?)
+            } else {
+                None
+            };
+            ctx.report.record_bug(key, case_seed, path);
+        }
+    }
+    ctx.report.checked += 1;
+    ctx.report.checked += 1;
+    Ok(())
+}
+
 fn run_campaign(args: &[String]) -> Result<ExitCode> {
     let options = parse_campaign_options(args)?;
     let root = workspace_root();
@@ -96,8 +166,7 @@ fn run_campaign(args: &[String]) -> Result<ExitCode> {
 
     let batch_count = options.cases.div_ceil(CAMPAIGN_BATCH_SIZE);
     let workers = thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(4)
+        .map_or(4, std::num::NonZeroUsize::get)
         .min(batch_count.max(1));
     let next_batch = AtomicUsize::new(0);
     let stop = AtomicBool::new(false);
@@ -152,60 +221,17 @@ fn run_campaign(args: &[String]) -> Result<ExitCode> {
                         return Err(error);
                     }
                 };
+                let mut ctx = CaseContext {
+                    report: &mut report,
+                    options: &options,
+                    runner: &runner,
+                    root: &root,
+                    stop: &stop,
+                    started,
+                    last_progress: &mut last_progress,
+                };
                 for ((program, source), result) in programs.into_iter().zip(sources).zip(results) {
-                    let case_seed = program.seed;
-                    match &result.classification {
-                        Classification::Match => {
-                            report.matched += 1;
-                            if report.matched % 100 == 0
-                                || last_progress.elapsed() >= PROGRESS_INTERVAL
-                            {
-                                print_campaign_progress(
-                                    report.matched,
-                                    options.cases,
-                                    case_seed,
-                                    started.elapsed(),
-                                );
-                                last_progress = Instant::now();
-                            }
-                        }
-                        Classification::NativeNondeterministic => {
-                            report.record_nondeterministic(case_seed);
-                        }
-                        Classification::InterpreterUnsupported => {
-                            let key = result.signature();
-                            let path = if report.should_save_gap(&key) {
-                                Some(
-                                    Artifact::new(case_seed, program, source, result.clone())
-                                        .save(&root)?,
-                                )
-                            } else {
-                                None
-                            };
-                            report.record_gap(key, case_seed, path);
-                        }
-                        classification => {
-                            if options.stop_on_first {
-                                stop.store(true, Ordering::Relaxed);
-                                stop_and_reduce(
-                                    &runner, &root, case_seed, program, source, result,
-                                )?;
-                                unreachable!("stop_and_reduce always fails");
-                            }
-                            let key = bucket_key(classification, &result);
-                            let saved = report.should_save(&key);
-                            let path = if saved {
-                                Some(
-                                    Artifact::new(case_seed, program, source, result.clone())
-                                        .save(&root)?,
-                                )
-                            } else {
-                                None
-                            };
-                            report.record_bug(key, case_seed, path);
-                        }
-                    }
-                    report.checked += 1;
+                    record_case(&mut ctx, program, source, result)?;
                 }
             }
         }
@@ -440,7 +466,7 @@ fn reduce_artifact(args: &[String]) -> Result<()> {
 }
 
 fn print_campaign_progress(completed: usize, total: usize, seed: u64, elapsed: Duration) {
-    let rate = completed as f64 / elapsed.as_secs_f64();
+    let rate = AsPrimitive::<f64>::as_(completed) / elapsed.as_secs_f64();
     println!(
         "progress: {completed}/{total}, through seed {seed}, {rate:.1} cases/s, {:.1}s elapsed",
         elapsed.as_secs_f64()

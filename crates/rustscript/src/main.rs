@@ -6,6 +6,7 @@ mod supported;
 mod update;
 
 use std::env;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, exit};
@@ -107,7 +108,11 @@ fn real_main() -> Result<()> {
         // `rust file.rs` and the shebang form both land here. Everything after
         // the filename is passed through to the script. An extensionless path
         // still runs when it is a real file, e.g. a launcher symlink.
-        path if path.ends_with(".rs") || Path::new(path).is_file() => run(path, &all[1..]),
+        path if Path::new(path).extension() == Some(OsStr::new("rs"))
+            || Path::new(path).is_file() =>
+        {
+            run(path, &all[1..])
+        }
         other => bail!("unknown command `{other}`, try `rust help`"),
     }
 }

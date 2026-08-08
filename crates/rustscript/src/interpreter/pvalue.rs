@@ -4,6 +4,7 @@
 //! shared by concurrent tasks. The fast engine keeps its `Rc` model untouched,
 //! so nothing here can slow the single threaded path.
 
+use num_traits::AsPrimitive;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
@@ -246,7 +247,7 @@ impl PValue {
             Const::Char(ch) => PValue::Char(*ch),
             Const::Str(s) => PValue::str(&**s),
             Const::Bytes(bytes) => {
-                PValue::vec(bytes.iter().map(|&b| PValue::Int(b as i64)).collect())
+                PValue::vec(bytes.iter().map(|&b| PValue::Int(i64::from(b))).collect())
             }
         }
     }
@@ -263,7 +264,7 @@ impl PValue {
     /// Build an integer of the given width from an in-range value.
     pub(super) fn int_of_width(value: i128, width: IntWidth) -> PValue {
         match width {
-            IntWidth::I64 => PValue::Int(value as i64),
+            IntWidth::I64 => PValue::Int(i64::try_from(value).expect("truncated to width")),
             other => PValue::IntW(other.encode(value), other),
         }
     }
@@ -277,7 +278,7 @@ impl PValue {
     }
 
     /// The i64 or f64 image of a width-tagged number, for the method and
-    /// bridge surface that predates real widths. A u64 value past i64::MAX
+    /// bridge surface that predates real widths. A u64 value past `i64::MAX`
     /// saturates, the clamp sentinels like `usize::MAX` always had here.
     /// None when the value is not tagged.
     pub(super) fn bridge_image(&self) -> Option<PValue> {
@@ -346,10 +347,10 @@ impl PValue {
             // A bare float literal next to an f32 value is f32 in the source
             // types, so it rounds to f32 before the comparison.
             (PValue::F32(a), PValue::Float(b)) | (PValue::Float(b), PValue::F32(a)) => {
-                *a == *b as f32
+                *a == AsPrimitive::<f32>::as_(*b)
             }
             (PValue::Int(a), PValue::Float(b)) | (PValue::Float(b), PValue::Int(a)) => {
-                *a as f64 == *b
+                AsPrimitive::<f64>::as_(*a) == *b
             }
             (PValue::Char(a), PValue::Char(b)) => a == b,
             (PValue::Str(a), PValue::Str(b)) => a == b,
@@ -382,7 +383,7 @@ impl PValue {
                             .fields
                             .iter()
                             .zip(va.iter())
-                            .all(|(k, v)| b.get(k).map(|o| v.eq_value(&o)).unwrap_or(false))
+                            .all(|(k, v)| b.get(k).is_some_and(|o| v.eq_value(&o)))
                 }
             }
             (PValue::Native(a), PValue::Native(b)) => Arc::ptr_eq(a, b),
@@ -466,38 +467,7 @@ impl PValue {
                 }
                 out.push('}');
             }
-            PValue::Struct(s) => {
-                write!(out, "{}", super::resolver::bare(s.name())).unwrap();
-                let values = s.values.lock();
-                if values.is_empty() {
-                    return;
-                }
-                if s.shape
-                    .fields
-                    .iter()
-                    .enumerate()
-                    .all(|(i, f)| **f == i.to_string())
-                {
-                    out.push('(');
-                    for (i, v) in values.iter().enumerate() {
-                        if i > 0 {
-                            out.push_str(", ");
-                        }
-                        v.write_debug(out);
-                    }
-                    out.push(')');
-                    return;
-                }
-                out.push_str(" { ");
-                for (i, (k, v)) in s.shape.fields.iter().zip(values.iter()).enumerate() {
-                    if i > 0 {
-                        out.push_str(", ");
-                    }
-                    write!(out, "{k}: ").unwrap();
-                    v.write_debug(out);
-                }
-                out.push_str(" }");
-            }
+            PValue::Struct(s) => write_struct_debug(s, out),
             PValue::Closure(_) => out.push_str("<closure>"),
             PValue::Ref(reference) => match reference.get() {
                 Some(value) => value.write_debug(out),
@@ -519,6 +489,41 @@ impl PValue {
             }
         }
     }
+}
+
+/// The derived-Debug form of a struct, the parallel twin of the fast
+/// engine's writer.
+fn write_struct_debug(s: &PStructData, out: &mut String) {
+    write!(out, "{}", super::resolver::bare(s.name())).unwrap();
+    let values = s.values.lock();
+    if values.is_empty() {
+        return;
+    }
+    if s.shape
+        .fields
+        .iter()
+        .enumerate()
+        .all(|(i, f)| **f == i.to_string())
+    {
+        out.push('(');
+        for (i, v) in values.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            v.write_debug(out);
+        }
+        out.push(')');
+        return;
+    }
+    out.push_str(" { ");
+    for (i, (k, v)) in s.shape.fields.iter().zip(values.iter()).enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        write!(out, "{k}: ").unwrap();
+        v.write_debug(out);
+    }
+    out.push_str(" }");
 }
 
 impl PKey {

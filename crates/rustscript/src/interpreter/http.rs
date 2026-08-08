@@ -7,14 +7,15 @@ use std::rc::Rc;
 use std::sync::OnceLock;
 
 use anyhow::{Result, anyhow, bail};
+use base64::Engine;
 use reqwest::Method;
 use reqwest::blocking::Client;
 
 use super::native::Native;
 use super::value::{StructData, Value};
 
-use super::json_bridge::*;
-use super::std_bridge::*;
+use super::json_bridge::{parse_json, value_to_json};
+use super::std_bridge::duration_from_value;
 
 type ResponseParts = (u16, String, Vec<(String, String)>, Option<u64>);
 
@@ -66,7 +67,7 @@ fn client_value(c: Client) -> Value {
 /// Handle a call whose canonical path starts with `reqwest`. Only the blocking
 /// API runs here; the async API is served by the parallel engine.
 pub(super) fn reqwest_call(canon: &[String], args: &[Value]) -> Result<Value> {
-    let last = canon.last().map(String::as_str).unwrap_or("");
+    let last = canon.last().map_or("", String::as_str);
     // A redirect policy marker, built by `reqwest::redirect::Policy::none()` or
     // `::limited(n)`. It carries no `blocking` segment, so match it first.
     if canon.iter().any(|s| s == "redirect") {
@@ -241,7 +242,6 @@ pub(super) fn request_method(s: &Rc<StructData>, method: &str, args: &[Value]) -
                 Some(other) => other.display(),
                 None => String::new(),
             };
-            use base64::Engine;
             let token = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
             add_header(s, "Authorization", &format!("Basic {token}"));
             Ok(this())
@@ -297,13 +297,12 @@ fn add_header(s: &StructData, k: &str, v: &str) {
 }
 
 fn ensure_vec_field(s: &StructData, field: &str) -> Rc<RefCell<Vec<Value>>> {
-    match s.get(field) {
-        Some(Value::Vec(v)) => v,
-        _ => {
-            let v = Rc::new(RefCell::new(vec![]));
-            s.set(field, Value::Vec(v.clone()));
-            v
-        }
+    if let Some(Value::Vec(v)) = s.get(field) {
+        v
+    } else {
+        let v = Rc::new(RefCell::new(vec![]));
+        s.set(field, Value::Vec(v.clone()));
+        v
     }
 }
 
@@ -322,7 +321,7 @@ fn run_request(s: &StructData) -> Value {
         Ok((status, text, headers, length)) => Value::ok(Value::struct_of(
             "ReqwestResponse",
             [
-                ("status".into(), Value::Int(status as i64)),
+                ("status".into(), Value::Int(i64::from(status))),
                 ("body".into(), Value::str(text)),
                 ("headers".into(), header_pairs(headers)),
                 (
@@ -341,8 +340,7 @@ fn run_request(s: &StructData) -> Value {
 fn execute(s: &StructData) -> Result<ResponseParts> {
     let method = s
         .get("method")
-        .map(|v| v.display())
-        .unwrap_or_else(|| "GET".into());
+        .map_or_else(|| "GET".into(), |v| v.display());
     let url = s.get("url").map(|v| v.display()).unwrap_or_default();
     let client = match s.get("client") {
         Some(Value::Native(h)) => match &*h.borrow() {
@@ -452,7 +450,7 @@ fn header_map_method(s: &StructData, method: &str, args: &[Value]) -> Value {
         "get" => {
             let name = args
                 .first()
-                .map(|v| v.display())
+                .map(super::value::Value::display)
                 .unwrap_or_default()
                 .to_lowercase();
             if let Some(Value::Vec(h)) = s.get("map") {
@@ -476,7 +474,7 @@ fn header_map_method(s: &StructData, method: &str, args: &[Value]) -> Value {
         "get_all" => {
             let name = args
                 .first()
-                .map(|v| v.display())
+                .map(super::value::Value::display)
                 .unwrap_or_default()
                 .to_lowercase();
             let mut out: Vec<Value> = Vec::new();

@@ -148,7 +148,11 @@ fn value_to_node(v: &Value) -> Result<XMLNode> {
     let Value::Enum { variant, data, .. } = v else {
         bail!("an Element child must be an XMLNode");
     };
-    let text = |i: usize| data.get(i).map(|v| v.display()).unwrap_or_default();
+    let text = |i: usize| {
+        data.get(i)
+            .map(super::value::Value::display)
+            .unwrap_or_default()
+    };
     Ok(match &**variant {
         "Element" => match data.first() {
             Some(Value::Struct(el)) => XMLNode::Element(value_to_element(el)?),
@@ -208,7 +212,7 @@ fn arg_bytes(v: Option<&Value>) -> Vec<u8> {
             .borrow()
             .iter()
             .filter_map(|v| match v {
-                Value::Int(n) => Some(*n as u8),
+                Value::Int(n) => u8::try_from(*n).ok(),
                 _ => None,
             })
             .collect(),

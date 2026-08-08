@@ -334,7 +334,10 @@ impl NumericStatement {
 
     fn uses(&self, name: &str) -> bool {
         match self {
-            Self::LetAnnotated { .. } | Self::LetSuffixed { .. } | Self::LetOpaque { .. } => false,
+            Self::LetAnnotated { .. }
+            | Self::LetSuffixed { .. }
+            | Self::LetOpaque { .. }
+            | Self::FloatLet { .. } => false,
             Self::LetBinary { left, right, .. } => left == name || right.uses(name),
             Self::Compound {
                 target, operand, ..
@@ -344,7 +347,6 @@ impl NumericStatement {
             | Self::Recast { source, .. }
             | Self::IntToFloat { source, .. }
             | Self::FloatToInt { source, .. } => source == name,
-            Self::FloatLet { .. } => false,
             Self::FloatBinary { left, right, .. } => left == name || right.uses(name),
         }
     }
@@ -385,32 +387,25 @@ impl NumericStatement {
                 op,
                 operand,
             } => format!("        {target} {}= {};\n", op.token(), operand.render()),
-            Self::Shift {
-                name,
-                source,
-                direction,
-                amount,
-                oversized,
-                ..
-            } => {
-                if *oversized {
-                    format!(
-                        "        let {} = {source} {} (diff_opaque({amount}i64) as u32);\n",
-                        binding(name, mutable),
-                        direction.token()
-                    )
-                } else {
-                    format!(
-                        "        let {} = {source} {} {amount};\n",
-                        binding(name, mutable),
-                        direction.token()
-                    )
-                }
-            }
+            Self::Shift { .. } => self.render_shift(mutable),
             Self::Negate { name, source, .. } => {
                 format!("        let {} = -{source};\n", binding(name, mutable))
             }
             Self::Recast {
+                name,
+                width,
+                source,
+            }
+            | Self::FloatToInt {
+                name,
+                width,
+                source,
+            } => format!(
+                "        let {} = {source} as {};\n",
+                binding(name, mutable),
+                width.rust()
+            ),
+            Self::IntToFloat {
                 name,
                 width,
                 source,
@@ -436,24 +431,35 @@ impl NumericStatement {
                 op.token(),
                 right.render()
             ),
-            Self::IntToFloat {
-                name,
-                width,
-                source,
-            } => format!(
-                "        let {} = {source} as {};\n",
+        }
+    }
+
+    /// A shift line. The oversized form launders the amount through the
+    /// opaque helper so the compiler cannot reject it as a constant.
+    fn render_shift(&self, mutable: &BTreeSet<String>) -> String {
+        let Self::Shift {
+            name,
+            source,
+            direction,
+            amount,
+            oversized,
+            ..
+        } = self
+        else {
+            unreachable!()
+        };
+        if *oversized {
+            format!(
+                "        let {} = {source} {} (diff_opaque({amount}i64) as u32);\n",
                 binding(name, mutable),
-                width.rust()
-            ),
-            Self::FloatToInt {
-                name,
-                width,
-                source,
-            } => format!(
-                "        let {} = {source} as {};\n",
+                direction.token()
+            )
+        } else {
+            format!(
+                "        let {} = {source} {} {amount};\n",
                 binding(name, mutable),
-                width.rust()
-            ),
+                direction.token()
+            )
         }
     }
 
@@ -579,7 +585,7 @@ impl NumericStatement {
                     simplified.push(Self::LetOpaque {
                         name: name.clone(),
                         width: *width,
-                        value: smaller as i64,
+                        value: i64::try_from(smaller).expect("shrunk within i64"),
                     });
                 }
             }
@@ -590,11 +596,7 @@ impl NumericStatement {
                 left,
                 right: IntOperand::Literal(value),
             } => {
-                let floor = if matches!(op, IntOp::Div | IntOp::Rem) {
-                    1
-                } else {
-                    0
-                };
+                let floor = i128::from(matches!(op, IntOp::Div | IntOp::Rem));
                 for smaller in shrink_value(*value) {
                     if smaller.abs() < floor {
                         continue;

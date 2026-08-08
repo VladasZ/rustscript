@@ -19,8 +19,8 @@ fn main() {
     // Handed to Option::map and Option::map_or.
     let some: Option<i64> = Some(5);
     let none: Option<i64> = None;
-    println!("{}", some.map(double).unwrap_or(0));
-    println!("{}", none.map(double).unwrap_or(-1));
+    println!("{}", some.map_or(0, double));
+    println!("{}", none.map_or(-1, double));
     println!("{}", some.map_or(0, double));
 
     // Handed to an iterator adaptor.

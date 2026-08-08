@@ -106,21 +106,19 @@ fn regex_method(regex: &RegexValue, method: &str, args: &[Value]) -> Result<Valu
         RegexOut::Bool(b) => Value::Bool(b),
         RegexOut::Text(s) => Value::str(s),
         RegexOut::Pattern => Value::Str(regex.pattern.clone()),
-        RegexOut::OptSpan(span) => span
-            .map(|(start, end)| Value::some(match_value(source.clone(), start, end)))
-            .unwrap_or_else(Value::none),
-        RegexOut::OptGroups(groups) => groups
-            .map(|groups| {
-                Value::some(
-                    Native::RegexCaptures(CapturesValue {
-                        source: source.clone(),
-                        groups,
-                        names: regex.names.clone(),
-                    })
-                    .wrap(),
-                )
-            })
-            .unwrap_or_else(Value::none),
+        RegexOut::OptSpan(span) => span.map_or_else(Value::none, |(start, end)| {
+            Value::some(match_value(source.clone(), start, end))
+        }),
+        RegexOut::OptGroups(groups) => groups.map_or_else(Value::none, |groups| {
+            Value::some(
+                Native::RegexCaptures(CapturesValue {
+                    source: source.clone(),
+                    groups,
+                    names: regex.names.clone(),
+                })
+                .wrap(),
+            )
+        }),
         RegexOut::Pieces(pieces) => Value::vec(pieces.into_iter().map(Value::str).collect()),
     })
 }
@@ -137,9 +135,9 @@ fn captures_method(captures: &CapturesValue, method: &str, args: &[Value]) -> Re
     let names = captures.names.iter().map(|(n, i)| (n.as_ref(), *i));
     match captures_core(method, &captures.groups, names, &VArgs(args))? {
         Some(CapturesOut::Int(i)) => Ok(Value::Int(i)),
-        Some(CapturesOut::OptSpan(span)) => Ok(span
-            .map(|(start, end)| Value::some(match_value(captures.source.clone(), start, end)))
-            .unwrap_or_else(Value::none)),
+        Some(CapturesOut::OptSpan(span)) => Ok(span.map_or_else(Value::none, |(start, end)| {
+            Value::some(match_value(captures.source.clone(), start, end))
+        })),
         None => bail!("unknown method `{method}` on Captures"),
     }
 }
@@ -153,7 +151,7 @@ pub(super) fn capture_index(handle: &Rc<RefCell<Native>>, key: &Value) -> Result
         captures.clone()
     };
     let index = match key {
-        Value::Int(index) if *index >= 0 => *index as usize,
+        Value::Int(index) if *index >= 0 => usize::try_from(*index)?,
         Value::Str(name) => captures
             .names
             .iter()

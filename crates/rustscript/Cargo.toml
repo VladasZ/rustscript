@@ -50,6 +50,7 @@ zip = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 terminal-light = { workspace = true }
+num-traits = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }
@@ -65,3 +66,6 @@ windows-service = { workspace = true }
 windows-sys = { workspace = true }
 winreg = { workspace = true }
 wmi = { workspace = true }
+
+[lints]
+workspace = true

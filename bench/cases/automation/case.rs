@@ -27,7 +27,7 @@ fn main() {
         serde_json::from_str(&fs::read_to_string(config_path).unwrap()).unwrap();
     let text = fs::read_to_string(input_path).unwrap();
     let regex = regex::Regex::new(config["pattern"].as_str().unwrap()).unwrap();
-    let limit = config["top"].as_i64().unwrap() as usize;
+    let limit = usize::try_from(config["top"].as_i64().unwrap()).unwrap();
     let mut counts: HashMap<String, i64> = HashMap::new();
     let mut total: i64 = 0;
     for found in regex.find_iter(&text) {
@@ -57,7 +57,7 @@ fn main() {
     let saved = fs::read_to_string(output_path).unwrap();
     let mut checksum: u64 = 0;
     for byte in saved.bytes() {
-        checksum = (checksum + byte as u64) % 1_000_000_007;
+        checksum = (checksum + u64::from(byte)) % 1_000_000_007;
     }
     let ns = t.elapsed().as_nanos();
     println!(

@@ -5,9 +5,9 @@ fn quicksort(list: Vec<i64>) -> Vec<i64> {
         return list;
     }
     let pivot = list[0];
-    let rest: Vec<i64> = list.iter().skip(1).cloned().collect();
-    let less: Vec<i64> = rest.iter().filter(|x| **x < pivot).cloned().collect();
-    let more: Vec<i64> = rest.iter().filter(|x| **x >= pivot).cloned().collect();
+    let rest: Vec<i64> = list.iter().skip(1).copied().collect();
+    let less: Vec<i64> = rest.iter().filter(|x| **x < pivot).copied().collect();
+    let more: Vec<i64> = rest.iter().filter(|x| **x >= pivot).copied().collect();
     let mut out = quicksort(less);
     out.push(pivot);
     out.extend(quicksort(more));

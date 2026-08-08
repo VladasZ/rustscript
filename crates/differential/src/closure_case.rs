@@ -101,7 +101,7 @@ impl ClosureCase {
 }
 
 pub fn apply_helper() -> &'static str {
-    r#"fn apply_generated<F>(mut operation: F, value: i64, times: usize) -> i64
+    r"fn apply_generated<F>(mut operation: F, value: i64, times: usize) -> i64
 where
     F: FnMut(i64) -> i64,
 {
@@ -114,7 +114,7 @@ where
     current
 }
 
-"#
+"
 }
 
 fn render_nested(input: i64, outer_bias: i64, inner_bias: i64, arguments: [i64; 2]) -> String {

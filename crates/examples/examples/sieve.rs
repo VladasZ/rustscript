@@ -17,5 +17,5 @@ fn main() {
         i += 1;
     }
     let primes: Vec<usize> = (2..=n).filter(|k| is_prime[*k]).collect();
-    println!("primes up to {n}: {:?}", primes);
+    println!("primes up to {n}: {primes:?}");
 }

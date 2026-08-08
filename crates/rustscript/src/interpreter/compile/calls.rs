@@ -11,7 +11,10 @@ use crate::interpreter::bytecode::{
 use crate::interpreter::json_bridge::serde_rename;
 use crate::interpreter::value::StructShape;
 
-use super::*;
+use super::{
+    Arc, Compiler, FnState, HashMap, NameLoc, Res, TypeIr, collect_pattern_names,
+    first_generic_type, idx16, int_literal,
+};
 
 impl Compiler<'_> {
     /// Compile arguments into a fresh contiguous register window and return its
@@ -24,7 +27,7 @@ impl Compiler<'_> {
             self.alloc();
         }
         for (i, a) in list.iter().enumerate() {
-            self.compile_into(base + i as Reg, a)?;
+            self.compile_into(base + idx16(i), a)?;
         }
         Ok(base)
     }
@@ -50,7 +53,7 @@ impl Compiler<'_> {
         }
         let table = &mut self.cur().call_type_args;
         table.push(Arc::from(types.into_boxed_slice()));
-        (table.len() - 1) as u32
+        u32::try_from(table.len() - 1).expect("type-arg table exceeds u32 indices")
     }
 
     pub(super) fn compile_call(&mut self, dst: Reg, c: &syn::ExprCall) -> Result<()> {
@@ -61,7 +64,7 @@ impl Compiler<'_> {
                 dst,
                 callee,
                 base,
-                argc: c.args.len() as u16,
+                argc: idx16(c.args.len()),
             });
             self.emit_mut_arg_writebacks(c.args.iter(), base)?;
             return Ok(());
@@ -77,56 +80,11 @@ impl Compiler<'_> {
                 _ => bail!("tokio::spawn needs an async block in this interpreter"),
             }
         }
-        let coerce = path
-            .segments
-            .last()
-            .and_then(first_generic_type)
-            .map(|t| self.lower_ir(t));
-        // A pending `let` annotation attaches to exactly this call, see
-        // `Compiler::json_let`. Failing that, the enclosing signature may name
-        // the target because the function hands this parse back, see
-        // `Compiler::json_tails`.
-        let coerce = match coerce {
-            Some(ty) => Some(ty),
-            None => match &self.json_let {
-                Some((ptr, ty)) if std::ptr::eq(*ptr, c) => {
-                    let ty = ty.clone();
-                    self.json_let = None;
-                    Some(ty)
-                }
-                _ => self.json_tails.get(&std::ptr::from_ref(c)).cloned(),
-            },
-        };
-        let argc = c.args.len() as u16;
+        let coerce = self.call_coerce(c, path);
+        let argc = idx16(c.args.len());
 
-        if path.segments.len() == 1 {
-            let name = path.segments[0].ident.to_string();
-            // A local or captured closure value called directly.
-            let callee = match self.resolve(&name) {
-                NameLoc::Local(reg) => Some(reg),
-                NameLoc::Cell(cell) => {
-                    let reg = self.alloc();
-                    self.emit(Op::LoadCell { dst: reg, cell });
-                    Some(reg)
-                }
-                NameLoc::Upvalue(idx) => {
-                    let reg = self.alloc();
-                    self.emit(Op::LoadUpvalue { dst: reg, idx });
-                    Some(reg)
-                }
-                NameLoc::None => None,
-            };
-            if let Some(callee) = callee {
-                let base = self.compile_args(c.args.iter())?;
-                self.emit(Op::CallValue {
-                    dst,
-                    callee,
-                    base,
-                    argc,
-                });
-                self.emit_mut_arg_writebacks(c.args.iter(), base)?;
-                return Ok(());
-            }
+        if self.try_compile_closure_call(dst, c, path, argc)? {
+            return Ok(());
         }
         let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
         let resolved = match self.resolve_path_res(&segs) {
@@ -201,6 +159,70 @@ impl Compiler<'_> {
             argc,
         });
         Ok(())
+    }
+
+    /// The coercion target of a call: its own turbofish, a pending `let`
+    /// annotation attached to exactly this call, or the enclosing signature
+    /// when the function hands this parse back. See `Compiler::json_let` and
+    /// `Compiler::json_tails`.
+    fn call_coerce(&mut self, c: &syn::ExprCall, path: &syn::Path) -> Option<TypeIr> {
+        let coerce = path
+            .segments
+            .last()
+            .and_then(first_generic_type)
+            .map(|t| self.lower_ir(t));
+        match coerce {
+            Some(ty) => Some(ty),
+            None => match &self.json_let {
+                Some((ptr, ty)) if std::ptr::eq(*ptr, c) => {
+                    let ty = ty.clone();
+                    self.json_let = None;
+                    Some(ty)
+                }
+                _ => self.json_tails.get(&std::ptr::from_ref(c)).cloned(),
+            },
+        }
+    }
+
+    /// A local or captured closure value called directly by its bare name.
+    /// True when the call was emitted here.
+    fn try_compile_closure_call(
+        &mut self,
+        dst: Reg,
+        c: &syn::ExprCall,
+        path: &syn::Path,
+        argc: u16,
+    ) -> Result<bool> {
+        if path.segments.len() != 1 {
+            return Ok(false);
+        }
+        let name = path.segments[0].ident.to_string();
+        let callee = match self.resolve(&name) {
+            NameLoc::Local(reg) => Some(reg),
+            NameLoc::Cell(cell) => {
+                let reg = self.alloc();
+                self.emit(Op::LoadCell { dst: reg, cell });
+                Some(reg)
+            }
+            NameLoc::Upvalue(idx) => {
+                let reg = self.alloc();
+                self.emit(Op::LoadUpvalue { dst: reg, idx });
+                Some(reg)
+            }
+            NameLoc::None => None,
+        };
+        let Some(callee) = callee else {
+            return Ok(false);
+        };
+        let base = self.compile_args(c.args.iter())?;
+        self.emit(Op::CallValue {
+            dst,
+            callee,
+            base,
+            argc,
+        });
+        self.emit_mut_arg_writebacks(c.args.iter(), base)?;
+        Ok(true)
     }
 
     pub(super) fn compile_method(&mut self, dst: Reg, m: &syn::ExprMethodCall) -> Result<()> {
@@ -294,12 +316,34 @@ impl Compiler<'_> {
         let recv = self.compile_expr(&m.receiver)?;
         self.option_result = outer_option_hint;
         let base = self.compile_args(m.args.iter())?;
-        // `collect` is type driven in real Rust. The interpreter has no types,
-        // so the three places the target is knowable lower to their own method
-        // here: a turbofish asking for a String, a pending `let s: String`
-        // annotation attached to exactly this call, and a `-> String` signature
-        // on the function whose returned value this call produces. See
-        // `Compiler::string_let` and `Compiler::string_tails`.
+        let (method, scalar) = self.method_name_and_scalar(m);
+        let name = self.add_name_with(method, scalar);
+        // A multiline chain compiles its receiver and args first, so restamp
+        // with the method's own line before the op lands, the line rustc
+        // would name for this call.
+        self.set_line(m.method.span());
+        self.emit(Op::Method {
+            dst,
+            recv,
+            name,
+            base,
+            argc: idx16(m.args.len()),
+        });
+        // Methods that fill a `&mut` argument, like read_line, write the new
+        // value into the arg window. The window slot is only a copy of the
+        // variable, so move the result back into the variable register.
+        self.emit_mut_arg_writebacks(m.args.iter(), base)?;
+        Ok(())
+    }
+
+    /// The lowered method name and its scalar result type, where knowable.
+    /// `collect` is type driven in real Rust; the interpreter has no types, so
+    /// the three places the target is knowable rename the call to
+    /// `collect_string`: a turbofish asking for a String, a pending
+    /// `let s: String` annotation attached to exactly this call, and a
+    /// `-> String` signature on the function whose returned value this call
+    /// produces. See `Compiler::string_let` and `Compiler::string_tails`.
+    fn method_name_and_scalar(&mut self, m: &syn::ExprMethodCall) -> (String, Option<ScalarTy>) {
         let mut method = m.method.to_string();
         if method == "collect" {
             let turbofish_string = m.turbofish.as_ref().is_some_and(names_string);
@@ -340,23 +384,7 @@ impl Compiler<'_> {
             self.option_result = None;
             scalar = scalar.or(Some(ScalarTy::Opt(Box::new(ScalarTy::Other))));
         }
-        let name = self.add_name_with(method, scalar);
-        // A multiline chain compiles its receiver and args first, so restamp
-        // with the method's own line before the op lands, the line rustc
-        // would name for this call.
-        self.set_line(m.method.span());
-        self.emit(Op::Method {
-            dst,
-            recv,
-            name,
-            base,
-            argc: m.args.len() as u16,
-        });
-        // Methods that fill a `&mut` argument, like read_line, write the new
-        // value into the arg window. The window slot is only a copy of the
-        // variable, so move the result back into the variable register.
-        self.emit_mut_arg_writebacks(m.args.iter(), base)?;
-        Ok(())
+        (method, scalar)
     }
 
     /// Emit a writeback for every `&mut variable` argument of a finished call.
@@ -378,7 +406,7 @@ impl Compiler<'_> {
             {
                 let name = p.path.segments[0].ident.to_string();
                 let location = self.resolve_for_write(&name);
-                self.emit_name_store(location, base + i as u16, &name)?;
+                self.emit_name_store(location, base + idx16(i), &name)?;
             }
         }
         Ok(())
@@ -395,9 +423,9 @@ impl Compiler<'_> {
         let child = self.frames.pop().unwrap();
         let caps: Vec<CapSource> = child.upvalues.iter().map(|(_, s)| *s).collect();
         let mut chunk = child.into_chunk(self.ctx.file.clone());
-        chunk.module = self.ctx.module as u16;
+        chunk.module = idx16(self.ctx.module);
         let parent = self.cur();
-        let child_idx = parent.children.len() as u16;
+        let child_idx = idx16(parent.children.len());
         parent.children.push(Rc::new(chunk));
         parent.child_caps.push(caps);
         self.emit(Op::Spawn {
@@ -424,10 +452,10 @@ impl Compiler<'_> {
         let child = self.frames.pop().unwrap();
         let caps: Vec<CapSource> = child.upvalues.iter().map(|(_, s)| *s).collect();
         let mut chunk = child.into_chunk(self.ctx.file.clone());
-        chunk.module = self.ctx.module as u16;
+        chunk.module = idx16(self.ctx.module);
         let chunk = Rc::new(chunk);
         let parent = self.cur();
-        let child_idx = parent.children.len() as u16;
+        let child_idx = idx16(parent.children.len());
         parent.children.push(chunk);
         parent.child_caps.push(caps);
         self.emit(Op::MakeClosure {
@@ -619,20 +647,17 @@ impl Compiler<'_> {
                 .resolver
                 .resolve_struct_key(self.ctx.module, &s.path)
         });
-        let (name, def) = match resolved {
-            Some(canon) => {
-                let def = self.ctx.resolver.structs.get(&canon).map(|d| d.ast.clone());
-                (canon.to_string(), def)
-            }
-            None => {
-                let bare = s
-                    .path
-                    .segments
-                    .last()
-                    .map(|seg| seg.ident.to_string())
-                    .unwrap_or_default();
-                (bare, None)
-            }
+        let (name, def) = if let Some(canon) = resolved {
+            let def = self.ctx.resolver.structs.get(&canon).map(|d| d.ast.clone());
+            (canon.to_string(), def)
+        } else {
+            let bare = s
+                .path
+                .segments
+                .last()
+                .map(|seg| seg.ident.to_string())
+                .unwrap_or_default();
+            (bare, None)
         };
         // Written fields keyed by name.
         let mut written: Vec<(String, &Expr)> = Vec::new();
@@ -651,7 +676,7 @@ impl Compiler<'_> {
                 let mut ordered: Vec<String> = def
                     .fields
                     .iter()
-                    .filter_map(|f| f.ident.as_ref().map(|i| i.to_string()))
+                    .filter_map(|f| f.ident.as_ref().map(std::string::ToString::to_string))
                     .filter(|k| written.iter().any(|(w, _)| w == k))
                     .collect();
                 for (k, _) in &written {
@@ -684,14 +709,14 @@ impl Compiler<'_> {
             self.alloc();
         }
         for (i, fname) in order.iter().enumerate() {
-            let dstf = base + i as Reg;
+            let dstf = base + idx16(i);
             match written.iter().find(|(k, _)| k == fname) {
                 Some((_, e)) => self.compile_into(dstf, e)?,
                 None => self.emit(Op::LoadUnit { dst: dstf }),
             }
         }
         if let Some(rest) = &s.rest {
-            self.compile_into(base + order.len() as Reg, rest)?;
+            self.compile_into(base + idx16(order.len()), rest)?;
         }
         let info = {
             let shape = StructShape::with_renames(
@@ -701,7 +726,7 @@ impl Compiler<'_> {
             );
             let f = self.cur();
             f.struct_lits.push(StructLit { shape, has_rest });
-            (f.struct_lits.len() - 1) as u16
+            idx16(f.struct_lits.len() - 1)
         };
         self.emit(Op::MakeStruct { dst, info, base });
         Ok(())
@@ -724,7 +749,7 @@ impl Compiler<'_> {
             pat: lower_pattern(pat),
             binds,
         });
-        Ok((f.pats.len() - 1) as u16)
+        Ok(u16::try_from(f.pats.len() - 1)?)
     }
 
     /// Bind an irrefutable pattern whose value already sits in `reg`.
@@ -910,12 +935,10 @@ fn lower_literal(literal: &Lit) -> PPat {
     match literal {
         Lit::Int(value) => value
             .base10_parse()
-            .map(|value| PPat::Lit(PLit::Int(value)))
-            .unwrap_or(PPat::Unsupported),
+            .map_or(PPat::Unsupported, |value| PPat::Lit(PLit::Int(value))),
         Lit::Float(value) => value
             .base10_parse()
-            .map(|value| PPat::Lit(PLit::Float(value)))
-            .unwrap_or(PPat::Unsupported),
+            .map_or(PPat::Unsupported, |value| PPat::Lit(PLit::Float(value))),
         Lit::Bool(value) => PPat::Lit(PLit::Bool(value.value)),
         Lit::Str(value) => PPat::Lit(PLit::Str(value.value())),
         Lit::Char(value) => PPat::Lit(PLit::Char(value.value())),
@@ -1007,15 +1030,16 @@ fn option_payload(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
             "clone" | "cloned" | "copied" | "take" | "as_ref" | "as_mut" | "filter" | "ok" => {
                 option_payload(&call.receiver, env)
             }
-            // `x.unwrap_or_default()` peels one layer, so its own payload is
-            // one layer further in than the receiver's.
-            "unwrap_or_default" => option_payload(&call.receiver, env)?.payload().cloned(),
+            // `x.unwrap_or_default()`, `unwrap`, and `expect` peel one layer,
+            // so their own payload is one layer further in than the receiver's.
+            "unwrap_or_default" | "unwrap" | "expect" => {
+                option_payload(&call.receiver, env)?.payload().cloned()
+            }
             // `x.unwrap_or(d)` peels one layer the same way, and the fallback
             // argument states the same type when the receiver does not.
             "unwrap_or" => option_payload(&call.receiver, env)
                 .and_then(|payload| payload.payload().cloned())
                 .or_else(|| call.args.first().and_then(|a| option_payload(a, env))),
-            "unwrap" | "expect" => option_payload(&call.receiver, env)?.payload().cloned(),
             // `v.get(i)`, the accessors, and the no-argument iterator
             // reductions answer an `Option` of the vec's element type.
             "get" | "first" | "last" | "pop" => element_ty(&call.receiver, env),
@@ -1120,7 +1144,10 @@ fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
         // Arithmetic keeps its operands' type, so either side that states it
         // answers, `(x as i8) / (y as i8)` for one. A comparison is a bool.
         Expr::Binary(bin) => {
-            use syn::BinOp::*;
+            use syn::BinOp::{
+                Add, And, BitAnd, BitOr, BitXor, Div, Eq, Ge, Gt, Le, Lt, Mul, Ne, Or, Rem, Shl,
+                Shr, Sub,
+            };
             match bin.op {
                 Add(_) | Sub(_) | Mul(_) | Div(_) | Rem(_) | BitAnd(_) | BitOr(_) | BitXor(_) => {
                     written_ty(&bin.left, env).or_else(|| written_ty(&bin.right, env))

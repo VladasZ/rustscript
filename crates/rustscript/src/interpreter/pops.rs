@@ -1,6 +1,7 @@
 //! Operators and pattern binding for the parallel VM, the `PValue` twin of
 //! `ops.rs`. Same logic, different value type.
 
+use num_traits::AsPrimitive;
 use std::cmp::Ordering;
 use std::slice::from_ref;
 
@@ -13,10 +14,12 @@ use super::numeric::{
 };
 use super::pbridge::{duration_from_std, duration_of};
 use super::pvalue::PValue;
-use super::shared::duration_arith;
+use super::shared::{duration_arith, usize_i64};
 
 pub(super) fn apply_bin(op: BinKind, l: &PValue, r: &PValue) -> Result<PValue> {
-    use BinKind::*;
+    use BinKind::{
+        Add, BitAnd, BitOr, BitXor, Div, Eq, Ge, Gt, Le, Lt, Mul, Ne, Rem, Shl, Shr, Sub,
+    };
     Ok(match op {
         Add | Sub | Mul | Div | Rem => return arith(op, l, r),
         Eq => PValue::Bool(l.eq_value(r)),
@@ -41,7 +44,7 @@ pub(super) fn apply_bin_imm(op: BinKind, l: &PValue, imm: i64) -> Result<PValue>
 }
 
 pub(super) fn cmp_test(op: BinKind, l: &PValue, r: &PValue) -> Result<bool> {
-    use BinKind::*;
+    use BinKind::{Eq, Ge, Gt, Le, Lt, Ne};
     Ok(match op {
         Eq => l.eq_value(r),
         Ne => !l.eq_value(r),
@@ -96,8 +99,8 @@ enum FloatPair {
 fn float_pair(l: &PValue, r: &PValue) -> Result<FloatPair> {
     Ok(match (l, r) {
         (PValue::F32(a), PValue::F32(b)) => FloatPair::F32(*a, *b),
-        (PValue::F32(a), PValue::Float(b)) => FloatPair::F32(*a, *b as f32),
-        (PValue::Float(a), PValue::F32(b)) => FloatPair::F32(*a as f32, *b),
+        (PValue::F32(a), PValue::Float(b)) => FloatPair::F32(*a, AsPrimitive::<f32>::as_(*b)),
+        (PValue::Float(a), PValue::F32(b)) => FloatPair::F32(AsPrimitive::<f32>::as_(*a), *b),
         (a, b) => FloatPair::F64(to_float(a)?, to_float(b)?),
     })
 }
@@ -109,7 +112,7 @@ fn bit_bin(op: BinKind, l: &PValue, r: &PValue) -> Result<PValue> {
     }
     if let (PValue::Bool(a), PValue::Bool(b)) = (l, r) {
         let f = bit_i64(op);
-        return Ok(PValue::Bool(f(*a as i64, *b as i64) != 0));
+        return Ok(PValue::Bool(f(i64::from(*a), i64::from(*b)) != 0));
     }
     if let (Some((a, wa)), Some((b, wb))) = (l.int_parts(), r.int_parts()) {
         let width = unify(wa, wb)?;
@@ -139,7 +142,7 @@ pub(super) fn compare_values(l: &PValue, r: &PValue) -> Result<Ordering> {
     partial_compare(l, r)?.ok_or_else(|| anyhow!("cannot order NaN"))
 }
 
-/// PartialOrd semantics, mirroring the fast engine: a NaN operand makes every
+/// `PartialOrd` semantics, mirroring the fast engine: a NaN operand makes every
 /// ordered comparison false instead of failing the run.
 fn partial_compare(l: &PValue, r: &PValue) -> Result<Option<Ordering>> {
     Ok(match (l, r) {
@@ -152,10 +155,10 @@ fn partial_compare(l: &PValue, r: &PValue) -> Result<Option<Ordering>> {
         }
         (PValue::Float(a), PValue::Float(b)) => a.partial_cmp(b),
         (PValue::F32(a), PValue::F32(b)) => a.partial_cmp(b),
-        (PValue::F32(a), PValue::Float(b)) => a.partial_cmp(&(*b as f32)),
-        (PValue::Float(a), PValue::F32(b)) => (*a as f32).partial_cmp(b),
-        (PValue::Int(a), PValue::Float(b)) => (*a as f64).partial_cmp(b),
-        (PValue::Float(a), PValue::Int(b)) => a.partial_cmp(&(*b as f64)),
+        (PValue::F32(a), PValue::Float(b)) => a.partial_cmp(&AsPrimitive::<f32>::as_(*b)),
+        (PValue::Float(a), PValue::F32(b)) => AsPrimitive::<f32>::as_(*a).partial_cmp(b),
+        (PValue::Int(a), PValue::Float(b)) => AsPrimitive::<f64>::as_(*a).partial_cmp(b),
+        (PValue::Float(a), PValue::Int(b)) => a.partial_cmp(&AsPrimitive::<f64>::as_(*b)),
         (PValue::Str(a), PValue::Str(b)) => Some(a.as_ref().cmp(b.as_ref())),
         (PValue::Char(a), PValue::Char(b)) => Some(a.cmp(b)),
         (PValue::Bool(a), PValue::Bool(b)) => Some(a.cmp(b)),
@@ -165,7 +168,7 @@ fn partial_compare(l: &PValue, r: &PValue) -> Result<Option<Ordering>> {
 
 fn to_float(v: &PValue) -> Result<f64> {
     match v {
-        PValue::Int(i) => Ok(*i as f64),
+        PValue::Int(i) => Ok(AsPrimitive::<f64>::as_(*i)),
         PValue::Float(f) => Ok(*f),
         other => bail!("expected a number, got {}", other.type_name()),
     }
@@ -187,7 +190,7 @@ pub(super) fn apply_un(op: UnKind, v: &PValue) -> Result<PValue> {
     })
 }
 
-/// The parallel-engine twin of the serde_json variant check in ops.rs. See the
+/// The parallel-engine twin of the `serde_json` variant check in ops.rs. See the
 /// note there.
 fn json_variant_kind_matches(name: Option<&str>, val: &PValue) -> bool {
     matches!(
@@ -293,7 +296,7 @@ fn endpoint_cmp(literal: &PLit, value: &PValue) -> Option<Ordering> {
             Some(i128::from(*a).cmp(&b))
         }
         (PLit::Float(a), PValue::Float(b)) => a.partial_cmp(b),
-        (PLit::Float(a), PValue::F32(b)) => (*a as f32).partial_cmp(b),
+        (PLit::Float(a), PValue::F32(b)) => AsPrimitive::<f32>::as_(*a).partial_cmp(b),
         (PLit::Char(a), PValue::Char(b)) => Some(a.cmp(b)),
         _ => None,
     }
@@ -326,7 +329,7 @@ fn plit_eq(l: &PLit, val: &PValue) -> bool {
         (PLit::Int(a), PValue::Int(b)) => a == b,
         (PLit::Int(a), PValue::IntW(..)) => val.int_parts().map(|(v, _)| v) == Some(i128::from(*a)),
         (PLit::Float(a), PValue::Float(b)) => a == b,
-        (PLit::Float(a), PValue::F32(b)) => *a as f32 == *b,
+        (PLit::Float(a), PValue::F32(b)) => AsPrimitive::<f32>::as_(*a) == *b,
         (PLit::Bool(a), PValue::Bool(b)) => a == b,
         (PLit::Str(a), PValue::Str(b)) => a.as_str() == b.as_ref(),
         (PLit::Char(a), PValue::Char(b)) => a == b,
@@ -358,7 +361,7 @@ pub(super) fn index(recv: &PValue, key: &PValue) -> Result<PValue> {
     }
     match recv {
         PValue::Vec(items) => {
-            let i = int_of(key)? as usize;
+            let i = usize::try_from(int_of(key)?)?;
             let items = items.lock();
             items.get(i).cloned().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -377,7 +380,7 @@ pub(super) fn index(recv: &PValue, key: &PValue) -> Result<PValue> {
                 .ok_or_else(|| anyhow::anyhow!("no entry found for key"))
         }
         PValue::Str(s) => {
-            let i = int_of(key)? as usize;
+            let i = usize::try_from(int_of(key)?)?;
             s.chars().nth(i).map(PValue::Char).ok_or_else(|| {
                 anyhow::anyhow!(
                     "index out of bounds: the len is {} but the index is {i}",
@@ -397,16 +400,16 @@ fn slice_value(base: &PValue, start: i64, end: i64, inclusive: bool) -> Result<P
             bail!("negative slice start {start}");
         }
         let end = if end == i64::MAX {
-            len as i64
+            usize_i64(len)
         } else if inclusive {
             end + 1
         } else {
             end
         };
-        if end < start || end as usize > len {
+        if end < start || usize::try_from(end).is_ok_and(|e| e > len) {
             bail!("slice {start}..{end} out of bounds (len {len})");
         }
-        Ok((start as usize, end as usize))
+        Ok((usize::try_from(start)?, usize::try_from(end)?))
     };
     match base {
         PValue::Vec(items) => {
@@ -428,7 +431,7 @@ fn slice_value(base: &PValue, start: i64, end: i64, inclusive: bool) -> Result<P
 pub(super) fn set_index(recv: &PValue, key: &PValue, v: PValue) -> Result<()> {
     match recv {
         PValue::Vec(items) => {
-            let i = int_of(key)? as usize;
+            let i = usize::try_from(int_of(key)?)?;
             let mut items = items.lock();
             if i >= items.len() {
                 bail!(
@@ -449,7 +452,7 @@ pub(super) fn set_index(recv: &PValue, key: &PValue, v: PValue) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn eval_try(v: PValue) -> Result<std::result::Result<PValue, PValue>> {
+pub(super) fn eval_try(v: PValue) -> Result<PValue, PValue> {
     match v {
         PValue::Enum {
             enum_name,
@@ -457,20 +460,18 @@ pub(super) fn eval_try(v: PValue) -> Result<std::result::Result<PValue, PValue>>
             data,
         } => match (&*enum_name, &*variant) {
             ("Result", "Ok") | ("Option", "Some") => {
-                Ok(Ok(data.first().cloned().unwrap_or(PValue::Unit)))
+                Ok(data.first().cloned().unwrap_or(PValue::Unit))
             }
-            ("Result", "Err") => Ok(Err(PValue::err(
-                data.first().cloned().unwrap_or(PValue::Unit),
-            ))),
-            ("Option", "None") => Ok(Err(PValue::none())),
+            ("Result", "Err") => Err(PValue::err(data.first().cloned().unwrap_or(PValue::Unit))),
+            ("Option", "None") => Err(PValue::none()),
             // Any other value acts as its own Some, matching eval_try in
             // eval.rs, see the comment there.
-            _ => Ok(Ok(PValue::Enum {
+            _ => Ok(PValue::Enum {
                 enum_name,
                 variant,
                 data,
-            })),
+            }),
         },
-        other => Ok(Ok(other)),
+        other => Ok(other),
     }
 }

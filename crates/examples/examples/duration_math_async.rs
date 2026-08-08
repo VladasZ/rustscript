@@ -16,7 +16,7 @@ async fn main() {
     println!("micros {}", total.as_micros());
     println!("subsec micros {}", total.subsec_micros());
     println!("float {}", total.as_secs_f64());
-    let gap = long - short;
+    let gap = long.checked_sub(short).unwrap();
     println!("gap millis {}", gap.as_millis());
     println!("sum secs {}", (short + long).as_secs());
 }

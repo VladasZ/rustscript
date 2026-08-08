@@ -86,68 +86,22 @@ fn add_direct_reductions(expression: &GeneratedExpr, candidates: &mut Vec<Genera
 }
 
 fn add_child_reductions(expression: &GeneratedExpr, candidates: &mut Vec<GeneratedExpr>) {
+    if let Some((construct, left, right)) = binary_parts(expression) {
+        shrink_binary(candidates, left, right, construct);
+        return;
+    }
+    if let Some((construct, value)) = unary_parts(expression) {
+        shrink_unary(candidates, value, construct);
+        return;
+    }
+    if vec_child_reductions(expression, candidates) {
+        return;
+    }
+    if option_child_reductions(expression, candidates) {
+        return;
+    }
     match expression {
-        GeneratedExpr::Add(left, right) => {
-            shrink_binary(candidates, left, right, GeneratedExpr::Add);
-        }
-        GeneratedExpr::Subtract(left, right) => {
-            shrink_binary(candidates, left, right, GeneratedExpr::Subtract);
-        }
-        GeneratedExpr::Multiply(left, right) => {
-            shrink_binary(candidates, left, right, GeneratedExpr::Multiply);
-        }
-        GeneratedExpr::Equal(left, right) => {
-            shrink_binary(candidates, left, right, GeneratedExpr::Equal);
-        }
-        GeneratedExpr::Less(left, right) => {
-            shrink_binary(candidates, left, right, GeneratedExpr::Less);
-        }
-        GeneratedExpr::And(left, right) => {
-            shrink_binary(candidates, left, right, GeneratedExpr::And);
-        }
-        GeneratedExpr::Or(left, right) => {
-            shrink_binary(candidates, left, right, GeneratedExpr::Or);
-        }
-        GeneratedExpr::Concat(left, right) => {
-            shrink_binary(candidates, left, right, GeneratedExpr::Concat);
-        }
-        GeneratedExpr::Not(value) => {
-            shrink_unary(candidates, value, GeneratedExpr::Not);
-        }
-        GeneratedExpr::If {
-            condition,
-            then_expr,
-            else_expr,
-            ty,
-        } => {
-            for shrunk in condition.shrinks() {
-                candidates.push(GeneratedExpr::If {
-                    condition: Box::new(shrunk),
-                    then_expr: then_expr.clone(),
-                    else_expr: else_expr.clone(),
-                    ty: *ty,
-                });
-            }
-            for shrunk in then_expr.shrinks() {
-                candidates.push(GeneratedExpr::If {
-                    condition: condition.clone(),
-                    then_expr: Box::new(shrunk),
-                    else_expr: else_expr.clone(),
-                    ty: *ty,
-                });
-            }
-            for shrunk in else_expr.shrinks() {
-                candidates.push(GeneratedExpr::If {
-                    condition: condition.clone(),
-                    then_expr: then_expr.clone(),
-                    else_expr: Box::new(shrunk),
-                    ty: *ty,
-                });
-            }
-        }
-        GeneratedExpr::Uppercase(value) => {
-            shrink_unary(candidates, value, GeneratedExpr::Uppercase);
-        }
+        GeneratedExpr::If { .. } => if_child_reductions(expression, candidates),
         GeneratedExpr::Replace { value, from, to } => {
             for shrunk in value.shrinks() {
                 candidates.push(GeneratedExpr::Replace {
@@ -157,12 +111,149 @@ fn add_child_reductions(expression: &GeneratedExpr, candidates: &mut Vec<Generat
                 });
             }
         }
-        GeneratedExpr::FormatI64(value) => {
-            shrink_unary(candidates, value, GeneratedExpr::FormatI64);
+        GeneratedExpr::ClosureCall {
+            binding,
+            input,
+            body,
+            ty,
+        } => {
+            for shrunk in input.shrinks() {
+                candidates.push(GeneratedExpr::ClosureCall {
+                    binding: binding.clone(),
+                    input: Box::new(shrunk),
+                    body: body.clone(),
+                    ty: *ty,
+                });
+            }
+            for shrunk in body.shrinks() {
+                candidates.push(GeneratedExpr::ClosureCall {
+                    binding: binding.clone(),
+                    input: input.clone(),
+                    body: Box::new(shrunk),
+                    ty: *ty,
+                });
+            }
         }
-        GeneratedExpr::DebugVec(value) => {
-            shrink_unary(candidates, value, GeneratedExpr::DebugVec);
+        GeneratedExpr::Cast(value, target) => {
+            for shrunk in value.shrinks() {
+                candidates.push(GeneratedExpr::Cast(Box::new(shrunk), *target));
+            }
         }
+        GeneratedExpr::FormatSpec { spec, value } => {
+            for shrunk in value.shrinks() {
+                candidates.push(GeneratedExpr::FormatSpec {
+                    spec: spec.clone(),
+                    value: Box::new(shrunk),
+                });
+            }
+        }
+        GeneratedExpr::Index { values, index } => {
+            for shrunk in values.shrinks() {
+                candidates.push(GeneratedExpr::Index {
+                    values: Box::new(shrunk),
+                    index: *index,
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Child reductions of an `if`, one branch shrunk at a time.
+fn if_child_reductions(expression: &GeneratedExpr, candidates: &mut Vec<GeneratedExpr>) {
+    let GeneratedExpr::If {
+        condition,
+        then_expr,
+        else_expr,
+        ty,
+    } = expression
+    else {
+        unreachable!()
+    };
+    for shrunk in condition.shrinks() {
+        candidates.push(GeneratedExpr::If {
+            condition: Box::new(shrunk),
+            then_expr: then_expr.clone(),
+            else_expr: else_expr.clone(),
+            ty: *ty,
+        });
+    }
+    for shrunk in then_expr.shrinks() {
+        candidates.push(GeneratedExpr::If {
+            condition: condition.clone(),
+            then_expr: Box::new(shrunk),
+            else_expr: else_expr.clone(),
+            ty: *ty,
+        });
+    }
+    for shrunk in else_expr.shrinks() {
+        candidates.push(GeneratedExpr::If {
+            condition: condition.clone(),
+            then_expr: then_expr.clone(),
+            else_expr: Box::new(shrunk),
+            ty: *ty,
+        });
+    }
+}
+
+type BinaryCtor = fn(Box<GeneratedExpr>, Box<GeneratedExpr>) -> GeneratedExpr;
+type UnaryCtor = fn(Box<GeneratedExpr>) -> GeneratedExpr;
+
+/// The constructor and children of a two-child tuple variant, so every binary
+/// operator shrinks through one code path.
+fn binary_parts(e: &GeneratedExpr) -> Option<(BinaryCtor, &GeneratedExpr, &GeneratedExpr)> {
+    use GeneratedExpr as G;
+    let (construct, left, right): (BinaryCtor, _, _) = match e {
+        G::Add(l, r) => (G::Add, &**l, &**r),
+        G::Subtract(l, r) => (G::Subtract, &**l, &**r),
+        G::Multiply(l, r) => (G::Multiply, &**l, &**r),
+        G::Equal(l, r) => (G::Equal, &**l, &**r),
+        G::Less(l, r) => (G::Less, &**l, &**r),
+        G::And(l, r) => (G::And, &**l, &**r),
+        G::Or(l, r) => (G::Or, &**l, &**r),
+        G::Concat(l, r) => (G::Concat, &**l, &**r),
+        G::RawAdd(l, r) => (G::RawAdd, &**l, &**r),
+        G::RawSub(l, r) => (G::RawSub, &**l, &**r),
+        G::RawMul(l, r) => (G::RawMul, &**l, &**r),
+        G::RawDiv(l, r) => (G::RawDiv, &**l, &**r),
+        G::RawRem(l, r) => (G::RawRem, &**l, &**r),
+        G::FAdd(l, r) => (G::FAdd, &**l, &**r),
+        G::FSub(l, r) => (G::FSub, &**l, &**r),
+        G::FMul(l, r) => (G::FMul, &**l, &**r),
+        G::FDiv(l, r) => (G::FDiv, &**l, &**r),
+        G::FLess(l, r) => (G::FLess, &**l, &**r),
+        G::FEq(l, r) => (G::FEq, &**l, &**r),
+        _ => return None,
+    };
+    Some((construct, left, right))
+}
+
+/// The constructor and child of a one-child tuple variant.
+fn unary_parts(e: &GeneratedExpr) -> Option<(UnaryCtor, &GeneratedExpr)> {
+    use GeneratedExpr as G;
+    let (construct, value): (UnaryCtor, _) = match e {
+        G::Not(v) => (G::Not, &**v),
+        G::Uppercase(v) => (G::Uppercase, &**v),
+        G::FormatI64(v) => (G::FormatI64, &**v),
+        G::DebugVec(v) => (G::DebugVec, &**v),
+        G::VecReverse(v) => (G::VecReverse, &**v),
+        G::VecLen(v) => (G::VecLen, &**v),
+        G::Some(v) => (G::Some, &**v),
+        G::OptionIsSome(v) => (G::OptionIsSome, &**v),
+        G::I64ToF64(v) => (G::I64ToF64, &**v),
+        G::F64ToI64(v) => (G::F64ToI64, &**v),
+        G::FormatF64(v) => (G::FormatF64, &**v),
+        G::DebugF64(v) => (G::DebugF64, &**v),
+        G::Unwrap(v) => (G::Unwrap, &**v),
+        _ => return None,
+    };
+    Some((construct, value))
+}
+
+/// Child reductions of the vec-shaped variants. True when the variant was one
+/// of them.
+fn vec_child_reductions(expression: &GeneratedExpr, candidates: &mut Vec<GeneratedExpr>) -> bool {
+    match expression {
         GeneratedExpr::VecLiteral(values) => {
             if !values.is_empty() {
                 let mut shorter = values.clone();
@@ -217,9 +308,6 @@ fn add_child_reductions(expression: &GeneratedExpr, candidates: &mut Vec<Generat
                 });
             }
         }
-        GeneratedExpr::VecReverse(value) => {
-            shrink_unary(candidates, value, GeneratedExpr::VecReverse);
-        }
         GeneratedExpr::VecAppend { values, value } => {
             for shrunk in values.shrinks() {
                 candidates.push(GeneratedExpr::VecAppend {
@@ -233,9 +321,6 @@ fn add_child_reductions(expression: &GeneratedExpr, candidates: &mut Vec<Generat
                     value: Box::new(shrunk),
                 });
             }
-        }
-        GeneratedExpr::VecLen(value) => {
-            shrink_unary(candidates, value, GeneratedExpr::VecLen);
         }
         GeneratedExpr::VecGetOr {
             values,
@@ -257,9 +342,18 @@ fn add_child_reductions(expression: &GeneratedExpr, candidates: &mut Vec<Generat
                 });
             }
         }
-        GeneratedExpr::Some(value) => {
-            shrink_unary(candidates, value, GeneratedExpr::Some);
-        }
+        _ => return false,
+    }
+    true
+}
+
+/// Child reductions of the option-shaped variants. True when the variant was
+/// one of them.
+fn option_child_reductions(
+    expression: &GeneratedExpr,
+    candidates: &mut Vec<GeneratedExpr>,
+) -> bool {
+    match expression {
         GeneratedExpr::OptionMap {
             option,
             binding,
@@ -314,9 +408,6 @@ fn add_child_reductions(expression: &GeneratedExpr, candidates: &mut Vec<Generat
                 });
             }
         }
-        GeneratedExpr::OptionIsSome(value) => {
-            shrink_unary(candidates, value, GeneratedExpr::OptionIsSome);
-        }
         GeneratedExpr::MatchOption {
             option,
             binding,
@@ -352,105 +443,9 @@ fn add_child_reductions(expression: &GeneratedExpr, candidates: &mut Vec<Generat
                 });
             }
         }
-        GeneratedExpr::ClosureCall {
-            binding,
-            input,
-            body,
-            ty,
-        } => {
-            for shrunk in input.shrinks() {
-                candidates.push(GeneratedExpr::ClosureCall {
-                    binding: binding.clone(),
-                    input: Box::new(shrunk),
-                    body: body.clone(),
-                    ty: *ty,
-                });
-            }
-            for shrunk in body.shrinks() {
-                candidates.push(GeneratedExpr::ClosureCall {
-                    binding: binding.clone(),
-                    input: input.clone(),
-                    body: Box::new(shrunk),
-                    ty: *ty,
-                });
-            }
-        }
-        GeneratedExpr::RawAdd(left, right) => {
-            shrink_binary(candidates, left, right, GeneratedExpr::RawAdd);
-        }
-        GeneratedExpr::RawSub(left, right) => {
-            shrink_binary(candidates, left, right, GeneratedExpr::RawSub);
-        }
-        GeneratedExpr::RawMul(left, right) => {
-            shrink_binary(candidates, left, right, GeneratedExpr::RawMul);
-        }
-        GeneratedExpr::RawDiv(left, right) => {
-            shrink_binary(candidates, left, right, GeneratedExpr::RawDiv);
-        }
-        GeneratedExpr::RawRem(left, right) => {
-            shrink_binary(candidates, left, right, GeneratedExpr::RawRem);
-        }
-        GeneratedExpr::FAdd(left, right) => {
-            shrink_binary(candidates, left, right, GeneratedExpr::FAdd);
-        }
-        GeneratedExpr::FSub(left, right) => {
-            shrink_binary(candidates, left, right, GeneratedExpr::FSub);
-        }
-        GeneratedExpr::FMul(left, right) => {
-            shrink_binary(candidates, left, right, GeneratedExpr::FMul);
-        }
-        GeneratedExpr::FDiv(left, right) => {
-            shrink_binary(candidates, left, right, GeneratedExpr::FDiv);
-        }
-        GeneratedExpr::FLess(left, right) => {
-            shrink_binary(candidates, left, right, GeneratedExpr::FLess);
-        }
-        GeneratedExpr::FEq(left, right) => {
-            shrink_binary(candidates, left, right, GeneratedExpr::FEq);
-        }
-        GeneratedExpr::Cast(value, target) => {
-            for shrunk in value.shrinks() {
-                candidates.push(GeneratedExpr::Cast(Box::new(shrunk), *target));
-            }
-        }
-        GeneratedExpr::I64ToF64(value) => {
-            shrink_unary(candidates, value, GeneratedExpr::I64ToF64);
-        }
-        GeneratedExpr::F64ToI64(value) => {
-            shrink_unary(candidates, value, GeneratedExpr::F64ToI64);
-        }
-        GeneratedExpr::FormatF64(value) => {
-            shrink_unary(candidates, value, GeneratedExpr::FormatF64);
-        }
-        GeneratedExpr::DebugF64(value) => {
-            shrink_unary(candidates, value, GeneratedExpr::DebugF64);
-        }
-        GeneratedExpr::FormatSpec { spec, value } => {
-            for shrunk in value.shrinks() {
-                candidates.push(GeneratedExpr::FormatSpec {
-                    spec: spec.clone(),
-                    value: Box::new(shrunk),
-                });
-            }
-        }
-        GeneratedExpr::Index { values, index } => {
-            for shrunk in values.shrinks() {
-                candidates.push(GeneratedExpr::Index {
-                    values: Box::new(shrunk),
-                    index: *index,
-                });
-            }
-        }
-        GeneratedExpr::Unwrap(value) => {
-            shrink_unary(candidates, value, GeneratedExpr::Unwrap);
-        }
-        GeneratedExpr::I64(_)
-        | GeneratedExpr::Bool(_)
-        | GeneratedExpr::Text(_)
-        | GeneratedExpr::F64(_)
-        | GeneratedExpr::Variable { .. }
-        | GeneratedExpr::None => {}
+        _ => return false,
     }
+    true
 }
 
 fn shrink_binary(

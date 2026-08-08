@@ -36,7 +36,7 @@ fn main() {
     println!("local vec:    {:?}", missing_vec.unwrap_or_default());
 
     let nested: Vec<Option<f64>> = Vec::new();
-    let missing_opt: Option<Option<f64>> = nested.first().cloned();
+    let missing_opt: Option<Option<f64>> = nested.first().copied();
     println!("local option: {:?}", missing_opt.unwrap_or_default());
 
     // A Result defaults from its Ok payload the same way.
