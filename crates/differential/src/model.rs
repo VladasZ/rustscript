@@ -457,6 +457,15 @@ impl Program {
         if self.rich_cases.iter().any(RichCase::requires_path) {
             source.push_str("use std::path::PathBuf;\n\n");
         }
+        let features = self.structural_features();
+        let uses_map = features.contains("lang-ty-map");
+        let uses_set = features.contains("lang-ty-set");
+        match (uses_map, uses_set) {
+            (true, true) => source.push_str("use std::collections::{HashMap, HashSet};\n\n"),
+            (true, false) => source.push_str("use std::collections::HashMap;\n\n"),
+            (false, true) => source.push_str("use std::collections::HashSet;\n\n"),
+            (false, false) => {}
+        }
         if self
             .rich_cases
             .iter()
@@ -498,6 +507,9 @@ impl Program {
         }
         for helper in helpers {
             source.push_str(helper.definition());
+        }
+        for block in &self.blocks {
+            source.push_str(&block.render_fns());
         }
         source.push_str("fn main() {\n");
         for statement in &self.statements {

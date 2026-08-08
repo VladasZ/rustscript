@@ -20,7 +20,7 @@ use rustscript_differential::workspace_root;
 
 fn block_for(seed: u64) -> Block {
     let mut rng = StdRng::seed_from_u64(seed);
-    generate_block(&mut rng)
+    generate_block(&mut rng, 0)
 }
 
 /// A program made only of one generated block, so a compile failure points at
@@ -28,9 +28,20 @@ fn block_for(seed: u64) -> Block {
 fn program_for(seed: u64) -> String {
     let block = block_for(seed);
     let mut source = String::new();
+    let mut features = BTreeSet::new();
+    block.features(&mut features);
+    let uses_map = features.contains("lang-ty-map");
+    let uses_set = features.contains("lang-ty-set");
+    match (uses_map, uses_set) {
+        (true, true) => source.push_str("use std::collections::{HashMap, HashSet};\n\n"),
+        (true, false) => source.push_str("use std::collections::HashMap;\n\n"),
+        (false, true) => source.push_str("use std::collections::HashSet;\n\n"),
+        (false, false) => {}
+    }
     for helper in block.helpers() {
         source.push_str(helper.definition());
     }
+    source.push_str(&block.render_fns());
     source.push_str("fn main() {\n");
     source.push_str(&block.render());
     source.push_str("}\n");
@@ -95,6 +106,14 @@ fn generation_covers_the_type_universe() {
         "lang-ty-string",
         "lang-ty-vec",
         "lang-ty-option",
+        "lang-ty-map",
+        "lang-ty-set",
+        "lang-pipe",
+        "lang-pipe-collect-fish",
+        "lang-pipe-collect-bare",
+        "lang-fn-def",
+        "lang-for-accum",
+        "lang-mut-map-insert",
         "lang-call",
         "lang-cast",
         "lang-if",

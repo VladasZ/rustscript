@@ -26,6 +26,8 @@ pub enum RecvClass {
     Str,
     Vec,
     Opt,
+    Map,
+    Set,
 }
 
 impl RecvClass {
@@ -40,19 +42,23 @@ impl RecvClass {
             Self::Str => matches!(ty, Ty::Str),
             Self::Vec => matches!(ty, Ty::Vec(_)),
             Self::Opt => matches!(ty, Ty::Opt(_)),
+            Self::Map => matches!(ty, Ty::Map(..)),
+            Self::Set => matches!(ty, Ty::Set(_)),
         }
     }
 
     /// Whether this class wraps an element type, so an `Elem` result can name
-    /// the receiver as a container over the wanted type.
+    /// the receiver as a container over the wanted type. `Map` is excluded,
+    /// its receiver needs a key type too and is completed in `solve`.
     pub fn is_container(self) -> bool {
-        matches!(self, Self::Vec | Self::Opt)
+        matches!(self, Self::Vec | Self::Opt | Self::Set)
     }
 
     pub fn wrap(self, elem: Ty) -> Option<Ty> {
         match self {
             Self::Vec => Some(Ty::vec_of(elem)),
             Self::Opt => Some(Ty::opt_of(elem)),
+            Self::Set => Some(Ty::set_of(elem)),
             _ => None,
         }
     }
@@ -63,8 +69,12 @@ impl RecvClass {
 pub enum TyPat {
     /// The receiver's own type.
     Same,
-    /// The element type of a `Vec<E>` or `Option<E>` receiver.
+    /// The element type of a `Vec<E>`, `Option<E>`, or `HashSet<E>` receiver.
     Elem,
+    /// The key type of a `HashMap<K, V>` receiver.
+    Key,
+    /// The value type of a `HashMap<K, V>` receiver.
+    Val,
     /// A fixed scalar type that carries no type variable.
     Exact(Fixed),
     Vec(&'static TyPat),
@@ -124,7 +134,7 @@ impl ElemReq {
 
 fn is_ord(ty: &Ty) -> bool {
     match ty {
-        Ty::Float(_) => false,
+        Ty::Float(_) | Ty::Map(..) | Ty::Set(_) => false,
         Ty::Vec(inner) | Ty::Opt(inner) => is_ord(inner),
         _ => true,
     }
@@ -628,15 +638,101 @@ pub const METHODS: &[Method] = &[
         Exact(FF64),
         "(({r}.is_some() as u8) as f64)",
     ),
+    // -- HashMap ------------------------------------------------------------
+    // Only order-neutral observations. Anything that iterates goes through a
+    // sort inside the template, per the determinism rule in `pipe`.
+    m("map_len", RecvClass::Map, &[], Exact(FUSize), "{r}.len()"),
+    m(
+        "map_is_empty",
+        RecvClass::Map,
+        &[],
+        Exact(FBool),
+        "{r}.is_empty()",
+    ),
+    m(
+        "map_contains_key",
+        RecvClass::Map,
+        &[TyPat::Key],
+        Exact(FBool),
+        "{r}.contains_key(&{0})",
+    ),
+    m(
+        "map_get_or",
+        RecvClass::Map,
+        &[TyPat::Key, TyPat::Val],
+        TyPat::Val,
+        "{r}.get(&{0}).cloned().unwrap_or({1})",
+    ),
+    m(
+        "map_get",
+        RecvClass::Map,
+        &[TyPat::Key],
+        TyPat::Opt(&TyPat::Val),
+        "{r}.get(&{0}).cloned()",
+    ),
+    m(
+        "map_remove",
+        RecvClass::Map,
+        &[TyPat::Key],
+        TyPat::Opt(&TyPat::Val),
+        "({{ let mut diff_owned = {r}; diff_owned.remove(&{0}) }})",
+    ),
+    m(
+        "map_sorted_keys",
+        RecvClass::Map,
+        &[],
+        TyPat::Vec(&TyPat::Key),
+        "({{ let mut diff_keys: Vec<{K}> = {r}.into_keys().collect(); diff_keys.sort(); diff_keys }})",
+    ),
+    m(
+        "map_sorted_values",
+        RecvClass::Map,
+        &[],
+        TyPat::Vec(&TyPat::Val),
+        "({{ let mut diff_values: Vec<{V}> = {r}.into_values().collect(); diff_values.sort(); diff_values }})",
+    ),
+    // -- HashSet ------------------------------------------------------------
+    m("set_len", RecvClass::Set, &[], Exact(FUSize), "{r}.len()"),
+    m(
+        "set_is_empty",
+        RecvClass::Set,
+        &[],
+        Exact(FBool),
+        "{r}.is_empty()",
+    ),
+    m(
+        "set_contains",
+        RecvClass::Set,
+        &[Elem],
+        Exact(FBool),
+        "{r}.contains(&{0})",
+    ),
+    m(
+        "set_insert_observed",
+        RecvClass::Set,
+        &[Elem],
+        Exact(FBool),
+        "({{ let mut diff_owned = {r}; diff_owned.insert({0}) }})",
+    ),
+    m(
+        "set_sorted",
+        RecvClass::Set,
+        &[],
+        TyPat::Vec(ELEM),
+        "({{ let mut diff_elems: Vec<{E}> = {r}.into_iter().collect(); diff_elems.sort(); diff_elems }})",
+    ),
 ];
 
 /// What solving a result pattern against a wanted type told us about the call.
 #[derive(Clone, Debug)]
 pub struct Solved {
     /// The receiver type, when the wanted type pinned it. `None` means any
-    /// type in the method's receiver class works and the generator picks.
+    /// type in the method's receiver class works and the generator picks,
+    /// guided by `key` or `val` when the result pinned half of a map.
     pub recv: Option<Ty>,
     pub fish: Option<Ty>,
+    pub key: Option<Ty>,
+    pub val: Option<Ty>,
 }
 
 /// Solve a method's result pattern against the type the generator wants.
@@ -645,6 +741,12 @@ pub struct Solved {
 pub fn solve(method: &Method, want: &Ty) -> Option<Solved> {
     let mut found = Found::default();
     unify(&method.ret, want, &mut found)?;
+    if method.recv == RecvClass::Map {
+        return solve_map(method, found);
+    }
+    if found.key.is_some() || found.val.is_some() {
+        return None;
+    }
     let recv = match (found.same, found.elem) {
         (Some(same), _) => {
             if !method.recv.accepts(&same) {
@@ -654,6 +756,9 @@ pub fn solve(method: &Method, want: &Ty) -> Option<Solved> {
         }
         (None, Some(elem)) => {
             if !method.recv.is_container() || !method.elem.allows(&elem) {
+                return None;
+            }
+            if method.recv == RecvClass::Set && !legal_set_elem(&elem) {
                 return None;
             }
             Some(method.recv.wrap(elem)?)
@@ -677,14 +782,53 @@ pub fn solve(method: &Method, want: &Ty) -> Option<Solved> {
     Some(Solved {
         recv,
         fish: found.fish,
+        key: None,
+        val: None,
     })
+}
+
+/// Complete a map method against what the result pinned. A pinned half must
+/// belong to a legal map shape, and a fully pinned pair must be one of the
+/// generated combos, otherwise the call could not compile or would leave the
+/// planned universe.
+fn solve_map(method: &Method, found: Found) -> Option<Solved> {
+    if found.same.is_some() || found.elem.is_some() || found.fish.is_some() {
+        return None;
+    }
+    if method.fish != FishReq::None {
+        return None;
+    }
+    let combos = crate::lang::ty::map_combos();
+    let fits = |key: &Option<Ty>, val: &Option<Ty>| {
+        combos.iter().any(|(k, v)| {
+            key.as_ref().is_none_or(|found_key| found_key == k)
+                && val.as_ref().is_none_or(|found_val| found_val == v)
+        })
+    };
+    if !fits(&found.key, &found.val) {
+        return None;
+    }
+    let recv = match (&found.key, &found.val) {
+        (Some(key), Some(val)) => Some(Ty::map_of(key.clone(), val.clone())),
+        _ => None,
+    };
+    Some(Solved {
+        recv,
+        fish: None,
+        key: found.key,
+        val: found.val,
+    })
+}
+
+fn legal_set_elem(elem: &Ty) -> bool {
+    crate::lang::ty::set_elems().contains(elem)
 }
 
 pub fn fish_allows(req: FishReq, ty: &Ty) -> bool {
     match req {
         FishReq::None => false,
         FishReq::ParseTarget => matches!(ty, Ty::Int(_) | Ty::Float(_) | Ty::Bool | Ty::Char),
-        FishReq::Scalar => !matches!(ty, Ty::Vec(_)),
+        FishReq::Scalar => !matches!(ty, Ty::Vec(_) | Ty::Map(..) | Ty::Set(_)),
     }
 }
 
@@ -693,6 +837,8 @@ struct Found {
     same: Option<Ty>,
     elem: Option<Ty>,
     fish: Option<Ty>,
+    key: Option<Ty>,
+    val: Option<Ty>,
 }
 
 fn unify(pat: &TyPat, want: &Ty, found: &mut Found) -> Option<()> {
@@ -703,6 +849,14 @@ fn unify(pat: &TyPat, want: &Ty, found: &mut Found) -> Option<()> {
         }
         Elem => {
             found.elem = Some(want.clone());
+            Some(())
+        }
+        TyPat::Key => {
+            found.key = Some(want.clone());
+            Some(())
+        }
+        TyPat::Val => {
+            found.val = Some(want.clone());
             Some(())
         }
         Exact(fixed) => (fixed.ty() == *want).then_some(()),
@@ -728,6 +882,8 @@ pub fn arg_ty(pat: &TyPat, recv: &Ty, fish: Option<&Ty>) -> Option<Ty> {
     Some(match pat {
         Same => recv.clone(),
         Elem => recv.elem()?.clone(),
+        TyPat::Key => recv.key_val()?.0.clone(),
+        TyPat::Val => recv.key_val()?.1.clone(),
         Exact(fixed) => fixed.ty(),
         Fish => fish?.clone(),
         TyPat::Vec(inner) => Ty::vec_of(arg_ty(inner, recv, fish)?),

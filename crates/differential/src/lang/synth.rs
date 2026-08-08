@@ -7,15 +7,18 @@
 //! a method added to the catalog immediately appears inside conditions, inside
 //! loop bodies, as a receiver of another call, and at any depth.
 
+use std::mem::take;
+
 use rand::RngExt;
 use rand::rngs::StdRng;
 
 use crate::lang::catalog::{
-    ElemReq, FishReq, METHODS, Method, RecvClass, TyPat, arg_ty, fish_allows, solve,
+    ElemReq, FishReq, METHODS, Method, RecvClass, Solved, TyPat, arg_ty, fish_allows, solve,
 };
 use crate::lang::expr::{BinOp, Expr, UnOp};
-use crate::lang::stmt::{Block, Stmt};
-use crate::lang::ty::{FLOAT_WIDTHS, INT_WIDTHS, SCALAR_TYPES, Ty};
+use crate::lang::pipe::{Access, Bind, Item, Pipe, Site, Source, Stage, Term, ty_is_ord};
+use crate::lang::stmt::{Block, FnDef, MutOp, Stmt};
+use crate::lang::ty::{FLOAT_WIDTHS, INT_WIDTHS, SCALAR_TYPES, Ty, map_combos, set_elems};
 use crate::numeric::{FloatWidth, IntWidth};
 
 /// How deep one expression may nest. Enough for a call whose receiver is a
@@ -27,28 +30,66 @@ struct Binding {
     ty: Ty,
 }
 
+/// How a collection-typed `let` states its collect target, when a pipe is the
+/// initializer at all.
+enum CollectRoute {
+    Plain,
+    BareLet,
+    Helper,
+}
+
 pub struct Generator<'a> {
     rng: &'a mut StdRng,
     scope: Vec<Binding>,
     labels: usize,
+    /// The block's index within its program, baked into helper function names
+    /// so two blocks never define the same top-level item.
+    tag: usize,
 }
 
 impl<'a> Generator<'a> {
-    pub fn new(rng: &'a mut StdRng) -> Self {
+    pub fn new(rng: &'a mut StdRng, tag: usize) -> Self {
         Self {
             rng,
             scope: Vec::new(),
             labels: 0,
+            tag,
         }
     }
 
     pub fn block(&mut self) -> Block {
         let mut statements = Vec::new();
+        let mut fns = Vec::new();
         let bindings = self.rng.random_range(3..=6);
         for index in 0..bindings {
             let ty = self.any_ty();
             let name = format!("lang_value_{index}");
-            let expr = self.expr(&ty, MAX_EXPR_DEPTH);
+            // A collection binding takes one of the three collect-target
+            // routes: a plain expression (turbofish pipes included), a bare
+            // collect whose type only the `let` annotation states, or a call
+            // of a helper whose return type states it.
+            let expr = match self.collection_route(&ty) {
+                CollectRoute::Plain => self.expr(&ty, MAX_EXPR_DEPTH),
+                CollectRoute::BareLet => self
+                    .pipe_collect(&ty, Site::Bare, MAX_EXPR_DEPTH)
+                    .unwrap_or_else(|| self.expr(&ty, MAX_EXPR_DEPTH)),
+                CollectRoute::Helper => match self.fn_body(&ty) {
+                    Some(body) => {
+                        let fn_name = format!("diff_helper_{}_{}", self.tag, self.labels);
+                        self.labels += 1;
+                        fns.push(FnDef {
+                            name: fn_name.clone(),
+                            ret: ty.clone(),
+                            body,
+                        });
+                        Expr::FnCall {
+                            name: fn_name,
+                            ty: ty.clone(),
+                        }
+                    }
+                    None => self.expr(&ty, MAX_EXPR_DEPTH),
+                },
+            };
             statements.push(Stmt::Let {
                 name: name.clone(),
                 ty: ty.clone(),
@@ -84,9 +125,29 @@ impl<'a> Generator<'a> {
             statements.push(Stmt::Print { label, expr });
         }
 
-        let mut block = Block { statements };
+        let mut block = Block { statements, fns };
         block.seal();
         block
+    }
+
+    /// A helper function body. The fn is a top-level item, so the body must
+    /// not read main's bindings; scope is emptied while it generates.
+    fn fn_body(&mut self, ty: &Ty) -> Option<Expr> {
+        let saved = take(&mut self.scope);
+        let body = self.pipe_collect(ty, Site::Bare, MAX_EXPR_DEPTH);
+        self.scope = saved;
+        body
+    }
+
+    fn collection_route(&mut self, ty: &Ty) -> CollectRoute {
+        if !matches!(ty, Ty::Vec(_) | Ty::Map(..) | Ty::Set(_)) {
+            return CollectRoute::Plain;
+        }
+        match self.rng.random_range(0..4) {
+            0 => CollectRoute::BareLet,
+            1 => CollectRoute::Helper,
+            _ => CollectRoute::Plain,
+        }
     }
 
     fn next_label(&mut self) -> String {
@@ -95,9 +156,10 @@ impl<'a> Generator<'a> {
         label
     }
 
-    /// A reassignment, a branch, or a loop over the existing bindings.
+    /// A reassignment, a branch, a loop, an in-place collection mutation, or
+    /// an accumulation loop over the existing bindings.
     fn mutation(&mut self) -> Stmt {
-        match self.rng.random_range(0..4) {
+        match self.rng.random_range(0..6) {
             0 if !self.scope.is_empty() => {
                 let index = self.rng.random_range(0..self.scope.len());
                 let name = self.scope[index].name.clone();
@@ -107,6 +169,24 @@ impl<'a> Generator<'a> {
                     expr: self.expr(&ty, MAX_EXPR_DEPTH - 1),
                 }
             }
+            4 => match self.collection_mutation() {
+                Some(stmt) => stmt,
+                None => {
+                    let ty = self.any_ty();
+                    let expr = self.expr(&ty, MAX_EXPR_DEPTH);
+                    let label = self.next_label();
+                    Stmt::Print { label, expr }
+                }
+            },
+            5 => match self.accumulation_loop() {
+                Some(stmt) => stmt,
+                None => {
+                    let ty = self.any_ty();
+                    let expr = self.expr(&ty, MAX_EXPR_DEPTH);
+                    let label = self.next_label();
+                    Stmt::Print { label, expr }
+                }
+            },
             1 => {
                 let condition = self.expr(&Ty::Bool, 2);
                 let then_body = self.nested_body();
@@ -162,14 +242,176 @@ impl<'a> Generator<'a> {
         body
     }
 
+    /// Generate a mutation-op body with `name` hidden from scope. An
+    /// `entry()` chain holds a mutable borrow of the map while its arguments
+    /// evaluate, so an argument reading the same binding is a borrow error.
+    fn op_without(&mut self, name: &str, build: impl FnOnce(&mut Self) -> MutOp) -> MutOp {
+        let index = self.scope.iter().position(|binding| binding.name == name);
+        let removed = index.map(|found| self.scope.remove(found));
+        let op = build(self);
+        if let Some(binding) = removed {
+            self.scope.push(binding);
+        }
+        op
+    }
+
+    /// An in-place mutation of a collection binding in scope.
+    fn collection_mutation(&mut self) -> Option<Stmt> {
+        let (name, ty) = self.pick_collection()?;
+        let op = match &ty {
+            Ty::Vec(elem) => {
+                let elem = (**elem).clone();
+                match self.rng.random_range(0..5) {
+                    0 => MutOp::VecPush(self.expr(&elem, 1)),
+                    1 if !matches!(elem, Ty::Float(_)) => MutOp::VecSort,
+                    2 => MutOp::VecDedup,
+                    3 => MutOp::VecSetIndex {
+                        index: self.rng.random_range(0..=6),
+                        value: self.expr(&elem, 1),
+                    },
+                    _ => MutOp::VecExtend(self.expr(&Ty::vec_of(elem), 1)),
+                }
+            }
+            Ty::Map(key, value) => {
+                let key_ty = (**key).clone();
+                let val_ty = (**value).clone();
+                match (&val_ty, self.rng.random_range(0..4)) {
+                    (Ty::Int(_), 0) => self.op_without(&name, |inner| MutOp::MapEntryAdd {
+                        key: inner.expr(&key_ty, 1),
+                        default: inner.expr(&val_ty, 1),
+                        add: inner.expr(&val_ty, 1),
+                    }),
+                    (Ty::Vec(elem), 0) => {
+                        let elem = (**elem).clone();
+                        self.op_without(&name, |inner| MutOp::MapEntryPush {
+                            key: inner.expr(&key_ty, 1),
+                            value: inner.expr(&elem, 1),
+                        })
+                    }
+                    (_, 1) => MutOp::MapRemove {
+                        key: self.expr(&key_ty, 1),
+                    },
+                    _ => MutOp::MapInsert {
+                        key: self.expr(&key_ty, 1),
+                        value: self.expr(&val_ty, 1),
+                    },
+                }
+            }
+            Ty::Set(elem) => {
+                let elem = (**elem).clone();
+                if self.rng.random_bool(0.7) {
+                    MutOp::SetInsert(self.expr(&elem, 1))
+                } else {
+                    MutOp::SetRemove(self.expr(&elem, 1))
+                }
+            }
+            _ => return None,
+        };
+        Some(Stmt::Mutate { name, op })
+    }
+
+    /// `for item in vec { accumulate into collection }`: the word-count shape
+    /// for maps, plain feeding for vecs and sets. The source is always a vec,
+    /// so iteration order is defined.
+    fn accumulation_loop(&mut self) -> Option<Stmt> {
+        let (target, ty) = self.pick_collection()?;
+        let var = format!("diff_item_{}", self.labels);
+        self.labels += 1;
+        let (source_elem, op) = match &ty {
+            Ty::Vec(elem) => {
+                let elem = (**elem).clone();
+                (
+                    elem.clone(),
+                    MutOp::VecPush(Expr::Var {
+                        name: var.clone(),
+                        ty: elem,
+                    }),
+                )
+            }
+            Ty::Set(elem) => {
+                let elem = (**elem).clone();
+                (
+                    elem.clone(),
+                    MutOp::SetInsert(Expr::Var {
+                        name: var.clone(),
+                        ty: elem,
+                    }),
+                )
+            }
+            Ty::Map(key, value) => {
+                let key_ty = (**key).clone();
+                let val_ty = (**value).clone();
+                let key_expr = Expr::Var {
+                    name: var.clone(),
+                    ty: key_ty.clone(),
+                };
+                let op = match &val_ty {
+                    Ty::Int(_) => self.op_without(&target, |inner| MutOp::MapEntryAdd {
+                        key: key_expr,
+                        default: inner.expr(&val_ty, 1),
+                        add: inner.expr(&val_ty, 1),
+                    }),
+                    Ty::Vec(elem) => {
+                        let elem = (**elem).clone();
+                        self.op_without(&target, |inner| MutOp::MapEntryPush {
+                            key: key_expr,
+                            value: inner.expr(&elem, 1),
+                        })
+                    }
+                    _ => MutOp::MapInsert {
+                        key: key_expr,
+                        value: self.expr(&val_ty, 1),
+                    },
+                };
+                (key_ty, op)
+            }
+            _ => return None,
+        };
+        let source = self.expr(&Ty::vec_of(source_elem), 2);
+        Some(Stmt::ForAccum {
+            var,
+            source,
+            target,
+            op,
+        })
+    }
+
+    fn pick_collection(&mut self) -> Option<(String, Ty)> {
+        let matching: Vec<usize> = self
+            .scope
+            .iter()
+            .enumerate()
+            .filter(|(_, binding)| matches!(binding.ty, Ty::Vec(_) | Ty::Map(..) | Ty::Set(_)))
+            .map(|(index, _)| index)
+            .collect();
+        if matching.is_empty() {
+            return None;
+        }
+        let index = matching[self.rng.random_range(0..matching.len())];
+        Some((self.scope[index].name.clone(), self.scope[index].ty.clone()))
+    }
+
     // -- types --------------------------------------------------------------
 
     fn any_ty(&mut self) -> Ty {
-        match self.rng.random_range(0..10) {
+        match self.rng.random_range(0..12) {
             0 => Ty::vec_of(self.scalar_ty()),
             1 => Ty::opt_of(self.scalar_ty()),
+            2 => self.map_ty(),
+            3 => self.set_ty(),
             _ => self.scalar_ty(),
         }
+    }
+
+    fn map_ty(&mut self) -> Ty {
+        let combos = map_combos();
+        let (key, value) = combos[self.rng.random_range(0..combos.len())].clone();
+        Ty::map_of(key, value)
+    }
+
+    fn set_ty(&mut self) -> Ty {
+        let elems = set_elems();
+        Ty::set_of(elems[self.rng.random_range(0..elems.len())].clone())
     }
 
     fn scalar_ty(&mut self) -> Ty {
@@ -193,8 +435,9 @@ impl<'a> Generator<'a> {
         }
         for _ in 0..3 {
             let attempt = match self.rng.random_range(0..100) {
-                0..=29 => Some(self.leaf(want)),
-                30..=64 => self.call(want, depth),
+                0..=24 => Some(self.leaf(want)),
+                25..=33 => self.pipe_collect(want, Site::Turbofish, depth),
+                34..=64 => self.call(want, depth),
                 65..=82 => self.binary(want, depth),
                 83..=88 => self.cast(want, depth),
                 89..=93 => self.unary(want, depth),
@@ -257,6 +500,25 @@ impl<'a> Generator<'a> {
                 Expr::OptLit {
                     elem: (**elem).clone(),
                     value,
+                }
+            }
+            Ty::Map(key, value) => {
+                let count = self.rng.random_range(0..=3);
+                let items = (0..count)
+                    .map(|_| (self.leaf(key), self.leaf(value)))
+                    .collect();
+                Expr::MapLit {
+                    key: (**key).clone(),
+                    value: (**value).clone(),
+                    items,
+                }
+            }
+            Ty::Set(elem) => {
+                let count = self.rng.random_range(0..=3);
+                let items = (0..count).map(|_| self.leaf(elem)).collect();
+                Expr::SetLit {
+                    elem: (**elem).clone(),
+                    items,
                 }
             }
         }
@@ -357,26 +619,23 @@ impl<'a> Generator<'a> {
     fn call(&mut self, want: &Ty, depth: usize) -> Option<Expr> {
         // Solving touches no generator state, so it runs first and the random
         // choices that follow borrow `self` on their own.
-        let solved: Vec<(&'static Method, Option<Ty>, Option<Ty>)> = METHODS
+        let solved: Vec<(&'static Method, Solved)> = METHODS
             .iter()
-            .filter_map(|method| {
-                let solved = solve(method, want)?;
-                Some((method, solved.recv, solved.fish))
-            })
+            .filter_map(|method| Some((method, solve(method, want)?)))
             .collect();
         if solved.is_empty() {
             return None;
         }
         for _ in 0..4 {
             let index = self.rng.random_range(0..solved.len());
-            let (method, pinned_recv, pinned_fish) = solved[index].clone();
-            let Some(recv_ty) = (match pinned_recv {
+            let (method, pinned) = solved[index].clone();
+            let Some(recv_ty) = (match pinned.recv {
                 Some(ty) => Some(ty),
-                None => self.sample_recv(method),
+                None => self.sample_recv(method, pinned.key.as_ref(), pinned.val.as_ref()),
             }) else {
                 continue;
             };
-            let mut fish = pinned_fish;
+            let mut fish = pinned.fish;
             if method.fish != FishReq::None && fish.is_none() {
                 fish = self.sample_fish(method.fish);
                 if fish.is_none() {
@@ -436,8 +695,10 @@ impl<'a> Generator<'a> {
         Some(self.expr(&ty, depth - 1))
     }
 
-    /// A receiver type for a method whose result did not pin one.
-    fn sample_recv(&mut self, method: &Method) -> Option<Ty> {
+    /// A receiver type for a method whose result did not pin one. A map
+    /// result may have pinned only the key or only the value; the sample
+    /// completes the pair within the legal combos.
+    fn sample_recv(&mut self, method: &Method, key: Option<&Ty>, val: Option<&Ty>) -> Option<Ty> {
         let ty = match method.recv {
             RecvClass::Int => Ty::Int(self.int_width()),
             RecvClass::SignedInt => {
@@ -462,6 +723,21 @@ impl<'a> Generator<'a> {
             RecvClass::Str => Ty::Str,
             RecvClass::Vec => Ty::vec_of(self.container_elem(method)?),
             RecvClass::Opt => Ty::opt_of(self.container_elem(method)?),
+            RecvClass::Map => {
+                let matching: Vec<(Ty, Ty)> = map_combos()
+                    .into_iter()
+                    .filter(|(combo_key, combo_val)| {
+                        key.is_none_or(|k| k == combo_key) && val.is_none_or(|v| v == combo_val)
+                    })
+                    .collect();
+                if matching.is_empty() {
+                    return None;
+                }
+                let (combo_key, combo_val) =
+                    matching[self.rng.random_range(0..matching.len())].clone();
+                Ty::map_of(combo_key, combo_val)
+            }
+            RecvClass::Set => self.set_ty(),
         };
         Some(ty)
     }
@@ -602,6 +878,345 @@ impl<'a> Generator<'a> {
             then_expr: Box::new(then_expr),
             else_expr: Box::new(else_expr),
             ty: want.clone(),
+        })
+    }
+
+    // -- pipelines -----------------------------------------------------------
+
+    /// A pipe whose result is `want`. `site` is where a `collect` states its
+    /// target; non-collect terminals ignore it. Every pipe built here must
+    /// pass `is_deterministic`, that is asserted rather than assumed.
+    fn pipe_collect(&mut self, want: &Ty, site: Site, depth: usize) -> Option<Expr> {
+        if depth == 0 {
+            return None;
+        }
+        let pipe = match want {
+            Ty::Vec(elem) => self.pipe_to_scalar_collect(elem, want.clone(), site, depth)?,
+            Ty::Set(elem) => self.pipe_to_scalar_collect(elem, want.clone(), site, depth)?,
+            Ty::Map(key, value) => self.pipe_to_map(key, value, site, depth)?,
+            Ty::Int(_) => self.pipe_to_int(want, depth)?,
+            Ty::Bool => self.pipe_any(depth)?,
+            Ty::Opt(inner) => self.pipe_to_opt(inner, depth)?,
+            _ => return None,
+        };
+        assert!(
+            pipe.is_deterministic(),
+            "generated a nondeterministic pipe: {}",
+            pipe.render()
+        );
+        Some(Expr::Pipe(Box::new(pipe)))
+    }
+
+    /// A source of scalar items, with whether its order is defined.
+    fn scalar_source(&mut self, depth: usize) -> (Source, bool) {
+        match self.rng.random_range(0..6) {
+            0 => {
+                let start = self.rng.random_range(-20..=20);
+                let count = self.rng.random_range(0..=6);
+                (Source::Range { start, count }, true)
+            }
+            1 => {
+                let set = self.set_ty();
+                let expr = self.expr(&set, depth - 1);
+                (
+                    Source::Coll {
+                        expr,
+                        access: Access::SetInto,
+                    },
+                    false,
+                )
+            }
+            2 => {
+                let map = self.map_ty();
+                let expr = self.expr(&map, depth - 1);
+                let access = if self.rng.random_bool(0.5) {
+                    Access::MapKeys
+                } else {
+                    Access::MapValues
+                };
+                (Source::Coll { expr, access }, false)
+            }
+            _ => {
+                let elem = self.scalar_ty();
+                let expr = self.expr(&Ty::vec_of(elem), depth - 1);
+                (
+                    Source::Coll {
+                        expr,
+                        access: Access::VecInto,
+                    },
+                    true,
+                )
+            }
+        }
+    }
+
+    fn fresh_bind(&mut self) -> String {
+        let name = format!("diff_x_{}", self.labels);
+        self.labels += 1;
+        name
+    }
+
+    /// Generate `body` with `bind: ty` visible as a variable.
+    fn body_with(&mut self, bind: &str, bind_ty: &Ty, want: &Ty, depth: usize) -> Expr {
+        self.scope.push(Binding {
+            name: bind.to_string(),
+            ty: bind_ty.clone(),
+        });
+        let body = self.expr(want, depth);
+        self.scope.pop();
+        body
+    }
+
+    /// Scalar items collected into a vec or set of `elem`.
+    fn pipe_to_scalar_collect(
+        &mut self,
+        elem: &Ty,
+        target: Ty,
+        site: Site,
+        depth: usize,
+    ) -> Option<Pipe> {
+        let (source, ordered) = self.scalar_source(depth);
+        let mut stages = Vec::new();
+        let mut item = match source.item() {
+            Item::Scalar(ty) => ty,
+            Item::Pair(..) => return None,
+        };
+        if item != *elem || self.rng.random_bool(0.3) {
+            let bind = self.fresh_bind();
+            let body = self.body_with(&bind, &item, elem, depth - 1);
+            stages.push(Stage::Map {
+                bind: Bind::One(bind),
+                body,
+            });
+            item = elem.clone();
+        }
+        if self.rng.random_bool(0.4) {
+            let bind = self.fresh_bind();
+            let pred = self.body_with(&bind, &item, &Ty::Bool, depth - 1);
+            stages.push(Stage::Filter {
+                bind: Bind::One(bind),
+                pred,
+            });
+        }
+        // A vec keeps arrival order, so an unordered source must sort first.
+        // A set forgets it, no sort needed.
+        if matches!(target, Ty::Vec(_)) {
+            if !ordered {
+                if !ty_is_ord(&item) {
+                    return None;
+                }
+                stages.push(Stage::Sorted);
+            }
+            if self.rng.random_bool(0.3) {
+                stages.push(match self.rng.random_range(0..3) {
+                    0 => Stage::Rev,
+                    1 => Stage::Take(self.rng.random_range(0..=5)),
+                    _ => Stage::Skip(self.rng.random_range(0..=3)),
+                });
+            }
+        }
+        // A set element must hash; keep it inside the generated element pool.
+        if matches!(target, Ty::Set(_)) && !set_elems().contains(&item) {
+            return None;
+        }
+        Some(Pipe {
+            source,
+            stages,
+            term: Term::Collect { target, site },
+        })
+    }
+
+    /// Pair items collected into a map. Three roads to a pair: a map source
+    /// iterated whole, a scalar source paired with a computed value, or an
+    /// ordered scalar source enumerated when the key is i64.
+    fn pipe_to_map(&mut self, key: &Ty, value: &Ty, site: Site, depth: usize) -> Option<Pipe> {
+        let target = Ty::map_of(key.clone(), value.clone());
+        let choice = self.rng.random_range(0..3);
+        if choice == 0 {
+            let expr = self.expr(&target, depth - 1);
+            let mut stages = Vec::new();
+            if self.rng.random_bool(0.4) {
+                let key_bind = self.fresh_bind();
+                let val_bind = self.fresh_bind();
+                self.scope.push(Binding {
+                    name: key_bind.clone(),
+                    ty: key.clone(),
+                });
+                self.scope.push(Binding {
+                    name: val_bind.clone(),
+                    ty: value.clone(),
+                });
+                let pred = self.expr(&Ty::Bool, depth - 1);
+                self.scope.pop();
+                self.scope.pop();
+                stages.push(Stage::Filter {
+                    bind: Bind::Pair(key_bind, val_bind),
+                    pred,
+                });
+            }
+            return Some(Pipe {
+                source: Source::Coll {
+                    expr,
+                    access: Access::MapPairs,
+                },
+                stages,
+                term: Term::Collect { target, site },
+            });
+        }
+        if choice == 1 && *key == Ty::I64 {
+            // Enumerate is order sensitive, so the source must be a vec.
+            let expr = self.expr(&Ty::vec_of(value.clone()), depth - 1);
+            return Some(Pipe {
+                source: Source::Coll {
+                    expr,
+                    access: Access::VecInto,
+                },
+                stages: vec![Stage::Enumerate],
+                term: Term::Collect { target, site },
+            });
+        }
+        let expr = self.expr(&Ty::vec_of(key.clone()), depth - 1);
+        let bind = self.fresh_bind();
+        let body = self.body_with(&bind, key, value, depth - 1);
+        Some(Pipe {
+            source: Source::Coll {
+                expr,
+                access: Access::VecInto,
+            },
+            stages: vec![Stage::PairWith {
+                bind: Bind::One(bind),
+                body,
+            }],
+            term: Term::Collect { target, site },
+        })
+    }
+
+    /// `sum`, `count`, or `fold` down to an integer.
+    fn pipe_to_int(&mut self, want: &Ty, depth: usize) -> Option<Pipe> {
+        let (source, ordered) = self.scalar_source(depth);
+        let item = match source.item() {
+            Item::Scalar(ty) => ty,
+            Item::Pair(..) => return None,
+        };
+        if *want == Ty::USIZE && self.rng.random_bool(0.4) {
+            let bind = self.fresh_bind();
+            let pred = self.body_with(&bind, &item, &Ty::Bool, depth - 1);
+            return Some(Pipe {
+                source,
+                stages: vec![Stage::Filter {
+                    bind: Bind::One(bind),
+                    pred,
+                }],
+                term: Term::Count,
+            });
+        }
+        let mut stages = Vec::new();
+        let mut item = item;
+        if item != *want {
+            let bind = self.fresh_bind();
+            let body = self.body_with(&bind, &item, want, depth - 1);
+            stages.push(Stage::Map {
+                bind: Bind::One(bind),
+                body,
+            });
+            item = want.clone();
+        }
+        if ordered && self.rng.random_bool(0.3) {
+            let acc = self.fresh_bind();
+            let bind = self.fresh_bind();
+            let init = self.expr(want, depth - 1);
+            self.scope.push(Binding {
+                name: acc.clone(),
+                ty: want.clone(),
+            });
+            self.scope.push(Binding {
+                name: bind.clone(),
+                ty: item,
+            });
+            let body = self.expr(want, depth - 1);
+            self.scope.pop();
+            self.scope.pop();
+            return Some(Pipe {
+                source,
+                stages,
+                term: Term::Fold {
+                    acc,
+                    bind: Bind::One(bind),
+                    init,
+                    body,
+                },
+            });
+        }
+        Some(Pipe {
+            source,
+            stages,
+            term: Term::Sum { out: want.clone() },
+        })
+    }
+
+    fn pipe_any(&mut self, depth: usize) -> Option<Pipe> {
+        let (source, _) = self.scalar_source(depth);
+        let item = match source.item() {
+            Item::Scalar(ty) => ty,
+            Item::Pair(..) => return None,
+        };
+        let bind = self.fresh_bind();
+        let pred = self.body_with(&bind, &item, &Ty::Bool, depth - 1);
+        Some(Pipe {
+            source,
+            stages: Vec::new(),
+            term: Term::Any {
+                bind: Bind::One(bind),
+                pred,
+            },
+        })
+    }
+
+    /// `min`, `max`, or an ordered `position` into an Option.
+    fn pipe_to_opt(&mut self, inner: &Ty, depth: usize) -> Option<Pipe> {
+        if *inner == Ty::USIZE && self.rng.random_bool(0.4) {
+            let elem = self.scalar_ty();
+            let expr = self.expr(&Ty::vec_of(elem.clone()), depth - 1);
+            let bind = self.fresh_bind();
+            let pred = self.body_with(&bind, &elem, &Ty::Bool, depth - 1);
+            return Some(Pipe {
+                source: Source::Coll {
+                    expr,
+                    access: Access::VecInto,
+                },
+                stages: Vec::new(),
+                term: Term::Position {
+                    bind: Bind::One(bind),
+                    pred,
+                },
+            });
+        }
+        if !ty_is_ord(inner) {
+            return None;
+        }
+        let (source, _) = self.scalar_source(depth);
+        let item = match source.item() {
+            Item::Scalar(ty) => ty,
+            Item::Pair(..) => return None,
+        };
+        let mut stages = Vec::new();
+        if item != *inner {
+            let bind = self.fresh_bind();
+            let body = self.body_with(&bind, &item, inner, depth - 1);
+            stages.push(Stage::Map {
+                bind: Bind::One(bind),
+                body,
+            });
+        }
+        let term = if self.rng.random_bool(0.5) {
+            Term::Min
+        } else {
+            Term::Max
+        };
+        Some(Pipe {
+            source,
+            stages,
+            term,
         })
     }
 }
