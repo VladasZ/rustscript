@@ -293,18 +293,20 @@ cargo run --release -p rustscript-differential -- run --cases 10000
 The campaign runs batches on all cores and exits nonzero when it finds a real
 divergence, so a scheduled run can gate on it. Findings are grouped by
 classification plus a short failure signature, so two different bugs with the
-same classification stay apart, and unsupported-feature gaps are reported
-separately without failing the run. Saved cases live under
-`target/rustscript-differential/failures`; pass `--stop-on-first` to halt and
-minimize the first finding. The minimizer holds both the classification and
+same classification stay apart. Unsupported-feature gaps do not fail the run,
+but they are tracked too: the summary ranks them by reason with counts and
+seeds, and one case per distinct reason is saved so it can be reproduced and
+fixed. Saved cases live under `target/rustscript-differential/failures`; pass
+`--stop-on-first` to halt and minimize the first finding. The minimizer holds both the classification and
 the signature, so shrinking cannot drift to a different bug. The harness
 batches native compilation, caches repeated reduction candidates, and stores
 enough program data to replay every result.
 
 The `Differential` workflow runs a campaign nightly on Linux, macOS, and
 Windows. The base seed derives from the date and each OS adds its own offset,
-so every night explores fresh disjoint seed ranges with nothing to track, and
-failure artifacts are uploaded when a run finds something.
+so every night explores fresh disjoint seed ranges with nothing to track.
+Saved finding and gap cases are uploaded as artifacts after every run, green
+or red.
 
 Minimized findings whose correct behavior is a panic are kept under
 `crates/differential/regressions` and replayed by a test, since the

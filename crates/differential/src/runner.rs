@@ -89,8 +89,11 @@ impl RunResult {
             Classification::InterpreterMissingPanic => panic_payload(&self.native.stderr),
             Classification::InterpreterSpuriousPanic => panic_payload(&self.interpreted.stderr),
             Classification::SemanticMismatch => diff_site(&self.native, &self.interpreted),
+            // The reason, not the location header, so each missing feature
+            // lands in its own bucket instead of all gaps collapsing into one
+            // "panicked at case_N.rs:N" line.
             Classification::InterpreterCrash | Classification::InterpreterUnsupported => {
-                first_meaningful_line(&self.interpreted.stderr)
+                gap_reason(&self.interpreted.stderr)
             }
             _ => String::new(),
         };
@@ -134,6 +137,20 @@ fn diff_site(native: &ProcessOutput, interpreted: &ProcessOutput) -> String {
 
 /// The first line of an error that carries information, used to group gaps and
 /// crashes by the missing feature rather than by the exact values around it.
+/// The reason of a gap or crash. An interpreter panic carries it on the line
+/// after the `panicked at` header, a plain `rust error:` on the first line.
+pub fn gap_reason(stderr: &str) -> String {
+    if stderr.contains("panicked at") {
+        let payload = panic_payload(stderr);
+        if let Some(reason) = payload.lines().next()
+            && !reason.is_empty()
+        {
+            return reason.to_string();
+        }
+    }
+    first_meaningful_line(stderr)
+}
+
 pub fn first_meaningful_line(stderr: &str) -> String {
     stderr
         .lines()
@@ -610,6 +627,21 @@ mod tests {
         assert_eq!(
             classify(&output(0, ""), &output(1, "unsupported item: macro")),
             Classification::InterpreterUnsupported
+        );
+    }
+
+    /// Two different missing features must land in two different buckets. The
+    /// reason sits after the `panicked at` header, so keying on the first
+    /// stderr line collapsed every gap into one.
+    #[test]
+    fn gaps_bucket_by_reason_not_location() {
+        let one = "thread 'main' panicked at case_3.rs:12:\nunknown method `ilog2` on a number\n  at main (case_3.rs:12)\n";
+        let two = "thread 'main' panicked at case_3.rs:12:\nunknown method `leading_ones` on a number\n  at main (case_3.rs:12)\n";
+        assert_eq!(gap_reason(one), "unknown method `ilog2` on a number");
+        assert_eq!(gap_reason(two), "unknown method `leading_ones` on a number");
+        assert_eq!(
+            gap_reason("rust unsupported: macro `todo`"),
+            "rust unsupported: macro `todo`"
         );
     }
 

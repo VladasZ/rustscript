@@ -10,7 +10,7 @@ selects. Unmarked methods run on both.
 
 ## any value
 
-`abs`, `as_array`, `as_array_mut`, `as_bool`, `as_f64`, `as_i128`, `as_i64`, `as_object`, `as_object_mut`, `as_str`, `as_u64`, `as_usize`, `ceil`, `checked_add`, `checked_div`, `checked_mul`, `checked_neg`, `checked_rem`, `checked_shl`, `checked_shr`, `checked_sub`, `clamp`, `clone`, `cmp`, `count_ones`, `count_zeros`, `div_euclid`, `floor`, `get`, `into`, `is_array`, `is_boolean`, `is_f64`, `is_i64`, `is_multiple_of`, `is_null`, `is_number`, `is_object`, `is_sign_positive`, `is_string`, `is_u64`, `isqrt`, `leading_zeros`, `max`, `min`, `mode` (fast), `partial_cmp`, `pointer`, `pointer_mut`, `pow`, `powf`, `powi`, `readonly` (fast), `rem_euclid`, `reverse_bits`, `rotate_left`, `rotate_right`, `round`, `saturating_add`, `saturating_mul`, `saturating_sub`, `set_readonly` (fast), `signum`, `sqrt`, `swap_bytes`, `then_some` (fast), `to_be_bytes`, `to_le_bytes`, `to_ne_bytes`, `to_string`, `trailing_zeros`, `trunc`, `wrapping_add`, `wrapping_mul`, `wrapping_neg`, `wrapping_sub`
+`abs`, `as_array`, `as_array_mut`, `as_bool`, `as_f64`, `as_i128`, `as_i64`, `as_object`, `as_object_mut`, `as_str`, `as_u64`, `as_usize`, `ceil`, `checked_add`, `checked_div`, `checked_mul`, `checked_neg`, `checked_rem`, `checked_shl`, `checked_shr`, `checked_sub`, `clamp`, `clone`, `cmp`, `count_ones`, `count_zeros`, `div_euclid`, `floor`, `fract`, `get`, `into`, `is_array`, `is_boolean`, `is_f64`, `is_finite`, `is_i64`, `is_infinite`, `is_multiple_of`, `is_nan`, `is_null`, `is_number`, `is_object`, `is_sign_negative`, `is_sign_positive`, `is_string`, `is_u64`, `isqrt`, `leading_zeros`, `max`, `min`, `mode` (fast), `mul_add`, `partial_cmp`, `pointer`, `pointer_mut`, `pow`, `powf`, `powi`, `readonly` (fast), `recip`, `rem_euclid`, `reverse_bits`, `rotate_left`, `rotate_right`, `round`, `saturating_add`, `saturating_mul`, `saturating_sub`, `set_readonly` (fast), `signum`, `sqrt`, `swap_bytes`, `then_some` (fast), `to_be_bytes`, `to_le_bytes`, `to_ne_bytes`, `to_string`, `trailing_zeros`, `trunc`, `wrapping_add`, `wrapping_mul`, `wrapping_neg`, `wrapping_sub`
 
 ## Base64
 
@@ -82,7 +82,7 @@ selects. Unmarked methods run on both.
 
 ## Option and Result (tokio mode)
 
-`as_deref` (tokio), `as_mut` (tokio), `as_ref` (tokio), `cloned` (tokio), `context` (tokio), `copied` (tokio), `expect` (tokio), `get` (tokio), `is_err` (tokio), `is_none` (tokio), `is_ok` (tokio), `is_some` (tokio), `ok` (tokio), `take` (tokio), `unwrap` (tokio), `unwrap_or` (tokio), `unwrap_or_default` (tokio), `with_context` (tokio)
+`as_deref` (tokio), `as_mut` (tokio), `as_ref` (tokio), `cloned` (tokio), `context` (tokio), `copied` (tokio), `expect` (tokio), `get` (tokio), `into_iter` (tokio), `is_err` (tokio), `is_none` (tokio), `is_ok` (tokio), `is_some` (tokio), `iter` (tokio), `ok` (tokio), `take` (tokio), `unwrap` (tokio), `unwrap_or` (tokio), `unwrap_or_default` (tokio), `with_context` (tokio)
 
 ## ExitStatus
 
@@ -134,7 +134,7 @@ selects. Unmarked methods run on both.
 
 ## Option
 
-`and_then`, `as_deref` (fast), `as_mut` (fast), `as_ref` (fast), `context` (fast), `expect` (fast), `filter`, `get` (fast), `is_none` (fast), `is_some` (fast), `is_some_and`, `map`, `map_or`, `map_or_else`, `ok_or` (fast), `ok_or_else`, `or` (fast), `or_else`, `take` (fast), `unwrap_or_default` (fast), `unwrap_or_else`, `with_context`
+`and_then`, `as_deref` (fast), `as_mut` (fast), `as_ref` (fast), `context` (fast), `expect` (fast), `filter`, `get` (fast), `into_iter` (fast), `is_none` (fast), `is_some` (fast), `is_some_and`, `iter` (fast), `map`, `map_or`, `map_or_else`, `ok_or` (fast), `ok_or_else`, `or` (fast), `or_else`, `take` (fast), `unwrap_or_default` (fast), `unwrap_or_else`, `with_context`
 
 ## OsString
 

@@ -170,7 +170,16 @@ fn run_campaign(args: &[String]) -> Result<ExitCode> {
                             }
                         }
                         Classification::InterpreterUnsupported => {
-                            report.record_gap(&result);
+                            let key = result.signature();
+                            let path = if report.should_save_gap(&key) {
+                                Some(
+                                    Artifact::new(case_seed, program, source, result.clone())
+                                        .save(&root)?,
+                                )
+                            } else {
+                                None
+                            };
+                            report.record_gap(key, case_seed, path);
                         }
                         classification => {
                             if options.stop_on_first {
@@ -223,12 +232,14 @@ fn bucket_key(classification: &Classification, result: &RunResult) -> String {
 
 const MAX_SEEDS_PER_GROUP: usize = 8;
 const MAX_ARTIFACTS_PER_GROUP: usize = 3;
+/// One saved case per distinct gap reason is enough to reproduce and fix it.
+const MAX_ARTIFACTS_PER_GAP: usize = 1;
 
 #[derive(Default)]
 struct CampaignReport {
     checked: usize,
     matched: usize,
-    gaps: BTreeMap<String, usize>,
+    gaps: BTreeMap<String, BugGroup>,
     bugs: BTreeMap<String, BugGroup>,
 }
 
@@ -240,8 +251,21 @@ struct BugGroup {
 }
 
 impl CampaignReport {
-    fn record_gap(&mut self, result: &RunResult) {
-        *self.gaps.entry(result.signature()).or_default() += 1;
+    fn should_save_gap(&self, key: &str) -> bool {
+        self.gaps
+            .get(key)
+            .is_none_or(|group| group.artifacts.len() < MAX_ARTIFACTS_PER_GAP)
+    }
+
+    fn record_gap(&mut self, key: String, seed: u64, path: Option<std::path::PathBuf>) {
+        let group = self.gaps.entry(key).or_default();
+        group.count += 1;
+        if group.seeds.len() < MAX_SEEDS_PER_GROUP {
+            group.seeds.push(seed);
+        }
+        if let Some(path) = path {
+            group.artifacts.push(path);
+        }
     }
 
     fn should_save(&self, key: &str) -> bool {
@@ -263,7 +287,7 @@ impl CampaignReport {
 
     fn print(&self, elapsed: Duration) {
         let findings: usize = self.bugs.values().map(|group| group.count).sum();
-        let gaps: usize = self.gaps.values().sum();
+        let gaps: usize = self.gaps.values().map(|group| group.count).sum();
         println!(
             "\nchecked {}: {} matched, {} findings, {} gaps, {:.1}s",
             self.checked,
@@ -290,9 +314,22 @@ impl CampaignReport {
             }
         }
         if !self.gaps.is_empty() {
-            println!("\ngaps (features the interpreter does not run yet):");
-            for (message, count) in &self.gaps {
-                println!("  {count} case(s): {message}");
+            println!("\ngaps (features the interpreter does not run yet), most common first:");
+            let mut ranked: Vec<_> = self.gaps.iter().collect();
+            ranked.sort_by(|a, b| b.1.count.cmp(&a.1.count).then(a.0.cmp(b.0)));
+            for (reason, group) in ranked {
+                let seeds = group
+                    .seeds
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!("  {} case(s): {reason}, seeds {seeds}", group.count);
+                for path in &group.artifacts {
+                    if let Some(dir) = path.parent() {
+                        println!("    saved {}", dir.display());
+                    }
+                }
             }
         }
     }
