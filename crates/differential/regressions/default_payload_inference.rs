@@ -61,4 +61,21 @@ fn main() {
     // From seed 20673109586.
     let letter = 'x';
     println!("{:?}", (if flag { vec![letter, 'a', letter] } else { vec![letter, letter, ' '] }).get((diff_opaque_u64(3) as usize)).cloned().unwrap_or_default());
+
+    // Arithmetic keeps its operands' type, so the division names the i8 the
+    // default is built from. From seed 20673005366.
+    println!("{:?}", flag.then_some(((diff_opaque_i64(127) as i8) / (diff_opaque_i64(125) as i8))).unwrap_or_default());
+
+    // An inner unwrap's value is its receiver's payload, a char here, so the
+    // outer default is a char too. From seed 20673118405.
+    println!("{:?}", flag.then_some(Some('\n').unwrap_or_default()).unwrap_or_default());
+
+    // `String::from` states the element type of the vec it sits in. From
+    // seed 20673204730.
+    println!("{:?}", Some(vec![Some(String::from("5 "))]).unwrap_or_default().get((diff_opaque_u64(2) as usize)).cloned().unwrap_or_default());
+
+    // A scalar-annotated local names the width a later checked default is
+    // built from. From seed 20673211807.
+    let scalar_local: u16 = (diff_opaque_u64(9) as u16);
+    println!("{:?}", scalar_local.checked_rem((diff_opaque_u64(0) as u16)).unwrap_or_default());
 }

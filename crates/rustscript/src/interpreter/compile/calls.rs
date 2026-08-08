@@ -1117,6 +1117,25 @@ fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
         Expr::Group(inner) => written_ty(&inner.expr, env),
         // `value as u8` names the type at the cast.
         Expr::Cast(cast) => ScalarTy::lower(&cast.ty),
+        // Arithmetic keeps its operands' type, so either side that states it
+        // answers, `(x as i8) / (y as i8)` for one. A comparison is a bool.
+        Expr::Binary(bin) => {
+            use syn::BinOp::*;
+            match bin.op {
+                Add(_) | Sub(_) | Mul(_) | Div(_) | Rem(_) | BitAnd(_) | BitOr(_) | BitXor(_) => {
+                    written_ty(&bin.left, env).or_else(|| written_ty(&bin.right, env))
+                }
+                Shl(_) | Shr(_) => written_ty(&bin.left, env),
+                Eq(_) | Ne(_) | Lt(_) | Le(_) | Gt(_) | Ge(_) | And(_) | Or(_) => {
+                    Some(ScalarTy::Bool)
+                }
+                _ => None,
+            }
+        }
+        Expr::Unary(un) => match un.op {
+            syn::UnOp::Neg(_) | syn::UnOp::Not(_) => written_ty(&un.expr, env),
+            _ => None,
+        },
         Expr::Lit(lit) => match &lit.lit {
             Lit::Str(_) => Some(ScalarTy::Str),
             Lit::Bool(_) => Some(ScalarTy::Bool),
@@ -1131,6 +1150,16 @@ fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
             },
             _ => None,
         },
+        // An unwrap's own value is the receiver's payload, so
+        // `Some('\n').unwrap_or_default()` is a char, not an Option.
+        Expr::MethodCall(call)
+            if matches!(
+                call.method.to_string().as_str(),
+                "unwrap" | "expect" | "unwrap_or" | "unwrap_or_default"
+            ) && option_payload(&call.receiver, env).is_some() =>
+        {
+            option_payload(&call.receiver, env)
+        }
         // Anything that is itself an `Option` is one layer deeper, keeping
         // what it wraps so a further unwrap can still read it.
         Expr::Call(_) | Expr::Path(_) | Expr::MethodCall(_) => {
@@ -1140,6 +1169,15 @@ fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                 Some(ScalarTy::Opt(Box::new(ScalarTy::Other)))
             } else if let Some(element) = vec_new_element(expr) {
                 Some(ScalarTy::List(Box::new(element)))
+            } else if is_string_call(expr) {
+                Some(ScalarTy::Str)
+            } else if let Expr::Path(path) = expr
+                && path.path.segments.len() == 1
+                && let Some(declared) = env.locals.get(&path.path.segments[0].ident.to_string())
+            {
+                // A bare name the program declared with any scalar
+                // annotation, `let x: u16` included.
+                Some(declared.clone())
             } else {
                 fn_return_ty(expr, env)
             }
@@ -1162,6 +1200,22 @@ fn fn_return_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
     };
     let segment = path.path.segments.last()?;
     env.fn_returns.get(&segment.ident.to_string()).cloned()
+}
+
+/// A call that builds a `String` outright, `String::from(..)` or
+/// `String::new()`.
+fn is_string_call(expr: &Expr) -> bool {
+    let Expr::Call(call) = expr else {
+        return false;
+    };
+    let Expr::Path(path) = &*call.func else {
+        return false;
+    };
+    let mut segments = path.path.segments.iter().rev();
+    let is_ctor = segments
+        .next()
+        .is_some_and(|s| s.ident == "from" || s.ident == "new");
+    is_ctor && segments.next().is_some_and(|s| s.ident == "String")
 }
 
 /// The stated element type of a `Vec::<T>::new()` or `VecDeque::<T>::new()`

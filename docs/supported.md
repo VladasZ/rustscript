@@ -42,7 +42,7 @@ selects. Unmarked methods run on both.
 
 ## Char
 
-`is_alphabetic`, `is_alphanumeric`, `is_ascii`, `is_ascii_alphabetic`, `is_ascii_alphanumeric`, `is_ascii_digit`, `is_ascii_hexdigit`, `is_ascii_lowercase`, `is_ascii_punctuation`, `is_ascii_uppercase`, `is_ascii_whitespace`, `is_lowercase`, `is_numeric`, `is_uppercase`, `is_whitespace`, `to_ascii_lowercase`, `to_ascii_uppercase`, `to_lowercase`, `to_uppercase`
+`is_alphabetic`, `is_alphanumeric`, `is_ascii`, `is_ascii_alphabetic`, `is_ascii_alphanumeric`, `is_ascii_digit`, `is_ascii_hexdigit`, `is_ascii_lowercase`, `is_ascii_punctuation`, `is_ascii_uppercase`, `is_ascii_whitespace`, `is_lowercase`, `is_numeric`, `is_uppercase`, `is_whitespace`, `to_ascii_lowercase`, `to_ascii_uppercase`, `to_digit`, `to_lowercase`, `to_uppercase`
 
 ## Child
 

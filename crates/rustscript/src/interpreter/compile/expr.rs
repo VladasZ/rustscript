@@ -1105,28 +1105,22 @@ impl Compiler<'_> {
     // -- calls -------------------------------------------------------------
 }
 
-/// The payload of an `Option<T>` or `Result<T, _>` annotation, for building a
-/// `Default` when the value turns out to be absent.
+/// The declared type of a `let` annotation as a scalar, for building a
+/// `Default` when a value turns out to be absent further down the chain.
 pub(super) fn annotation_scalar(ty: &syn::Type) -> Option<ScalarTy> {
-    let syn::Type::Path(path) = ty else {
-        return None;
-    };
-    let segment = path.path.segments.last()?;
-    let container = segment.ident.to_string();
-    if !matches!(container.as_str(), "Option" | "Result" | "Vec" | "VecDeque") {
-        return None;
-    }
-    let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
-        return None;
-    };
-    let inner = args.args.iter().find_map(|arg| match arg {
-        syn::GenericArgument::Type(inner) => ScalarTy::lower(inner),
-        _ => None,
-    })?;
     // A `Result<T, E>` answers its defaults through the same `Opt` shape,
-    // since only the payload side ever builds one.
-    Some(match container.as_str() {
-        "Option" | "Result" => ScalarTy::Opt(Box::new(inner)),
-        _ => ScalarTy::List(Box::new(inner)),
-    })
+    // since only the payload side ever builds one. Everything else, scalars
+    // and the containers alike, lowers directly.
+    if let syn::Type::Path(path) = ty
+        && let Some(segment) = path.path.segments.last()
+        && segment.ident == "Result"
+        && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+    {
+        let inner = args.args.iter().find_map(|arg| match arg {
+            syn::GenericArgument::Type(inner) => ScalarTy::lower(inner),
+            _ => None,
+        })?;
+        return Some(ScalarTy::Opt(Box::new(inner)));
+    }
+    ScalarTy::lower(ty)
 }

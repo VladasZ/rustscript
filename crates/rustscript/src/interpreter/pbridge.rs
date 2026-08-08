@@ -907,10 +907,19 @@ fn map_method(recv: &PValue, m: &str, args: &mut [PValue]) -> Result<PValue> {
 /// Width-aware integer methods, the same core the fast engine uses, so the
 /// two engines cannot drift on integer semantics.
 fn int_method(recv: &PValue, m: &str, args: &[PValue]) -> Option<Result<PValue>> {
-    let (value, width) = recv.int_parts()?;
+    let (value, mut width) = recv.int_parts()?;
     let mut decoded = Vec::with_capacity(args.len());
     for arg in args {
-        decoded.push(arg.int_parts()?.0);
+        let (arg_value, arg_width) = arg.int_parts()?;
+        decoded.push(arg_value);
+        // Receiver and argument share one type in real Rust, so a width
+        // either side states answers for both, exactly as the fast engine
+        // unifies. A shift amount's own u32 must not redefine the receiver.
+        if !super::int_methods::takes_amount_arg(m)
+            && let Ok(unified) = super::numeric::unify(width, arg_width)
+        {
+            width = unified;
+        }
     }
     Some(
         match super::int_methods::int_method(m, width, value, &decoded)? {
@@ -1006,12 +1015,17 @@ fn scalar_method(recv: &PValue, m: &str, args: &[PValue]) -> Result<PValue> {
         bail!("method `{m}` on a number is not supported in tokio mode");
     }
     if let PValue::Char(ch) = recv
-        && let Some(out) = shared::char_method(*ch, m)
+        && let Some(out) = shared::char_method(*ch, m, &PArgs(args))
     {
-        return Ok(match out {
+        return Ok(match out? {
             CharOut::Bool(v) => PValue::Bool(v),
             CharOut::Char(c) => PValue::Char(c),
             CharOut::Str(s) => PValue::str(s),
+            CharOut::OptU32(Some(digit)) => PValue::some(PValue::int_of_width(
+                i128::from(digit),
+                super::numeric::IntWidth::U32,
+            )),
+            CharOut::OptU32(None) => PValue::none(),
         });
     }
     bail!(
