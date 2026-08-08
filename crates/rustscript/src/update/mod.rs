@@ -10,7 +10,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use asset::{Asset, download, download_url, extract, fetch_text, verify_checksum};
+use asset::{Asset, asset_exists, download, download_url, extract, fetch_text, verify_checksum};
 use install::{
     BINARY, cargo_home, cleanup_stale_binaries, move_aside, restore, swap, verify, warn_if_shadowed,
 };
@@ -74,9 +74,26 @@ pub fn update(args: &[String]) -> Result<()> {
         return Ok(());
     }
 
+    let asset = asset_for(&release, request.from_source);
+
+    // The release workflow pushes the version tag minutes before the built
+    // binaries, so the newest tag can exist while its assets are still
+    // uploading. Not an update target yet, the next update gets it once
+    // publishing ends. An asked for version skips this and fails loudly.
+    if let Some(asset) = &asset
+        && request.version.is_none()
+        && !asset_exists(&download_url(&release.tag, &asset.name))?
+    {
+        println!(
+            "{} is still publishing, staying on v{INSTALLED}",
+            release.tag
+        );
+        return Ok(());
+    }
+
     println!("updating rustscript from v{INSTALLED} to {}", release.tag);
 
-    match asset_for(&release, request.from_source) {
+    match asset {
         Some(asset) => install_asset(&release, &asset, &home, &target)?,
         None => install_from_source(&release.tag, &target)?,
     }

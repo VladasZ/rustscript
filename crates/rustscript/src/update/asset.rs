@@ -62,6 +62,23 @@ pub fn download_url(tag: &str, file: &str) -> String {
     format!("{REPOSITORY}/releases/download/{tag}/{file}")
 }
 
+/// Whether the release has this file attached yet. The release workflow
+/// pushes the version tag minutes before the built binaries, so the newest
+/// tag can exist while its assets are still uploading.
+pub fn asset_exists(url: &str) -> Result<bool> {
+    let response = client()?
+        .head(url)
+        .send()
+        .with_context(|| format!("could not reach {url}"))?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(false);
+    }
+    response
+        .error_for_status()
+        .with_context(|| format!("could not reach {url}"))?;
+    Ok(true)
+}
+
 fn client() -> Result<Client> {
     Client::builder()
         .user_agent(concat!("rustscript/", env!("CARGO_PKG_VERSION")))
