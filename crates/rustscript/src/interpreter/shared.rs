@@ -281,13 +281,27 @@ pub(super) enum CharOut {
     Bool(bool),
     Char(char),
     Str(String),
+    /// `to_digit`, whose payload is a u32 in real Rust.
+    OptU32(Option<u32>),
 }
 
 /// The `char` classification and conversion methods, shared by both engines so
 /// a script sees the same set whichever one runs it.
-pub(super) fn char_method(ch: char, name: &str) -> Option<CharOut> {
-    let b = |v: bool| Some(CharOut::Bool(v));
+pub(super) fn char_method(ch: char, name: &str, args: &impl Args) -> Option<Result<CharOut>> {
+    let b = |v: bool| Some(Ok(CharOut::Bool(v)));
     match name {
+        "to_digit" => {
+            let radix = match int_arg(args, 0) {
+                Ok(radix) => radix,
+                Err(error) => return Some(Err(error)),
+            };
+            if !(2..=36).contains(&radix) {
+                return Some(Err(anyhow!(
+                    "to_digit: invalid radix -- radix must be in the range 2 to 36 inclusive"
+                )));
+            }
+            Some(Ok(CharOut::OptU32(ch.to_digit(radix as u32))))
+        }
         "is_ascii_digit" => b(ch.is_ascii_digit()),
         "is_ascii_alphabetic" => b(ch.is_ascii_alphabetic()),
         "is_ascii_alphanumeric" => b(ch.is_ascii_alphanumeric()),
@@ -303,12 +317,12 @@ pub(super) fn char_method(ch: char, name: &str) -> Option<CharOut> {
         "is_whitespace" => b(ch.is_whitespace()),
         "is_uppercase" => b(ch.is_uppercase()),
         "is_lowercase" => b(ch.is_lowercase()),
-        "to_ascii_uppercase" => Some(CharOut::Char(ch.to_ascii_uppercase())),
-        "to_ascii_lowercase" => Some(CharOut::Char(ch.to_ascii_lowercase())),
+        "to_ascii_uppercase" => Some(Ok(CharOut::Char(ch.to_ascii_uppercase()))),
+        "to_ascii_lowercase" => Some(Ok(CharOut::Char(ch.to_ascii_lowercase()))),
         // These yield an iterator in real Rust, but a script only ever renders
         // or collects it, so the string it would produce is handed back.
-        "to_uppercase" => Some(CharOut::Str(ch.to_uppercase().to_string())),
-        "to_lowercase" => Some(CharOut::Str(ch.to_lowercase().to_string())),
+        "to_uppercase" => Some(Ok(CharOut::Str(ch.to_uppercase().to_string()))),
+        "to_lowercase" => Some(Ok(CharOut::Str(ch.to_lowercase().to_string()))),
         _ => None,
     }
 }

@@ -18,4 +18,10 @@ fn main() {
     let mut floats = vec![0.5f64, 4.0];
     floats.push(2.5);
     println!("{}", floats.iter().product::<f64>());
+
+    // `to_digit` answers Some(u32) within the radix and None outside it.
+    println!("{:?}", '7'.to_digit(10));
+    println!("{:?}", 'z'.to_digit(36));
+    println!("{:?}", '5'.to_digit(2));
+    println!("{:?}", 'は'.to_digit(10));
 }

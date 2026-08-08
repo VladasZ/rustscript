@@ -126,11 +126,16 @@ pub(super) fn generic_method(recv: &Value, name: &str, args: &[Value]) -> Result
         // PathBuf for example, handles `into` in its own bridge before this.
         (_, "into") => Ok(recv.clone()),
         (_, "to_string") => Ok(Value::str(recv.display())),
-        (Value::Char(ch), name) if let Some(out) = shared::char_method(*ch, name) => {
-            Ok(match out {
+        (Value::Char(ch), name) if let Some(out) = shared::char_method(*ch, name, &VArgs(args)) => {
+            Ok(match out? {
                 CharOut::Bool(v) => Value::Bool(v),
                 CharOut::Char(c) => Value::Char(c),
                 CharOut::Str(s) => Value::str(s),
+                CharOut::OptU32(Some(digit)) => Value::some(Value::int_of_width(
+                    i128::from(digit),
+                    super::numeric::IntWidth::U32,
+                )),
+                CharOut::OptU32(None) => Value::none(),
             })
         }
         (Value::Bool(b), "as_bool") => Ok(Value::some(Value::Bool(*b))),
@@ -815,12 +820,23 @@ pub(super) fn map_pairs(m: &Rc<RefCell<Map>>) -> Value {
 /// Answer a width-aware integer method, or `None` when the receiver is not an
 /// integer or the name is not one of them, so dispatch falls through.
 pub(super) fn int_method(recv: &Value, name: &str, args: &[Value]) -> Option<Result<Value>> {
-    let (value, width) = recv.int_parts()?;
+    let (value, mut width) = recv.int_parts()?;
     let mut decoded = Vec::with_capacity(args.len());
     for arg in args {
         // Every argument of these methods is an integer in real Rust, so a
         // non-integer here means this is not the method it looks like.
-        decoded.push(arg.int_parts()?.0);
+        let (arg_value, arg_width) = arg.int_parts()?;
+        decoded.push(arg_value);
+        // In real Rust the receiver and the argument share one type, so a
+        // width either side states answers for both. Without this an untagged
+        // `len()` receiver ran `1.saturating_sub(huge_usize)` in i64 and
+        // printed `i64::MIN` where the compiled usize floors at 0. A shift
+        // amount is a u32 of its own and must not redefine the receiver.
+        if !super::int_methods::takes_amount_arg(name)
+            && let Ok(unified) = super::numeric::unify(width, arg_width)
+        {
+            width = unified;
+        }
     }
     Some(
         match super::int_methods::int_method(name, width, value, &decoded)? {

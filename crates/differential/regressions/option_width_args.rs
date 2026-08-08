@@ -43,4 +43,9 @@ fn main() {
     // From seeds 20673218374 and 20673012633.
     println!("then_some_not: {:?}", true.then_some((!None::<u64>.unwrap_or((diff_opaque_u64(0) as u64)))));
     println!("then_some_wide: {:?}", true.then_some(((diff_opaque_i64(-2147483648) as i32) as usize)));
+
+    // An untagged `len()` receiver takes the width its argument states, so
+    // the usize subtraction floors at 0 instead of saturating at `i64::MIN`.
+    // From seed 20673115610.
+    println!("len_sub: {:?}", String::from("1").len().saturating_sub(((diff_opaque_u64(16690579655298140432) as usize).max((diff_opaque_u64(0) as usize)) | String::from("1.5").chars().count())));
 }
