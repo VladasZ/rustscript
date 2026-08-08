@@ -33,6 +33,11 @@ pub struct Ctx<'r> {
     pub async_mode: bool,
     /// Concrete target of the `impl` whose method is being compiled.
     pub impl_type: Option<&'r str>,
+    /// Stated return scalars of the script's own functions, one more place a
+    /// `Default` payload is written down: `f()` is an f32 when `fn f() -> f32`
+    /// says so. A name defined more than once with differing returns is
+    /// absent, since the call site cannot tell which one it reaches.
+    pub fn_returns: &'r HashMap<String, ScalarTy>,
 }
 
 /// Per function compilation state. A stack of these supports nested closures.
@@ -175,10 +180,12 @@ pub struct Compiler<'a> {
     /// A `let x: T = ...unwrap_or_default()` annotation waiting to attach to
     /// that exact call, naming the payload the default is built from.
     pub(super) default_let: Option<(*const syn::ExprMethodCall, ScalarTy)>,
-    /// Payload types of locals declared as `Option<T>` or `Result<T, _>`, so
-    /// `opt.unwrap_or_default()` can build the right default from the type the
-    /// binding was declared with. Only ever read to pick a `Default`.
-    pub(super) option_locals: HashMap<String, ScalarTy>,
+    /// Declared types of locals annotated `Option<T>`, `Result<T, _>`, or
+    /// `Vec<T>`, as `Opt(T)` or `List(T)`, so `opt.unwrap_or_default()` and
+    /// `v.get(i).cloned().unwrap_or_default()` can build the right default
+    /// from the type the binding was declared with. Only ever read to pick a
+    /// `Default`.
+    pub(super) typed_locals: HashMap<String, ScalarTy>,
 }
 
 /// Where a referenced name lives.
@@ -204,7 +211,7 @@ impl<'a> Compiler<'a> {
             json_tails: HashMap::new(),
             option_result: None,
             default_let: None,
-            option_locals: HashMap::new(),
+            typed_locals: HashMap::new(),
         }
     }
 

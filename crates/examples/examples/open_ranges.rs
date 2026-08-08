@@ -20,7 +20,9 @@ fn main() {
     println!("index open [{}]", &s[3..]);
     println!("index from start [{}]", &s[..2]);
 
-    let v = vec![10, 20, 30, 40];
+    // An annotated Vec, so the open range slices a real vector rather than
+    // the array clippy would otherwise ask for.
+    let v: Vec<i64> = vec![10, 20, 30, 40];
     let tail = &v[2..];
     println!("vec open {} {}", tail.len(), tail[1]);
 

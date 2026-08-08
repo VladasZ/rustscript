@@ -307,9 +307,9 @@ so every night explores fresh disjoint seed ranges with nothing to track, and
 failure artifacts are uploaded when a run finds something.
 
 Minimized findings whose correct behavior is a panic are kept under
-`crates/differential/corpus` and replayed by a test, since the equivalence
-suite only covers examples that exit cleanly. `promote` routes a fixed case
-to the corpus or to the examples automatically.
+`crates/differential/regressions` and replayed by a test, since the
+equivalence suite only covers examples that exit cleanly. `promote` routes a
+fixed case to the regressions or to the examples automatically.
 
 Every bridge and language feature must have an example under
 `crates/examples/examples`. Examples build as real cargo binaries, and the

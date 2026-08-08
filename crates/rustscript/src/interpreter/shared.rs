@@ -127,6 +127,40 @@ pub(super) fn num_core(recv: Num, name: &str, args: &impl Args) -> Result<Option
     }))
 }
 
+/// What an f32 method produced, materialized by each engine.
+pub(super) enum F32Out {
+    Val(f32),
+    Bool(bool),
+    SomeOrdering(Ordering),
+}
+
+/// The f32 method surface, computed in real f32 so results match a compiled
+/// binary bit for bit. Routing an f32 through the f64 core double rounds
+/// `sqrt` and friends, and the result forgets it was an f32, so `{:?}` printed
+/// the f64 shortest form, `3.4028234663852886e38` instead of `3.4028235e38`
+/// for `f32::MAX`.
+pub(super) fn f32_core(recv: f32, name: &str, args: &impl Args) -> Result<Option<F32Out>> {
+    use F32Out as O;
+    let arg = |i: usize| -> Result<f32> { float_arg(args, i).map(|f| f as f32) };
+    Ok(Some(match name {
+        "abs" => O::Val(recv.abs()),
+        "powi" => O::Val(recv.powi(int_arg(args, 0)? as i32)),
+        "powf" => O::Val(recv.powf(arg(0)?)),
+        "sqrt" => O::Val(recv.sqrt()),
+        "floor" => O::Val(recv.floor()),
+        "trunc" => O::Val(recv.trunc()),
+        "ceil" => O::Val(recv.ceil()),
+        "round" => O::Val(recv.round()),
+        "min" => O::Val(recv.min(arg(0)?)),
+        "max" => O::Val(recv.max(arg(0)?)),
+        "clamp" => O::Val(recv.clamp(arg(0)?, arg(1)?)),
+        "is_sign_positive" => O::Bool(recv.is_sign_positive()),
+        // The same answer the f64 core gives, so both precisions stay in step.
+        "partial_cmp" => O::SomeOrdering(recv.partial_cmp(&arg(0)?).unwrap_or(Ordering::Equal)),
+        _ => return Ok(None),
+    }))
+}
+
 // -- json ------------------------------------------------------------------
 
 /// The shape a decoded json value has once it is an interpreter value. A

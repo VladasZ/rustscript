@@ -235,6 +235,19 @@ pub fn int_method(
                 in_range(width, recv % b)
             })
         }),
+        // A shift is checked on the amount alone, `None` at the width and
+        // beyond, and bits shifted past the width are simply dropped.
+        "checked_shl" => count_arg(args, 0)
+            .map(|n| IntOut::Checked((n < bits).then(|| from_raw(width, raw(width, recv) << n)))),
+        "checked_shr" => count_arg(args, 0).map(|n| {
+            IntOut::Checked((n < bits).then(|| {
+                if width.is_signed() {
+                    recv >> n
+                } else {
+                    from_raw(width, raw(width, recv) >> n)
+                }
+            }))
+        }),
         "pow" => count_arg(args, 0).and_then(|e| pow(width, recv, e).map(IntOut::Same)),
         "abs" => {
             if !width.is_signed() {
@@ -440,6 +453,18 @@ mod tests {
         assert!(matches!(checked, Ok(IntOut::Checked(None))));
         let checked = int_method("checked_add", IntWidth::U8, 1, &[2]).expect("known");
         assert!(matches!(checked, Ok(IntOut::Checked(Some(3)))));
+    }
+
+    #[test]
+    fn checked_shifts_gate_on_the_width() {
+        let shifted = int_method("checked_shl", IntWidth::U8, 200, &[1]).expect("known");
+        assert!(matches!(shifted, Ok(IntOut::Checked(Some(144)))));
+        let shifted = int_method("checked_shl", IntWidth::U8, 1, &[8]).expect("known");
+        assert!(matches!(shifted, Ok(IntOut::Checked(None))));
+        let shifted = int_method("checked_shr", IntWidth::I8, -128, &[2]).expect("known");
+        assert!(matches!(shifted, Ok(IntOut::Checked(Some(-32)))));
+        let shifted = int_method("checked_shr", IntWidth::I8, -1, &[8]).expect("known");
+        assert!(matches!(shifted, Ok(IntOut::Checked(None))));
     }
 
     #[test]

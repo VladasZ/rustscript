@@ -16,7 +16,7 @@ use super::pchunk::{PChunk, convert};
 use super::pnative::PNative;
 use super::pvalue::{PClosure, PValue, PValueRef};
 use super::pvm::PInterp;
-use super::shared::{self, Args, CharOut, Num, NumOut, Parsed, StrOut, parse_rfc3339};
+use super::shared::{self, Args, CharOut, F32Out, Num, NumOut, Parsed, StrOut, parse_rfc3339};
 use super::value::Value;
 
 impl PInterp {
@@ -331,6 +331,13 @@ impl PInterp {
         if let Some(result) = int_method(recv, m, args) {
             return result;
         }
+        // f32 methods likewise: computed in real f32 before the image below
+        // widens the receiver to an f64 that prints the wrong shortest form.
+        if let PValue::F32(f) = recv
+            && let Some(value) = f32_method(*f, m, args)?
+        {
+            return Ok(value);
+        }
         // Everything below computes in i64 and f64, so width-tagged numbers
         // pass their plain image.
         let widened;
@@ -341,9 +348,15 @@ impl PInterp {
             }
             None => recv,
         };
-        for arg in args.iter_mut() {
-            if let Some(image) = arg.bridge_image() {
-                *arg = image;
+        // Option and Result methods hand arguments through to the caller,
+        // `unwrap_or` for one, so their width tags must survive. Flattening
+        // here made `None::<u8>.unwrap_or(x).count_zeros()` count 64 bits and
+        // saturated a u64 argument past `i64::MAX`.
+        if !matches!(recv, PValue::Enum { .. }) {
+            for arg in args.iter_mut() {
+                if let Some(image) = arg.bridge_image() {
+                    *arg = image;
+                }
             }
         }
         // The async http client, request, and response types.
@@ -899,11 +912,28 @@ fn int_method(recv: &PValue, m: &str, args: &[PValue]) -> Option<Result<PValue>>
     )
 }
 
+/// Materialize an f32 core answer as a parallel engine value. Called before
+/// `bridge_image` widens the receiver, so the result keeps the f32 tag.
+fn f32_method(recv: f32, name: &str, args: &[PValue]) -> Result<Option<PValue>> {
+    Ok(
+        shared::f32_core(recv, name, &PArgs(args))?.map(|out| match out {
+            F32Out::Val(value) => PValue::F32(value),
+            F32Out::Bool(value) => PValue::Bool(value),
+            F32Out::SomeOrdering(ordering) => PValue::some(p_ordering(ordering)),
+        }),
+    )
+}
+
 fn int_out(out: super::int_methods::IntOut, width: super::numeric::IntWidth) -> PValue {
     use super::int_methods::IntOut;
     match out {
         IntOut::Same(value) => PValue::int_of_width(value, width),
-        IntOut::Count(count) => PValue::Int(i64::from(count)),
+        // The counting family answers u32 in real Rust, so the tag has to say
+        // so, or `!x.count_ones()` computes in 64 bits and prints -1 where the
+        // compiled binary prints 4294967295.
+        IntOut::Count(count) => {
+            PValue::int_of_width(i128::from(count), super::numeric::IntWidth::U32)
+        }
         IntOut::Bool(value) => PValue::Bool(value),
         IntOut::Checked(Some(value)) => PValue::some(PValue::int_of_width(value, width)),
         IntOut::Checked(None) => PValue::none(),
@@ -1239,6 +1269,7 @@ impl Args for PArgs<'_> {
     fn int(&self, i: usize) -> Option<i64> {
         match self.0.get(i) {
             Some(PValue::Int(n)) => Some(*n),
+            Some(tagged @ PValue::IntW(..)) => tagged.untag_int(),
             _ => None,
         }
     }
@@ -1246,7 +1277,9 @@ impl Args for PArgs<'_> {
     fn float(&self, i: usize) -> Option<f64> {
         match self.0.get(i) {
             Some(PValue::Float(f)) => Some(*f),
+            Some(PValue::F32(f)) => Some(f64::from(*f)),
             Some(PValue::Int(n)) => Some(*n as f64),
+            Some(tagged @ PValue::IntW(..)) => tagged.untag_int().map(|n| n as f64),
             _ => None,
         }
     }
