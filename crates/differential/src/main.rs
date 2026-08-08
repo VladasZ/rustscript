@@ -434,12 +434,12 @@ fn promote(args: &[String]) -> Result<()> {
     }
     // A case whose correct behavior is a panic cannot live under examples,
     // the equivalence suite requires a clean exit there. It goes into the
-    // differential corpus, which compares panicking runs too.
+    // differential regressions, which compare panicking runs too.
     let destination = if current.native.status == Some(0) {
         root.join("crates/examples/examples")
             .join(format!("{name}.rs"))
     } else {
-        root.join("crates/differential/corpus")
+        root.join("crates/differential/regressions")
             .join(format!("{name}.rs"))
     };
     if destination.exists() {

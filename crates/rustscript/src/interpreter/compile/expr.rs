@@ -333,14 +333,15 @@ impl Compiler<'_> {
                             self.default_let = Some((std::ptr::from_ref(mc), ty));
                         }
                     }
-                    // `let opt: Option<T> = ..` records T, so a later
-                    // `opt.unwrap_or_default()` builds the right default from
-                    // the type the binding was declared with.
+                    // `let opt: Option<T> = ..` and `let v: Vec<T> = ..`
+                    // record the declared type, so a later
+                    // `opt.unwrap_or_default()` or `v.get(i).cloned()
+                    // .unwrap_or_default()` builds the right default from it.
                     if let Pat::Type(t) = &local.pat
                         && let Pat::Ident(ident) = &*t.pat
-                        && let Some(payload) = annotation_payload(&t.ty)
+                        && let Some(declared) = annotation_scalar(&t.ty)
                     {
-                        self.option_locals.insert(ident.ident.to_string(), payload);
+                        self.typed_locals.insert(ident.ident.to_string(), declared);
                     }
                     // A numeric annotation types a bare literal init at
                     // compile time, so the value never exists at the wrong
@@ -1106,19 +1107,26 @@ impl Compiler<'_> {
 
 /// The payload of an `Option<T>` or `Result<T, _>` annotation, for building a
 /// `Default` when the value turns out to be absent.
-pub(super) fn annotation_payload(ty: &syn::Type) -> Option<ScalarTy> {
+pub(super) fn annotation_scalar(ty: &syn::Type) -> Option<ScalarTy> {
     let syn::Type::Path(path) = ty else {
         return None;
     };
     let segment = path.path.segments.last()?;
-    if segment.ident != "Option" && segment.ident != "Result" {
+    let container = segment.ident.to_string();
+    if !matches!(container.as_str(), "Option" | "Result" | "Vec" | "VecDeque") {
         return None;
     }
     let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
         return None;
     };
-    args.args.iter().find_map(|arg| match arg {
+    let inner = args.args.iter().find_map(|arg| match arg {
         syn::GenericArgument::Type(inner) => ScalarTy::lower(inner),
         _ => None,
+    })?;
+    // A `Result<T, E>` answers its defaults through the same `Opt` shape,
+    // since only the payload side ever builds one.
+    Some(match container.as_str() {
+        "Option" | "Result" => ScalarTy::Opt(Box::new(inner)),
+        _ => ScalarTy::List(Box::new(inner)),
     })
 }

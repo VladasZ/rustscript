@@ -167,6 +167,29 @@ impl Interp {
             }
         }
 
+        // Stated return scalars of the script's own functions, one more place
+        // a `Default` payload is written down. A name defined in more than one
+        // module with differing returns answers for neither.
+        let mut seen_returns: HashMap<String, Option<bytecode::ScalarTy>> = HashMap::default();
+        for (_, f) in &pending_fns {
+            let lowered = match &f.sig.output {
+                syn::ReturnType::Type(_, ty) => bytecode::ScalarTy::lower(ty),
+                syn::ReturnType::Default => None,
+            };
+            seen_returns
+                .entry(f.sig.ident.to_string())
+                .and_modify(|known| {
+                    if *known != lowered {
+                        *known = None;
+                    }
+                })
+                .or_insert(lowered);
+        }
+        let fn_returns: HashMap<String, bytecode::ScalarTy> = seen_returns
+            .into_iter()
+            .filter_map(|(name, scalar)| scalar.map(|s| (name, s)))
+            .collect();
+
         let mut functions = Vec::with_capacity(pending_fns.len());
         for (m, f) in &pending_fns {
             let ctx = Ctx {
@@ -175,6 +198,7 @@ impl Interp {
                 file: modules[*m].file.clone(),
                 async_mode,
                 impl_type: None,
+                fn_returns: &fn_returns,
             };
             let mut c = Compiler::new(&ctx);
             functions.push(Rc::new(c.compile_fn(&f.sig, &f.block)?));
@@ -187,6 +211,7 @@ impl Interp {
                 file: modules[*m].file.clone(),
                 async_mode,
                 impl_type: Some(ty),
+                fn_returns: &fn_returns,
             };
             let mut c = Compiler::new(&ctx);
             methods.insert(
@@ -202,6 +227,7 @@ impl Interp {
                 file: modules[*m].file.clone(),
                 async_mode,
                 impl_type: None,
+                fn_returns: &fn_returns,
             };
             let mut c = Compiler::new(&ctx);
             globals.push(GlobalSlot::Todo(Rc::new(c.compile_const(expr)?)));

@@ -379,6 +379,13 @@ impl Interp {
         if let Some(result) = super::methods::int_method(recv, &name.text, args) {
             return result;
         }
+        // f32 methods likewise: computed in real f32 before the image below
+        // widens the receiver to an f64 that prints the wrong shortest form.
+        if let Value::F32(f) = recv
+            && let Some(value) = super::methods::f32_method(*f, &name.text, args)?
+        {
+            return Ok(value);
+        }
         let widened;
         let recv = match recv.bridge_image() {
             Some(image) => {
@@ -387,9 +394,15 @@ impl Interp {
             }
             None => recv,
         };
-        for arg in args.iter_mut() {
-            if let Some(image) = arg.bridge_image() {
-                *arg = image;
+        // Option and Result methods hand arguments through to the caller,
+        // `unwrap_or` for one, so their width tags must survive. Flattening
+        // here made `None::<u8>.unwrap_or(x).count_zeros()` count 64 bits and
+        // saturated a u64 argument past `i64::MAX`.
+        if !matches!(recv, Value::Enum { .. }) {
+            for arg in args.iter_mut() {
+                if let Some(image) = arg.bridge_image() {
+                    *arg = image;
+                }
             }
         }
         if let Value::Range {

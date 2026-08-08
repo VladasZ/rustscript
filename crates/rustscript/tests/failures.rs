@@ -1,4 +1,4 @@
-//! Failure behavior parity. Each corpus case runs twice, compiled by the real
+//! Failure behavior parity. Each case runs twice, compiled by the real
 //! rustc and interpreted, and both runs must agree on the exit code and on the
 //! failure text. This is the failing-path twin of the equivalence suite, which
 //! only covers success output.
@@ -37,7 +37,7 @@ fn run_compiled(path: &PathBuf) -> Output {
         .expect("failed to launch rustc");
     assert!(
         build.status.success(),
-        "corpus case must compile:\n{}",
+        "failure case must compile:\n{}",
         String::from_utf8_lossy(&build.stderr)
     );
     let out = Command::new(&bin).output().expect("failed to run compiled");

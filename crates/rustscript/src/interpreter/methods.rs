@@ -13,7 +13,7 @@ use super::value::{Map, MapKind, RStr, StructData, Value};
 
 use super::builtins::*;
 use super::ops::compare_values;
-use super::shared::{self, Args, CharOut, Num, NumOut, Parsed, StrOut};
+use super::shared::{self, Args, CharOut, F32Out, Num, NumOut, Parsed, StrOut};
 
 /// `map.entry(k).or_insert_with(Vec::new).push(x)` accumulates in place.
 pub(super) fn entry_method(s: &StructData, name: &str, args: &[Value]) -> Result<Value> {
@@ -319,6 +319,7 @@ impl Args for VArgs<'_> {
     fn int(&self, i: usize) -> Option<i64> {
         match self.0.get(i) {
             Some(Value::Int(n)) => Some(*n),
+            Some(tagged @ Value::IntW(..)) => tagged.untag_int(),
             _ => None,
         }
     }
@@ -326,7 +327,9 @@ impl Args for VArgs<'_> {
     fn float(&self, i: usize) -> Option<f64> {
         match self.0.get(i) {
             Some(Value::Float(f)) => Some(*f),
+            Some(Value::F32(f)) => Some(f64::from(*f)),
             Some(Value::Int(n)) => Some(*n as f64),
+            Some(tagged @ Value::IntW(..)) => tagged.untag_int().map(|n| n as f64),
             _ => None,
         }
     }
@@ -831,7 +834,12 @@ fn int_out(out: super::int_methods::IntOut, width: super::numeric::IntWidth) -> 
     use super::int_methods::IntOut;
     match out {
         IntOut::Same(value) => Value::int_of_width(value, width),
-        IntOut::Count(count) => Value::Int(i64::from(count)),
+        // The counting family answers u32 in real Rust, so the tag has to say
+        // so, or `!x.count_ones()` computes in 64 bits and prints -1 where the
+        // compiled binary prints 4294967295.
+        IntOut::Count(count) => {
+            Value::int_of_width(i128::from(count), super::numeric::IntWidth::U32)
+        }
         IntOut::Bool(value) => Value::Bool(value),
         IntOut::Checked(Some(value)) => Value::some(Value::int_of_width(value, width)),
         IntOut::Checked(None) => Value::none(),
@@ -847,6 +855,18 @@ fn int_out(out: super::int_methods::IntOut, width: super::numeric::IntWidth) -> 
                 .collect(),
         ),
     }
+}
+
+/// Materialize an f32 core answer as a fast engine value. Called before
+/// `bridge_image` widens the receiver, so the result keeps the f32 tag.
+pub(super) fn f32_method(recv: f32, name: &str, args: &[Value]) -> Result<Option<Value>> {
+    Ok(
+        shared::f32_core(recv, name, &VArgs(args))?.map(|out| match out {
+            F32Out::Val(value) => Value::F32(value),
+            F32Out::Bool(value) => Value::Bool(value),
+            F32Out::SomeOrdering(ordering) => Value::some(make_ordering(ordering)),
+        }),
+    )
 }
 
 pub(super) fn num_method(recv: &Value, name: &str, args: &[Value]) -> Result<Value> {
