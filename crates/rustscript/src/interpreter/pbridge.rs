@@ -349,10 +349,11 @@ impl PInterp {
             None => recv,
         };
         // Option and Result methods hand arguments through to the caller,
-        // `unwrap_or` for one, so their width tags must survive. Flattening
-        // here made `None::<u8>.unwrap_or(x).count_zeros()` count 64 bits and
-        // saturated a u64 argument past `i64::MAX`.
-        if !matches!(recv, PValue::Enum { .. }) {
+        // `unwrap_or` for one, and `flag.then_some(x)` on a bool does the
+        // same, so their width tags must survive. Flattening here made
+        // `None::<u8>.unwrap_or(x).count_zeros()` count 64 bits and saturated
+        // a u64 argument past `i64::MAX`.
+        if !matches!(recv, PValue::Enum { .. } | PValue::Bool(_)) {
             for arg in args.iter_mut() {
                 if let Some(image) = arg.bridge_image() {
                     *arg = image;

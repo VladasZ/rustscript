@@ -52,4 +52,13 @@ fn main() {
     // `unwrap_or` peels one layer of a nested Option, so the final default
     // is one layer further in. From seed 426738.
     println!("{:?}", vec![Some((diff_opaque_u64(65534) as u16)), None::<u16>].last().cloned().unwrap_or((diff_opaque_u64(65534) as u16).checked_mul((diff_opaque_u64(52843) as u16))).unwrap_or_default());
+
+    // `parse` states its payload in its own turbofish, and `ok` hands it
+    // through. From seed 20673218959.
+    println!("{:?}", (diff_opaque_f32(1.5f32) as f64) / String::from("  ").parse::<f64>().ok().unwrap_or_default());
+
+    // An if-else vec literal states its element type through either branch.
+    // From seed 20673109586.
+    let letter = 'x';
+    println!("{:?}", (if flag { vec![letter, 'a', letter] } else { vec![letter, letter, ' '] }).get((diff_opaque_u64(3) as usize)).cloned().unwrap_or_default());
 }
