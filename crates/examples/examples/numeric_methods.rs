@@ -47,6 +47,20 @@ fn main() {
     println!("five multiple:     {}", 5u32.is_multiple_of(0));
     println!("six multiple:      {}", 6u32.is_multiple_of(3));
 
+    // The f64 method surface, including the sign and class tests.
+    let float: f64 = -2.75;
+    println!("f64 fract:         {:?}", float.fract());
+    println!("f64 signum:        {:?}", float.signum());
+    println!("f64 recip:         {:?}", float.recip());
+    println!("f64 mul add:       {:?}", float.mul_add(2.0, 0.5));
+    println!("f64 is nan:        {}", float.is_nan());
+    println!("f64 nan is nan:    {}", f64::NAN.is_nan());
+    println!("f64 is finite:     {}", float.is_finite());
+    println!("f64 inf finite:    {}", f64::INFINITY.is_finite());
+    println!("f64 is infinite:   {}", f64::NEG_INFINITY.is_infinite());
+    println!("f64 sign negative: {}", float.is_sign_negative());
+    println!("f64 zero negative: {}", (-0.0f64).is_sign_negative());
+
     // Float sums start from -0.0 in std, so the sign of a negative zero
     // survives the fold.
     let zeros = [-0.0f64, -0.0f64];

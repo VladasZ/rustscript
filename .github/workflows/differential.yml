@@ -57,8 +57,10 @@ jobs:
             --seed "$seed" \
             --cases "${cases:-20000}" \
             --timeout-ms 10000
-      - name: Upload failure artifacts
-        if: failure()
+      # Always, not only on failure. A green run still saves one case per
+      # distinct gap reason, and those are the input for closing the gaps.
+      - name: Upload failure and gap artifacts
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: differential-failures-${{ matrix.os }}

@@ -25,7 +25,16 @@ fn main() {
     println!("trunc:      {:?}", (-2.7f32).trunc());
 
     println!("sign pos:   {:?}", (-0.0f32).is_sign_positive());
+    println!("sign neg:   {:?}", (-0.0f32).is_sign_negative());
     println!("cmp:        {:?}", 1.5f32.partial_cmp(&2.5f32));
+
+    println!("fract:      {:?}", (-2.75f32).fract());
+    println!("signum:     {:?}", (-2.75f32).signum());
+    println!("recip:      {:?}", 4.0f32.recip());
+    println!("mul add:    {:?}", 1.3f32.mul_add(2.0f32, 0.5f32));
+    println!("is nan:     {:?}", f32::NAN.is_nan());
+    println!("is finite:  {:?}", f32::INFINITY.is_finite());
+    println!("infinite:   {:?}", f32::NEG_INFINITY.is_infinite());
 
     // Chained results stay f32 too.
     let tiny: f32 = f32::MIN_POSITIVE;

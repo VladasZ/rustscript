@@ -935,6 +935,9 @@ pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
         // default. For another type use unwrap_or with an explicit value.
         "unwrap_or_default" => inner.unwrap_or_else(|| default_of(method.scalar.as_ref())),
         "as_ref" | "as_deref" | "take" | "as_mut" => recv.clone(),
+        // Iterating an Option yields its payload or nothing, as a vec so the
+        // chain's `collect`, `rev`, and friends compose on it.
+        "into_iter" | "iter" => Value::vec(inner.into_iter().collect()),
         // A json null parses to None here, so a serde lookup into a value that
         // turned out to be null is None rather than an unknown method error.
         "get" => Value::none(),

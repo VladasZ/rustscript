@@ -1162,6 +1162,15 @@ fn enum_method(recv: &PValue, m: &str, args: &mut [PValue]) -> Result<PValue> {
         // values, so handing the same value back is equivalent, and it is what
         // the fast engine does too.
         "as_ref" | "as_deref" | "as_mut" | "take" | "cloned" | "copied" => recv.clone(),
+        // Iterating an Option or Result yields the payload or nothing, as a
+        // vec so the chain's `collect`, `rev`, and friends compose on it.
+        "into_iter" | "iter" => {
+            if matches!(&**variant, "Some" | "Ok") {
+                PValue::vec(vec![payload()])
+            } else {
+                PValue::vec(Vec::new())
+            }
+        }
         // `Option::context` and `Result::context` produce a Result, so a
         // following `?` has something to unwrap.
         "context" | "with_context" => {
