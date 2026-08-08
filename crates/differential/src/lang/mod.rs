@@ -15,6 +15,7 @@
 
 pub mod catalog;
 pub mod expr;
+pub mod pipe;
 pub mod stmt;
 pub mod synth;
 pub mod ty;
@@ -25,6 +26,9 @@ pub use expr::Expr;
 pub use stmt::{Block, Stmt};
 pub use ty::Ty;
 
-pub fn generate_block(rng: &mut StdRng) -> Block {
-    synth::Generator::new(rng).block()
+/// `tag` distinguishes the blocks of one program. Bindings may shadow across
+/// blocks, but generated helper functions are top-level items, so their names
+/// carry the tag to stay unique.
+pub fn generate_block(rng: &mut StdRng, tag: usize) -> Block {
+    synth::Generator::new(rng, tag).block()
 }

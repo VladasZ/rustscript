@@ -253,8 +253,9 @@ and compares native and interpreted runs, including panics. Native is built
 with overflow checks on, the debug default.
 
 Its core is a type directed generator over the real type universe: all nine
-integer widths, both floats, `bool`, `char`, `String`, `Vec<T>`, and
-`Option<T>`. Generation is driven by types rather than by hand written cases,
+integer widths, both floats, `bool`, `char`, `String`, `Vec<T>`, `Option<T>`,
+`HashMap<K, V>`, and `HashSet<E>`.
+Generation is driven by types rather than by hand written cases,
 so asking for a `u8` offers every literal, operator, cast, branch and bridged
 method that can produce one, at any depth. Bridged methods live in one typed
 catalog where a row states its receiver class, argument patterns and result
@@ -264,6 +265,18 @@ because a dimension the generator cannot name is a bug it cannot find, and the
 older per-method case lists could only name `i64`, `bool` and `String`, which
 is why a width bug in `saturating_add` survived every campaign that ran before
 them.
+
+Collections come with iterator pipelines: a source, adapters like `map`,
+`filter`, `rev`, `take`, `skip`, and `enumerate`, and a terminal such as
+`sum`, `fold`, `any`, `min`, or `collect`. A `collect` states its target at
+one of the three real annotation sites, a turbofish, the `let` annotation, or
+the return type of a generated helper function, which is how target-inference
+bugs get found. Map and set state mutates in place too, `insert`, `remove`,
+the entry API, and accumulation loops. Real Rust randomizes map iteration
+order per process, so generated programs observe maps and sets only through
+sorted or order-neutral forms, and the runner executes every native binary
+twice, discarding a case whose two reference runs disagree instead of blaming
+the interpreter.
 
 Generated cases also cover ownership and borrowing, closures, structs, enums,
 patterns, iterators, loops, `Result`, floats with their special values,

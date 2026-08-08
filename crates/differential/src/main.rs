@@ -169,6 +169,9 @@ fn run_campaign(args: &[String]) -> Result<ExitCode> {
                                 last_progress = Instant::now();
                             }
                         }
+                        Classification::NativeNondeterministic => {
+                            report.record_nondeterministic(case_seed);
+                        }
                         Classification::InterpreterUnsupported => {
                             let key = result.signature();
                             let path = if report.should_save_gap(&key) {
@@ -241,6 +244,9 @@ struct CampaignReport {
     matched: usize,
     gaps: BTreeMap<String, BugGroup>,
     bugs: BTreeMap<String, BugGroup>,
+    /// Cases whose two native runs disagreed. Each one is a generator grammar
+    /// hole, so they are counted with seeds rather than silently dropped.
+    nondeterministic: BugGroup,
 }
 
 #[derive(Default)]
@@ -285,6 +291,13 @@ impl CampaignReport {
         }
     }
 
+    fn record_nondeterministic(&mut self, seed: u64) {
+        self.nondeterministic.count += 1;
+        if self.nondeterministic.seeds.len() < MAX_SEEDS_PER_GROUP {
+            self.nondeterministic.seeds.push(seed);
+        }
+    }
+
     fn print(&self, elapsed: Duration) {
         let findings: usize = self.bugs.values().map(|group| group.count).sum();
         let gaps: usize = self.gaps.values().map(|group| group.count).sum();
@@ -296,6 +309,19 @@ impl CampaignReport {
             gaps,
             elapsed.as_secs_f64()
         );
+        if self.nondeterministic.count > 0 {
+            let seeds = self
+                .nondeterministic
+                .seeds
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!(
+                "discarded {} nondeterministic case(s), a generator grammar hole, seeds {seeds}",
+                self.nondeterministic.count
+            );
+        }
         if !self.bugs.is_empty() {
             println!("\nfindings (real divergences):");
             for (kind, group) in &self.bugs {

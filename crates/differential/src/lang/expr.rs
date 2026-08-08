@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::lang::catalog::{METHODS, Method};
+use crate::lang::pipe::Pipe;
 use crate::lang::ty::Ty;
 use crate::numeric::{FloatWidth, IntWidth};
 
@@ -138,6 +139,25 @@ pub enum Expr {
         elem: Ty,
         value: Option<Box<Expr>>,
     },
+    /// A map built entry by entry through `insert`, the form real scripts
+    /// write. Empty renders as a turbofished `new`.
+    MapLit {
+        key: Ty,
+        value: Ty,
+        items: Vec<(Expr, Expr)>,
+    },
+    SetLit {
+        elem: Ty,
+        items: Vec<Expr>,
+    },
+    /// An iterator pipeline, the collect-target shapes among it.
+    Pipe(Box<Pipe>),
+    /// A call of a generated zero-argument helper function, the vehicle for a
+    /// bare `collect` whose target only the helper's return type states.
+    FnCall {
+        name: String,
+        ty: Ty,
+    },
     Var {
         name: String,
         ty: Ty,
@@ -185,12 +205,16 @@ impl Expr {
             Self::StrLit(_) => Ty::Str,
             Self::VecLit { elem, .. } => Ty::vec_of(elem.clone()),
             Self::OptLit { elem, .. } => Ty::opt_of(elem.clone()),
+            Self::MapLit { key, value, .. } => Ty::map_of(key.clone(), value.clone()),
+            Self::SetLit { elem, .. } => Ty::set_of(elem.clone()),
+            Self::Pipe(pipe) => pipe.ty(),
             Self::Cast { to, .. } => to.clone(),
             Self::Var { ty, .. }
             | Self::Bin { ty, .. }
             | Self::Unary { ty, .. }
             | Self::Call { ty, .. }
-            | Self::If { ty, .. } => ty.clone(),
+            | Self::If { ty, .. }
+            | Self::FnCall { ty, .. } => ty.clone(),
         }
     }
 
@@ -225,6 +249,43 @@ impl Expr {
                 Some(inner) => format!("Some({})", inner.render()),
                 None => format!("None::<{}>", elem.rust()),
             },
+            Self::MapLit { key, value, items } if items.is_empty() => {
+                format!("HashMap::<{}, {}>::new()", key.rust(), value.rust())
+            }
+            Self::MapLit { key, value, items } => {
+                let inserts: Vec<String> = items
+                    .iter()
+                    .map(|(entry_key, entry_value)| {
+                        format!(
+                            "diff_map.insert({}, {});",
+                            entry_key.render(),
+                            entry_value.render()
+                        )
+                    })
+                    .collect();
+                format!(
+                    "({{ let mut diff_map: HashMap<{}, {}> = HashMap::new(); {} diff_map }})",
+                    key.rust(),
+                    value.rust(),
+                    inserts.join(" ")
+                )
+            }
+            Self::SetLit { elem, items } if items.is_empty() => {
+                format!("HashSet::<{}>::new()", elem.rust())
+            }
+            Self::SetLit { elem, items } => {
+                let inserts: Vec<String> = items
+                    .iter()
+                    .map(|item| format!("diff_set.insert({});", item.render()))
+                    .collect();
+                format!(
+                    "({{ let mut diff_set: HashSet<{}> = HashSet::new(); {} diff_set }})",
+                    elem.rust(),
+                    inserts.join(" ")
+                )
+            }
+            Self::Pipe(pipe) => pipe.render(),
+            Self::FnCall { name, .. } => format!("{name}()"),
             // A non-copy binding is always read through a clone, which is what
             // keeps generated programs free of move and borrow errors without
             // the generator having to track liveness.
@@ -272,6 +333,12 @@ impl Expr {
             | Self::StrLit(_) => false,
             Self::VecLit { items, .. } => items.iter().any(|item| item.uses_any(names)),
             Self::OptLit { value, .. } => value.as_ref().is_some_and(|inner| inner.uses_any(names)),
+            Self::MapLit { items, .. } => items
+                .iter()
+                .any(|(key, value)| key.uses_any(names) || value.uses_any(names)),
+            Self::SetLit { items, .. } => items.iter().any(|item| item.uses_any(names)),
+            Self::Pipe(pipe) => pipe.uses_any(names),
+            Self::FnCall { .. } => false,
             Self::Bin { left, right, .. } => left.uses_any(names) || right.uses_any(names),
             Self::Unary { value, .. } | Self::Cast { value, .. } => value.uses_any(names),
             Self::Call { recv, args, .. } => {
@@ -301,9 +368,15 @@ impl Expr {
             Self::OptLit { value, .. } => {
                 value.as_ref().is_some_and(|inner| inner.has_fallible_op())
             }
+            Self::MapLit { items, .. } => items
+                .iter()
+                .any(|(key, value)| key.has_fallible_op() || value.has_fallible_op()),
+            Self::SetLit { items, .. } => items.iter().any(Expr::has_fallible_op),
             // Every catalog call reaches std code the const propagator can look
             // through, `pow` and `sum` among them, so a call counts as fallible.
-            Self::Call { .. } => true,
+            // A pipe carries `sum` and `fold`, a helper body is out of sight,
+            // both count the same way.
+            Self::Call { .. } | Self::Pipe(_) | Self::FnCall { .. } => true,
             Self::If {
                 condition,
                 then_expr,
@@ -326,6 +399,12 @@ impl Expr {
             Self::OptLit {
                 value: Some(inner), ..
             } => inner.make_opaque(),
+            Self::MapLit { items, .. } => items.iter_mut().for_each(|(key, value)| {
+                key.make_opaque();
+                value.make_opaque();
+            }),
+            Self::SetLit { items, .. } => items.iter_mut().for_each(Expr::make_opaque),
+            Self::Pipe(pipe) => pipe.make_opaque(),
             Self::Bin { left, right, .. } => {
                 left.make_opaque();
                 right.make_opaque();
@@ -377,6 +456,12 @@ impl Expr {
             Self::OptLit {
                 value: Some(inner), ..
             } => inner.helpers(out),
+            Self::MapLit { items, .. } => items.iter().for_each(|(key, value)| {
+                key.helpers(out);
+                value.helpers(out);
+            }),
+            Self::SetLit { items, .. } => items.iter().for_each(|item| item.helpers(out)),
+            Self::Pipe(pipe) => pipe.helpers(out),
             Self::Bin { left, right, .. } => {
                 left.helpers(out);
                 right.helpers(out);
@@ -443,8 +528,27 @@ impl Expr {
             Self::OptLit {
                 value: Some(inner), ..
             } => inner.features(out),
+            Self::MapLit { items, .. } => items.iter().for_each(|(key, value)| {
+                key.features(out);
+                value.features(out);
+            }),
+            Self::SetLit { items, .. } => items.iter().for_each(|item| item.features(out)),
+            Self::Pipe(pipe) => pipe.features(out),
+            Self::FnCall { .. } => {
+                out.insert("lang-fn-call");
+            }
             _ => {}
         }
+    }
+
+    /// Whether the tree contains a call of the helper function `name`.
+    pub fn calls_fn(&self, name: &str) -> bool {
+        if let Self::FnCall { name: called, .. } = self
+            && called == name
+        {
+            return true;
+        }
+        self.children().iter().any(|child| child.calls_fn(name))
     }
 
     /// Direct children, so shrinking can hoist a same-typed subtree.
@@ -465,6 +569,11 @@ impl Expr {
             } => vec![condition, then_expr, else_expr],
             Self::VecLit { items, .. } => items.iter().collect(),
             Self::OptLit { value, .. } => value.iter().map(|inner| &**inner).collect(),
+            Self::MapLit { items, .. } => {
+                items.iter().flat_map(|(key, value)| [key, value]).collect()
+            }
+            Self::SetLit { items, .. } => items.iter().collect(),
+            Self::Pipe(pipe) => pipe.exprs(),
             _ => Vec::new(),
         }
     }
@@ -490,6 +599,27 @@ impl Expr {
                 items.pop();
             }
             candidates.push(shorter);
+        }
+        if let Self::MapLit { items, .. } = self
+            && !items.is_empty()
+        {
+            let mut shorter = self.clone();
+            if let Self::MapLit { items, .. } = &mut shorter {
+                items.pop();
+            }
+            candidates.push(shorter);
+        }
+        if let Self::SetLit { items, .. } = self
+            && !items.is_empty()
+        {
+            let mut shorter = self.clone();
+            if let Self::SetLit { items, .. } = &mut shorter {
+                items.pop();
+            }
+            candidates.push(shorter);
+        }
+        if let Self::Pipe(pipe) = self {
+            candidates.extend(pipe.shrinks().into_iter().map(|p| Self::Pipe(Box::new(p))));
         }
         candidates
     }
@@ -539,14 +669,35 @@ fn render_call(method: &str, recv: &Expr, args: &[Expr], fish: Option<&Ty>) -> S
         return recv.render();
     };
     let rendered_args: Vec<String> = args.iter().map(Expr::render).collect();
-    let elem = recv.ty().elem().map(Ty::rust).unwrap_or_default();
+    let recv_ty = recv.ty();
+    let elem = recv_ty.elem().map(Ty::rust).unwrap_or_default();
+    let (key, val) = match recv_ty.key_val() {
+        Some((key, value)) => (key.rust(), value.rust()),
+        None => (String::new(), String::new()),
+    };
     let fish = fish.map(Ty::rust).unwrap_or_default();
-    fill(entry.template, &recv.render(), &rendered_args, &elem, &fish)
+    fill(
+        entry.template,
+        &recv.render(),
+        &rendered_args,
+        &elem,
+        &fish,
+        &key,
+        &val,
+    )
 }
 
 /// Expand a catalog template. `{{` and `}}` escape a literal brace, the same
 /// way `format!` does, so a template can carry a block expression.
-fn fill(template: &str, recv: &str, args: &[String], elem: &str, fish: &str) -> String {
+fn fill(
+    template: &str,
+    recv: &str,
+    args: &[String],
+    elem: &str,
+    fish: &str,
+    key_ty: &str,
+    val: &str,
+) -> String {
     let mut out = String::with_capacity(template.len() + recv.len());
     let mut chars = template.chars().peekable();
     while let Some(c) = chars.next() {
@@ -577,6 +728,8 @@ fn fill(template: &str, recv: &str, args: &[String], elem: &str, fish: &str) -> 
             "r" => out.push_str(recv),
             "E" => out.push_str(elem),
             "T" => out.push_str(fish),
+            "K" => out.push_str(key_ty),
+            "V" => out.push_str(val),
             index => match index.parse::<usize>() {
                 Ok(index) if index < args.len() => out.push_str(&args[index]),
                 _ => {}
@@ -612,6 +765,15 @@ pub fn minimal(ty: &Ty) -> Expr {
         Ty::Opt(elem) => Expr::OptLit {
             elem: (**elem).clone(),
             value: None,
+        },
+        Ty::Map(key, value) => Expr::MapLit {
+            key: (**key).clone(),
+            value: (**value).clone(),
+            items: Vec::new(),
+        },
+        Ty::Set(elem) => Expr::SetLit {
+            elem: (**elem).clone(),
+            items: Vec::new(),
         },
     }
 }

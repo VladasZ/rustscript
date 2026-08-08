@@ -23,6 +23,12 @@ pub enum Ty {
     Str,
     Vec(Box<Ty>),
     Opt(Box<Ty>),
+    /// `HashMap<K, V>`. Iteration order is random per process in real Rust,
+    /// so a map value is only ever observed through sorted or order-neutral
+    /// forms, never printed raw.
+    Map(Box<Ty>, Box<Ty>),
+    /// `HashSet<E>`, under the same observation rule as `Map`.
+    Set(Box<Ty>),
 }
 
 impl Ty {
@@ -35,6 +41,8 @@ impl Ty {
             Self::Str => "String".to_string(),
             Self::Vec(inner) => format!("Vec<{}>", inner.rust()),
             Self::Opt(inner) => format!("Option<{}>", inner.rust()),
+            Self::Map(key, value) => format!("HashMap<{}, {}>", key.rust(), value.rust()),
+            Self::Set(elem) => format!("HashSet<{}>", elem.rust()),
         }
     }
 
@@ -44,7 +52,7 @@ impl Ty {
     pub fn is_copy(&self) -> bool {
         match self {
             Self::Int(_) | Self::Float(_) | Self::Bool | Self::Char => true,
-            Self::Str | Self::Vec(_) => false,
+            Self::Str | Self::Vec(_) | Self::Map(..) | Self::Set(_) => false,
             Self::Opt(inner) => inner.is_copy(),
         }
     }
@@ -57,17 +65,26 @@ impl Ty {
         matches!(self, Self::Int(_) | Self::Float(_))
     }
 
-    /// The element type of a `Vec<E>` or `Option<E>`.
+    /// The element type of a `Vec<E>`, `Option<E>`, or `HashSet<E>`.
     pub fn elem(&self) -> Option<&Ty> {
         match self {
-            Self::Vec(inner) | Self::Opt(inner) => Some(inner),
+            Self::Vec(inner) | Self::Opt(inner) | Self::Set(inner) => Some(inner),
+            _ => None,
+        }
+    }
+
+    /// The key and value types of a `HashMap<K, V>`.
+    pub fn key_val(&self) -> Option<(&Ty, &Ty)> {
+        match self {
+            Self::Map(key, value) => Some((key, value)),
             _ => None,
         }
     }
 
     pub fn depth(&self) -> usize {
         match self {
-            Self::Vec(inner) | Self::Opt(inner) => 1 + inner.depth(),
+            Self::Vec(inner) | Self::Opt(inner) | Self::Set(inner) => 1 + inner.depth(),
+            Self::Map(key, value) => 1 + key.depth().max(value.depth()),
             _ => 0,
         }
     }
@@ -91,6 +108,8 @@ impl Ty {
             Self::Str => "lang-ty-string",
             Self::Vec(_) => "lang-ty-vec",
             Self::Opt(_) => "lang-ty-option",
+            Self::Map(..) => "lang-ty-map",
+            Self::Set(_) => "lang-ty-set",
         }
     }
 
@@ -106,8 +125,33 @@ impl Ty {
         Self::Opt(Box::new(inner))
     }
 
+    pub fn map_of(key: Ty, value: Ty) -> Self {
+        Self::Map(Box::new(key), Box::new(value))
+    }
+
+    pub fn set_of(elem: Ty) -> Self {
+        Self::Set(Box::new(elem))
+    }
+
     pub const USIZE: Ty = Ty::Int(IntWidth::USize);
     pub const U32: Ty = Ty::Int(IntWidth::U32);
+    pub const I64: Ty = Ty::Int(IntWidth::I64);
+}
+
+/// The map shapes generation draws from. Wider than one entry so the key and
+/// the value axis both vary, narrow enough that every combo has real script
+/// precedent: counting by name, an integer index, and grouping into buckets.
+pub fn map_combos() -> [(Ty, Ty); 3] {
+    [
+        (Ty::Str, Ty::I64),
+        (Ty::I64, Ty::I64),
+        (Ty::Str, Ty::vec_of(Ty::I64)),
+    ]
+}
+
+/// The set shapes generation draws from.
+pub fn set_elems() -> [Ty; 1] {
+    [Ty::I64]
 }
 
 /// Every scalar type the generator builds bindings from, in a fixed order so

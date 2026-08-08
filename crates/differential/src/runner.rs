@@ -31,15 +31,24 @@ pub enum Classification {
     InterpreterTimeout,
     NativeCrash,
     NativeTimeout,
+    /// Two runs of the same native binary disagreed with each other, so the
+    /// case has no stable reference to compare against. A grammar hole let
+    /// nondeterminism through; the case is discarded and counted, never
+    /// reported as an interpreter bug.
+    NativeNondeterministic,
     RustcRejected,
     RustcTimeout,
 }
 
 impl Classification {
-    /// A real divergence worth saving and fixing. `Match` is agreement and
-    /// `InterpreterUnsupported` is a known gap, so neither is hard.
+    /// A real divergence worth saving and fixing. `Match` is agreement,
+    /// `InterpreterUnsupported` is a known gap, and a nondeterministic case
+    /// indicts the generator rather than the interpreter, so none is hard.
     pub fn is_hard_failure(&self) -> bool {
-        !matches!(self, Self::Match | Self::InterpreterUnsupported)
+        !matches!(
+            self,
+            Self::Match | Self::InterpreterUnsupported | Self::NativeNondeterministic
+        )
     }
 }
 
@@ -251,6 +260,16 @@ impl Runner {
             Command::new(&binary_path).current_dir(directory.path()),
             self.native_timeout,
         )?;
+        // The reference runs twice. If real Rust disagrees with itself, some
+        // nondeterminism slipped past the grammar and the case proves nothing
+        // about the interpreter.
+        let rerun = run_command(
+            Command::new(&binary_path).current_dir(directory.path()),
+            self.native_timeout,
+        )?;
+        if !same_native_run(&native, &rerun) {
+            return Ok(incomplete(Classification::NativeNondeterministic, compiler));
+        }
         let interpreted = self.run_interpreted(&source_path, directory.path())?;
         let classification = classify(&native, &interpreted);
         Ok(RunResult {
@@ -303,6 +322,18 @@ impl Runner {
                         .current_dir(directory.path()),
                     self.native_timeout,
                 )?;
+                let rerun = run_command(
+                    Command::new(&binary_path)
+                        .env("RUSTSCRIPT_DIFFERENTIAL_CASE", index.to_string())
+                        .current_dir(directory.path()),
+                    self.native_timeout,
+                )?;
+                if !same_native_run(&native, &rerun) {
+                    return Ok(incomplete(
+                        Classification::NativeNondeterministic,
+                        compiler.clone(),
+                    ));
+                }
                 let interpreted = self.run_interpreted(source_path, directory.path())?;
                 let classification = classify(&native, &interpreted);
                 Ok(RunResult {
@@ -533,6 +564,16 @@ fn is_unsupported(stderr: &str) -> bool {
 /// note. The compiled binary prints `panicked at FILE:LINE:COL:` and a
 /// `note: run with RUST_BACKTRACE` line the interpreter never emits, so those
 /// are dropped before the payloads are compared.
+/// Whether two runs of the same native binary count as the same outcome. The
+/// panic header carries the thread id, which changes per process, so stderr
+/// is compared through `panic_payload` rather than byte for byte.
+fn same_native_run(first: &ProcessOutput, second: &ProcessOutput) -> bool {
+    first.status == second.status
+        && first.timed_out == second.timed_out
+        && first.stdout == second.stdout
+        && panic_payload(&first.stderr) == panic_payload(&second.stderr)
+}
+
 fn panic_payload(stderr: &str) -> String {
     let mut lines = stderr.lines();
     for line in lines.by_ref() {

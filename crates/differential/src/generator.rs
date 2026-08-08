@@ -96,7 +96,7 @@ pub(crate) fn generate_base(seed: u64) -> Program {
 fn generate_blocks(rng: &mut StdRng) -> Vec<crate::lang::Block> {
     let count = rng.random_range(1..=2);
     (0..count)
-        .map(|_| crate::lang::generate_block(rng))
+        .map(|tag| crate::lang::generate_block(rng, tag))
         .collect()
 }
 
