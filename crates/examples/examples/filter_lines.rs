@@ -5,7 +5,7 @@ fn main() {
     let errors: Vec<String> = log
         .lines()
         .filter(|line| line.contains("ERROR"))
-        .map(|line| line.to_string())
+        .map(std::string::ToString::to_string)
         .collect();
     println!("{} errors found", errors.len());
     for e in errors {

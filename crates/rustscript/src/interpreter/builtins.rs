@@ -8,66 +8,77 @@ use super::bytecode::{BuiltinId, Chunk, MethodName, Op};
 use super::Interp;
 use super::value::{ClosureData, StructShape, Value};
 
-use super::crates_bridge::*;
-use super::http::*;
-use super::jwt_bridge::*;
-use super::methods::*;
-use super::process::*;
-use super::regex_bridge::*;
+use super::crates_bridge::{base64_engine, base64_method, datetime_method, rng_method};
+use super::http::http_method;
+use super::jwt_bridge::jwt_algorithm;
+use super::methods::{
+    entry_method, generic_method, map_method, num_method, opt_method, res_method, str_method,
+    vec_method,
+};
+use super::process::{child_method, command_method, exitstatus_method};
+use super::regex_bridge::regex_native_method;
 use super::service_bridge::{manager_method, service_const, service_method, service_variant};
-use super::std_bridge::*;
+use super::std_bridge::{
+    assoc_fn, dir_entry_method, duration_from_value, duration_method, file_type_method,
+    metadata_method, native_call, one, os_string_method, path_method, std_stream_method,
+};
 use super::winreg_bridge::{winreg_const, winreg_method};
 use super::wmi_bridge::wmi_method;
 
 impl Interp {
     /// Resolve a path used as a value: `None`, a unit enum variant, a constant,
     /// or a bare constructor wrapped as a closure.
+    /// A single-segment path used as a value: `None`, a constant, a unit
+    /// struct or variant, a `use`d constant, or a bare function name.
+    fn eval_bare_value(&self, name: &String) -> Result<Value> {
+        if name == "None" {
+            return Ok(Value::none());
+        }
+        // A function-local `use std::time::UNIX_EPOCH` does not register in the uses map, so the
+        // bare name resolves here, the same way the other std constants below do.
+        if name == "UNIX_EPOCH" {
+            return Ok(super::native::Native::SystemTime(std::time::UNIX_EPOCH).wrap());
+        }
+        if let Some(v) = base64_engine(name) {
+            return Ok(v);
+        }
+        if let Some(v) = winreg_const(name) {
+            return Ok(v);
+        }
+        if let Some(v) = service_const(name) {
+            return Ok(v);
+        }
+        if let Some(v) = self.unit_variant(None, name) {
+            return Ok(v);
+        }
+        // A unit struct used as a value, `struct Marker;` then `Marker`.
+        if let Some(def) = self.structs().get(name.as_str())
+            && matches!(def.ast.fields, syn::Fields::Unit)
+        {
+            return Ok(Value::structure(
+                StructShape::new(name.as_str(), Vec::new()),
+                Vec::new(),
+            ));
+        }
+        // A `use`d constant like `use std::env::consts::OS` then bare `OS`
+        // resolves through its full path.
+        if let Some(full) = self.uses.get(name.as_str())
+            && full.len() > 1
+        {
+            return self.eval_path_value(full);
+        }
+        // A bare function name used as a value, `.map(strip_html)`, wrapped
+        // in a closure that forwards its arguments to the call. The
+        // path-qualified forms like `str::trim` resolve below already.
+        if let Some(chunk) = self.user_function(name) {
+            return Ok(path_call_closure(vec![name.clone()], chunk.num_params));
+        }
+        bail!("unknown variable `{name}`");
+    }
+
     pub(super) fn eval_path_value(&self, segs: &[String]) -> Result<Value> {
-        if segs.len() == 1 {
-            let name = &segs[0];
-            if name == "None" {
-                return Ok(Value::none());
-            }
-            // A function-local `use std::time::UNIX_EPOCH` does not register in the uses map, so the
-            // bare name resolves here, the same way the other std constants below do.
-            if name == "UNIX_EPOCH" {
-                return Ok(super::native::Native::SystemTime(std::time::UNIX_EPOCH).wrap());
-            }
-            if let Some(v) = base64_engine(name) {
-                return Ok(v);
-            }
-            if let Some(v) = winreg_const(name) {
-                return Ok(v);
-            }
-            if let Some(v) = service_const(name) {
-                return Ok(v);
-            }
-            if let Some(v) = self.unit_variant(None, name) {
-                return Ok(v);
-            }
-            // A unit struct used as a value, `struct Marker;` then `Marker`.
-            if let Some(def) = self.structs().get(name.as_str())
-                && matches!(def.ast.fields, syn::Fields::Unit)
-            {
-                return Ok(Value::structure(
-                    StructShape::new(name.as_str(), Vec::new()),
-                    Vec::new(),
-                ));
-            }
-            // A `use`d constant like `use std::env::consts::OS` then bare `OS`
-            // resolves through its full path.
-            if let Some(full) = self.uses.get(name.as_str())
-                && full.len() > 1
-            {
-                return self.eval_path_value(full);
-            }
-            // A bare function name used as a value, `.map(strip_html)`, wrapped
-            // in a closure that forwards its arguments to the call. The
-            // path-qualified forms like `str::trim` resolve below already.
-            if let Some(chunk) = self.user_function(name) {
-                return Ok(path_call_closure(vec![name.clone()], chunk.num_params));
-            }
-            bail!("unknown variable `{name}`");
+        if let [name] = segs {
+            return self.eval_bare_value(name);
         }
 
         let last = &segs[segs.len() - 1];
@@ -110,7 +121,7 @@ impl Interp {
             return Ok(v);
         }
         if ty == "Ordering" {
-            use std::cmp::Ordering::*;
+            use std::cmp::Ordering::{Equal, Greater, Less};
             return Ok(make_ordering(match last.as_str() {
                 "Less" => Less,
                 "Greater" => Greater,
@@ -200,7 +211,7 @@ impl Interp {
                 return self.run_chunk(&chunk, &args, &[]);
             }
             if self.structs().contains_key(name.as_str()) {
-                return self.make_tuple_struct(name, args);
+                return Ok(Self::make_tuple_struct(name, args));
             }
             if let Some(v) = self.make_tuple_variant(None, name, &args) {
                 return v;
@@ -308,9 +319,9 @@ impl Interp {
         }
     }
 
-    fn make_tuple_struct(&self, name: &str, args: Vec<Value>) -> Result<Value> {
+    fn make_tuple_struct(name: &str, args: Vec<Value>) -> Value {
         let fields = (0..args.len()).map(|i| i.to_string().into()).collect();
-        Ok(Value::structure(StructShape::new(name, fields), args))
+        Value::structure(StructShape::new(name, fields), args)
     }
 
     fn make_tuple_variant(
@@ -406,42 +417,13 @@ impl Interp {
                 }
             }
         }
-        if let Value::Range {
-            start,
-            end,
-            inclusive,
-        } = recv
-        {
-            match name.id {
-                BuiltinId::Clone => return Ok(recv.clone()),
-                BuiltinId::Contains => {
-                    let Some(Value::Int(value)) = args.first() else {
-                        bail!("range contains needs an integer");
-                    };
-                    return Ok(Value::Bool(if *inclusive {
-                        *value >= *start && *value <= *end
-                    } else {
-                        *value >= *start && *value < *end
-                    }));
-                }
-                BuiltinId::Len | BuiltinId::Count => {
-                    let extra = i64::from(*inclusive && end >= start);
-                    return Ok(Value::Int(end.saturating_sub(*start) + extra));
-                }
-                BuiltinId::IsEmpty => {
-                    return Ok(Value::Bool(if *inclusive {
-                        start > end
-                    } else {
-                        start >= end
-                    }));
-                }
-                _ => {}
-            }
+        if let Some(v) = range_builtin(recv, name, args)? {
+            return Ok(v);
         }
         // A method on a range acts on its iterator value.
         let expanded;
         let recv = if matches!(recv, Value::Range { .. }) {
-            expanded = self.iterator_value(recv.clone())?;
+            expanded = Self::iterator_value(recv.clone())?;
             &expanded
         } else {
             recv
@@ -519,7 +501,7 @@ pub(super) fn option_inner(v: &Value) -> Option<Value> {
 /// like `Vec::new` and 1 for a method reference or one-arg constructor. The
 /// parallel engine converts this same chunk, so both engines share one body.
 pub(super) fn path_call_chunk(segs: Vec<String>, num_params: usize) -> Chunk {
-    let dst = num_params as u16;
+    let dst = u16::try_from(num_params).expect("parameter count fits u16");
     let mut chunk = Chunk::empty("<pathfn>");
     chunk.num_params = num_params;
     chunk.num_regs = num_params + 1;
@@ -529,7 +511,7 @@ pub(super) fn path_call_chunk(segs: Vec<String>, num_params: usize) -> Chunk {
         dst,
         path: 0,
         base: 0,
-        argc: num_params as u16,
+        argc: dst,
     });
     chunk.code.push(Op::Ret { src: dst });
     chunk
@@ -577,31 +559,71 @@ pub(super) fn int_limit(ty: &str, name: &str) -> Option<Value> {
     }
     // u128 and i128 carry no runtime width and keep their old i64 clamp.
     let width = match ty {
-        "i128" => Some((i64::MIN as i128, i64::MAX as i128)),
-        "u128" => Some((0, i64::MAX as i128)),
+        "i128" => Some((i128::from(i64::MIN), i128::from(i64::MAX))),
+        "u128" => Some((0, i128::from(i64::MAX))),
         _ => None,
     };
-    let (min, max) = match width {
-        Some(clamped) => clamped,
-        None => {
-            let w = super::numeric::IntWidth::parse(ty)?;
-            let value = match name {
-                "MAX" => w.max(),
-                "MIN" => w.min(),
-                _ => return None,
-            };
-            return Some(Value::int_of_width(value, w));
-        }
+    let Some((min, max)) = width else {
+        let w = super::numeric::IntWidth::parse(ty)?;
+        let value = match name {
+            "MAX" => w.max(),
+            "MIN" => w.min(),
+            _ => return None,
+        };
+        return Some(Value::int_of_width(value, w));
     };
     match name {
-        "MAX" => Some(Value::Int(max as i64)),
-        "MIN" => Some(Value::Int(min as i64)),
+        "MAX" => Some(Value::Int(
+            i64::try_from(max).expect("clamped to i64 range"),
+        )),
+        "MIN" => Some(Value::Int(
+            i64::try_from(min).expect("clamped to i64 range"),
+        )),
         _ => None,
     }
 }
 
+/// The builtin methods a range answers directly, before it expands to its
+/// iterator value.
+fn range_builtin(recv: &Value, name: &MethodName, args: &[Value]) -> Result<Option<Value>> {
+    let Value::Range {
+        start,
+        end,
+        inclusive,
+    } = recv
+    else {
+        return Ok(None);
+    };
+    match name.id {
+        BuiltinId::Clone => return Ok(Some(recv.clone())),
+        BuiltinId::Contains => {
+            let Some(Value::Int(value)) = args.first() else {
+                bail!("range contains needs an integer");
+            };
+            return Ok(Some(Value::Bool(if *inclusive {
+                *value >= *start && *value <= *end
+            } else {
+                *value >= *start && *value < *end
+            })));
+        }
+        BuiltinId::Len | BuiltinId::Count => {
+            let extra = i64::from(*inclusive && end >= start);
+            return Ok(Some(Value::Int(end.saturating_sub(*start) + extra)));
+        }
+        BuiltinId::IsEmpty => {
+            return Ok(Some(Value::Bool(if *inclusive {
+                start > end
+            } else {
+                start >= end
+            })));
+        }
+        _ => {}
+    }
+    Ok(None)
+}
+
 pub(super) fn make_ordering(o: std::cmp::Ordering) -> Value {
-    use std::cmp::Ordering::*;
+    use std::cmp::Ordering::{Equal, Greater, Less};
     thread_local! {
         static VALUES: [Value; 3] = [
             ordering_value("Less"),
@@ -626,7 +648,7 @@ fn ordering_value(variant: &str) -> Value {
 }
 
 pub(super) fn ordering_from_value(v: &Value) -> Option<std::cmp::Ordering> {
-    use std::cmp::Ordering::*;
+    use std::cmp::Ordering::{Equal, Greater, Less};
     match v {
         Value::Enum {
             enum_name, variant, ..
@@ -676,7 +698,7 @@ pub(super) fn builtin_method(
             res_method(recv, method, &*args)
         }
         Value::Struct(s) => match &**s.name() {
-            "Duration" => duration_method(s, name),
+            "Duration" => duration_method(s, name, &*args),
             "Metadata" => metadata_method(s, name, &*args),
             "Permissions" => match name {
                 "mode" => Ok(s.get("mode").unwrap_or(Value::Int(0))),

@@ -8,6 +8,7 @@
 //! arguments. Anything else, methods and std or crate bridges, is delegated to
 //! the existing dispatch on `Interp` with already evaluated values.
 
+use num_traits::AsPrimitive;
 use std::cmp::Ordering;
 use std::slice::from_ref;
 
@@ -23,17 +24,19 @@ use anyhow::{Result, anyhow, bail};
 /// The u64 view of a width-tagged value when its width is 64-bit unsigned.
 /// u64 and usize dominate real scripts, sizes, counts, and hashes, so they
 /// get the same kind of inline fast path plain i64 has.
-#[inline(always)]
+#[inline]
 fn as_u64(v: &Value) -> Option<(u64, IntWidth)> {
     match v {
-        Value::IntW(stored, w @ (IntWidth::U64 | IntWidth::USize)) => Some((*stored as u64, *w)),
+        Value::IntW(stored, w @ (IntWidth::U64 | IntWidth::USize)) => {
+            Some((stored.cast_unsigned(), *w))
+        }
         _ => None,
     }
 }
 
-#[inline(always)]
+#[inline]
 fn u64_arith(op: BinKind, a: u64, b: u64, w: IntWidth) -> Result<Value> {
-    use BinKind::*;
+    use BinKind::{Add, Div, Mul, Rem, Sub};
     let result = match op {
         Add => a
             .checked_add(b)
@@ -58,13 +61,15 @@ fn u64_arith(op: BinKind, a: u64, b: u64, w: IntWidth) -> Result<Value> {
         }
         _ => unreachable!(),
     };
-    Ok(Value::IntW(result as i64, w))
+    Ok(Value::IntW(result.cast_signed(), w))
 }
 
 // -- operators -------------------------------------------------------------
 
 pub(super) fn apply_bin(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
-    use BinKind::*;
+    use BinKind::{
+        Add, BitAnd, BitOr, BitXor, Div, Eq, Ge, Gt, Le, Lt, Mul, Ne, Rem, Shl, Shr, Sub,
+    };
     Ok(match op {
         Add | Sub | Mul | Div | Rem => return arith(op, l, r),
         Eq => Value::Bool(l.eq_value(r)),
@@ -89,7 +94,9 @@ pub(super) fn apply_bin(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
 /// arm so the dispatch stays a single match.
 #[inline]
 pub(super) fn apply_bin_imm(op: BinKind, l: &Value, imm: i64) -> Result<Value> {
-    use BinKind::*;
+    use BinKind::{
+        Add, BitAnd, BitOr, BitXor, Div, Eq, Ge, Gt, Le, Lt, Mul, Ne, Rem, Shl, Shr, Sub,
+    };
     if let Value::Int(a) = l {
         let a = *a;
         // One `i64_arith` call per arm keeps `op` constant inside each, so
@@ -117,7 +124,7 @@ pub(super) fn apply_bin_imm(op: BinKind, l: &Value, imm: i64) -> Result<Value> {
     if let Some((a, w)) = as_u64(l)
         && imm >= 0
     {
-        let b = imm as u64;
+        let b = imm.cast_unsigned();
         return Ok(match op {
             Add | Sub | Mul | Div | Rem => u64_arith(op, a, b, w)?,
             Eq => Value::Bool(a == b),
@@ -126,9 +133,9 @@ pub(super) fn apply_bin_imm(op: BinKind, l: &Value, imm: i64) -> Result<Value> {
             Le => Value::Bool(a <= b),
             Gt => Value::Bool(a > b),
             Ge => Value::Bool(a >= b),
-            BitAnd => Value::IntW((a & b) as i64, w),
-            BitOr => Value::IntW((a | b) as i64, w),
-            BitXor => Value::IntW((a ^ b) as i64, w),
+            BitAnd => Value::IntW((a & b).cast_signed(), w),
+            BitOr => Value::IntW((a | b).cast_signed(), w),
+            BitXor => Value::IntW((a ^ b).cast_signed(), w),
             Shl | Shr => shift_bin(op, l, &Value::Int(imm))?,
         });
     }
@@ -137,7 +144,7 @@ pub(super) fn apply_bin_imm(op: BinKind, l: &Value, imm: i64) -> Result<Value> {
 
 /// Comparison result for the fused compare-and-branch ops.
 pub(super) fn cmp_test(op: BinKind, l: &Value, r: &Value) -> Result<bool> {
-    use BinKind::*;
+    use BinKind::{Eq, Ge, Gt, Le, Lt, Ne};
     Ok(match op {
         Eq => l.eq_value(r),
         Ne => !l.eq_value(r),
@@ -156,7 +163,7 @@ pub(super) fn cmp_test(op: BinKind, l: &Value, r: &Value) -> Result<bool> {
 }
 
 pub(super) fn cmp_test_imm(op: BinKind, l: &Value, imm: i64) -> Result<bool> {
-    use BinKind::*;
+    use BinKind::{Eq, Ge, Gt, Le, Lt, Ne};
     if let Value::Int(a) = l {
         let a = *a;
         return Ok(match op {
@@ -172,7 +179,7 @@ pub(super) fn cmp_test_imm(op: BinKind, l: &Value, imm: i64) -> Result<bool> {
     if let Some((a, _)) = as_u64(l)
         && imm >= 0
     {
-        let b = imm as u64;
+        let b = imm.cast_unsigned();
         return Ok(match op {
             Eq => a == b,
             Ne => a != b,
@@ -232,8 +239,8 @@ enum FloatPair {
 fn float_pair(l: &Value, r: &Value) -> Result<FloatPair> {
     Ok(match (l, r) {
         (Value::F32(a), Value::F32(b)) => FloatPair::F32(*a, *b),
-        (Value::F32(a), Value::Float(b)) => FloatPair::F32(*a, *b as f32),
-        (Value::Float(a), Value::F32(b)) => FloatPair::F32(*a as f32, *b),
+        (Value::F32(a), Value::Float(b)) => FloatPair::F32(*a, AsPrimitive::<f32>::as_(*b)),
+        (Value::Float(a), Value::F32(b)) => FloatPair::F32(AsPrimitive::<f32>::as_(*a), *b),
         (a, b) => FloatPair::F64(to_float(a)?, to_float(b)?),
     })
 }
@@ -247,7 +254,7 @@ fn bit_bin(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
         }));
     }
     if let (Value::Bool(a), Value::Bool(b)) = (l, r) {
-        let (a, b) = (*a as i64, *b as i64);
+        let (a, b) = (i64::from(*a), i64::from(*b));
         let bits = match op {
             BinKind::BitAnd => a & b,
             BinKind::BitOr => a | b,
@@ -275,7 +282,7 @@ pub(super) fn compare_values(l: &Value, r: &Value) -> Result<Ordering> {
     partial_compare(l, r)?.ok_or_else(|| anyhow!("cannot order NaN"))
 }
 
-/// PartialOrd semantics: a NaN operand compares as `None`, which makes every
+/// `PartialOrd` semantics: a NaN operand compares as `None`, which makes every
 /// ordered comparison operator false, exactly like compiled Rust. Contexts
 /// that need a total order, sorting for example, go through `compare_values`
 /// and keep rejecting NaN.
@@ -289,10 +296,10 @@ fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
         }
         (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
         (Value::F32(a), Value::F32(b)) => a.partial_cmp(b),
-        (Value::F32(a), Value::Float(b)) => a.partial_cmp(&(*b as f32)),
-        (Value::Float(a), Value::F32(b)) => (*a as f32).partial_cmp(b),
-        (Value::Int(a), Value::Float(b)) => (*a as f64).partial_cmp(b),
-        (Value::Float(a), Value::Int(b)) => a.partial_cmp(&(*b as f64)),
+        (Value::F32(a), Value::Float(b)) => a.partial_cmp(&AsPrimitive::<f32>::as_(*b)),
+        (Value::Float(a), Value::F32(b)) => AsPrimitive::<f32>::as_(*a).partial_cmp(b),
+        (Value::Int(a), Value::Float(b)) => AsPrimitive::<f64>::as_(*a).partial_cmp(b),
+        (Value::Float(a), Value::Int(b)) => a.partial_cmp(&AsPrimitive::<f64>::as_(*b)),
         (Value::Str(a), Value::Str(b)) => Some(a.as_str().cmp(b.as_str())),
         (Value::Char(a), Value::Char(b)) => Some(a.cmp(b)),
         (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
@@ -361,7 +368,7 @@ fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
 
 fn to_float(v: &Value) -> Result<f64> {
     match v {
-        Value::Int(i) => Ok(*i as f64),
+        Value::Int(i) => Ok(AsPrimitive::<f64>::as_(*i)),
         Value::Float(f) => Ok(*f),
         other => bail!("expected a number, got {}", other.type_name()),
     }
@@ -385,7 +392,7 @@ pub(super) fn apply_un(op: UnKind, v: &Value) -> Result<Value> {
 
 // -- patterns --------------------------------------------------------------
 
-/// True when a serde_json `Value` variant name matches the native value that a
+/// True when a `serde_json` `Value` variant name matches the native value that a
 /// parsed json holds. A json string is a `Str`, a number an `Int` or `Float`, an
 /// array a `Vec`, an object a `Map`. `Null` is handled separately as a unit
 /// variant because a json null is `Option::None` here.
@@ -500,7 +507,7 @@ fn endpoint_cmp(literal: &PLit, value: &Value) -> Option<Ordering> {
             Some(i128::from(*a).cmp(&b))
         }
         (PLit::Float(a), Value::Float(b)) => a.partial_cmp(b),
-        (PLit::Float(a), Value::F32(b)) => (*a as f32).partial_cmp(b),
+        (PLit::Float(a), Value::F32(b)) => AsPrimitive::<f32>::as_(*a).partial_cmp(b),
         (PLit::Char(a), Value::Char(b)) => Some(a.cmp(b)),
         _ => None,
     }
@@ -561,8 +568,14 @@ fn literal_matches(literal: &PLit, value: &Value) -> bool {
         (PLit::Int(left), Value::IntW(..)) => {
             value.int_parts().map(|(v, _)| v) == Some(i128::from(*left))
         }
-        (PLit::Float(left), Value::Float(right)) => left == right,
-        (PLit::Float(left), Value::F32(right)) => *left as f32 == *right,
+        // Exact IEEE equality on purpose, a float literal pattern matches the
+        // way `==` compares, NaN never and negative zero equal to zero.
+        (PLit::Float(left), Value::Float(right)) => {
+            left.partial_cmp(right) == Some(Ordering::Equal)
+        }
+        (PLit::Float(left), Value::F32(right)) => {
+            AsPrimitive::<f32>::as_(*left).partial_cmp(right) == Some(Ordering::Equal)
+        }
         (PLit::Bool(left), Value::Bool(right)) => left == right,
         (PLit::Str(left), Value::Str(right)) => left == right.as_str(),
         (PLit::Char(left), Value::Char(right)) => left == right,

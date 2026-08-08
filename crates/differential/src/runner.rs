@@ -59,7 +59,7 @@ const PANIC_STATUS: i32 = 101;
 /// How the native binary is compiled: the same way the default `cargo run`,
 /// `build`, and `test` profiles do, with no optimization and overflow checks
 /// on. That is the behavior a script author gets by default, so it is the
-/// semantics RustScript targets, which means integer overflow must panic, not
+/// semantics `RustScript` targets, which means integer overflow must panic, not
 /// wrap. It is also the only setting that lets the harness see an overflow
 /// divergence at all, because with the checks off both sides wrap and agree.
 /// Skipping optimization keeps each of the many compiles fast. Do not drop the
@@ -200,23 +200,22 @@ const INTERPRETED_TIMEOUT_FACTOR: u32 = 4;
 
 impl Runner {
     pub fn build(workspace: &Path, timeout_ms: u64) -> Result<Self> {
-        let interpreter = match std::env::var_os("RUSTSCRIPT_INTERPRETER") {
-            Some(path) => PathBuf::from(path),
-            None => {
-                // A release interpreter runs campaigns several times faster
-                // than the debug default. Point RUSTSCRIPT_INTERPRETER at a
-                // debug build when its assertions are wanted.
-                let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-                let status = Command::new(cargo)
-                    .args(["build", "--release", "-p", "run-rs"])
-                    .current_dir(workspace)
-                    .status()
-                    .context("failed to build RustScript")?;
-                if !status.success() {
-                    bail!("cargo build --release -p run-rs failed");
-                }
-                target_dir(workspace).join(executable_name("rust"))
+        let interpreter = if let Some(path) = std::env::var_os("RUSTSCRIPT_INTERPRETER") {
+            PathBuf::from(path)
+        } else {
+            // A release interpreter runs campaigns several times faster
+            // than the debug default. Point RUSTSCRIPT_INTERPRETER at a
+            // debug build when its assertions are wanted.
+            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+            let status = Command::new(cargo)
+                .args(["build", "--release", "-p", "run-rs"])
+                .current_dir(workspace)
+                .status()
+                .context("failed to build RustScript")?;
+            if !status.success() {
+                bail!("cargo build --release -p run-rs failed");
             }
+            target_dir(workspace).join(executable_name("rust"))
         };
         if !interpreter.is_file() {
             bail!("RustScript binary not found at {}", interpreter.display());
@@ -605,7 +604,7 @@ fn run_command(command: &mut Command, timeout: Duration) -> Result<ProcessOutput
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!("failed to launch {:?}", command.get_program()))?;
+        .with_context(|| format!("failed to launch {}", command.get_program().display()))?;
     let stdout = child
         .stdout
         .take()

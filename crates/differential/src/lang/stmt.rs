@@ -182,10 +182,18 @@ impl Stmt {
                 else_body,
                 ..
             } => {
-                then_body.iter().for_each(|stmt| stmt.assigned(out));
-                else_body.iter().for_each(|stmt| stmt.assigned(out));
+                for stmt in then_body {
+                    stmt.assigned(out);
+                }
+                for stmt in else_body {
+                    stmt.assigned(out);
+                }
             }
-            Self::ForRange { body, .. } => body.iter().for_each(|stmt| stmt.assigned(out)),
+            Self::ForRange { body, .. } => {
+                for stmt in body {
+                    stmt.assigned(out);
+                }
+            }
             _ => {}
         }
     }
@@ -262,14 +270,28 @@ impl Stmt {
                 else_body,
             } => {
                 condition.make_opaque();
-                then_body.iter_mut().for_each(Stmt::make_opaque);
-                else_body.iter_mut().for_each(Stmt::make_opaque);
+                for stmt in then_body {
+                    stmt.make_opaque();
+                }
+                for stmt in else_body {
+                    stmt.make_opaque();
+                }
             }
-            Self::ForRange { body, .. } => body.iter_mut().for_each(Stmt::make_opaque),
-            Self::Mutate { op, .. } => op.exprs_mut().into_iter().for_each(Expr::make_opaque),
+            Self::ForRange { body, .. } => {
+                for stmt in body {
+                    stmt.make_opaque();
+                }
+            }
+            Self::Mutate { op, .. } => {
+                for expr in op.exprs_mut() {
+                    expr.make_opaque();
+                }
+            }
             Self::ForAccum { source, op, .. } => {
                 source.make_opaque();
-                op.exprs_mut().into_iter().for_each(Expr::make_opaque);
+                for expr in op.exprs_mut() {
+                    expr.make_opaque();
+                }
             }
         }
     }
@@ -285,14 +307,28 @@ impl Stmt {
                 else_body,
             } => {
                 condition.helpers(out);
-                then_body.iter().for_each(|stmt| stmt.helpers(out));
-                else_body.iter().for_each(|stmt| stmt.helpers(out));
+                for stmt in then_body {
+                    stmt.helpers(out);
+                }
+                for stmt in else_body {
+                    stmt.helpers(out);
+                }
             }
-            Self::ForRange { body, .. } => body.iter().for_each(|stmt| stmt.helpers(out)),
-            Self::Mutate { op, .. } => op.exprs().iter().for_each(|expr| expr.helpers(out)),
+            Self::ForRange { body, .. } => {
+                for stmt in body {
+                    stmt.helpers(out);
+                }
+            }
+            Self::Mutate { op, .. } => {
+                for expr in op.exprs() {
+                    expr.helpers(out);
+                }
+            }
             Self::ForAccum { source, op, .. } => {
                 source.helpers(out);
-                op.exprs().iter().for_each(|expr| expr.helpers(out));
+                for expr in op.exprs() {
+                    expr.helpers(out);
+                }
             }
         }
     }
@@ -315,22 +351,32 @@ impl Stmt {
             } => {
                 out.insert("lang-if-stmt");
                 condition.features(out);
-                then_body.iter().for_each(|stmt| stmt.features(out));
-                else_body.iter().for_each(|stmt| stmt.features(out));
+                for stmt in then_body {
+                    stmt.features(out);
+                }
+                for stmt in else_body {
+                    stmt.features(out);
+                }
             }
             Self::ForRange { body, .. } => {
                 out.insert("lang-for");
-                body.iter().for_each(|stmt| stmt.features(out));
+                for stmt in body {
+                    stmt.features(out);
+                }
             }
             Self::Mutate { op, .. } => {
                 out.insert(op.feature());
-                op.exprs().iter().for_each(|expr| expr.features(out));
+                for expr in op.exprs() {
+                    expr.features(out);
+                }
             }
             Self::ForAccum { source, op, .. } => {
                 out.insert("lang-for-accum");
                 out.insert(op.feature());
                 source.features(out);
-                op.exprs().iter().for_each(|expr| expr.features(out));
+                for expr in op.exprs() {
+                    expr.features(out);
+                }
             }
         }
     }
@@ -346,14 +392,20 @@ impl Stmt {
                 ..
             } => {
                 out.push_str("if(");
-                then_body.iter().for_each(|stmt| stmt.shape(out));
+                for stmt in then_body {
+                    stmt.shape(out);
+                }
                 out.push('|');
-                else_body.iter().for_each(|stmt| stmt.shape(out));
+                for stmt in else_body {
+                    stmt.shape(out);
+                }
                 out.push_str("),");
             }
             Self::ForRange { body, .. } => {
                 out.push_str("for(");
-                body.iter().for_each(|stmt| stmt.shape(out));
+                for stmt in body {
+                    stmt.shape(out);
+                }
                 out.push_str("),");
             }
             Self::Mutate { op, .. } => {
@@ -463,32 +515,7 @@ impl Stmt {
                     expr,
                 })
                 .collect(),
-            Self::If {
-                condition,
-                then_body,
-                else_body,
-            } => {
-                let mut candidates = Vec::new();
-                for index in 0..then_body.len() {
-                    let mut shorter = then_body.clone();
-                    shorter.remove(index);
-                    candidates.push(Self::If {
-                        condition: condition.clone(),
-                        then_body: shorter,
-                        else_body: else_body.clone(),
-                    });
-                }
-                for index in 0..else_body.len() {
-                    let mut shorter = else_body.clone();
-                    shorter.remove(index);
-                    candidates.push(Self::If {
-                        condition: condition.clone(),
-                        then_body: then_body.clone(),
-                        else_body: shorter,
-                    });
-                }
-                candidates
-            }
+            Self::If { .. } => self.shrink_if(),
             Self::ForRange { var, count, body } => {
                 let mut candidates = Vec::new();
                 if *count > 1 {
@@ -525,39 +552,78 @@ impl Stmt {
                 }
                 candidates
             }
-            Self::ForAccum {
-                var,
-                source,
-                target,
-                op,
-            } => {
-                let mut candidates: Vec<Self> = source
-                    .shrinks()
-                    .into_iter()
-                    .map(|shrunk| Self::ForAccum {
-                        var: var.clone(),
-                        source: shrunk,
-                        target: target.clone(),
-                        op: op.clone(),
-                    })
-                    .collect();
-                for (index, expr) in op.exprs().iter().enumerate() {
-                    for shrunk in expr.shrinks() {
-                        let mut smaller = op.clone();
-                        if let Some(slot) = smaller.exprs_mut().into_iter().nth(index) {
-                            *slot = shrunk;
-                        }
-                        candidates.push(Self::ForAccum {
-                            var: var.clone(),
-                            source: source.clone(),
-                            target: target.clone(),
-                            op: smaller,
-                        });
-                    }
+            Self::ForAccum { .. } => self.shrink_for_accum(),
+        }
+    }
+
+    /// Shrinks of an `if`, dropping one statement from either body.
+    fn shrink_if(&self) -> Vec<Self> {
+        let Self::If {
+            condition,
+            then_body,
+            else_body,
+        } = self
+        else {
+            unreachable!()
+        };
+        let mut candidates = Vec::new();
+        for index in 0..then_body.len() {
+            let mut shorter = then_body.clone();
+            shorter.remove(index);
+            candidates.push(Self::If {
+                condition: condition.clone(),
+                then_body: shorter,
+                else_body: else_body.clone(),
+            });
+        }
+        for index in 0..else_body.len() {
+            let mut shorter = else_body.clone();
+            shorter.remove(index);
+            candidates.push(Self::If {
+                condition: condition.clone(),
+                then_body: then_body.clone(),
+                else_body: shorter,
+            });
+        }
+        candidates
+    }
+
+    /// Shrinks of an accumulation loop, its source first, then each operand.
+    fn shrink_for_accum(&self) -> Vec<Self> {
+        let Self::ForAccum {
+            var,
+            source,
+            target,
+            op,
+        } = self
+        else {
+            unreachable!()
+        };
+        let mut candidates: Vec<Self> = source
+            .shrinks()
+            .into_iter()
+            .map(|shrunk| Self::ForAccum {
+                var: var.clone(),
+                source: shrunk,
+                target: target.clone(),
+                op: op.clone(),
+            })
+            .collect();
+        for (index, expr) in op.exprs().iter().enumerate() {
+            for shrunk in expr.shrinks() {
+                let mut smaller = op.clone();
+                if let Some(slot) = smaller.exprs_mut().into_iter().nth(index) {
+                    *slot = shrunk;
                 }
-                candidates
+                candidates.push(Self::ForAccum {
+                    var: var.clone(),
+                    source: source.clone(),
+                    target: target.clone(),
+                    op: smaller,
+                });
             }
         }
+        candidates
     }
 
     /// Whether any expression in the statement calls the helper `name`.
@@ -677,8 +743,12 @@ impl Block {
         let fallible = self.statements.iter().any(Stmt::has_fallible_op)
             || self.fns.iter().any(|def| def.body.has_fallible_op());
         if fallible {
-            self.statements.iter_mut().for_each(Stmt::make_opaque);
-            self.fns.iter_mut().for_each(|def| def.body.make_opaque());
+            for stmt in &mut self.statements {
+                stmt.make_opaque();
+            }
+            for def in &mut self.fns {
+                def.body.make_opaque();
+            }
         }
     }
 
@@ -694,9 +764,7 @@ impl Block {
     pub fn shrinks(&self) -> Vec<Self> {
         let mut candidates = Vec::new();
         for index in 0..self.statements.len() {
-            if let Some(candidate) = self.without(index) {
-                candidates.push(candidate);
-            }
+            candidates.push(self.without(index));
             for stmt in self.statements[index].shrinks() {
                 let mut candidate = self.clone();
                 candidate.statements[index] = stmt;
@@ -717,7 +785,7 @@ impl Block {
 
     /// Drop one statement, and everything that depended on it, so the result
     /// still compiles.
-    fn without(&self, index: usize) -> Option<Self> {
+    fn without(&self, index: usize) -> Self {
         let mut dropped: BTreeSet<String> = BTreeSet::new();
         if let Stmt::Let { name, .. } = &self.statements[index] {
             dropped.insert(name.clone());
@@ -741,6 +809,6 @@ impl Block {
         };
         candidate.retain_called_fns();
         candidate.seal();
-        Some(candidate)
+        candidate
     }
 }

@@ -246,7 +246,10 @@ cargo test --workspace
 
 The equivalence tests run the same examples through rustc and the interpreter
 and compare their output byte for byte. The multifile conformance test does the
-same for a deep module tree.
+same for a deep module tree. The numeric semantics scripts under
+`crates/rustscript/tests/cases` get the same treatment, compiled with rustc at
+test time rather than as cargo targets, since their sources exercise `as`
+casts and float comparison on purpose.
 
 The differential harness generates deterministic, compile-valid Rust programs
 and compares native and interpreted runs, including panics. Native is built

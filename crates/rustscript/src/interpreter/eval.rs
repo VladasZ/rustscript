@@ -2,12 +2,14 @@
 //! types, indexing, field access, the `?` operator, casts, and iteration. These
 //! carry no control flow, the VM drives that.
 
+use num_traits::AsPrimitive;
 use std::rc::Rc;
 
 use anyhow::{Result, anyhow, bail};
 
 use super::Interp;
 use super::numeric::{float_to_int, truncate};
+use super::shared::usize_i64;
 use super::typeir::{CastIr, TypeIr, lower_type};
 use super::value::{KeyRef, Map, MapKind, StructShape, Value};
 
@@ -178,7 +180,7 @@ impl Interp {
         Value::structure(shape.runtime.clone(), values)
     }
 
-    pub(super) fn eval_try(&self, v: Value) -> Result<std::result::Result<Value, Value>> {
+    pub(super) fn eval_try(v: Value) -> std::result::Result<Value, Value> {
         match v {
             Value::Enum {
                 enum_name,
@@ -187,9 +189,9 @@ impl Interp {
             } if &*enum_name == "Result" => {
                 let inner = data.first().cloned().unwrap_or(Value::Unit);
                 if &*variant == "Ok" {
-                    Ok(Ok(inner))
+                    Ok(inner)
                 } else {
-                    Ok(Err(Value::err(inner)))
+                    Err(Value::err(inner))
                 }
             }
             Value::Enum {
@@ -199,9 +201,9 @@ impl Interp {
             } if &*enum_name == "Option" => {
                 let inner = data.first().cloned().unwrap_or(Value::Unit);
                 if &*variant == "Some" {
-                    Ok(Ok(inner))
+                    Ok(inner)
                 } else {
-                    Ok(Err(Value::none()))
+                    Err(Value::none())
                 }
             }
             // A json accessor hands its value back already unwrapped, a json
@@ -210,19 +212,19 @@ impl Interp {
             // see the json_option example. Scripts pass a real cargo check,
             // so `?` never reaches a value that is not Option or Result in
             // the source types.
-            other => Ok(Ok(other)),
+            other => Ok(other),
         }
     }
 
     /// An `as` cast to a named primitive type, with real Rust semantics per
     /// width: integer casts truncate, float to integer casts saturate, and
     /// f32 becomes a real f32 value.
-    pub(super) fn eval_cast(&self, v: Value, target: &CastIr) -> Result<Value> {
+    pub(super) fn eval_cast(v: Value, target: &CastIr) -> Result<Value> {
         let width = match target {
             CastIr::F64 => {
                 return Ok(Value::Float(match v {
-                    Value::Int(i) => i as f64,
-                    Value::IntW(..) => v.int_parts().unwrap().0 as f64,
+                    Value::Int(i) => AsPrimitive::<f64>::as_(i),
+                    Value::IntW(..) => AsPrimitive::<f64>::as_(v.int_parts().unwrap().0),
                     Value::Float(f) => f,
                     Value::F32(f) => f64::from(f),
                     other => bail!("cannot cast {} to float", other.type_name()),
@@ -230,9 +232,9 @@ impl Interp {
             }
             CastIr::F32 => {
                 return Ok(Value::F32(match v {
-                    Value::Int(i) => i as f32,
-                    Value::IntW(..) => v.int_parts().unwrap().0 as f32,
-                    Value::Float(f) => f as f32,
+                    Value::Int(i) => AsPrimitive::<f32>::as_(i),
+                    Value::IntW(..) => AsPrimitive::<f32>::as_(v.int_parts().unwrap().0),
+                    Value::Float(f) => AsPrimitive::<f32>::as_(f),
                     Value::F32(f) => f,
                     other => bail!("cannot cast {} to float", other.type_name()),
                 }));
@@ -240,7 +242,10 @@ impl Interp {
             CastIr::Char => {
                 return Ok(match v {
                     Value::Int(i) => Value::Char(
-                        char::from_u32(i as u32).ok_or_else(|| anyhow!("invalid char code {i}"))?,
+                        u32::try_from(i)
+                            .ok()
+                            .and_then(char::from_u32)
+                            .ok_or_else(|| anyhow!("invalid char code {i}"))?,
                     ),
                     Value::Char(c) => Value::Char(c),
                     other => bail!("cannot cast {} to char", other.type_name()),
@@ -265,7 +270,7 @@ impl Interp {
 
     // -- indexing and fields ----------------------------------------------
 
-    pub(super) fn index(&self, base: &Value, key: &Value) -> Result<Value> {
+    pub(super) fn index(base: &Value, key: &Value) -> Result<Value> {
         if let Value::Range {
             start,
             end,
@@ -310,7 +315,7 @@ impl Interp {
         })
     }
 
-    pub(super) fn set_index(&self, base: &Value, key: &Value, val: Value) -> Result<()> {
+    pub(super) fn set_index(base: &Value, key: &Value, val: Value) -> Result<()> {
         match base {
             Value::Vec(items) => {
                 let i = as_index(key)?;
@@ -331,11 +336,7 @@ impl Interp {
         Ok(())
     }
 
-    pub(super) fn get_field(
-        &self,
-        base: &Value,
-        member: &super::bytecode::Member,
-    ) -> Result<Value> {
+    pub(super) fn get_field(base: &Value, member: &super::bytecode::Member) -> Result<Value> {
         use super::bytecode::Member;
         match (base, member) {
             (Value::Struct(s), Member::Named(name)) => {
@@ -357,7 +358,6 @@ impl Interp {
     }
 
     pub(super) fn set_field(
-        &self,
         base: &Value,
         member: &super::bytecode::Member,
         val: Value,
@@ -387,7 +387,7 @@ impl Interp {
 
 fn as_index(key: &Value) -> Result<usize> {
     match key {
-        Value::Int(i) if *i >= 0 => Ok(*i as usize),
+        Value::Int(i) if *i >= 0 => Ok(usize::try_from(*i)?),
         Value::Int(i) => bail!("negative index {i}"),
         Value::IntW(..) => {
             let (v, _) = key.int_parts().unwrap();
@@ -398,23 +398,23 @@ fn as_index(key: &Value) -> Result<usize> {
 }
 
 /// `v[a..b]` on vectors and byte-based `s[a..b]` on strings, matching real
-/// slice semantics. An i64::MAX end is the open-end sentinel meaning len.
+/// slice semantics. An `i64::MAX` end is the open-end sentinel meaning len.
 fn slice_value(base: &Value, start: i64, end: i64, inclusive: bool) -> Result<Value> {
     let bounds = |len: usize| -> Result<(usize, usize)> {
         if start < 0 {
             bail!("negative slice start {start}");
         }
         let end = if end == i64::MAX {
-            len as i64
+            usize_i64(len)
         } else if inclusive {
             end + 1
         } else {
             end
         };
-        if end < start || end as usize > len {
+        if end < start || usize::try_from(end).is_ok_and(|e| e > len) {
             bail!("slice {start}..{end} out of bounds (len {len})");
         }
-        Ok((start as usize, end as usize))
+        Ok((usize::try_from(start)?, usize::try_from(end)?))
     };
     match base {
         Value::Vec(items) => {

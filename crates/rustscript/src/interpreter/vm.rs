@@ -143,8 +143,8 @@ impl Interp {
                         ip: ip + 1,
                         base,
                         dst: $dst,
-                        abase: $abase as u16,
-                        argc: $argc as u16,
+                        abase: u16::try_from($abase).expect("register index fits u16"),
+                        argc: u16::try_from($argc).expect("argument count fits u16"),
                     });
                     base = nbase;
                     ip = 0;
@@ -267,7 +267,9 @@ impl Interp {
                         let callee = self.functions[func].clone();
                         // Bind the call's turbofish type args to the callee's
                         // generic parameters, resolved in this (caller) module.
-                        let tenv: TypeEnv = if *targ != u32::MAX {
+                        let tenv: TypeEnv = if *targ == u32::MAX {
+                            empty_type_env()
+                        } else {
                             let targs = &cur.call_type_args[*targ as usize];
                             callee
                                 .generics
@@ -275,8 +277,6 @@ impl Interp {
                                 .zip(targs.iter())
                                 .map(|(name, ty)| (name.clone(), ty.clone()))
                                 .collect()
-                        } else {
-                            empty_type_env()
                         };
                         call!(callee, None, dst, abase, argc, tenv);
                     }
@@ -304,10 +304,10 @@ impl Interp {
                         let (dst, path) = (*dst, *path as usize);
                         let (abase, argc) = (*abase as usize, *argc as usize);
                         let (segs, coerce) = &cur.paths[path];
-                        if let Some(v) = self.internal_path(segs, &stack[base..], abase, argc)? {
+                        if let Some(v) = Self::internal_path(segs, &stack[base..], abase, argc)? {
                             set_reg(&mut stack[base + dst as usize], v);
                         } else {
-                            let args = take_range(stack, base + abase, argc);
+                            let call_args = take_range(stack, base + abase, argc);
                             // Typed json parses straight into the target structs,
                             // no generic tree and no coercion pass afterwards.
                             if let Some(ty) = coerce {
@@ -316,13 +316,13 @@ impl Interp {
                                     && canon[canon.len() - 2] == "serde_json"
                                     && canon[canon.len() - 1] == "from_str"
                                 {
-                                    let v = self.typed_from_str(&args, ty, &cur_tenv)?;
+                                    let v = self.typed_from_str(&call_args, ty, &cur_tenv)?;
                                     set_reg(&mut stack[base + dst as usize], v);
                                     ip += 1;
                                     continue;
                                 }
                             }
-                            let mut v = self.dispatch_call(segs, args)?;
+                            let mut v = self.dispatch_call(segs, call_args)?;
                             if let Some(ty) = coerce {
                                 v = self.coerce_result(v, ty);
                             }
@@ -399,7 +399,7 @@ impl Interp {
                                     enum_name, variant, ..
                                 } => {
                                     if matches!(name.id, BuiltinId::Copied) {
-                                        if &**enum_name == "Option" { 1 } else { 0 }
+                                        i32::from(&**enum_name == "Option")
                                     } else if !matches!(&**enum_name, "Option" | "Result") {
                                         0
                                     } else if matches!(&**variant, "Some" | "Ok") {
@@ -462,36 +462,33 @@ impl Interp {
                             let Value::Map(m, _) = &lo[base + recv] else {
                                 unreachable!()
                             };
-                            let v = match name.id {
-                                BuiltinId::Insert => {
-                                    let k = take(&mut hi[0]).into_key();
-                                    let Some(k) = k else { bail!("invalid map key") };
-                                    let val = if argc > 1 {
-                                        take(&mut hi[1])
-                                    } else {
-                                        Value::Unit
-                                    };
-                                    let old = m.borrow_mut().insert(k, val);
-                                    if dst == DISCARD {
-                                        Value::Unit
-                                    } else {
-                                        match old {
-                                            Some(old) => Value::some(old),
-                                            None => Value::none(),
-                                        }
+                            let v = if name.id == BuiltinId::Insert {
+                                let k = take(&mut hi[0]).into_key();
+                                let Some(k) = k else { bail!("invalid map key") };
+                                let val = if argc > 1 {
+                                    take(&mut hi[1])
+                                } else {
+                                    Value::Unit
+                                };
+                                let old = m.borrow_mut().insert(k, val);
+                                if dst == DISCARD {
+                                    Value::Unit
+                                } else {
+                                    match old {
+                                        Some(old) => Value::some(old),
+                                        None => Value::none(),
                                     }
                                 }
-                                _ => {
-                                    let Some(k) = hi[0].key_ref() else {
-                                        bail!("invalid map key")
-                                    };
-                                    if matches!(name.id, BuiltinId::ContainsKey) {
-                                        Value::Bool(m.borrow().get(&k).is_some())
-                                    } else {
-                                        match m.borrow().get(&k).cloned() {
-                                            Some(v) => Value::some(v),
-                                            None => Value::none(),
-                                        }
+                            } else {
+                                let Some(k) = hi[0].key_ref() else {
+                                    bail!("invalid map key")
+                                };
+                                if matches!(name.id, BuiltinId::ContainsKey) {
+                                    Value::Bool(m.borrow().get(&k).is_some())
+                                } else {
+                                    match m.borrow().get(&k).cloned() {
+                                        Some(v) => Value::some(v),
+                                        None => Value::none(),
                                     }
                                 }
                             };
@@ -599,8 +596,10 @@ impl Interp {
                     }
                     Op::MakeArrayRepeat { dst, val, count } => {
                         let n = match &stack[base + *count as usize] {
-                            Value::Int(n) => *n as usize,
-                            v if v.untag_int().is_some() => v.untag_int().unwrap() as usize,
+                            Value::Int(n) => usize::try_from(*n)?,
+                            v if v.untag_int().is_some() => {
+                                usize::try_from(v.untag_int().unwrap())?
+                            }
                             _ => bail!("array repeat length must be an integer"),
                         };
                         let v = stack[base + *val as usize].clone();
@@ -628,7 +627,7 @@ impl Interp {
                     }
                     Op::IterInit { dst, src } => {
                         let src_v = stack[base + *src as usize].clone();
-                        let it = self.iterator_value(src_v)?;
+                        let it = Self::iterator_value(src_v)?;
                         set_reg(&mut stack[base + *dst as usize], it);
                     }
                     Op::ForNext { iter, idx, val, to } => {
@@ -640,16 +639,13 @@ impl Interp {
                             Value::Native(iterator) => self.iterator_next(&iterator)?,
                             other => bail!("{} is not an iterator", other.type_name()),
                         };
-                        match item {
-                            Some(v) => {
-                                set_reg(&mut stack[base + *val as usize], v);
-                                self.run_pending_ctrlc()?;
-                                set_reg(&mut stack[base + *idx as usize], Value::Int(i + 1));
-                            }
-                            None => {
-                                ip = *to as usize;
-                                continue;
-                            }
+                        if let Some(v) = item {
+                            set_reg(&mut stack[base + *val as usize], v);
+                            self.run_pending_ctrlc()?;
+                            set_reg(&mut stack[base + *idx as usize], Value::Int(i + 1));
+                        } else {
+                            ip = *to as usize;
+                            continue;
                         }
                     }
                     Op::MakeStruct {
@@ -761,11 +757,11 @@ impl Interp {
 
                     Op::Index { dst, base: b, key } => {
                         let v =
-                            self.index(&stack[base + *b as usize], &stack[base + *key as usize])?;
+                            Self::index(&stack[base + *b as usize], &stack[base + *key as usize])?;
                         set_reg(&mut stack[base + *dst as usize], v);
                     }
                     Op::SetIndex { base: b, key, val } => {
-                        self.set_index(
+                        Self::set_index(
                             &stack[base + *b as usize],
                             &stack[base + *key as usize],
                             stack[base + *val as usize].clone(),
@@ -793,7 +789,7 @@ impl Interp {
                         base: b,
                         member,
                     } => {
-                        let v = self.get_field(
+                        let v = Self::get_field(
                             &stack[base + *b as usize],
                             &cur.members[*member as usize],
                         )?;
@@ -804,7 +800,7 @@ impl Interp {
                         member,
                         val,
                     } => {
-                        self.set_field(
+                        Self::set_field(
                             &stack[base + *b as usize],
                             &cur.members[*member as usize],
                             stack[base + *val as usize].clone(),
@@ -812,13 +808,13 @@ impl Interp {
                     }
 
                     Op::Try { dst, src } => {
-                        match self.eval_try(stack[base + *src as usize].clone())? {
+                        match Self::eval_try(stack[base + *src as usize].clone()) {
                             Ok(v) => stack[base + *dst as usize] = v,
                             Err(early) => ret!(early),
                         }
                     }
                     Op::Cast { dst, src, ty } => {
-                        let v = self.eval_cast(
+                        let v = Self::eval_cast(
                             stack[base + *src as usize].clone(),
                             &cur.casts[*ty as usize],
                         )?;
@@ -848,11 +844,11 @@ impl Interp {
                     }
 
                     Op::Fmt { dst, spec } => {
-                        let text = self.render_fmt(&cur, *spec, &stack[base..])?;
+                        let text = Self::render_fmt(&cur, *spec, &stack[base..])?;
                         set_reg(&mut stack[base + *dst as usize], Value::str(text));
                     }
                     Op::MacroCall { kind, dst, spec } => {
-                        let text = self.render_fmt(&cur, *spec, &stack[base..])?;
+                        let text = Self::render_fmt(&cur, *spec, &stack[base..])?;
                         match kind {
                             MacroKind::Println => println!("{text}"),
                             MacroKind::Print => print!("{text}"),

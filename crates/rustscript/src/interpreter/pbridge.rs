@@ -3,6 +3,7 @@
 //! for example gh-clone spawning many `git clone` processes, and bails with a
 //! clear message on anything not yet ported.
 
+use num_traits::AsPrimitive;
 use std::f64::consts::PI;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -16,13 +17,15 @@ use super::pchunk::{PChunk, convert};
 use super::pnative::PNative;
 use super::pvalue::{PClosure, PValue, PValueRef};
 use super::pvm::PInterp;
-use super::shared::{self, Args, CharOut, F32Out, Num, NumOut, Parsed, StrOut, parse_rfc3339};
+use super::shared::{
+    self, Args, CharOut, F32Out, Num, NumOut, Parsed, StrOut, parse_rfc3339, usize_i64,
+};
 use super::value::Value;
 
 impl PInterp {
     // -- format ------------------------------------------------------------
 
-    pub(super) fn render_fmt(&self, chunk: &PChunk, spec: u16, regs: &[PValue]) -> Result<String> {
+    pub(super) fn render_fmt(chunk: &PChunk, spec: u16, regs: &[PValue]) -> Result<String> {
         let f = &chunk.fmts[spec as usize];
         let positional: Vec<PValue> = f
             .positional
@@ -39,10 +42,9 @@ impl PInterp {
 
     // -- iteration ---------------------------------------------------------
 
-    pub(super) fn iter_items(&self, v: PValue) -> Result<Vec<PValue>> {
+    pub(super) fn iter_items(v: PValue) -> Result<Vec<PValue>> {
         Ok(match v {
-            PValue::Vec(items) => items.lock().clone(),
-            PValue::Tuple(items) => items.lock().clone(),
+            PValue::Vec(items) | PValue::Tuple(items) => items.lock().clone(),
             PValue::Range {
                 start,
                 end,
@@ -138,6 +140,23 @@ impl PInterp {
 
     // -- path calls --------------------------------------------------------
 
+    /// A one-segment call: the option and result constructors, `drop`, or a
+    /// script function by bare name.
+    fn dispatch_bare_call(self: &Arc<Self>, name: &str, args: Vec<PValue>) -> Result<PValue> {
+        match name {
+            "Some" => Ok(PValue::some(one(args)?)),
+            "Ok" => Ok(PValue::ok(one(args)?)),
+            "Err" => Ok(PValue::err(one(args)?)),
+            "drop" => Ok(PValue::Unit),
+            name => {
+                if let Some(chunk) = self.user_function(name) {
+                    return self.run_chunk(&chunk, &args, &[]);
+                }
+                bail!("unknown function `{name}` in tokio mode")
+            }
+        }
+    }
+
     pub(super) fn dispatch_call(
         self: &Arc<Self>,
         segs: &[String],
@@ -147,21 +166,10 @@ impl PInterp {
             return super::phttp::reqwest_call(segs, &args);
         }
         if segs.len() == 1 {
-            return match segs[0].as_str() {
-                "Some" => Ok(PValue::some(one(args)?)),
-                "Ok" => Ok(PValue::ok(one(args)?)),
-                "Err" => Ok(PValue::err(one(args)?)),
-                "drop" => Ok(PValue::Unit),
-                name => {
-                    if let Some(chunk) = self.user_function(name) {
-                        return self.run_chunk(&chunk, &args, &[]);
-                    }
-                    bail!("unknown function `{name}` in tokio mode")
-                }
-            };
+            return self.dispatch_bare_call(&segs[0], args);
         }
         let last = segs[segs.len() - 1].as_str();
-        let ns = segs[segs.len() - 2].as_str();
+        let namespace = segs[segs.len() - 2].as_str();
         // Namespaced calls reach native bridges that compute in i64 and f64,
         // so width-tagged numbers pass their plain image.
         let args: Vec<PValue> = args
@@ -173,10 +181,10 @@ impl PInterp {
             .collect();
         // Ahead of the match because `Widget::render` mutates the buffer it is
         // given, so it must run exactly once.
-        if let Some(v) = super::pratatui::ratatui_assoc(ns, last, &args) {
+        if let Some(v) = super::pratatui::ratatui_assoc(namespace, last, &args) {
             return Ok(v);
         }
-        match (ns, last) {
+        match (namespace, last) {
             ("serde_json", _) => super::pjson::bridge_serde_json(last, &args),
             ("env", "args") => Ok(PValue::vec(
                 super::script_args().into_iter().map(PValue::str).collect(),
@@ -201,23 +209,23 @@ impl PInterp {
                     _ => bail!("BufReader::new needs a reader handle in tokio mode"),
                 }
             }
-            ("Vec", "new") | ("Vec", "with_capacity") => Ok(PValue::vec(vec![])),
-            ("HashMap", "new") | ("HashMap", "with_capacity") | ("BTreeMap", "new") => {
-                Ok(PValue::map())
-            }
+            ("Vec", "new" | "with_capacity") => Ok(PValue::vec(vec![])),
+            ("HashMap" | "BTreeMap", "new") | ("HashMap", "with_capacity") => Ok(PValue::map()),
             ("String", "new") => Ok(PValue::str("")),
             ("String", "from") => Ok(PValue::str(arg0(&args).display())),
             ("Instant", "now") => Ok(PNative::Instant(Instant::now()).wrap()),
-            ("Utc", "now") | ("Local", "now") => Ok(now_datetime(ns == "Local")),
+            ("Utc" | "Local", "now") => Ok(now_datetime(namespace == "Local")),
             ("DateTime", "parse_from_rfc3339") => Ok(match parse_rfc3339(&arg0(&args).display()) {
-                Ok((secs, nanos, offset)) => PValue::ok(datetime_value(secs, nanos, false, offset)),
+                Ok((unix_secs, nanos, offset)) => {
+                    PValue::ok(datetime_value(unix_secs, nanos, false, offset))
+                }
                 Err(e) => PValue::err(PValue::str(e)),
             }),
             ("Duration", "from_millis") => Ok(duration_value(int_arg(&args))),
             ("Duration", "from_secs") => Ok(duration_value(int_arg(&args).saturating_mul(1000))),
             ("process", "exit") => {
                 let code = match args.first() {
-                    Some(PValue::Int(i)) => *i as i32,
+                    Some(PValue::Int(i)) => i32::try_from(*i).unwrap_or(0),
                     _ => 0,
                 };
                 std::process::exit(code)
@@ -225,11 +233,11 @@ impl PInterp {
             ("time", "sleep") => Ok(sleep_future(&args)),
             ("task", "yield_now") => Ok(yield_future()),
             _ => {
-                if let Some(v) = super::pstd::native_call(ns, last, &args)? {
+                if let Some(v) = super::pstd::native_call(namespace, last, &args)? {
                     return Ok(v);
                 }
                 // A user associated function like `Type::new`, keyed by type.
-                if let Some(chunk) = self.user_method(ns, last) {
+                if let Some(chunk) = self.user_method(namespace, last) {
                     return self.run_chunk(&chunk, &args, &[]);
                 }
                 // A user associated function or method by name, called UFCS.
@@ -239,7 +247,7 @@ impl PInterp {
                 // A json value written out in a script, `Value::String(s)`. A
                 // parsed json is held as native values here, so each variant is
                 // exactly its own payload, the same as on the fast engine.
-                if ns == "Value"
+                if namespace == "Value"
                     && matches!(last, "String" | "Bool" | "Number" | "Array" | "Object")
                 {
                     return one(args);
@@ -364,6 +372,16 @@ impl PInterp {
         if let Some(res) = super::phttp::http_method(recv, m, args) {
             return res;
         }
+        self.method_by_receiver(recv, m, args)
+    }
+
+    /// The per-receiver dispatch, after the any-receiver families above.
+    fn method_by_receiver(
+        self: &Arc<Self>,
+        recv: &PValue,
+        m: &str,
+        args: &mut [PValue],
+    ) -> Result<PValue> {
         match recv {
             PValue::Str(s) => str_method(s, m, args),
             PValue::Vec(_) => self.vec_method(recv, m, args),
@@ -391,7 +409,7 @@ impl PInterp {
             PValue::Struct(st) if &**st.name() == "Child" => super::pprocess::child_method(recv, m),
             PValue::Struct(st) if &**st.name() == "ExitStatus" => exitstatus_method(st, m),
             PValue::Struct(st) if &**st.name() == "Output" => output_method(st, m),
-            PValue::Struct(st) if &**st.name() == "Duration" => duration_method(st, m),
+            PValue::Struct(st) if &**st.name() == "Duration" => duration_method(st, m, args),
             PValue::Struct(st) if &**st.name() == "DateTime" => datetime_method(st, m, args),
             PValue::Struct(st) if matches!(&**st.name(), "Path" | "PathBuf") => {
                 super::pstd::path_method(st, m, args)
@@ -435,55 +453,16 @@ impl PInterp {
                 Some(v) => PValue::some(v),
                 None => PValue::none(),
             },
-            // Compiled from `v[a..b].copy_from_slice(src)`, see the fast twin.
-            "copy_from_slice" => {
-                let start = usize::try_from(int_arg(args)).unwrap_or(0);
-                let end_raw = match args.get(1) {
-                    Some(PValue::Int(n)) => *n,
-                    _ => bail!("copy_from_slice takes numeric bounds"),
-                };
-                let src: Vec<PValue> = match args.get(2) {
-                    Some(PValue::Vec(other)) => other.lock().clone(),
-                    _ => bail!("copy_from_slice takes a slice argument"),
-                };
-                let mut items = items.lock();
-                let end = if end_raw == i64::MAX {
-                    items.len()
-                } else {
-                    end_raw as usize
-                };
-                if end > items.len() {
-                    bail!(
-                        "range end index {end} out of range for slice of length {}",
-                        items.len()
-                    );
-                }
-                let dst_len = end.saturating_sub(start);
-                if dst_len != src.len() {
-                    bail!(
-                        "source slice length ({}) does not match destination slice length ({dst_len})",
-                        src.len()
-                    );
-                }
-                for (k, val) in src.into_iter().enumerate() {
-                    items[start + k] = val;
-                }
-                PValue::Unit
-            }
-            "len" => PValue::Int(items.lock().len() as i64),
+            "copy_from_slice" => return Self::vec_copy_from_slice(items, args),
+            "len" | "count" => PValue::Int(usize_i64(items.lock().len())),
             "is_empty" => PValue::Bool(items.lock().is_empty()),
             "clear" => {
                 items.lock().clear();
                 PValue::Unit
             }
-            "first" => items
-                .lock()
-                .first()
-                .cloned()
-                .map_or_else(PValue::none, PValue::some),
             // Iterators are eager Vecs on this engine, so `next` answers the
             // first element. Scripts only use it to peel the head off a split.
-            "next" => items
+            "first" | "next" => items
                 .lock()
                 .first()
                 .cloned()
@@ -517,6 +496,58 @@ impl PInterp {
                 let needle = args.first().cloned().unwrap_or(PValue::Unit);
                 PValue::Bool(items.lock().iter().any(|v| v.eq_value(&needle)))
             }
+            _ => match self.vec_view_method(recv, items, m, args)? {
+                Some(v) => v,
+                None => return Self::vec_reduce_method(items, m),
+            },
+        })
+    }
+
+    /// Compiled from `v[a..b].copy_from_slice(src)`, see the fast twin.
+    fn vec_copy_from_slice(items: &Arc<Mutex<Vec<PValue>>>, args: &[PValue]) -> Result<PValue> {
+        let start = usize::try_from(int_arg(args)).unwrap_or(0);
+        let end_raw = match args.get(1) {
+            Some(PValue::Int(n)) => *n,
+            _ => bail!("copy_from_slice takes numeric bounds"),
+        };
+        let src: Vec<PValue> = match args.get(2) {
+            Some(PValue::Vec(other)) => other.lock().clone(),
+            _ => bail!("copy_from_slice takes a slice argument"),
+        };
+        let mut items = items.lock();
+        let end = if end_raw == i64::MAX {
+            items.len()
+        } else {
+            usize::try_from(end_raw)?
+        };
+        if end > items.len() {
+            bail!(
+                "range end index {end} out of range for slice of length {}",
+                items.len()
+            );
+        }
+        let dst_len = end.saturating_sub(start);
+        if dst_len != src.len() {
+            bail!(
+                "source slice length ({}) does not match destination slice length ({dst_len})",
+                src.len()
+            );
+        }
+        for (k, val) in src.into_iter().enumerate() {
+            items[start + k] = val;
+        }
+        Ok(PValue::Unit)
+    }
+
+    /// Read-only views and adapters that build a new list or string.
+    fn vec_view_method(
+        self: &Arc<Self>,
+        recv: &PValue,
+        items: &Arc<Mutex<Vec<PValue>>>,
+        m: &str,
+        args: &mut [PValue],
+    ) -> Result<Option<PValue>> {
+        Ok(Some(match m {
             "iter" | "into_iter" | "collect" | "to_vec" | "copied" => {
                 PValue::vec(items.lock().clone())
             }
@@ -538,7 +569,7 @@ impl PInterp {
                     // Cloned before the extend, so extending a vec with itself
                     // does not deadlock on the same mutex.
                     Some(PValue::Vec(other)) => other.lock().clone(),
-                    Some(other) => self.iter_items(other.clone())?,
+                    Some(other) => Self::iter_items(other.clone())?,
                     None => bail!("`{m}` needs something iterable"),
                 };
                 items.lock().extend(source);
@@ -558,7 +589,7 @@ impl PInterp {
             "collect_string" => {
                 PValue::str(items.lock().iter().map(PValue::display).collect::<String>())
             }
-            "sort" => {
+            "sort" | "sort_unstable" => {
                 items.lock().sort_by(|a, b| {
                     super::pops::compare_values(a, b).unwrap_or(std::cmp::Ordering::Equal)
                 });
@@ -594,7 +625,7 @@ impl PInterp {
             | "for_each" => {
                 let f = args.first().cloned().unwrap_or(PValue::Unit);
                 let items = items.lock().clone();
-                return self.higher_order(m, &items, &f);
+                return self.higher_order(m, &items, &f).map(Some);
             }
             "rev" => {
                 let mut out = items.lock().clone();
@@ -621,10 +652,16 @@ impl PInterp {
                     .lock()
                     .iter()
                     .enumerate()
-                    .map(|(i, v)| PValue::tuple(vec![PValue::Int(i as i64), v.clone()]))
+                    .map(|(i, v)| PValue::tuple(vec![PValue::Int(usize_i64(i)), v.clone()]))
                     .collect(),
             ),
-            "count" => PValue::Int(items.lock().len() as i64),
+            _ => return Ok(None),
+        }))
+    }
+
+    /// Reductions over the elements.
+    fn vec_reduce_method(items: &Arc<Mutex<Vec<PValue>>>, m: &str) -> Result<PValue> {
+        Ok(match m {
             "sum" => {
                 let mut total = PValue::Int(0);
                 for v in items.lock().iter() {
@@ -722,15 +759,23 @@ fn int_arg(args: &[PValue]) -> i64 {
 }
 
 fn duration_value(millis: i64) -> PValue {
-    duration_from_std(Duration::from_millis(millis as u64))
+    duration_from_std(Duration::from_millis(
+        u64::try_from(millis).unwrap_or_default(),
+    ))
 }
 
 pub(super) fn duration_from_std(duration: Duration) -> PValue {
     PValue::struct_of(
         "Duration",
         [
-            ("millis".into(), PValue::Int(duration.as_millis() as i64)),
-            ("nanos".into(), PValue::Int(duration.as_nanos() as i64)),
+            (
+                "millis".into(),
+                PValue::Int(i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)),
+            ),
+            (
+                "nanos".into(),
+                PValue::Int(i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX)),
+            ),
         ],
     )
 }
@@ -742,7 +787,7 @@ pub(super) fn duration_of(v: &PValue) -> Option<Duration> {
         && &**s.name() == "Duration"
         && let Some(PValue::Int(nanos)) = s.get("nanos")
     {
-        return Some(Duration::from_nanos(nanos.max(0) as u64));
+        return Some(Duration::from_nanos(nanos.max(0).cast_unsigned()));
     }
     None
 }
@@ -769,7 +814,7 @@ fn yield_future() -> PValue {
 fn duration_millis(v: Option<&PValue>) -> u64 {
     match v {
         Some(PValue::Struct(s)) => match s.get("millis") {
-            Some(PValue::Int(m)) => m as u64,
+            Some(PValue::Int(m)) => u64::try_from(m).unwrap_or_default(),
             _ => 0,
         },
         _ => 0,
@@ -796,7 +841,12 @@ fn now_datetime(local: bool) -> PValue {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
-    datetime_value(now.as_secs() as i64, now.subsec_nanos(), local, 0)
+    datetime_value(
+        i64::try_from(now.as_secs()).unwrap_or(i64::MAX),
+        now.subsec_nanos(),
+        local,
+        0,
+    )
 }
 
 fn datetime_method(
@@ -809,12 +859,12 @@ fn datetime_method(
         _ => 0,
     };
     let nanos = match s.get("nanos") {
-        Some(PValue::Int(v)) => v as u32,
+        Some(PValue::Int(v)) => u32::try_from(v).unwrap_or_default(),
         _ => 0,
     };
     let local = matches!(s.get("local"), Some(PValue::Bool(true)));
     let offset = match s.get("offset") {
-        Some(PValue::Int(v)) => v as i32,
+        Some(PValue::Int(v)) => i32::try_from(v).unwrap_or_default(),
         _ => 0,
     };
     match shared::datetime_core(m, secs, nanos, local, offset, &PArgs(args)) {
@@ -824,15 +874,30 @@ fn datetime_method(
     }
 }
 
-fn duration_method(s: &Arc<super::pvalue::PStructData>, m: &str) -> Result<PValue> {
+fn duration_method(
+    s: &Arc<super::pvalue::PStructData>,
+    m: &str,
+    args: &[PValue],
+) -> Result<PValue> {
     // This engine's Duration struct stores total nanos, so split it into the
     // secs plus nanos view the shared core computes over.
     let total = match s.get("nanos") {
-        Some(PValue::Int(nanos)) => nanos.max(0) as u64,
+        Some(PValue::Int(nanos)) => nanos.max(0).cast_unsigned(),
         _ => 0,
     };
     let secs = total / 1_000_000_000;
     let nanos = (total % 1_000_000_000) as u32;
+    if let "checked_add" | "checked_sub" = m {
+        let own = Duration::new(secs, nanos);
+        let Some(other) = args.first().and_then(duration_of) else {
+            bail!("`{m}` on Duration takes a Duration argument");
+        };
+        let out = match m {
+            "checked_add" => own.checked_add(other),
+            _ => own.checked_sub(other),
+        };
+        return Ok(out.map_or_else(PValue::none, |d| PValue::some(duration_from_std(d))));
+    }
     match shared::duration_core(m, secs, nanos) {
         Some(shared::DurOut::Int(i)) => Ok(PValue::Int(i)),
         Some(shared::DurOut::Float(f)) => Ok(PValue::Float(f)),
@@ -892,9 +957,14 @@ fn map_method(recv: &PValue, m: &str, args: &mut [PValue]) -> Result<PValue> {
                 .shift_remove(&k)
                 .map_or_else(PValue::none, PValue::some)
         }
-        "len" => PValue::Int(map.lock().len() as i64),
+        "len" => PValue::Int(usize_i64(map.lock().len())),
         "is_empty" => PValue::Bool(map.lock().is_empty()),
-        "keys" => PValue::vec(map.lock().keys().map(|k| k.to_value()).collect()),
+        "keys" => PValue::vec(
+            map.lock()
+                .keys()
+                .map(super::pvalue::PKey::to_value)
+                .collect(),
+        ),
         "values" => PValue::vec(map.lock().values().cloned().collect()),
         // A json object is a Map here, and the handle is shared, so both the
         // plain and the mut serde accessor hand the same map back.
@@ -989,11 +1059,10 @@ fn scalar_method(recv: &PValue, m: &str, args: &[PValue]) -> Result<PValue> {
         let matched = match (recv, m) {
             (PValue::Bool(_), "as_bool")
             | (PValue::Str(_), "as_str")
-            | (PValue::Int(_), "as_i64" | "as_u64")
-            | (PValue::IntW(_, _), "as_i64" | "as_u64")
+            | (PValue::Int(_) | PValue::IntW(_, _), "as_i64" | "as_u64")
             | (PValue::Float(_), "as_f64") => true,
             (PValue::Int(i), "as_f64") => {
-                return Ok(PValue::some(PValue::Float(*i as f64)));
+                return Ok(PValue::some(PValue::Float(AsPrimitive::<f64>::as_(*i))));
             }
             _ => false,
         };
@@ -1073,7 +1142,7 @@ fn path_closure(segs: Vec<String>, num_params: usize) -> PValue {
     }))
 }
 
-/// The serde_json methods that apply to a whole `Value` whatever shape it
+/// The `serde_json` methods that apply to a whole `Value` whatever shape it
 /// turned out to be, the parallel twin of the fast engine's function of the
 /// same name. See that one for what each answers and why.
 fn json_value_method(recv: &PValue, m: &str, args: &[PValue]) -> Option<PValue> {
@@ -1309,8 +1378,8 @@ impl Args for PArgs<'_> {
         match self.0.get(i) {
             Some(PValue::Float(f)) => Some(*f),
             Some(PValue::F32(f)) => Some(f64::from(*f)),
-            Some(PValue::Int(n)) => Some(*n as f64),
-            Some(tagged @ PValue::IntW(..)) => tagged.untag_int().map(|n| n as f64),
+            Some(PValue::Int(n)) => Some(AsPrimitive::<f64>::as_(*n)),
+            Some(tagged @ PValue::IntW(..)) => tagged.untag_int().map(AsPrimitive::<f64>::as_),
             _ => None,
         }
     }
@@ -1471,7 +1540,7 @@ impl PInterp {
                 }
                 "position" => {
                     if got.is_truthy() {
-                        return Ok(PValue::some(PValue::Int(index as i64)));
+                        return Ok(PValue::some(PValue::Int(usize_i64(index))));
                     }
                 }
                 _ => bail!("unknown higher order method `{m}`"),
@@ -1487,7 +1556,7 @@ impl PInterp {
     }
 
     /// Closure-taking methods on Option, the parallel-engine twin of
-    /// `option_higher_order` in higher_order.rs. Returns None when `m` is not one
+    /// `option_higher_order` in `higher_order.rs`. Returns None when `m` is not one
     /// of these, so the caller falls through to the non-closure `enum_method`.
     fn option_higher_order(
         self: &Arc<Self>,

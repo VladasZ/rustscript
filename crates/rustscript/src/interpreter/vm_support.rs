@@ -83,13 +83,12 @@ pub(super) fn trace_error(
 
 impl Interp {
     pub(super) fn internal_path(
-        &self,
         segments: &[String],
         registers: &[Value],
         base: usize,
         count: usize,
     ) -> Result<Option<Value>> {
-        let head = segments.first().map(String::as_str).unwrap_or("");
+        let head = segments.first().map_or("", String::as_str);
         match head {
             "::unreachable_match" => bail!("no match arm matched the value"),
             "::assert_failed" => bail!("assertion failed"),
@@ -106,7 +105,6 @@ impl Interp {
     }
 
     pub(super) fn render_fmt(
-        &self,
         chunk: &Chunk,
         specification: u16,
         registers: &[Value],
@@ -132,7 +130,7 @@ pub(super) fn take_range(stack: &mut [Value], start: usize, count: usize) -> Vec
         .collect()
 }
 
-#[inline(always)]
+#[inline]
 pub(super) fn set_reg(slot: &mut Value, value: Value) {
     if matches!(
         slot,

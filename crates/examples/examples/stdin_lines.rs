@@ -10,7 +10,7 @@ fn main() -> anyhow::Result<()> {
     io::stdin().read_to_string(&mut input)?;
     let lines = input.lines().count();
     let words = input.split_whitespace().count();
-    println!("lines: {}", lines);
-    println!("words: {}", words);
+    println!("lines: {lines}");
+    println!("words: {words}");
     Ok(())
 }

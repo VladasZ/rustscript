@@ -73,7 +73,7 @@ impl<'de> serde::de::DeserializeSeed<'de> for KeySeed<'_> {
     }
 }
 
-impl<'de> serde::de::Visitor<'de> for KeySeed<'_> {
+impl serde::de::Visitor<'_> for KeySeed<'_> {
     type Value = Rc<RStr>;
 
     fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -265,7 +265,7 @@ impl RenameRule {
         })
     }
 
-    /// Apply to a field name, which is snake_case in the source, following
+    /// Apply to a field name, which is `snake_case` in the source, following
     /// serde's field rules.
     pub(super) fn apply(self, field: &str) -> String {
         match self {
@@ -445,7 +445,7 @@ impl<'de> serde::de::DeserializeSeed<'de> for FieldSeed<'_> {
     }
 }
 
-impl<'de> serde::de::Visitor<'de> for FieldSeed<'_> {
+impl serde::de::Visitor<'_> for FieldSeed<'_> {
     type Value = Option<usize>;
 
     fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -606,8 +606,7 @@ pub(super) fn missing_field<E: serde::de::Error>(
         let key = key_map
             .iter()
             .find(|(_, slot)| **slot == i)
-            .map(|(k, _)| k.as_str())
-            .unwrap_or("?");
+            .map_or("?", |(k, _)| k.as_str());
         return Err(E::custom(format!("missing field `{key}`")));
     }
     Ok(())
@@ -681,15 +680,13 @@ pub(super) fn value_to_json(v: &Value) -> Result<serde_json::Value> {
             let (value, _) = v.int_parts().unwrap();
             match i64::try_from(value) {
                 Ok(small) => J::Number(serde_json::Number::from(small)),
-                Err(_) => J::Number(serde_json::Number::from(value as u64)),
+                Err(_) => J::Number(serde_json::Number::from(
+                    u64::try_from(value).expect("width-tagged value fits u64"),
+                )),
             }
         }
-        Value::Float(f) => serde_json::Number::from_f64(*f)
-            .map(J::Number)
-            .unwrap_or(J::Null),
-        Value::F32(f) => serde_json::Number::from_f64(f64::from(*f))
-            .map(J::Number)
-            .unwrap_or(J::Null),
+        Value::Float(f) => serde_json::Number::from_f64(*f).map_or(J::Null, J::Number),
+        Value::F32(f) => serde_json::Number::from_f64(f64::from(*f)).map_or(J::Null, J::Number),
         Value::Char(c) => J::String(c.to_string()),
         Value::Str(s) => J::String(s.to_string()),
         Value::Vec(items) | Value::Tuple(items) => J::Array(
@@ -737,17 +734,15 @@ pub(super) fn value_to_json(v: &Value) -> Result<serde_json::Value> {
                     "Some" => value_to_json(&data[0])?,
                     _ => J::Null,
                 }
+            } else if data.is_empty() {
+                J::String(variant.to_string())
             } else {
-                if data.is_empty() {
-                    J::String(variant.to_string())
-                } else {
-                    let mut obj = serde_json::Map::default();
-                    obj.insert(
-                        variant.to_string(),
-                        J::Array(data.iter().map(value_to_json).collect::<Result<_>>()?),
-                    );
-                    J::Object(obj)
-                }
+                let mut obj = serde_json::Map::default();
+                obj.insert(
+                    variant.to_string(),
+                    J::Array(data.iter().map(value_to_json).collect::<Result<_>>()?),
+                );
+                J::Object(obj)
             }
         }
         Value::Range { .. } => bail!("cannot serialize a range to json"),

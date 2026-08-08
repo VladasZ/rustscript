@@ -10,7 +10,7 @@ use which::which;
 pub const BINARY: &str = if cfg!(windows) { "rust.exe" } else { "rust" };
 
 /// Where cargo keeps its installed binaries and its install records.
-/// RustScript needs cargo anyway to check and build scripts, so a missing
+/// `RustScript` needs cargo anyway to check and build scripts, so a missing
 /// cargo directory is a broken setup rather than a case to work around.
 pub fn cargo_home() -> Result<PathBuf> {
     let home = match var_os("CARGO_HOME") {

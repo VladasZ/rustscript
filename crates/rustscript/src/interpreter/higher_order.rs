@@ -1,4 +1,4 @@
-//! The closure taking methods on Vec, HashMap entries, Option, and
+//! The closure taking methods on Vec, `HashMap` entries, Option, and
 //! Result: map, filter, fold and friends. Split from `builtins.rs`.
 
 use std::cell::RefCell;
@@ -8,10 +8,11 @@ use std::slice::from_ref;
 use anyhow::{Result, anyhow, bail};
 
 use super::Interp;
+use super::shared::usize_i64;
 use super::value::{StructData, Value};
 
-use super::builtins::*;
-use super::methods::*;
+use super::builtins::{as_closure, option_inner, ordering_from_value};
+use super::methods::{SortKey, sort_key};
 
 impl Interp {
     /// Methods that take a closure, on Vec, Option, and Result. Returns None
@@ -114,6 +115,22 @@ impl Interp {
         name: &str,
         args: &[Value],
     ) -> Result<Option<Value>> {
+        if let Some(v) = self.vec_transform_ho(items, name, args)? {
+            return Ok(Some(v));
+        }
+        if let Some(v) = self.vec_reduce_ho(items, name, args)? {
+            return Ok(Some(v));
+        }
+        self.vec_order_ho(items, name, args)
+    }
+
+    /// Closure adapters that build a new list or walk it for effect.
+    fn vec_transform_ho(
+        &self,
+        items: &Rc<RefCell<Vec<Value>>>,
+        name: &str,
+        args: &[Value],
+    ) -> Result<Option<Value>> {
         let clo = |i: usize| as_closure(args.get(i));
         let list = items.borrow().clone();
         let out = match name {
@@ -160,6 +177,58 @@ impl Interp {
                 }
                 Value::Unit
             }
+            "take_while" => {
+                let f = clo(0)?;
+                let mut r = Vec::new();
+                for x in list {
+                    if self.call_closure(&f, from_ref(&x))?.is_truthy() {
+                        r.push(x);
+                    } else {
+                        break;
+                    }
+                }
+                Value::vec(r)
+            }
+            "skip_while" => {
+                let f = clo(0)?;
+                let mut r = Vec::new();
+                let mut skipping = true;
+                for x in list {
+                    if skipping && self.call_closure(&f, from_ref(&x))?.is_truthy() {
+                        continue;
+                    }
+                    skipping = false;
+                    r.push(x);
+                }
+                Value::vec(r)
+            }
+            "partition" => {
+                let f = clo(0)?;
+                let (mut yes, mut no) = (Vec::new(), Vec::new());
+                for x in list {
+                    if self.call_closure(&f, from_ref(&x))?.is_truthy() {
+                        yes.push(x);
+                    } else {
+                        no.push(x);
+                    }
+                }
+                Value::tuple(vec![Value::vec(yes), Value::vec(no)])
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(out))
+    }
+
+    /// Closure reductions down to one value.
+    fn vec_reduce_ho(
+        &self,
+        items: &Rc<RefCell<Vec<Value>>>,
+        name: &str,
+        args: &[Value],
+    ) -> Result<Option<Value>> {
+        let clo = |i: usize| as_closure(args.get(i));
+        let list = items.borrow().clone();
+        let out = match name {
             "find" => {
                 let f = clo(0)?;
                 let mut found = Value::none();
@@ -176,7 +245,7 @@ impl Interp {
                 let mut found = Value::none();
                 for (i, x) in list.into_iter().enumerate() {
                     if self.call_closure(&f, &[x])?.is_truthy() {
-                        found = Value::some(Value::Int(i as i64));
+                        found = Value::some(Value::Int(usize_i64(i)));
                         break;
                     }
                 }
@@ -227,6 +296,21 @@ impl Interp {
                     None => Value::none(),
                 }
             }
+            _ => return Ok(None),
+        };
+        Ok(Some(out))
+    }
+
+    /// Closure forms that reorder or rewrite the list in place.
+    fn vec_order_ho(
+        &self,
+        items: &Rc<RefCell<Vec<Value>>>,
+        name: &str,
+        args: &[Value],
+    ) -> Result<Option<Value>> {
+        let clo = |i: usize| as_closure(args.get(i));
+        let list = items.borrow().clone();
+        let out = match name {
             "retain" => {
                 let f = clo(0)?;
                 let mut kept = Vec::new();
@@ -298,43 +382,6 @@ impl Interp {
                     None => Value::none(),
                 }
             }
-            "take_while" => {
-                let f = clo(0)?;
-                let mut r = Vec::new();
-                for x in list {
-                    if self.call_closure(&f, from_ref(&x))?.is_truthy() {
-                        r.push(x);
-                    } else {
-                        break;
-                    }
-                }
-                Value::vec(r)
-            }
-            "skip_while" => {
-                let f = clo(0)?;
-                let mut r = Vec::new();
-                let mut skipping = true;
-                for x in list {
-                    if skipping && self.call_closure(&f, from_ref(&x))?.is_truthy() {
-                        continue;
-                    }
-                    skipping = false;
-                    r.push(x);
-                }
-                Value::vec(r)
-            }
-            "partition" => {
-                let f = clo(0)?;
-                let (mut yes, mut no) = (Vec::new(), Vec::new());
-                for x in list {
-                    if self.call_closure(&f, from_ref(&x))?.is_truthy() {
-                        yes.push(x);
-                    } else {
-                        no.push(x);
-                    }
-                }
-                Value::tuple(vec![Value::vec(yes), Value::vec(no)])
-            }
             _ => return Ok(None),
         };
         Ok(Some(out))
@@ -397,14 +444,7 @@ impl Interp {
                     self.call_closure(&*clo(0)?, &[])?
                 }
             }
-            "ok_or_else" => {
-                if is_some {
-                    Value::ok(inner())
-                } else {
-                    Value::err(self.call_closure(&*clo(0)?, &[])?)
-                }
-            }
-            "with_context" => {
+            "ok_or_else" | "with_context" => {
                 if is_some {
                     Value::ok(inner())
                 } else {

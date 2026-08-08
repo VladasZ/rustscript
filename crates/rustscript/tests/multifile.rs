@@ -107,14 +107,14 @@ fn main() {
         ),
         (
             "a.rs",
-            r#"
+            r"
 pub mod b;
 use self::b::Thing;
 
 pub fn make_default() -> Thing {
     Thing { size: 38 }
 }
-"#,
+",
         ),
         (
             "a/b.rs",
@@ -175,9 +175,9 @@ impl Widget {
         ),
         (
             "facade.rs",
-            r#"
+            r"
 pub use crate::inner::{Widget, WIDGET_NAME};
-"#,
+",
         ),
     ]);
     let out = run_script(&dir.join("main.rs"));
@@ -239,10 +239,10 @@ pub fn who() -> &'static str {
 fn missing_module_file_errors() {
     let dir = fixture(&[(
         "main.rs",
-        r#"
+        r"
 mod nope;
 fn main() {}
-"#,
+",
     )]);
     let out = run_script(&dir.join("main.rs"));
     assert!(!out.status.success(), "script unexpectedly succeeded");
@@ -273,9 +273,9 @@ fn main() {
         ),
         (
             "util.rs",
-            r#"
+            r"
 pub fn helper() -> i64 { 1 }
-"#,
+",
         ),
     ]);
     let out = run_script(&dir.join("main.rs"));

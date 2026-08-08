@@ -1200,9 +1200,7 @@ fn f299(x: i64) -> i64 {
     (x + 82621) % 99991
 }
 
-fn main() {
-    let t = Instant::now();
-    let mut acc: i64 = 1;
+fn stage0(mut acc: i64) -> i64 {
     acc = f000(acc);
     acc = f001(acc);
     acc = f002(acc);
@@ -1278,6 +1276,10 @@ fn main() {
     acc = f072(acc);
     acc = f073(acc);
     acc = f074(acc);
+    acc
+}
+
+fn stage1(mut acc: i64) -> i64 {
     acc = f075(acc);
     acc = f076(acc);
     acc = f077(acc);
@@ -1353,6 +1355,10 @@ fn main() {
     acc = f147(acc);
     acc = f148(acc);
     acc = f149(acc);
+    acc
+}
+
+fn stage2(mut acc: i64) -> i64 {
     acc = f150(acc);
     acc = f151(acc);
     acc = f152(acc);
@@ -1428,6 +1434,10 @@ fn main() {
     acc = f222(acc);
     acc = f223(acc);
     acc = f224(acc);
+    acc
+}
+
+fn stage3(mut acc: i64) -> i64 {
     acc = f225(acc);
     acc = f226(acc);
     acc = f227(acc);
@@ -1503,6 +1513,16 @@ fn main() {
     acc = f297(acc);
     acc = f298(acc);
     acc = f299(acc);
+    acc
+}
+
+fn main() {
+    let t = Instant::now();
+    let mut acc: i64 = 1;
+    acc = stage0(acc);
+    acc = stage1(acc);
+    acc = stage2(acc);
+    acc = stage3(acc);
     let ns = t.elapsed().as_nanos();
     println!("acc = {acc}");
     eprintln!("COMPUTE_NS {ns}");

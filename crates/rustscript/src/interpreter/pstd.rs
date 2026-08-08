@@ -3,6 +3,7 @@
 //! `Send + Sync` value model, so a parallel script can walk directories and
 //! probe streams the same way a fast-engine script does.
 
+use num_traits::AsPrimitive;
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
@@ -61,7 +62,10 @@ pub(super) fn native_call(module: &str, func: &str, args: &[PValue]) -> Result<O
         // enforced even though every integer is an i64 here.
         ("char", "from") => match args.first() {
             Some(PValue::Char(c)) => PValue::Char(*c),
-            Some(PValue::Int(n)) if (0..=255).contains(n) => PValue::Char(char::from(*n as u8)),
+            Some(PValue::Int(n)) => match u8::try_from(*n) {
+                Ok(b) => PValue::Char(char::from(b)),
+                Err(_) => bail!("`char::from` needs a u8"),
+            },
             _ => bail!("`char::from` needs a u8"),
         },
         // Every integer type parses the same way here, values are untyped ints.
@@ -72,7 +76,7 @@ pub(super) fn native_call(module: &str, func: &str, args: &[PValue]) -> Result<O
         ) => {
             let text = args.first().map(PValue::display).unwrap_or_default();
             let radix = match args.get(1) {
-                Some(PValue::Int(i)) => *i as u32,
+                Some(PValue::Int(i)) => u32::try_from(*i).unwrap_or_default(),
                 _ => 10,
             };
             match i64::from_str_radix(text.trim(), radix) {
@@ -89,7 +93,7 @@ pub(super) fn native_call(module: &str, func: &str, args: &[PValue]) -> Result<O
         ) => PValue::Int(int_from_arg(module, args.first())?),
         ("f32" | "f64", "from") => match args.first() {
             Some(PValue::Float(f)) => PValue::Float(*f),
-            Some(PValue::Int(n)) => PValue::Float(*n as f64),
+            Some(PValue::Int(n)) => PValue::Float(AsPrimitive::<f64>::as_(*n)),
             Some(PValue::Bool(b)) => PValue::Float(if *b { 1.0 } else { 0.0 }),
             _ => bail!("`{module}::from` needs a number"),
         },
@@ -170,8 +174,7 @@ fn make_file_type(path: &std::path::Path) -> PValue {
     // DirEntry::file_type does not follow symlinks, so a symlink to a dir
     // reports is_symlink, not is_dir, same as the real std.
     let ft = path.symlink_metadata().map(|m| m.file_type());
-    let is =
-        |f: &dyn Fn(&std::fs::FileType) -> bool| PValue::Bool(ft.as_ref().map(f).unwrap_or(false));
+    let is = |f: &dyn Fn(&std::fs::FileType) -> bool| PValue::Bool(ft.as_ref().is_ok_and(f));
     PValue::struct_of(
         "FileType",
         [
@@ -186,7 +189,10 @@ fn make_metadata(m: &std::fs::Metadata) -> PValue {
     PValue::struct_of(
         "Metadata",
         [
-            ("len".into(), PValue::Int(m.len() as i64)),
+            (
+                "len".into(),
+                PValue::Int(i64::try_from(m.len()).unwrap_or(i64::MAX)),
+            ),
             ("is_dir".into(), PValue::Bool(m.is_dir())),
             ("is_file".into(), PValue::Bool(m.is_file())),
             ("is_symlink".into(), PValue::Bool(m.is_symlink())),
@@ -352,7 +358,7 @@ fn bytes_to_string(arg: Option<&PValue>) -> String {
                 .lock()
                 .iter()
                 .filter_map(|x| match x {
-                    PValue::Int(i) => Some(*i as u8),
+                    PValue::Int(i) => u8::try_from(*i).ok(),
                     _ => None,
                 })
                 .collect();

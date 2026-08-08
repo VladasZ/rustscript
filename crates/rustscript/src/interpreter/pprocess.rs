@@ -11,6 +11,7 @@ use parking_lot::Mutex;
 
 use super::pnative::PNative;
 use super::pvalue::{PStructData, PValue};
+use super::shared::usize_i64;
 
 /// Build a real `Command` from a script `Command` value's fields.
 fn build_command(s: &Arc<PStructData>) -> std::process::Command {
@@ -189,13 +190,12 @@ pub(super) fn command_method(recv: &PValue, m: &str, args: &mut [PValue]) -> Res
 }
 
 fn command_envs(s: &PStructData) -> PValue {
-    match s.get("envs") {
-        Some(PValue::Map(envs)) => PValue::Map(envs),
-        _ => {
-            let envs = PValue::map();
-            s.set("envs", envs.clone());
-            envs
-        }
+    if let Some(PValue::Map(envs)) = s.get("envs") {
+        PValue::Map(envs)
+    } else {
+        let envs = PValue::map();
+        s.set("envs", envs.clone());
+        envs
     }
 }
 
@@ -206,23 +206,23 @@ fn push_arg(s: &Arc<PStructData>, a: PValue) {
 }
 
 /// Methods on a spawned `Child`.
-pub(super) fn child_method(recv: &PValue, m: &str) -> Result<PValue> {
-    let PValue::Struct(s) = recv else {
+pub(super) fn child_method(recv: &PValue, method: &str) -> Result<PValue> {
+    let PValue::Struct(child) = recv else {
         unreachable!()
     };
     // Waiting on a child fed through a piped stdin must close that pipe first or
     // the child blocks forever waiting for EOF. Real Rust closes it when the
     // taken `ChildStdin` drops, but the VM keeps every value alive in a register
     // for the whole call, so drop it through the shared handle instead.
-    if matches!(m, "wait" | "wait_with_output") {
-        if let Some(v) = s.get("stdin") {
+    if matches!(method, "wait" | "wait_with_output") {
+        if let Some(v) = child.get("stdin") {
             close_handle(&v);
         }
-        s.set("stdin", PValue::none());
+        child.set("stdin", PValue::none());
     }
-    match m {
+    match method {
         "wait" => {
-            let status = wait_child(s)?;
+            let status = wait_child(child)?;
             Ok(match status {
                 Ok(st) => PValue::ok(exit_status(st)),
                 Err(e) => PValue::err(PValue::str(e)),
@@ -231,15 +231,15 @@ pub(super) fn child_method(recv: &PValue, m: &str) -> Result<PValue> {
         "wait_with_output" => {
             // Drain before waiting, so a child that fills its pipe buffer is not
             // deadlocked against a parent that is waiting for it to exit.
-            let out = drain_pipe(s, "stdout");
-            let err = drain_pipe(s, "stderr");
-            Ok(match wait_child(s)? {
+            let out = drain_pipe(child, "stdout");
+            let err = drain_pipe(child, "stderr");
+            Ok(match wait_child(child)? {
                 Ok(st) => PValue::ok(make_output(out.as_bytes(), err.as_bytes(), st)),
                 Err(e) => PValue::err(PValue::str(e)),
             })
         }
         "id" => {
-            let handle = child_handle(s)?;
+            let handle = child_handle(child)?;
             let mut h = handle.lock();
             match &mut *h {
                 PNative::Child(c) => Ok(PValue::Int(i64::from(c.id()))),
@@ -247,7 +247,7 @@ pub(super) fn child_method(recv: &PValue, m: &str) -> Result<PValue> {
             }
         }
         "kill" => {
-            let handle = child_handle(s)?;
+            let handle = child_handle(child)?;
             let mut h = handle.lock();
             match &mut *h {
                 PNative::Child(c) => Ok(match c.kill() {
@@ -257,7 +257,7 @@ pub(super) fn child_method(recv: &PValue, m: &str) -> Result<PValue> {
                 _ => bail!("child handle missing"),
             }
         }
-        _ => bail!("method `{m}` on Child is not supported in tokio mode"),
+        _ => bail!("method `{method}` on Child is not supported in tokio mode"),
     }
 }
 
@@ -348,7 +348,7 @@ pub(super) fn native_method(
                     if let Some(t) = args.first_mut() {
                         *t = PValue::str(buf);
                     }
-                    PValue::ok(PValue::Int(n as i64))
+                    PValue::ok(PValue::Int(usize_i64(n)))
                 }
                 Err(e) => PValue::err(PValue::str(e.to_string())),
             }))
@@ -364,7 +364,7 @@ pub(super) fn native_method(
                     if let Some(t) = args.first_mut() {
                         *t = PValue::str(buf);
                     }
-                    PValue::ok(PValue::Int(n as i64))
+                    PValue::ok(PValue::Int(usize_i64(n)))
                 }
                 Err(e) => PValue::err(PValue::str(e.to_string())),
             }))

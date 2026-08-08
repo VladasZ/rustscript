@@ -17,7 +17,7 @@ fn main() -> anyhow::Result<()> {
         entry?;
         count += 1;
     }
-    println!("txt files matched: {}", count);
+    println!("txt files matched: {count}");
 
     fs::remove_dir_all(&dir)?;
     Ok(())

@@ -13,7 +13,7 @@ fn generation_covers_typed_structural_surfaces() {
     let programs = (0..250).map(generate).collect::<Vec<_>>();
     let features = programs
         .iter()
-        .flat_map(|program| program.structural_features())
+        .flat_map(rustscript_differential::model::Program::structural_features)
         .collect::<BTreeSet<_>>();
     for expected in [
         "dataflow",

@@ -5,6 +5,7 @@
 //! these values into real ratatui widgets and lets the crate itself draw them,
 //! so interpreted output matches compiled output cell for cell.
 
+use num_traits::AsPrimitive;
 use ratatui::layout::Constraint;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
@@ -365,10 +366,9 @@ pub(super) fn value_padding(v: &Value) -> Padding {
 /// `u16` field or a plain literal to the same bridge helper.
 pub(super) fn int_of(v: &Value) -> i64 {
     match v {
-        Value::Int(i) => *i,
-        Value::IntW(i, _) => *i,
+        Value::Int(i) | Value::IntW(i, _) => *i,
         Value::Bool(b) => i64::from(*b),
-        Value::Float(f) => *f as i64,
+        Value::Float(f) => AsPrimitive::<i64>::as_(*f),
         _ => 0,
     }
 }
@@ -377,8 +377,7 @@ pub(super) fn text_of(v: &Value) -> String {
     match v {
         Value::Str(s) => s.as_str().to_string(),
         Value::Char(c) => c.to_string(),
-        Value::Int(i) => i.to_string(),
-        Value::IntW(i, _) => i.to_string(),
+        Value::Int(i) | Value::IntW(i, _) => i.to_string(),
         _ => String::new(),
     }
 }

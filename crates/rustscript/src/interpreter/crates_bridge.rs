@@ -1,6 +1,7 @@
 //! Bridges for the extra crates a script may use: base64, chrono,
 //! rand and friends. Split from `builtins.rs`.
 
+use num_traits::AsPrimitive;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -10,14 +11,18 @@ use super::native::Native;
 
 use super::value::{StructData, Value};
 
-use super::json_bridge::*;
-use super::jwt_bridge::*;
+use super::json_bridge::{json_to_value, value_to_json};
+use super::jwt_bridge::jwt_encode;
 use super::shared::parse_rfc3339;
-use super::std_bridge::*;
+use super::std_bridge::{bytes_arg, bytes_to_vec, field_int, make_path, opt_path};
 
 /// `module::func` call is not a plain std bridge.
 pub(super) fn crate_bridge(module: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
-    let s0 = || args.first().map(|v| v.display()).unwrap_or_default();
+    let s0 = || {
+        args.first()
+            .map(super::value::Value::display)
+            .unwrap_or_default()
+    };
     Ok(Some(match (module, func) {
         // dirs -------------------------------------------------------------
         ("dirs", "home_dir") => opt_path(dirs::home_dir()),
@@ -49,7 +54,7 @@ pub(super) fn crate_bridge(module: &str, func: &str, args: &[Value]) -> Result<O
             Err(e) => Value::err(Value::str(e.to_string())),
         },
         // sha2 -------------------------------------------------------------
-        ("Sha256", "new") | ("Sha256", "default") => {
+        ("Sha256", "new" | "default") => {
             use sha2::Digest;
             Native::Sha256(sha2::Sha256::new()).wrap()
         }
@@ -70,7 +75,7 @@ pub(super) fn crate_bridge(module: &str, func: &str, args: &[Value]) -> Result<O
             Ok(j) => Value::ok(json_to_value(j)),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
-        ("toml", "to_string") | ("toml", "to_string_pretty") => {
+        ("toml", "to_string" | "to_string_pretty") => {
             match toml::to_string(&value_to_json(args.first().unwrap_or(&Value::Unit))?) {
                 Ok(s) => Value::ok(Value::str(s)),
                 Err(e) => Value::err(Value::str(e.to_string())),
@@ -88,10 +93,10 @@ pub(super) fn crate_bridge(module: &str, func: &str, args: &[Value]) -> Result<O
             }
         }
         // rand -------------------------------------------------------------
-        ("rand", "rng") | ("rand", "thread_rng") => Value::struct_of("Rng", []),
+        ("rand", "rng" | "thread_rng") => Value::struct_of("Rng", []),
         ("rand", "random") => Value::Float(rand::random::<f64>()),
         // chrono -----------------------------------------------------------
-        ("Utc", "now") | ("Local", "now") => now_datetime(module == "Local"),
+        ("Utc" | "Local", "now") => now_datetime(module == "Local"),
         ("DateTime", "parse_from_rfc3339") => match parse_rfc3339(&s0()) {
             Ok((secs, nanos, offset)) => Value::ok(datetime_value(secs, nanos, false, offset)),
             Err(e) => Value::err(Value::str(e)),
@@ -181,7 +186,10 @@ pub(super) fn base64_method(s: &StructData, method: &str, args: &[Value]) -> Res
     Ok(match method {
         "encode" => Value::str(pick!(encode, bytes_arg(args.first()))),
         "decode" => {
-            let input = args.first().map(|v| v.display()).unwrap_or_default();
+            let input = args
+                .first()
+                .map(super::value::Value::display)
+                .unwrap_or_default();
             match pick!(decode, &input) {
                 Ok(b) => Value::ok(bytes_to_vec(&b)),
                 Err(e) => Value::err(Value::str(e.to_string())),
@@ -212,14 +220,19 @@ pub(super) fn now_datetime(local: bool) -> Value {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
-    datetime_value(now.as_secs() as i64, now.subsec_nanos(), local, 0)
+    datetime_value(
+        i64::try_from(now.as_secs()).unwrap_or(i64::MAX),
+        now.subsec_nanos(),
+        local,
+        0,
+    )
 }
 
 pub(super) fn datetime_method(s: &StructData, name: &str, args: &[Value]) -> Result<Value> {
     let secs = field_int(s, "secs");
-    let nanos = field_int(s, "nanos") as u32;
+    let nanos = u32::try_from(field_int(s, "nanos")).unwrap_or_default();
     let local = matches!(s.get("local"), Some(Value::Bool(true)));
-    let offset = field_int(s, "offset") as i32;
+    let offset = i32::try_from(field_int(s, "offset")).unwrap_or_default();
     let args = super::methods::VArgs(args);
     match super::shared::datetime_core(name, secs, nanos, local, offset, &args) {
         Some(super::shared::DateOut::Int(i)) => Ok(Value::Int(i)),
@@ -250,7 +263,7 @@ pub(super) fn rng_method(name: &str, args: &[Value]) -> Result<Value> {
         "random_bool" | "gen_bool" => {
             let p = match args.first() {
                 Some(Value::Float(f)) => *f,
-                Some(Value::Int(i)) => *i as f64,
+                Some(Value::Int(i)) => AsPrimitive::<f64>::as_(*i),
                 _ => 0.5,
             };
             Value::Bool(rng.random_bool(p.clamp(0.0, 1.0)))
@@ -260,7 +273,7 @@ pub(super) fn rng_method(name: &str, args: &[Value]) -> Result<Value> {
             if let Some(Value::Vec(v)) = args.first() {
                 let mut buf = v.borrow_mut();
                 for slot in buf.iter_mut() {
-                    *slot = Value::Int(rng.random::<u8>() as i64);
+                    *slot = Value::Int(i64::from(rng.random::<u8>()));
                 }
             }
             Value::Unit

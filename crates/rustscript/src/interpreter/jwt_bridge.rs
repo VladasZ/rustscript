@@ -1,5 +1,5 @@
 //! Bridge for the jsonwebtoken crate: Algorithm values, Header and
-//! EncodingKey construction, and `encode` for signing tokens.
+//! `EncodingKey` construction, and `encode` for signing tokens.
 
 use std::str::FromStr;
 
@@ -25,7 +25,7 @@ pub(super) fn jwt_algorithm(ty: &str, variant: &str) -> Option<Value> {
 
 pub(super) fn jwt_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
     Ok(Some(match (ty, func) {
-        ("Header", "new") | ("Header", "default") => {
+        ("Header", "new" | "default") => {
             let alg = match args.first() {
                 Some(v) => v.clone(),
                 None => jwt_algorithm("Algorithm", "HS256").expect("HS256 is a known algorithm"),

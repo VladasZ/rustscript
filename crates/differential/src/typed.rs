@@ -266,7 +266,18 @@ impl GeneratedExpr {
             | Self::Less(left, right)
             | Self::And(left, right)
             | Self::Or(left, right)
-            | Self::Concat(left, right) => left.uses(name) || right.uses(name),
+            | Self::Concat(left, right)
+            | Self::RawAdd(left, right)
+            | Self::RawSub(left, right)
+            | Self::RawMul(left, right)
+            | Self::RawDiv(left, right)
+            | Self::RawRem(left, right)
+            | Self::FAdd(left, right)
+            | Self::FSub(left, right)
+            | Self::FMul(left, right)
+            | Self::FDiv(left, right)
+            | Self::FLess(left, right)
+            | Self::FEq(left, right) => left.uses(name) || right.uses(name),
             Self::Not(value)
             | Self::Uppercase(value)
             | Self::FormatI64(value)
@@ -274,14 +285,21 @@ impl GeneratedExpr {
             | Self::VecReverse(value)
             | Self::VecLen(value)
             | Self::Some(value)
-            | Self::OptionIsSome(value) => value.uses(name),
+            | Self::OptionIsSome(value)
+            | Self::Cast(value, _)
+            | Self::Unwrap(value)
+            | Self::I64ToF64(value)
+            | Self::F64ToI64(value)
+            | Self::FormatF64(value)
+            | Self::DebugF64(value)
+            | Self::FormatSpec { value, .. }
+            | Self::Replace { value, .. } => value.uses(name),
             Self::If {
                 condition,
                 then_expr,
                 else_expr,
                 ..
             } => condition.uses(name) || then_expr.uses(name) || else_expr.uses(name),
-            Self::Replace { value, .. } => value.uses(name),
             Self::VecLiteral(values) => values.iter().any(|value| value.uses(name)),
             Self::VecMap { values, body, .. }
             | Self::VecFilter {
@@ -311,24 +329,6 @@ impl GeneratedExpr {
                 option, some, none, ..
             } => option.uses(name) || some.uses(name) || none.uses(name),
             Self::ClosureCall { input, body, .. } => input.uses(name) || body.uses(name),
-            Self::RawAdd(left, right)
-            | Self::RawSub(left, right)
-            | Self::RawMul(left, right)
-            | Self::RawDiv(left, right)
-            | Self::RawRem(left, right)
-            | Self::FAdd(left, right)
-            | Self::FSub(left, right)
-            | Self::FMul(left, right)
-            | Self::FDiv(left, right)
-            | Self::FLess(left, right)
-            | Self::FEq(left, right) => left.uses(name) || right.uses(name),
-            Self::Cast(value, _)
-            | Self::Unwrap(value)
-            | Self::I64ToF64(value)
-            | Self::F64ToI64(value)
-            | Self::FormatF64(value)
-            | Self::DebugF64(value)
-            | Self::FormatSpec { value, .. } => value.uses(name),
             Self::Index { values, .. } => values.uses(name),
             Self::I64(_) | Self::Bool(_) | Self::Text(_) | Self::F64(_) | Self::None => false,
         }
@@ -541,7 +541,18 @@ impl GeneratedExpr {
             | Self::Less(left, right)
             | Self::And(left, right)
             | Self::Or(left, right)
-            | Self::Concat(left, right) => vec![left, right],
+            | Self::Concat(left, right)
+            | Self::RawAdd(left, right)
+            | Self::RawSub(left, right)
+            | Self::RawMul(left, right)
+            | Self::RawDiv(left, right)
+            | Self::RawRem(left, right)
+            | Self::FAdd(left, right)
+            | Self::FSub(left, right)
+            | Self::FMul(left, right)
+            | Self::FDiv(left, right)
+            | Self::FLess(left, right)
+            | Self::FEq(left, right) => vec![left, right],
             Self::Not(value)
             | Self::Uppercase(value)
             | Self::FormatI64(value)
@@ -549,14 +560,21 @@ impl GeneratedExpr {
             | Self::VecReverse(value)
             | Self::VecLen(value)
             | Self::Some(value)
-            | Self::OptionIsSome(value) => vec![value],
+            | Self::OptionIsSome(value)
+            | Self::Cast(value, _)
+            | Self::Unwrap(value)
+            | Self::I64ToF64(value)
+            | Self::F64ToI64(value)
+            | Self::FormatF64(value)
+            | Self::DebugF64(value)
+            | Self::FormatSpec { value, .. }
+            | Self::Replace { value, .. } => vec![value],
             Self::If {
                 condition,
                 then_expr,
                 else_expr,
                 ..
             } => vec![condition, then_expr, else_expr],
-            Self::Replace { value, .. } => vec![value],
             Self::VecLiteral(values) => values.iter().collect(),
             Self::VecMap { values, body, .. }
             | Self::VecFilter {
@@ -586,24 +604,6 @@ impl GeneratedExpr {
                 option, some, none, ..
             } => vec![option, some, none],
             Self::ClosureCall { input, body, .. } => vec![input, body],
-            Self::RawAdd(left, right)
-            | Self::RawSub(left, right)
-            | Self::RawMul(left, right)
-            | Self::RawDiv(left, right)
-            | Self::RawRem(left, right)
-            | Self::FAdd(left, right)
-            | Self::FSub(left, right)
-            | Self::FMul(left, right)
-            | Self::FDiv(left, right)
-            | Self::FLess(left, right)
-            | Self::FEq(left, right) => vec![left, right],
-            Self::Cast(value, _)
-            | Self::Unwrap(value)
-            | Self::I64ToF64(value)
-            | Self::F64ToI64(value)
-            | Self::FormatF64(value)
-            | Self::DebugF64(value)
-            | Self::FormatSpec { value, .. } => vec![value],
             Self::Index { values, .. } => vec![values],
             Self::I64(_)
             | Self::Bool(_)

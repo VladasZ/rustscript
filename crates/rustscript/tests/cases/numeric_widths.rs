@@ -17,12 +17,12 @@ fn main() {
     let suffixed = 55u8;
     println!("u8 sum: {}", small + suffixed);
 
-    let big: u64 = 18446744073709551615;
+    let big: u64 = 18_446_744_073_709_551_615;
     println!("u64 max: {big}");
     println!("u64 half: {}", big / 2);
-    let big_size = 18446744073709551614usize;
+    let big_size = 18_446_744_073_709_551_614usize;
     println!("usize: {big_size}");
-    println!("u64 vs literal: {}", big > 9223372036854775807);
+    println!("u64 vs literal: {}", big > 9_223_372_036_854_775_807);
 
     // Narrowing casts truncate, float to int casts saturate, NaN is zero.
     let wide = opaque(300);
@@ -49,9 +49,9 @@ fn main() {
     let y: f64 = 0.2;
     println!("f64 sum: {}", x + y);
     println!("f32 eps: {}", f32::EPSILON);
-    println!("f32 debug: {:?}", 16777217.0f32);
-    println!("i64 as f32: {}", opaque(16777217) as f32);
-    println!("f32 as f64: {}", 0.1f32 as f64);
+    println!("f32 debug: {:?}", 16_777_217.0f32);
+    println!("i64 as f32: {}", opaque(16_777_217) as f32);
+    println!("f32 as f64: {}", f64::from(0.1f32));
     println!("f32 inf: {} {}", f32::INFINITY, 1e30f32 * 1e30f32);
 
     // Radix specs print the two's complement image at the value's width.

@@ -11,7 +11,7 @@ fn main() {
     let mut x: i64 = 12345;
     let mut values: Vec<i64> = Vec::new();
     for _ in 0..n {
-        x = x * 48271 % 2147483647;
+        x = x * 48271 % 2_147_483_647;
         values.push(x % 1_000_000);
     }
     values.sort_by_cached_key(|value| (value % 1000, *value));

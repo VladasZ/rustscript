@@ -21,7 +21,7 @@ fn main() {
     let saved = fs::read_to_string(output).unwrap();
     let mut checksum: u64 = 0;
     for byte in saved.bytes() {
-        checksum = (checksum + byte as u64) % 1_000_000_007;
+        checksum = (checksum + u64::from(byte)) % 1_000_000_007;
     }
     let ns = t.elapsed().as_nanos();
     println!("lines={lines} bytes={} checksum={checksum}", saved.len());

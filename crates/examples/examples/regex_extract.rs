@@ -14,7 +14,7 @@ fn main() -> Result<()> {
     println!("entries: {count}");
 
     // The iterator terminal `last` drains to the final item.
-    let last_start = re.find_iter(text).last().map(|m| m.start()).unwrap_or(0);
+    let last_start = re.find_iter(text).last().map_or(0, |m| m.start());
     println!("last entry starts at: {last_start}");
     let last_level = re
         .captures_iter(text)

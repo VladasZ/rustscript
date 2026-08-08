@@ -1,3 +1,4 @@
+use num_traits::AsPrimitive;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -741,7 +742,7 @@ fn print_stats(wall: &[TimeStat], compute: &[TimeStat], memory: &[MemStat]) {
         println!(
             "  rss    {:<11} {:>8.1} MB",
             stat.lang,
-            stat.median_bytes as f64 / 1e6
+            AsPrimitive::<f64>::as_(stat.median_bytes) / 1e6
         );
     }
 }

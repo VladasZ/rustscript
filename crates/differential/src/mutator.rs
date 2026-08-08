@@ -119,9 +119,7 @@ fn rebind(
             if candidates.is_empty() {
                 *expr = minimal_literal(*ty);
             } else {
-                *name = candidates[rng.random_range(0..candidates.len())]
-                    .name
-                    .clone();
+                name.clone_from(&candidates[rng.random_range(0..candidates.len())].name);
             }
         }
         GeneratedExpr::VecMap {

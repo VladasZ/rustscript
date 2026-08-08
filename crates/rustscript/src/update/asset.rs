@@ -113,7 +113,7 @@ pub fn download(url: &str) -> Result<Vec<u8>> {
         bar.set_draw_target(ProgressDrawTarget::hidden());
     }
 
-    let mut bytes = Vec::with_capacity(total as usize);
+    let mut bytes = Vec::with_capacity(usize::try_from(total).unwrap_or_default());
     bar.wrap_read(response)
         .read_to_end(&mut bytes)
         .with_context(|| format!("could not download {url}"))?;

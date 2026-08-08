@@ -22,10 +22,10 @@ fn main() {
         list.push(w.to_string());
         groups.insert(key, list);
     }
-    let mut keys: Vec<char> = groups.keys().cloned().collect();
-    keys.sort();
+    let mut keys: Vec<char> = groups.keys().copied().collect();
+    keys.sort_unstable();
     for k in keys {
         let list = groups.get(&k).cloned().unwrap_or(vec![]);
-        println!("{k}: {:?}", list);
+        println!("{k}: {list:?}");
     }
 }

@@ -148,7 +148,7 @@ impl SemanticCase {
 
 fn borrowed_vector_prelude(id: usize) -> String {
     format!(
-        r#"fn generated_adjust_values_{id}(values: &mut Vec<i64>, delta: i64) {{
+        r"fn generated_adjust_values_{id}(values: &mut Vec<i64>, delta: i64) {{
     for value in values.iter_mut() {{
         *value = (*value).saturating_add(delta);
     }}
@@ -161,13 +161,13 @@ fn generated_sum_slice_{id}(values: &[i64]) -> i64 {{
         .fold(0i64, |total, value| total.saturating_add(value))
 }}
 
-"#
+"
     )
 }
 
 fn owned_record_prelude(id: usize) -> String {
     format!(
-        r#"struct GeneratedRecord{id} {{
+        r"struct GeneratedRecord{id} {{
     label: String,
     values: Vec<i64>,
 }}
@@ -194,7 +194,7 @@ impl GeneratedRecord{id} {{
     }}
 }}
 
-"#
+"
     )
 }
 

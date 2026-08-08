@@ -109,165 +109,193 @@ impl RichCase {
 
     pub fn shrinks(&self) -> Vec<Self> {
         match self {
-            Self::OptionClosure {
-                input,
-                threshold,
-                multiplier,
-                offset,
-                fallback,
-            } => {
-                let mut candidates = Vec::new();
-                push_if_changed(
-                    &mut candidates,
-                    self,
-                    Self::OptionClosure {
-                        input: None,
-                        threshold: *threshold,
-                        multiplier: *multiplier,
-                        offset: *offset,
-                        fallback: *fallback,
-                    },
-                );
-                push_if_changed(
-                    &mut candidates,
-                    self,
-                    Self::OptionClosure {
-                        input: *input,
-                        threshold: 0,
-                        multiplier: 1,
-                        offset: 0,
-                        fallback: None,
-                    },
-                );
-                candidates
-            }
-            Self::VectorPipeline {
-                values,
-                multiplier,
-                offset,
-                minimum,
-                extra,
-                lookup,
-                reverse,
-            } => {
-                let mut candidates = Vec::new();
-                push_if_changed(
-                    &mut candidates,
-                    self,
-                    Self::VectorPipeline {
-                        values: Vec::new(),
-                        multiplier: *multiplier,
-                        offset: *offset,
-                        minimum: *minimum,
-                        extra: *extra,
-                        lookup: *lookup,
-                        reverse: *reverse,
-                    },
-                );
-                if values.len() > 1 {
-                    push_if_changed(
-                        &mut candidates,
-                        self,
-                        Self::VectorPipeline {
-                            values: vec![values[0]],
-                            multiplier: *multiplier,
-                            offset: *offset,
-                            minimum: *minimum,
-                            extra: *extra,
-                            lookup: *lookup,
-                            reverse: *reverse,
-                        },
-                    );
-                }
-                push_if_changed(
-                    &mut candidates,
-                    self,
-                    Self::VectorPipeline {
-                        values: values.clone(),
-                        multiplier: 1,
-                        offset: 0,
-                        minimum: 0,
-                        extra: 0,
-                        lookup: 0,
-                        reverse: false,
-                    },
-                );
-                candidates
-            }
-            Self::PathString {
-                raw,
-                child,
-                extension,
-                separator,
-                needle,
-                replacement,
-                uppercase,
-            } => {
-                let mut candidates = Vec::new();
-                push_if_changed(
-                    &mut candidates,
-                    self,
-                    Self::PathString {
-                        raw: "a.txt".to_string(),
-                        child: child.clone(),
-                        extension: extension.clone(),
-                        separator: *separator,
-                        needle: needle.clone(),
-                        replacement: replacement.clone(),
-                        uppercase: *uppercase,
-                    },
-                );
-                push_if_changed(
-                    &mut candidates,
-                    self,
-                    Self::PathString {
-                        raw: raw.clone(),
-                        child: None,
-                        extension: String::new(),
-                        separator: '_',
-                        needle: String::new(),
-                        replacement: String::new(),
-                        uppercase: false,
-                    },
-                );
-                candidates
-            }
-            Self::EnumMatch {
-                variant,
-                label,
-                path,
-                values,
-                needle,
-                bias,
-            } => {
-                let mut candidates = Vec::new();
-                push_if_changed(
-                    &mut candidates,
-                    self,
-                    Self::EnumMatch {
-                        variant: StateVariant::Idle,
-                        label: label.clone(),
-                        path: path.clone(),
-                        values: values.clone(),
-                        needle: needle.clone(),
-                        bias: *bias,
-                    },
-                );
-                push_if_changed(
-                    &mut candidates,
-                    self,
-                    Self::EnumMatch {
-                        variant: *variant,
-                        label: String::new(),
-                        path: "a".to_string(),
-                        values: Vec::new(),
-                        needle: String::new(),
-                        bias: 0,
-                    },
-                );
-                candidates
-            }
+            Self::OptionClosure { .. } => self.shrink_option_closure(),
+            Self::VectorPipeline { .. } => self.shrink_vector_pipeline(),
+            Self::PathString { .. } => self.shrink_path_string(),
+            Self::EnumMatch { .. } => self.shrink_enum_match(),
         }
+    }
+
+    fn shrink_option_closure(&self) -> Vec<Self> {
+        let Self::OptionClosure {
+            input,
+            threshold,
+            multiplier,
+            offset,
+            fallback,
+        } = self
+        else {
+            unreachable!()
+        };
+
+        let mut candidates = Vec::new();
+        push_if_changed(
+            &mut candidates,
+            self,
+            Self::OptionClosure {
+                input: None,
+                threshold: *threshold,
+                multiplier: *multiplier,
+                offset: *offset,
+                fallback: *fallback,
+            },
+        );
+        push_if_changed(
+            &mut candidates,
+            self,
+            Self::OptionClosure {
+                input: *input,
+                threshold: 0,
+                multiplier: 1,
+                offset: 0,
+                fallback: None,
+            },
+        );
+        candidates
+    }
+
+    fn shrink_vector_pipeline(&self) -> Vec<Self> {
+        let Self::VectorPipeline {
+            values,
+            multiplier,
+            offset,
+            minimum,
+            extra,
+            lookup,
+            reverse,
+        } = self
+        else {
+            unreachable!()
+        };
+
+        let mut candidates = Vec::new();
+        push_if_changed(
+            &mut candidates,
+            self,
+            Self::VectorPipeline {
+                values: Vec::new(),
+                multiplier: *multiplier,
+                offset: *offset,
+                minimum: *minimum,
+                extra: *extra,
+                lookup: *lookup,
+                reverse: *reverse,
+            },
+        );
+        if values.len() > 1 {
+            push_if_changed(
+                &mut candidates,
+                self,
+                Self::VectorPipeline {
+                    values: vec![values[0]],
+                    multiplier: *multiplier,
+                    offset: *offset,
+                    minimum: *minimum,
+                    extra: *extra,
+                    lookup: *lookup,
+                    reverse: *reverse,
+                },
+            );
+        }
+        push_if_changed(
+            &mut candidates,
+            self,
+            Self::VectorPipeline {
+                values: values.clone(),
+                multiplier: 1,
+                offset: 0,
+                minimum: 0,
+                extra: 0,
+                lookup: 0,
+                reverse: false,
+            },
+        );
+        candidates
+    }
+
+    fn shrink_path_string(&self) -> Vec<Self> {
+        let Self::PathString {
+            raw,
+            child,
+            extension,
+            separator,
+            needle,
+            replacement,
+            uppercase,
+        } = self
+        else {
+            unreachable!()
+        };
+
+        let mut candidates = Vec::new();
+        push_if_changed(
+            &mut candidates,
+            self,
+            Self::PathString {
+                raw: "a.txt".to_string(),
+                child: child.clone(),
+                extension: extension.clone(),
+                separator: *separator,
+                needle: needle.clone(),
+                replacement: replacement.clone(),
+                uppercase: *uppercase,
+            },
+        );
+        push_if_changed(
+            &mut candidates,
+            self,
+            Self::PathString {
+                raw: raw.clone(),
+                child: None,
+                extension: String::new(),
+                separator: '_',
+                needle: String::new(),
+                replacement: String::new(),
+                uppercase: false,
+            },
+        );
+        candidates
+    }
+
+    fn shrink_enum_match(&self) -> Vec<Self> {
+        let Self::EnumMatch {
+            variant,
+            label,
+            path,
+            values,
+            needle,
+            bias,
+        } = self
+        else {
+            unreachable!()
+        };
+
+        let mut candidates = Vec::new();
+        push_if_changed(
+            &mut candidates,
+            self,
+            Self::EnumMatch {
+                variant: StateVariant::Idle,
+                label: label.clone(),
+                path: path.clone(),
+                values: values.clone(),
+                needle: needle.clone(),
+                bias: *bias,
+            },
+        );
+        push_if_changed(
+            &mut candidates,
+            self,
+            Self::EnumMatch {
+                variant: *variant,
+                label: String::new(),
+                path: "a".to_string(),
+                values: Vec::new(),
+                needle: String::new(),
+                bias: 0,
+            },
+        );
+        candidates
     }
 }
 

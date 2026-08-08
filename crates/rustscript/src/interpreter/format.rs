@@ -1,3 +1,4 @@
+use num_traits::AsPrimitive;
 use anyhow::{Result, anyhow};
 
 use super::value::Value;
@@ -34,7 +35,7 @@ pub(super) fn render_values(
                 };
                 let value = resolve_arg(arg_ref, &mut next_positional, positional, named)?;
                 let spec = expand_arg_widths(spec, positional, named)?;
-                out.push_str(&format_value(&value, &spec)?);
+                out.push_str(&format_value(&value, &spec));
             }
             '}' => {
                 if chars.peek() == Some(&'}') {
@@ -76,7 +77,7 @@ fn resolve_arg(
 }
 
 /// Apply the format spec to an already-evaluated value.
-fn format_value(value: &Value, spec: &str) -> Result<String> {
+fn format_value(value: &Value, spec: &str) -> String {
     let number = match value {
         Value::Float(f) => Some(SpecNumber::Float(*f)),
         Value::F32(f) => Some(SpecNumber::F32(*f)),
@@ -87,7 +88,7 @@ fn format_value(value: &Value, spec: &str) -> Result<String> {
         }),
         _ => None,
     };
-    Ok(apply_spec(spec, &value.display(), &value.debug(), number))
+    apply_spec(spec, &value.display(), &value.debug(), number)
 }
 
 /// The numeric identity of a formatted value. Radix forms need the exact
@@ -109,7 +110,7 @@ pub(super) enum SpecNumber {
 impl SpecNumber {
     /// The bits radix forms print, masked to the value's own width.
     fn radix_bits(value: i128, bits: u32) -> u64 {
-        (value as u64) & (u64::MAX >> (64 - bits))
+        AsPrimitive::<u64>::as_(value ) & (u64::MAX >> (64 - bits))
     }
 }
 
@@ -122,8 +123,15 @@ struct ParsedSpec {
     zero: bool,
     width: Option<usize>,
     precision: Option<usize>,
-    debug: bool,
+    repr: Repr,
     ty: Option<char>,
+}
+
+/// Whether the spec asks for the debug rendering, a trailing `?`.
+#[derive(PartialEq)]
+enum Repr {
+    Display,
+    Debug,
 }
 
 fn parse_spec(spec: &str) -> ParsedSpec {
@@ -136,7 +144,7 @@ fn parse_spec(spec: &str) -> ParsedSpec {
         zero: false,
         width: None,
         precision: None,
-        debug: false,
+        repr: Repr::Display,
         ty: None,
     };
     let mut index = 0;
@@ -184,7 +192,7 @@ fn parse_spec(spec: &str) -> ParsedSpec {
     }
     for &c in &chars[index.min(chars.len())..] {
         match c {
-            '?' => parsed.debug = true,
+            '?' => parsed.repr = Repr::Debug,
             'x' | 'X' | 'o' | 'b' | 'e' | 'E' => parsed.ty = Some(c),
             _ => {}
         }
@@ -274,7 +282,7 @@ fn render_base(
     debug: &str,
     number: Option<SpecNumber>,
 ) -> String {
-    if parsed.debug {
+    if parsed.repr == Repr::Debug {
         return debug.to_string();
     }
     match (parsed.ty, number) {

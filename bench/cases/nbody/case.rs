@@ -65,23 +65,23 @@ fn bodies() -> Vec<Body> {
 
 fn energy(bodies: &[Body]) -> f64 {
     let n = bodies.len();
-    let mut e = 0.0;
+    let mut total = 0.0;
     let mut i = 0;
     while i < n {
-        let b = &bodies[i];
-        e += 0.5 * b.mass * (b.vx * b.vx + b.vy * b.vy + b.vz * b.vz);
+        let body = &bodies[i];
+        total += 0.5 * body.mass * (body.vx * body.vx + body.vy * body.vy + body.vz * body.vz);
         let mut j = i + 1;
         while j < n {
-            let dx = b.x - bodies[j].x;
-            let dy = b.y - bodies[j].y;
-            let dz = b.z - bodies[j].z;
-            let d = (dx * dx + dy * dy + dz * dz).sqrt();
-            e -= b.mass * bodies[j].mass / d;
+            let dx = body.x - bodies[j].x;
+            let dy = body.y - bodies[j].y;
+            let dz = body.z - bodies[j].z;
+            let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+            total -= body.mass * bodies[j].mass / dist;
             j += 1;
         }
         i += 1;
     }
-    e
+    total
 }
 
 fn main() {
@@ -146,10 +146,8 @@ fn main() {
     }
     let e1 = energy(&bodies);
     let ns = t.elapsed().as_nanos();
-    println!(
-        "start {} end {}",
-        (e0 * 1e9).round() as i64,
-        (e1 * 1e9).round() as i64
-    );
+    // An integral f64 displays without a fraction, so the rounded checksum
+    // prints the same digits the old i64 cast did.
+    println!("start {} end {}", (e0 * 1e9).round(), (e1 * 1e9).round());
     eprintln!("COMPUTE_NS {ns}");
 }

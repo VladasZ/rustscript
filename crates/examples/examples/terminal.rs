@@ -9,7 +9,7 @@ use std::io::{self, IsTerminal};
 
 fn main() {
     let interactive = io::stdout().is_terminal();
-    println!("stdout is a terminal: {}", interactive);
+    println!("stdout is a terminal: {interactive}");
 
     let styled = "status".green().bold().to_string();
     // When not a tty the styled text equals the plain text.

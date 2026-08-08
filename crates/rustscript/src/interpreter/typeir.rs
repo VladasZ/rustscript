@@ -123,15 +123,15 @@ fn lower(
         type_arg(seg, i).map(|t| Arc::new(lower(t, resolver, module, generics, depth + 1)))
     };
     match name.as_str() {
-        "Vec" | "VecDeque" => arg(0).map(TypeIr::Vec).unwrap_or(TypeIr::Dynamic),
-        "Option" => arg(0).map(TypeIr::Option).unwrap_or(TypeIr::Dynamic),
+        "Vec" | "VecDeque" => arg(0).map_or(TypeIr::Dynamic, TypeIr::Vec),
+        "Option" => arg(0).map_or(TypeIr::Dynamic, TypeIr::Option),
         // Smart pointers are transparent at runtime.
         "Box" | "Rc" | "Arc" => match type_arg(seg, 0) {
             Some(t) => lower(t, resolver, module, generics, depth + 1),
             None => TypeIr::Dynamic,
         },
-        "HashMap" | "BTreeMap" => arg(1).map(TypeIr::MapValue).unwrap_or(TypeIr::Dynamic),
-        "HashSet" | "BTreeSet" => arg(0).map(TypeIr::Set).unwrap_or(TypeIr::Dynamic),
+        "HashMap" | "BTreeMap" => arg(1).map_or(TypeIr::Dynamic, TypeIr::MapValue),
+        "HashSet" | "BTreeSet" => arg(0).map_or(TypeIr::Dynamic, TypeIr::Set),
         _ => {
             if let Some(canon) = resolver.resolve_struct_key(module, &p.path) {
                 return TypeIr::Struct(Arc::from(&*canon));

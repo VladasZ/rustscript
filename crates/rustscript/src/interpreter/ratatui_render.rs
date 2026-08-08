@@ -80,8 +80,7 @@ pub(super) fn ratatui_assoc(ty: &str, func: &str, args: &[Value]) -> Option<Valu
             "Span",
             [("content".into(), arg(0)), ("style".into(), arg(1))],
         ),
-        ("Line", "from") => line_from(&arg(0)),
-        ("Line", "raw" | "styled") => line_from(&arg(0)),
+        ("Line", "from" | "raw" | "styled") => line_from(&arg(0)),
         ("Cell", "from" | "new") => Value::struct_of(
             "Cell",
             [
@@ -429,14 +428,19 @@ fn build_sparkline(s: &StructData) -> Sparkline<'static> {
     let data: Vec<u64> = s
         .get("data")
         .as_ref()
-        .map(|d| items(d).iter().map(|v| int_of(v).max(0) as u64).collect())
+        .map(|d| {
+            items(d)
+                .iter()
+                .map(|v| int_of(v).max(0).cast_unsigned())
+                .collect()
+        })
         .unwrap_or_default();
     let mut spark = Sparkline::default().data(data);
     if let Some(style) = s.get("style") {
         spark = spark.style(value_style(&style));
     }
     if let Some(max) = option_inner(s.get("max").as_ref()) {
-        spark = spark.max(int_of(&max).max(0) as u64);
+        spark = spark.max(int_of(&max).max(0).cast_unsigned());
     }
     spark
 }

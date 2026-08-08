@@ -29,8 +29,8 @@ fn main() -> anyhow::Result<()> {
 
     let claims = Claims {
         iss: "issuer-id-1".to_string(),
-        iat: 1700000000,
-        exp: 1700001200,
+        iat: 1_700_000_000,
+        exp: 1_700_001_200,
         aud: "appstoreconnect-v1".to_string(),
     };
 

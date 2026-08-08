@@ -2,7 +2,7 @@
 
 //! Integer methods answer in the receiver's real width. These all used to run
 //! on an i64 image, so saturation happened at i64's bounds and a u64 past
-//! i64::MAX was clamped before the method ever saw it.
+//! `i64::MAX` was clamped before the method ever saw it.
 
 fn main() {
     let small: u8 = 200;

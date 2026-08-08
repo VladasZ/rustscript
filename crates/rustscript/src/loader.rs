@@ -8,6 +8,7 @@
 //! a top level module so `use shared::x` resolves at runtime without a `mod`
 //! declaration, while the checker sees it as a real path dependency.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -83,7 +84,7 @@ pub fn load(script_path: &Path, root_source: &str) -> Result<Program> {
 /// `main.rs` so the mirrored file stays a name cargo builds without fuss.
 fn root_file_name(script_path: &Path) -> String {
     match script_path.file_name().and_then(|n| n.to_str()) {
-        Some(name) if name.ends_with(".rs") => name.to_string(),
+        Some(name) if Path::new(name).extension() == Some(OsStr::new("rs")) => name.to_string(),
         _ => "main.rs".to_string(),
     }
 }
@@ -215,20 +216,19 @@ fn collect(
                 child_dir = children_dir.join(&name);
                 (inline_items, file.clone())
             }
-            None => match &path_attr {
-                Some(rel) => {
+            None => {
+                if let Some(rel) = &path_attr {
                     let target = children_dir.join(rel);
                     let loaded = load_file_at(files, script_dir, &target, &child_path)?;
                     child_dir = target
                         .parent()
                         .map_or_else(|| children_dir.to_path_buf(), Path::to_path_buf);
                     loaded
-                }
-                None => {
+                } else {
                     child_dir = children_dir.join(&name);
                     load_file(files, script_dir, children_dir, &name, &child_path)?
                 }
-            },
+            }
         };
         let child = collect(
             modules,

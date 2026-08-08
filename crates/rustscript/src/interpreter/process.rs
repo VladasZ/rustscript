@@ -12,7 +12,7 @@ use super::value::{Map, MapKey, MapKind, RStr, StructData, Value};
 
 /// Build a real `Command` from a script `Command` value's fields. Every field
 /// that becomes an OS string goes through `path_like`, so a `Path` or `PathBuf`
-/// value contributes its path, not its struct debug form. current_dir was the
+/// value contributes its path, not its struct debug form. `current_dir` was the
 /// sharp edge, a debug string there made every spawn fail with ENOENT.
 pub(super) fn build_command(s: &StructData) -> std::process::Command {
     let program = s.get("program").map(|v| path_like(&v)).unwrap_or_default();
@@ -124,8 +124,7 @@ pub(super) fn spawn_command(s: &StructData) -> Value {
         .stdin
         .take()
         .map(|w| Native::ChildStdin(w).wrap())
-        .map(Value::some)
-        .unwrap_or_else(Value::none);
+        .map_or_else(Value::none, Value::some);
     let stdout = child
         .stdout
         .take()
@@ -135,8 +134,7 @@ pub(super) fn spawn_command(s: &StructData) -> Value {
             ))
             .wrap()
         })
-        .map(Value::some)
-        .unwrap_or_else(Value::none);
+        .map_or_else(Value::none, Value::some);
     let stderr = child
         .stderr
         .take()
@@ -146,8 +144,7 @@ pub(super) fn spawn_command(s: &StructData) -> Value {
             ))
             .wrap()
         })
-        .map(Value::some)
-        .unwrap_or_else(Value::none);
+        .map_or_else(Value::none, Value::some);
     Value::ok(Value::struct_of(
         "Child",
         [
@@ -166,7 +163,7 @@ pub(super) fn make_exit_status(status: std::process::ExitStatus) -> Value {
         [
             (
                 "code".into(),
-                Value::Int(status.code().unwrap_or(-1) as i64),
+                Value::Int(i64::from(status.code().unwrap_or(-1))),
             ),
             ("success".into(), Value::Bool(status.success())),
         ],
@@ -213,14 +210,20 @@ pub(super) fn command_method(s: &Rc<StructData>, name: &str, args: &[Value]) -> 
             cmd_value()
         }
         "env" => {
-            let key = args.first().map(|v| v.display()).unwrap_or_default();
+            let key = args
+                .first()
+                .map(super::value::Value::display)
+                .unwrap_or_default();
             let val = args.get(1).cloned().unwrap_or(Value::Unit);
             let envs = command_envs(s);
             envs.borrow_mut().insert(MapKey::Str(RStr::new(key)), val);
             cmd_value()
         }
         "env_remove" => {
-            let key = args.first().map(|v| v.display()).unwrap_or_default();
+            let key = args
+                .first()
+                .map(super::value::Value::display)
+                .unwrap_or_default();
             let envs = command_envs(s);
             envs.borrow_mut()
                 .insert(MapKey::Str(RStr::new(key)), Value::Unit);
@@ -250,13 +253,12 @@ pub(super) fn command_method(s: &Rc<StructData>, name: &str, args: &[Value]) -> 
 }
 
 fn command_envs(s: &StructData) -> Rc<RefCell<Map>> {
-    match s.get("envs") {
-        Some(Value::Map(envs, _)) => envs,
-        _ => {
-            let envs = Rc::new(RefCell::new(Map::default()));
-            s.set("envs", Value::Map(envs.clone(), MapKind::Map));
-            envs
-        }
+    if let Some(Value::Map(envs, _)) = s.get("envs") {
+        envs
+    } else {
+        let envs = Rc::new(RefCell::new(Map::default()));
+        s.set("envs", Value::Map(envs.clone(), MapKind::Map));
+        envs
     }
 }
 

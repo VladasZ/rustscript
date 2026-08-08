@@ -41,7 +41,7 @@ fn bin_cache() -> PathBuf {
 
 /// A cache entry unused for this long is removed by the sweep that runs after
 /// every check and build. Interpreted runs never touch the cache.
-const GC_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+const GC_MAX_AGE: Duration = Duration::from_hours(720);
 
 /// Mark a cache file as used now, so the age sweep keeps its entry.
 fn touch(path: &Path) {
@@ -487,7 +487,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
         let now = SystemTime::now();
-        let old = now - GC_MAX_AGE - Duration::from_secs(60 * 60 * 24);
+        let old = now - GC_MAX_AGE - Duration::from_hours(24);
 
         project_entry(root, "stale", true, old);
         project_entry(root, "fresh", true, now);

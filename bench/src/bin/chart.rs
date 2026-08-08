@@ -5,6 +5,7 @@
 //!
 //! Usage: cargo run --release --bin chart
 
+use num_traits::AsPrimitive;
 use std::fs;
 use std::path::Path;
 
@@ -74,7 +75,10 @@ fn main() -> Result<()> {
 }
 
 /// One PNG for one case at one tier.
-fn render_case(out: &Path, c: &CaseResult, meta: &Meta) -> Result<()> {
+/// The panels a case renders: wall-clock, compute-only when self timed, and
+/// peak memory when measured. The time panels share one axis so bar heights
+/// compare directly.
+fn case_panels(c: &CaseResult) -> Vec<Panel> {
     let mut panels: Vec<Panel> = Vec::new();
 
     let wall: Vec<_> = LANG_ORDER
@@ -119,7 +123,7 @@ fn render_case(out: &Path, c: &CaseResult, meta: &Meta) -> Result<()> {
             c.memory_of(l).map(|m| {
                 (
                     display_name(l).to_string(),
-                    m.median_bytes as f64,
+                    AsPrimitive::<f64>::as_(m.median_bytes),
                     color_for(l),
                 )
             })
@@ -134,7 +138,11 @@ fn render_case(out: &Path, c: &CaseResult, meta: &Meta) -> Result<()> {
             fmt: fmt_bytes,
         });
     }
+    panels
+}
 
+fn render_case(out: &Path, c: &CaseResult, meta: &Meta) -> Result<()> {
+    let panels = case_panels(c);
     let w = match panels.len() {
         1 => 620u32,
         2 => 1080u32,
@@ -167,7 +175,7 @@ fn render_case(out: &Path, c: &CaseResult, meta: &Meta) -> Result<()> {
         ("sans-serif", 15).into_font().color(&MUTED),
     ))?;
     // Legend, top right.
-    let mut lx = (w as i32) - 470;
+    let mut lx = i32::try_from(w).expect("chart width fits i32") - 470;
     for lang in LANG_ORDER {
         head.draw(&Rectangle::new(
             [(lx, 20), (lx + 18, 36)],
@@ -197,8 +205,8 @@ where
 {
     let de = |e: DrawingAreaErrorKind<<DB as DrawingBackend>::ErrorType>| anyhow::anyhow!("{e:?}");
     let (w, h) = area.dim_in_pixel();
-    let w = w as i32;
-    let h = h as i32;
+    let w = i32::try_from(w).expect("chart width fits i32");
+    let h = i32::try_from(h).expect("chart height fits i32");
     let (left, right, top, bottom) = (24i32, 24i32, 46i32, 34i32);
     let plot_l = left;
     let plot_r = w - right;
@@ -222,12 +230,12 @@ where
     if p.bars.is_empty() {
         return Ok(());
     }
-    let n = p.bars.len() as i32;
+    let n = i32::try_from(p.bars.len()).expect("bar count fits i32");
     let slot = plot_w / n;
-    let bw = (slot as f64 * 0.5) as i32;
+    let bw = slot / 2;
     for (i, (label, value, color)) in p.bars.iter().enumerate() {
-        let cx = plot_l + slot * i as i32 + slot / 2;
-        let bh = ((value / p.axis_hi) * plot_h as f64).round() as i32;
+        let cx = plot_l + slot * i32::try_from(i).expect("bar count fits i32") + slot / 2;
+        let bh = AsPrimitive::<i32>::as_(((value / p.axis_hi) * f64::from(plot_h)).round());
         let x0 = cx - bw / 2;
         let x1 = cx + bw / 2;
         let y0 = plot_b - bh.max(1);

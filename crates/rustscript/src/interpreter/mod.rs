@@ -129,6 +129,50 @@ pub struct Interp {
     shapes: RefCell<HashMap<Rc<str>, Rc<eval::Shape>>>,
 }
 
+/// Stated return scalars of the script's own functions, one more place a
+/// `Default` payload is written down. A name defined in more than one module
+/// with differing returns answers for neither.
+fn collect_fn_returns(
+    pending_fns: &[(usize, Rc<syn::ItemFn>)],
+) -> HashMap<String, bytecode::ScalarTy> {
+    let mut seen_returns: HashMap<String, Option<bytecode::ScalarTy>> = HashMap::default();
+    for (_, f) in pending_fns {
+        let lowered = match &f.sig.output {
+            syn::ReturnType::Type(_, ty) => bytecode::ScalarTy::lower(ty),
+            syn::ReturnType::Default => None,
+        };
+        seen_returns
+            .entry(f.sig.ident.to_string())
+            .and_modify(|known| {
+                if *known != lowered {
+                    *known = None;
+                }
+            })
+            .or_insert(lowered);
+    }
+    seen_returns
+        .into_iter()
+        .filter_map(|(name, scalar)| scalar.map(|s| (name, s)))
+        .collect()
+}
+
+/// Every function under its full `module::name` key, bare names at the root.
+fn build_fn_index(resolver: &Resolver) -> HashMap<String, u32> {
+    let mut fn_index = HashMap::default();
+    for syms in &resolver.modules {
+        let prefix = syms.path.join("::");
+        for (name, &idx) in &syms.fns {
+            let key = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}::{name}")
+            };
+            fn_index.insert(key, idx);
+        }
+    }
+    fn_index
+}
+
 impl Interp {
     pub fn load(modules: &[ModuleSrc], async_mode: bool) -> Result<Self> {
         let mut resolver = build_module_tree(modules);
@@ -167,28 +211,7 @@ impl Interp {
             }
         }
 
-        // Stated return scalars of the script's own functions, one more place
-        // a `Default` payload is written down. A name defined in more than one
-        // module with differing returns answers for neither.
-        let mut seen_returns: HashMap<String, Option<bytecode::ScalarTy>> = HashMap::default();
-        for (_, f) in &pending_fns {
-            let lowered = match &f.sig.output {
-                syn::ReturnType::Type(_, ty) => bytecode::ScalarTy::lower(ty),
-                syn::ReturnType::Default => None,
-            };
-            seen_returns
-                .entry(f.sig.ident.to_string())
-                .and_modify(|known| {
-                    if *known != lowered {
-                        *known = None;
-                    }
-                })
-                .or_insert(lowered);
-        }
-        let fn_returns: HashMap<String, bytecode::ScalarTy> = seen_returns
-            .into_iter()
-            .filter_map(|(name, scalar)| scalar.map(|s| (name, s)))
-            .collect();
+        let fn_returns = collect_fn_returns(&pending_fns);
 
         let mut functions = Vec::with_capacity(pending_fns.len());
         for (m, f) in &pending_fns {
@@ -233,18 +256,7 @@ impl Interp {
             globals.push(GlobalSlot::Todo(Rc::new(c.compile_const(expr)?)));
         }
 
-        let mut fn_index = HashMap::default();
-        for syms in &resolver.modules {
-            let prefix = syms.path.join("::");
-            for (name, &idx) in &syms.fns {
-                let key = if prefix.is_empty() {
-                    name.clone()
-                } else {
-                    format!("{prefix}::{name}")
-                };
-                fn_index.insert(key, idx);
-            }
-        }
+        let fn_index = build_fn_index(&resolver);
         let main_index = resolver.modules[0].fns.get("main").copied();
         let uses = resolver.modules[0].uses.clone();
         Ok(Interp {
@@ -297,7 +309,7 @@ impl Interp {
             && &**enum_name == "Result"
             && &**variant == "Err"
         {
-            let msg = data.first().map(|v| v.display()).unwrap_or_default();
+            let msg = data.first().map(value::Value::display).unwrap_or_default();
             return Err(anyhow::Error::new(vm_support::ErrReturn(msg)));
         }
         Ok(())
@@ -357,7 +369,10 @@ impl Interp {
             && &**enum_name == "Result"
             && &**variant == "Err"
         {
-            let msg = data.first().map(|v| v.display()).unwrap_or_default();
+            let msg = data
+                .first()
+                .map(pvalue::PValue::display)
+                .unwrap_or_default();
             return Err(anyhow::Error::new(vm_support::ErrReturn(msg)));
         }
         Ok(())
@@ -455,9 +470,10 @@ fn register_item(
     match item {
         Item::Fn(f) => {
             let name = f.sig.ident.to_string();
-            resolver.modules[m]
-                .fns
-                .insert(name, pending_fns.len() as u32);
+            resolver.modules[m].fns.insert(
+                name,
+                u32::try_from(pending_fns.len()).expect("table fits u32"),
+            );
             pending_fns.push((m, Rc::new(f.clone())));
         }
         Item::Struct(s) => {
@@ -485,18 +501,20 @@ fn register_item(
             collect_use_tree(&u.tree, &mut prefix, &mut syms.uses, &mut syms.globs);
         }
         Item::Const(c) => {
-            resolver.modules[m]
-                .consts
-                .insert(c.ident.to_string(), pending_consts.len() as u32);
+            resolver.modules[m].consts.insert(
+                c.ident.to_string(),
+                u32::try_from(pending_consts.len()).expect("table fits u32"),
+            );
             pending_consts.push((m, Rc::new((*c.expr).clone())));
         }
         Item::Static(s) => {
             if matches!(s.mutability, syn::StaticMutability::Mut(_)) {
                 bail!("unsupported feature: `static mut`");
             }
-            resolver.modules[m]
-                .consts
-                .insert(s.ident.to_string(), pending_consts.len() as u32);
+            resolver.modules[m].consts.insert(
+                s.ident.to_string(),
+                u32::try_from(pending_consts.len()).expect("table fits u32"),
+            );
             pending_consts.push((m, Rc::new((*s.expr).clone())));
         }
         Item::Type(t) => {

@@ -11,7 +11,7 @@ fn main() {
     let mut spans: i64 = 0;
     for m in re_low.find_iter(&text) {
         matches += 1;
-        spans += m.start() as i64 % 1000;
+        spans += i64::try_from(m.start()).unwrap() % 1000;
     }
     let re_cap = regex::Regex::new(r"w(\d)(\d)9\d").unwrap();
     let mut digits: i64 = 0;

@@ -4,10 +4,11 @@
 //! usize keep their full range.
 //!
 //! Storage convention: a width-tagged value lives in one i64. Signed widths
-//! and unsigned widths up to u32 store the true value. U64 and USize store
+//! and unsigned widths up to u32 store the true value. U64 and `USize` store
 //! the raw bits, reinterpreted through `u64` on decode. `I64` never appears
 //! in a tag, a plain i64 stays the engine's untagged integer value.
 
+use num_traits::AsPrimitive;
 use std::ops::{Add, Div, Mul, Rem, Sub};
 
 use anyhow::{Result, anyhow, bail};
@@ -95,16 +96,16 @@ impl IntWidth {
     /// Decode a stored i64 into the value it represents.
     pub fn decode(self, stored: i64) -> i128 {
         match self {
-            Self::U64 | Self::USize => (stored as u64) as i128,
-            _ => stored as i128,
+            Self::U64 | Self::USize => i128::from(stored.cast_unsigned()),
+            _ => i128::from(stored),
         }
     }
 
     /// Encode an in-range value into its i64 storage form.
     pub fn encode(self, value: i128) -> i64 {
         match self {
-            Self::U64 | Self::USize => (value as u64) as i64,
-            _ => value as i64,
+            Self::U64 | Self::USize => AsPrimitive::<u64>::as_(value).cast_signed(),
+            _ => AsPrimitive::<i64>::as_(value),
         }
     }
 }
@@ -160,7 +161,7 @@ pub fn int_arith(op: BinKind, width: IntWidth, a: i128, b: i128) -> Result<i128>
 /// `+ - * / %` on untagged i64 values, panicking exactly like debug Rust.
 /// The hot fast path of both engines, so it stays checked native arithmetic
 /// with no i128 widening.
-#[inline(always)]
+#[inline]
 pub fn i64_arith(op: BinKind, a: i64, b: i64) -> Result<i64> {
     Ok(match op {
         BinKind::Add => a
@@ -191,7 +192,7 @@ pub fn i64_arith(op: BinKind, a: i64, b: i64) -> Result<i64> {
 }
 
 /// `+ - * / %` at one float width. Rust float arithmetic never panics.
-#[inline(always)]
+#[inline]
 pub fn float_arith<T>(op: BinKind, x: T, y: T) -> T
 where
     T: Add<Output = T> + Sub<Output = T> + Mul<Output = T> + Div<Output = T> + Rem<Output = T>,
@@ -257,14 +258,14 @@ pub fn int_not(width: IntWidth, value: i128) -> i128 {
 /// the target, exactly the host's own cast per width.
 pub fn truncate(value: i128, target: IntWidth) -> i128 {
     match target {
-        IntWidth::U8 => value as u8 as i128,
-        IntWidth::U16 => value as u16 as i128,
-        IntWidth::U32 => value as u32 as i128,
-        IntWidth::U64 | IntWidth::USize => value as u64 as i128,
-        IntWidth::I8 => value as i8 as i128,
-        IntWidth::I16 => value as i16 as i128,
-        IntWidth::I32 => value as i32 as i128,
-        IntWidth::I64 => value as i64 as i128,
+        IntWidth::U8 => i128::from(AsPrimitive::<u8>::as_(value)),
+        IntWidth::U16 => i128::from(AsPrimitive::<u16>::as_(value)),
+        IntWidth::U32 => i128::from(AsPrimitive::<u32>::as_(value)),
+        IntWidth::U64 | IntWidth::USize => i128::from(AsPrimitive::<u64>::as_(value)),
+        IntWidth::I8 => i128::from(AsPrimitive::<i8>::as_(value)),
+        IntWidth::I16 => i128::from(AsPrimitive::<i16>::as_(value)),
+        IntWidth::I32 => i128::from(AsPrimitive::<i32>::as_(value)),
+        IntWidth::I64 => i128::from(AsPrimitive::<i64>::as_(value)),
     }
 }
 
@@ -273,14 +274,14 @@ pub fn truncate(value: i128, target: IntWidth) -> i128 {
 /// semantics, so delegate per width.
 pub fn float_to_int(value: f64, target: IntWidth) -> i128 {
     match target {
-        IntWidth::U8 => value as u8 as i128,
-        IntWidth::U16 => value as u16 as i128,
-        IntWidth::U32 => value as u32 as i128,
-        IntWidth::U64 | IntWidth::USize => value as u64 as i128,
-        IntWidth::I8 => value as i8 as i128,
-        IntWidth::I16 => value as i16 as i128,
-        IntWidth::I32 => value as i32 as i128,
-        IntWidth::I64 => value as i64 as i128,
+        IntWidth::U8 => i128::from(AsPrimitive::<u8>::as_(value)),
+        IntWidth::U16 => i128::from(AsPrimitive::<u16>::as_(value)),
+        IntWidth::U32 => i128::from(AsPrimitive::<u32>::as_(value)),
+        IntWidth::U64 | IntWidth::USize => i128::from(AsPrimitive::<u64>::as_(value)),
+        IntWidth::I8 => i128::from(AsPrimitive::<i8>::as_(value)),
+        IntWidth::I16 => i128::from(AsPrimitive::<i16>::as_(value)),
+        IntWidth::I32 => i128::from(AsPrimitive::<i32>::as_(value)),
+        IntWidth::I64 => i128::from(AsPrimitive::<i64>::as_(value)),
     }
 }
 
@@ -312,7 +313,7 @@ mod tests {
     #[test]
     fn casts_truncate_and_saturate() {
         assert_eq!(truncate(300, IntWidth::U8), 44);
-        assert_eq!(truncate(-1, IntWidth::U64), u64::MAX as i128);
+        assert_eq!(truncate(-1, IntWidth::U64), i128::from(u64::MAX));
         assert_eq!(float_to_int(300.9, IntWidth::U8), 255);
         assert_eq!(float_to_int(f64::NAN, IntWidth::I32), 0);
         assert_eq!(float_to_int(-1.5, IntWidth::U16), 0);

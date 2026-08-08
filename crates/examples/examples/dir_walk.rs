@@ -39,7 +39,7 @@ fn main() -> Result<()> {
     names.sort();
 
     println!("subdirectories: {dirs}");
-    println!("files here: {:?}", names);
+    println!("files here: {names:?}");
     println!("total files including sub: {}", count_files(base)?);
     Ok(())
 }

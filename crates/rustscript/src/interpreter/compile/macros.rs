@@ -8,7 +8,7 @@ use syn::{Expr, Lit};
 
 use crate::interpreter::bytecode::{BinKind, Const, FmtSpec, MacroKind, Op, Reg};
 
-use super::*;
+use super::{Compiler, inline_holes, parse_exprs, parse_matches, parse_vec_repeat};
 
 impl Compiler<'_> {
     pub(super) fn compile_macro(&mut self, mac: &syn::Macro, dst: Reg) -> Result<()> {
@@ -30,7 +30,7 @@ impl Compiler<'_> {
                             "unimplemented" => "not implemented",
                             _ => "internal error: entered unreachable code",
                         };
-                        self.literal_fmt_spec(msg)
+                        self.literal_fmt_spec(msg)?
                     }
                     _ => self.build_fmt_spec(mac)?,
                 };
@@ -74,106 +74,10 @@ impl Compiler<'_> {
                 });
             }
             "vec" => self.compile_vec_macro(dst, mac)?,
-            "assert" => {
-                let args = parse_exprs(mac)?;
-                let cond = args
-                    .first()
-                    .ok_or_else(|| anyhow!("assert! needs a condition"))?;
-                let c = self.compile_expr(cond)?;
-                let ok = self.here();
-                self.emit(Op::JumpIfTrue { cond: c, to: 0 });
-                let p = self.add_path(vec!["::assert_failed".to_string()], None);
-                self.emit(Op::CallPath {
-                    dst,
-                    path: p,
-                    base: dst,
-                    argc: 0,
-                });
-                let end = self.here() as u32;
-                self.patch_jump(ok, end);
-                self.emit(Op::LoadUnit { dst });
-            }
-            "assert_eq" | "assert_ne" => {
-                let args = parse_exprs(mac)?;
-                let a = self.compile_expr(
-                    args.first()
-                        .ok_or_else(|| anyhow!("assert needs two args"))?,
-                )?;
-                let b = self.compile_expr(
-                    args.get(1)
-                        .ok_or_else(|| anyhow!("assert needs two args"))?,
-                )?;
-                let eqr = self.alloc();
-                self.emit(Op::Bin {
-                    dst: eqr,
-                    a,
-                    b,
-                    op: BinKind::Eq,
-                });
-                let ok = self.here();
-                if name == "assert_eq" {
-                    self.emit(Op::JumpIfTrue { cond: eqr, to: 0 });
-                } else {
-                    self.emit(Op::JumpIfFalse { cond: eqr, to: 0 });
-                }
-                let p = self.add_path(vec!["::assert_failed".to_string()], None);
-                self.emit(Op::CallPath {
-                    dst,
-                    path: p,
-                    base: dst,
-                    argc: 0,
-                });
-                let end = self.here() as u32;
-                self.patch_jump(ok, end);
-                self.emit(Op::LoadUnit { dst });
-            }
-            "matches" => {
-                let (expr, pat, guard) = parse_matches(mac)?;
-                let scrut = self.compile_expr(&expr)?;
-                self.push_scope();
-                let pidx = self.pattern_info(&pat)?;
-                self.emit(Op::TestBind {
-                    val: scrut,
-                    pat: pidx,
-                    dst,
-                });
-                if let Some(g) = guard {
-                    let skip = self.here();
-                    self.emit(Op::JumpIfFalse { cond: dst, to: 0 });
-                    self.compile_into(dst, &g)?;
-                    let end = self.here() as u32;
-                    self.patch_jump(skip, end);
-                }
-                self.pop_scope();
-            }
-            "ensure" => {
-                let args = parse_exprs(mac)?;
-                let cond = args
-                    .first()
-                    .ok_or_else(|| anyhow!("ensure! needs a condition"))?;
-                let c = self.compile_expr(cond)?;
-                let ok = self.here();
-                self.emit(Op::JumpIfTrue { cond: c, to: 0 });
-                // Build the error message and return it.
-                let msg = self.alloc();
-                if let Some(m) = args.get(1) {
-                    self.compile_into(msg, m)?;
-                } else {
-                    let k = self.add_const(Const::Str(Arc::from("condition failed")));
-                    self.emit(Op::LoadConst { dst: msg, k });
-                }
-                let p = self.add_path(vec!["::ensure_fail".to_string()], None);
-                self.emit(Op::CallPath {
-                    dst,
-                    path: p,
-                    base: msg,
-                    argc: 1,
-                });
-                self.emit(Op::Ret { src: dst });
-                let end = self.here() as u32;
-                self.patch_jump(ok, end);
-                self.emit(Op::LoadUnit { dst });
-            }
+            "assert" => self.compile_assert_macro(dst, mac)?,
+            "assert_eq" | "assert_ne" => self.compile_assert_cmp_macro(&name, dst, mac)?,
+            "matches" => self.compile_matches_macro(dst, mac)?,
+            "ensure" => self.compile_ensure_macro(dst, mac)?,
             "cfg" => {
                 // A compile time predicate in real Rust. The interpreter runs on
                 // the host it was built for, so it folds to a constant here too.
@@ -189,38 +93,150 @@ impl Compiler<'_> {
                 self.emit(Op::Dbg {
                     dst,
                     base,
-                    argc: args.len() as u16,
+                    argc: u16::try_from(args.len())?,
                 });
             }
-            "join" => {
-                if !self.ctx.async_mode {
-                    bail!("`join!` is only available under #[tokio::main]");
-                }
-                let args = parse_exprs(mac)?;
-                // Evaluate every argument first, so all spawned tasks are running
-                // before we await any of them, which is what makes join overlap.
-                let handles: Vec<Reg> = args
-                    .iter()
-                    .map(|a| self.compile_expr(a))
-                    .collect::<Result<_>>()?;
-                let base = self.cur().reg_top;
-                for _ in &handles {
-                    self.alloc();
-                }
-                for (i, h) in handles.iter().enumerate() {
-                    self.emit(Op::Await {
-                        dst: base + i as Reg,
-                        src: *h,
-                    });
-                }
-                self.emit(Op::MakeTuple {
-                    dst,
-                    base,
-                    count: handles.len() as u16,
-                });
-            }
+            "join" => self.compile_join_macro(dst, mac)?,
             other => bail!("unsupported macro: {other}!"),
         }
+        Ok(())
+    }
+
+    fn compile_assert_macro(&mut self, dst: Reg, mac: &syn::Macro) -> Result<()> {
+        let args = parse_exprs(mac)?;
+        let cond = args
+            .first()
+            .ok_or_else(|| anyhow!("assert! needs a condition"))?;
+        let c = self.compile_expr(cond)?;
+        let ok = self.here();
+        self.emit(Op::JumpIfTrue { cond: c, to: 0 });
+        let p = self.add_path(vec!["::assert_failed".to_string()], None);
+        self.emit(Op::CallPath {
+            dst,
+            path: p,
+            base: dst,
+            argc: 0,
+        });
+        let end = self.mark()?;
+        self.patch_jump(ok, end);
+        self.emit(Op::LoadUnit { dst });
+        Ok(())
+    }
+
+    fn compile_assert_cmp_macro(&mut self, name: &str, dst: Reg, mac: &syn::Macro) -> Result<()> {
+        let args = parse_exprs(mac)?;
+        let a = self.compile_expr(
+            args.first()
+                .ok_or_else(|| anyhow!("assert needs two args"))?,
+        )?;
+        let b = self.compile_expr(
+            args.get(1)
+                .ok_or_else(|| anyhow!("assert needs two args"))?,
+        )?;
+        let eqr = self.alloc();
+        self.emit(Op::Bin {
+            dst: eqr,
+            a,
+            b,
+            op: BinKind::Eq,
+        });
+        let ok = self.here();
+        if name == "assert_eq" {
+            self.emit(Op::JumpIfTrue { cond: eqr, to: 0 });
+        } else {
+            self.emit(Op::JumpIfFalse { cond: eqr, to: 0 });
+        }
+        let p = self.add_path(vec!["::assert_failed".to_string()], None);
+        self.emit(Op::CallPath {
+            dst,
+            path: p,
+            base: dst,
+            argc: 0,
+        });
+        let end = self.mark()?;
+        self.patch_jump(ok, end);
+        self.emit(Op::LoadUnit { dst });
+        Ok(())
+    }
+
+    fn compile_matches_macro(&mut self, dst: Reg, mac: &syn::Macro) -> Result<()> {
+        let (expr, pat, guard) = parse_matches(mac)?;
+        let scrut = self.compile_expr(&expr)?;
+        self.push_scope();
+        let pidx = self.pattern_info(&pat)?;
+        self.emit(Op::TestBind {
+            val: scrut,
+            pat: pidx,
+            dst,
+        });
+        if let Some(g) = guard {
+            let skip = self.here();
+            self.emit(Op::JumpIfFalse { cond: dst, to: 0 });
+            self.compile_into(dst, &g)?;
+            let end = self.mark()?;
+            self.patch_jump(skip, end);
+        }
+        self.pop_scope();
+        Ok(())
+    }
+
+    fn compile_ensure_macro(&mut self, dst: Reg, mac: &syn::Macro) -> Result<()> {
+        let args = parse_exprs(mac)?;
+        let cond = args
+            .first()
+            .ok_or_else(|| anyhow!("ensure! needs a condition"))?;
+        let c = self.compile_expr(cond)?;
+        let ok = self.here();
+        self.emit(Op::JumpIfTrue { cond: c, to: 0 });
+        // Build the error message and return it.
+        let msg = self.alloc();
+        if let Some(m) = args.get(1) {
+            self.compile_into(msg, m)?;
+        } else {
+            let k = self.add_const(Const::Str(Arc::from("condition failed")));
+            self.emit(Op::LoadConst { dst: msg, k });
+        }
+        let p = self.add_path(vec!["::ensure_fail".to_string()], None);
+        self.emit(Op::CallPath {
+            dst,
+            path: p,
+            base: msg,
+            argc: 1,
+        });
+        self.emit(Op::Ret { src: dst });
+        let end = self.mark()?;
+        self.patch_jump(ok, end);
+        self.emit(Op::LoadUnit { dst });
+        Ok(())
+    }
+
+    /// `join!` under tokio: spawn everything, then await in order.
+    fn compile_join_macro(&mut self, dst: Reg, mac: &syn::Macro) -> Result<()> {
+        if !self.ctx.async_mode {
+            bail!("`join!` is only available under #[tokio::main]");
+        }
+        let args = parse_exprs(mac)?;
+        // Evaluate every argument first, so all spawned tasks are running
+        // before we await any of them, which is what makes join overlap.
+        let handles: Vec<Reg> = args
+            .iter()
+            .map(|a| self.compile_expr(a))
+            .collect::<Result<_>>()?;
+        let base = self.cur().reg_top;
+        for _ in &handles {
+            self.alloc();
+        }
+        for (i, h) in handles.iter().enumerate() {
+            self.emit(Op::Await {
+                dst: base + Reg::try_from(i)?,
+                src: *h,
+            });
+        }
+        self.emit(Op::MakeTuple {
+            dst,
+            base,
+            count: u16::try_from(handles.len())?,
+        });
         Ok(())
     }
 
@@ -236,7 +252,7 @@ impl Compiler<'_> {
         self.emit(Op::MakeVec {
             dst,
             base,
-            count: exprs.len() as u16,
+            count: u16::try_from(exprs.len())?,
         });
         Ok(())
     }
@@ -245,14 +261,14 @@ impl Compiler<'_> {
     /// `{name}` holes to variables in scope.
     /// A format spec that is a fixed string with no interpolation, for the
     /// no-argument forms of `unreachable!`, `todo!`, and `unimplemented!`.
-    pub(super) fn literal_fmt_spec(&mut self, text: &str) -> u16 {
+    pub(super) fn literal_fmt_spec(&mut self, text: &str) -> Result<u16> {
         let f = self.cur();
         f.fmts.push(FmtSpec {
             template: text.to_string(),
             positional: Vec::new(),
             named: Vec::new(),
         });
-        (f.fmts.len() - 1) as u16
+        Ok(u16::try_from(f.fmts.len() - 1)?)
     }
 
     pub(super) fn build_fmt_spec(&mut self, mac: &syn::Macro) -> Result<u16> {
@@ -307,7 +323,7 @@ impl Compiler<'_> {
             positional,
             named,
         });
-        Ok((f.fmts.len() - 1) as u16)
+        Ok(u16::try_from(f.fmts.len() - 1)?)
     }
 
     // -- jump patching -----------------------------------------------------
