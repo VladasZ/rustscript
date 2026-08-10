@@ -1,5 +1,4 @@
-// Typed and dynamic serde_json on the parallel engine that `#[tokio::main]`
-// selects: struct targets with optional and renamed fields, a generic helper
+// Typed and dynamic serde_json under `#[tokio::main]`: struct targets with optional and renamed fields, a generic helper
 // resolving its turbofish, an annotated let coercion, and serialization back
 // to text.
 

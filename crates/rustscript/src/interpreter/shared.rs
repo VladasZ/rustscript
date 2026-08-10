@@ -1,11 +1,10 @@
-//! Engine neutral method cores, written once and materialized by both engines.
+//! Value model neutral method cores.
 //!
 //! The two engines this interpreter once had carried their own copy of
-//! every scalar method, and the copies drifted. A core here works on plain
-//! Rust types and answers through a small output enum, so each engine only
-//! adapts arguments in and values out. The coverage harvest reads this file
-//! once as `Engine::Both`, so a method added here reaches both engines and
-//! both tables in the same commit.
+//! every scalar method, and the copies drifted; these cores are what ended
+//! that. A core works on plain Rust types and answers through a small output
+//! enum, so the dispatch layer only adapts arguments in and values out, and
+//! the coverage harvest reads each core exactly once.
 //!
 //! What stays out of the cores: anything lazy or stateful. The
 //! iterator forms of `chars`, `lines`, `bytes`, and `split_whitespace` cannot
@@ -25,7 +24,7 @@ use super::numeric::IntWidth;
 /// value slice; the cores monomorphize over this, so the view costs nothing.
 pub(super) trait Args {
     /// The argument rendered as text, what `Display` would print. Missing
-    /// arguments render empty, matching how both engines behaved.
+    /// arguments render empty, the behavior scripts always saw.
     fn text(&self, i: usize) -> String;
     fn int(&self, i: usize) -> Option<i64>;
     /// An integer, or an integer view of a float argument.
@@ -299,7 +298,7 @@ pub(super) enum CharOut {
     OptU32(Option<u32>),
 }
 
-/// The `char` classification and conversion methods, shared by both engines so
+/// The `char` classification and conversion methods, in one table so
 /// a script sees the same set whichever one runs it.
 pub(super) fn char_method(ch: char, name: &str, args: &impl Args) -> Option<Result<CharOut>> {
     let b = |v: bool| Some(Ok(CharOut::Bool(v)));
@@ -346,7 +345,7 @@ pub(super) fn char_method(ch: char, name: &str, args: &impl Args) -> Option<Resu
 // -- strings ---------------------------------------------------------------
 
 /// What a string method produced, materialized by each engine. `Keep` and
-/// `OkKeep` hand the receiver back so both engines answer with a refcount
+/// `OkKeep` hand the receiver back so the caller answers with a refcount
 /// bump, never a copy.
 pub(super) enum StrOut {
     Bool(bool),
@@ -683,7 +682,7 @@ pub(super) enum DateOut {
     Text(String),
 }
 
-/// `DateTime::parse_from_rfc3339` reduced to the three numbers both engines
+/// `DateTime::parse_from_rfc3339` reduced to the three numbers the bridge
 /// store for a datetime, the unix seconds, the sub second nanos, and the
 /// seconds east of UTC the text carried. The error is the real chrono
 /// `ParseError` rendered as text, so a script sees the same message it would

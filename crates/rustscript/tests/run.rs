@@ -913,7 +913,7 @@ async fn main() {
 #[test]
 #[ignore = "runs real cargo check, slow"]
 fn check_reports_a_method_the_interpreter_lacks() {
-    // Valid Rust that `cargo check` accepts, but the parallel engine has no
+    // Valid Rust that `cargo check` accepts, but the interpreter has no
     // `rposition`, so the coverage gate must catch it without running anything.
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("script.rs");

@@ -134,11 +134,7 @@ fn check_coverage(program: &loader::Program) -> Result<()> {
         out.push_str(&finding.message());
         out.push('\n');
     }
-    let engine_name = if program.tokio_main {
-        "the parallel engine, which #[tokio::main] selects"
-    } else {
-        "the interpreter"
-    };
+    let engine_name = "the interpreter";
     let (count, verb) = if findings.len() == 1 {
         ("1 method".to_string(), "is")
     } else {
@@ -178,7 +174,7 @@ fn run(file: &str, script_args: &[String]) -> Result<()> {
 
 /// Run a command line snippet, `rust -e 'println!("hi")'`. A snippet that is
 /// already a complete program with its own `fn main` runs as written, so
-/// `#[tokio::main]` still selects the parallel engine. Anything else becomes
+/// `#[tokio::main]` still enables the async surface. Anything else becomes
 /// the body of a plain `fn main`. `?` still works there: the interpreter
 /// propagates an `Err` out of `main` regardless of the signature, ending the
 /// run the same way an `anyhow::Result` main does.

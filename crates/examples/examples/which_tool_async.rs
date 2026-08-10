@@ -1,7 +1,7 @@
 #!/usr/bin/env rust
 
-// Look up an executable on PATH from a tokio script. The parallel engine has
-// its own bridge table, so a crate call that works in the fast engine can still
+// Look up an executable on PATH from a tokio script, so the crate bridge
+// is proven under the async surface too and can still
 // be missing here. This is the twin of which_tool.rs that covers that engine.
 
 #[tokio::main]

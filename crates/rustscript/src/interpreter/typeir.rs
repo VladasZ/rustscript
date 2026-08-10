@@ -1,6 +1,6 @@
 //! Types lowered at compile time into a plain IR, so chunks hold no syn AST.
 //! syn nodes are not `Send`, so this lowering is what lets the same cast,
-//! coercion, and turbofish tables serve both engines, and it moves all name
+//! coercion, and turbofish tables are plain data, and it moves all name
 //! resolution to load time, out of the hot runtime paths.
 
 use std::sync::Arc;

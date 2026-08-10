@@ -1,5 +1,5 @@
-// Chrono datetimes on the parallel engine that `#[tokio::main]` selects,
-// backed by the same shared core as the fast engine. Only stable properties
+// Chrono datetimes under `#[tokio::main]`, backed by the same shared
+// core as everywhere else. Only stable properties
 // are printed, so compiled and interpreted output stay identical.
 
 use chrono::{Datelike, Utc};

@@ -1,6 +1,6 @@
 #!/usr/bin/env rust
 
-// The tokio engine's copy of terminal_query, so both engines report the
+// The `#[tokio::main]` copy of terminal_query, so the async path reports the
 // terminal the same way.
 
 use crossterm::terminal::size;

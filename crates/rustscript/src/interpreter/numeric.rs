@@ -1,4 +1,4 @@
-//! Width-aware integer semantics shared by both engines. Values carry their
+//! Width-aware integer semantics. Values carry their
 //! real Rust integer width at runtime, so arithmetic panics exactly where
 //! debug Rust panics, casts truncate and saturate the same way, and u64 and
 //! usize keep their full range.
@@ -159,7 +159,7 @@ pub fn int_arith(op: BinKind, width: IntWidth, a: i128, b: i128) -> Result<i128>
 }
 
 /// `+ - * / %` on untagged i64 values, panicking exactly like debug Rust.
-/// The hot fast path of both engines, so it stays checked native arithmetic
+/// The hot fast path of the VM, so it stays checked native arithmetic
 /// with no i128 widening.
 #[inline]
 pub fn i64_arith(op: BinKind, a: i64, b: i64) -> Result<i64> {
