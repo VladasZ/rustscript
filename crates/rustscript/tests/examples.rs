@@ -4,6 +4,8 @@
 
 use std::process::Command;
 
+mod common;
+
 fn examples_dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../examples/examples")
@@ -37,17 +39,19 @@ fn every_example_runs() {
         if !cfg!(windows) && matches!(stem, Some("registry_demo" | "service_demo" | "wmi_demo")) {
             continue;
         }
-        let out = Command::new(env!("CARGO_BIN_EXE_rust"))
-            .arg("run")
-            .arg(&path)
-            .env("RUSTSCRIPT_SKIP_CHECK", "1")
-            .output()
-            .expect("failed to launch rustscript");
+        let label = stem.unwrap_or("example");
+        let (ok, _, err) = common::run(
+            Command::new(env!("CARGO_BIN_EXE_rust"))
+                .arg("run")
+                .arg(&path)
+                .env("RUSTSCRIPT_SKIP_CHECK", "1"),
+            label,
+        );
         assert!(
-            out.status.success(),
+            ok,
             "example {} failed:\n{}",
             path.display(),
-            String::from_utf8_lossy(&out.stderr)
+            String::from_utf8_lossy(&err)
         );
         ran += 1;
     }

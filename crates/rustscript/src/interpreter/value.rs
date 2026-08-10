@@ -387,8 +387,13 @@ impl Value {
             }
             (Value::Char(a), Value::Char(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
+            // Snapshots, not held guards. Comparing a value with its own
+            // clone sees the same mutex on both sides, and a guard held
+            // across the recursion would relock a mutex the element methods
+            // lock again. Both are instant deadlocks under parking_lot.
             (Value::Vec(a), Value::Vec(b)) | (Value::Tuple(a), Value::Tuple(b)) => {
-                let (a, b) = (a.lock(), b.lock());
+                let a = a.lock().clone();
+                let b = b.lock().clone();
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.eq_value(y))
             }
             (
@@ -408,15 +413,20 @@ impl Value {
                     && da.len() == db.len()
                     && da.iter().zip(db.iter()).all(|(x, y)| x.eq_value(y))
             }
+            // Snapshot both field vectors before comparing. The old code held
+            // both guards and then called `b.get`, which locks `b` again, so
+            // any struct comparison with at least one field deadlocked. That
+            // hung every script comparing two `PathBuf`s.
             (Value::Struct(a), Value::Struct(b)) => {
                 a.name() == b.name() && {
-                    let (va, vb) = (a.values.lock(), b.values.lock());
+                    let va = a.values.lock().clone();
+                    let vb = b.values.lock().clone();
                     va.len() == vb.len()
                         && a.shape
                             .fields
                             .iter()
                             .zip(va.iter())
-                            .all(|(k, v)| b.get(k).is_some_and(|o| v.eq_value(&o)))
+                            .all(|(k, v)| b.shape.slot(k).is_some_and(|i| v.eq_value(&vb[i])))
                 }
             }
             (Value::Native(a), Value::Native(b)) => Arc::ptr_eq(a, b),

@@ -242,8 +242,16 @@ Run the repository checks:
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo test --workspace --features run-rs/deadlock-detection
 ```
+
+The `deadlock-detection` feature compiles parking_lot's lock cycle detector
+and a watchdog thread into the interpreter, so a deadlock in the value model
+aborts the run within a second, printing the backtrace of every thread in the
+cycle. CI always tests with it. It is not a default feature because tracking
+lock owners costs on every acquisition, so released binaries never carry it.
+The suites that execute scripts also give every run a hard timeout, which
+catches hangs that are not lock cycles.
 
 The equivalence tests run the same examples through rustc and the interpreter
 and compare their output byte for byte. The multifile conformance test does the
