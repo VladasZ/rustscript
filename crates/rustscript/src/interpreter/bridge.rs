@@ -324,8 +324,15 @@ impl Vm {
         // Option and Result methods hand arguments through to the caller,
         // `unwrap_or` for one, and `flag.then_some(x)` on a bool does the
         // same, so their width tags must survive. `fold` hands its initial
-        // value through the closure and the result the same way.
-        if !matches!(recv, Value::Enum { .. } | Value::Bool(_)) && name.id != BuiltinId::Fold {
+        // value through the closure and the result the same way, and the
+        // containers and a map entry store their arguments, so a pushed or
+        // inserted number keeps its real width too.
+        let hands_args_through = matches!(
+            recv,
+            Value::Enum { .. } | Value::Bool(_) | Value::Vec(_) | Value::Map(..)
+        ) || matches!(recv, Value::Struct(st) if &**st.name() == "Entry")
+            || name.id == BuiltinId::Fold;
+        if !hands_args_through {
             for arg in args.iter_mut() {
                 if let Some(image) = arg.bridge_image() {
                     *arg = image;

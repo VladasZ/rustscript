@@ -482,6 +482,8 @@ impl Compiler<'_> {
 
     // -- assignment --------------------------------------------------------
 
+    /// Rust evaluates an assignment's right operand before the place, so a
+    /// panic in the value fires before a panic in the place expression.
     pub(super) fn compile_assign(&mut self, target: &Expr, value: &Expr) -> Result<()> {
         match target {
             Expr::Path(p) if p.path.segments.len() == 1 => {
@@ -491,20 +493,20 @@ impl Compiler<'_> {
                 self.emit_name_store(location, value, &name)?;
             }
             Expr::Index(idx) => {
+                let val = self.compile_expr(value)?;
                 let base = self.compile_expr(&idx.expr)?;
                 let key = self.compile_expr(&idx.index)?;
-                let val = self.compile_expr(value)?;
                 self.emit(Op::SetIndex { base, key, val });
             }
             Expr::Field(f) => {
+                let val = self.compile_expr(value)?;
                 let base = self.compile_expr(&f.base)?;
                 let member = self.member_of(&f.member);
-                let val = self.compile_expr(value)?;
                 self.emit(Op::SetField { base, member, val });
             }
             Expr::Unary(u) if matches!(u.op, UnOp::Deref(_)) => {
-                let target = self.compile_expr(&u.expr)?;
                 let val = self.compile_expr(value)?;
+                let target = self.compile_expr(&u.expr)?;
                 self.emit(Op::SetDeref { target, val });
             }
             Expr::Paren(p) => self.compile_assign(&p.expr, value)?,
@@ -513,6 +515,8 @@ impl Compiler<'_> {
         Ok(())
     }
 
+    /// Rust evaluates a compound assignment's right operand before the place,
+    /// so a panic in the value fires before a panic in the place expression.
     pub(super) fn compile_compound_assign(
         &mut self,
         target: &Expr,
@@ -524,27 +528,31 @@ impl Compiler<'_> {
             Expr::Path(p) if p.path.segments.len() == 1 => {
                 let name = p.path.segments[0].ident.to_string();
                 let location = self.resolve_for_write(&name);
-                let current = self.load_name_location(location, &name)?;
-                let result = self.alloc();
                 if let Some(imm) = int_literal(rhs) {
+                    let current = self.load_name_location(location, &name)?;
+                    let result = self.alloc();
                     self.emit(Op::BinImm {
                         dst: result,
                         a: current,
                         imm,
                         op,
                     });
+                    self.emit_name_store(location, result, &name)?;
                 } else {
                     let b = self.compile_expr(rhs)?;
+                    let current = self.load_name_location(location, &name)?;
+                    let result = self.alloc();
                     self.emit(Op::Bin {
                         dst: result,
                         a: current,
                         b,
                         op,
                     });
+                    self.emit_name_store(location, result, &name)?;
                 }
-                self.emit_name_store(location, result, &name)?;
             }
             Expr::Index(idx) => {
+                let b = self.compile_expr(rhs)?;
                 let base = self.compile_expr(&idx.expr)?;
                 let key = self.compile_expr(&idx.index)?;
                 let cur = self.alloc();
@@ -553,7 +561,6 @@ impl Compiler<'_> {
                     base,
                     key,
                 });
-                let b = self.compile_expr(rhs)?;
                 let res = self.alloc();
                 self.emit(Op::Bin {
                     dst: res,
@@ -568,6 +575,7 @@ impl Compiler<'_> {
                 });
             }
             Expr::Field(f) => {
+                let b = self.compile_expr(rhs)?;
                 let base = self.compile_expr(&f.base)?;
                 let member = self.member_of(&f.member);
                 let cur = self.alloc();
@@ -576,7 +584,6 @@ impl Compiler<'_> {
                     base,
                     member,
                 });
-                let b = self.compile_expr(rhs)?;
                 let res = self.alloc();
                 self.emit(Op::Bin {
                     dst: res,
@@ -591,13 +598,13 @@ impl Compiler<'_> {
                 });
             }
             Expr::Unary(u) if matches!(u.op, UnOp::Deref(_)) => {
+                let b = self.compile_expr(rhs)?;
                 let target = self.compile_expr(&u.expr)?;
                 let current = self.alloc();
                 self.emit(Op::Deref {
                     dst: current,
                     src: target,
                 });
-                let b = self.compile_expr(rhs)?;
                 let result = self.alloc();
                 self.emit(Op::Bin {
                     dst: result,

@@ -310,7 +310,13 @@ impl Term {
         match self {
             // Collecting into a map or set forgets arrival order, a vec keeps it.
             Self::Collect { target, .. } => matches!(target, Ty::Vec(_)),
-            Self::Sum { .. } => item.is_float(),
+            // A float sum rounds per order. A signed sum panics on an
+            // order-dependent prefix when positive and negative values
+            // cancel, an unsigned prefix only grows, so its overflow does
+            // not depend on order.
+            Self::Sum { out } => {
+                item.is_float() || matches!(out, Ty::Int(width) if width.is_signed())
+            }
             Self::Count | Self::Min | Self::Max | Self::Any { .. } => false,
             Self::Position { .. } | Self::Fold { .. } => true,
         }
