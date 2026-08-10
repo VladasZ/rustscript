@@ -480,23 +480,27 @@ pub(super) fn collect_set(items: Vec<Value>) -> Result<Value> {
 }
 
 pub(super) fn int_arg(args: &[Value], i: usize) -> Result<i64> {
-    match args.get(i) {
-        Some(Value::Int(n)) => Ok(*n),
-        _ => bail!("expected an integer argument"),
+    match args.get(i).and_then(Value::int_parts) {
+        // A count past i64 saturates, matching the i64 image such an
+        // argument passed before widths were real.
+        Some((n, _)) => Ok(i64::try_from(n).unwrap_or(i64::MAX)),
+        None => bail!("expected an integer argument"),
     }
 }
 
 /// Ordering key for `sort`, good enough for numbers and strings.
 pub(super) fn sort_key(v: &Value) -> SortKey {
     match v {
-        Value::Int(i) => SortKey::Int(*i),
-        Value::IntW(..) => match v.bridge_image() {
-            Some(Value::Int(i)) => SortKey::Int(i),
-            _ => SortKey::Str(v.display()),
+        Value::Int(i) => SortKey::Int(i128::from(*i)),
+        // The full i128 value, so two u64 values past i64::MAX still order
+        // by value rather than tying at a clamp.
+        Value::IntW(..) => match v.int_parts() {
+            Some((i, _)) => SortKey::Int(i),
+            None => SortKey::Str(v.display()),
         },
         Value::F32(f) => SortKey::Float(f64::from(*f)),
         Value::Float(f) => SortKey::Float(*f),
-        Value::Bool(b) => SortKey::Int(i64::from(*b)),
+        Value::Bool(b) => SortKey::Int(i128::from(*b)),
         Value::Str(s) => SortKey::Str(s.to_string()),
         Value::Char(c) => SortKey::Str(c.to_string()),
         Value::Tuple(items) | Value::Vec(items) => {
@@ -508,7 +512,7 @@ pub(super) fn sort_key(v: &Value) -> SortKey {
 
 #[derive(PartialEq)]
 pub(super) enum SortKey {
-    Int(i64),
+    Int(i128),
     Float(f64),
     Str(String),
     List(Vec<SortKey>),

@@ -1148,6 +1148,11 @@ impl<'a> Generator<'a> {
                 },
             });
         }
+        // A signed sum panics on an order-dependent prefix, so an unordered
+        // source sorts first.
+        if !ordered && matches!(want, Ty::Int(width) if width.is_signed()) {
+            stages.push(Stage::Sorted);
+        }
         Some(Pipe {
             source,
             stages,
