@@ -2,13 +2,14 @@
 //! `EncodingKey` construction, and `encode` for signing tokens.
 
 use std::str::FromStr;
+use std::sync::Arc;
 
 use anyhow::{Result, bail};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 
-use super::builtins::option_inner;
-use super::json_bridge::value_to_json;
-use super::std_bridge::bytes_arg;
+use super::iterator::option_inner;
+use super::json_bridge::pvalue_to_json;
+use super::native_methods::value_to_bytes;
 use super::value::{StructData, Value};
 
 /// Recognize `Algorithm::ES256` and friends used as a path value.
@@ -17,9 +18,9 @@ pub(super) fn jwt_algorithm(ty: &str, variant: &str) -> Option<Value> {
         return None;
     }
     Some(Value::Enum {
-        enum_name: "Algorithm".into(),
-        variant: variant.into(),
-        data: Value::empty_data(),
+        enum_name: Arc::from("Algorithm"),
+        variant: Arc::from(variant),
+        data: Arc::from(Vec::new()),
     })
 }
 
@@ -44,7 +45,7 @@ pub(super) fn jwt_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<V
         }
         ("EncodingKey", "from_secret") => key_value("secret", args),
         ("EncodingKey", "from_ec_pem") => {
-            match EncodingKey::from_ec_pem(&bytes_arg(args.first())) {
+            match EncodingKey::from_ec_pem(&value_to_bytes(args.first())) {
                 Ok(_) => Value::ok(key_value("ec_pem", args)),
                 Err(e) => Value::err(Value::str(e.to_string())),
             }
@@ -76,7 +77,7 @@ pub(super) fn jwt_encode(args: &[Value]) -> Result<Value> {
     real.kid = opt_string(header, "kid");
     real.cty = opt_string(header, "cty");
 
-    let bytes = bytes_arg(key.get("data").as_ref());
+    let bytes = value_to_bytes(key.get("data").as_ref());
     let kind = key.get("kind").map(|v| v.display()).unwrap_or_default();
     let real_key = match kind.as_str() {
         "secret" => EncodingKey::from_secret(&bytes),
@@ -88,7 +89,7 @@ pub(super) fn jwt_encode(args: &[Value]) -> Result<Value> {
     };
 
     Ok(
-        match jsonwebtoken::encode(&real, &value_to_json(claims)?, &real_key) {
+        match jsonwebtoken::encode(&real, &pvalue_to_json(claims)?, &real_key) {
             Ok(token) => Value::ok(Value::str(token)),
             Err(e) => Value::err(Value::str(e.to_string())),
         },

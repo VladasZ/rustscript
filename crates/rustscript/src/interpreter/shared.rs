@@ -1,13 +1,13 @@
 //! Engine neutral method cores, written once and materialized by both engines.
 //!
-//! The fast engine and the parallel engine used to carry their own copy of
+//! The two engines this interpreter once had carried their own copy of
 //! every scalar method, and the copies drifted. A core here works on plain
 //! Rust types and answers through a small output enum, so each engine only
 //! adapts arguments in and values out. The coverage harvest reads this file
 //! once as `Engine::Both`, so a method added here reaches both engines and
 //! both tables in the same commit.
 //!
-//! What stays engine side: anything lazy or stateful. The fast engine's
+//! What stays out of the cores: anything lazy or stateful. The
 //! iterator forms of `chars`, `lines`, `bytes`, and `split_whitespace` cannot
 //! be expressed as a finished value, and containers live behind different
 //! cell types per engine.
@@ -563,7 +563,7 @@ pub(super) enum RegexOut {
 }
 
 /// The eager `Regex` methods. The `find_iter` and `captures_iter` forms stay
-/// engine side, the fast engine streams them lazily and the parallel engine
+/// out of the core, the interpreter streams them lazily and
 /// collects them.
 pub(super) fn regex_core(
     re: &regex::Regex,

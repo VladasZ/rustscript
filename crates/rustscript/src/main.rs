@@ -123,13 +123,8 @@ fn real_main() -> Result<()> {
 /// reaches those too. The coverage walk then adds every method call the VM
 /// could make, on every branch, without executing a line.
 fn check_coverage(program: &loader::Program) -> Result<()> {
-    let engine = if program.tokio_main {
-        interpreter::coverage::Engine::Parallel
-    } else {
-        interpreter::coverage::Engine::Fast
-    };
     let interp = interpreter::Interp::load(&program.modules, program.tokio_main)?;
-    let findings = interp.coverage(engine);
+    let findings = interp.coverage();
     if findings.is_empty() {
         return Ok(());
     }
@@ -178,14 +173,7 @@ fn run(file: &str, script_args: &[String]) -> Result<()> {
     args.extend(script_args.iter().cloned());
     interpreter::set_script_args(args);
 
-    // `#[tokio::main]` routes to the parallel engine. Everything else runs the
-    // single threaded fast engine, unchanged.
-    if program.tokio_main {
-        return interpreter::run_parallel(&program.modules);
-    }
-
-    let interp = interpreter::Interp::load(&program.modules, false)?;
-    interp.run_main()
+    interpreter::run(&program.modules, program.tokio_main)
 }
 
 /// Run a command line snippet, `rust -e 'println!("hi")'`. A snippet that is
@@ -212,11 +200,7 @@ fn eval(code: &str, script_args: &[String]) -> Result<()> {
     args.extend(script_args.iter().cloned());
     interpreter::set_script_args(args);
 
-    if program.tokio_main {
-        return interpreter::run_parallel(&program.modules);
-    }
-    let interp = interpreter::Interp::load(&program.modules, false)?;
-    interp.run_main()
+    interpreter::run(&program.modules, program.tokio_main)
 }
 
 /// Whether the snippet is a complete program: it parses as a file and has a

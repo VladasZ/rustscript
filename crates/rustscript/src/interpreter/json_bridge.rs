@@ -1,384 +1,270 @@
-//! Direct serde based json parsing plus conversions between script
-//! values and `serde_json::Value`. Split from `builtins.rs`.
+//! `serde_json`: dynamic and typed parsing straight
+//! into `Value`, serialization back to json text, and the coercion pass for
+//! annotated lets. The `Value` twin of `json_bridge.rs` and the coercion
+//! half of `eval.rs`.
+//!
+//! Struct layouts come from a table precomputed at load on the main thread,
+//! so nothing here touches the resolver or the syn AST, which are not `Send`.
 
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::{Result, bail};
-
 use rustc_hash::FxHashMap;
 
 use super::Interp;
 use super::numeric::IntWidth;
 use super::typeir::{TypeIr, lower_type};
-use super::value::{MapKey, MapKind, RStr, StructShape, Value, map_with_capacity};
+use super::value::{MapKey, StructShape, Value};
+use super::vm::Vm;
 
-// -- serde_json bridge -----------------------------------------------------
-
-/// Parse json text straight into a script value, skipping the intermediate
-/// `serde_json::Value` tree that would otherwise be built and dropped.
-pub(super) fn parse_json(text: &str) -> std::result::Result<Value, serde_json::Error> {
-    use serde::de::DeserializeSeed;
-    let mut de = serde_json::Deserializer::from_str(text);
-    let keys = RefCell::new(FxHashMap::default());
-    let v = JsonSeed { keys: &keys }.deserialize(&mut de)?;
-    de.end()?;
-    Ok(v)
-}
-
-/// Object keys repeat for every element of an array, so each parse keeps one
-/// intern table and every repeat of a key shares the first `Rc`. That skips
-/// the allocation and gives later map lookups pointer equality plus a warm
-/// hash cache.
-pub(super) type JsonKeys = RefCell<FxHashMap<String, Rc<RStr>>>;
-
-pub(super) struct JsonSeed<'a> {
-    keys: &'a JsonKeys,
-}
-
-impl<'de> serde::de::DeserializeSeed<'de> for JsonSeed<'_> {
-    type Value = Value;
-
-    fn deserialize<D: serde::Deserializer<'de>>(
-        self,
-        d: D,
-    ) -> std::result::Result<Value, D::Error> {
-        d.deserialize_any(JsonVisitor { keys: self.keys })
-    }
-}
-
-pub(super) struct KeySeed<'a> {
-    keys: &'a JsonKeys,
-}
-
-impl KeySeed<'_> {
-    fn intern(&self, s: &str) -> Rc<RStr> {
-        if let Some(rc) = self.keys.borrow().get(s) {
-            return rc.clone();
-        }
-        let rc = RStr::new(s);
-        self.keys.borrow_mut().insert(s.to_string(), rc.clone());
-        rc
-    }
-}
-
-impl<'de> serde::de::DeserializeSeed<'de> for KeySeed<'_> {
-    type Value = Rc<RStr>;
-
-    fn deserialize<D: serde::Deserializer<'de>>(
-        self,
-        d: D,
-    ) -> std::result::Result<Rc<RStr>, D::Error> {
-        d.deserialize_str(self)
-    }
-}
-
-impl serde::de::Visitor<'_> for KeySeed<'_> {
-    type Value = Rc<RStr>;
-
-    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.write_str("an object key")
-    }
-
-    fn visit_str<E: serde::de::Error>(self, s: &str) -> std::result::Result<Rc<RStr>, E> {
-        Ok(self.intern(s))
-    }
-
-    fn visit_string<E: serde::de::Error>(self, s: String) -> std::result::Result<Rc<RStr>, E> {
-        Ok(self.intern(&s))
-    }
-}
-
-pub(super) struct JsonVisitor<'a> {
-    keys: &'a JsonKeys,
-}
-
-impl<'de> serde::de::Visitor<'de> for JsonVisitor<'_> {
-    type Value = Value;
-
-    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.write_str("a json value")
-    }
-
-    fn visit_bool<E>(self, b: bool) -> std::result::Result<Value, E> {
-        Ok(Value::Bool(b))
-    }
-
-    fn visit_i64<E>(self, i: i64) -> std::result::Result<Value, E> {
-        Ok(Value::Int(i))
-    }
-
-    fn visit_u64<E>(self, u: u64) -> std::result::Result<Value, E> {
-        // A u64 past `i64::MAX` is an exact json integer, so it keeps its
-        // width instead of turning into a float that cannot hold it.
-        Ok(match i64::try_from(u) {
-            Ok(i) => Value::Int(i),
-            Err(_) => Value::int_of_width(i128::from(u), IntWidth::U64),
-        })
-    }
-
-    fn visit_f64<E>(self, f: f64) -> std::result::Result<Value, E> {
-        Ok(Value::Float(f))
-    }
-
-    fn visit_str<E>(self, s: &str) -> std::result::Result<Value, E> {
-        Ok(Value::str(s))
-    }
-
-    fn visit_string<E>(self, s: String) -> std::result::Result<Value, E> {
-        Ok(Value::str(s))
-    }
-
-    fn visit_unit<E>(self) -> std::result::Result<Value, E> {
-        Ok(Value::none())
-    }
-
-    fn visit_seq<A: serde::de::SeqAccess<'de>>(
-        self,
-        mut seq: A,
-    ) -> std::result::Result<Value, A::Error> {
-        let mut items = Vec::with_capacity(seq.size_hint().unwrap_or(0));
-        while let Some(v) = seq.next_element_seed(JsonSeed { keys: self.keys })? {
-            items.push(v);
-        }
-        Ok(Value::vec(items))
-    }
-
-    fn visit_map<A: serde::de::MapAccess<'de>>(
-        self,
-        mut access: A,
-    ) -> std::result::Result<Value, A::Error> {
-        let mut map = map_with_capacity(access.size_hint().unwrap_or(0));
-        while let Some(k) = access.next_key_seed(KeySeed { keys: self.keys })? {
-            map.insert(
-                MapKey::Str(k),
-                access.next_value_seed(JsonSeed { keys: self.keys })?,
-            );
-        }
-        Ok(Value::map_of(map))
-    }
-}
-
-// -- typed deserialization ---------------------------------------------------
-
-/// What `from_str::<T>` should build while parsing, so a known struct target
-/// goes straight into `Value::Struct` with no intermediate map and no
-/// coercion pass afterwards.
-pub(super) enum JsonPlan {
-    /// No type information, parse like the untyped path.
-    Dynamic,
-    Vec(Box<JsonPlan>),
-    Map(Box<JsonPlan>),
-    /// A json array of elements deserialized into a set.
-    Set(Box<JsonPlan>),
-    Struct(Rc<StructPlan>),
-}
-
-pub(super) struct StructPlan {
-    pub shape: Rc<StructShape>,
-    /// One plan per shape field, same order.
-    pub fields: Vec<JsonPlan>,
-    /// Whether field i was declared `Option<T>`, so a present value is wrapped
-    /// in `Some` and a missing key stays `None`.
+/// Everything the interpreter needs to know about one user struct,
+/// precomputed at load: the runtime layout, the lowered field types for
+/// coercion and typed json, and the json key mapping with serde renames.
+pub struct StructInfo {
+    pub shape: Arc<StructShape>,
+    /// Per field, its lowered type when coercion can change the value.
+    pub coerce: Vec<Option<TypeIr>>,
+    /// Per field, its lowered type for json planning.
+    pub json: Vec<TypeIr>,
+    /// Whether field i was declared `Option<T>` in the source.
     pub optional: Vec<bool>,
-    /// Json object key to field slot. Holds the `#[serde(rename = "..")]` name
-    /// when set, otherwise the field name, so camelCase keys map correctly.
+    /// Json object key to field slot, `#[serde(rename)]` applied.
     pub key_map: FxHashMap<String, usize>,
 }
 
-/// Read a field's `#[serde(rename = "..")]` value, if present.
-pub(super) fn serde_rename(field: &syn::Field) -> Option<String> {
-    let mut renamed = None;
-    for attr in &field.attrs {
-        if !attr.path().is_ident("serde") {
-            continue;
-        }
-        // parse_nested_meta walks the `serde(...)` list, e.g. `rename = "x"`.
-        if attr
-            .parse_nested_meta(|meta| {
-                if meta.path.is_ident("rename")
-                    && let Ok(value) = meta.value()
-                    && let Ok(lit) = value.parse::<syn::LitStr>()
-                {
-                    renamed = Some(lit.value());
+pub type Structs = HashMap<Arc<str>, Arc<StructInfo>>;
+
+impl Interp {
+    /// Build the parallel struct table from the AST, once at load on the main
+    /// thread. Mirrors what `struct_shape` and `json_plan` read lazily on the
+    /// AST lazily.
+    pub(super) fn build_structs(&self) -> Structs {
+        let mut out = Structs::default();
+        for (canon, def) in self.structs() {
+            let module = def.module;
+            let ast = def.ast.clone();
+            let mut fields: Vec<Arc<str>> = Vec::new();
+            let mut renames: Vec<Option<Arc<str>>> = Vec::new();
+            let mut coerce = Vec::new();
+            let mut json = Vec::new();
+            let mut optional = Vec::new();
+            let mut key_map = FxHashMap::default();
+            let rule = super::serde_attrs::serde_rename_all(&ast.attrs);
+            if let syn::Fields::Named(named) = &ast.fields {
+                let mut slot = 0;
+                for f in &named.named {
+                    let Some(ident) = &f.ident else { continue };
+                    let name = ident.to_string();
+                    // A field's own rename wins over the container rule.
+                    let rename = super::serde_attrs::serde_rename(f)
+                        .or_else(|| rule.map(|r| r.apply(&name)));
+                    fields.push(Arc::from(name.as_str()));
+                    renames.push(rename.as_deref().map(Arc::from));
+                    let ir = lower_type(&f.ty, self.resolver(), module, &[]);
+                    coerce.push(ir.is_active().then(|| ir.clone()));
+                    json.push(ir);
+                    optional.push(matches!(
+                        &f.ty,
+                        syn::Type::Path(p)
+                            if p.path.segments.last().is_some_and(|s| s.ident == "Option")
+                    ));
+                    key_map.insert(rename.unwrap_or(name), slot);
+                    slot += 1;
                 }
-                Ok(())
-            })
-            .is_err()
-        {
-            return None;
+            }
+            let shape = Arc::new(StructShape {
+                name: Arc::from(&**canon),
+                fields,
+                renames,
+            });
+            out.insert(
+                Arc::from(&**canon),
+                Arc::new(StructInfo {
+                    shape,
+                    coerce,
+                    json,
+                    optional,
+                    key_map,
+                }),
+            );
         }
+        out
     }
-    renamed
 }
 
-/// A container-level `#[serde(rename_all = "..")]` casing rule.
-#[derive(Clone, Copy)]
-pub(super) enum RenameRule {
-    Lower,
-    Upper,
-    Pascal,
-    Camel,
-    Snake,
-    ScreamingSnake,
-    Kebab,
-    ScreamingKebab,
-}
+// -- coercion ---------------------------------------------------------------
 
-/// Read a struct's `#[serde(rename_all = "..")]` rule, if present.
-pub(super) fn serde_rename_all(attrs: &[syn::Attribute]) -> Option<RenameRule> {
-    let mut rule = None;
-    for attr in attrs {
-        if !attr.path().is_ident("serde") {
-            continue;
-        }
-        if attr
-            .parse_nested_meta(|meta| {
-                if meta.path.is_ident("rename_all")
-                    && let Ok(value) = meta.value()
-                    && let Ok(lit) = value.parse::<syn::LitStr>()
-                {
-                    rule = RenameRule::parse(&lit.value());
-                }
-                Ok(())
-            })
-            .is_err()
-        {
-            return None;
-        }
-    }
-    rule
-}
-
-impl RenameRule {
-    fn parse(name: &str) -> Option<RenameRule> {
-        Some(match name {
-            "lowercase" => RenameRule::Lower,
-            "UPPERCASE" => RenameRule::Upper,
-            "PascalCase" => RenameRule::Pascal,
-            "camelCase" => RenameRule::Camel,
-            "snake_case" => RenameRule::Snake,
-            "SCREAMING_SNAKE_CASE" => RenameRule::ScreamingSnake,
-            "kebab-case" => RenameRule::Kebab,
-            "SCREAMING-KEBAB-CASE" => RenameRule::ScreamingKebab,
-            _ => return None,
-        })
-    }
-
-    /// Apply to a field name, which is `snake_case` in the source, following
-    /// serde's field rules.
-    pub(super) fn apply(self, field: &str) -> String {
-        match self {
-            RenameRule::Lower | RenameRule::Snake => field.to_string(),
-            RenameRule::Upper | RenameRule::ScreamingSnake => field.to_ascii_uppercase(),
-            RenameRule::Kebab => field.replace('_', "-"),
-            RenameRule::ScreamingKebab => field.to_ascii_uppercase().replace('_', "-"),
-            RenameRule::Pascal | RenameRule::Camel => {
-                let mut out = String::with_capacity(field.len());
-                let mut upper = matches!(self, RenameRule::Pascal);
-                for ch in field.chars() {
-                    if ch == '_' {
-                        upper = true;
-                    } else if upper {
-                        out.extend(ch.to_uppercase());
-                        upper = false;
-                    } else {
-                        out.push(ch);
+impl Vm {
+    /// Turn a dynamic value into `ty` when it reaches a known struct, walking
+    /// `Vec<T>` and `Option<T>`. The `Value` twin of `coerce_value` in
+    /// eval.rs.
+    pub(super) fn coerce_value(&self, value: Value, ty: &TypeIr) -> Value {
+        match ty {
+            TypeIr::Dynamic | TypeIr::Generic(_) | TypeIr::MapValue(_) => value,
+            TypeIr::Vec(inner) => {
+                let Value::Vec(items) = &value else {
+                    return value;
+                };
+                match &**inner {
+                    // A struct element type resolves once for the whole
+                    // vector, and a primitive element type needs no work.
+                    TypeIr::Struct(canon) => match self.structs.get(&**canon) {
+                        Some(info) => Value::vec(
+                            items
+                                .lock()
+                                .iter()
+                                .map(|v| match v {
+                                    Value::Map(m, _) => self.struct_from_map(info, &m.lock()),
+                                    other => other.clone(),
+                                })
+                                .collect(),
+                        ),
+                        None => value,
+                    },
+                    TypeIr::Vec(_) | TypeIr::Option(_) | TypeIr::Set(_) => {
+                        let out = items
+                            .lock()
+                            .iter()
+                            .map(|v| self.coerce_value(v.clone(), inner))
+                            .collect();
+                        Value::vec(out)
                     }
+                    TypeIr::Dynamic | TypeIr::Generic(_) | TypeIr::MapValue(_) => value,
                 }
-                out
+            }
+            TypeIr::Set(inner) => {
+                // A map-shaped value only needs the set tag. A `collect()`
+                // lands here as a Vec and packs into the shared map storage.
+                if let Value::Map(m, _) = &value {
+                    return Value::Map(m.clone(), super::value::MapKind::Set);
+                }
+                let Value::Vec(items) = &value else {
+                    return value;
+                };
+                let mut set = indexmap::IndexMap::default();
+                for v in items.lock().iter() {
+                    // An element that cannot be a key leaves the value alone,
+                    // the give-up path every other coercion takes.
+                    let Some(key) = self.coerce_value(v.clone(), inner).into_key() else {
+                        return value.clone();
+                    };
+                    set.insert(key, Value::Unit);
+                }
+                Value::set_of(set)
+            }
+            TypeIr::Option(inner) => {
+                if let Value::Enum {
+                    enum_name,
+                    variant,
+                    data,
+                } = &value
+                    && &**enum_name == "Option"
+                    && &**variant == "Some"
+                {
+                    let coerced =
+                        self.coerce_value(data.first().cloned().unwrap_or(Value::Unit), inner);
+                    return Value::some(coerced);
+                }
+                value
+            }
+            TypeIr::Struct(canon) => {
+                if let Value::Map(map, _) = &value
+                    && let Some(info) = self.structs.get(&**canon)
+                {
+                    return self.struct_from_map(info, &map.lock());
+                }
+                value
             }
         }
     }
-}
 
-/// Whether a type is spelled `Option<..>` at the top level.
-fn is_option(ty: &syn::Type) -> bool {
-    if let syn::Type::Path(p) = ty
-        && let Some(seg) = p.path.segments.last()
-    {
-        return seg.ident == "Option";
+    /// If `value` is `Ok(x)` coerce `x`, otherwise coerce `value` directly.
+    pub(super) fn coerce_result(&self, value: Value, ty: &TypeIr) -> Value {
+        if let Value::Enum {
+            enum_name,
+            variant,
+            data,
+        } = &value
+            && &**enum_name == "Result"
+            && &**variant == "Ok"
+        {
+            let inner = data.first().cloned().unwrap_or(Value::Unit);
+            return Value::ok(self.coerce_value(inner, ty));
+        }
+        self.coerce_value(value, ty)
     }
-    false
-}
 
-impl Interp {
-    /// Lower a turbofish type into a parse plan. `building` guards against
-    /// recursive struct definitions, which fall back to dynamic parsing.
+    fn struct_from_map(&self, info: &StructInfo, map: &indexmap::IndexMap<MapKey, Value>) -> Value {
+        let mut values = Vec::with_capacity(info.coerce.len());
+        for (fname, ty) in info.shape.fields.iter().zip(&info.coerce) {
+            let raw = map
+                .get(&MapKey::Str(fname.clone()))
+                .cloned()
+                .unwrap_or_else(Value::none);
+            let coerced = match ty {
+                Some(t) => self.coerce_value(raw, t),
+                None => raw,
+            };
+            values.push(coerced);
+        }
+        Value::structure(info.shape.clone(), values)
+    }
+
+    /// Lower a turbofish type into a parse plan, the `Value` twin of
+    /// `json_plan` in `json_bridge.rs`. `building` guards recursive structs.
     pub(super) fn json_plan(
         &self,
         ty: &TypeIr,
         building: &mut Vec<String>,
-        tenv: &[(Rc<str>, TypeIr)],
+        tenv: &[(Arc<str>, TypeIr)],
     ) -> JsonPlan {
         match ty {
             TypeIr::Dynamic => JsonPlan::Dynamic,
-            // A generic parameter the caller bound by turbofish resolves to
-            // its concrete type, already lowered in the caller's module.
             TypeIr::Generic(name) => match tenv.iter().find(|(n, _)| **n == **name) {
                 Some((_, bound)) => self.json_plan(bound, building, tenv),
                 None => JsonPlan::Dynamic,
             },
-            TypeIr::Vec(inner) => JsonPlan::Vec(Box::new(self.json_plan(inner, building, tenv))),
+            // A set parses as a list first; the annotation coercion packs it
+            // into the shared map storage afterwards. The elements still
+            // parse with their own plan.
+            TypeIr::Vec(inner) | TypeIr::Set(inner) => {
+                JsonPlan::Vec(Box::new(self.json_plan(inner, building, tenv)))
+            }
             TypeIr::Option(inner) => self.json_plan(inner, building, tenv),
             TypeIr::MapValue(inner) => {
                 JsonPlan::Map(Box::new(self.json_plan(inner, building, tenv)))
             }
-            TypeIr::Set(inner) => JsonPlan::Set(Box::new(self.json_plan(inner, building, tenv))),
             TypeIr::Struct(canon) => {
                 if building.iter().any(|b| b.as_str() == &**canon) {
                     return JsonPlan::Dynamic;
                 }
-                let Some(shape) = self.struct_shape(canon) else {
+                let Some(info) = self.structs.get(&**canon) else {
                     return JsonPlan::Dynamic;
                 };
-                let Some(def) = self.structs().get(&**canon) else {
-                    return JsonPlan::Dynamic;
-                };
-                let def_module = def.module;
-                let def = def.ast.clone();
                 building.push(canon.to_string());
-                let mut fields = Vec::with_capacity(shape.runtime.fields.len());
-                let mut optional = Vec::with_capacity(shape.runtime.fields.len());
-                let mut key_map = FxHashMap::default();
-                let rule = serde_rename_all(&def.attrs);
-                if let syn::Fields::Named(named) = &def.fields {
-                    let mut slot = 0;
-                    for f in &named.named {
-                        let Some(ident) = &f.ident else {
-                            continue;
-                        };
-                        // Field types resolve where the struct is declared and
-                        // are concrete, so no caller type env applies here.
-                        let fir = lower_type(&f.ty, self.resolver(), def_module, &[]);
-                        fields.push(self.json_plan(&fir, building, &[]));
-                        optional.push(is_option(&f.ty));
-                        // A field's own rename wins over the container rule.
-                        let key = serde_rename(f)
-                            .or_else(|| rule.map(|r| r.apply(&ident.to_string())))
-                            .unwrap_or_else(|| ident.to_string());
-                        key_map.insert(key, slot);
-                        slot += 1;
-                    }
-                }
+                let fields = info
+                    .json
+                    .iter()
+                    .map(|fir| self.json_plan(fir, building, &[]))
+                    .collect();
                 building.pop();
-                JsonPlan::Struct(Rc::new(StructPlan {
-                    shape: shape.runtime.clone(),
+                JsonPlan::Struct(Arc::new(StructPlan {
+                    info: info.clone(),
                     fields,
-                    optional,
-                    key_map,
                 }))
             }
         }
     }
 
-    /// `serde_json::from_str::<T>` with a known target type. Parses straight
-    /// into typed values, so no coercion pass runs afterwards.
+    /// `serde_json::from_str::<T>` with a known target type, the `Value`
+    /// twin of `typed_from_str`.
     pub(super) fn typed_from_str(
         &self,
         args: &[Value],
         ty: &TypeIr,
-        tenv: &[(Rc<str>, TypeIr)],
+        tenv: &[(Arc<str>, TypeIr)],
     ) -> Result<Value> {
         let owned;
         let text: &str = match args.first() {
@@ -397,7 +283,40 @@ impl Interp {
     }
 }
 
-pub(super) fn parse_json_planned(
+// -- parsing ----------------------------------------------------------------
+
+pub(super) enum JsonPlan {
+    Dynamic,
+    Vec(Box<JsonPlan>),
+    Map(Box<JsonPlan>),
+    Struct(Arc<StructPlan>),
+}
+
+pub(super) struct StructPlan {
+    info: Arc<StructInfo>,
+    /// One plan per shape field, same order.
+    fields: Vec<JsonPlan>,
+}
+
+/// Object keys repeat for every array element, so each parse interns them,
+/// mirroring `JsonKeys` in `json_bridge.rs`. The parse runs on one thread, so
+/// a `RefCell` is fine even though the values are `Send`.
+type JsonKeys = RefCell<FxHashMap<String, Arc<str>>>;
+
+pub(super) fn parse_json(text: &str) -> std::result::Result<Value, serde_json::Error> {
+    use serde::de::DeserializeSeed;
+    let mut de = serde_json::Deserializer::from_str(text);
+    let keys = RefCell::new(FxHashMap::default());
+    let v = PlanSeed {
+        plan: &JsonPlan::Dynamic,
+        keys: &keys,
+    }
+    .deserialize(&mut de)?;
+    de.end()?;
+    Ok(v)
+}
+
+fn parse_json_planned(
     text: &str,
     plan: &JsonPlan,
 ) -> std::result::Result<Value, serde_json::Error> {
@@ -425,6 +344,48 @@ impl<'de> serde::de::DeserializeSeed<'de> for PlanSeed<'_> {
             plan: self.plan,
             keys: self.keys,
         })
+    }
+}
+
+struct KeySeed<'a> {
+    keys: &'a JsonKeys,
+}
+
+impl KeySeed<'_> {
+    fn intern(&self, s: &str) -> Arc<str> {
+        if let Some(k) = self.keys.borrow().get(s) {
+            return k.clone();
+        }
+        let k: Arc<str> = Arc::from(s);
+        self.keys.borrow_mut().insert(s.to_string(), k.clone());
+        k
+    }
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for KeySeed<'_> {
+    type Value = Arc<str>;
+
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        d: D,
+    ) -> std::result::Result<Arc<str>, D::Error> {
+        d.deserialize_str(self)
+    }
+}
+
+impl serde::de::Visitor<'_> for KeySeed<'_> {
+    type Value = Arc<str>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("an object key")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, s: &str) -> std::result::Result<Arc<str>, E> {
+        Ok(self.intern(s))
+    }
+
+    fn visit_string<E: serde::de::Error>(self, s: String) -> std::result::Result<Arc<str>, E> {
+        Ok(self.intern(&s))
     }
 }
 
@@ -506,19 +467,6 @@ impl<'de> serde::de::Visitor<'de> for PlanVisitor<'_> {
         self,
         mut seq: A,
     ) -> std::result::Result<Value, A::Error> {
-        if let JsonPlan::Set(elem) = self.plan {
-            let mut set = super::value::Map::default();
-            while let Some(v) = seq.next_element_seed(PlanSeed {
-                plan: elem,
-                keys: self.keys,
-            })? {
-                let Some(key) = v.into_key() else {
-                    return Err(serde::de::Error::custom("invalid set element"));
-                };
-                set.insert(key, Value::Unit);
-            }
-            return Ok(Value::set_of(set));
-        }
         let elem = match self.plan {
             JsonPlan::Vec(p) => &**p,
             _ => &JsonPlan::Dynamic,
@@ -539,11 +487,12 @@ impl<'de> serde::de::Visitor<'de> for PlanVisitor<'_> {
     ) -> std::result::Result<Value, A::Error> {
         match self.plan {
             JsonPlan::Struct(sp) => {
-                let mut values: Vec<Value> =
-                    (0..sp.shape.fields.len()).map(|_| Value::none()).collect();
+                let mut values: Vec<Value> = (0..sp.info.shape.fields.len())
+                    .map(|_| Value::none())
+                    .collect();
                 let mut filled = vec![false; values.len()];
                 while let Some(slot) = access.next_key_seed(FieldSeed {
-                    key_map: &sp.key_map,
+                    key_map: &sp.info.key_map,
                 })? {
                     match slot {
                         Some(i) => {
@@ -551,9 +500,9 @@ impl<'de> serde::de::Visitor<'de> for PlanVisitor<'_> {
                                 plan: &sp.fields[i],
                                 keys: self.keys,
                             })?;
-                            // An Option field wraps a present, non-null value in
-                            // Some so a `match Some(x)` in the script matches.
-                            values[i] = if sp.optional[i] && !v.is_none_value() {
+                            // An Option field wraps a present, non-null value
+                            // in Some so a `match Some(x)` matches.
+                            values[i] = if sp.info.optional[i] && !v.is_none_value() {
                                 Value::some(v)
                             } else {
                                 v
@@ -568,15 +517,15 @@ impl<'de> serde::de::Visitor<'de> for PlanVisitor<'_> {
                 // A required field with no key in the json fails the parse,
                 // like real serde, instead of binding a hole that only
                 // explodes later. Option fields stay None.
-                missing_field(&filled, &sp.optional, &sp.key_map)?;
-                Ok(Value::structure(sp.shape.clone(), values))
+                missing_field(&filled, &sp.info.optional, &sp.info.key_map)?;
+                Ok(Value::structure(sp.info.shape.clone(), values))
             }
             plan => {
                 let elem = match plan {
                     JsonPlan::Map(p) => &**p,
                     _ => &JsonPlan::Dynamic,
                 };
-                let mut map = map_with_capacity(access.size_hint().unwrap_or(0));
+                let mut map = indexmap::IndexMap::default();
                 while let Some(k) = access.next_key_seed(KeySeed { keys: self.keys })? {
                     map.insert(
                         MapKey::Str(k),
@@ -592,85 +541,40 @@ impl<'de> serde::de::Visitor<'de> for PlanVisitor<'_> {
     }
 }
 
-/// Error on the first required field the json never set. Shared shape logic
-/// for both engines' typed parsers.
-pub(super) fn missing_field<E: serde::de::Error>(
-    filled: &[bool],
-    optional: &[bool],
-    key_map: &FxHashMap<String, usize>,
-) -> std::result::Result<(), E> {
-    for (i, done) in filled.iter().enumerate() {
-        if *done || optional.get(i).copied().unwrap_or(false) {
-            continue;
-        }
-        let key = key_map
-            .iter()
-            .find(|(_, slot)| **slot == i)
-            .map_or("?", |(k, _)| k.as_str());
-        return Err(E::custom(format!("missing field `{key}`")));
-    }
-    Ok(())
-}
+// -- serialization ----------------------------------------------------------
 
-pub(super) fn bridge_serde_json(func: &str, args: &[Value]) -> Result<Value> {
-    match func {
-        "from_str" => {
-            let owned;
-            let s: &str = match args.first() {
-                Some(Value::Str(s)) => s,
-                Some(other) => {
-                    owned = other.display();
-                    &owned
-                }
-                None => bail!("from_str needs a string"),
-            };
-            match parse_json(s) {
-                Ok(v) => Ok(Value::ok(v)),
-                Err(e) => Ok(Value::err(Value::str(e.to_string()))),
-            }
-        }
-        "to_string" | "to_string_pretty" => {
-            let v = args.first().cloned().unwrap_or(Value::Unit);
-            let j = value_to_json(&v)?;
-            let s = if func == "to_string_pretty" {
-                serde_json::to_string_pretty(&j)?
+/// A `serde_json::Value` as an interpreter value, for the toml and yaml
+/// bridges that parse through `serde_json`'s model. Null maps to None, the same
+/// mapping the json parser uses.
+pub(super) fn json_to_pvalue(v: serde_json::Value) -> Value {
+    use serde_json::Value as J;
+    match v {
+        J::Null => Value::none(),
+        J::Bool(b) => Value::Bool(b),
+        J::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Int(i)
+            } else if let Some(u) = n.as_u64() {
+                Value::int_of_width(i128::from(u), super::numeric::IntWidth::U64)
             } else {
-                serde_json::to_string(&j)?
-            };
-            Ok(Value::ok(Value::str(s)))
-        }
-        "to_value" => {
-            let v = args.first().cloned().unwrap_or(Value::Unit);
-            Ok(Value::ok(json_to_value(value_to_json(&v)?)))
-        }
-        other => bail!("unsupported serde_json function `{other}`"),
-    }
-}
-
-/// Consumes the parsed tree so strings move into values instead of cloning.
-pub(super) fn json_to_value(j: serde_json::Value) -> Value {
-    match j {
-        serde_json::Value::Null => Value::none(),
-        serde_json::Value::Bool(b) => Value::Bool(b),
-        serde_json::Value::Number(n) => match (n.as_i64(), n.as_u64()) {
-            (Some(i), _) => Value::Int(i),
-            // A u64 past `i64::MAX` keeps its width, a float cannot hold it.
-            (None, Some(u)) => Value::int_of_width(i128::from(u), IntWidth::U64),
-            _ => Value::Float(n.as_f64().unwrap_or(0.0)),
-        },
-        serde_json::Value::String(s) => Value::str(s),
-        serde_json::Value::Array(a) => Value::vec(a.into_iter().map(json_to_value).collect()),
-        serde_json::Value::Object(o) => {
-            let mut map = map_with_capacity(o.len());
-            for (k, v) in o {
-                map.insert(MapKey::Str(RStr::new(k)), json_to_value(v));
+                Value::Float(n.as_f64().unwrap_or(f64::NAN))
             }
-            Value::map_of(map)
+        }
+        J::String(s) => Value::str(s),
+        J::Array(items) => Value::vec(items.into_iter().map(json_to_pvalue).collect()),
+        J::Object(map) => {
+            let mut out = indexmap::IndexMap::default();
+            for (k, v) in map {
+                if let Some(key) = Value::str(k).into_key() {
+                    out.insert(key, json_to_pvalue(v));
+                }
+            }
+            Value::map_of(out)
         }
     }
 }
 
-pub(super) fn value_to_json(v: &Value) -> Result<serde_json::Value> {
+pub(super) fn pvalue_to_json(v: &Value) -> Result<serde_json::Value> {
     use serde_json::Value as J;
     Ok(match v {
         Value::Unit => J::Null,
@@ -691,28 +595,21 @@ pub(super) fn value_to_json(v: &Value) -> Result<serde_json::Value> {
         Value::Str(s) => J::String(s.to_string()),
         Value::Vec(items) | Value::Tuple(items) => J::Array(
             items
-                .borrow()
+                .lock()
                 .iter()
-                .map(value_to_json)
+                .map(pvalue_to_json)
                 .collect::<Result<_>>()?,
         ),
-        // serde serializes a set as a json array of its elements.
-        Value::Map(map, MapKind::Set) => J::Array(
-            map.borrow()
-                .keys()
-                .map(|k| value_to_json(&k.to_value()))
-                .collect::<Result<_>>()?,
-        ),
-        Value::Map(map, MapKind::Map) => {
+        Value::Map(map, _) => {
             let mut obj = serde_json::Map::default();
-            for (k, val) in map.borrow().iter() {
-                obj.insert(k.to_value().display(), value_to_json(val)?);
+            for (k, val) in map.lock().iter() {
+                obj.insert(k.to_value().display(), pvalue_to_json(val)?);
             }
             J::Object(obj)
         }
         Value::Struct(s) => {
             let mut obj = serde_json::Map::default();
-            let values = s.values.borrow();
+            let values = s.values.lock();
             for (slot, (field, val)) in s.shape.fields.iter().zip(values.iter()).enumerate() {
                 let key = s
                     .shape
@@ -720,7 +617,7 @@ pub(super) fn value_to_json(v: &Value) -> Result<serde_json::Value> {
                     .get(slot)
                     .and_then(Option::as_ref)
                     .unwrap_or(field);
-                obj.insert(key.to_string(), value_to_json(val)?);
+                obj.insert(key.to_string(), pvalue_to_json(val)?);
             }
             J::Object(obj)
         }
@@ -731,7 +628,7 @@ pub(super) fn value_to_json(v: &Value) -> Result<serde_json::Value> {
         } => {
             if &**enum_name == "Option" {
                 match &**variant {
-                    "Some" => value_to_json(&data[0])?,
+                    "Some" => pvalue_to_json(&data[0])?,
                     _ => J::Null,
                 }
             } else if data.is_empty() {
@@ -740,7 +637,7 @@ pub(super) fn value_to_json(v: &Value) -> Result<serde_json::Value> {
                 let mut obj = serde_json::Map::default();
                 obj.insert(
                     variant.to_string(),
-                    J::Array(data.iter().map(value_to_json).collect::<Result<_>>()?),
+                    J::Array(data.iter().map(pvalue_to_json).collect::<Result<_>>()?),
                 );
                 J::Object(obj)
             }
@@ -751,8 +648,64 @@ pub(super) fn value_to_json(v: &Value) -> Result<serde_json::Value> {
             let Some(value) = reference.get() else {
                 bail!("cannot serialize a dangling reference to json");
             };
-            value_to_json(&value)?
+            pvalue_to_json(&value)?
         }
-        Value::Native(n) => bail!("cannot serialize a {} to json", n.borrow().type_name()),
+        Value::Native(n) => bail!("cannot serialize a {} to json", n.lock().type_name()),
     })
+}
+
+/// The `serde_json` free functions on the dynamic path, `from_str` with no
+/// type information plus `to_string` and `to_string_pretty`.
+pub(super) fn bridge_serde_json(func: &str, args: &[Value]) -> Result<Value> {
+    match func {
+        "from_str" => {
+            let owned;
+            let s: &str = match args.first() {
+                Some(Value::Str(s)) => s,
+                Some(other) => {
+                    owned = other.display();
+                    &owned
+                }
+                None => bail!("from_str needs a string"),
+            };
+            match parse_json(s) {
+                Ok(v) => Ok(Value::ok(v)),
+                Err(e) => Ok(Value::err(Value::str(e.to_string()))),
+            }
+        }
+        "to_string" | "to_string_pretty" => {
+            let v = args.first().cloned().unwrap_or(Value::Unit);
+            let j = pvalue_to_json(&v)?;
+            let s = if func == "to_string_pretty" {
+                serde_json::to_string_pretty(&j)?
+            } else {
+                serde_json::to_string(&j)?
+            };
+            Ok(Value::ok(Value::str(s)))
+        }
+        "to_value" => {
+            let v = args.first().cloned().unwrap_or(Value::Unit);
+            Ok(Value::ok(json_to_pvalue(pvalue_to_json(&v)?)))
+        }
+        other => bail!("unsupported serde_json function `{other}`"),
+    }
+}
+
+/// Error out on a required struct field the json object never supplied.
+fn missing_field<E: serde::de::Error>(
+    filled: &[bool],
+    optional: &[bool],
+    key_map: &FxHashMap<String, usize>,
+) -> std::result::Result<(), E> {
+    for (i, done) in filled.iter().enumerate() {
+        if *done || optional.get(i).copied().unwrap_or(false) {
+            continue;
+        }
+        let key = key_map
+            .iter()
+            .find(|(_, slot)| **slot == i)
+            .map_or("?", |(k, _)| k.as_str());
+        return Err(E::custom(format!("missing field `{key}`")));
+    }
+    Ok(())
 }

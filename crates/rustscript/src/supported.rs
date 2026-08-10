@@ -3,7 +3,7 @@
 //! rendering produces `docs/supported.md`, and a test keeps that page in sync,
 //! so neither view can drift from the dispatch source.
 
-use crate::interpreter::coverage::{Avail, surface};
+use crate::interpreter::coverage::surface;
 
 /// Receiver display names for the internal table keys.
 fn recv_label(recv: &str) -> &str {
@@ -12,26 +12,17 @@ fn recv_label(recv: &str) -> &str {
         "builtin" => "builtin (dispatched by id on matching receivers)",
         "Str" => "String and str",
         "Native" => "native handles (files, sockets, readers, processes)",
-        "Enum" => "Option and Result (tokio mode)",
         other => other,
     }
 }
 
-fn mark(avail: Avail) -> &'static str {
-    match avail {
-        Avail::Both => "",
-        Avail::FastOnly => " (fast)",
-        Avail::ParallelOnly => " (tokio)",
-    }
-}
-
 /// Group the surface by receiver, in table order.
-fn groups() -> Vec<(&'static str, Vec<(&'static str, Avail)>)> {
-    let mut out: Vec<(&'static str, Vec<(&'static str, Avail)>)> = Vec::new();
-    for (recv, name, avail) in surface() {
+fn groups() -> Vec<(&'static str, Vec<&'static str>)> {
+    let mut out: Vec<(&'static str, Vec<&'static str>)> = Vec::new();
+    for (recv, name) in surface() {
         match out.last_mut() {
-            Some((last, names)) if *last == recv => names.push((name, avail)),
-            _ => out.push((recv, vec![(name, avail)])),
+            Some((last, names)) if *last == recv => names.push(name),
+            _ => out.push((recv, vec![name])),
         }
     }
     out
@@ -39,18 +30,10 @@ fn groups() -> Vec<(&'static str, Vec<(&'static str, Avail)>)> {
 
 /// The terminal listing.
 pub fn print_supported() {
-    println!(
-        "Methods the interpreter implements, by receiver. A name marked (fast)\n\
-         runs only on the single threaded engine; (tokio) only on the parallel\n\
-         engine that #[tokio::main] selects. Unmarked names run on both.\n"
-    );
+    println!("Methods the interpreter implements, by receiver.\n");
     for (recv, names) in groups() {
         println!("{}:", recv_label(recv));
-        let line: Vec<String> = names
-            .iter()
-            .map(|(n, a)| format!("{n}{}", mark(*a)))
-            .collect();
-        println!("  {}\n", line.join(", "));
+        println!("  {}\n", names.join(", "));
     }
 }
 
@@ -60,17 +43,11 @@ pub fn markdown() -> String {
         "# Supported interpreter surface\n\n\
          Generated from the bridge dispatch tables. Do not edit by hand; run\n\
          `rust supported md > docs/supported.md` after changing a bridge, and\n\
-         the `supported_page_is_current` test enforces it.\n\n\
-         A method marked `fast` runs only on the single threaded engine. One\n\
-         marked `tokio` runs only on the parallel engine that `#[tokio::main]`\n\
-         selects. Unmarked methods run on both.\n",
+         the `supported_page_is_current` test enforces it.\n",
     );
     for (recv, names) in groups() {
         out.push_str(&format!("\n## {}\n\n", recv_label(recv)));
-        let line: Vec<String> = names
-            .iter()
-            .map(|(n, a)| format!("`{n}`{}", mark(*a)))
-            .collect();
+        let line: Vec<String> = names.iter().map(|n| format!("`{n}`")).collect();
         out.push_str(&line.join(", "));
         out.push('\n');
     }

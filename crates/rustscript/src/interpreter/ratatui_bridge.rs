@@ -375,7 +375,7 @@ pub(super) fn int_of(v: &Value) -> i64 {
 
 pub(super) fn text_of(v: &Value) -> String {
     match v {
-        Value::Str(s) => s.as_str().to_string(),
+        Value::Str(s) => s.to_string(),
         Value::Char(c) => c.to_string(),
         Value::Int(i) | Value::IntW(i, _) => i.to_string(),
         _ => String::new(),
@@ -385,7 +385,7 @@ pub(super) fn text_of(v: &Value) -> String {
 /// The elements of a `Vec` value, empty for anything else.
 pub(super) fn items(v: &Value) -> Vec<Value> {
     match v {
-        Value::Vec(items) | Value::Tuple(items) => items.borrow().clone(),
+        Value::Vec(items) | Value::Tuple(items) => items.lock().clone(),
         _ => Vec::new(),
     }
 }

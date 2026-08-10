@@ -3,7 +3,6 @@
 //! ever touching the parse tree again. Registers are numbered slots in a flat
 //! frame, so variable access is an array read, not a name lookup.
 
-use std::rc::Rc;
 use std::sync::Arc;
 
 use super::typeir::{CastIr, TypeIr};
@@ -76,7 +75,7 @@ pub enum UnKind {
 /// A field being read or written, named for structs, positional for tuples.
 #[derive(Clone)]
 pub enum Member {
-    Named(Rc<str>),
+    Named(Arc<str>),
     Indexed(usize),
 }
 
@@ -104,15 +103,15 @@ impl CapSource {
 /// time and shared by every instance the literal creates.
 pub struct StructLit {
     /// Field names in the register order `base..base+fields.len()`.
-    pub shape: Rc<super::value::StructShape>,
+    pub shape: Arc<StructShape>,
     /// Whether a trailing `..rest` value sits in the register after the fields.
     pub has_rest: bool,
 }
 
 #[derive(Clone)]
 pub struct EnumVariant {
-    pub enum_name: Rc<str>,
-    pub variant: Rc<str>,
+    pub enum_name: Arc<str>,
+    pub variant: Arc<str>,
 }
 
 /// A method name with its builtin id resolved once at compile time, so hot
@@ -806,12 +805,12 @@ pub struct Chunk {
     pub paths: Vec<(Vec<String>, Option<TypeIr>)>,
     pub names: Vec<MethodName>,
     /// Nested closure bodies, referenced by `MakeClosure`.
-    pub children: Vec<Rc<Chunk>>,
+    pub children: Vec<Arc<Chunk>>,
     /// For each child, where to copy its upvalues from.
     pub child_caps: Vec<Vec<CapSource>>,
     /// Generic parameter names of this function, in order, e.g. `["T"]`. Used
     /// to bind a caller's turbofish type args when the body resolves them.
-    pub generics: Vec<Rc<str>>,
+    pub generics: Vec<Arc<str>>,
     /// Turbofish type args recorded at `CallFn` sites, referenced by `targ`.
     pub call_type_args: Vec<Arc<[TypeIr]>>,
 }
@@ -843,4 +842,67 @@ impl Chunk {
             call_type_args: Vec::new(),
         }
     }
+}
+
+/// Field layout of a struct, shared by every instance built from the same
+/// site. Instances then carry a plain `Vec<Value>` in this order, so a field
+/// read is a short name scan plus an index, not a hash probe, and building an
+/// instance allocates no map.
+pub struct StructShape {
+    pub name: Arc<str>,
+    pub fields: Vec<Arc<str>>,
+    /// One entry per field, its `#[serde(rename = "..")]` name if any. Empty
+    /// when the struct has no renamed fields. Read when serializing to json so
+    /// the output key matches serde, the same names deserialize already honors.
+    pub renames: Vec<Option<Arc<str>>>,
+}
+
+impl StructShape {
+    pub fn new(name: impl Into<Arc<str>>, fields: Vec<Arc<str>>) -> Arc<StructShape> {
+        Arc::new(StructShape {
+            name: name.into(),
+            fields,
+            renames: Vec::new(),
+        })
+    }
+
+    pub fn with_renames(
+        name: impl Into<Arc<str>>,
+        fields: Vec<Arc<str>>,
+        renames: Vec<Option<Arc<str>>>,
+    ) -> Arc<StructShape> {
+        Arc::new(StructShape {
+            name: name.into(),
+            fields,
+            renames,
+        })
+    }
+
+    /// Slot index of a field. Structs have a handful of fields, so a linear
+    /// scan beats hashing.
+    pub fn slot(&self, field: &str) -> Option<usize> {
+        self.fields.iter().position(|f| &**f == field)
+    }
+}
+
+/// The chunk behind a path used as a function value. It forwards its
+/// `num_params` arguments to the path call. `num_params` is 0 for a
+/// constructor like `Vec::new` and 1 for a method reference or one-arg
+/// constructor.
+pub fn path_call_chunk(segs: Vec<String>, num_params: usize) -> Arc<Chunk> {
+    let dst = u16::try_from(num_params).expect("parameter count fits u16");
+    let mut chunk = Chunk::empty("<pathfn>");
+    chunk.num_params = num_params;
+    chunk.num_regs = num_params + 1;
+    chunk.paths.push((segs, None));
+    // Arguments land in registers 0..num_params, the result goes just past
+    // them.
+    chunk.code.push(Op::CallPath {
+        dst,
+        path: 0,
+        base: 0,
+        argc: dst,
+    });
+    chunk.code.push(Op::Ret { src: dst });
+    Arc::new(chunk)
 }

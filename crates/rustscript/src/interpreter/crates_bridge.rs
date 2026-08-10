@@ -1,28 +1,33 @@
-//! Bridges for the extra crates a script may use: base64, chrono,
-//! rand and friends. Split from `builtins.rs`.
+//! Bridges for the extra crates a script may use: base64, chrono, rand, sha2,
+//! hex, toml, yaml, glob, dirs, tempfile and friends. Ported from the fast
+//! engine's `crates_bridge.rs`.
 
 use num_traits::AsPrimitive;
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::{Result, bail};
+use parking_lot::Mutex;
 
+use super::json_bridge::{json_to_pvalue, pvalue_to_json};
 use super::native::Native;
-
+use super::native_methods::value_to_bytes;
+use super::std_bridge::make_path;
 use super::value::{StructData, Value};
 
-use super::json_bridge::{json_to_value, value_to_json};
-use super::jwt_bridge::jwt_encode;
-use super::shared::parse_rfc3339;
-use super::std_bridge::{bytes_arg, bytes_to_vec, field_int, make_path, opt_path};
+fn opt_path(p: Option<std::path::PathBuf>) -> Value {
+    match p {
+        Some(p) => Value::some(make_path(p.display().to_string())),
+        None => Value::none(),
+    }
+}
 
-/// `module::func` call is not a plain std bridge.
+pub(super) fn bytes_to_vec(b: &[u8]) -> Value {
+    Value::vec(b.iter().map(|x| Value::Int(i64::from(*x))).collect())
+}
+
+/// `module::func` call that is not a plain std bridge.
 pub(super) fn crate_bridge(module: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
-    let s0 = || {
-        args.first()
-            .map(super::value::Value::display)
-            .unwrap_or_default()
-    };
+    let s0 = || args.first().map(Value::display).unwrap_or_default();
     Ok(Some(match (module, func) {
         // dirs -------------------------------------------------------------
         ("dirs", "home_dir") => opt_path(dirs::home_dir()),
@@ -60,34 +65,34 @@ pub(super) fn crate_bridge(module: &str, func: &str, args: &[Value]) -> Result<O
         }
         ("Sha256", "digest") => {
             use sha2::Digest;
-            bytes_to_vec(&sha2::Sha256::digest(bytes_arg(args.first())))
+            bytes_to_vec(&sha2::Sha256::digest(value_to_bytes(args.first())))
         }
         // regex free functions ---------------------------------------------
         ("regex", "escape") => Value::str(regex::escape(&s0())),
         // hex --------------------------------------------------------------
-        ("hex", "encode") => Value::str(hex::encode(bytes_arg(args.first()))),
+        ("hex", "encode") => Value::str(hex::encode(value_to_bytes(args.first()))),
         ("hex", "decode") => match hex::decode(s0()) {
             Ok(b) => Value::ok(bytes_to_vec(&b)),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
         // toml -------------------------------------------------------------
         ("toml", "from_str") => match toml::from_str::<serde_json::Value>(&s0()) {
-            Ok(j) => Value::ok(json_to_value(j)),
+            Ok(j) => Value::ok(json_to_pvalue(j)),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
         ("toml", "to_string" | "to_string_pretty") => {
-            match toml::to_string(&value_to_json(args.first().unwrap_or(&Value::Unit))?) {
+            match toml::to_string(&pvalue_to_json(args.first().unwrap_or(&Value::Unit))?) {
                 Ok(s) => Value::ok(Value::str(s)),
                 Err(e) => Value::err(Value::str(e.to_string())),
             }
         }
         // serde_yaml -------------------------------------------------------
         ("serde_yaml", "from_str") => match serde_yaml::from_str::<serde_json::Value>(&s0()) {
-            Ok(j) => Value::ok(json_to_value(j)),
+            Ok(j) => Value::ok(json_to_pvalue(j)),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
         ("serde_yaml", "to_string") => {
-            match serde_yaml::to_string(&value_to_json(args.first().unwrap_or(&Value::Unit))?) {
+            match serde_yaml::to_string(&pvalue_to_json(args.first().unwrap_or(&Value::Unit))?) {
                 Ok(s) => Value::ok(Value::str(s)),
                 Err(e) => Value::err(Value::str(e.to_string())),
             }
@@ -95,14 +100,9 @@ pub(super) fn crate_bridge(module: &str, func: &str, args: &[Value]) -> Result<O
         // rand -------------------------------------------------------------
         ("rand", "rng" | "thread_rng") => Value::struct_of("Rng", []),
         ("rand", "random") => Value::Float(rand::random::<f64>()),
-        // chrono -----------------------------------------------------------
-        ("Utc" | "Local", "now") => now_datetime(module == "Local"),
-        ("DateTime", "parse_from_rfc3339") => match parse_rfc3339(&s0()) {
-            Ok((secs, nanos, offset)) => Value::ok(datetime_value(secs, nanos, false, offset)),
-            Err(e) => Value::err(Value::str(e)),
-        },
-        // jsonwebtoken -------------------------------------------------------
-        ("jsonwebtoken", "encode") => jwt_encode(args)?,
+        // chrono is answered in `dispatch_call`, Utc/Local/DateTime.
+        // jsonwebtoken -----------------------------------------------------
+        ("jsonwebtoken", "encode") => super::jwt_bridge::jwt_encode(args)?,
         // tempfile ---------------------------------------------------------
         ("tempfile", "tempdir") => match tempfile::tempdir() {
             Ok(d) => Value::ok(Native::TempDir(d).wrap()),
@@ -118,14 +118,14 @@ pub(super) fn crate_bridge(module: &str, func: &str, args: &[Value]) -> Result<O
         },
         // winreg -----------------------------------------------------------
         ("RegKey", "predef") => super::winreg_bridge::predef(args),
-        // windows-service ---------------------------------------------------
+        // windows-service --------------------------------------------------
         ("ServiceManager", "local_computer") => super::service_bridge::local_computer(args),
-        // wmi ---------------------------------------------------------------
+        // wmi --------------------------------------------------------------
         ("WMIConnection", "new") => super::wmi_bridge::connection(args, true),
         ("WMIConnection", "with_namespace_path") => super::wmi_bridge::connection(args, false),
-        // crossterm ----------------------------------------------------------
+        // crossterm --------------------------------------------------------
         ("terminal", "size") => terminal_size(),
-        // terminal-light -----------------------------------------------------
+        // terminal-light ---------------------------------------------------
         ("terminal_light", "luma") => terminal_luma(),
         _ => return Ok(None),
     }))
@@ -184,12 +184,9 @@ pub(super) fn base64_method(s: &StructData, method: &str, args: &[Value]) -> Res
         };
     }
     Ok(match method {
-        "encode" => Value::str(pick!(encode, bytes_arg(args.first()))),
+        "encode" => Value::str(pick!(encode, value_to_bytes(args.first()))),
         "decode" => {
-            let input = args
-                .first()
-                .map(super::value::Value::display)
-                .unwrap_or_default();
+            let input = args.first().map(Value::display).unwrap_or_default();
             match pick!(decode, &input) {
                 Ok(b) => Value::ok(bytes_to_vec(&b)),
                 Err(e) => Value::err(Value::str(e.to_string())),
@@ -197,48 +194,6 @@ pub(super) fn base64_method(s: &StructData, method: &str, args: &[Value]) -> Res
         }
         _ => bail!("unknown method `{method}` on a base64 engine"),
     })
-}
-
-/// Build a `DateTime` value, storing the unix timestamp so the accessors can
-/// reconstruct a real chrono value. `offset` is the seconds east of UTC the
-/// value carries, zero for `Utc::now()` and whatever the text held for a
-/// parsed one.
-pub(super) fn datetime_value(secs: i64, nanos: u32, local: bool, offset: i32) -> Value {
-    Value::struct_of(
-        "DateTime",
-        [
-            ("secs".into(), Value::Int(secs)),
-            ("nanos".into(), Value::Int(i64::from(nanos))),
-            ("local".into(), Value::Bool(local)),
-            ("offset".into(), Value::Int(i64::from(offset))),
-        ],
-    )
-}
-
-/// Build a `DateTime` value for `Utc::now()` / `Local::now()`.
-pub(super) fn now_datetime(local: bool) -> Value {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    datetime_value(
-        i64::try_from(now.as_secs()).unwrap_or(i64::MAX),
-        now.subsec_nanos(),
-        local,
-        0,
-    )
-}
-
-pub(super) fn datetime_method(s: &StructData, name: &str, args: &[Value]) -> Result<Value> {
-    let secs = field_int(s, "secs");
-    let nanos = u32::try_from(field_int(s, "nanos")).unwrap_or_default();
-    let local = matches!(s.get("local"), Some(Value::Bool(true)));
-    let offset = i32::try_from(field_int(s, "offset")).unwrap_or_default();
-    let args = super::methods::VArgs(args);
-    match super::shared::datetime_core(name, secs, nanos, local, offset, &args) {
-        Some(super::shared::DateOut::Int(i)) => Ok(Value::Int(i)),
-        Some(super::shared::DateOut::Text(t)) => Ok(Value::str(t)),
-        None => bail!("unknown method `{name}` on DateTime"),
-    }
 }
 
 pub(super) fn rng_method(name: &str, args: &[Value]) -> Result<Value> {
@@ -271,7 +226,7 @@ pub(super) fn rng_method(name: &str, args: &[Value]) -> Result<Value> {
         "random" | "r#gen" | "gen" => Value::Float(rng.random::<f64>()),
         "fill_bytes" | "fill" => {
             if let Some(Value::Vec(v)) = args.first() {
-                let mut buf = v.borrow_mut();
+                let mut buf = v.lock();
                 for slot in buf.iter_mut() {
                     *slot = Value::Int(i64::from(rng.random::<u8>()));
                 }
@@ -288,22 +243,22 @@ pub(super) fn rng_method(name: &str, args: &[Value]) -> Result<Value> {
 /// vec. `finalize` clones the hasher rather than consuming it, so the byte vec
 /// pairs with `hex::encode` exactly as the compiled crate does.
 pub(super) fn sha256_method(
-    handle: &Rc<RefCell<Native>>,
+    handle: &Arc<Mutex<Native>>,
     method: &str,
     args: &[Value],
 ) -> Result<Option<Value>> {
     use sha2::Digest;
-    let mut h = handle.borrow_mut();
+    let mut h = handle.lock();
     let Native::Sha256(hasher) = &mut *h else {
         return Ok(None);
     };
     Ok(Some(match method {
         "update" => {
-            hasher.update(bytes_arg(args.first()));
+            hasher.update(value_to_bytes(args.first()));
             Value::Unit
         }
         "chain_update" => {
-            hasher.update(bytes_arg(args.first()));
+            hasher.update(value_to_bytes(args.first()));
             Value::Native(handle.clone())
         }
         "finalize" => bytes_to_vec(&hasher.clone().finalize()),

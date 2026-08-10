@@ -18,251 +18,118 @@ use std::path::Path;
 
 use syn::visit::Visit;
 
-/// Which engine a table belongs to. A `#[tokio::main]` script runs on the
-/// parallel engine, whose surface is thinner, so the two are kept apart.
-#[derive(Clone, Copy, PartialEq)]
-pub enum Engine {
-    Fast,
-    Parallel,
-    /// Present in both, for example the shared char table.
-    Both,
-}
-
-impl Engine {
-    fn as_str(self) -> &'static str {
-        match self {
-            Engine::Fast => "Engine::Fast",
-            Engine::Parallel => "Engine::Parallel",
-            Engine::Both => "Engine::Both",
-        }
-    }
-}
-
 /// A function whose dispatch arms are harvested, and the receiver those methods
 /// belong to. `recv` is the type name the checker infers for a value, or "*"
 /// when the arms apply to any receiver.
 pub struct Bridge {
     pub file: &'static str,
     pub func: &'static str,
-    pub engine: Engine,
     pub recv: &'static str,
 }
 
 pub const BRIDGES: &[Bridge] = &[
-    // -- shared cores, one source materialized by both engines ------------
-    b("shared.rs", "str_core", Engine::Both, "Str"),
-    b("shared.rs", "color_core", Engine::Both, "Str"),
-    b("shared.rs", "num_core", Engine::Both, "*"),
-    b("shared.rs", "char_method", Engine::Both, "Char"),
-    b("shared.rs", "regex_core", Engine::Both, "Regex"),
-    b("shared.rs", "match_core", Engine::Both, "Match"),
-    b("shared.rs", "captures_core", Engine::Both, "Captures"),
-    b("shared.rs", "duration_core", Engine::Both, "Duration"),
-    b("shared.rs", "datetime_core", Engine::Both, "DateTime"),
-    b("shared.rs", "status_core", Engine::Both, "Status"),
-    b(
-        "shared.rs",
-        "header_value_core",
-        Engine::Both,
-        "HeaderValue",
-    ),
-    b("shared.rs", "exit_status_core", Engine::Both, "ExitStatus"),
-    b("shared.rs", "json_type_test", Engine::Both, "*"),
-    b("methods.rs", "json_value_method", Engine::Fast, "*"),
-    b("pbridge.rs", "json_value_method", Engine::Parallel, "*"),
-    b("int_methods.rs", "int_method", Engine::Both, "*"),
-    // -- fast engine ------------------------------------------------------
-    b("methods.rs", "str_method_slow", Engine::Fast, "Str"),
-    b("methods.rs", "vec_method", Engine::Fast, "Vec"),
-    b("methods.rs", "vec_method_by_name", Engine::Fast, "Vec"),
-    b("methods.rs", "vec_copy_from_slice", Engine::Fast, "Vec"),
-    b("methods.rs", "vec_min_max", Engine::Fast, "Vec"),
-    b("methods.rs", "map_method", Engine::Fast, "Map"),
-    b("methods.rs", "opt_method", Engine::Fast, "Option"),
-    b("methods.rs", "res_method", Engine::Fast, "Result"),
-    b("methods.rs", "entry_method", Engine::Fast, "Entry"),
-    b("builtins.rs", "builtin_method", Engine::Fast, "*"),
-    b("methods.rs", "generic_method", Engine::Fast, "*"),
-    b("methods.rs", "num_method", Engine::Fast, "*"),
-    b("std_bridge.rs", "path_method", Engine::Fast, "Path"),
-    b("std_bridge.rs", "metadata_method", Engine::Fast, "Metadata"),
-    b(
-        "std_bridge.rs",
-        "os_string_method",
-        Engine::Fast,
-        "OsString",
-    ),
-    b(
-        "std_bridge.rs",
-        "dir_entry_method",
-        Engine::Fast,
-        "DirEntry",
-    ),
-    b(
-        "std_bridge.rs",
-        "file_type_method",
-        Engine::Fast,
-        "FileType",
-    ),
-    b("native.rs", "reader_native_method", Engine::Fast, "Native"),
-    b("native.rs", "writer_native_method", Engine::Fast, "Native"),
-    b("native.rs", "file_native_method", Engine::Fast, "Native"),
-    b("native.rs", "child_native_method", Engine::Fast, "Native"),
-    b("native.rs", "net_native_method", Engine::Fast, "Native"),
-    b("native.rs", "udp_native_method", Engine::Fast, "Native"),
-    b("native.rs", "time_native_method", Engine::Fast, "Native"),
-    b("native.rs", "temp_native_method", Engine::Fast, "Native"),
-    b("native.rs", "http_native_method", Engine::Fast, "Native"),
-    b("pdf_bridge.rs", "document_method", Engine::Fast, "Document"),
-    b(
-        "xmltree_bridge.rs",
-        "element_method",
-        Engine::Fast,
-        "Element",
-    ),
-    b("ratatui_render.rs", "style_method", Engine::Both, "Style"),
-    b(
-        "ratatui_render.rs",
-        "modifier_method",
-        Engine::Both,
-        "Modifier",
-    ),
-    b("ratatui_render.rs", "span_method", Engine::Both, "Span"),
-    b("ratatui_render.rs", "line_method", Engine::Both, "Line"),
-    b("ratatui_render.rs", "cell_method", Engine::Both, "Cell"),
-    b("ratatui_render.rs", "row_method", Engine::Both, "Row"),
-    b("ratatui_render.rs", "table_method", Engine::Both, "Table"),
-    b("ratatui_render.rs", "block_method", Engine::Both, "Block"),
-    b(
-        "ratatui_render.rs",
-        "sparkline_method",
-        Engine::Both,
-        "Sparkline",
-    ),
-    b("ratatui_render.rs", "buffer_method", Engine::Both, "Buffer"),
-    b(
-        "ratatui_render.rs",
-        "buffer_cell_method",
-        Engine::Both,
-        "BufferCell",
-    ),
-    b("process.rs", "command_method", Engine::Fast, "Command"),
+    // -- engine neutral method cores ---------------------------------------
+    b("shared.rs", "str_core", "Str"),
+    b("shared.rs", "color_core", "Str"),
+    b("shared.rs", "num_core", "*"),
+    b("shared.rs", "char_method", "Char"),
+    b("shared.rs", "regex_core", "Regex"),
+    b("shared.rs", "match_core", "Match"),
+    b("shared.rs", "captures_core", "Captures"),
+    b("shared.rs", "duration_core", "Duration"),
+    b("shared.rs", "datetime_core", "DateTime"),
+    b("shared.rs", "status_core", "Status"),
+    b("shared.rs", "header_value_core", "HeaderValue"),
+    b("shared.rs", "exit_status_core", "ExitStatus"),
+    b("shared.rs", "json_type_test", "*"),
+    b("int_methods.rs", "int_method", "*"),
+    // -- value methods ------------------------------------------------------
+    b("methods.rs", "json_value_method", "*"),
+    b("methods.rs", "str_method", "Str"),
+    b("methods.rs", "str_method_slow", "Str"),
+    b("methods.rs", "opt_method", "Option"),
+    b("methods.rs", "res_method", "Result"),
+    b("methods.rs", "entry_method", "Entry"),
+    b("methods.rs", "generic_method", "*"),
+    b("vecmap.rs", "vec_method", "Vec"),
+    b("vecmap.rs", "vec_method_by_name", "Vec"),
+    b("vecmap.rs", "vec_copy_from_slice", "Vec"),
+    b("vecmap.rs", "vec_min_max", "Vec"),
+    b("vecmap.rs", "map_method", "Map"),
+    b("higher_order.rs", "higher_order", "*"),
+    b("higher_order.rs", "vec_higher_order", "Vec"),
+    b("higher_order.rs", "vec_transform_ho", "Vec"),
+    b("higher_order.rs", "vec_reduce_ho", "Vec"),
+    b("higher_order.rs", "vec_order_ho", "Vec"),
+    b("higher_order.rs", "option_higher_order", "Option"),
+    b("higher_order.rs", "result_higher_order", "Result"),
+    b("higher_order.rs", "entry_higher_order", "Entry"),
+    b("iterator.rs", "iterator_method", "Iterator"),
+    b("iterator.rs", "iterator_higher_order", "Iterator"),
+    b("iterator.rs", "iterator_predicate", "Iterator"),
+    // -- dispatch front door ------------------------------------------------
+    b("bridge.rs", "eval_method", "*"),
+    b("bridge.rs", "method_by_receiver", "*"),
+    b("bridge.rs", "scalar_method", "*"),
+    b("bridge.rs", "range_builtin", "*"),
+    b("bridge.rs", "native_method", "Native"),
+    b("bridge.rs", "exitstatus_method", "ExitStatus"),
+    b("bridge.rs", "output_method", "Output"),
+    b("bridge.rs", "duration_method", "Duration"),
+    b("bridge.rs", "datetime_method", "DateTime"),
+    // -- std ----------------------------------------------------------------
+    b("std_bridge.rs", "path_method", "Path"),
+    b("std_bridge.rs", "metadata_method", "Metadata"),
+    b("std_bridge.rs", "os_string_method", "OsString"),
+    b("std_bridge.rs", "dir_entry_method", "DirEntry"),
+    b("std_bridge.rs", "file_type_method", "FileType"),
+    b("std_bridge.rs", "std_stream_method", "Native"),
+    b("std_bridge.rs", "openoptions_method", "OpenOptions"),
+    // -- native handles -----------------------------------------------------
+    b("native_methods.rs", "reader_native_method", "Native"),
+    b("native_methods.rs", "writer_native_method", "Native"),
+    b("native_methods.rs", "file_native_method", "Native"),
+    b("native_methods.rs", "child_native_method", "Native"),
+    b("native_methods.rs", "net_native_method", "Native"),
+    b("native_methods.rs", "udp_native_method", "Native"),
+    b("native_methods.rs", "time_native_method", "Native"),
+    b("native_methods.rs", "temp_native_method", "Native"),
+    // -- processes, regex, http ---------------------------------------------
+    b("process.rs", "command_method", "Command"),
+    b("process.rs", "child_method", "Child"),
     // The lazy find_iter and captures_iter arms; the rest comes from the
     // shared regex cores.
-    b("regex_bridge.rs", "regex_method", Engine::Fast, "Regex"),
-    b("iterator.rs", "iterator_method", Engine::Fast, "Iterator"),
-    b(
-        "iterator.rs",
-        "iterator_higher_order",
-        Engine::Fast,
-        "Iterator",
-    ),
-    b(
-        "iterator.rs",
-        "iterator_predicate",
-        Engine::Fast,
-        "Iterator",
-    ),
-    b("http.rs", "request_method", Engine::Fast, "Request"),
-    b("http.rs", "builder_method", Engine::Fast, "Builder"),
-    b("http.rs", "response_method", Engine::Fast, "Response"),
-    b("crates_bridge.rs", "base64_method", Engine::Fast, "Base64"),
-    b("crates_bridge.rs", "rng_method", Engine::Fast, "Rng"),
-    b("crates_bridge.rs", "sha256_method", Engine::Fast, "Sha256"),
-    b("winreg_bridge.rs", "regkey_method", Engine::Fast, "RegKey"),
-    b(
-        "service_bridge.rs",
-        "service_method",
-        Engine::Fast,
-        "Service",
-    ),
-    b(
-        "service_bridge.rs",
-        "manager_method",
-        Engine::Fast,
-        "ServiceManager",
-    ),
-    b("wmi_bridge.rs", "wmi_method", Engine::Fast, "WmiConnection"),
-    b("std_bridge.rs", "std_stream_method", Engine::Fast, "Native"),
-    b(
-        "std_bridge.rs",
-        "openoptions_method",
-        Engine::Fast,
-        "OpenOptions",
-    ),
-    b("http.rs", "header_map_method", Engine::Fast, "HeaderMap"),
-    b("higher_order.rs", "vec_transform_ho", Engine::Fast, "Vec"),
-    b("higher_order.rs", "vec_reduce_ho", Engine::Fast, "Vec"),
-    b("higher_order.rs", "vec_order_ho", Engine::Fast, "Vec"),
-    b(
-        "higher_order.rs",
-        "option_higher_order",
-        Engine::Fast,
-        "Option",
-    ),
-    b(
-        "higher_order.rs",
-        "result_higher_order",
-        Engine::Fast,
-        "Result",
-    ),
-    b(
-        "higher_order.rs",
-        "entry_higher_order",
-        Engine::Fast,
-        "Entry",
-    ),
-    // -- parallel engine --------------------------------------------------
-    b("pbridge.rs", "str_method", Engine::Parallel, "Str"),
-    b("pbridge.rs", "vec_method", Engine::Parallel, "Vec"),
-    b("pbridge.rs", "vec_view_method", Engine::Parallel, "Vec"),
-    b("pbridge.rs", "vec_reduce_method", Engine::Parallel, "Vec"),
-    b("pbridge.rs", "vec_copy_from_slice", Engine::Parallel, "Vec"),
-    b("pbridge.rs", "higher_order", Engine::Parallel, "Vec"),
-    b("pbridge.rs", "map_method", Engine::Parallel, "Map"),
-    b("pbridge.rs", "enum_method", Engine::Parallel, "Enum"),
-    b("pbridge.rs", "scalar_method", Engine::Parallel, "*"),
-    b("pprocess.rs", "command_method", Engine::Parallel, "Command"),
-    b("pprocess.rs", "child_method", Engine::Parallel, "Child"),
-    b("pprocess.rs", "native_method", Engine::Parallel, "Native"),
-    // The eager find_iter and captures_iter arms; the rest comes from the
-    // shared regex cores.
-    b("pregex.rs", "regex_method", Engine::Parallel, "Regex"),
-    b("phttp.rs", "request_method", Engine::Parallel, "Request"),
-    b("phttp.rs", "client_method", Engine::Parallel, "Client"),
-    b("phttp.rs", "builder_method", Engine::Parallel, "Builder"),
-    b("phttp.rs", "response_method", Engine::Parallel, "Response"),
-    b(
-        "phttp.rs",
-        "header_map_method",
-        Engine::Parallel,
-        "HeaderMap",
-    ),
-    b("pbridge.rs", "output_method", Engine::Parallel, "Output"),
-    b("pbridge.rs", "eval_method", Engine::Parallel, "*"),
-    // The parallel engine's own native handle and closure-taking dispatch.
-    // These were never harvested, so `rust check` could not tell that the
-    // engine implements `elapsed`, `and_then` or `is_some_and`, and only the
-    // engine-agnostic builtin id list kept it from rejecting working scripts.
-    b("pbridge.rs", "native_method", Engine::Parallel, "Native"),
-    b(
-        "pbridge.rs",
-        "option_higher_order",
-        Engine::Parallel,
-        "Option",
-    ),
-    // The std handle arms, `is_terminal` and `flush` on stdout. Without this
-    // the engine implemented them but `rust check` did not know.
-    b("pstd.rs", "std_stream_method", Engine::Parallel, "Native"),
+    b("regex_bridge.rs", "regex_method", "Regex"),
+    b("http.rs", "request_method", "Request"),
+    b("http.rs", "client_method", "Client"),
+    b("http.rs", "builder_method", "Builder"),
+    b("http.rs", "response_method", "Response"),
+    b("http.rs", "header_map_method", "HeaderMap"),
+    // -- crates -------------------------------------------------------------
+    b("crates_bridge.rs", "base64_method", "Base64"),
+    b("crates_bridge.rs", "rng_method", "Rng"),
+    b("crates_bridge.rs", "sha256_method", "Sha256"),
+    b("pdf_bridge.rs", "document_method", "Document"),
+    b("xmltree_bridge.rs", "element_method", "Element"),
+    b("ratatui_render.rs", "style_method", "Style"),
+    b("ratatui_render.rs", "modifier_method", "Modifier"),
+    b("ratatui_render.rs", "span_method", "Span"),
+    b("ratatui_render.rs", "line_method", "Line"),
+    b("ratatui_render.rs", "cell_method", "Cell"),
+    b("ratatui_render.rs", "row_method", "Row"),
+    b("ratatui_render.rs", "table_method", "Table"),
+    b("ratatui_render.rs", "block_method", "Block"),
+    b("ratatui_render.rs", "sparkline_method", "Sparkline"),
+    b("ratatui_render.rs", "buffer_method", "Buffer"),
+    b("ratatui_render.rs", "buffer_cell_method", "BufferCell"),
+    b("winreg_bridge.rs", "regkey_method", "RegKey"),
+    b("service_bridge.rs", "service_method", "Service"),
+    b("service_bridge.rs", "manager_method", "ServiceManager"),
+    b("wmi_bridge.rs", "wmi_method", "WmiConnection"),
 ];
 
-const fn b(file: &'static str, func: &'static str, engine: Engine, recv: &'static str) -> Bridge {
-    Bridge {
-        file,
-        func,
-        engine,
-        recv,
-    }
+const fn b(file: &'static str, func: &'static str, recv: &'static str) -> Bridge {
+    Bridge { file, func, recv }
 }
 
 /// Collects every string literal inside one bridge function.
@@ -390,8 +257,7 @@ pub fn generate(interpreter_dir: &Path) -> String {
         });
         let list: Vec<String> = names.iter().map(|n| format!("{n:?}")).collect();
         rows.push(format!(
-            "    BridgeTable {{ engine: {}, recv: {:?}, names: &[{}] }},",
-            bridge.engine.as_str(),
+            "    BridgeTable {{ recv: {:?}, names: &[{}] }},",
             bridge.recv,
             list.join(", ")
         ));

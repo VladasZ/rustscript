@@ -38,9 +38,9 @@ pub(super) fn wmi_method(s: &StructData, name: &str, args: &[Value]) -> Result<V
 
 #[cfg(windows)]
 mod imp {
-    use std::cell::RefCell;
+
     use std::collections::HashMap;
-    use std::rc::Rc;
+    use std::sync::Arc;
 
     use anyhow::{Result, bail};
     use wmi::{Variant, WMIConnection};
@@ -87,7 +87,7 @@ mod imp {
         let mut names: Vec<&String> = row.keys().collect();
         // HashMap order is arbitrary, so sort for a stable script side result.
         names.sort();
-        let mut map = Map::default();
+        let mut map = IndexMap::default();
         for name in names {
             let Some(v) = row.get(name) else { continue };
             map.insert(MapKey::Str(RStr::new(name.clone())), from_variant(v));

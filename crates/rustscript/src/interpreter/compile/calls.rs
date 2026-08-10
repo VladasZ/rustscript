@@ -1,19 +1,19 @@
 //! Calls, closures, assignment, struct literals, and patterns. Split from the compiler.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::{Result, bail};
 use syn::{Expr, Lit, Pat, UnOp};
 
+use crate::interpreter::bytecode::StructShape;
 use crate::interpreter::bytecode::{
     BinKind, CapSource, DISCARD, Member, Op, PLit, PPat, PatInfo, Reg, ScalarTy, StructLit,
 };
-use crate::interpreter::json_bridge::serde_rename;
-use crate::interpreter::value::StructShape;
+use crate::interpreter::serde_attrs::serde_rename;
 
 use super::{
-    Arc, Compiler, FnState, HashMap, NameLoc, Res, TypeIr, collect_pattern_names,
-    first_generic_type, idx16, int_literal,
+    Compiler, FnState, HashMap, NameLoc, Res, TypeIr, collect_pattern_names, first_generic_type,
+    idx16, int_literal,
 };
 
 impl Compiler<'_> {
@@ -426,7 +426,7 @@ impl Compiler<'_> {
         chunk.module = idx16(self.ctx.module);
         let parent = self.cur();
         let child_idx = idx16(parent.children.len());
-        parent.children.push(Rc::new(chunk));
+        parent.children.push(Arc::new(chunk));
         parent.child_caps.push(caps);
         self.emit(Op::Spawn {
             dst,
@@ -453,7 +453,7 @@ impl Compiler<'_> {
         let caps: Vec<CapSource> = child.upvalues.iter().map(|(_, s)| *s).collect();
         let mut chunk = child.into_chunk(self.ctx.file.clone());
         chunk.module = idx16(self.ctx.module);
-        let chunk = Rc::new(chunk);
+        let chunk = Arc::new(chunk);
         let parent = self.cur();
         let child_idx = idx16(parent.children.len());
         parent.children.push(chunk);
@@ -642,7 +642,7 @@ impl Compiler<'_> {
         let self_type = (s.path.segments.len() == 1 && s.path.segments[0].ident == "Self")
             .then_some(self.ctx.impl_type)
             .flatten();
-        let resolved = self_type.map(Rc::<str>::from).or_else(|| {
+        let resolved = self_type.map(Arc::<str>::from).or_else(|| {
             self.ctx
                 .resolver
                 .resolve_struct_key(self.ctx.module, &s.path)
@@ -671,7 +671,7 @@ impl Compiler<'_> {
         // Field order follows the declaration when the struct is known.
         // Written fields in declaration order, then any extras. A trailing
         // `..rest` fills whatever was not written.
-        let (order, renames): (Vec<String>, Vec<Option<Rc<str>>>) = match def {
+        let (order, renames): (Vec<String>, Vec<Option<Arc<str>>>) = match def {
             Some(def) => {
                 let mut ordered: Vec<String> = def
                     .fields
@@ -693,7 +693,7 @@ impl Compiler<'_> {
                             .iter()
                             .find(|f| f.ident.as_ref().is_some_and(|i| i == k))
                             .and_then(serde_rename)
-                            .map(Rc::<str>::from)
+                            .map(Arc::<str>::from)
                     })
                     .collect();
                 (ordered, renames)
