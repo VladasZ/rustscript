@@ -144,9 +144,7 @@ fn container_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value>
             None => Value::vec(vec![]),
         },
         ("HashMap" | "BTreeMap", "new") | ("HashMap", "with_capacity") => Value::map(),
-        ("HashSet" | "BTreeSet", "new") | ("HashSet", "with_capacity") => {
-            Value::set_of(indexmap::IndexMap::default())
-        }
+        ("HashSet" | "BTreeSet", "new") | ("HashSet", "with_capacity") => Value::set(),
         ("Box" | "Rc" | "Arc" | "RefCell" | "Cell", "new") => {
             args.first().cloned().unwrap_or(Value::Unit)
         }

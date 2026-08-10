@@ -17,7 +17,7 @@ use super::bytecode::{
 use super::numeric::IntWidth;
 use super::resolver::{Res, Resolver};
 use super::typeir::{CastIr, TypeIr, lower_cast, lower_type};
-use expr::{returned_collects, returned_from_strs, returned_json_type, returns_string};
+use expr::{collect_return_target, returned_collects, returned_from_strs, returned_json_type};
 
 /// Program level facts the compiler needs, filled before any body is compiled.
 pub struct Ctx<'r> {
@@ -129,6 +129,7 @@ impl FnState {
             child_caps: self.child_caps,
             generics: self.generics,
             call_type_args: self.call_type_args,
+            path_forwarder: false,
         }
     }
 }
@@ -143,6 +144,39 @@ struct LoopCtx {
     result: Reg,
 }
 
+/// The collect targets the compiler can name at the call site. `collect` is
+/// type driven in real Rust and the interpreter has no types, so where the
+/// source states the target, the call is renamed to a target-specific method
+/// the runtime answers directly.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum CollectTarget {
+    Str,
+    Map,
+    Set,
+}
+
+impl CollectTarget {
+    /// The runtime method name a targeted `collect` is renamed to.
+    pub(super) fn method_name(self) -> &'static str {
+        match self {
+            Self::Str => "collect_string",
+            Self::Map => "collect_map",
+            Self::Set => "collect_set",
+        }
+    }
+
+    /// The target a type names, when it is one collect must build specially.
+    pub(super) fn of_type(ty: &syn::Type) -> Option<Self> {
+        let syn::Type::Path(p) = ty else { return None };
+        match p.path.segments.last()?.ident.to_string().as_str() {
+            "String" => Some(Self::Str),
+            "HashMap" | "BTreeMap" => Some(Self::Map),
+            "HashSet" | "BTreeSet" => Some(Self::Set),
+            _ => None,
+        }
+    }
+}
+
 pub struct Compiler<'a> {
     ctx: &'a Ctx<'a>,
     frames: Vec<FnState>,
@@ -155,19 +189,20 @@ pub struct Compiler<'a> {
     /// inside its arguments cannot steal it. Lets the typed json path run
     /// without a turbofish.
     pub(super) json_let: Option<(*const syn::ExprCall, TypeIr)>,
-    /// A `let s: String = ...collect()` annotation waiting to attach to that
-    /// exact `collect` call, keyed by the call's address like `json_let`.
-    /// Lets an annotated let collect into a String without a turbofish.
-    pub(super) string_let: Option<*const syn::ExprMethodCall>,
+    /// A `let s: String = ...collect()` (or HashMap/HashSet) annotation
+    /// waiting to attach to that exact `collect` call, keyed by the call's
+    /// address like `json_let`. Lets an annotated let collect into a String,
+    /// a map, or a set without a turbofish.
+    pub(super) collect_let: Option<(*const syn::ExprMethodCall, CollectTarget)>,
     /// Every `collect` in the current function whose value the function hands
-    /// back, when that function is declared `-> String`. A set rather than one
-    /// slot because an `if` or a `match` in tail position returns from several
-    /// call sites. Keyed by address like the hints above, so only those exact
-    /// calls collect into a String.
-    pub(super) string_tails: HashSet<*const syn::ExprMethodCall>,
+    /// back, when that function is declared `-> String`, a map, or a set. A
+    /// map rather than one slot because an `if` or a `match` in tail position
+    /// returns from several call sites. Keyed by address like the hints
+    /// above, so only those exact calls collect into the named target.
+    pub(super) collect_tails: HashMap<*const syn::ExprMethodCall, CollectTarget>,
     /// Every `from_str` in the current function whose parsed value the function
     /// hands back, mapped to the payload type its signature names. The same
-    /// idea as `string_tails`, for the typed json path rather than `collect`.
+    /// idea as `collect_tails`, for the typed json path rather than `collect`.
     pub(super) json_tails: HashMap<*const syn::ExprCall, TypeIr>,
     /// An `unwrap_or_default` call whose result is unwrapped again, so it
     /// produced an `Option` and its own default is `None`. Keyed by address
@@ -202,8 +237,8 @@ impl<'a> Compiler<'a> {
             loops: Vec::new(),
             cur_line: 0,
             json_let: None,
-            string_let: None,
-            string_tails: HashSet::new(),
+            collect_let: None,
+            collect_tails: HashMap::new(),
             json_tails: HashMap::new(),
             option_result: None,
             default_let: None,
@@ -260,13 +295,17 @@ impl<'a> Compiler<'a> {
                 Some(pat) => self.bind_pattern_irrefutable(pat, reg)?,
             }
         }
-        // A `-> String` signature names the target of every `collect` this body
-        // returns, which is the third place that target is knowable after a
-        // turbofish and an annotated `let`. Saved and restored so a nested item
-        // fn or a method compiled inside this one cannot inherit the hints.
-        let outer_string_tails = std::mem::take(&mut self.string_tails);
-        if returns_string(&sig.output) {
-            self.string_tails = returned_collects(block).into_iter().collect();
+        // A `-> String` (or map or set) signature names the target of every
+        // `collect` this body returns, which is the third place that target is
+        // knowable after a turbofish and an annotated `let`. Saved and
+        // restored so a nested item fn or a method compiled inside this one
+        // cannot inherit the hints.
+        let outer_collect_tails = std::mem::take(&mut self.collect_tails);
+        if let Some(target) = collect_return_target(&sig.output) {
+            self.collect_tails = returned_collects(block)
+                .into_iter()
+                .map(|call| (call, target))
+                .collect();
         }
         // The same for a `from_str` the body hands back, whose target is the
         // payload of the return type rather than a `let` annotation.
@@ -280,7 +319,7 @@ impl<'a> Compiler<'a> {
         }
         let ret = self.alloc();
         let res = self.compile_block(block, ret);
-        self.string_tails = outer_string_tails;
+        self.collect_tails = outer_collect_tails;
         self.json_tails = outer_json_tails;
         res?;
         self.emit(Op::Ret { src: ret });

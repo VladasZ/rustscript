@@ -28,27 +28,42 @@ pub enum MapKind {
     Set,
 }
 
-pub struct ValueRef {
-    values: List,
-    index: usize,
+pub enum ValueRef {
+    VecElement { values: List, index: usize },
+    MapEntry { map: Map, key: MapKey },
 }
 
 impl ValueRef {
     pub fn vec_element(values: List, index: usize) -> Self {
-        Self { values, index }
+        Self::VecElement { values, index }
+    }
+
+    pub fn map_entry(map: Map, key: MapKey) -> Self {
+        Self::MapEntry { map, key }
     }
 
     pub fn get(&self) -> Option<Value> {
-        self.values.lock().get(self.index).cloned()
+        match self {
+            Self::VecElement { values, index } => values.lock().get(*index).cloned(),
+            Self::MapEntry { map, key } => map.lock().get(key).cloned(),
+        }
     }
 
     pub fn set(&self, value: Value) -> bool {
-        let mut values = self.values.lock();
-        let Some(slot) = values.get_mut(self.index) else {
-            return false;
-        };
-        *slot = value;
-        true
+        match self {
+            Self::VecElement { values, index } => {
+                let mut values = values.lock();
+                let Some(slot) = values.get_mut(*index) else {
+                    return false;
+                };
+                *slot = value;
+                true
+            }
+            Self::MapEntry { map, key } => {
+                map.lock().insert(key.clone(), value);
+                true
+            }
+        }
     }
 }
 
@@ -176,6 +191,10 @@ impl Value {
 
     pub fn map_of(map: IndexMap<MapKey, Value>) -> Value {
         Value::Map(Arc::new(Mutex::new(map)), MapKind::Map)
+    }
+
+    pub fn set() -> Value {
+        Value::Map(Arc::new(Mutex::new(IndexMap::default())), MapKind::Set)
     }
 
     pub fn set_of(map: IndexMap<MapKey, Value>) -> Value {

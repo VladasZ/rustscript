@@ -144,6 +144,13 @@ pub enum ScalarTy {
     Opt(Box<ScalarTy>),
     /// `Vec<T>`, whose `Default` is the empty vec.
     List(Box<ScalarTy>),
+    /// `HashMap<K, V>` or `BTreeMap<K, V>`, whose `Default` is the empty map.
+    /// The payload is the value type `V`, which is what `map.get(k)` answers
+    /// an `Option` of.
+    Map(Box<ScalarTy>),
+    /// `HashSet<T>` or `BTreeSet<T>` with its element type, whose `Default`
+    /// is the empty set.
+    Set(Box<ScalarTy>),
     /// A type the source named but this model does not describe, a user
     /// struct for one. Only its presence matters, never its identity.
     Other,
@@ -156,7 +163,12 @@ impl ScalarTy {
         let syn::Type::Path(path) = ty else {
             return None;
         };
-        let segment = path.path.segments.last()?;
+        Self::lower_segment(path.path.segments.last()?)
+    }
+
+    /// Lower one path segment, so a `HashMap::<K, V>::new()` call path can be
+    /// read without rebuilding a `syn::Type` around its container segment.
+    pub fn lower_segment(segment: &syn::PathSegment) -> Option<Self> {
         if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
             // A container knows its own `Default` whatever it holds, and the
             // element type is still carried so one more unwrap can read it.
@@ -164,6 +176,11 @@ impl ScalarTy {
             return match segment.ident.to_string().as_str() {
                 "Option" => Some(Self::Opt(inner())),
                 "Vec" | "VecDeque" => Some(Self::List(inner())),
+                // A map's payload is its value type, the second argument.
+                "HashMap" | "BTreeMap" => Some(Self::Map(Box::new(
+                    Self::nth_arg(args, 1).unwrap_or(Self::Other),
+                ))),
+                "HashSet" | "BTreeSet" => Some(Self::Set(inner())),
                 _ => None,
             };
         }
@@ -179,10 +196,19 @@ impl ScalarTy {
 
     /// The first type argument of a generic path segment.
     fn first_arg(args: &syn::AngleBracketedGenericArguments) -> Option<Self> {
-        args.args.iter().find_map(|arg| match arg {
-            syn::GenericArgument::Type(ty) => Self::lower(ty),
-            _ => None,
-        })
+        Self::nth_arg(args, 0)
+    }
+
+    /// The n-th type argument of a generic path segment, lowered.
+    fn nth_arg(args: &syn::AngleBracketedGenericArguments, n: usize) -> Option<Self> {
+        args.args
+            .iter()
+            .filter_map(|arg| match arg {
+                syn::GenericArgument::Type(ty) => Some(ty),
+                _ => None,
+            })
+            .nth(n)
+            .and_then(Self::lower)
     }
 
     /// What one more unwrap of this type answers with, for a chain like
@@ -306,8 +332,8 @@ impl BuiltinId {
             "contains_key" => ContainsKey,
             "remove" => Remove,
             "entry" => Entry,
-            "keys" => Keys,
-            "values" => Values,
+            "keys" | "into_keys" => Keys,
+            "values" | "into_values" => Values,
             "iter" | "into_iter" => Iter,
             "iter_mut" => IterMut,
             "push" => Push,
@@ -813,6 +839,11 @@ pub struct Chunk {
     pub generics: Vec<Arc<str>>,
     /// Turbofish type args recorded at `CallFn` sites, referenced by `targ`.
     pub call_type_args: Vec<Arc<[TypeIr]>>,
+    /// True for the synthesized body behind a path used as a function value.
+    /// Its arity is a guess, a builtin reference like `u8::saturating_add`
+    /// has no known parameter count, so a call with a different count rebuilds
+    /// the body for the count actually passed instead of failing.
+    pub path_forwarder: bool,
 }
 
 impl Chunk {
@@ -840,6 +871,7 @@ impl Chunk {
             child_caps: Vec::new(),
             generics: Vec::new(),
             call_type_args: Vec::new(),
+            path_forwarder: false,
         }
     }
 }
@@ -888,10 +920,13 @@ impl StructShape {
 /// The chunk behind a path used as a function value. It forwards its
 /// `num_params` arguments to the path call. `num_params` is 0 for a
 /// constructor like `Vec::new` and 1 for a method reference or one-arg
-/// constructor.
+/// constructor. A builtin method reference has no known parameter count, so
+/// `num_params` is only a default, a call with a different count rebuilds the
+/// forwarder for the count actually passed.
 pub fn path_call_chunk(segs: Vec<String>, num_params: usize) -> Arc<Chunk> {
     let dst = u16::try_from(num_params).expect("parameter count fits u16");
     let mut chunk = Chunk::empty("<pathfn>");
+    chunk.path_forwarder = true;
     chunk.num_params = num_params;
     chunk.num_regs = num_params + 1;
     chunk.paths.push((segs, None));

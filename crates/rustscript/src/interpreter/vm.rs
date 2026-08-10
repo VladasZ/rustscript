@@ -10,7 +10,7 @@ use anyhow::{Result, anyhow, bail};
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
 
-use super::bytecode::{Chunk, Member};
+use super::bytecode::{Chunk, Member, path_call_chunk};
 use super::native::Native;
 use super::typeir::TypeIr;
 use super::value::{ClosureData, StructShape, Upvalue, Value};
@@ -173,6 +173,16 @@ impl Vm {
         args: &[Value],
         upvalues: &[Upvalue],
     ) -> Result<Value> {
+        // A path forwarder's arity is only a guess, so rebuild it for the
+        // count actually passed. `u8::saturating_add` handed to `fold` takes
+        // two arguments where the guess was one.
+        let rebuilt;
+        let chunk = if chunk.path_forwarder && args.len() != chunk.num_params {
+            rebuilt = path_call_chunk(chunk.paths[0].0.clone(), args.len());
+            &rebuilt
+        } else {
+            chunk
+        };
         if args.len() != chunk.num_params {
             bail!(
                 "`{}` expects {} args but got {}",

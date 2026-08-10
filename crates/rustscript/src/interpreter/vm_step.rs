@@ -12,7 +12,7 @@ use anyhow::{Result, anyhow, bail};
 use num_traits::AsPrimitive;
 use parking_lot::Mutex;
 
-use super::bytecode::{CapSource, Chunk, MacroKind, Op};
+use super::bytecode::{CapSource, Chunk, MacroKind, Op, path_call_chunk};
 use super::native::Native;
 use super::numeric::{float_to_int, truncate};
 use super::ops::{
@@ -264,6 +264,14 @@ fn request_call(
     argc: u16,
     type_env: TypeEnv,
 ) -> Result<Flow> {
+    // A path forwarder's arity is only a guess, so rebuild it for the count
+    // actually passed. `u8::saturating_add` handed to `fold` takes two
+    // arguments where the guess was one.
+    let chunk = if chunk.path_forwarder && argc as usize != chunk.num_params {
+        path_call_chunk(chunk.paths[0].0.clone(), argc as usize)
+    } else {
+        chunk
+    };
     if argc as usize != chunk.num_params {
         bail!(
             "`{}` expects {} args but got {}",

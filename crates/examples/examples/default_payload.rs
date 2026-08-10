@@ -50,4 +50,14 @@ fn main() {
     // The long standing shape this method is mostly used for still works.
     let unset = std::env::var("RUSTSCRIPT_DEFINITELY_UNSET").ok();
     println!("env var:      {:?}", unset.unwrap_or_default());
+
+    // A `collect` turbofish states the element type, an Option here, so a
+    // missing element defaults to None.
+    let collected = [Some(1.0f32)]
+        .into_iter()
+        .collect::<Vec<Option<f32>>>()
+        .get(2)
+        .copied()
+        .unwrap_or_default();
+    println!("collected:    {collected:?}");
 }

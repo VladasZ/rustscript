@@ -538,9 +538,11 @@ pub(super) fn parse_core(text: &str, target: Option<&ScalarTy>) -> Parsed {
         ScalarTy::Str => Parsed::Str(text.to_string()),
         // No container implements `FromStr`, so these never name a parse
         // target. They exist only to describe a `Default`.
-        ScalarTy::Opt(_) | ScalarTy::List(_) | ScalarTy::Other => {
-            Parsed::Fail(format!("cannot parse `{text}`"))
-        }
+        ScalarTy::Opt(_)
+        | ScalarTy::List(_)
+        | ScalarTy::Map(_)
+        | ScalarTy::Set(_)
+        | ScalarTy::Other => Parsed::Fail(format!("cannot parse `{text}`")),
     }
 }
 
