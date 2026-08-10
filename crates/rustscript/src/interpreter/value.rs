@@ -1,166 +1,23 @@
-use num_traits::AsPrimitive;
-use std::cell::{Cell, RefCell};
-use std::fmt::{self, Write};
-use std::hash::{Hash, Hasher};
-use std::ops::Deref;
-use std::ptr;
-use std::rc::Rc;
+//! The `Send + Sync` value model, used by `#[tokio::main]`
+//! scripts. It mirrors `value.rs` but swaps `Rc` for `Arc` and `RefCell` for a
+//! `parking_lot::Mutex`, so a value can move between worker threads and be
+//! shared by concurrent tasks.
 
-use compact_str::CompactString;
-use indexmap::{Equivalent, IndexMap};
-use rustc_hash::{FxBuildHasher, FxHasher};
+use num_traits::AsPrimitive;
+use std::fmt::Write as _;
+use std::sync::Arc;
+
+use indexmap::IndexMap;
+use parking_lot::Mutex;
 
 use super::bytecode::Const;
 use super::native::Native;
 use super::numeric::IntWidth;
 
-/// Interpreter string. The buffer is immutable while the `Rc` is shared, so
-/// clones and `to_string` are refcount bumps. Mutation goes through
-/// `Value::str_make_mut`, which copies first when another handle exists. That
-/// matches real `String` semantics, where a clone never sees later edits to
-/// the original. The hash of the bytes is cached after the first map use,
-/// the same trick `CPython` uses for str objects.
-pub struct RStr {
-    /// Cached key hash of the bytes. 0 means not computed yet.
-    hash: Cell<u64>,
-    /// Inline storage up to 24 bytes, so short strings cost one allocation
-    /// for the `Rc` and none for the bytes.
-    s: CompactString,
-}
-
-impl RStr {
-    pub fn new(s: impl Into<CompactString>) -> Rc<RStr> {
-        Rc::new(RStr {
-            hash: Cell::new(0),
-            s: s.into(),
-        })
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.s
-    }
-
-    /// The cached key hash, computed on first use.
-    pub fn key_hash(&self) -> u64 {
-        let h = self.hash.get();
-        if h != 0 {
-            return h;
-        }
-        let h = str_hash(&self.s);
-        self.hash.set(h);
-        h
-    }
-}
-
-/// Hash used for string map keys. Reserves 0 as the "not cached" sentinel.
-fn str_hash(s: &str) -> u64 {
-    let mut h = FxHasher::default();
-    s.hash(&mut h);
-    let v = h.finish();
-    if v == 0 { 1 } else { v }
-}
-
-impl Deref for RStr {
-    type Target = str;
-
-    fn deref(&self) -> &str {
-        &self.s
-    }
-}
-
-impl PartialEq for RStr {
-    fn eq(&self, other: &RStr) -> bool {
-        self.s == other.s
-    }
-}
-
-impl Eq for RStr {}
-
-impl fmt::Display for RStr {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.s)
-    }
-}
-
-impl fmt::Debug for RStr {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self.s)
-    }
-}
-
-/// Field layout of a struct, shared by every instance built from the same
-/// site. Instances then carry a plain `Vec<Value>` in this order, so a field
-/// read is a short name scan plus an index, not a hash probe, and building an
-/// instance allocates no map.
-pub struct StructShape {
-    pub name: Rc<str>,
-    pub fields: Vec<Rc<str>>,
-    /// One entry per field, its `#[serde(rename = "..")]` name if any. Empty
-    /// when the struct has no renamed fields. Read when serializing to json so
-    /// the output key matches serde, the same names deserialize already honors.
-    pub renames: Vec<Option<Rc<str>>>,
-}
-
-impl StructShape {
-    pub fn new(name: impl Into<Rc<str>>, fields: Vec<Rc<str>>) -> Rc<StructShape> {
-        Rc::new(StructShape {
-            name: name.into(),
-            fields,
-            renames: Vec::new(),
-        })
-    }
-
-    pub fn with_renames(
-        name: impl Into<Rc<str>>,
-        fields: Vec<Rc<str>>,
-        renames: Vec<Option<Rc<str>>>,
-    ) -> Rc<StructShape> {
-        Rc::new(StructShape {
-            name: name.into(),
-            fields,
-            renames,
-        })
-    }
-
-    /// Slot index of a field. Structs have a handful of fields, so a linear
-    /// scan beats hashing.
-    pub fn slot(&self, field: &str) -> Option<usize> {
-        self.fields.iter().position(|f| &**f == field)
-    }
-}
-
-/// A struct instance: its shape plus one value per field, in shape order.
-pub struct StructData {
-    pub shape: Rc<StructShape>,
-    pub values: RefCell<Vec<Value>>,
-}
-
-impl StructData {
-    pub fn name(&self) -> &Rc<str> {
-        &self.shape.name
-    }
-
-    pub fn get(&self, field: &str) -> Option<Value> {
-        self.shape
-            .slot(field)
-            .map(|i| self.values.borrow()[i].clone())
-    }
-
-    /// Write a field that exists in the shape. False when it does not.
-    pub fn set(&self, field: &str, v: Value) -> bool {
-        match self.shape.slot(field) {
-            Some(i) => {
-                self.values.borrow_mut()[i] = v;
-                true
-            }
-            None => false,
-        }
-    }
-}
-
-/// Script `HashMap` storage. Hashed lookups, insertion ordered iteration.
-/// Lookups by a borrowed key go through `KeyRef` so they never clone the key.
-pub type Map = IndexMap<MapKey, Value, FxBuildHasher>;
+/// Shared, growable list. `Arc` for cross thread sharing, `Mutex` for the
+/// interior mutation the interpreter needs since it ignores ownership.
+pub type List = Arc<Mutex<Vec<Value>>>;
+pub type Map = Arc<Mutex<IndexMap<MapKey, Value>>>;
 
 /// A set shares the map storage, each element stored as key -> Unit. The kind
 /// is what makes iteration yield elements instead of pairs and routes the set
@@ -172,21 +29,21 @@ pub enum MapKind {
 }
 
 pub struct ValueRef {
-    values: Rc<RefCell<Vec<Value>>>,
+    values: List,
     index: usize,
 }
 
 impl ValueRef {
-    pub fn vec_element(values: Rc<RefCell<Vec<Value>>>, index: usize) -> Self {
+    pub fn vec_element(values: List, index: usize) -> Self {
         Self { values, index }
     }
 
     pub fn get(&self) -> Option<Value> {
-        self.values.borrow().get(self.index).cloned()
+        self.values.lock().get(self.index).cloned()
     }
 
     pub fn set(&self, value: Value) -> bool {
-        let mut values = self.values.borrow_mut();
+        let mut values = self.values.lock();
         let Some(slot) = values.get_mut(self.index) else {
             return false;
         };
@@ -195,58 +52,51 @@ impl ValueRef {
     }
 }
 
-/// A runtime value. Containers use `Rc<RefCell<..>>` so that `&mut` aliasing and
-/// shared mutation behave, since the interpreter ignores ownership entirely.
-#[derive(Clone)]
-pub enum Value {
-    Unit,
-    Bool(bool),
-    Int(i64),
-    Float(f64),
-    Char(char),
-    Str(Rc<RStr>),
-    Vec(Rc<RefCell<Vec<Value>>>),
-    Map(Rc<RefCell<Map>>, MapKind),
-    Tuple(Rc<RefCell<Vec<Value>>>),
-    /// Struct instance. Named fields, or positional for tuple structs.
-    Struct(Rc<StructData>),
-    /// Enum value, including the builtin Option and Result. The payload is
-    /// immutable once built, so it is a plain shared slice, not a `RefCell`.
-    Enum {
-        enum_name: Rc<str>,
-        variant: Rc<str>,
-        data: Rc<[Value]>,
-    },
-    Range {
-        start: i64,
-        end: i64,
-        inclusive: bool,
-    },
-    Closure(Rc<ClosureData>),
-    Ref(Rc<ValueRef>),
-    /// A live host resource: an open file, a child process, a socket, a
-    /// buffered reader. Shared by `Rc` so the same handle can be passed around.
-    Native(Rc<RefCell<Native>>),
-    /// An integer that carries a real width other than i64. The i64 holds the
-    /// storage form described in `numeric`, so u64 and usize keep their full
-    /// range. Values of width i64 always use the plain `Int` variant.
-    IntW(i64, IntWidth),
-    /// A real f32. Kept at f32 precision so arithmetic rounds per operation
-    /// and printing uses f32's shortest round-trip form.
-    F32(f32),
+/// Field layout of a struct, shared by every instance from the same site.
+/// The compiler emits these shapes directly, so runtime and bytecode share
+/// one definition.
+pub use super::bytecode::StructShape;
+
+/// A struct instance: its shape plus one value per field, in shape order.
+pub struct StructData {
+    pub shape: Arc<StructShape>,
+    pub values: Mutex<Vec<Value>>,
 }
 
+impl StructData {
+    pub fn name(&self) -> &Arc<str> {
+        &self.shape.name
+    }
+
+    pub fn get(&self, field: &str) -> Option<Value> {
+        self.shape
+            .slot(field)
+            .map(|i| self.values.lock()[i].clone())
+    }
+
+    pub fn set(&self, field: &str, v: Value) -> bool {
+        match self.shape.slot(field) {
+            Some(i) => {
+                self.values.lock()[i] = v;
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// A compiled closure body plus its captured upvalues.
 #[derive(Clone)]
 pub enum Upvalue {
     Value(Value),
-    Mutable(Rc<RefCell<Value>>),
+    Mutable(Arc<Mutex<Value>>),
 }
 
 impl Upvalue {
     pub fn get(&self) -> Value {
         match self {
             Self::Value(value) => value.clone(),
-            Self::Mutable(value) => value.borrow().clone(),
+            Self::Mutable(value) => value.lock().clone(),
         }
     }
 
@@ -254,122 +104,142 @@ impl Upvalue {
         let Self::Mutable(cell) = self else {
             return false;
         };
-        *cell.borrow_mut() = value;
+        *cell.lock() = value;
         true
     }
 }
 
-/// A closure is a compiled body plus its captured upvalues. Immutable captures
-/// hold values directly; mutable captures share a cell with the defining frame.
 pub struct ClosureData {
-    pub chunk: Rc<super::bytecode::Chunk>,
+    pub chunk: Arc<super::bytecode::Chunk>,
     pub captured: Vec<Upvalue>,
 }
 
-/// Hashable key for maps. Only a subset of values can be keys. String keys
-/// share the value's buffer, so building a key from a string never copies.
-#[derive(Clone)]
+/// A runtime value that is `Send + Sync`.
+#[derive(Clone, Default)]
+pub enum Value {
+    #[default]
+    Unit,
+    Bool(bool),
+    Int(i64),
+    /// An integer with a real width other than i64, in the storage form
+    /// described in `numeric`.
+    IntW(i64, IntWidth),
+    Float(f64),
+    /// A real f32, kept at f32 precision, mirroring `Value::F32`.
+    F32(f32),
+    Char(char),
+    Str(Arc<str>),
+    Vec(List),
+    Map(Map, MapKind),
+    Tuple(List),
+    Struct(Arc<StructData>),
+    Enum {
+        enum_name: Arc<str>,
+        variant: Arc<str>,
+        data: Arc<[Value]>,
+    },
+    Range {
+        start: i64,
+        end: i64,
+        inclusive: bool,
+    },
+    Closure(Arc<ClosureData>),
+    Ref(Arc<ValueRef>),
+    Native(Arc<Mutex<Native>>),
+}
+
+/// Hashable map key, the subset of values that may be keys.
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub enum MapKey {
     Bool(bool),
     Int(i64),
     Char(char),
-    Str(Rc<RStr>),
-}
-
-impl PartialEq for MapKey {
-    fn eq(&self, other: &MapKey) -> bool {
-        match (self, other) {
-            (MapKey::Bool(a), MapKey::Bool(b)) => a == b,
-            (MapKey::Int(a), MapKey::Int(b)) => a == b,
-            (MapKey::Char(a), MapKey::Char(b)) => a == b,
-            (MapKey::Str(a), MapKey::Str(b)) => Rc::ptr_eq(a, b) || a == b,
-            _ => false,
-        }
-    }
-}
-
-impl Eq for MapKey {}
-
-/// Hashes must not include the variant tag so a borrowed `KeyRef` lookup and a
-/// stored `MapKey` land in the same bucket. Cross-variant collisions are fine,
-/// equality still separates them. String keys feed the cached `key_hash` into
-/// the state, and every other string-key hasher below must do the same, or
-/// lookups miss.
-impl Hash for MapKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        match self {
-            MapKey::Bool(b) => b.hash(state),
-            MapKey::Int(i) => i.hash(state),
-            MapKey::Char(c) => c.hash(state),
-            MapKey::Str(s) => state.write_u64(s.key_hash()),
-        }
-    }
-}
-
-/// Borrowed view of a value used as a map key, so `get` and `contains_key` do
-/// not clone the key string. `Interned` reuses the cached hash of the value's
-/// buffer, `Str` is for plain `&str` callers and hashes the bytes.
-pub enum KeyRef<'a> {
-    Bool(bool),
-    Int(i64),
-    Char(char),
-    Str(&'a str),
-    Interned(&'a RStr),
-}
-
-impl Hash for KeyRef<'_> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        match self {
-            KeyRef::Bool(b) => b.hash(state),
-            KeyRef::Int(i) => i.hash(state),
-            KeyRef::Char(c) => c.hash(state),
-            KeyRef::Str(s) => state.write_u64(str_hash(s)),
-            KeyRef::Interned(s) => state.write_u64(s.key_hash()),
-        }
-    }
-}
-
-impl Equivalent<MapKey> for KeyRef<'_> {
-    fn equivalent(&self, key: &MapKey) -> bool {
-        match (self, key) {
-            (KeyRef::Bool(a), MapKey::Bool(b)) => a == b,
-            (KeyRef::Int(a), MapKey::Int(b)) => a == b,
-            (KeyRef::Char(a), MapKey::Char(b)) => a == b,
-            (KeyRef::Str(a), MapKey::Str(b)) => *a == &***b,
-            (KeyRef::Interned(a), MapKey::Str(b)) => ptr::eq(*a, Rc::as_ptr(b)) || *a == &**b,
-            _ => false,
-        }
-    }
-}
-
-thread_local! {
-    /// Shared empty payload so `None` and unit variants allocate nothing.
-    static EMPTY_DATA: Rc<[Value]> = Rc::from(Vec::new());
-    static OPTION_NAME: Rc<str> = Rc::from("Option");
-    static SOME_NAME: Rc<str> = Rc::from("Some");
-    static NONE_NAME: Rc<str> = Rc::from("None");
-    static RESULT_NAME: Rc<str> = Rc::from("Result");
-    static OK_NAME: Rc<str> = Rc::from("Ok");
-    static ERR_NAME: Rc<str> = Rc::from("Err");
-}
-
-pub fn map_with_capacity(n: usize) -> Map {
-    Map::with_capacity_and_hasher(n, FxBuildHasher)
-}
-
-/// `Unit` default so registers can be moved out with `mem::take`.
-impl Default for Value {
-    fn default() -> Value {
-        Value::Unit
-    }
+    Str(Arc<str>),
 }
 
 impl Value {
-    pub fn str(s: impl Into<CompactString>) -> Value {
-        Value::Str(RStr::new(s))
+    pub fn str(s: impl Into<Arc<str>>) -> Value {
+        Value::Str(s.into())
     }
 
-    /// Materialize a chunk's literal constant into a runtime value.
+    pub fn vec(items: Vec<Value>) -> Value {
+        Value::Vec(Arc::new(Mutex::new(items)))
+    }
+
+    pub fn tuple(items: Vec<Value>) -> Value {
+        Value::Tuple(Arc::new(Mutex::new(items)))
+    }
+
+    pub fn map() -> Value {
+        Value::Map(Arc::new(Mutex::new(IndexMap::default())), MapKind::Map)
+    }
+
+    pub fn map_of(map: IndexMap<MapKey, Value>) -> Value {
+        Value::Map(Arc::new(Mutex::new(map)), MapKind::Map)
+    }
+
+    pub fn set_of(map: IndexMap<MapKey, Value>) -> Value {
+        Value::Map(Arc::new(Mutex::new(map)), MapKind::Set)
+    }
+
+    pub fn structure(shape: Arc<StructShape>, values: Vec<Value>) -> Value {
+        Value::Struct(Arc::new(StructData {
+            shape,
+            values: Mutex::new(values),
+        }))
+    }
+
+    pub fn struct_of(
+        name: impl Into<Arc<str>>,
+        pairs: impl IntoIterator<Item = (Arc<str>, Value)>,
+    ) -> Value {
+        let (fields, values): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
+        Value::structure(StructShape::new(name, fields), values)
+    }
+
+    pub fn some(v: Value) -> Value {
+        Value::Enum {
+            enum_name: Arc::from("Option"),
+            variant: Arc::from("Some"),
+            data: Arc::from(vec![v]),
+        }
+    }
+
+    pub fn none() -> Value {
+        Value::Enum {
+            enum_name: Arc::from("Option"),
+            variant: Arc::from("None"),
+            data: Arc::from(Vec::new()),
+        }
+    }
+
+    /// True for `Option::None`, used to keep a null json value as None rather
+    /// than wrapping it in Some when filling an Option struct field.
+    pub fn is_none_value(&self) -> bool {
+        matches!(self, Value::Enum { enum_name, variant, .. }
+            if &**enum_name == "Option" && &**variant == "None")
+    }
+
+    pub fn ok(v: Value) -> Value {
+        Value::Enum {
+            enum_name: Arc::from("Result"),
+            variant: Arc::from("Ok"),
+            data: Arc::from(vec![v]),
+        }
+    }
+
+    pub fn err(v: Value) -> Value {
+        Value::Enum {
+            enum_name: Arc::from("Result"),
+            variant: Arc::from("Err"),
+            data: Arc::from(vec![v]),
+        }
+    }
+
+    pub fn is_truthy(&self) -> bool {
+        matches!(self, Value::Bool(true))
+    }
+
     pub fn from_const(c: &Const) -> Value {
         match c {
             Const::Float(f) => Value::Float(*f),
@@ -399,8 +269,7 @@ impl Value {
         }
     }
 
-    /// A tagged integer's value as an i64 when it fits, so consumers that
-    /// only understand i64, indexes and bridges, accept width-tagged values.
+    /// A tagged integer's value as an i64 when it fits.
     pub(super) fn untag_int(&self) -> Option<i64> {
         match self {
             Value::IntW(v, w) => i64::try_from(w.decode(*v)).ok(),
@@ -423,102 +292,6 @@ impl Value {
         }
     }
 
-    /// Mutable access to a string buffer. Copies first when the handle is
-    /// shared, so other holders keep the old contents, exactly like editing
-    /// one `String` clone in real Rust. Resets the cached hash.
-    pub fn str_make_mut(rc: &mut Rc<RStr>) -> &mut CompactString {
-        if Rc::get_mut(rc).is_none() {
-            *rc = RStr::new(rc.s.clone());
-        }
-        let inner = Rc::get_mut(rc).unwrap();
-        inner.hash.set(0);
-        &mut inner.s
-    }
-
-    pub fn vec(items: Vec<Value>) -> Value {
-        Value::Vec(Rc::new(RefCell::new(items)))
-    }
-
-    pub fn tuple(items: Vec<Value>) -> Value {
-        Value::Tuple(Rc::new(RefCell::new(items)))
-    }
-
-    pub fn map_of(map: Map) -> Value {
-        Value::Map(Rc::new(RefCell::new(map)), MapKind::Map)
-    }
-
-    pub fn set_of(map: Map) -> Value {
-        Value::Map(Rc::new(RefCell::new(map)), MapKind::Set)
-    }
-
-    pub fn structure(shape: Rc<StructShape>, values: Vec<Value>) -> Value {
-        Value::Struct(Rc::new(StructData {
-            shape,
-            values: RefCell::new(values),
-        }))
-    }
-
-    /// One-off struct built by a bridge, shape and instance in one go.
-    pub fn struct_of(
-        name: impl Into<Rc<str>>,
-        pairs: impl IntoIterator<Item = (Rc<str>, Value)>,
-    ) -> Value {
-        let (fields, values) = pairs.into_iter().unzip();
-        Value::structure(StructShape::new(name, fields), values)
-    }
-
-    pub fn empty_data() -> Rc<[Value]> {
-        EMPTY_DATA.with(Rc::clone)
-    }
-
-    /// Single element enum payload, one allocation.
-    pub fn one_data(v: Value) -> Rc<[Value]> {
-        std::iter::once(v).collect()
-    }
-
-    pub fn some(v: Value) -> Value {
-        Value::Enum {
-            enum_name: OPTION_NAME.with(Rc::clone),
-            variant: SOME_NAME.with(Rc::clone),
-            data: Value::one_data(v),
-        }
-    }
-
-    pub fn none() -> Value {
-        Value::Enum {
-            enum_name: OPTION_NAME.with(Rc::clone),
-            variant: NONE_NAME.with(Rc::clone),
-            data: Value::empty_data(),
-        }
-    }
-
-    /// True for `Option::None`, used to keep a null json value as None rather
-    /// than wrapping it in Some when filling an Option struct field.
-    pub fn is_none_value(&self) -> bool {
-        matches!(self, Value::Enum { enum_name, variant, .. }
-            if &**enum_name == "Option" && &**variant == "None")
-    }
-
-    pub fn ok(v: Value) -> Value {
-        Value::Enum {
-            enum_name: RESULT_NAME.with(Rc::clone),
-            variant: OK_NAME.with(Rc::clone),
-            data: Value::one_data(v),
-        }
-    }
-
-    pub fn err(v: Value) -> Value {
-        Value::Enum {
-            enum_name: RESULT_NAME.with(Rc::clone),
-            variant: ERR_NAME.with(Rc::clone),
-            data: Value::one_data(v),
-        }
-    }
-
-    pub fn is_truthy(&self) -> bool {
-        matches!(self, Value::Bool(true))
-    }
-
     pub fn type_name(&self) -> &'static str {
         match self {
             Value::Unit => "()",
@@ -538,7 +311,7 @@ impl Value {
             Value::Ref(reference) => reference
                 .get()
                 .map_or("reference", |value| value.type_name()),
-            Value::Native(n) => n.borrow().type_name(),
+            Value::Native(_) => "native",
         }
     }
 
@@ -546,8 +319,8 @@ impl Value {
         Some(match self {
             Value::Bool(b) => MapKey::Bool(*b),
             Value::Int(i) => MapKey::Int(*i),
-            // The storage form is unique per value within one width, and one
-            // real map never mixes key widths, so it hashes and compares fine.
+            // Unique per value within one width, and one real map never
+            // mixes key widths.
             Value::IntW(v, _) => MapKey::Int(*v),
             Value::Char(c) => MapKey::Char(*c),
             Value::Str(s) => MapKey::Str(s.clone()),
@@ -568,20 +341,6 @@ impl Value {
         })
     }
 
-    /// Borrowed key view of this value for lookups that must not clone.
-    /// None when the value cannot be a key.
-    pub fn key_ref(&self) -> Option<KeyRef<'_>> {
-        Some(match self {
-            Value::Bool(b) => KeyRef::Bool(*b),
-            Value::Int(i) => KeyRef::Int(*i),
-            Value::IntW(v, _) => KeyRef::Int(*v),
-            Value::Char(c) => KeyRef::Char(*c),
-            Value::Str(s) => KeyRef::Interned(s),
-            _ => return None,
-        })
-    }
-
-    /// Value equality used by `==`, `match`, and map lookups.
     pub fn eq_value(&self, other: &Value) -> bool {
         if let Value::Ref(reference) = self {
             return reference.get().is_some_and(|value| value.eq_value(other));
@@ -601,12 +360,16 @@ impl Value {
             (Value::F32(a), Value::F32(b)) => a == b,
             // A bare float literal next to an f32 value is f32 in the source
             // types, so it rounds to f32 before the comparison.
-            (Value::F32(a), Value::Float(b)) | (Value::Float(b), Value::F32(a)) => *a == AsPrimitive::<f32>::as_(*b),
-            (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => AsPrimitive::<f64>::as_(*a) == *b,
+            (Value::F32(a), Value::Float(b)) | (Value::Float(b), Value::F32(a)) => {
+                *a == AsPrimitive::<f32>::as_(*b)
+            }
+            (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => {
+                AsPrimitive::<f64>::as_(*a) == *b
+            }
             (Value::Char(a), Value::Char(b)) => a == b,
-            (Value::Str(a), Value::Str(b)) => Rc::ptr_eq(a, b) || a == b,
+            (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Vec(a), Value::Vec(b)) | (Value::Tuple(a), Value::Tuple(b)) => {
-                let (a, b) = (a.borrow(), b.borrow());
+                let (a, b) = (a.lock(), b.lock());
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.eq_value(y))
             }
             (
@@ -628,7 +391,7 @@ impl Value {
             }
             (Value::Struct(a), Value::Struct(b)) => {
                 a.name() == b.name() && {
-                    let (va, vb) = (a.values.borrow(), b.values.borrow());
+                    let (va, vb) = (a.values.lock(), b.values.lock());
                     va.len() == vb.len()
                         && a.shape
                             .fields
@@ -637,7 +400,7 @@ impl Value {
                             .all(|(k, v)| b.get(k).is_some_and(|o| v.eq_value(&o)))
                 }
             }
-            (Value::Native(a), Value::Native(b)) => Rc::ptr_eq(a, b),
+            (Value::Native(a), Value::Native(b)) => Arc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -652,7 +415,7 @@ impl Value {
             Value::Float(f) => format_float(*f),
             Value::F32(f) => f.to_string(),
             Value::Char(c) => c.to_string(),
-            Value::Str(s) => s.s.as_str().to_string(),
+            Value::Str(s) => s.to_string(),
             other => other.debug(),
         }
     }
@@ -684,7 +447,7 @@ impl Value {
             }
             Value::Vec(items) => {
                 out.push('[');
-                for (i, v) in items.borrow().iter().enumerate() {
+                for (i, v) in items.lock().iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");
                     }
@@ -694,7 +457,7 @@ impl Value {
             }
             Value::Tuple(items) => {
                 out.push('(');
-                let items = items.borrow();
+                let items = items.lock();
                 for (i, v) in items.iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");
@@ -708,7 +471,7 @@ impl Value {
             }
             Value::Map(map, kind) => {
                 out.push('{');
-                for (i, (k, v)) in map.borrow().iter().enumerate() {
+                for (i, (k, v)) in map.lock().iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");
                     }
@@ -726,7 +489,7 @@ impl Value {
                 Some(value) => value.write_debug(out),
                 None => out.push_str("<dangling reference>"),
             },
-            Value::Native(n) => write!(out, "<{}>", n.borrow().type_name()).unwrap(),
+            Value::Native(n) => write!(out, "<{}>", n.lock().type_name()).unwrap(),
             Value::Enum { variant, data, .. } => {
                 write!(out, "{variant}").unwrap();
                 if !data.is_empty() {
@@ -744,17 +507,13 @@ impl Value {
     }
 }
 
-/// The derived-Debug form of a struct: bare canonical name, paren form for
-/// tuple structs, brace form with field names otherwise.
+/// The derived-Debug form of a struct.
 fn write_struct_debug(s: &StructData, out: &mut String) {
-    // Canonical names print bare, like the compiler's Debug derive.
     write!(out, "{}", super::resolver::bare(s.name())).unwrap();
-    let values = s.values.borrow();
+    let values = s.values.lock();
     if values.is_empty() {
         return;
     }
-    // Tuple structs carry positional field names and print in
-    // paren form, matching the derived Debug output.
     if s.shape
         .fields
         .iter()
@@ -788,7 +547,7 @@ impl MapKey {
             MapKey::Bool(b) => write!(out, "{b}").unwrap(),
             MapKey::Int(i) => write!(out, "{i}").unwrap(),
             MapKey::Char(c) => write!(out, "{c:?}").unwrap(),
-            MapKey::Str(s) => write!(out, "{:?}", &***s).unwrap(),
+            MapKey::Str(s) => write!(out, "{:?}", &**s).unwrap(),
         }
     }
 
@@ -802,11 +561,8 @@ impl MapKey {
     }
 }
 
-/// Floats format through the host's own Display and Debug. The native binary
-/// a script is compared against is built by the same rustc, so delegating is
-/// the only implementation that can never drift. A hand-rolled `{f:.0}` for
-/// whole floats printed the exact 300-digit expansion of `1e300` where real
-/// Display prints the shortest round-trip form.
+/// The host's Display and Debug are the target
+/// semantics, so delegate instead of approximating them.
 fn format_float(f: f64) -> String {
     f.to_string()
 }

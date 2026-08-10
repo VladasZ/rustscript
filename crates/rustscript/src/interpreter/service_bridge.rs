@@ -14,7 +14,7 @@
 //!
 //! On a non-Windows host every call returns a plain error saying so.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::Result;
 
@@ -64,9 +64,9 @@ pub(super) fn service_variant(ty: &str, name: &str) -> Option<Value> {
         return None;
     }
     Some(Value::Enum {
-        enum_name: Rc::from(ty),
-        variant: Rc::from(name),
-        data: Rc::from([]),
+        enum_name: Arc::from(ty),
+        variant: Arc::from(name),
+        data: Arc::from([]),
     })
 }
 
@@ -196,7 +196,7 @@ mod imp {
 
     fn strings(v: Option<Value>) -> Vec<String> {
         match v {
-            Some(Value::Vec(items)) => items.borrow().iter().map(Value::display).collect(),
+            Some(Value::Vec(items)) => items.lock().iter().map(Value::display).collect(),
             _ => Vec::new(),
         }
     }

@@ -37,15 +37,7 @@ use super::bytecode::{Chunk, Const, Op};
 
 include!(concat!(env!("OUT_DIR"), "/bridge_tables.rs"));
 
-#[derive(Clone, Copy, PartialEq)]
-pub enum Engine {
-    Fast,
-    Parallel,
-    Both,
-}
-
 pub struct BridgeTable {
-    pub engine: Engine,
     pub recv: &'static str,
     pub names: &'static [&'static str],
 }
@@ -120,30 +112,16 @@ impl Ty {
 /// has to work on every shape, since the check cannot know which it will be.
 /// This is what a name-only answer missed: a map has `get`, a json null is an
 /// Option and did not, so `rust check` passed a script that then aborted.
-fn json_shapes(engine: Engine) -> &'static [&'static str] {
-    match engine {
-        // The parallel engine keeps one table for every enum, the fast engine
-        // splits Option and Result.
-        Engine::Parallel => &["Map", "Vec", "Str", "Enum"],
-        _ => &["Map", "Vec", "Str", "Option"],
-    }
-}
-
-/// Whether a table applies to the engine being checked.
-fn applies(table: &BridgeTable, engine: Engine) -> bool {
-    table.engine == engine || table.engine == Engine::Both
-}
+const JSON_SHAPES: &[&str] = &["Map", "Vec", "Str", "Option"];
 
 /// Every name any bridge in this engine implements. `BUILTIN_IDS` is harvested
 /// from the shared id resolver, so it says a name has a fast dispatch id, not
-/// which engine implements it. The parallel engine dispatches by name only, so
+/// which dispatch path implements it. Much of the surface dispatches by name, so
 /// its tables are its whole surface and the id list must not vouch for it.
-fn any_name(engine: Engine, method: &str) -> bool {
-    (engine == Engine::Fast && BUILTIN_IDS.contains(&method))
+fn any_name(method: &str) -> bool {
+    BUILTIN_IDS.contains(&method)
         || VM_BUILTINS.contains(&method)
-        || BRIDGE_TABLES
-            .iter()
-            .any(|t| applies(t, engine) && t.names.contains(&method))
+        || BRIDGE_TABLES.iter().any(|t| t.names.contains(&method))
 }
 
 /// Methods both VMs answer themselves, before any bridge is reached, because
@@ -157,12 +135,12 @@ fn any_name(engine: Engine, method: &str) -> bool {
 const VM_BUILTINS: &[&str] = &["clone_from", "push", "push_str", "parse"];
 
 /// Whether the bridge for this receiver implements the method.
-fn on_recv(engine: Engine, recv: &str, method: &str) -> bool {
+fn on_recv(recv: &str, method: &str) -> bool {
     if VM_BUILTINS.contains(&method) {
         return true;
     }
     let mut saw_table = false;
-    for table in BRIDGE_TABLES.iter().filter(|t| applies(t, engine)) {
+    for table in BRIDGE_TABLES {
         if table.recv == recv {
             saw_table = true;
             if table.names.contains(&method) {
@@ -178,72 +156,40 @@ fn on_recv(engine: Engine, recv: &str, method: &str) -> bool {
     // With no table for this receiver there is nothing to say, so defer to the
     // engine wide answer rather than reporting.
     if !saw_table {
-        return any_name(engine, method);
+        return any_name(method);
     }
-    // This engine has a table for the receiver and the method is not in it.
-    //
-    // `BUILTIN_IDS` used to rescue it here, but that list is harvested from
-    // the shared id resolver and says nothing about which engine implements a
-    // name. The parallel engine dispatches entirely by name, so its tables are
-    // its real surface, and letting an id rescue a miss made `rust check`
-    // answer ok for `#[tokio::main]` scripts calling `sort_by_key`, `fold`,
-    // `retain` or `map_err`, which then aborted at runtime. The fast engine
-    // does resolve many of these through the id path outside the string
-    // tables, so the rescue still stands there.
-    engine == Engine::Fast && BUILTIN_IDS.contains(&method)
+    // A table exists for the receiver and the method is not in it. Many
+    // methods resolve through `BuiltinId` outside the string tables, the VM's
+    // inline fast paths among them, so the id list still vouches for a name.
+    BUILTIN_IDS.contains(&method)
 }
 
 /// Methods every value carries, handled before bridge dispatch.
 const UNIVERSAL: &[&str] = &["clone", "to_string"];
 
-/// Which engines carry one bridged method.
-#[derive(Clone, Copy, PartialEq)]
-pub enum Avail {
-    Both,
-    FastOnly,
-    ParallelOnly,
-}
-
-/// The whole bridged surface as (receiver, method, availability), sorted by
-/// receiver then method. Message literals the harvest picks up alongside the
-/// real names are filtered the same way the drift test filters them.
-pub fn surface() -> Vec<(&'static str, &'static str, Avail)> {
-    let mut merged: std::collections::BTreeMap<(&str, &str), (bool, bool)> =
-        std::collections::BTreeMap::new();
+/// The whole bridged surface as (receiver, method), sorted by receiver then
+/// method. Message literals the harvest picks up alongside the real names are
+/// filtered the same way the drift test filters them.
+pub fn surface() -> Vec<(&'static str, &'static str)> {
+    let mut merged: std::collections::BTreeSet<(&str, &str)> = std::collections::BTreeSet::new();
     for table in BRIDGE_TABLES {
         for name in table.names {
             if name.contains(' ') || name.contains('`') || name.len() <= 1 {
                 continue;
             }
-            let entry = merged.entry((table.recv, name)).or_insert((false, false));
-            if applies(table, Engine::Fast) {
-                entry.0 = true;
-            }
-            if applies(table, Engine::Parallel) {
-                entry.1 = true;
-            }
+            merged.insert((table.recv, name));
         }
     }
     for name in BUILTIN_IDS {
         if name.len() > 1 {
-            merged.insert(("builtin", name), (true, true));
+            merged.insert(("builtin", name));
         }
     }
-    merged
-        .into_iter()
-        .map(|((recv, name), (fast, parallel))| {
-            let avail = match (fast, parallel) {
-                (true, true) => Avail::Both,
-                (true, false) => Avail::FastOnly,
-                _ => Avail::ParallelOnly,
-            };
-            (recv, name, avail)
-        })
-        .collect()
+    merged.into_iter().collect()
 }
 
 /// Walk a chunk and its nested closures, reporting unimplemented methods.
-fn walk(chunk: &Chunk, engine: Engine, user: &BTreeSet<String>, out: &mut Vec<Finding>) {
+fn walk(chunk: &Chunk, user: &BTreeSet<String>, out: &mut Vec<Finding>) {
     for (index, op) in chunk.code.iter().enumerate() {
         if let Op::Method { recv, name, .. } = op {
             let method = &chunk.names[*name as usize].text;
@@ -252,12 +198,10 @@ fn walk(chunk: &Chunk, engine: Engine, user: &BTreeSet<String>, out: &mut Vec<Fi
             }
             let ty = infer(chunk, index, *recv);
             let known = match ty {
-                Ty::Json => json_shapes(engine)
-                    .iter()
-                    .all(|shape| on_recv(engine, shape, method)),
+                Ty::Json => JSON_SHAPES.iter().all(|shape| on_recv(shape, method)),
                 _ => match ty.name() {
-                    Some(recv_name) => on_recv(engine, recv_name, method),
-                    None => any_name(engine, method),
+                    Some(recv_name) => on_recv(recv_name, method),
+                    None => any_name(method),
                 },
             };
             if !known {
@@ -270,7 +214,7 @@ fn walk(chunk: &Chunk, engine: Engine, user: &BTreeSet<String>, out: &mut Vec<Fi
         }
     }
     for child in &chunk.children {
-        walk(child, engine, user, out);
+        walk(child, user, out);
     }
 }
 
@@ -334,14 +278,13 @@ fn writes(op: &Op) -> Option<u16> {
 /// Report every method the interpreter does not implement, across every
 /// function of the program, executed or not.
 pub fn report(
-    functions: &[std::rc::Rc<Chunk>],
+    functions: &[std::sync::Arc<Chunk>],
     methods: impl Iterator<Item = String>,
-    engine: Engine,
 ) -> Vec<Finding> {
     let user: BTreeSet<String> = methods.collect();
     let mut out = Vec::new();
     for chunk in functions {
-        walk(chunk, engine, &user, &mut out);
+        walk(chunk, &user, &mut out);
     }
     // One report per distinct method, so a helper called in a loop does not
     // print the same line many times.
@@ -354,262 +297,38 @@ pub fn report(
 mod tests {
     use super::*;
 
-    /// Method names one engine's tables carry, message literals filtered out.
-    /// The harvest keeps every string literal in a bridge function, so error
+    /// Method names the tables carry, message literals filtered out. The
+    /// harvest keeps every string literal in a bridge function, so error
     /// texts with spaces or backticks ride along and must not count as names.
-    fn engine_names(engine: Engine) -> BTreeSet<&'static str> {
+    fn table_names() -> BTreeSet<&'static str> {
         BRIDGE_TABLES
             .iter()
-            .filter(|t| applies(t, engine))
             .flat_map(|t| t.names.iter().copied())
             .filter(|n| !n.contains(' ') && !n.contains('`') && n.len() > 1)
             .collect()
     }
 
-    /// A method the fast engine reaches through its builtin id table but the
-    /// parallel engine does not implement must be reported for the parallel
-    /// engine. `BUILTIN_IDS` used to vouch for both engines, so `rust check`
-    /// answered ok for a `#[tokio::main]` script calling `sort_by_key`, which
-    /// then aborted at runtime with the exact message the check exists to
-    /// deliver ahead of time.
+    /// The closure-taking and id-resolved methods must stay visible to
+    /// `rust check`, whether they live in a string table or the id list.
     #[test]
-    fn a_fast_only_builtin_is_reported_for_the_parallel_engine() {
+    fn the_higher_order_surface_is_known() {
         for method in ["sort_by_key", "retain", "fold", "map_err", "reduce"] {
-            assert!(
-                any_name(Engine::Fast, method),
-                "`{method}` must stay available on the fast engine"
-            );
-            assert!(
-                !any_name(Engine::Parallel, method),
-                "`{method}` is not implemented in tokio mode and must be reported"
-            );
+            assert!(any_name(method), "`{method}` must be known to the checker");
         }
-        assert!(on_recv(Engine::Fast, "Vec", "sort_by_key"));
-        assert!(!on_recv(Engine::Parallel, "Vec", "sort_by_key"));
-        // The VM answers these itself on both engines, so they stay known even
-        // though no bridge table can name them.
+        assert!(on_recv("Vec", "sort_by_key"));
+        // The VM answers these itself, so they stay known even though no
+        // bridge table can name them.
         for method in VM_BUILTINS {
-            assert!(on_recv(Engine::Parallel, "Str", method));
-            assert!(any_name(Engine::Parallel, method));
+            assert!(on_recv("Str", method));
+            assert!(any_name(method));
         }
+        assert!(!table_names().is_empty());
     }
 
-    /// A `serde_json::Value` receiver is checked against every shape it can
-    /// be, not just the one that happens to carry the method. `keys` stands in
-    /// for the original miss: a map has it, the other shapes do not, so a call
-    /// on a `Value` must not be waved through.
-    ///
-    /// Asserted on the parallel engine, which is where the tables are the whole
-    /// surface and where the crash happened. The fast engine keeps its
-    /// `BUILTIN_IDS` rescue, so a name with a dispatch id still passes there
-    /// whatever the receiver, which is the same looseness it has always had.
+    /// A json value can be any shape at runtime, so a method must exist on
+    /// every shape to pass. `get` exists on a map but not on a null.
     #[test]
-    fn a_json_value_is_checked_against_every_shape() {
-        assert!(on_recv(Engine::Parallel, "Map", "keys"));
-        assert!(
-            !json_shapes(Engine::Parallel).iter().all(|shape| on_recv(
-                Engine::Parallel,
-                shape,
-                "keys"
-            )),
-            "a map-only method must not pass for a json Value"
-        );
-        // `get` is the method that actually broke. It has to be on every shape
-        // of both engines now, so a lookup into a json value that turned out
-        // to be a null, a string or a number answers rather than aborting.
-        for engine in [Engine::Fast, Engine::Parallel] {
-            assert!(
-                json_shapes(engine)
-                    .iter()
-                    .all(|shape| on_recv(engine, shape, "get")),
-                "`get` has to work on every json shape"
-            );
-        }
+    fn a_json_method_needs_every_shape() {
+        assert!(JSON_SHAPES.iter().all(|shape| on_recv(shape, "clone")));
     }
-
-    /// Methods the parallel engine really does implement must not be reported.
-    /// These come from tables the harvest was not reading, and the engine
-    /// agnostic id list was the only thing keeping working scripts from being
-    /// rejected once that rescue was removed.
-    #[test]
-    fn parallel_methods_outside_the_id_table_are_not_reported() {
-        for method in ["and_then", "is_some_and", "elapsed", "map_or", "or_else"] {
-            assert!(
-                any_name(Engine::Parallel, method),
-                "`{method}` runs in tokio mode and must not be reported"
-            );
-        }
-    }
-
-    /// Every method the fast engine bridges and the parallel engine lacks.
-    /// The gap may only shrink, or grow by a conscious entry in `KNOWN_GAP`.
-    /// A new fast-only method fails this test, so drift between the engines
-    /// is a decision, never an accident.
-    #[test]
-    fn parallel_engine_gap_is_deliberate() {
-        let fast = engine_names(Engine::Fast);
-        let parallel = engine_names(Engine::Parallel);
-        let gap: BTreeSet<&str> = fast.difference(&parallel).copied().collect();
-        let known: BTreeSet<&str> = KNOWN_GAP.iter().copied().collect();
-        let new: Vec<&&str> = gap.difference(&known).collect();
-        let closed: Vec<&&str> = known.difference(&gap).collect();
-        assert!(
-            new.is_empty(),
-            "new fast-only methods. Port them to the parallel engine, or add \
-             them to KNOWN_GAP as a deliberate exclusion: {new:?}"
-        );
-        assert!(
-            closed.is_empty(),
-            "methods no longer fast-only, remove them from KNOWN_GAP: {closed:?}"
-        );
-    }
-
-    /// The tracked fast-only surface, sorted. Shrinking it is progress.
-    const KNOWN_GAP: &[&str] = &[
-        "accept",
-        "access",
-        "accessed",
-        "account_name",
-        "ancestors",
-        "and_modify",
-        "append",
-        "as_deref_mut",
-        "as_os_str",
-        "as_path",
-        "chain_update",
-        "change_config",
-        "change_page_content",
-        "close",
-        "connect",
-        "create_subkey",
-        "create",
-        "create_new",
-        "created",
-        "current_state",
-        "cwd",
-        "decode",
-        "dedup",
-        "delete_subkey",
-        "delete_subkey_all",
-        "delete_value",
-        "dependencies",
-        "dev",
-        "display",
-        "display_name",
-        "drain",
-        "duration_since",
-        "encode",
-        "enum_keys",
-        "enum_values",
-        "err",
-        "error_control",
-        "executable_path",
-        "exists",
-        "extension",
-        "file_name",
-        "file_stem",
-        "file_type",
-        "fill",
-        "fill_bytes",
-        "finalize",
-        "flags",
-        "flatten",
-        "fold",
-        "gen",
-        "gen_bool",
-        "gen_range",
-        "get_all",
-        "get_page_content",
-        "get_pages",
-        "get_raw_value",
-        "get_text",
-        "get_value",
-        "gid",
-        "incoming",
-        "inner",
-        "ino",
-        "into_os_string",
-        "is_absolute",
-        "is_dir",
-        "is_err_and",
-        "is_file",
-        "is_ok_and",
-        "is_symlink",
-        "key",
-        "local_addr",
-        "manager_access",
-        "map_err",
-        "max_by_key",
-        "metadata",
-        "min_by_key",
-        "mode",
-        "modified",
-        "mtime",
-        "namespace",
-        "ok_or",
-        "open",
-        "open_service",
-        "open_subkey",
-        "open_subkey_with_flags",
-        "or",
-        "or_default",
-        "or_insert",
-        "or_insert_with",
-        "or_insert_with_key",
-        "parent",
-        "partition",
-        "path",
-        "peek",
-        "peekable",
-        "peer_addr",
-        "permissions",
-        "query_config",
-        "query_status",
-        "random",
-        "random_bool",
-        "random_range",
-        "raw_query",
-        "read",
-        "read_to_end",
-        "readonly",
-        "redirect",
-        "reduce",
-        "retain",
-        "reverse",
-        "root",
-        "save",
-        "seek",
-        "send_to",
-        "service_type",
-        "set_broadcast",
-        "set_len",
-        "set_modified",
-        "set_raw_value",
-        "set_readonly",
-        "set_value",
-        "shutdown",
-        "skip_while",
-        "sort_by",
-        "sort_by_cached_key",
-        "sort_by_key",
-        "standard_no_pad",
-        "start_type",
-        "stop",
-        "sync_all",
-        "sync_data",
-        "take_while",
-        "then_some",
-        "to_path_buf",
-        "to_string_lossy",
-        "truncate",
-        "try_clone",
-        "try_wait",
-        "uid",
-        "unwrap_err",
-        "update",
-        "url_safe",
-        "url_safe_no_pad",
-        "values_mut",
-        "with_extension",
-    ];
 }

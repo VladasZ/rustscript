@@ -1,70 +1,20 @@
-//! Binary and unary operator evaluation plus pattern binding for the
-//! register machine. Split from `vm.rs`.
-
-//! The register machine. Executes a compiled `Chunk` against one contiguous
-//! register stack. Calls to user functions and closures push a frame record
-//! and continue in the same instruction loop, so a script-level call costs no
-//! native recursion, no allocation, and no register file copy beyond its
-//! arguments. Anything else, methods and std or crate bridges, is delegated to
-//! the existing dispatch on `Interp` with already evaluated values.
+//! Operators and pattern binding for the parallel VM, the `Value` twin of
+//! `ops.rs`. Same logic, different value type.
 
 use num_traits::AsPrimitive;
 use std::cmp::Ordering;
 use std::slice::from_ref;
 
-use super::bytecode::{BinKind, PLit, PPat, UnKind};
-use super::numeric::{
-    IntWidth, float_arith, i64_arith, int_arith, int_bit, int_neg, int_not, int_shift, unify,
-};
-use super::shared::duration_arith;
-use super::std_bridge::{duration_from_value, make_duration};
-use super::value::Value;
 use anyhow::{Result, anyhow, bail};
 
-/// The u64 view of a width-tagged value when its width is 64-bit unsigned.
-/// u64 and usize dominate real scripts, sizes, counts, and hashes, so they
-/// get the same kind of inline fast path plain i64 has.
-#[inline]
-fn as_u64(v: &Value) -> Option<(u64, IntWidth)> {
-    match v {
-        Value::IntW(stored, w @ (IntWidth::U64 | IntWidth::USize)) => {
-            Some((stored.cast_unsigned(), *w))
-        }
-        _ => None,
-    }
-}
-
-#[inline]
-fn u64_arith(op: BinKind, a: u64, b: u64, w: IntWidth) -> Result<Value> {
-    use BinKind::{Add, Div, Mul, Rem, Sub};
-    let result = match op {
-        Add => a
-            .checked_add(b)
-            .ok_or_else(|| anyhow!("attempt to add with overflow"))?,
-        Sub => a
-            .checked_sub(b)
-            .ok_or_else(|| anyhow!("attempt to subtract with overflow"))?,
-        Mul => a
-            .checked_mul(b)
-            .ok_or_else(|| anyhow!("attempt to multiply with overflow"))?,
-        Div => {
-            if b == 0 {
-                bail!("attempt to divide by zero");
-            }
-            a / b
-        }
-        Rem => {
-            if b == 0 {
-                bail!("attempt to calculate the remainder with a divisor of zero");
-            }
-            a % b
-        }
-        _ => unreachable!(),
-    };
-    Ok(Value::IntW(result.cast_signed(), w))
-}
-
-// -- operators -------------------------------------------------------------
+use super::bytecode::{BinKind, UnKind};
+use super::bytecode::{PLit, PPat};
+use super::numeric::{
+    float_arith, i64_arith, int_arith, int_bit, int_neg, int_not, int_shift, unify,
+};
+use super::shared::{duration_arith, usize_i64};
+use super::std_bridge::{duration_from_value, make_duration};
+use super::value::Value;
 
 pub(super) fn apply_bin(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
     use BinKind::{
@@ -89,60 +39,10 @@ pub(super) fn apply_bin(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
     })
 }
 
-/// `apply_bin` with an integer literal right operand, with a fast integer path
-/// that skips building a `Value` for the literal. Each operator keeps its own
-/// arm so the dispatch stays a single match.
-#[inline]
 pub(super) fn apply_bin_imm(op: BinKind, l: &Value, imm: i64) -> Result<Value> {
-    use BinKind::{
-        Add, BitAnd, BitOr, BitXor, Div, Eq, Ge, Gt, Le, Lt, Mul, Ne, Rem, Shl, Shr, Sub,
-    };
-    if let Value::Int(a) = l {
-        let a = *a;
-        // One `i64_arith` call per arm keeps `op` constant inside each, so
-        // the inlined inner match folds away and dispatch stays one match.
-        return Ok(match op {
-            Add => Value::Int(i64_arith(Add, a, imm)?),
-            Sub => Value::Int(i64_arith(Sub, a, imm)?),
-            Mul => Value::Int(i64_arith(Mul, a, imm)?),
-            Div => Value::Int(i64_arith(Div, a, imm)?),
-            Rem => Value::Int(i64_arith(Rem, a, imm)?),
-            Eq => Value::Bool(a == imm),
-            Ne => Value::Bool(a != imm),
-            Lt => Value::Bool(a < imm),
-            Le => Value::Bool(a <= imm),
-            Gt => Value::Bool(a > imm),
-            Ge => Value::Bool(a >= imm),
-            BitAnd => Value::Int(a & imm),
-            BitOr => Value::Int(a | imm),
-            BitXor => Value::Int(a ^ imm),
-            Shl | Shr => shift_bin(op, l, &Value::Int(imm))?,
-        });
-    }
-    // A literal next to a u64 or usize value is that type itself, so it is
-    // never negative in a program that passed the real type checker.
-    if let Some((a, w)) = as_u64(l)
-        && imm >= 0
-    {
-        let b = imm.cast_unsigned();
-        return Ok(match op {
-            Add | Sub | Mul | Div | Rem => u64_arith(op, a, b, w)?,
-            Eq => Value::Bool(a == b),
-            Ne => Value::Bool(a != b),
-            Lt => Value::Bool(a < b),
-            Le => Value::Bool(a <= b),
-            Gt => Value::Bool(a > b),
-            Ge => Value::Bool(a >= b),
-            BitAnd => Value::IntW((a & b).cast_signed(), w),
-            BitOr => Value::IntW((a | b).cast_signed(), w),
-            BitXor => Value::IntW((a ^ b).cast_signed(), w),
-            Shl | Shr => shift_bin(op, l, &Value::Int(imm))?,
-        });
-    }
     apply_bin(op, l, &Value::Int(imm))
 }
 
-/// Comparison result for the fused compare-and-branch ops.
 pub(super) fn cmp_test(op: BinKind, l: &Value, r: &Value) -> Result<bool> {
     use BinKind::{Eq, Ge, Gt, Le, Lt, Ne};
     Ok(match op {
@@ -163,52 +63,10 @@ pub(super) fn cmp_test(op: BinKind, l: &Value, r: &Value) -> Result<bool> {
 }
 
 pub(super) fn cmp_test_imm(op: BinKind, l: &Value, imm: i64) -> Result<bool> {
-    use BinKind::{Eq, Ge, Gt, Le, Lt, Ne};
-    if let Value::Int(a) = l {
-        let a = *a;
-        return Ok(match op {
-            Eq => a == imm,
-            Ne => a != imm,
-            Lt => a < imm,
-            Le => a <= imm,
-            Gt => a > imm,
-            Ge => a >= imm,
-            _ => unreachable!("compare jump carries a non-comparison operator"),
-        });
-    }
-    if let Some((a, _)) = as_u64(l)
-        && imm >= 0
-    {
-        let b = imm.cast_unsigned();
-        return Ok(match op {
-            Eq => a == b,
-            Ne => a != b,
-            Lt => a < b,
-            Le => a <= b,
-            Gt => a > b,
-            Ge => a >= b,
-            _ => unreachable!("compare jump carries a non-comparison operator"),
-        });
-    }
     cmp_test(op, l, &Value::Int(imm))
 }
 
-/// The hot i64 case stays inline in the dispatch loop with one match per
-/// operator, and everything else, strings, width-tagged integers, and
-/// floats, lives in the outlined general path.
-#[inline]
 fn arith(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
-    if let (Value::Int(a), Value::Int(b)) = (l, r) {
-        return Ok(Value::Int(i64_arith(op, *a, *b)?));
-    }
-    if let (Some((a, w)), Some((b, _))) = (as_u64(l), as_u64(r)) {
-        return u64_arith(op, a, b, w);
-    }
-    arith_general(op, l, r)
-}
-
-#[inline(never)]
-fn arith_general(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
     if let (BinKind::Add, Value::Str(a), Value::Str(b)) = (op, l, r) {
         let mut out = String::with_capacity(a.len() + b.len());
         out.push_str(a);
@@ -217,6 +75,9 @@ fn arith_general(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
     }
     if let (Some(a), Some(b)) = (duration_from_value(l), duration_from_value(r)) {
         return Ok(make_duration(duration_arith(op, a, b)?));
+    }
+    if let (Value::Int(a), Value::Int(b)) = (l, r) {
+        return Ok(Value::Int(i64_arith(op, *a, *b)?));
     }
     if let (Some((a, wa)), Some((b, wb))) = (l.int_parts(), r.int_parts()) {
         let width = unify(wa, wb)?;
@@ -228,9 +89,8 @@ fn arith_general(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
     }
 }
 
-/// The two sides of a float op at the width they compute in. An untagged f64
-/// next to an f32 is a bare literal that is f32 in the source types, so it
-/// rounds to f32 and the op runs at f32 precision.
+/// An untagged f64 next to an f32 is a bare
+/// literal that is f32 in the source types.
 enum FloatPair {
     F64(f64, f64),
     F32(f32, f32),
@@ -247,20 +107,12 @@ fn float_pair(l: &Value, r: &Value) -> Result<FloatPair> {
 
 fn bit_bin(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
     if let (Value::Int(a), Value::Int(b)) = (l, r) {
-        return Ok(Value::Int(match op {
-            BinKind::BitAnd => a & b,
-            BinKind::BitOr => a | b,
-            _ => a ^ b,
-        }));
+        let f = bit_i64(op);
+        return Ok(Value::Int(f(*a, *b)));
     }
     if let (Value::Bool(a), Value::Bool(b)) = (l, r) {
-        let (a, b) = (i64::from(*a), i64::from(*b));
-        let bits = match op {
-            BinKind::BitAnd => a & b,
-            BinKind::BitOr => a | b,
-            _ => a ^ b,
-        };
-        return Ok(Value::Bool(bits != 0));
+        let f = bit_i64(op);
+        return Ok(Value::Bool(f(i64::from(*a), i64::from(*b)) != 0));
     }
     if let (Some((a, wa)), Some((b, wb))) = (l.int_parts(), r.int_parts()) {
         let width = unify(wa, wb)?;
@@ -269,8 +121,16 @@ fn bit_bin(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
     bail!("bitwise operators need integers")
 }
 
-/// `<<` and `>>`. The amount side keeps its own width and only supplies the
-/// count, the result has the shifted side's width.
+fn bit_i64(op: BinKind) -> fn(i64, i64) -> i64 {
+    match op {
+        BinKind::BitAnd => |a, b| a & b,
+        BinKind::BitOr => |a, b| a | b,
+        _ => |a, b| a ^ b,
+    }
+}
+
+/// `<<` and `>>`, the amount only supplies the count and the result keeps
+/// the shifted side's width.
 fn shift_bin(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
     let (Some((a, wa)), Some((b, _))) = (l.int_parts(), r.int_parts()) else {
         bail!("shift operators need integers");
@@ -282,10 +142,9 @@ pub(super) fn compare_values(l: &Value, r: &Value) -> Result<Ordering> {
     partial_compare(l, r)?.ok_or_else(|| anyhow!("cannot order NaN"))
 }
 
-/// `PartialOrd` semantics: a NaN operand compares as `None`, which makes every
-/// ordered comparison operator false, exactly like compiled Rust. Contexts
-/// that need a total order, sorting for example, go through `compare_values`
-/// and keep rejecting NaN.
+/// `PartialOrd` semantics: a NaN operand makes every ordered
+/// comparison false, exactly like compiled Rust. Contexts that need a total
+/// order, sorting for example, go through `compare_values` and reject NaN.
 fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
     Ok(match (l, r) {
         (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
@@ -300,14 +159,14 @@ fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
         (Value::Float(a), Value::F32(b)) => AsPrimitive::<f32>::as_(*a).partial_cmp(b),
         (Value::Int(a), Value::Float(b)) => AsPrimitive::<f64>::as_(*a).partial_cmp(b),
         (Value::Float(a), Value::Int(b)) => a.partial_cmp(&AsPrimitive::<f64>::as_(*b)),
-        (Value::Str(a), Value::Str(b)) => Some(a.as_str().cmp(b.as_str())),
+        (Value::Str(a), Value::Str(b)) => Some(a.as_ref().cmp(b.as_ref())),
         (Value::Char(a), Value::Char(b)) => Some(a.cmp(b)),
         (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
         // Sequences order lexicographically, the first differing element
         // deciding and a prefix ordering before what extends it. Tuples order
         // the same way, field by field.
         (Value::Vec(a), Value::Vec(b)) | (Value::Tuple(a), Value::Tuple(b)) => {
-            let (a, b) = (a.borrow(), b.borrow());
+            let (a, b) = (a.lock().clone(), b.lock().clone());
             let mut order = None;
             for (left, right) in a.iter().zip(b.iter()) {
                 match partial_compare(left, right)? {
@@ -390,12 +249,8 @@ pub(super) fn apply_un(op: UnKind, v: &Value) -> Result<Value> {
     })
 }
 
-// -- patterns --------------------------------------------------------------
-
-/// True when a `serde_json` `Value` variant name matches the native value that a
-/// parsed json holds. A json string is a `Str`, a number an `Int` or `Float`, an
-/// array a `Vec`, an object a `Map`. `Null` is handled separately as a unit
-/// variant because a json null is `Option::None` here.
+/// The parallel-engine twin of the `serde_json` variant check in ops.rs. See the
+/// note there.
 fn json_variant_kind_matches(name: Option<&str>, val: &Value) -> bool {
     matches!(
         (name, val),
@@ -407,44 +262,35 @@ fn json_variant_kind_matches(name: Option<&str>, val: &Value) -> bool {
     )
 }
 
-/// Match `pat` against `val`, calling `define` for each bound name. Returns
-/// false without fully binding when the pattern does not match.
 pub(super) fn try_bind(pat: &PPat, val: &Value, define: &mut dyn FnMut(&str, Value)) -> bool {
     match pat {
         PPat::Wild | PPat::Rest => true,
         PPat::Ident { name, sub } => {
-            if let Some(subpattern) = sub
-                && !try_bind(subpattern, val, define)
+            if let Some(s) = sub
+                && !try_bind(s, val, define)
             {
                 return false;
             }
             define(name, val.clone());
             true
         }
-        PPat::Lit(literal) => literal_matches(literal, val),
-        PPat::Tuple(patterns) => match val {
-            Value::Tuple(items) => bind_seq(patterns, &items.borrow(), define),
-            Value::Unit if patterns.is_empty() => true,
+        PPat::Lit(l) => plit_eq(l, val),
+        PPat::Tuple(elems) => match val {
+            Value::Tuple(items) => bind_seq(elems, &items.lock(), define),
+            Value::Unit if elems.is_empty() => true,
             _ => false,
         },
         PPat::TupleStruct { name, elems } => match val {
             Value::Enum { variant, data, .. } => {
                 name.as_deref() == Some(&**variant) && bind_seq(elems, data, define)
             }
-            Value::Struct(structure) => bind_seq(elems, &structure.values.borrow(), define),
-            // A json string is a plain Str here, so a serde accessor like
-            // as_str hands back the string itself as an already unwrapped Some,
-            // the same model the Option methods on a Str follow. Matching a
-            // bare value against Some(x) does not type check in real Rust, so
-            // the script can only mean that pre-unwrapped Some. Unit is left
-            // out because it is also this interpreter's filler for a missing
-            // value.
+            Value::Struct(st) => {
+                let vals: Vec<Value> = st.values.lock().clone();
+                bind_seq(elems, &vals, define)
+            }
+            // Matches the pre-unwrapped Some rule in ops.rs, see the note there.
             Value::Unit => false,
             other => {
-                // A serde_json Value variant pattern, `Value::String(s)` and
-                // friends, matched against the native value a parsed json holds.
-                // The single field binds to the value itself, the same shape as
-                // the pre-unwrapped Some rule below.
                 if json_variant_kind_matches(name.as_deref(), other) {
                     bind_seq(elems, from_ref(other), define)
                 } else {
@@ -465,27 +311,29 @@ pub(super) fn try_bind(pat: &PPat, val: &Value, define: &mut dyn FnMut(&str, Val
             _ => false,
         },
         PPat::Struct { name, fields } => {
-            let Value::Struct(structure) = val else {
+            let Value::Struct(st) = val else {
                 return false;
             };
-            if let Some(pattern_name) = name
-                && pattern_name != super::resolver::bare(structure.name())
+            if let Some(pn) = name
+                && pn.as_str() != super::resolver::bare(st.name())
             {
                 return false;
             }
-            for (field, pattern) in fields {
-                match structure.get(field) {
-                    Some(value) if try_bind(pattern, &value, define) => {}
-                    _ => return false,
+            for (key, fp) in fields {
+                match st.get(key) {
+                    Some(v) => {
+                        if !try_bind(fp, &v, define) {
+                            return false;
+                        }
+                    }
+                    None => return false,
                 }
             }
             true
         }
-        PPat::Or(patterns) => patterns
-            .iter()
-            .any(|pattern| try_bind(pattern, val, define)),
-        PPat::Slice(patterns) => match val {
-            Value::Vec(items) => bind_seq(patterns, &items.borrow(), define),
+        PPat::Or(cases) => cases.iter().any(|c| try_bind(c, val, define)),
+        PPat::Slice(elems) => match val {
+            Value::Vec(items) => bind_seq(elems, &items.lock(), define),
             _ => false,
         },
         PPat::Range { lo, hi, inclusive } => {
@@ -513,8 +361,182 @@ fn endpoint_cmp(literal: &PLit, value: &Value) -> Option<Ordering> {
     }
 }
 
-/// Shared range test, parameterized over the engine's endpoint comparison.
-/// `cmp` orders an endpoint literal against the matched value.
+fn bind_seq(pats: &[PPat], vals: &[Value], define: &mut dyn FnMut(&str, Value)) -> bool {
+    if pats.iter().any(|p| matches!(p, PPat::Rest)) {
+        let head = pats.iter().take_while(|p| !matches!(p, PPat::Rest)).count();
+        for (p, v) in pats.iter().take(head).zip(vals.iter()) {
+            if !try_bind(p, v, define) {
+                return false;
+            }
+        }
+        for (p, v) in pats.iter().skip(head + 1).zip(vals.iter().rev()) {
+            if !try_bind(p, v, define) {
+                return false;
+            }
+        }
+        return true;
+    }
+    pats.len() == vals.len()
+        && pats
+            .iter()
+            .zip(vals.iter())
+            .all(|(p, v)| try_bind(p, v, define))
+}
+
+fn plit_eq(l: &PLit, val: &Value) -> bool {
+    match (l, val) {
+        (PLit::Int(a), Value::Int(b)) => a == b,
+        (PLit::Int(a), Value::IntW(..)) => val.int_parts().map(|(v, _)| v) == Some(i128::from(*a)),
+        (PLit::Float(a), Value::Float(b)) => a == b,
+        (PLit::Float(a), Value::F32(b)) => AsPrimitive::<f32>::as_(*a) == *b,
+        (PLit::Bool(a), Value::Bool(b)) => a == b,
+        (PLit::Str(a), Value::Str(b)) => a.as_str() == b.as_ref(),
+        (PLit::Char(a), Value::Char(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// An integer operand, for range bounds and sequence indexes.
+pub(super) fn int_of(v: &Value) -> Result<i64> {
+    match v {
+        Value::Int(i) => Ok(*i),
+        Value::IntW(..) => v
+            .untag_int()
+            .ok_or_else(|| anyhow!("integer out of the i64 range")),
+        _ => bail!("range bound must be an integer"),
+    }
+}
+
+// -- indexing and `?` ------------------------------------------------------
+
+pub(super) fn index(recv: &Value, key: &Value) -> Result<Value> {
+    if let Value::Range {
+        start,
+        end,
+        inclusive,
+    } = key
+    {
+        return slice_value(recv, *start, *end, *inclusive);
+    }
+    match recv {
+        Value::Vec(items) => {
+            let i = usize::try_from(int_of(key)?)?;
+            let items = items.lock();
+            items.get(i).cloned().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "index out of bounds: the len is {} but the index is {i}",
+                    items.len()
+                )
+            })
+        }
+        Value::Map(m, _) => {
+            let k = key
+                .as_key()
+                .ok_or_else(|| anyhow::anyhow!("invalid map key"))?;
+            m.lock()
+                .get(&k)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("no entry found for key"))
+        }
+        Value::Str(s) => {
+            let i = usize::try_from(int_of(key)?)?;
+            s.chars().nth(i).map(Value::Char).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "index out of bounds: the len is {} but the index is {i}",
+                    s.chars().count()
+                )
+            })
+        }
+        // `caps[1]` and `caps["name"]` on a capture set.
+        Value::Native(h) => super::regex_bridge::capture_index(h, key),
+        _ => bail!("cannot index {}", recv.type_name()),
+    }
+}
+
+fn slice_value(base: &Value, start: i64, end: i64, inclusive: bool) -> Result<Value> {
+    let bounds = |len: usize| -> Result<(usize, usize)> {
+        if start < 0 {
+            bail!("negative slice start {start}");
+        }
+        let end = if end == i64::MAX {
+            usize_i64(len)
+        } else if inclusive {
+            end + 1
+        } else {
+            end
+        };
+        if end < start || usize::try_from(end).is_ok_and(|e| e > len) {
+            bail!("slice {start}..{end} out of bounds (len {len})");
+        }
+        Ok((usize::try_from(start)?, usize::try_from(end)?))
+    };
+    match base {
+        Value::Vec(items) => {
+            let items = items.lock();
+            let (a, b) = bounds(items.len())?;
+            Ok(Value::vec(items[a..b].to_vec()))
+        }
+        Value::Str(s) => {
+            let (a, b) = bounds(s.len())?;
+            match s.get(a..b) {
+                Some(sub) => Ok(Value::str(sub.to_string())),
+                None => bail!("slice {a}..{b} is not on a char boundary"),
+            }
+        }
+        other => bail!("cannot slice {}", other.type_name()),
+    }
+}
+
+pub(super) fn set_index(recv: &Value, key: &Value, v: Value) -> Result<()> {
+    match recv {
+        Value::Vec(items) => {
+            let i = usize::try_from(int_of(key)?)?;
+            let mut items = items.lock();
+            if i >= items.len() {
+                bail!(
+                    "index out of bounds: the len is {} but the index is {i}",
+                    items.len()
+                );
+            }
+            items[i] = v;
+        }
+        Value::Map(m, _) => {
+            let k = key
+                .as_key()
+                .ok_or_else(|| anyhow::anyhow!("invalid map key"))?;
+            m.lock().insert(k, v);
+        }
+        _ => bail!("cannot index {}", recv.type_name()),
+    }
+    Ok(())
+}
+
+pub(super) fn eval_try(v: Value) -> Result<Value, Value> {
+    match v {
+        Value::Enum {
+            enum_name,
+            variant,
+            data,
+        } => match (&*enum_name, &*variant) {
+            ("Result", "Ok") | ("Option", "Some") => {
+                Ok(data.first().cloned().unwrap_or(Value::Unit))
+            }
+            ("Result", "Err") => Err(Value::err(data.first().cloned().unwrap_or(Value::Unit))),
+            ("Option", "None") => Err(Value::none()),
+            // Any other value acts as its own Some, matching eval_try in
+            // eval.rs, see the comment there.
+            _ => Ok(Value::Enum {
+                enum_name,
+                variant,
+                data,
+            }),
+        },
+        other => Ok(other),
+    }
+}
+
+/// Whether a scrutinee lands inside a `lo..hi` pattern, given a comparator
+/// against each bound.
 pub(super) fn range_matches<L>(
     lo: Option<&L>,
     hi: Option<&L>,
@@ -535,50 +557,4 @@ pub(super) fn range_matches<L>(
         }
     }
     true
-}
-
-fn bind_seq(patterns: &[PPat], vals: &[Value], define: &mut dyn FnMut(&str, Value)) -> bool {
-    if patterns.iter().any(|pattern| matches!(pattern, PPat::Rest)) {
-        let head_len = patterns
-            .iter()
-            .take_while(|pattern| !matches!(pattern, PPat::Rest))
-            .count();
-        for (pattern, value) in patterns.iter().take(head_len).zip(vals.iter()) {
-            if !try_bind(pattern, value, define) {
-                return false;
-            }
-        }
-        for (pattern, value) in patterns.iter().skip(head_len + 1).zip(vals.iter().rev()) {
-            if !try_bind(pattern, value, define) {
-                return false;
-            }
-        }
-        return true;
-    }
-    patterns.len() == vals.len()
-        && patterns
-            .iter()
-            .zip(vals.iter())
-            .all(|(pattern, value)| try_bind(pattern, value, define))
-}
-
-fn literal_matches(literal: &PLit, value: &Value) -> bool {
-    match (literal, value) {
-        (PLit::Int(left), Value::Int(right)) => left == right,
-        (PLit::Int(left), Value::IntW(..)) => {
-            value.int_parts().map(|(v, _)| v) == Some(i128::from(*left))
-        }
-        // Exact IEEE equality on purpose, a float literal pattern matches the
-        // way `==` compares, NaN never and negative zero equal to zero.
-        (PLit::Float(left), Value::Float(right)) => {
-            left.partial_cmp(right) == Some(Ordering::Equal)
-        }
-        (PLit::Float(left), Value::F32(right)) => {
-            AsPrimitive::<f32>::as_(*left).partial_cmp(right) == Some(Ordering::Equal)
-        }
-        (PLit::Bool(left), Value::Bool(right)) => left == right,
-        (PLit::Str(left), Value::Str(right)) => left == right.as_str(),
-        (PLit::Char(left), Value::Char(right)) => left == right,
-        _ => false,
-    }
 }

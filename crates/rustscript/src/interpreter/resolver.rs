@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::{Result, bail};
 
@@ -21,9 +22,9 @@ pub(super) struct ModuleSyms {
     /// Local name to global constant index.
     pub consts: HashMap<String, u32>,
     /// Local name to canonical struct key.
-    pub structs: HashMap<String, Rc<str>>,
+    pub structs: HashMap<String, Arc<str>>,
     /// Local name to canonical enum key.
-    pub enums: HashMap<String, Rc<str>>,
+    pub enums: HashMap<String, Arc<str>>,
     /// Local alias name to its target type.
     pub aliases: HashMap<String, Rc<syn::Type>>,
     /// Import name to the path it stands for.
@@ -41,11 +42,11 @@ pub(super) struct StructDef {
 pub(super) enum Res {
     Fn(u32),
     Const(u32),
-    Struct(Rc<str>),
-    Enum(Rc<str>),
+    Struct(Arc<str>),
+    Enum(Arc<str>),
     /// `Type::rest` where the type is a user struct or enum: an associated
     /// function, a method used UFCS style, or an enum variant.
-    TypeMember(Rc<str>, Vec<String>),
+    TypeMember(Arc<str>, Vec<String>),
     /// A type alias hit exactly, resolved in its defining module.
     Alias(usize, Rc<syn::Type>),
     Module,
@@ -55,8 +56,8 @@ pub(super) enum Res {
 
 pub(super) struct Resolver {
     pub modules: Vec<ModuleSyms>,
-    pub structs: HashMap<Rc<str>, StructDef>,
-    pub enums: HashMap<Rc<str>, Rc<syn::ItemEnum>>,
+    pub structs: HashMap<Arc<str>, StructDef>,
+    pub enums: HashMap<Arc<str>, Rc<syn::ItemEnum>>,
 }
 
 /// Bound on import chains, so `pub use` cycles error instead of hanging.
@@ -197,7 +198,7 @@ impl Resolver {
     }
 
     /// Resolve a type path to a user struct canonical key, following aliases.
-    pub fn resolve_struct_key(&self, m: usize, path: &syn::Path) -> Option<Rc<str>> {
+    pub fn resolve_struct_key(&self, m: usize, path: &syn::Path) -> Option<Arc<str>> {
         let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
         match self.resolve(m, &segs).ok()? {
             Res::Struct(c) => Some(c),

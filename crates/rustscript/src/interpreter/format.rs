@@ -1,95 +1,8 @@
+//! Format spec parsing and rendering shared by the VM's `Fmt` op: the
+//! `{:...}` spec grammar, radix and float forms, and `$` width expansion.
+
+use anyhow::Result;
 use num_traits::AsPrimitive;
-use anyhow::{Result, anyhow};
-
-use super::value::Value;
-
-/// Render a format template. Positional and named arguments, including inline
-/// `{name}` holes, are already evaluated by the compiler.
-pub(super) fn render_values(
-    template: &str,
-    positional: &[Value],
-    named: &[(String, Value)],
-) -> Result<String> {
-    let mut out = String::new();
-    let mut chars = template.chars().peekable();
-    let mut next_positional = 0;
-
-    while let Some(c) = chars.next() {
-        match c {
-            '{' => {
-                if chars.peek() == Some(&'{') {
-                    chars.next();
-                    out.push('{');
-                    continue;
-                }
-                let mut inner = String::new();
-                for ic in chars.by_ref() {
-                    if ic == '}' {
-                        break;
-                    }
-                    inner.push(ic);
-                }
-                let (arg_ref, spec) = match inner.split_once(':') {
-                    Some((a, s)) => (a.trim(), s),
-                    None => (inner.trim(), ""),
-                };
-                let value = resolve_arg(arg_ref, &mut next_positional, positional, named)?;
-                let spec = expand_arg_widths(spec, positional, named)?;
-                out.push_str(&format_value(&value, &spec));
-            }
-            '}' => {
-                if chars.peek() == Some(&'}') {
-                    chars.next();
-                }
-                out.push('}');
-            }
-            other => out.push(other),
-        }
-    }
-    Ok(out)
-}
-
-fn resolve_arg(
-    arg_ref: &str,
-    next_positional: &mut usize,
-    positional: &[Value],
-    named: &[(String, Value)],
-) -> Result<Value> {
-    if arg_ref.is_empty() {
-        let idx = *next_positional;
-        *next_positional += 1;
-        return positional
-            .get(idx)
-            .cloned()
-            .ok_or_else(|| anyhow!("not enough arguments for format string"));
-    }
-    if let Ok(idx) = arg_ref.parse::<usize>() {
-        return positional
-            .get(idx)
-            .cloned()
-            .ok_or_else(|| anyhow!("format argument {idx} out of range"));
-    }
-    named
-        .iter()
-        .find(|(n, _)| n == arg_ref)
-        .map(|(_, v)| v.clone())
-        .ok_or_else(|| anyhow!("`{arg_ref}` not found for format string"))
-}
-
-/// Apply the format spec to an already-evaluated value.
-fn format_value(value: &Value, spec: &str) -> String {
-    let number = match value {
-        Value::Float(f) => Some(SpecNumber::Float(*f)),
-        Value::F32(f) => Some(SpecNumber::F32(*f)),
-        Value::Int(i) => Some(SpecNumber::Int(*i)),
-        Value::IntW(v, w) => Some(SpecNumber::Sized {
-            value: w.decode(*v),
-            bits: w.bits(),
-        }),
-        _ => None,
-    };
-    apply_spec(spec, &value.display(), &value.debug(), number)
-}
 
 /// The numeric identity of a formatted value. Radix forms need the exact
 /// integer, an f64 would lose the low bits past 2^53, and integers must
@@ -110,7 +23,7 @@ pub(super) enum SpecNumber {
 impl SpecNumber {
     /// The bits radix forms print, masked to the value's own width.
     fn radix_bits(value: i128, bits: u32) -> u64 {
-        AsPrimitive::<u64>::as_(value ) & (u64::MAX >> (64 - bits))
+        AsPrimitive::<u64>::as_(value) & (u64::MAX >> (64 - bits))
     }
 }
 
@@ -379,58 +292,6 @@ pub(super) fn expand_widths_with(
     }
     out.push_str(&token);
     Ok(out)
-}
-
-fn expand_arg_widths(
-    spec: &str,
-    positional: &[Value],
-    named: &[(String, Value)],
-) -> Result<String> {
-    if !spec.contains('$') {
-        return Ok(spec.to_string());
-    }
-    let mut out = String::new();
-    let mut token = String::new();
-    for c in spec.chars() {
-        if c.is_alphanumeric() || c == '_' {
-            token.push(c);
-            continue;
-        }
-        if c == '$' {
-            out.push_str(&width_arg(&token, positional, named)?.to_string());
-            token.clear();
-            continue;
-        }
-        out.push_str(&token);
-        token.clear();
-        out.push(c);
-    }
-    out.push_str(&token);
-    Ok(out)
-}
-
-fn width_arg(token: &str, positional: &[Value], named: &[(String, Value)]) -> Result<i64> {
-    let value = match token.parse::<usize>() {
-        Ok(idx) => positional
-            .get(idx)
-            .cloned()
-            .ok_or_else(|| anyhow!("format width argument {idx} out of range"))?,
-        Err(_) => named
-            .iter()
-            .find(|(n, _)| n == token)
-            .map(|(_, v)| v.clone())
-            .ok_or_else(|| anyhow!("`{token}` not found for a format width"))?,
-    };
-    match value {
-        Value::Int(i) => Ok(i),
-        Value::IntW(..) => value
-            .untag_int()
-            .ok_or_else(|| anyhow!("format width out of range")),
-        other => Err(anyhow!(
-            "format width must be an integer, got {}",
-            other.type_name()
-        )),
-    }
 }
 
 fn fill_str(c: char, n: usize) -> String {

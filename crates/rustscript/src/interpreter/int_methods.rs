@@ -225,16 +225,28 @@ fn int_arith_method(
         "saturating_mul" => {
             arg(args, 0).map(|b| IntOut::Same(saturate(width, recv.saturating_mul(b))))
         }
-        "wrapping_add" => {
-            arg(args, 0).map(|b| IntOut::Same(from_raw(width, AsPrimitive::<u128>::as_(recv.wrapping_add(b)))))
-        }
-        "wrapping_sub" => {
-            arg(args, 0).map(|b| IntOut::Same(from_raw(width, AsPrimitive::<u128>::as_(recv.wrapping_sub(b)))))
-        }
-        "wrapping_mul" => {
-            arg(args, 0).map(|b| IntOut::Same(from_raw(width, AsPrimitive::<u128>::as_(recv.wrapping_mul(b)))))
-        }
-        "wrapping_neg" => Ok(IntOut::Same(from_raw(width, AsPrimitive::<u128>::as_(-recv)))),
+        "wrapping_add" => arg(args, 0).map(|b| {
+            IntOut::Same(from_raw(
+                width,
+                AsPrimitive::<u128>::as_(recv.wrapping_add(b)),
+            ))
+        }),
+        "wrapping_sub" => arg(args, 0).map(|b| {
+            IntOut::Same(from_raw(
+                width,
+                AsPrimitive::<u128>::as_(recv.wrapping_sub(b)),
+            ))
+        }),
+        "wrapping_mul" => arg(args, 0).map(|b| {
+            IntOut::Same(from_raw(
+                width,
+                AsPrimitive::<u128>::as_(recv.wrapping_mul(b)),
+            ))
+        }),
+        "wrapping_neg" => Ok(IntOut::Same(from_raw(
+            width,
+            AsPrimitive::<u128>::as_(-recv),
+        ))),
         "checked_add" => arg(args, 0)
             .map(|b| IntOut::Checked(recv.checked_add(b).and_then(|v| in_range(width, v)))),
         "checked_sub" => arg(args, 0)

@@ -52,7 +52,7 @@ rust run FILE.rs     same as above
 rust -e 'CODE'       run a snippet, arguments after CODE go to it
 rust check FILE.rs   validate without running
 rust build FILE.rs   compile, cache, and run a native binary
-rust supported       list every bridged method per receiver and engine
+rust supported       list every bridged method per receiver
 rust clean           clear cached checks and builds
 rust update [VER]    install a release, the newest one by default
 rust --version       show version and build information
@@ -73,7 +73,8 @@ Cargo. Symlinks to scripts work too, including extensionless command names.
 
 - `rust FILE.rs` parses the source with
   [`syn`](https://github.com/dtolnay/syn), compiles it to bytecode, and runs it
-  on a register VM. It does not invoke Cargo or a type checker.
+  on a register VM over a multi thread tokio runtime, so `#[tokio::main]`
+  scripts get real concurrency. It does not invoke Cargo or a type checker.
 - `rust check FILE.rs` creates a small Cargo project and runs `cargo check`.
   It then inspects every compiled branch for method calls the interpreter does
   not implement. Results are cached by source hash.
@@ -122,7 +123,7 @@ Supported language features include:
 - formatting, named arguments, width, precision, and common macros
 - modules, imports, re-exports, constants, statics, and local path crates
 - `#[tokio::main]`, spawned tasks, joins, yielding, timers, and async HTTP
-- typed and dynamic `serde_json`, `regex`, and `chrono` in tokio mode too
+- typed and dynamic `serde_json`, `regex`, and `chrono`
 
 The standard-library bridge covers files, directories, paths, stdin and stdout,
 buffered I/O, processes, TCP sockets, environment variables, arguments, time,
@@ -171,7 +172,7 @@ Windows builds also bridge
 See the programs under `crates/examples/examples` for working examples of the
 language, standard library, and crate bridges, and
 [docs/supported.md](docs/supported.md) for the full generated list of bridged
-methods per receiver and engine.
+methods per receiver.
 
 ## Modules and local crates
 

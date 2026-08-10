@@ -1,14 +1,16 @@
-//! The `Command`, `Child`, and process output bridge.
-//! Split from `builtins.rs`.
+//! The `Command`, `Child`, and process output bridge, ported from the fast
+//! engine's `process.rs`. Children and their pipes are native handles, so a
+//! spawned process can be driven from concurrent tasks.
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::{Result, bail};
+use parking_lot::Mutex;
 
-use super::native::{self, Native};
+use super::native::Native;
+use super::native_methods;
 use super::std_bridge::path_like;
-use super::value::{Map, MapKey, MapKind, RStr, StructData, Value};
+use super::value::{StructData, Value};
 
 /// Build a real `Command` from a script `Command` value's fields. Every field
 /// that becomes an OS string goes through `path_like`, so a `Path` or `PathBuf`
@@ -18,7 +20,7 @@ pub(super) fn build_command(s: &StructData) -> std::process::Command {
     let program = s.get("program").map(|v| path_like(&v)).unwrap_or_default();
     let mut cmd = std::process::Command::new(&program);
     if let Some(Value::Vec(a)) = s.get("args") {
-        for item in a.borrow().iter() {
+        for item in a.lock().iter() {
             cmd.arg(path_like(item));
         }
     }
@@ -30,7 +32,7 @@ pub(super) fn build_command(s: &StructData) -> std::process::Command {
         }
     }
     if let Some(Value::Map(envs, _)) = s.get("envs") {
-        for (k, v) in envs.borrow().iter() {
+        for (k, v) in envs.lock().iter() {
             let key = path_like(&k.to_value());
             if matches!(v, Value::Unit) {
                 cmd.env_remove(key);
@@ -72,7 +74,7 @@ pub(super) fn status_command(s: &StructData) -> Value {
 
 /// Map a stored `Stdio` marker to a real `std::process::Stdio`, defaulting to
 /// inherit so a spawned child shares the terminal like a shell command.
-pub(super) fn stdio_for(s: &StructData, key: &str) -> std::process::Stdio {
+fn stdio_for(s: &StructData, key: &str) -> std::process::Stdio {
     stdio_or(s, key, std::process::Stdio::inherit())
 }
 
@@ -92,14 +94,14 @@ fn stdio_or(s: &StructData, key: &str, default: std::process::Stdio) -> std::pro
     }
 }
 
-/// The real `Stdio` behind an `Stdio::from(file)` marker. The handle is cloned, so the script's own
-/// `File` value stays usable after the child takes its copy.
+/// The real `Stdio` behind an `Stdio::from(file)` marker. The handle is cloned,
+/// so the script's own `File` value stays usable after the child takes its copy.
 fn stdio_from_file(file: Option<Value>) -> Option<std::process::Stdio> {
     let Some(Value::Native(handle)) = file else {
         return None;
     };
-    let borrowed = handle.borrow();
-    let Native::File(reader) = &*borrowed else {
+    let locked = handle.lock();
+    let Native::File(reader) = &*locked else {
         return None;
     };
     reader
@@ -128,22 +130,12 @@ pub(super) fn spawn_command(s: &StructData) -> Value {
     let stdout = child
         .stdout
         .take()
-        .map(|r| {
-            Native::Reader(std::io::BufReader::new(
-                Box::new(r) as Box<dyn std::io::Read>
-            ))
-            .wrap()
-        })
+        .map(reader_value)
         .map_or_else(Value::none, Value::some);
     let stderr = child
         .stderr
         .take()
-        .map(|r| {
-            Native::Reader(std::io::BufReader::new(
-                Box::new(r) as Box<dyn std::io::Read>
-            ))
-            .wrap()
-        })
+        .map(reader_value)
         .map_or_else(Value::none, Value::some);
     Value::ok(Value::struct_of(
         "Child",
@@ -154,6 +146,13 @@ pub(super) fn spawn_command(s: &StructData) -> Value {
             ("stderr".into(), stderr),
         ],
     ))
+}
+
+fn reader_value(r: impl std::io::Read + Send + 'static) -> Value {
+    Native::Reader(std::io::BufReader::new(
+        Box::new(r) as Box<dyn std::io::Read + Send>
+    ))
+    .wrap()
 }
 
 /// Build an `ExitStatus` value with `code` and `success`.
@@ -188,12 +187,15 @@ pub(super) fn make_output(out: std::process::Output) -> Value {
     )
 }
 
-pub(super) fn command_method(s: &Rc<StructData>, name: &str, args: &[Value]) -> Result<Value> {
-    let cmd_value = || Value::Struct(s.clone());
+pub(super) fn command_method(recv: &Value, name: &str, args: &[Value]) -> Result<Value> {
+    let Value::Struct(s) = recv else {
+        unreachable!()
+    };
+    let cmd_value = || recv.clone();
     Ok(match name {
         "arg" => {
             if let Some(Value::Vec(list)) = s.get("args") {
-                list.borrow_mut()
+                list.lock()
                     .push(args.first().cloned().unwrap_or(Value::Unit));
             }
             cmd_value()
@@ -201,7 +203,8 @@ pub(super) fn command_method(s: &Rc<StructData>, name: &str, args: &[Value]) -> 
         "args" => {
             if let (Some(Value::Vec(list)), Some(Value::Vec(extra))) = (s.get("args"), args.first())
             {
-                list.borrow_mut().extend(extra.borrow().iter().cloned());
+                let extra = extra.lock().clone();
+                list.lock().extend(extra);
             }
             cmd_value()
         }
@@ -210,29 +213,25 @@ pub(super) fn command_method(s: &Rc<StructData>, name: &str, args: &[Value]) -> 
             cmd_value()
         }
         "env" => {
-            let key = args
-                .first()
-                .map(super::value::Value::display)
-                .unwrap_or_default();
+            let key = args.first().map(Value::display).unwrap_or_default();
             let val = args.get(1).cloned().unwrap_or(Value::Unit);
             let envs = command_envs(s);
-            envs.borrow_mut().insert(MapKey::Str(RStr::new(key)), val);
+            if let Some(k) = Value::str(key).as_key() {
+                envs.lock().insert(k, val);
+            }
             cmd_value()
         }
         "env_remove" => {
-            let key = args
-                .first()
-                .map(super::value::Value::display)
-                .unwrap_or_default();
+            let key = args.first().map(Value::display).unwrap_or_default();
             let envs = command_envs(s);
-            envs.borrow_mut()
-                .insert(MapKey::Str(RStr::new(key)), Value::Unit);
+            if let Some(k) = Value::str(key).as_key() {
+                envs.lock().insert(k, Value::Unit);
+            }
             cmd_value()
         }
-        // Rejected rather than stored when it is not an Stdio, because a value this does not understand
-        // used to be kept and then quietly ignored when the command was built. `File::create(p).into()`
-        // took that path: the redirect never happened, the output went to the terminal, and the file was
-        // left empty with nothing to say why.
+        // Rejected rather than stored when it is not an Stdio, because a value
+        // this does not understand used to be kept and then quietly ignored
+        // when the command was built.
         "stdin" | "stdout" | "stderr" => {
             let arg = args.first().cloned().unwrap_or(Value::Unit);
             match &arg {
@@ -245,30 +244,28 @@ pub(super) fn command_method(s: &Rc<StructData>, name: &str, args: &[Value]) -> 
             s.set(name, arg);
             cmd_value()
         }
-        "spawn" => return Ok(spawn_command(s)),
+        "spawn" => spawn_command(s),
         "output" => run_command(s),
         "status" => status_command(s),
         _ => bail!("unknown method `{name}` on Command"),
     })
 }
 
-fn command_envs(s: &StructData) -> Rc<RefCell<Map>> {
+fn command_envs(s: &StructData) -> super::value::Map {
     if let Some(Value::Map(envs, _)) = s.get("envs") {
         envs
     } else {
-        let envs = Rc::new(RefCell::new(Map::default()));
-        s.set("envs", Value::Map(envs.clone(), MapKind::Map));
+        let envs: super::value::Map = Arc::new(Mutex::new(indexmap::IndexMap::default()));
+        s.set("envs", Value::Map(envs.clone(), super::value::MapKind::Map));
         envs
     }
 }
 
-/// Methods on a spawned `Child`. Lifecycle calls delegate to the real child
-/// handle; `wait_with_output` reads any piped stdout/stderr to the end first.
 /// Drop the real `ChildStdin` inside a shared handle, closing the pipe. Walks a
 /// `Some(Native)` wrapper from `child.stdin.take()`.
-pub(super) fn close_child_stdin(v: &Value) {
+fn close_child_stdin(v: &Value) {
     match v {
-        Value::Native(rc) => *rc.borrow_mut() = Native::Closed,
+        Value::Native(h) => *h.lock() = Native::Taken,
         Value::Enum {
             enum_name,
             variant,
@@ -282,13 +279,16 @@ pub(super) fn close_child_stdin(v: &Value) {
     }
 }
 
-pub(super) fn child_method(s: &StructData, name: &str, args: &mut [Value]) -> Result<Value> {
+/// Methods on a spawned `Child`. Lifecycle calls delegate to the real child
+/// handle; `wait_with_output` reads any piped stdout/stderr to the end first.
+pub(super) fn child_method(recv: &Value, name: &str, args: &mut [Value]) -> Result<Value> {
+    let Value::Struct(s) = recv else {
+        unreachable!()
+    };
     // Waiting on a child that was fed piped stdin must first close that pipe,
     // or the child blocks forever on EOF. Real Rust closes it when the taken
     // `ChildStdin` drops. The VM keeps every value alive in a register for the
-    // whole call, so a `let w = cat.stdin.take()` clone stays live and the
-    // writer never drops on its own. Close it through the shared handle instead,
-    // which drops the real `ChildStdin` no matter how many clones exist.
+    // whole call, so close it through the shared handle instead.
     if matches!(name, "wait" | "wait_with_output") {
         if let Some(v) = s.get("stdin") {
             close_child_stdin(&v);
@@ -300,7 +300,7 @@ pub(super) fn child_method(s: &StructData, name: &str, args: &mut [Value]) -> Re
         let err = drain_child_pipe(s, "stderr");
         let status = {
             let handle = child_handle(s)?;
-            let mut h = handle.borrow_mut();
+            let mut h = handle.lock();
             if let Native::Child(c) = &mut *h {
                 match c.wait() {
                     Ok(st) => st,
@@ -320,13 +320,13 @@ pub(super) fn child_method(s: &StructData, name: &str, args: &mut [Value]) -> Re
         )));
     }
     let handle = child_handle(s)?;
-    match native::native_method(&handle, name, args)? {
+    match native_methods::native_method(&handle, name, args)? {
         Some(v) => Ok(v),
         None => bail!("unknown method `{name}` on Child"),
     }
 }
 
-pub(super) fn child_handle(s: &StructData) -> Result<Rc<RefCell<Native>>> {
+fn child_handle(s: &StructData) -> Result<Arc<Mutex<Native>>> {
     match s.get("handle") {
         Some(Value::Native(h)) => Ok(h),
         _ => bail!("child handle missing"),
@@ -334,7 +334,7 @@ pub(super) fn child_handle(s: &StructData) -> Result<Rc<RefCell<Native>>> {
 }
 
 /// Read a child's piped stdout/stderr field to the end as a string.
-pub(super) fn drain_child_pipe(s: &StructData, key: &str) -> String {
+fn drain_child_pipe(s: &StructData, key: &str) -> String {
     let handle = match s.get(key) {
         Some(Value::Enum { data, .. }) => match data.first() {
             Some(Value::Native(h)) => h.clone(),
@@ -343,7 +343,7 @@ pub(super) fn drain_child_pipe(s: &StructData, key: &str) -> String {
         _ => return String::new(),
     };
     let mut target = [Value::str("")];
-    match native::native_method(&handle, "read_to_string", &mut target) {
+    match native_methods::native_method(&handle, "read_to_string", &mut target) {
         Ok(_) => {}
         Err(_) => return String::new(),
     }
@@ -351,21 +351,5 @@ pub(super) fn drain_child_pipe(s: &StructData, key: &str) -> String {
         out.to_string()
     } else {
         String::new()
-    }
-}
-
-/// The `HashMap::entry` slot, without closures. Returns the stored value; for
-/// container values that Rc-share, mutating the result mutates the map, so
-pub(super) fn exitstatus_method(s: &StructData, name: &str) -> Result<Value> {
-    let success = matches!(s.get("success"), Some(Value::Bool(true)));
-    let code = match s.get("code") {
-        Some(Value::Int(c)) => Some(c),
-        _ => None,
-    };
-    match super::shared::exit_status_core(name, success, code) {
-        Some(super::shared::ExitOut::Bool(b)) => Ok(Value::Bool(b)),
-        Some(super::shared::ExitOut::OptInt(Some(c))) => Ok(Value::some(Value::Int(c))),
-        Some(super::shared::ExitOut::OptInt(None)) => Ok(Value::none()),
-        None => bail!("unknown method `{name}` on ExitStatus"),
     }
 }

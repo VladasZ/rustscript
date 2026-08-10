@@ -1,90 +1,87 @@
-use std::cell::RefCell;
-use std::rc::Rc;
+//! The `Regex`, `Match` and `Captures` bridge. Mirrors
+//! `regex_bridge.rs` on the `Send + Sync` value model, so a `#[tokio::main]`
+//! script can compile a pattern once and match from concurrent tasks.
+
+use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
+use parking_lot::Mutex;
 
-use super::iterator::{regex_captures, regex_find};
-use super::methods::VArgs;
+use super::bridge::VArgs;
 use super::native::Native;
 use super::shared::{CapturesOut, MatchOut, RegexOut, captures_core, match_core, regex_core};
-use super::value::{RStr, Value};
+use super::value::Value;
 
-type CaptureNames = Rc<Vec<(Rc<str>, usize)>>;
+type CaptureNames = Arc<Vec<(Arc<str>, usize)>>;
 
 #[derive(Clone)]
 pub struct RegexValue {
-    pub compiled: Rc<regex::Regex>,
-    pattern: Rc<RStr>,
+    pub compiled: Arc<regex::Regex>,
+    pattern: Arc<str>,
     pub names: CaptureNames,
 }
 
 #[derive(Clone)]
 pub struct MatchValue {
-    pub source: Rc<RStr>,
+    pub source: Arc<str>,
     pub start: usize,
     pub end: usize,
 }
 
 #[derive(Clone)]
 pub struct CapturesValue {
-    pub source: Rc<RStr>,
+    pub source: Arc<str>,
     pub groups: Vec<Option<(usize, usize)>>,
     pub names: CaptureNames,
 }
 
-pub(super) fn make_regex(compiled: regex::Regex, pattern: String) -> Value {
+pub(super) fn make_regex(compiled: regex::Regex, pattern: &str) -> Value {
     let names = compiled
         .capture_names()
         .enumerate()
-        .filter_map(|(index, name)| name.map(|name| (Rc::from(name), index)))
+        .filter_map(|(index, name)| name.map(|name| (Arc::from(name), index)))
         .collect();
     Native::Regex(RegexValue {
-        compiled: Rc::new(compiled),
-        pattern: RStr::new(pattern),
-        names: Rc::new(names),
+        compiled: Arc::new(compiled),
+        pattern: Arc::from(pattern),
+        names: Arc::new(names),
     })
     .wrap()
 }
 
-fn text_arg(args: &[Value], index: usize) -> Rc<RStr> {
+fn text_arg(args: &[Value], index: usize) -> Arc<str> {
     match args.get(index) {
         Some(Value::Str(text)) => text.clone(),
-        Some(value) => RStr::new(value.display()),
-        None => RStr::new(""),
+        Some(value) => Arc::from(value.display().as_str()),
+        None => Arc::from(""),
     }
 }
 
-fn replacement_arg(args: &[Value]) -> String {
-    args.get(1).map(Value::display).unwrap_or_default()
-}
-
-fn match_value(source: Rc<RStr>, start: usize, end: usize) -> Value {
+fn match_value(source: Arc<str>, start: usize, end: usize) -> Value {
     Native::RegexMatch(MatchValue { source, start, end }).wrap()
 }
 
+/// Dispatch a method on a regex-family handle. `Ok(None)` when the handle is
+/// not one of these, so the caller can keep looking.
 pub(super) fn regex_native_method(
-    handle: &Rc<RefCell<Native>>,
+    handle: &Arc<Mutex<Native>>,
     method: &str,
     args: &[Value],
 ) -> Result<Option<Value>> {
-    let kind = {
-        let native = handle.borrow();
-        match &*native {
-            Native::Regex(regex) => RegexKind::Regex(regex.clone()),
-            Native::RegexMatch(found) => RegexKind::Match(found.clone()),
-            Native::RegexCaptures(captures) => RegexKind::Captures(captures.clone()),
-            _ => return Ok(None),
-        }
+    let kind = match &*handle.lock() {
+        Native::Regex(regex) => Kind::Regex(regex.clone()),
+        Native::RegexMatch(found) => Kind::Match(found.clone()),
+        Native::RegexCaptures(captures) => Kind::Captures(captures.clone()),
+        _ => return Ok(None),
     };
-    let value = match kind {
-        RegexKind::Regex(regex) => regex_method(&regex, method, args)?,
-        RegexKind::Match(found) => match_method(&found, method)?,
-        RegexKind::Captures(captures) => captures_method(&captures, method, args)?,
-    };
-    Ok(Some(value))
+    Ok(Some(match kind {
+        Kind::Regex(regex) => regex_method(&regex, method, args)?,
+        Kind::Match(found) => match_method(&found, method)?,
+        Kind::Captures(captures) => captures_method(&captures, method, args)?,
+    }))
 }
 
-enum RegexKind {
+enum Kind {
     Regex(RegexValue),
     Match(MatchValue),
     Captures(CapturesValue),
@@ -92,13 +89,14 @@ enum RegexKind {
 
 fn regex_method(regex: &RegexValue, method: &str, args: &[Value]) -> Result<Value> {
     let source = text_arg(args, 0);
-    // The lazy iterator forms cannot come out of the eager shared core.
+    // The iterator forms are lazy walks over the source, engine specific by
+    // design, so they stay out of the shared core.
     match method {
-        "find_iter" => return Ok(regex_find(regex.clone(), source)),
-        "captures_iter" => return Ok(regex_captures(regex.clone(), source)),
+        "find_iter" => return Ok(super::iterator::regex_find(regex.clone(), source)),
+        "captures_iter" => return Ok(super::iterator::regex_captures(regex.clone(), source)),
         _ => {}
     }
-    let replacement = || replacement_arg(args);
+    let replacement = || args.get(1).map(Value::display).unwrap_or_default();
     let Some(out) = regex_core(&regex.compiled, method, &source, &replacement) else {
         bail!("unknown method `{method}` on Regex");
     };
@@ -142,9 +140,17 @@ fn captures_method(captures: &CapturesValue, method: &str, args: &[Value]) -> Re
     }
 }
 
-pub(super) fn capture_index(handle: &Rc<RefCell<Native>>, key: &Value) -> Result<Value> {
+fn group_by_name(captures: &CapturesValue, name: &str) -> Option<usize> {
+    captures
+        .names
+        .iter()
+        .find_map(|(candidate, index)| (candidate.as_ref() == name).then_some(*index))
+}
+
+/// `caps[1]` and `caps["name"]`, which panic in real Rust on a missing group.
+pub(super) fn capture_index(handle: &Arc<Mutex<Native>>, key: &Value) -> Result<Value> {
     let captures = {
-        let native = handle.borrow();
+        let native = handle.lock();
         let Native::RegexCaptures(captures) = &*native else {
             bail!("cannot index {}", native.type_name());
         };
@@ -152,10 +158,7 @@ pub(super) fn capture_index(handle: &Rc<RefCell<Native>>, key: &Value) -> Result
     };
     let index = match key {
         Value::Int(index) if *index >= 0 => usize::try_from(*index)?,
-        Value::Str(name) => captures
-            .names
-            .iter()
-            .find_map(|(candidate, index)| (candidate.as_ref() == name.as_str()).then_some(*index))
+        Value::Str(name) => group_by_name(&captures, name)
             .ok_or_else(|| anyhow!("no capture group named `{name}`"))?,
         _ => bail!("invalid capture index"),
     };

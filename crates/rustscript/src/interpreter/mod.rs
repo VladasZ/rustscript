@@ -1,10 +1,10 @@
-mod builtins;
+mod assoc;
+mod bridge;
 mod bytecode;
 mod compile;
 mod console;
 pub mod coverage;
 mod crates_bridge;
-mod eval;
 mod format;
 mod higher_order;
 mod http;
@@ -14,32 +14,23 @@ mod json_bridge;
 mod jwt_bridge;
 mod methods;
 mod native;
+mod native_methods;
 mod numeric;
 mod ops;
-mod pbridge;
-mod pchunk;
 mod pdf_bridge;
-mod phttp;
-mod pjson;
-mod pnative;
-mod pops;
-mod pprocess;
-mod pratatui;
-mod pregex;
 mod process;
-mod pstd;
-mod pvalue;
-mod pvm;
+mod ratatui;
 mod ratatui_bridge;
 mod ratatui_render;
 mod regex_bridge;
 mod resolver;
-mod runner;
+mod serde_attrs;
 mod service_bridge;
 mod shared;
 mod std_bridge;
 mod typeir;
 mod value;
+mod vecmap;
 mod vm;
 mod vm_support;
 mod winreg_bridge;
@@ -48,8 +39,8 @@ mod xmltree_bridge;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::mem::replace;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -60,25 +51,34 @@ use crate::loader::ModuleSrc;
 use bytecode::Chunk;
 use compile::{Compiler, Ctx};
 use resolver::{ModuleSyms, Res, Resolver, StructDef};
-pub use value::Value;
 pub use vm_support::{ErrReturn, ScriptPanic};
 
 /// Set by the real Ctrl-C handler, which must stay `Send`, and drained by the
 /// interpreter between loop iterations so it can run the script's own handler.
 static CTRLC_HIT: AtomicBool = AtomicBool::new(false);
 static CTRLC_INSTALLED: OnceLock<bool> = OnceLock::new();
+static CTRLC_HANDLER: parking_lot::Mutex<Option<value::Value>> = parking_lot::Mutex::new(None);
 
-thread_local! {
-    static CTRLC_HANDLER: RefCell<Option<Value>> = const { RefCell::new(None) };
-}
-
-pub(crate) fn set_ctrlc_handler(closure: Value) -> Result<()> {
-    CTRLC_HANDLER.with(|h| *h.borrow_mut() = Some(closure));
+pub(crate) fn set_ctrlc_handler(closure: value::Value) -> Result<()> {
+    *CTRLC_HANDLER.lock() = Some(closure);
     if CTRLC_INSTALLED.set(true).is_ok() {
         ctrlc::set_handler(|| CTRLC_HIT.store(true, Ordering::SeqCst))
             .map_err(|e| anyhow!("could not install ctrl-c handler: {e}"))?;
     }
     Ok(())
+}
+
+/// The script's Ctrl-C handler when a Ctrl-C is pending, None otherwise.
+/// Draining the flag here means each Ctrl-C runs the handler once.
+pub(crate) fn pending_ctrlc_handler() -> Option<value::Value> {
+    // Cheap relaxed load first, this runs on every loop iteration.
+    if !CTRLC_HIT.load(Ordering::Relaxed) {
+        return None;
+    }
+    if !CTRLC_HIT.swap(false, Ordering::SeqCst) {
+        return None;
+    }
+    CTRLC_HANDLER.lock().clone()
 }
 
 /// The arguments a script sees through `std::env::args()`. Index 0 is the
@@ -95,29 +95,28 @@ pub(crate) fn script_args() -> Vec<String> {
     SCRIPT_ARGS.get().cloned().unwrap_or_default()
 }
 
-/// Entry point for `#[tokio::main]` scripts. These run on the parallel engine
-/// with a real multi thread tokio runtime, values backed by `Arc` so tasks move
-/// across threads.
-pub fn run_parallel(modules: &[ModuleSrc]) -> Result<()> {
-    let interp = Interp::load(modules, true)?;
-    interp.run_parallel()
+/// Run a program. Every script runs on the one engine, a multi thread tokio
+/// runtime whose values are backed by `Arc`. `async_mode` marks the script as
+/// `#[tokio::main]`, which is what allows `.await`, `tokio::spawn`, and
+/// `join!` to compile.
+pub fn run(modules: &[ModuleSrc], async_mode: bool) -> Result<()> {
+    let interp = Interp::load(modules, async_mode)?;
+    interp.run()
 }
 
 /// A module level const or static: compiled once, evaluated on first read.
 enum GlobalSlot {
-    Todo(Rc<Chunk>),
-    Busy,
-    Ready(Value),
+    Todo(Arc<Chunk>),
 }
 
 /// The whole program, compiled to bytecode and ready to run.
 pub struct Interp {
     /// Every function of every module, indexed by id. Direct calls use the id.
-    functions: Vec<Rc<Chunk>>,
+    functions: Vec<Arc<Chunk>>,
     /// Canonical name to function id, for calls resolved at runtime.
     fn_index: HashMap<String, u32>,
     /// Inherent and trait methods, keyed by (canonical type name, method name).
-    methods: HashMap<(String, String), Rc<Chunk>>,
+    methods: HashMap<(String, String), Arc<Chunk>>,
     /// Module tree and item tables, shared by compile and runtime lookups.
     resolver: Resolver,
     /// Consts and statics, evaluated lazily so declaration order is free.
@@ -125,8 +124,6 @@ pub struct Interp {
     /// Root module imports, used by the bridge dispatch to expand aliases.
     uses: HashMap<String, Vec<String>>,
     main_index: Option<u32>,
-    /// Lazily built field layouts for user structs, shared across coercions.
-    shapes: RefCell<HashMap<Rc<str>, Rc<eval::Shape>>>,
 }
 
 /// Stated return scalars of the script's own functions, one more place a
@@ -224,7 +221,7 @@ impl Interp {
                 fn_returns: &fn_returns,
             };
             let mut c = Compiler::new(&ctx);
-            functions.push(Rc::new(c.compile_fn(&f.sig, &f.block)?));
+            functions.push(Arc::new(c.compile_fn(&f.sig, &f.block)?));
         }
         let mut methods = HashMap::default();
         for (ty, name, m, f) in &pending_methods {
@@ -239,7 +236,7 @@ impl Interp {
             let mut c = Compiler::new(&ctx);
             methods.insert(
                 (ty.clone(), name.clone()),
-                Rc::new(c.compile_fn(&f.sig, &f.block)?),
+                Arc::new(c.compile_fn(&f.sig, &f.block)?),
             );
         }
         let mut globals = Vec::with_capacity(pending_consts.len());
@@ -253,7 +250,7 @@ impl Interp {
                 fn_returns: &fn_returns,
             };
             let mut c = Compiler::new(&ctx);
-            globals.push(GlobalSlot::Todo(Rc::new(c.compile_const(expr)?)));
+            globals.push(GlobalSlot::Todo(Arc::new(c.compile_const(expr)?)));
         }
 
         let fn_index = build_fn_index(&resolver);
@@ -267,41 +264,90 @@ impl Interp {
             globals: RefCell::new(globals),
             uses,
             main_index,
-            shapes: RefCell::new(HashMap::default()),
         })
-    }
-
-    /// If a Ctrl-C arrived, run the script's registered handler closure.
-    pub(super) fn run_pending_ctrlc(&self) -> Result<()> {
-        // Cheap relaxed load first, this runs on every loop iteration.
-        if !CTRLC_HIT.load(Ordering::Relaxed) {
-            return Ok(());
-        }
-        if !CTRLC_HIT.swap(false, Ordering::SeqCst) {
-            return Ok(());
-        }
-        let handler = CTRLC_HANDLER.with(|h| h.borrow().clone());
-        if let Some(Value::Closure(clo)) = handler {
-            self.call_closure(&clo, &[])?;
-        }
-        Ok(())
     }
 
     /// Run `fn main`. Its returned `Result::Err` is reported like anyhow does.
     /// Report methods the interpreter does not implement, without running
     /// anything. Used by `rust check`.
-    pub fn coverage(&self, engine: coverage::Engine) -> Vec<coverage::Finding> {
+    pub fn coverage(&self) -> Vec<coverage::Finding> {
         let user = self.methods.keys().map(|(_, m)| m.clone());
-        coverage::report(&self.functions, user, engine)
+        coverage::report(&self.functions, user)
     }
 
-    pub fn run_main(&self) -> Result<()> {
+    /// Run `main` as a blocking task on a multi thread tokio runtime, so
+    /// awaited futures can be driven with `block_on` from a worker thread.
+    fn run(&self) -> Result<()> {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| anyhow!("cannot start tokio runtime: {e}"))?;
+        let functions = self.functions.clone();
+        let methods = self.methods.clone();
+        let globals: Vec<parking_lot::Mutex<vm::GlobalSlot>> = self
+            .globals
+            .borrow()
+            .iter()
+            .map(|slot| {
+                let GlobalSlot::Todo(c) = slot;
+                parking_lot::Mutex::new(vm::GlobalSlot::Todo(c.clone()))
+            })
+            .collect();
+        // The runtime tables for dynamic dispatch, precomputed here so nothing
+        // at runtime touches the syn AST, which is not `Send`.
+        let enums: Vec<vm::EnumDef> = self
+            .resolver
+            .enums
+            .iter()
+            .map(|(name, def)| vm::EnumDef {
+                name: Arc::from(&**name),
+                variants: def
+                    .variants
+                    .iter()
+                    .map(|v| {
+                        (
+                            Arc::from(v.ident.to_string().as_str()),
+                            matches!(v.fields, syn::Fields::Unit),
+                        )
+                    })
+                    .collect(),
+            })
+            .collect();
+        let unit_structs: Vec<Arc<str>> = self
+            .resolver
+            .structs
+            .iter()
+            .filter(|(_, def)| matches!(def.ast.fields, syn::Fields::Unit))
+            .map(|(name, _)| Arc::from(&**name))
+            .collect();
+        let struct_names: std::collections::HashSet<String> = self
+            .resolver
+            .structs
+            .keys()
+            .map(ToString::to_string)
+            .collect();
+        let pinterp = Arc::new(vm::Vm {
+            functions,
+            fn_index: self.fn_index.clone(),
+            methods,
+            globals,
+            structs: self.build_structs(),
+            uses: self.uses.clone(),
+            enums,
+            unit_structs,
+            struct_names,
+            rt: rt.handle().clone(),
+        });
         let idx = self
             .main_index
-            .ok_or_else(|| anyhow!("no `main` function found"))?;
-        let chunk = self.functions[idx as usize].clone();
-        let ret = self.run_chunk(&chunk, &[], &[])?;
-        if let Value::Enum {
+            .ok_or_else(|| anyhow!("no `main` function found"))? as usize;
+        let main_chunk = pinterp.functions[idx].clone();
+        let runner = pinterp.clone();
+        let joined = rt.block_on(async move {
+            tokio::task::spawn_blocking(move || runner.run_chunk(&main_chunk, &[], &[])).await
+        });
+        let ret = joined.map_err(|e| anyhow!("main task panicked: {e}"))??;
+        if let value::Value::Enum {
             enum_name,
             variant,
             data,
@@ -315,119 +361,12 @@ impl Interp {
         Ok(())
     }
 
-    /// Run a `#[tokio::main]` program on the parallel engine. Compiles once to
-    /// the fast bytecode, converts it to `Arc` based `PChunk`, then runs `main`
-    /// as a blocking task on a multi thread tokio runtime so awaited futures can
-    /// be driven with `block_on` from a worker.
-    fn run_parallel(&self) -> Result<()> {
-        use std::sync::Arc;
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| anyhow!("cannot start tokio runtime: {e}"))?;
-        let functions: Vec<Arc<pchunk::PChunk>> =
-            self.functions.iter().map(|c| pchunk::convert(c)).collect();
-        let methods = self
-            .methods
-            .iter()
-            .map(|(k, c)| (k.clone(), pchunk::convert(c)))
-            .collect();
-        let globals: Vec<parking_lot::Mutex<pvm::PGlobalSlot>> = self
-            .globals
-            .borrow()
-            .iter()
-            .map(|slot| {
-                let g = match slot {
-                    GlobalSlot::Todo(c) => pvm::PGlobalSlot::Todo(pchunk::convert(c)),
-                    _ => pvm::PGlobalSlot::Busy,
-                };
-                parking_lot::Mutex::new(g)
-            })
-            .collect();
-        let pinterp = Arc::new(pvm::PInterp {
-            functions,
-            fn_index: self.fn_index.clone(),
-            methods,
-            globals,
-            structs: self.build_pstructs(),
-            rt: rt.handle().clone(),
-        });
-        let idx = self
-            .main_index
-            .ok_or_else(|| anyhow!("no `main` function found"))? as usize;
-        let main_chunk = pinterp.functions[idx].clone();
-        let runner = pinterp.clone();
-        let joined = rt.block_on(async move {
-            tokio::task::spawn_blocking(move || runner.run_chunk(&main_chunk, &[], &[])).await
-        });
-        let ret = joined.map_err(|e| anyhow!("main task panicked: {e}"))??;
-        if let pvalue::PValue::Enum {
-            enum_name,
-            variant,
-            data,
-        } = &ret
-            && &**enum_name == "Result"
-            && &**variant == "Err"
-        {
-            let msg = data
-                .first()
-                .map(pvalue::PValue::display)
-                .unwrap_or_default();
-            return Err(anyhow::Error::new(vm_support::ErrReturn(msg)));
-        }
-        Ok(())
-    }
-
-    // -- lookups used by the bridge dispatch and the VM ---------------------
-
-    pub(super) fn user_function(&self, name: &str) -> Option<Rc<Chunk>> {
-        self.fn_index
-            .get(name)
-            .map(|&i| self.functions[i as usize].clone())
-    }
-
-    pub(super) fn user_method(&self, ty: &str, name: &str) -> Option<Rc<Chunk>> {
-        self.methods
-            .get(&(ty.to_string(), name.to_string()))
-            .cloned()
-    }
-
-    fn structs(&self) -> &HashMap<Rc<str>, StructDef> {
+    fn structs(&self) -> &HashMap<Arc<str>, StructDef> {
         &self.resolver.structs
-    }
-
-    fn enums(&self) -> &HashMap<Rc<str>, Rc<syn::ItemEnum>> {
-        &self.resolver.enums
     }
 
     fn resolver(&self) -> &Resolver {
         &self.resolver
-    }
-
-    /// Value of a const or static, evaluated on first use so cross module
-    /// declaration order never matters.
-    fn global(&self, idx: usize) -> Result<Value> {
-        {
-            let globals = self.globals.borrow();
-            match &globals[idx] {
-                GlobalSlot::Ready(v) => return Ok(v.clone()),
-                GlobalSlot::Busy => bail!("constant initializers depend on each other in a cycle"),
-                GlobalSlot::Todo(_) => {}
-            }
-        }
-        let chunk = {
-            let mut globals = self.globals.borrow_mut();
-            match replace(&mut globals[idx], GlobalSlot::Busy) {
-                GlobalSlot::Todo(c) => c,
-                other => {
-                    globals[idx] = other;
-                    bail!("constant initializers depend on each other in a cycle");
-                }
-            }
-        };
-        let v = self.run_chunk(&chunk, &[], &[])?;
-        self.globals.borrow_mut()[idx] = GlobalSlot::Ready(v.clone());
-        Ok(v)
     }
 }
 
@@ -478,7 +417,7 @@ fn register_item(
         }
         Item::Struct(s) => {
             let name = s.ident.to_string();
-            let canon: Rc<str> = resolver.canon(m, &name).into();
+            let canon: Arc<str> = resolver.canon(m, &name).into();
             resolver.modules[m].structs.insert(name, canon.clone());
             resolver.structs.insert(
                 canon,
@@ -490,7 +429,7 @@ fn register_item(
         }
         Item::Enum(e) => {
             let name = e.ident.to_string();
-            let canon: Rc<str> = resolver.canon(m, &name).into();
+            let canon: Arc<str> = resolver.canon(m, &name).into();
             resolver.modules[m].enums.insert(name, canon.clone());
             resolver.enums.insert(canon, Rc::new(e.clone()));
         }

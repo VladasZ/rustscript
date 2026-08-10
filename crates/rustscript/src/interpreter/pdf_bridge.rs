@@ -5,10 +5,11 @@
 //! `(u32, u16)` tuple lopdf defines, carried here as a plain tuple value.
 
 use anyhow::{Result, bail};
+use indexmap::IndexMap;
 use lopdf::{Document, ObjectId};
 
 use super::native::Native;
-use super::value::{Map, Value};
+use super::value::Value;
 
 pub(super) fn load(path: &str) -> Value {
     match Document::load(path) {
@@ -26,7 +27,7 @@ pub(super) fn document_method(
     Ok(Some(match name {
         // BTreeMap of page number to page ObjectId, as a map of int to tuple.
         "get_pages" => {
-            let mut map = Map::default();
+            let mut map = IndexMap::default();
             for (num, id) in doc.get_pages() {
                 let key = Value::Int(i64::from(num))
                     .into_key()
@@ -55,10 +56,7 @@ pub(super) fn document_method(
         }
         // The real save returns the created File; scripts drop it, so Unit.
         "save" => {
-            let path = args
-                .first()
-                .map(super::value::Value::display)
-                .unwrap_or_default();
+            let path = args.first().map(Value::display).unwrap_or_default();
             match doc.save(&path) {
                 Ok(_) => Value::ok(Value::Unit),
                 Err(e) => Value::err(Value::str(e.to_string())),
@@ -78,7 +76,7 @@ fn object_id_value(id: ObjectId) -> Value {
 /// An `ObjectId` argument, the `(u32, u16)` tuple `get_pages` handed out.
 fn object_id_arg(args: &[Value], i: usize) -> Result<ObjectId> {
     if let Some(Value::Tuple(items)) = args.get(i) {
-        let items = items.borrow();
+        let items = items.lock();
         if let (Some(Value::Int(a)), Some(Value::Int(b))) = (items.first(), items.get(1)) {
             return Ok((u32::try_from(*a)?, u16::try_from(*b)?));
         }
@@ -92,7 +90,7 @@ fn bytes_arg(args: &[Value], i: usize) -> Vec<u8> {
         return Vec::new();
     };
     items
-        .borrow()
+        .lock()
         .iter()
         .filter_map(|v| match v {
             Value::Int(n) => u8::try_from(*n).ok(),

@@ -4,7 +4,6 @@
 //! and the common macros are lowered inline.
 
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
@@ -54,7 +53,7 @@ struct FnState {
     coerces: Vec<TypeIr>,
     paths: Vec<(Vec<String>, Option<TypeIr>)>,
     names: Vec<MethodName>,
-    children: Vec<Rc<Chunk>>,
+    children: Vec<Arc<Chunk>>,
     child_caps: Vec<Vec<CapSource>>,
     upvalues: Vec<(String, CapSource)>,
     mutable_locals: HashSet<Reg>,
@@ -64,7 +63,7 @@ struct FnState {
     num_params: usize,
     param_types: Vec<Option<String>>,
     name: String,
-    generics: Vec<Rc<str>>,
+    generics: Vec<Arc<str>>,
     call_type_args: Vec<Arc<[TypeIr]>>,
 }
 
@@ -227,10 +226,10 @@ impl<'a> Compiler<'a> {
         self.frames.push(FnState::new(sig.ident.to_string()));
         // Record generic parameter names so a caller's turbofish type args can
         // be bound to them when the body resolves a type, e.g. `from_str::<T>`.
-        let generics: Vec<Rc<str>> = sig
+        let generics: Vec<Arc<str>> = sig
             .generics
             .type_params()
-            .map(|p| Rc::from(p.ident.to_string().as_str()))
+            .map(|p| Arc::from(p.ident.to_string().as_str()))
             .collect();
         self.cur().generics = generics;
         // Parameters occupy the first registers, self first if present.
@@ -418,7 +417,7 @@ impl<'a> Compiler<'a> {
 
     fn enum_variant(
         &self,
-        enum_name: &Rc<str>,
+        enum_name: &Arc<str>,
         rest: &[String],
         fields: impl Fn(&syn::Fields) -> bool,
     ) -> Option<EnumVariant> {
@@ -430,7 +429,7 @@ impl<'a> Compiler<'a> {
             .find(|variant| variant.ident == variant_name && fields(&variant.fields))?;
         Some(EnumVariant {
             enum_name: enum_name.clone(),
-            variant: Rc::from(variant.ident.to_string()),
+            variant: Arc::from(variant.ident.to_string()),
         })
     }
 

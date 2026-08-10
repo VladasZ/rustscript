@@ -4,7 +4,7 @@
 //! come back into the script's buffer, so an interpreted script and the same
 //! file compiled by cargo paint identical output.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::Result;
 use anyhow::bail;
@@ -155,7 +155,7 @@ fn line_from(v: &Value) -> Value {
 /// A builder method returns a fresh value the way the real consuming builders
 /// do, so a script that keeps the earlier value still sees the earlier state.
 fn with(s: &StructData, field: &str, v: Value) -> Value {
-    let out = Value::structure(Rc::clone(&s.shape), s.values.borrow().clone());
+    let out = Value::structure(Arc::clone(&s.shape), s.values.lock().clone());
     if let Value::Struct(data) = &out {
         data.set(field, v);
     }
@@ -187,9 +187,9 @@ fn add_modifier(s: &StructData, m: ratatui::style::Modifier) -> Value {
 }
 
 pub(super) fn modifier_method(s: &StructData, name: &str, args: &[Value]) -> Result<Value> {
-    let mine = value_modifier(&Value::Struct(Rc::new(StructData {
-        shape: Rc::clone(&s.shape),
-        values: std::cell::RefCell::new(s.values.borrow().clone()),
+    let mine = value_modifier(&Value::Struct(Arc::new(StructData {
+        shape: Arc::clone(&s.shape),
+        values: parking_lot::Mutex::new(s.values.lock().clone()),
     })));
     let other = args
         .first()
@@ -290,7 +290,7 @@ pub(super) fn buffer_method(s: &StructData, name: &str, args: &[Value]) -> Resul
                 .map_or(Rect::new(0, 0, 0, 0), value_rect);
             match (cell_index(area, x, y), s.get("content")) {
                 (Some(index), Some(Value::Vec(cells))) => {
-                    let cells = cells.borrow();
+                    let cells = cells.lock();
                     match cells.get(index) {
                         Some(cell) => Value::some(cell.clone()),
                         None => Value::none(),
@@ -333,7 +333,7 @@ fn cell_index(area: Rect, x: u16, y: u16) -> Option<usize> {
 }
 
 fn rebuild(s: &StructData) -> Value {
-    Value::structure(Rc::clone(&s.shape), s.values.borrow().clone())
+    Value::structure(Arc::clone(&s.shape), s.values.lock().clone())
 }
 
 fn build_block(v: &Value) -> Option<Block<'static>> {

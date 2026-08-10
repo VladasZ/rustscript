@@ -1,20 +1,46 @@
-//! Builtin methods on the plain value types: String, Vec, `HashMap`,
-//! numbers, Option, and Result. Split from `builtins.rs`.
+//! Builtin methods on strings, Option, Result, entries, and the generic
+//! any-receiver names, from the
+//! `methods.rs`. Same semantics, `Arc` model.
 
-use num_traits::AsPrimitive;
-use std::cell::RefCell;
-use std::mem::take;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
 
+use super::bridge::VArgs;
 use super::bytecode::{BuiltinId, MethodName, ScalarTy};
-
-use super::value::{Map, MapKind, RStr, StructData, Value};
-
-use super::builtins::make_ordering;
+use super::iterator;
 use super::ops::compare_values;
-use super::shared::{self, Args, CharOut, F32Out, Num, NumOut, Parsed, StrOut, usize_i64};
+use super::shared::{self, CharOut, Parsed, StrOut, usize_i64};
+use super::value::{StructData, Value};
+
+/// `std::cmp::Ordering` as the enum value scripts match on.
+pub(super) fn make_ordering(o: std::cmp::Ordering) -> Value {
+    let variant = match o {
+        std::cmp::Ordering::Less => "Less",
+        std::cmp::Ordering::Equal => "Equal",
+        std::cmp::Ordering::Greater => "Greater",
+    };
+    Value::Enum {
+        enum_name: Arc::from("Ordering"),
+        variant: Arc::from(variant),
+        data: Arc::from(Vec::new()),
+    }
+}
+
+pub(super) fn ordering_from_value(v: &Value) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    match v {
+        Value::Enum {
+            enum_name, variant, ..
+        } if &**enum_name == "Ordering" => match &**variant {
+            "Less" => Some(Less),
+            "Equal" => Some(Equal),
+            "Greater" => Some(Greater),
+            _ => None,
+        },
+        _ => None,
+    }
+}
 
 /// `map.entry(k).or_insert_with(Vec::new).push(x)` accumulates in place.
 pub(super) fn entry_method(s: &StructData, name: &str, args: &[Value]) -> Result<Value> {
@@ -28,11 +54,11 @@ pub(super) fn entry_method(s: &StructData, name: &str, args: &[Value]) -> Result
     Ok(match name {
         "or_insert" => {
             let default = args.first().cloned().unwrap_or(Value::Unit);
-            let mut map = m.borrow_mut();
+            let mut map = m.lock();
             map.entry(key).or_insert(default).clone()
         }
         "or_default" => {
-            let mut map = m.borrow_mut();
+            let mut map = m.lock();
             map.entry(key)
                 .or_insert_with(|| Value::vec(Vec::new()))
                 .clone()
@@ -42,33 +68,25 @@ pub(super) fn entry_method(s: &StructData, name: &str, args: &[Value]) -> Result
     })
 }
 
-/// The `serde_json` `is_*` family. A json value is a plain interpreter value
-/// here, so each one is a type test, answered from the shared table so the
-/// parallel engine cannot drift from this one.
+/// The `serde_json` `is_*` family, answered from the shared table.
 pub(super) fn json_type_test(recv: &Value, name: &str) -> Option<Value> {
     shared::json_type_test(json_kind(recv), name).map(Value::Bool)
 }
 
 /// The `serde_json` methods that apply to a whole `Value` whatever shape it
-/// turned out to be, so they are answered before the per type dispatch.
-///
-/// `pointer` and `pointer_mut` are the RFC 6901 lookup, and a pointer that
-/// leaves the tree answers None instead of failing. The interpreter shares its
-/// containers, so the mut form hands back the same value the plain one does.
-///
-/// `get` reaches here only on a shape with no lookup of its own, a string, a
-/// number or a bool, where serde answers None rather than failing. A map, a
-/// vec and an Option each have their own `get` and never reach this. A range
-/// argument on a string is `str::get`, a different method, so that one is left
-/// alone rather than silently answered None.
+/// turned out to be, so they are answered before the per type dispatch. See
+/// each arm for what it answers and why.
 pub(super) fn json_value_method(recv: &Value, name: &str, args: &[Value]) -> Option<Value> {
     if name == "get" {
         return match recv {
             Value::Str(_) if matches!(args.first(), Some(Value::Range { .. })) => None,
-            Value::Str(_) | Value::Int(_) | Value::IntW(..) | Value::Float(_) | Value::F32(_) => {
-                Some(Value::none())
-            }
-            Value::Bool(_) | Value::Unit => Some(Value::none()),
+            Value::Str(_)
+            | Value::Int(_)
+            | Value::IntW(..)
+            | Value::Float(_)
+            | Value::F32(_)
+            | Value::Bool(_)
+            | Value::Unit => Some(Value::none()),
             _ => None,
         };
     }
@@ -84,9 +102,9 @@ pub(super) fn json_value_method(recv: &Value, name: &str, args: &[Value]) -> Opt
         let next = match &here {
             Value::Map(map, _) => Value::str(token)
                 .as_key()
-                .and_then(|key| map.borrow().get(&key).cloned()),
+                .and_then(|key| map.lock().get(&key).cloned()),
             Value::Vec(items) => shared::json_pointer_index(&token)
-                .and_then(|index| items.borrow().get(index).cloned()),
+                .and_then(|index| items.lock().get(index).cloned()),
             _ => None,
         };
         match next {
@@ -97,8 +115,8 @@ pub(super) fn json_value_method(recv: &Value, name: &str, args: &[Value]) -> Opt
     Some(Value::some(here))
 }
 
-/// The json shape of a fast engine value.
-fn json_kind(recv: &Value) -> shared::JsonKind {
+/// The json shape of a runtime value.
+pub(super) fn json_kind(recv: &Value) -> shared::JsonKind {
     use shared::JsonKind as K;
     match recv {
         Value::Map(..) => K::Object,
@@ -121,9 +139,9 @@ fn json_kind(recv: &Value) -> shared::JsonKind {
 pub(super) fn generic_method(recv: &Value, name: &str, args: &[Value]) -> Result<Value> {
     match (recv, name) {
         // Values are structurally typed here, so a conversion that only changes
-        // the static type is a no-op. `vec.into()` for a `Cow<[u8]>` field is
-        // the same vec. A receiver with a real conversion, an OsString into a
-        // PathBuf for example, handles `into` in its own bridge before this.
+        // the static type is a no-op. A receiver with a real conversion, an
+        // OsString into a PathBuf for example, handles `into` in its own
+        // bridge before this.
         (_, "clone" | "into") => Ok(recv.clone()),
         (_, "to_string") => Ok(Value::str(recv.display())),
         (Value::Char(ch), name) if let Some(out) = shared::char_method(*ch, name, &VArgs(args)) => {
@@ -145,7 +163,7 @@ pub(super) fn generic_method(recv: &Value, name: &str, args: &[Value]) -> Result
         } else {
             Value::none()
         }),
-        (Value::Vec(v), "as_array") => Ok(Value::some(Value::vec(v.borrow().clone()))),
+        (Value::Vec(v), "as_array") => Ok(Value::some(Value::vec(v.lock().clone()))),
         (Value::Vec(v), "as_array_mut") => Ok(Value::some(Value::Vec(v.clone()))),
         // Serde accessors on a value that is not the matching type, for example
         // as_str on Null, are None rather than an error.
@@ -184,13 +202,9 @@ fn str_slice(s: &str, start: i64, end: i64) -> Option<&str> {
     s.get(start..end)
 }
 
-pub(super) fn str_method(s: &Rc<RStr>, method: &MethodName, args: &[Value]) -> Result<Value> {
+pub(super) fn str_method(s: &Arc<str>, method: &MethodName, args: &[Value]) -> Result<Value> {
     use BuiltinId as B;
-    let arg_str = |i: usize| -> String {
-        args.get(i)
-            .map(super::value::Value::display)
-            .unwrap_or_default()
-    };
+    let arg_str = |i: usize| -> String { args.get(i).map(Value::display).unwrap_or_default() };
     Ok(match method.id {
         B::Len => Value::Int(usize_i64(s.len())),
         B::IsEmpty => Value::Bool(s.is_empty()),
@@ -227,12 +241,12 @@ pub(super) fn str_method(s: &Rc<RStr>, method: &MethodName, args: &[Value]) -> R
             }
             _ => Value::none(),
         },
-        B::Chars => super::iterator::chars(s.clone()),
-        B::Lines => super::iterator::lines(s.clone()),
+        B::Chars => iterator::chars(s.clone()),
+        B::Lines => iterator::lines(s.clone()),
         B::Split => split_value(s, args.first()),
-        B::SplitWhitespace => super::iterator::split_whitespace(s.clone()),
+        B::SplitWhitespace => iterator::split_whitespace(s.clone()),
         B::Count => Value::Int(usize_i64(s.chars().count())),
-        B::Parse => parse_value(s.as_str(), method.scalar.as_ref()),
+        B::Parse => parse_value(s, method.scalar.as_ref()),
         _ => return str_method_slow(s, &method.text, args),
     })
 }
@@ -258,7 +272,7 @@ fn default_of(target: Option<&ScalarTy>) -> Value {
     }
 }
 
-/// Materialize the engine neutral parse answer as a fast engine value.
+/// Materialize the neutral parse answer as a runtime value.
 pub(super) fn parse_value(text: &str, target: Option<&ScalarTy>) -> Value {
     match shared::parse_core(text, target) {
         Parsed::Int(value, width) => Value::ok(Value::int_of_width(value, width)),
@@ -271,23 +285,23 @@ pub(super) fn parse_value(text: &str, target: Option<&ScalarTy>) -> Value {
     }
 }
 
-pub(super) fn str_method_slow(s: &Rc<RStr>, name: &str, args: &[Value]) -> Result<Value> {
-    if let Some(out) = shared::str_core(s.as_str(), name, &VArgs(args))? {
+pub(super) fn str_method_slow(s: &Arc<str>, name: &str, args: &[Value]) -> Result<Value> {
+    if let Some(out) = shared::str_core(s, name, &VArgs(args))? {
         return Ok(str_out(s, out));
     }
-    if let Some(text) = shared::color_core(s.as_str(), name) {
+    if let Some(text) = shared::color_core(s, name) {
         return Ok(Value::str(text));
     }
     match name {
-        // The lazy iterator form of the byte walk, engine specific by design.
-        "bytes" => Ok(super::iterator::bytes(s.clone())),
+        // The lazy iterator form of the byte walk.
+        "bytes" => Ok(iterator::bytes(s.clone())),
         _ => generic_method(&Value::Str(s.clone()), name, args),
     }
 }
 
-/// Turn a neutral string core answer into a fast engine value. `Keep` clones
-/// the `Rc`, so handing the receiver back stays a refcount bump.
-fn str_out(s: &Rc<RStr>, out: StrOut) -> Value {
+/// Turn a neutral string core answer into a runtime value. `Keep`
+/// clones the `Arc`, so handing the receiver back stays a refcount bump.
+fn str_out(s: &Arc<str>, out: StrOut) -> Value {
     match out {
         StrOut::Bool(b) => Value::Bool(b),
         StrOut::Int(i) => Value::Int(i),
@@ -317,656 +331,6 @@ fn str_out(s: &Rc<RStr>, out: StrOut) -> Value {
     }
 }
 
-/// The fast engine's argument view for the shared cores.
-pub(super) struct VArgs<'a>(pub(super) &'a [Value]);
-
-impl Args for VArgs<'_> {
-    fn text(&self, i: usize) -> String {
-        self.0
-            .get(i)
-            .map(super::value::Value::display)
-            .unwrap_or_default()
-    }
-
-    fn int(&self, i: usize) -> Option<i64> {
-        match self.0.get(i) {
-            Some(Value::Int(n)) => Some(*n),
-            Some(tagged @ Value::IntW(..)) => tagged.untag_int(),
-            _ => None,
-        }
-    }
-
-    fn float(&self, i: usize) -> Option<f64> {
-        match self.0.get(i) {
-            Some(Value::Float(f)) => Some(*f),
-            Some(Value::F32(f)) => Some(f64::from(*f)),
-            Some(Value::Int(n)) => Some(AsPrimitive::<f64>::as_(*n)),
-            Some(tagged @ Value::IntW(..)) => tagged.untag_int().map(AsPrimitive::<f64>::as_),
-            _ => None,
-        }
-    }
-
-    fn pattern_chars(&self, i: usize) -> Option<Vec<char>> {
-        let Some(Value::Vec(items)) = self.0.get(i) else {
-            return None;
-        };
-        Some(
-            items
-                .borrow()
-                .iter()
-                .filter_map(|v| match v {
-                    Value::Char(c) => Some(*c),
-                    Value::Str(text) => text.chars().next(),
-                    _ => None,
-                })
-                .collect(),
-        )
-    }
-}
-
-pub(super) fn vec_method(
-    v: &Rc<RefCell<Vec<Value>>>,
-    method: &MethodName,
-    args: &mut [Value],
-) -> Result<Value> {
-    use BuiltinId as B;
-    Ok(match method.id {
-        B::Len | B::Count => Value::Int(usize_i64(v.borrow().len())),
-        B::IsEmpty => Value::Bool(v.borrow().is_empty()),
-        B::Clone => Value::vec(v.borrow().clone()),
-        B::Iter => super::iterator::value_iter(v.clone()),
-        B::IterMut => super::iterator::value_iter_mut(v.clone()),
-        B::Push => {
-            v.borrow_mut()
-                .push(args.first_mut().map_or(Value::Unit, take));
-            Value::Unit
-        }
-        B::Pop => match v.borrow_mut().pop() {
-            Some(x) => Value::some(x),
-            None => Value::none(),
-        },
-        B::Insert => {
-            let i = usize::try_from(int_arg(args, 0)?)?;
-            v.borrow_mut()
-                .insert(i, args.get(1).cloned().unwrap_or(Value::Unit));
-            Value::Unit
-        }
-        B::Remove => {
-            let i = usize::try_from(int_arg(args, 0)?)?;
-            v.borrow_mut().remove(i)
-        }
-        // A json array reads by index, and serde answers None for a key that
-        // is not one rather than failing, so a non-integer argument is None.
-        B::Get => match args.first().and_then(super::value::Value::int_parts) {
-            Some((index, _)) => match usize::try_from(index)
-                .ok()
-                .and_then(|i| v.borrow().get(i).cloned())
-            {
-                Some(x) => Value::some(x),
-                None => Value::none(),
-            },
-            None => Value::none(),
-        },
-        B::First => v
-            .borrow()
-            .first()
-            .cloned()
-            .map_or_else(Value::none, Value::some),
-        B::Last => v
-            .borrow()
-            .last()
-            .cloned()
-            .map_or_else(Value::none, Value::some),
-        B::SplitFirst => match v.borrow().split_first() {
-            Some((head, rest)) => {
-                Value::some(Value::tuple(vec![head.clone(), Value::vec(rest.to_vec())]))
-            }
-            None => Value::none(),
-        },
-        B::Contains => {
-            let needle = args.first().cloned().unwrap_or(Value::Unit);
-            Value::Bool(v.borrow().iter().any(|x| x.eq_value(&needle)))
-        }
-        B::Sort => {
-            let mut items = v.borrow_mut();
-            items.sort_by_key(sort_key);
-            Value::Unit
-        }
-        B::Join => vec_join(v, args),
-        B::Concat => vec_concat(v),
-        B::Sum => return vec_sum(v, method),
-        B::Product => return vec_product(v),
-        B::Rev => {
-            let mut items = v.borrow().clone();
-            items.reverse();
-            Value::vec(items)
-        }
-        B::Enumerate => Value::vec(
-            v.borrow()
-                .iter()
-                .enumerate()
-                .map(|(i, x)| Value::tuple(vec![Value::Int(usize_i64(i)), x.clone()]))
-                .collect(),
-        ),
-        B::Take => {
-            let n = usize::try_from(int_arg(args, 0)?)?;
-            Value::vec(v.borrow().iter().take(n).cloned().collect())
-        }
-        B::Skip => {
-            let n = usize::try_from(int_arg(args, 0)?)?;
-            Value::vec(v.borrow().iter().skip(n).cloned().collect())
-        }
-        _ => return vec_method_by_name(v, method, args),
-    })
-}
-
-/// `sum` over the elements, with the -0.0 float identity and the width
-/// checks the arms explain.
-fn vec_sum(v: &Rc<RefCell<Vec<Value>>>, method: &MethodName) -> Result<Value> {
-    Ok({
-        let mut acc_i = 0i64;
-        // `Sum` for floats starts at -0.0 so summing negative zeros keeps
-        // the sign, matching std.
-        let mut acc_f = -0.0f64;
-        let mut is_float = false;
-        for x in v.borrow().iter() {
-            match &x.bridge_image().unwrap_or_else(|| x.clone()) {
-                Value::Int(i) => {
-                    acc_i = acc_i
-                        .checked_add(*i)
-                        .ok_or_else(|| anyhow!("attempt to add with overflow"))?;
-                    // A `sum::<u8>()` overflows at 255, not at `i64::MAX`.
-                    if let Some(ScalarTy::Int(width)) = &method.scalar
-                        && (i128::from(acc_i) < width.min() || i128::from(acc_i) > width.max())
-                    {
-                        bail!("attempt to add with overflow");
-                    }
-                }
-                Value::Float(f) => {
-                    is_float = true;
-                    acc_f += f;
-                }
-                _ => bail!("sum needs numbers"),
-            }
-        }
-        // An empty vec carries no element to say whether the sum is an
-        // integer or a float one, so a `sum::<f64>()` turbofish is the
-        // only thing that can tell them apart.
-        let float_target = matches!(method.scalar, Some(ScalarTy::F32 | ScalarTy::F64));
-        if is_float || (float_target && acc_i == 0) {
-            // The integer side only joins when it carries a value, so it
-            // cannot cancel the -0.0 identity with a +0.0.
-            let total = if acc_i == 0 {
-                acc_f
-            } else {
-                acc_f + AsPrimitive::<f64>::as_(acc_i)
-            };
-            if matches!(method.scalar, Some(ScalarTy::F32)) {
-                Value::F32(AsPrimitive::<f32>::as_(total))
-            } else {
-                Value::Float(total)
-            }
-        } else if let Some(ScalarTy::Int(width)) = &method.scalar {
-            // The sum carries the element width, so a later `!` or shift on
-            // it computes at that width, not at i64's.
-            Value::int_of_width(i128::from(acc_i), *width)
-        } else {
-            Value::Int(acc_i)
-        }
-    })
-}
-
-/// `product` over the elements, floats fold in at the end.
-fn vec_product(v: &Rc<RefCell<Vec<Value>>>) -> Result<Value> {
-    Ok({
-        let mut acc_i = 1i64;
-        let mut acc_f = 1f64;
-        let mut is_float = false;
-        for x in v.borrow().iter() {
-            match &x.bridge_image().unwrap_or_else(|| x.clone()) {
-                Value::Int(i) => {
-                    acc_i = acc_i
-                        .checked_mul(*i)
-                        .ok_or_else(|| anyhow!("attempt to multiply with overflow"))?;
-                }
-                Value::Float(f) => {
-                    is_float = true;
-                    acc_f *= f;
-                }
-                _ => bail!("product needs numbers"),
-            }
-        }
-        if is_float {
-            Value::Float(acc_f * AsPrimitive::<f64>::as_(acc_i))
-        } else {
-            Value::Int(acc_i)
-        }
-    })
-}
-
-/// A vec of vecs flattens like the real slice `concat`; anything else
-/// concatenates the display forms, which covers `Vec<String>`. The empty
-/// case cannot know its element type, so it is a string.
-fn vec_concat(v: &Rc<RefCell<Vec<Value>>>) -> Value {
-    let items = v.borrow();
-    match items.first() {
-        Some(Value::Vec(_)) => {
-            let mut out = Vec::new();
-            for x in items.iter() {
-                if let Value::Vec(inner) = x {
-                    out.extend(inner.borrow().iter().cloned());
-                }
-            }
-            Value::vec(out)
-        }
-        _ => Value::str(
-            items
-                .iter()
-                .map(super::value::Value::display)
-                .collect::<String>(),
-        ),
-    }
-}
-
-/// `join` through the display forms with a display-form separator.
-fn vec_join(v: &Rc<RefCell<Vec<Value>>>, args: &[Value]) -> Value {
-    let sep = args
-        .first()
-        .map(super::value::Value::display)
-        .unwrap_or_default();
-    let joined = v
-        .borrow()
-        .iter()
-        .map(super::value::Value::display)
-        .collect::<Vec<_>>()
-        .join(&sep);
-    Value::str(joined)
-}
-
-/// The by-name tail of `vec_method`, everything without a builtin id.
-fn vec_method_by_name(
-    v: &Rc<RefCell<Vec<Value>>>,
-    method: &MethodName,
-    args: &mut [Value],
-) -> Result<Value> {
-    Ok(match method.text.as_str() {
-        "to_vec" | "collect" | "cloned" | "copied" => Value::vec(v.borrow().clone()),
-        // `by_ref` lends the iterator out, so whatever the borrow hands on
-        // is gone from this one too. A draining view over the same vector
-        // is that borrow.
-        "by_ref" => super::iterator::draining_iter(v.clone()),
-        "nth" => match v.borrow().get(usize::try_from(int_arg(args, 0)?)?) {
-            Some(item) => Value::some(item.clone()),
-            None => Value::none(),
-        },
-        "collect_string" => Value::str(v.borrow().iter().map(Value::display).collect::<String>()),
-        "reverse" => {
-            v.borrow_mut().reverse();
-            Value::Unit
-        }
-        "dedup" => {
-            let mut items = v.borrow_mut();
-            items.dedup_by(|a, b| a.eq_value(b));
-            Value::Unit
-        }
-        "clear" => {
-            v.borrow_mut().clear();
-            Value::Unit
-        }
-        "copy_from_slice" => return vec_copy_from_slice(v, args),
-        "truncate" => {
-            let n = usize::try_from(int_arg(args, 0)?)?;
-            v.borrow_mut().truncate(n);
-            Value::Unit
-        }
-        // A lazy iterator argument is drained into a vec before it gets
-        // here, see `builtin_method`'s caller. Anything else that is not a
-        // vec is an error rather than a silent no-op: extending by nothing
-        // and reporting success hides the bug in the caller's data.
-        "extend" | "append" | "extend_from_slice" => {
-            let Some(Value::Vec(other)) = args.first() else {
-                bail!("`{}` needs something iterable", method.text);
-            };
-            let appended: Vec<Value> = other.borrow().clone();
-            v.borrow_mut().extend(appended);
-            Value::Unit
-        }
-        // Flattens one level: nested vectors spill their items, and Ok/Some
-        // yield their inner value while Err/None drop out.
-        "flatten" => {
-            let items = v.borrow();
-            let mut out: Vec<Value> = Vec::new();
-            for item in items.iter() {
-                match item {
-                    Value::Vec(inner) => out.extend(inner.borrow().iter().cloned()),
-                    Value::Enum { variant, data, .. } if matches!(&**variant, "Some" | "Ok") => {
-                        if let Some(inner) = data.first() {
-                            out.push(inner.clone());
-                        }
-                    }
-                    Value::Enum { variant, .. } if matches!(&**variant, "None" | "Err") => {}
-                    other => out.push(other.clone()),
-                }
-            }
-            Value::vec(out)
-        }
-        // Iterators are eager vectors here, so `next` takes the front item
-        // and leaves the rest behind. Handing back the first item without
-        // removing it read correctly on its own but left the iterator
-        // unconsumed, so a following `collect` saw the item again and
-        // `split(..).next()` then `collect()` returned the whole text.
-        // Taking from the front shifts the rest, which is nothing at the
-        // sizes a script splits, and the check gate keeps this off real
-        // vectors, where it would not compile anyway.
-        "next" => {
-            let mut items = v.borrow_mut();
-            if items.is_empty() {
-                Value::none()
-            } else {
-                Value::some(items.remove(0))
-            }
-        }
-        "max" | "min" => return vec_min_max(v, method, args),
-        // A JSON array parsed by the interpreter is a plain Vec, so the
-        // serde_json accessors resolve against it here.
-        _ => match method.text.as_str() {
-            "as_array" => Value::some(Value::vec(v.borrow().clone())),
-            // The mut accessor has to hand back the same list, not a copy,
-            // so a push through it reaches the value it was taken from.
-            "as_array_mut" => Value::some(Value::Vec(v.clone())),
-            "as_object" | "as_object_mut" => Value::none(),
-            // Names that apply to any receiver, `clone` and `into` and the
-            // rest, live in one place instead of being repeated per type.
-            other => return generic_method(&Value::Vec(v.clone()), other, args),
-        },
-    })
-}
-
-/// Compiled from `v[a..b].copy_from_slice(src)` with the bounds as leading
-/// args, so the write reaches the base vec instead of a copied slice
-/// temporary. An open end arrives as the max sentinel.
-fn vec_copy_from_slice(v: &Rc<RefCell<Vec<Value>>>, args: &[Value]) -> Result<Value> {
-    let start = usize::try_from(int_arg(args, 0)?)?;
-    let end_raw = int_arg(args, 1)?;
-    let src: Vec<Value> = match args.get(2) {
-        Some(Value::Vec(other)) => other.borrow().clone(),
-        _ => bail!("copy_from_slice takes a slice argument"),
-    };
-    let mut items = v.borrow_mut();
-    let end = if end_raw == i64::MAX {
-        items.len()
-    } else {
-        usize::try_from(end_raw)?
-    };
-    if end > items.len() {
-        bail!(
-            "range end index {end} out of range for slice of length {}",
-            items.len()
-        );
-    }
-    let dst_len = end.saturating_sub(start);
-    if dst_len != src.len() {
-        bail!(
-            "source slice length ({}) does not match destination slice length ({dst_len})",
-            src.len()
-        );
-    }
-    for (k, val) in src.into_iter().enumerate() {
-        items[start + k] = val;
-    }
-    Ok(Value::Unit)
-}
-
-/// With an argument this is `Ord::max` on two whole vecs, which orders them
-/// lexicographically and hands one back. Only the no-argument form is the
-/// iterator reduction over the elements.
-fn vec_min_max(v: &Rc<RefCell<Vec<Value>>>, method: &MethodName, args: &[Value]) -> Result<Value> {
-    if let Some(other) = args.first() {
-        let recv = Value::Vec(v.clone());
-        let ord = compare_values(&recv, other)?;
-        let take_recv = if method.text == "max" {
-            ord.is_ge()
-        } else {
-            ord.is_le()
-        };
-        return Ok(if take_recv { recv } else { other.clone() });
-    }
-    let items = v.borrow();
-    let mut best: Option<&Value> = None;
-    for item in items.iter() {
-        let better = match best {
-            Some(b) => {
-                let ord = compare_values(item, b)?;
-                if method.text == "max" {
-                    ord.is_gt()
-                } else {
-                    ord.is_lt()
-                }
-            }
-            None => true,
-        };
-        if better {
-            best = Some(item);
-        }
-    }
-    Ok(best.cloned().map_or_else(Value::none, Value::some))
-}
-
-pub(super) fn map_method(
-    m: &Rc<RefCell<Map>>,
-    kind: MapKind,
-    method: &MethodName,
-    args: &mut [Value],
-) -> Result<Value> {
-    use BuiltinId as B;
-    // Read-only lookups borrow the key instead of cloning it.
-    let lookup = |i: usize, f: &dyn Fn(Option<&Value>) -> Value| -> Result<Value> {
-        let arg = args.get(i).ok_or_else(|| anyhow!("invalid map key"))?;
-        let k = arg.key_ref().ok_or_else(|| anyhow!("invalid map key"))?;
-        Ok(f(m.borrow().get(&k)))
-    };
-    Ok(match method.id {
-        B::Len | B::Count => Value::Int(usize_i64(m.borrow().len())),
-        B::IsEmpty => Value::Bool(m.borrow().is_empty()),
-        B::Clone => Value::Map(Rc::new(RefCell::new(m.borrow().clone())), kind),
-        B::Insert => {
-            let k = take(&mut args[0])
-                .into_key()
-                .ok_or_else(|| anyhow!("invalid map key"))?;
-            // A set's insert takes only the element and answers whether it
-            // was new, a map's takes a value and answers the old one.
-            if kind == MapKind::Set {
-                let old = m.borrow_mut().insert(k, Value::Unit);
-                return Ok(Value::Bool(old.is_none()));
-            }
-            let val = args.get_mut(1).map_or(Value::Unit, take);
-            let old = m.borrow_mut().insert(k, val);
-            match old {
-                Some(v) => Value::some(v),
-                None => Value::none(),
-            }
-        }
-        // A set's get answers the stored element itself, not the Unit value
-        // that backs it.
-        B::Get if kind == MapKind::Set => {
-            let arg = args.first().ok_or_else(|| anyhow!("invalid map key"))?;
-            let k = arg.key_ref().ok_or_else(|| anyhow!("invalid map key"))?;
-            match m.borrow().get_key_value(&k) {
-                Some((key, _)) => Value::some(key.to_value()),
-                None => Value::none(),
-            }
-        }
-        B::Get => lookup(0, &|v| match v {
-            Some(v) => Value::some(v.clone()),
-            None => Value::none(),
-        })?,
-        B::Contains if kind == MapKind::Set => lookup(0, &|v| Value::Bool(v.is_some()))?,
-        B::ContainsKey => lookup(0, &|v| Value::Bool(v.is_some()))?,
-        B::Remove => {
-            let arg = args.first().ok_or_else(|| anyhow!("invalid map key"))?;
-            let k = arg.key_ref().ok_or_else(|| anyhow!("invalid map key"))?;
-            let removed = m.borrow_mut().shift_remove(&k);
-            // A set's remove answers whether the element was there.
-            if kind == MapKind::Set {
-                return Ok(Value::Bool(removed.is_some()));
-            }
-            match removed {
-                Some(v) => Value::some(v),
-                None => Value::none(),
-            }
-        }
-        B::Keys => Value::vec(
-            m.borrow()
-                .keys()
-                .map(super::value::MapKey::to_value)
-                .collect(),
-        ),
-        B::Values => Value::vec(m.borrow().values().cloned().collect()),
-        B::Entry => Value::struct_of(
-            "Entry",
-            [
-                ("map".into(), Value::Map(m.clone(), kind)),
-                ("key".into(), args.first().cloned().unwrap_or(Value::Unit)),
-            ],
-        ),
-        B::Iter if kind == MapKind::Set => set_items(m),
-        B::Iter => map_pairs(m),
-        _ => match method.text.as_str() {
-            "values_mut" => Value::vec(m.borrow().values().cloned().collect()),
-            "drain" if kind == MapKind::Set => set_items(m),
-            "drain" => map_pairs(m),
-            // A JSON object parsed by the interpreter is a Map, so the
-            // serde_json accessors resolve against it here. A Map is Rc shared,
-            // so the mut accessor is the same call: what it hands back is the
-            // same map, and an insert through it reaches the original value.
-            "as_object" | "as_object_mut" => Value::some(Value::Map(m.clone(), kind)),
-            "as_array" | "as_array_mut" => Value::none(),
-            name => return generic_method(&Value::Map(m.clone(), kind), name, &*args),
-        },
-    })
-}
-
-/// The elements of a set, for `iter` and `into_iter` and `drain`.
-fn set_items(m: &Rc<RefCell<Map>>) -> Value {
-    Value::vec(
-        m.borrow()
-            .keys()
-            .map(super::value::MapKey::to_value)
-            .collect(),
-    )
-}
-
-pub(super) fn map_pairs(m: &Rc<RefCell<Map>>) -> Value {
-    Value::vec(
-        m.borrow()
-            .iter()
-            .map(|(k, v)| Value::tuple(vec![k.to_value(), v.clone()]))
-            .collect(),
-    )
-}
-
-/// Answer a width-aware integer method, or `None` when the receiver is not an
-/// integer or the name is not one of them, so dispatch falls through.
-pub(super) fn int_method(recv: &Value, name: &str, args: &[Value]) -> Option<Result<Value>> {
-    let (value, mut width) = recv.int_parts()?;
-    let mut decoded = Vec::with_capacity(args.len());
-    for arg in args {
-        // Every argument of these methods is an integer in real Rust, so a
-        // non-integer here means this is not the method it looks like.
-        let (arg_value, arg_width) = arg.int_parts()?;
-        decoded.push(arg_value);
-        // In real Rust the receiver and the argument share one type, so a
-        // width either side states answers for both. Without this an untagged
-        // `len()` receiver ran `1.saturating_sub(huge_usize)` in i64 and
-        // printed `i64::MIN` where the compiled usize floors at 0. A shift
-        // amount is a u32 of its own and must not redefine the receiver.
-        if !super::int_methods::takes_amount_arg(name)
-            && let Ok(unified) = super::numeric::unify(width, arg_width)
-        {
-            width = unified;
-        }
-    }
-    Some(
-        match super::int_methods::int_method(name, width, value, &decoded)? {
-            Ok(out) => Ok(int_out(out, width)),
-            Err(error) => Err(error),
-        },
-    )
-}
-
-fn int_out(out: super::int_methods::IntOut, width: super::numeric::IntWidth) -> Value {
-    use super::int_methods::IntOut;
-    match out {
-        IntOut::Same(value) => Value::int_of_width(value, width),
-        // The counting family answers u32 in real Rust, so the tag has to say
-        // so, or `!x.count_ones()` computes in 64 bits and prints -1 where the
-        // compiled binary prints 4294967295.
-        IntOut::Count(count) => {
-            Value::int_of_width(i128::from(count), super::numeric::IntWidth::U32)
-        }
-        IntOut::Bool(value) => Value::Bool(value),
-        IntOut::Checked(Some(value)) => Value::some(Value::int_of_width(value, width)),
-        IntOut::Checked(None) => Value::none(),
-        IntOut::SomeFloat(value) => Value::some(Value::Float(value)),
-        IntOut::Ordering(ordering) => make_ordering(ordering),
-        // A byte array is a plain vec of untagged ints, the same shape
-        // `as_bytes` and `fs::read` produce, so every bridge that eats bytes
-        // eats these too.
-        IntOut::Bytes(bytes) => Value::vec(
-            bytes
-                .into_iter()
-                .map(|byte| Value::Int(i64::from(byte)))
-                .collect(),
-        ),
-    }
-}
-
-/// Materialize an f32 core answer as a fast engine value. Called before
-/// `bridge_image` widens the receiver, so the result keeps the f32 tag.
-pub(super) fn f32_method(recv: f32, name: &str, args: &[Value]) -> Result<Option<Value>> {
-    Ok(
-        shared::f32_core(recv, name, &VArgs(args))?.map(|out| match out {
-            F32Out::Val(value) => Value::F32(value),
-            F32Out::Bool(value) => Value::Bool(value),
-            F32Out::SomeOrdering(ordering) => Value::some(make_ordering(ordering)),
-        }),
-    )
-}
-
-pub(super) fn num_method(recv: &Value, name: &str, args: &[Value]) -> Result<Value> {
-    match name {
-        "to_string" => return Ok(Value::str(recv.display())),
-        // A number never reaches the generic dispatch below, so the conversion
-        // that only changes the static type is answered here. `2.into()` for a
-        // `serde_json::Number` is the same 2.
-        "clone" | "into" => return Ok(recv.clone()),
-        _ => {}
-    }
-    let n = match recv {
-        Value::Int(i) => Num::Int(*i),
-        Value::Float(f) => Num::Float(*f),
-        _ => bail!("unknown method `{name}` on a number"),
-    };
-    match shared::num_core(n, name, &VArgs(args))? {
-        Some(out) => Ok(num_out(out)),
-        None => bail!("unknown method `{name}` on a number"),
-    }
-}
-
-/// Turn a neutral numeric core answer into a fast engine value.
-fn num_out(out: NumOut) -> Value {
-    match out {
-        NumOut::Int(i) => Value::Int(i),
-        NumOut::Float(f) => Value::Float(f),
-        NumOut::Bool(b) => Value::Bool(b),
-        NumOut::SomeInt(i) => Value::some(Value::Int(i)),
-        NumOut::SomeFloat(f) => Value::some(Value::Float(f)),
-        NumOut::Nothing => Value::none(),
-        NumOut::Ordering(o) => make_ordering(o),
-        NumOut::SomeOrdering(o) => Value::some(make_ordering(o)),
-    }
-}
-
 pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> Result<Value> {
     use BuiltinId as B;
     // The hot accessors dispatch on the id before the variant is even looked
@@ -991,18 +355,10 @@ pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
     Ok(match name {
         "is_some" => Value::Bool(is_some),
         "is_none" => Value::Bool(!is_some),
-        "expect" => inner.ok_or_else(|| {
-            anyhow!(
-                "{}",
-                args.first()
-                    .map(super::value::Value::display)
-                    .unwrap_or_default()
-            )
-        })?,
-        // There is no runtime type here, so the Ok type's Default cannot be
-        // built. Scripts use this almost only on string results such as
-        // read_to_string and env::var, so an empty string is the practical
-        // default. For another type use unwrap_or with an explicit value.
+        "expect" => inner
+            .ok_or_else(|| anyhow!("{}", args.first().map(Value::display).unwrap_or_default()))?,
+        // There is no runtime type here, so the payload type's Default cannot
+        // be built beyond what the call site wrote down.
         "unwrap_or_default" => inner.unwrap_or_else(|| default_of(method.scalar.as_ref())),
         "as_ref" | "as_deref" | "take" | "as_mut" => recv.clone(),
         // Iterating an Option yields its payload or nothing, as a vec so the
@@ -1053,12 +409,7 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
             if is_ok {
                 inner.unwrap_or(Value::Unit)
             } else {
-                bail!(
-                    "{}",
-                    args.first()
-                        .map(super::value::Value::display)
-                        .unwrap_or_default()
-                );
+                bail!("{}", args.first().map(Value::display).unwrap_or_default());
             }
         }
         "unwrap_or" => {
@@ -1091,14 +442,19 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
                 Value::some(inner.unwrap_or(Value::Unit))
             }
         }
+        // Iterating a Result yields the payload or nothing, like Option.
+        "into_iter" | "iter" => {
+            if is_ok {
+                Value::vec(inner.into_iter().collect())
+            } else {
+                Value::vec(Vec::new())
+            }
+        }
         "context" | "with_context" => {
             if is_ok {
                 Value::ok(inner.unwrap_or(Value::Unit))
             } else {
-                let ctx = args
-                    .first()
-                    .map(super::value::Value::display)
-                    .unwrap_or_default();
+                let ctx = args.first().map(Value::display).unwrap_or_default();
                 let cause = inner.map(|v| v.display()).unwrap_or_default();
                 Value::err(Value::str(format!("{ctx}\nCaused by: {cause}")))
             }
@@ -1107,80 +463,13 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
     })
 }
 
-pub(super) fn int_arg(args: &[Value], i: usize) -> Result<i64> {
-    match args.get(i) {
-        Some(Value::Int(n)) => Ok(*n),
-        _ => bail!("expected an integer argument"),
-    }
-}
-
-/// Ordering key for `sort`, good enough for numbers and strings.
-pub(super) fn sort_key(v: &Value) -> SortKey {
-    match v {
-        Value::Int(i) => SortKey::Int(*i),
-        Value::IntW(..) => match v.bridge_image() {
-            Some(Value::Int(i)) => SortKey::Int(i),
-            _ => SortKey::Str(v.display()),
-        },
-        Value::F32(f) => SortKey::Float(f64::from(*f)),
-        Value::Float(f) => SortKey::Float(*f),
-        Value::Bool(b) => SortKey::Int(i64::from(*b)),
-        Value::Str(s) => SortKey::Str(s.to_string()),
-        Value::Char(c) => SortKey::Str(c.to_string()),
-        Value::Tuple(items) | Value::Vec(items) => {
-            SortKey::List(items.borrow().iter().map(sort_key).collect())
-        }
-        other => SortKey::Str(other.display()),
-    }
-}
-
-#[derive(PartialEq)]
-pub(super) enum SortKey {
-    Int(i64),
-    Float(f64),
-    Str(String),
-    List(Vec<SortKey>),
-}
-
-impl Eq for SortKey {}
-
-impl PartialOrd for SortKey {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for SortKey {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        use std::cmp::Ordering;
-        match (self, other) {
-            (SortKey::Int(a), SortKey::Int(b)) => a.cmp(b),
-            (SortKey::Float(a), SortKey::Float(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
-            (SortKey::Int(a), SortKey::Float(b)) => {
-                AsPrimitive::<f64>::as_(*a).partial_cmp(b).unwrap_or(Ordering::Equal)
-            }
-            (SortKey::Float(a), SortKey::Int(b)) => a
-                .partial_cmp(&AsPrimitive::<f64>::as_(*b))
-                .unwrap_or(Ordering::Equal),
-            (SortKey::Str(a), SortKey::Str(b)) => a.cmp(b),
-            (SortKey::List(a), SortKey::List(b)) => a.cmp(b),
-            (SortKey::Int(_) | SortKey::Float(_), _) | (SortKey::Str(_), SortKey::List(_)) => {
-                Ordering::Less
-            }
-            (_, SortKey::Int(_) | SortKey::Float(_)) | (SortKey::List(_), SortKey::Str(_)) => {
-                Ordering::Greater
-            }
-        }
-    }
-}
-
 /// `str::split` with either a string pattern or a set of chars. A char array
 /// like `['-', '_']` splits on any of them, which a plain string pattern would
 /// otherwise match only as the literal sequence.
-pub(super) fn split_value(s: &Rc<RStr>, pattern: Option<&Value>) -> Value {
+pub(super) fn split_value(s: &Arc<str>, pattern: Option<&Value>) -> Value {
     if let Some(Value::Vec(items)) = pattern {
         let chars: Vec<char> = items
-            .borrow()
+            .lock()
             .iter()
             .filter_map(|v| match v {
                 Value::Char(c) => Some(*c),

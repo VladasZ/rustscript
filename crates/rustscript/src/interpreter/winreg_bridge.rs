@@ -15,7 +15,7 @@
 //! On a non-Windows host every entry point returns a plain error instead of
 //! being absent, so a script that reaches registry code by mistake says why.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::Result;
 
@@ -37,9 +37,9 @@ const REG_TYPES: [&str; 7] = [
 
 fn unit_enum(enum_name: &str, variant: &str) -> Value {
     Value::Enum {
-        enum_name: Rc::from(enum_name),
-        variant: Rc::from(variant),
-        data: Rc::from([]),
+        enum_name: Arc::from(enum_name),
+        variant: Arc::from(variant),
+        data: Arc::from([]),
     }
 }
 
@@ -172,7 +172,7 @@ mod imp {
                 }
             }
             Value::Vec(items) => {
-                let items = items.borrow();
+                let items = items.lock();
                 if items.iter().all(|i| matches!(i, Value::Str(_))) && !items.is_empty() {
                     let strings: Vec<String> = items.iter().map(Value::display).collect();
                     return Ok(own(strings.to_reg_value()));
@@ -253,7 +253,7 @@ mod imp {
         let Some(Value::Vec(items)) = s.get("bytes") else {
             bail!("a RegValue needs a bytes field holding a vec of byte ints");
         };
-        let items = items.borrow();
+        let items = items.lock();
         let mut bytes = Vec::with_capacity(items.len());
         for i in items.iter() {
             let Some(n) = as_i64(i) else {

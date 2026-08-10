@@ -9,7 +9,11 @@
 use anyhow::{Result, bail};
 use xmltree::{Element, Namespace, XMLNode};
 
-use super::value::Value;
+use std::sync::Arc;
+
+use indexmap::IndexMap;
+
+use super::value::{StructData, Value};
 
 /// `Element::parse(bytes_or_str)` as the real associated function.
 pub(super) fn parse(args: &[Value]) -> Value {
@@ -26,11 +30,7 @@ pub(super) fn new_element(name: &str) -> Value {
 }
 
 /// Methods on an `Element` struct value, mirroring the real crate.
-pub(super) fn element_method(
-    recv: &super::value::StructData,
-    name: &str,
-    args: &[Value],
-) -> Result<Value> {
+pub(super) fn element_method(recv: &StructData, name: &str, args: &[Value]) -> Result<Value> {
     match name {
         // The real write takes any writer; scripts hand in a `Vec<u8>`, which
         // is shared, so the serialized bytes land in the caller's vec.
@@ -40,7 +40,7 @@ pub(super) fn element_method(
             match el.write(&mut out) {
                 Ok(()) => {
                     if let Some(Value::Vec(v)) = args.first() {
-                        v.borrow_mut()
+                        v.lock()
                             .extend(out.into_iter().map(|b| Value::Int(i64::from(b))));
                     }
                     Ok(Value::ok(Value::Unit))
@@ -101,18 +101,18 @@ fn node_to_value(node: &XMLNode) -> Value {
         ),
     };
     Value::Enum {
-        enum_name: "XMLNode".into(),
-        variant: variant.into(),
+        enum_name: Arc::from("XMLNode"),
+        variant: Arc::from(variant),
         data: data.into(),
     }
 }
 
-fn value_to_element(s: &super::value::StructData) -> Result<Element> {
+fn value_to_element(s: &StructData) -> Result<Element> {
     let namespaces = match s.get("namespaces") {
         Some(v) => match option_value(&v) {
             Some(Value::Map(m, _)) => {
                 let map = m
-                    .borrow()
+                    .lock()
                     .iter()
                     .map(|(k, v)| (k.to_value().display(), v.display()))
                     .collect();
@@ -124,13 +124,13 @@ fn value_to_element(s: &super::value::StructData) -> Result<Element> {
     };
     let mut attributes = xmltree::AttributeMap::new();
     if let Some(Value::Map(m, _)) = s.get("attributes") {
-        for (k, v) in m.borrow().iter() {
+        for (k, v) in m.lock().iter() {
             attributes.insert(k.to_value().display(), v.display());
         }
     }
     let mut children = Vec::new();
     if let Some(Value::Vec(items)) = s.get("children") {
-        for node in items.borrow().iter() {
+        for node in items.lock().iter() {
             children.push(value_to_node(node)?);
         }
     }
@@ -148,11 +148,7 @@ fn value_to_node(v: &Value) -> Result<XMLNode> {
     let Value::Enum { variant, data, .. } = v else {
         bail!("an Element child must be an XMLNode");
     };
-    let text = |i: usize| {
-        data.get(i)
-            .map(super::value::Value::display)
-            .unwrap_or_default()
-    };
+    let text = |i: usize| data.get(i).map(Value::display).unwrap_or_default();
     Ok(match &**variant {
         "Element" => match data.first() {
             Some(Value::Struct(el)) => XMLNode::Element(value_to_element(el)?),
@@ -176,7 +172,7 @@ fn opt_str(v: Option<&str>) -> Value {
     }
 }
 
-fn field_opt_str(s: &super::value::StructData, field: &str) -> Option<String> {
+fn field_opt_str(s: &StructData, field: &str) -> Option<String> {
     s.get(field)
         .as_ref()
         .and_then(option_value)
@@ -196,7 +192,7 @@ fn option_value(v: &Value) -> Option<Value> {
 }
 
 fn map_value(pairs: impl IntoIterator<Item = (Value, Value)>) -> Value {
-    let mut map = super::value::Map::default();
+    let mut map = IndexMap::default();
     for (k, v) in pairs {
         if let Some(key) = k.into_key() {
             map.insert(key, v);
@@ -209,7 +205,7 @@ fn map_value(pairs: impl IntoIterator<Item = (Value, Value)>) -> Value {
 fn arg_bytes(v: Option<&Value>) -> Vec<u8> {
     match v {
         Some(Value::Vec(items)) => items
-            .borrow()
+            .lock()
             .iter()
             .filter_map(|v| match v {
                 Value::Int(n) => u8::try_from(*n).ok(),

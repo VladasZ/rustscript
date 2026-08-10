@@ -1,37 +1,39 @@
+//! Lazy, stateful iterators, ported from the fast
+//! engine's `iterator.rs`. The states live inside a `Native::Iterator`, so an
+//! iterator is a shared handle exactly like every other native resource, and
+//! `by_ref`, `peekable`, and open-ended ranges keep their real semantics.
+
 use num_traits::AsPrimitive;
-use std::cell::RefCell;
-use std::rc::Rc;
 use std::slice::from_ref;
+use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
+use parking_lot::Mutex;
 
-use super::Interp;
-use super::builtins::{as_closure, option_inner};
 use super::bytecode::{BuiltinId, MethodName, ScalarTy};
-use super::native::{Native, lines_next};
+use super::native::Native;
 use super::ops::compare_values;
 use super::regex_bridge::{CapturesValue, MatchValue, RegexValue};
 use super::shared::usize_i64;
-use super::value::{ClosureData, Map, MapKey, MapKind, RStr, Value, ValueRef};
+use super::value::{ClosureData, List, MapKind, Value, ValueRef};
+use super::vm::Vm;
 
-type Handle = Rc<RefCell<Native>>;
+type Handle = Arc<Mutex<Native>>;
 
 pub enum IteratorState {
     Values {
-        values: Rc<RefCell<Vec<Value>>>,
+        values: List,
         index: usize,
     },
     MutableValues {
-        values: Rc<RefCell<Vec<Value>>>,
+        values: List,
         index: usize,
     },
     /// A borrow of an eager vector taken with `by_ref`. It takes from the front
     /// of the shared vector rather than walking an index of its own, so
-    /// whatever it hands out is gone from the borrowed iterator too. That is
-    /// the whole point of `by_ref`, and a cursor could not do it, since the
-    /// cursor would die with the borrow and leave the source untouched.
+    /// whatever it hands out is gone from the borrowed iterator too.
     DrainingValues {
-        values: Rc<RefCell<Vec<Value>>>,
+        values: List,
     },
     Owned {
         values: Vec<Value>,
@@ -43,42 +45,42 @@ pub enum IteratorState {
         inclusive: bool,
     },
     Bytes {
-        source: Rc<RStr>,
+        source: Arc<str>,
         index: usize,
     },
     Chars {
-        source: Rc<RStr>,
+        source: Arc<str>,
         offset: usize,
     },
     Lines {
-        source: Rc<RStr>,
+        source: Arc<str>,
         offset: usize,
     },
     SplitWhitespace {
-        source: Rc<RStr>,
+        source: Arc<str>,
         offset: usize,
     },
     RegexFind {
         regex: RegexValue,
-        source: Rc<RStr>,
+        source: Arc<str>,
         offset: usize,
     },
     RegexCaptures {
         regex: RegexValue,
-        source: Rc<RStr>,
+        source: Arc<str>,
         offset: usize,
     },
     Map {
         source: Handle,
-        closure: Rc<ClosureData>,
+        closure: Arc<ClosureData>,
     },
     Filter {
         source: Handle,
-        closure: Rc<ClosureData>,
+        closure: Arc<ClosureData>,
     },
     FilterMap {
         source: Handle,
-        closure: Rc<ClosureData>,
+        closure: Arc<ClosureData>,
     },
     Enumerate {
         source: Handle,
@@ -94,12 +96,12 @@ pub enum IteratorState {
     },
     TakeWhile {
         source: Handle,
-        closure: Rc<ClosureData>,
+        closure: Arc<ClosureData>,
         done: bool,
     },
     SkipWhile {
         source: Handle,
-        closure: Rc<ClosureData>,
+        closure: Arc<ClosureData>,
         skipping: bool,
     },
     /// `peekable`. Holds at most one item pulled early by `peek`, which the
@@ -112,55 +114,55 @@ pub enum IteratorState {
 
 enum Step {
     Ready(Option<Value>),
-    Map(Handle, Rc<ClosureData>),
-    Filter(Handle, Rc<ClosureData>),
-    FilterMap(Handle, Rc<ClosureData>),
+    Map(Handle, Arc<ClosureData>),
+    Filter(Handle, Arc<ClosureData>),
+    FilterMap(Handle, Arc<ClosureData>),
     Enumerate(Handle, usize),
     Take(Handle),
     Skip(Handle, usize),
-    TakeWhile(Handle, Rc<ClosureData>),
-    SkipWhile(Handle, Rc<ClosureData>, bool),
+    TakeWhile(Handle, Arc<ClosureData>),
+    SkipWhile(Handle, Arc<ClosureData>, bool),
 }
 
 pub(super) fn wrap(state: IteratorState) -> Value {
     Native::Iterator(state).wrap()
 }
 
-pub(super) fn value_iter(items: Rc<RefCell<Vec<Value>>>) -> Value {
+pub(super) fn value_iter(items: List) -> Value {
     wrap(IteratorState::Values {
         values: items,
         index: 0,
     })
 }
 
-pub(super) fn value_iter_mut(items: Rc<RefCell<Vec<Value>>>) -> Value {
+pub(super) fn value_iter_mut(items: List) -> Value {
     wrap(IteratorState::MutableValues {
         values: items,
         index: 0,
     })
 }
 
-pub(super) fn draining_iter(items: Rc<RefCell<Vec<Value>>>) -> Value {
+pub(super) fn draining_iter(items: List) -> Value {
     wrap(IteratorState::DrainingValues { values: items })
 }
 
-pub(super) fn bytes(source: Rc<RStr>) -> Value {
+pub(super) fn bytes(source: Arc<str>) -> Value {
     wrap(IteratorState::Bytes { source, index: 0 })
 }
 
-pub(super) fn chars(source: Rc<RStr>) -> Value {
+pub(super) fn chars(source: Arc<str>) -> Value {
     wrap(IteratorState::Chars { source, offset: 0 })
 }
 
-pub(super) fn lines(source: Rc<RStr>) -> Value {
+pub(super) fn lines(source: Arc<str>) -> Value {
     wrap(IteratorState::Lines { source, offset: 0 })
 }
 
-pub(super) fn split_whitespace(source: Rc<RStr>) -> Value {
+pub(super) fn split_whitespace(source: Arc<str>) -> Value {
     wrap(IteratorState::SplitWhitespace { source, offset: 0 })
 }
 
-pub(super) fn regex_find(regex: RegexValue, source: Rc<RStr>) -> Value {
+pub(super) fn regex_find(regex: RegexValue, source: Arc<str>) -> Value {
     wrap(IteratorState::RegexFind {
         regex,
         source,
@@ -168,7 +170,7 @@ pub(super) fn regex_find(regex: RegexValue, source: Rc<RStr>) -> Value {
     })
 }
 
-pub(super) fn regex_captures(regex: RegexValue, source: Rc<RStr>) -> Value {
+pub(super) fn regex_captures(regex: RegexValue, source: Arc<str>) -> Value {
     wrap(IteratorState::RegexCaptures {
         regex,
         source,
@@ -176,7 +178,27 @@ pub(super) fn regex_captures(regex: RegexValue, source: Rc<RStr>) -> Value {
     })
 }
 
-fn next_line(source: &RStr, offset: &mut usize) -> Option<Value> {
+pub(super) fn as_closure(v: Option<&Value>) -> Result<Arc<ClosureData>> {
+    match v {
+        Some(Value::Closure(c)) => Ok(c.clone()),
+        _ => bail!("this method expects a closure argument"),
+    }
+}
+
+pub(super) fn option_inner(v: &Value) -> Option<Value> {
+    match v {
+        Value::Enum {
+            enum_name,
+            variant,
+            data,
+        } if &**enum_name == "Option" && &**variant == "Some" => {
+            Some(data.first().cloned().unwrap_or(Value::Unit))
+        }
+        _ => None,
+    }
+}
+
+fn next_line(source: &str, offset: &mut usize) -> Option<Value> {
     if *offset >= source.len() {
         return None;
     }
@@ -192,7 +214,7 @@ fn next_line(source: &RStr, offset: &mut usize) -> Option<Value> {
     Some(Value::str(line))
 }
 
-fn next_word(source: &RStr, offset: &mut usize) -> Option<Value> {
+fn next_word(source: &str, offset: &mut usize) -> Option<Value> {
     let rest = &source[*offset..];
     let word = rest.split_whitespace().next()?;
     let start = word.as_ptr() as usize - rest.as_ptr() as usize;
@@ -214,19 +236,19 @@ impl IteratorState {
     fn step(&mut self) -> Step {
         match self {
             IteratorState::Values { values, index } => {
-                let value = values.borrow().get(*index).cloned();
+                let value = values.lock().get(*index).cloned();
                 *index += usize::from(value.is_some());
                 Step::Ready(value)
             }
             IteratorState::MutableValues { values, index } => {
-                let exists = *index < values.borrow().len();
+                let exists = *index < values.lock().len();
                 let value = exists
-                    .then(|| Value::Ref(Rc::new(ValueRef::vec_element(values.clone(), *index))));
+                    .then(|| Value::Ref(Arc::new(ValueRef::vec_element(values.clone(), *index))));
                 *index += usize::from(exists);
                 Step::Ready(value)
             }
             IteratorState::DrainingValues { values } => {
-                let mut items = values.borrow_mut();
+                let mut items = values.lock();
                 let value = if items.is_empty() {
                     None
                 } else {
@@ -310,14 +332,14 @@ impl IteratorState {
 }
 
 /// One step over a string's bytes.
-fn bytes_step(source: &RStr, index: &mut usize) -> Step {
+fn bytes_step(source: &str, index: &mut usize) -> Step {
     let value = source.as_bytes().get(*index).copied();
     *index += usize::from(value.is_some());
     Step::Ready(value.map(|byte| Value::Int(i64::from(byte))))
 }
 
 /// One step over a string's chars, advancing by the char's own width.
-fn chars_step(source: &RStr, offset: &mut usize) -> Step {
+fn chars_step(source: &str, offset: &mut usize) -> Step {
     let value = source[*offset..].chars().next();
     if let Some(ch) = value {
         *offset += ch.len_utf8();
@@ -338,7 +360,7 @@ fn range_step(next: &mut i64, end: i64, inclusive: bool) -> Step {
 }
 
 /// One `find_iter` step, advancing past the match or an empty match's char.
-fn regex_find_step(regex: &RegexValue, source: &Rc<RStr>, offset: &mut usize) -> Step {
+fn regex_find_step(regex: &RegexValue, source: &Arc<str>, offset: &mut usize) -> Step {
     if *offset > source.len() {
         return Step::Ready(None);
     }
@@ -357,7 +379,7 @@ fn regex_find_step(regex: &RegexValue, source: &Rc<RStr>, offset: &mut usize) ->
 }
 
 /// One `captures_iter` step, the groups as spans over the same source.
-fn regex_captures_step(regex: &RegexValue, source: &Rc<RStr>, offset: &mut usize) -> Step {
+fn regex_captures_step(regex: &RegexValue, source: &Arc<str>, offset: &mut usize) -> Step {
     if *offset > source.len() {
         return Step::Ready(None);
     }
@@ -381,21 +403,38 @@ fn regex_captures_step(regex: &RegexValue, source: &Rc<RStr>, offset: &mut usize
     ))
 }
 
-impl Interp {
+/// The next item of a live line iterator, errors wrapped exactly as the
+/// `ForNext` op wraps them.
+fn lines_next(handle: &Handle) -> Option<Value> {
+    let mut native = handle.lock();
+    let Native::Lines(lines) = &mut *native else {
+        return None;
+    };
+    match lines.next() {
+        Some(Ok(line)) => Some(Value::ok(Value::str(line))),
+        Some(Err(e)) => Some(Value::err(Value::str(e.to_string()))),
+        None => None,
+    }
+}
+
+impl Vm {
     pub(super) fn iterator_value(value: Value) -> Result<Value> {
         Ok(match value {
             Value::Native(native)
-                if matches!(&*native.borrow(), Native::Iterator(_) | Native::Lines(_)) =>
+                if matches!(&*native.lock(), Native::Iterator(_) | Native::Lines(_)) =>
             {
                 Value::Native(native)
             }
             Value::Vec(values) | Value::Tuple(values) => value_iter(values),
             Value::Map(map, kind) => {
-                let map = map.borrow();
+                let map = map.lock();
                 // A set iterates its elements, a map its (key, value) pairs.
                 let owned = match kind {
-                    MapKind::Map => map_items(&map),
-                    MapKind::Set => map.keys().map(MapKey::to_value).collect(),
+                    MapKind::Map => map
+                        .iter()
+                        .map(|(k, v)| Value::tuple(vec![k.to_value(), v.clone()]))
+                        .collect(),
+                    MapKind::Set => map.keys().map(super::value::MapKey::to_value).collect(),
                 };
                 wrap(IteratorState::Owned {
                     values: owned,
@@ -416,12 +455,12 @@ impl Interp {
         })
     }
 
-    pub(super) fn iterator_next(&self, iterator: &Handle) -> Result<Option<Value>> {
-        if matches!(&*iterator.borrow(), Native::Lines(_)) {
+    pub(super) fn iterator_next(self: &Arc<Self>, iterator: &Handle) -> Result<Option<Value>> {
+        if matches!(&*iterator.lock(), Native::Lines(_)) {
             return Ok(lines_next(iterator));
         }
         let step = {
-            let mut native = iterator.borrow_mut();
+            let mut native = iterator.lock();
             let Native::Iterator(state) = &mut *native else {
                 bail!("{} is not an iterator", native.type_name());
             };
@@ -430,14 +469,17 @@ impl Interp {
         match step {
             Step::Ready(value) => Ok(value),
             Step::Map(source, closure) => match self.iterator_next(&source)? {
-                Some(value) => Ok(Some(self.call_closure(&closure, &[value])?)),
+                Some(value) => Ok(Some(self.call_closure_data(&closure, &[value])?)),
                 None => Ok(None),
             },
             Step::Filter(source, closure) => loop {
                 let Some(value) = self.iterator_next(&source)? else {
                     return Ok(None);
                 };
-                if self.call_closure(&closure, from_ref(&value))?.is_truthy() {
+                if self
+                    .call_closure_data(&closure, from_ref(&value))?
+                    .is_truthy()
+                {
                     return Ok(Some(value));
                 }
             },
@@ -445,16 +487,13 @@ impl Interp {
                 let Some(value) = self.iterator_next(&source)? else {
                     return Ok(None);
                 };
-                if let Some(inner) = option_inner(&self.call_closure(&closure, &[value])?) {
+                if let Some(inner) = option_inner(&self.call_closure_data(&closure, &[value])?) {
                     return Ok(Some(inner));
                 }
             },
-            Step::Enumerate(source, index) => Ok(self.iterator_next(&source)?.map(|value| {
-                Value::Tuple(Rc::new(RefCell::new(vec![
-                    Value::Int(usize_i64(index)),
-                    value,
-                ])))
-            })),
+            Step::Enumerate(source, index) => Ok(self
+                .iterator_next(&source)?
+                .map(|value| Value::tuple(vec![Value::Int(usize_i64(index)), value]))),
             Step::Take(source) => self.iterator_next(&source),
             Step::Skip(source, count) => {
                 for _ in 0..count {
@@ -468,11 +507,14 @@ impl Interp {
                 let Some(value) = self.iterator_next(&source)? else {
                     return Ok(None);
                 };
-                if self.call_closure(&closure, from_ref(&value))?.is_truthy() {
+                if self
+                    .call_closure_data(&closure, from_ref(&value))?
+                    .is_truthy()
+                {
                     Ok(Some(value))
                 } else {
                     if let Native::Iterator(IteratorState::TakeWhile { done, .. }) =
-                        &mut *iterator.borrow_mut()
+                        &mut *iterator.lock()
                     {
                         *done = true;
                     }
@@ -486,11 +528,13 @@ impl Interp {
                         return Ok(None);
                     };
                     if !still_skipping
-                        || !self.call_closure(&closure, from_ref(&value))?.is_truthy()
+                        || !self
+                            .call_closure_data(&closure, from_ref(&value))?
+                            .is_truthy()
                     {
                         if still_skipping
                             && let Native::Iterator(IteratorState::SkipWhile { skipping, .. }) =
-                                &mut *iterator.borrow_mut()
+                                &mut *iterator.lock()
                         {
                             *skipping = false;
                         }
@@ -502,7 +546,18 @@ impl Interp {
         }
     }
 
-    pub(super) fn iter_items(&self, value: Value) -> Result<Vec<Value>> {
+    /// Invoke a closure held by an iterator state directly.
+    pub(super) fn call_closure_data(
+        self: &Arc<Self>,
+        clo: &Arc<ClosureData>,
+        args: &[Value],
+    ) -> Result<Value> {
+        let chunk = clo.chunk.clone();
+        self.run_chunk(&chunk, args, &clo.captured)
+    }
+
+    /// Drain any iterable, lazy iterators included, into a plain vec.
+    pub(super) fn drain_items(self: &Arc<Self>, value: Value) -> Result<Vec<Value>> {
         let Value::Native(iterator) = Self::iterator_value(value)? else {
             unreachable!();
         };
@@ -514,7 +569,7 @@ impl Interp {
     }
 
     pub(super) fn iterator_method(
-        &self,
+        self: &Arc<Self>,
         iterator: &Handle,
         method: &MethodName,
         args: &[Value],
@@ -571,7 +626,7 @@ impl Interp {
                 // `peek` pulls one item early and keeps it, so the value is
                 // still there for the next `next`.
                 "peek" => {
-                    let buffered = match &*iterator.borrow() {
+                    let buffered = match &*iterator.lock() {
                         Native::Iterator(IteratorState::Peekable { buffered, .. }) => {
                             buffered.clone()
                         }
@@ -580,13 +635,13 @@ impl Interp {
                     if let Some(item) = buffered {
                         return Ok(Some(Value::some(item)));
                     }
-                    let source = match &*iterator.borrow() {
+                    let source = match &*iterator.lock() {
                         Native::Iterator(IteratorState::Peekable { source, .. }) => source.clone(),
                         _ => return Ok(None),
                     };
                     let item = self.iterator_next(&source)?;
                     if let Native::Iterator(IteratorState::Peekable { buffered, .. }) =
-                        &mut *iterator.borrow_mut()
+                        &mut *iterator.lock()
                     {
                         buffered.clone_from(&item);
                     }
@@ -604,7 +659,7 @@ impl Interp {
                 // `Chars::as_str` gives the not yet consumed tail, which is what
                 // makes the `chars.next()` then `chars.as_str()` capitalize idiom
                 // work. Only a char iterator still knows its source text.
-                "as_str" => match &*iterator.borrow() {
+                "as_str" => match &*iterator.lock() {
                     Native::Iterator(IteratorState::Chars { source, offset }) => {
                         Value::str(source[*offset..].to_string())
                     }
@@ -617,7 +672,7 @@ impl Interp {
     }
 
     pub(super) fn iterator_higher_order(
-        &self,
+        self: &Arc<Self>,
         iterator: &Handle,
         name: &str,
         args: &[Value],
@@ -649,7 +704,7 @@ impl Interp {
             "for_each" => {
                 let closure = closure(0)?;
                 while let Some(value) = self.iterator_next(iterator)? {
-                    self.call_closure(&closure, &[value])?;
+                    self.call_closure_data(&closure, &[value])?;
                 }
                 Value::Unit
             }
@@ -658,11 +713,25 @@ impl Interp {
                     .iterator_predicate(iterator, name, &closure(0)?)
                     .map(Some);
             }
+            _ => return self.iterator_reduce_ho(iterator, name, args),
+        };
+        Ok(Some(value))
+    }
+
+    /// The closure reductions that drain the iterator down to one value.
+    fn iterator_reduce_ho(
+        self: &Arc<Self>,
+        iterator: &Handle,
+        name: &str,
+        args: &[Value],
+    ) -> Result<Option<Value>> {
+        let closure = |index| as_closure(args.get(index));
+        let value = match name {
             "fold" => {
                 let closure = closure(1)?;
                 let mut accumulator = args.first().cloned().unwrap_or(Value::Unit);
                 while let Some(value) = self.iterator_next(iterator)? {
-                    accumulator = self.call_closure(&closure, &[accumulator, value])?;
+                    accumulator = self.call_closure_data(&closure, &[accumulator, value])?;
                 }
                 accumulator
             }
@@ -672,7 +741,7 @@ impl Interp {
                     return Ok(Some(Value::none()));
                 };
                 while let Some(value) = self.iterator_next(iterator)? {
-                    accumulator = self.call_closure(&closure, &[accumulator, value])?;
+                    accumulator = self.call_closure_data(&closure, &[accumulator, value])?;
                 }
                 Value::some(accumulator)
             }
@@ -680,8 +749,8 @@ impl Interp {
                 let closure = closure(0)?;
                 let mut output = Vec::new();
                 while let Some(value) = self.iterator_next(iterator)? {
-                    let mapped = self.call_closure(&closure, &[value])?;
-                    output.extend(self.iter_items(mapped)?);
+                    let mapped = self.call_closure_data(&closure, &[value])?;
+                    output.extend(self.drain_items(mapped)?);
                 }
                 Value::vec(output)
             }
@@ -689,19 +758,22 @@ impl Interp {
                 let closure = closure(0)?;
                 let (mut yes, mut no) = (Vec::new(), Vec::new());
                 while let Some(value) = self.iterator_next(iterator)? {
-                    if self.call_closure(&closure, from_ref(&value))?.is_truthy() {
+                    if self
+                        .call_closure_data(&closure, from_ref(&value))?
+                        .is_truthy()
+                    {
                         yes.push(value);
                     } else {
                         no.push(value);
                     }
                 }
-                Value::Tuple(Rc::new(RefCell::new(vec![Value::vec(yes), Value::vec(no)])))
+                Value::tuple(vec![Value::vec(yes), Value::vec(no)])
             }
             "max_by_key" | "min_by_key" => {
                 let closure = closure(0)?;
                 let mut best: Option<(Value, Value)> = None;
                 while let Some(value) = self.iterator_next(iterator)? {
-                    let key = self.call_closure(&closure, from_ref(&value))?;
+                    let key = self.call_closure_data(&closure, from_ref(&value))?;
                     let take = match &best {
                         None => true,
                         Some((best_key, _)) => {
@@ -724,7 +796,7 @@ impl Interp {
         Ok(Some(value))
     }
 
-    fn drain_iterator(&self, iterator: &Handle) -> Result<Vec<Value>> {
+    fn drain_iterator(self: &Arc<Self>, iterator: &Handle) -> Result<Vec<Value>> {
         let mut values = Vec::new();
         while let Some(value) = self.iterator_next(iterator)? {
             values.push(value);
@@ -732,14 +804,17 @@ impl Interp {
         Ok(values)
     }
 
-    fn iterator_sum(&self, iterator: &Handle, target: Option<&ScalarTy>) -> Result<Value> {
+    fn iterator_sum(
+        self: &Arc<Self>,
+        iterator: &Handle,
+        target: Option<&ScalarTy>,
+    ) -> Result<Value> {
         // The accumulator is an i128 so a `u64` element past `i64::MAX` keeps
         // its value. Reading elements through `bridge_image` clamped them to
         // `i64::MAX` before they were even added.
         let mut integers = 0i128;
         // `Sum` for floats starts at -0.0, not 0.0, so that summing negative
-        // zeros keeps the sign. Starting at 0.0 turned `[-0.0].sum()` into
-        // `0.0`, because `0.0 + -0.0` is `0.0`.
+        // zeros keeps the sign.
         let mut floats = -0.0f64;
         let mut has_float = false;
         // Without a target the sum is a plain i64 and overflows at its bounds,
@@ -770,14 +845,10 @@ impl Interp {
         }
         // An empty sequence carries no element to tell an integer sum from a
         // float one, so a `sum::<f64>()` turbofish is the only thing that can.
-        // Without it an empty float sum answered `0`, which prints `0.0` after
-        // the annotation coerces it, where real Rust prints `-0.0`.
         let float_target = matches!(target, Some(ScalarTy::F32 | ScalarTy::F64));
         Ok(if has_float || (float_target && integers == 0) {
-            // Folding the integer side back in would add a +0.0 that cancels
-            // the -0.0 identity, so it only joins when it carries a value. A
-            // real sum has one element type anyway, the split accumulator is
-            // only here because the interpreter cannot see which.
+            // The integer side only joins when it carries a value, so it
+            // cannot cancel the -0.0 identity with a +0.0.
             let total = if integers == 0 {
                 floats
             } else {
@@ -797,7 +868,7 @@ impl Interp {
         })
     }
 
-    fn iterator_product(&self, iterator: &Handle) -> Result<Value> {
+    fn iterator_product(self: &Arc<Self>, iterator: &Handle) -> Result<Value> {
         let mut integers = 1i64;
         let mut floats = 1f64;
         let mut has_float = false;
@@ -823,7 +894,7 @@ impl Interp {
         })
     }
 
-    fn iterator_extreme(&self, iterator: &Handle, name: &str) -> Result<Value> {
+    fn iterator_extreme(self: &Arc<Self>, iterator: &Handle, name: &str) -> Result<Value> {
         let mut best: Option<Value> = None;
         while let Some(value) = self.iterator_next(iterator)? {
             let take = match &best {
@@ -845,14 +916,16 @@ impl Interp {
     }
 
     fn iterator_predicate(
-        &self,
+        self: &Arc<Self>,
         iterator: &Handle,
         name: &str,
-        closure: &Rc<ClosureData>,
+        closure: &Arc<ClosureData>,
     ) -> Result<Value> {
         let mut index = 0;
         while let Some(value) = self.iterator_next(iterator)? {
-            let matches = self.call_closure(closure, from_ref(&value))?.is_truthy();
+            let matches = self
+                .call_closure_data(closure, from_ref(&value))?
+                .is_truthy();
             match name {
                 "find" if matches => return Ok(Value::some(value)),
                 "position" if matches => return Ok(Value::some(Value::Int(index))),
@@ -876,12 +949,4 @@ fn int_arg(args: &[Value]) -> Result<i64> {
         Some(Value::Int(value)) if *value >= 0 => Ok(*value),
         _ => bail!("iterator count needs a non-negative integer"),
     }
-}
-
-fn map_items(map: &Map) -> Vec<Value> {
-    map.iter()
-        .map(|(key, value)| {
-            Value::Tuple(Rc::new(RefCell::new(vec![key.to_value(), value.clone()])))
-        })
-        .collect()
 }

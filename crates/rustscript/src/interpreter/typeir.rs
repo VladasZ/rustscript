@@ -3,7 +3,6 @@
 //! coercion, and turbofish tables serve both engines, and it moves all name
 //! resolution to load time, out of the hot runtime paths.
 
-use std::rc::Rc;
 use std::sync::Arc;
 
 use super::numeric::IntWidth;
@@ -90,7 +89,7 @@ pub fn lower_type(
     ty: &syn::Type,
     resolver: &Resolver,
     module: usize,
-    generics: &[Rc<str>],
+    generics: &[Arc<str>],
 ) -> TypeIr {
     lower(ty, resolver, module, generics, 0)
 }
@@ -99,7 +98,7 @@ fn lower(
     ty: &syn::Type,
     resolver: &Resolver,
     module: usize,
-    generics: &[Rc<str>],
+    generics: &[Arc<str>],
     depth: u32,
 ) -> TypeIr {
     if depth > MAX_DEPTH {
