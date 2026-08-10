@@ -210,7 +210,7 @@ pub(super) fn str_method(s: &Arc<str>, method: &MethodName, args: &[Value]) -> R
     use BuiltinId as B;
     let arg_str = |i: usize| -> String { args.get(i).map(Value::display).unwrap_or_default() };
     Ok(match method.id {
-        B::Len => Value::Int(usize_i64(s.len())),
+        B::Len => shared::usize_value(s.len()),
         B::IsEmpty => Value::Bool(s.is_empty()),
         B::Clone | B::ToString => Value::Str(s.clone()),
         B::Trim => Value::str(s.trim().to_string()),
@@ -310,7 +310,7 @@ pub(super) fn str_method_slow(s: &Arc<str>, name: &str, args: &[Value]) -> Resul
 fn str_out(s: &Arc<str>, out: StrOut) -> Value {
     match out {
         StrOut::Bool(b) => Value::Bool(b),
-        StrOut::Int(i) => Value::Int(i),
+        StrOut::USize(n) => shared::usize_value(n),
         StrOut::Owned(o) => Value::str(o),
         StrOut::Keep => Value::Str(s.clone()),
         StrOut::OkKeep => Value::ok(Value::Str(s.clone())),
