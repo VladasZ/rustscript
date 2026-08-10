@@ -9,7 +9,7 @@ use anyhow::{Result, anyhow, bail};
 use indexmap::IndexMap;
 use parking_lot::Mutex;
 
-use super::bytecode::{BuiltinId, MethodName, ScalarTy};
+use super::bytecode::{BuiltinId, MethodName};
 use super::iterator;
 use super::ops::compare_values;
 use super::value::{List, MapKey, MapKind, Value};
@@ -119,57 +119,7 @@ pub(super) fn vec_method(v: &List, method: &MethodName, args: &mut [Value]) -> R
 /// `sum` over the elements, with the -0.0 float identity and the width
 /// checks the arms explain.
 fn vec_sum(v: &List, method: &MethodName) -> Result<Value> {
-    Ok({
-        let mut acc_i = 0i64;
-        // `Sum` for floats starts at -0.0 so summing negative zeros keeps
-        // the sign, matching std.
-        let mut acc_f = -0.0f64;
-        let mut is_float = false;
-        for x in v.lock().iter() {
-            match &x.bridge_image().unwrap_or_else(|| x.clone()) {
-                Value::Int(i) => {
-                    acc_i = acc_i
-                        .checked_add(*i)
-                        .ok_or_else(|| anyhow!("attempt to add with overflow"))?;
-                    // A `sum::<u8>()` overflows at 255, not at `i64::MAX`.
-                    if let Some(ScalarTy::Int(width)) = &method.scalar
-                        && (i128::from(acc_i) < width.min() || i128::from(acc_i) > width.max())
-                    {
-                        bail!("attempt to add with overflow");
-                    }
-                }
-                Value::Float(f) => {
-                    is_float = true;
-                    acc_f += f;
-                }
-                _ => bail!("sum needs numbers"),
-            }
-        }
-        // An empty vec carries no element to say whether the sum is an
-        // integer or a float one, so a `sum::<f64>()` turbofish is the
-        // only thing that can tell them apart.
-        let float_target = matches!(method.scalar, Some(ScalarTy::F32 | ScalarTy::F64));
-        if is_float || (float_target && acc_i == 0) {
-            // The integer side only joins when it carries a value, so it
-            // cannot cancel the -0.0 identity with a +0.0.
-            let total = if acc_i == 0 {
-                acc_f
-            } else {
-                acc_f + AsPrimitive::<f64>::as_(acc_i)
-            };
-            if matches!(method.scalar, Some(ScalarTy::F32)) {
-                Value::F32(AsPrimitive::<f32>::as_(total))
-            } else {
-                Value::Float(total)
-            }
-        } else if let Some(ScalarTy::Int(width)) = &method.scalar {
-            // The sum carries the element width, so a later `!` or shift on
-            // it computes at that width, not at i64's.
-            Value::int_of_width(i128::from(acc_i), *width)
-        } else {
-            Value::Int(acc_i)
-        }
-    })
+    iterator::sum_values(v.lock().clone(), method.scalar.as_ref())
 }
 
 /// `product` over the elements, floats fold in at the end.
@@ -244,6 +194,8 @@ fn vec_method_by_name(v: &List, method: &MethodName, args: &mut [Value]) -> Resu
             None => Value::none(),
         },
         "collect_string" => Value::str(v.lock().iter().map(Value::display).collect::<String>()),
+        "collect_map" => return collect_map(v.lock().clone()),
+        "collect_set" => return collect_set(v.lock().clone()),
         "reverse" => {
             v.lock().reverse();
             Value::Unit
@@ -495,6 +447,36 @@ pub(super) fn map_pairs(m: &Arc<Mutex<MapStore>>) -> Value {
             .map(|(k, v)| Value::tuple(vec![k.to_value(), v.clone()]))
             .collect(),
     )
+}
+
+/// `collect` into a `HashMap`, from `(key, value)` items.
+pub(super) fn collect_map(items: Vec<Value>) -> Result<Value> {
+    let mut map = MapStore::default();
+    for item in items {
+        let Value::Tuple(pair) = item else {
+            bail!("collect into a map needs (key, value) items");
+        };
+        let mut pair = pair.lock();
+        if pair.len() != 2 {
+            bail!("collect into a map needs (key, value) items");
+        }
+        let value = take(&mut pair[1]);
+        let key = take(&mut pair[0])
+            .into_key()
+            .ok_or_else(|| anyhow!("invalid map key"))?;
+        map.insert(key, value);
+    }
+    Ok(Value::map_of(map))
+}
+
+/// `collect` into a `HashSet`.
+pub(super) fn collect_set(items: Vec<Value>) -> Result<Value> {
+    let mut set = MapStore::default();
+    for item in items {
+        let key = item.into_key().ok_or_else(|| anyhow!("invalid set key"))?;
+        set.insert(key, Value::Unit);
+    }
+    Ok(Value::set_of(set))
 }
 
 pub(super) fn int_arg(args: &[Value], i: usize) -> Result<i64> {

@@ -10,7 +10,7 @@ use crate::interpreter::bytecode::{BinKind, Const, DISCARD, Op, Reg, UnKind};
 use crate::interpreter::numeric::{IntWidth, truncate};
 
 use super::{
-    Compiler, FloatTy, LoopCtx, NameLoc, NumericTy, ScalarTy, bin_kind, expr_kind,
+    CollectTarget, Compiler, FloatTy, LoopCtx, NameLoc, NumericTy, ScalarTy, bin_kind, expr_kind,
     first_generic_type, int_literal, is_assign_op, macro_yields_value, numeric_annotation,
 };
 
@@ -83,16 +83,13 @@ fn collect_root(e: &Expr) -> Option<&syn::ExprMethodCall> {
     }
 }
 
-/// Whether an annotated type is a plain `String`.
-fn is_string_type(ty: &syn::Type) -> bool {
-    matches!(ty, syn::Type::Path(p)
-        if p.path.segments.last().is_some_and(|s| s.ident == "String"))
-}
-
-/// Whether a signature returns a plain `String`, so the return type names the
-/// target of a `collect` whose value the function hands back.
-pub(super) fn returns_string(output: &syn::ReturnType) -> bool {
-    matches!(output, syn::ReturnType::Type(_, ty) if is_string_type(ty))
+/// The collect target a signature's return type names, so the return type
+/// types a `collect` whose value the function hands back.
+pub(super) fn collect_return_target(output: &syn::ReturnType) -> Option<CollectTarget> {
+    match output {
+        syn::ReturnType::Type(_, ty) => CollectTarget::of_type(ty),
+        syn::ReturnType::Default => None,
+    }
 }
 
 /// The payload a signature hands back, looking inside a `Result`. That is the
@@ -361,17 +358,17 @@ impl Compiler<'_> {
         // A let nested in the init chain, say in a closure body,
         // runs this code again before the outer collect consumes
         // its hint, so the outer hint is restored, not cleared.
-        let outer_string_let = self.string_let.take();
+        let outer_collect_let = self.collect_let.take();
         if let Pat::Type(t) = &local.pat
             && let Some(init) = &local.init
         {
             if let Some(call) = from_str_root(&init.expr) {
                 self.json_let = Some((std::ptr::from_ref(call), self.lower_ir(&t.ty)));
                 offered = true;
-            } else if is_string_type(&t.ty)
+            } else if let Some(target) = CollectTarget::of_type(&t.ty)
                 && let Some(mc) = collect_root(&init.expr)
             {
-                self.string_let = Some(std::ptr::from_ref(mc));
+                self.collect_let = Some((std::ptr::from_ref(mc), target));
             }
             // `let x: T = ...unwrap_or_default()` is the only place
             // that names the payload the default is built from,
@@ -409,9 +406,21 @@ impl Compiler<'_> {
                 None => self.emit(Op::LoadUnit { dst: val }),
             }
         }
+        // An unannotated `let sorted = vec!['a', 'b']` states its type
+        // through the init, so a default built from `sorted` later still
+        // has an element type to read. Read after the init compiles, so
+        // annotated locals inside its blocks are already recorded and a
+        // block-tail element can answer through them.
+        if !matches!(&local.pat, Pat::Type(_))
+            && let Pat::Ident(ident) = &local.pat
+            && let Some(init) = &local.init
+            && let Some(stated) = self.stated_ty(&init.expr)
+        {
+            self.typed_locals.insert(ident.ident.to_string(), stated);
+        }
         let consumed = offered && self.json_let.is_none();
         self.json_let = None;
-        self.string_let = outer_string_let;
+        self.collect_let = outer_collect_let;
         // A type annotation coerces a dynamic value into that type.
         if let Pat::Type(t) = &local.pat {
             if !consumed && !typed_literal {

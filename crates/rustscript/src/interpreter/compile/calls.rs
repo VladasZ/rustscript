@@ -12,8 +12,8 @@ use crate::interpreter::bytecode::{
 use crate::interpreter::serde_attrs::serde_rename;
 
 use super::{
-    Compiler, FnState, HashMap, NameLoc, Res, TypeIr, collect_pattern_names, first_generic_type,
-    idx16, int_literal,
+    CollectTarget, Compiler, FnState, HashMap, NameLoc, Res, TypeIr, collect_pattern_names,
+    first_generic_type, idx16, int_literal,
 };
 
 impl Compiler<'_> {
@@ -346,12 +346,15 @@ impl Compiler<'_> {
     fn method_name_and_scalar(&mut self, m: &syn::ExprMethodCall) -> (String, Option<ScalarTy>) {
         let mut method = m.method.to_string();
         if method == "collect" {
-            let turbofish_string = m.turbofish.as_ref().is_some_and(names_string);
-            let let_string = matches!(self.string_let, Some(ptr) if std::ptr::eq(ptr, m));
-            let tail_string = self.string_tails.contains(&std::ptr::from_ref(m));
-            if turbofish_string || let_string || tail_string {
-                self.string_let = None;
-                method = "collect_string".to_string();
+            let from_turbofish = m.turbofish.as_ref().and_then(turbofish_collect_target);
+            let from_let = match self.collect_let {
+                Some((ptr, target)) if std::ptr::eq(ptr, m) => Some(target),
+                _ => None,
+            };
+            let from_tail = self.collect_tails.get(&std::ptr::from_ref(m)).copied();
+            if let Some(target) = from_turbofish.or(from_let).or(from_tail) {
+                self.collect_let = None;
+                method = target.method_name().to_string();
             }
         }
         // An explicit turbofish is the only place a method's result type is
@@ -385,6 +388,18 @@ impl Compiler<'_> {
             scalar = scalar.or(Some(ScalarTy::Opt(Box::new(ScalarTy::Other))));
         }
         (method, scalar)
+    }
+
+    /// The type an expression states about itself, read against the current
+    /// typed locals. Lets `compile_let` record an unannotated
+    /// `let sorted = vec!['a', 'b']` so a later default built from `sorted`'s
+    /// elements has the right type.
+    pub(super) fn stated_ty(&self, expr: &Expr) -> Option<ScalarTy> {
+        let env = TyEnv {
+            locals: &self.typed_locals,
+            fn_returns: self.ctx.fn_returns,
+        };
+        written_ty(expr, &env)
     }
 
     /// Emit a writeback for every `&mut variable` argument of a finished call.
@@ -954,11 +969,12 @@ fn is_tokio_spawn(path: &syn::Path) -> bool {
     segs.last().map(String::as_str) == Some("spawn") && segs.iter().any(|s| s == "tokio")
 }
 
-/// Whether a turbofish asks for a `String`, as in `collect::<String>()`.
-fn names_string(tf: &syn::AngleBracketedGenericArguments) -> bool {
-    tf.args.iter().any(|arg| {
-        matches!(arg, syn::GenericArgument::Type(syn::Type::Path(p))
-            if p.path.segments.last().is_some_and(|s| s.ident == "String"))
+/// The collect target a turbofish asks for, as in `collect::<String>()` or
+/// `collect::<HashMap<K, V>>()`.
+fn turbofish_collect_target(tf: &syn::AngleBracketedGenericArguments) -> Option<CollectTarget> {
+    tf.args.iter().find_map(|arg| match arg {
+        syn::GenericArgument::Type(ty) => CollectTarget::of_type(ty),
+        _ => None,
     })
 }
 
@@ -1042,7 +1058,9 @@ fn option_payload(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                 .or_else(|| call.args.first().and_then(|a| option_payload(a, env))),
             // `v.get(i)`, the accessors, and the no-argument iterator
             // reductions answer an `Option` of the vec's element type.
-            "get" | "first" | "last" | "pop" => element_ty(&call.receiver, env),
+            // `map.get(k)` answers an `Option` of the map's value type.
+            "get" => element_ty(&call.receiver, env).or_else(|| map_value_ty(&call.receiver, env)),
+            "first" | "last" | "pop" => element_ty(&call.receiver, env),
             "min" | "max" if call.args.is_empty() => element_ty(&call.receiver, env),
             // `x.checked_add(y)` answers an `Option` of the receiver's own
             // integer width.
@@ -1105,6 +1123,17 @@ fn element_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
             "iter" | "into_iter" | "cloned" | "copied" | "clone" | "to_vec" | "rev" => {
                 element_ty(&call.receiver, env)
             }
+            // `it.map(|x| e)` makes whatever `e` states its own type to be
+            // the element type.
+            "map" => match call.args.first() {
+                Some(Expr::Closure(closure)) => written_ty(&closure.body, env),
+                _ => None,
+            },
+            // `it.collect::<Vec<T>>()` states its element in the turbofish.
+            "collect" => match turbofish_scalar(call.turbofish.as_ref()) {
+                Some(ScalarTy::List(element)) => Some(*element),
+                _ => None,
+            },
             // The vec an unwrap settles on, from whichever side wrote its
             // type down.
             "unwrap" | "unwrap_or" | "unwrap_or_default" => {
@@ -1139,6 +1168,9 @@ fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
     match expr {
         Expr::Paren(inner) => written_ty(&inner.expr, env),
         Expr::Group(inner) => written_ty(&inner.expr, env),
+        // A block answers through its tail expression, which is how a
+        // `({ let mut m: HashMap<K, V> = ...; m })` vec element states itself.
+        Expr::Block(block) => block_tail(&block.block).and_then(|e| written_ty(e, env)),
         // `value as u8` names the type at the cast.
         Expr::Cast(cast) => ScalarTy::lower(&cast.ty),
         // Arithmetic keeps its operands' type, so either side that states it
@@ -1198,6 +1230,8 @@ fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                 Some(ScalarTy::Opt(Box::new(ScalarTy::Other)))
             } else if let Some(element) = vec_new_element(expr) {
                 Some(ScalarTy::List(Box::new(element)))
+            } else if let Some(container) = container_new_ty(expr) {
+                Some(container)
             } else if is_string_call(expr) {
                 Some(ScalarTy::Str)
             } else if let Expr::Path(path) = expr
@@ -1269,6 +1303,56 @@ fn vec_new_element(expr: &Expr) -> Option<ScalarTy> {
         return None;
     };
     turbofish_scalar(Some(args))
+}
+
+/// The map or set type a `HashMap::<K, V>::new()` / `HashSet::<T>::new()`
+/// call states in its own turbofish, the map twin of `vec_new_element`.
+fn container_new_ty(expr: &Expr) -> Option<ScalarTy> {
+    let Expr::Call(call) = expr else {
+        return None;
+    };
+    let Expr::Path(path) = &*call.func else {
+        return None;
+    };
+    let mut segments = path.path.segments.iter().rev();
+    let last = segments.next()?;
+    if last.ident != "new" {
+        return None;
+    }
+    let container = segments.next()?;
+    let name = container.ident.to_string();
+    if !matches!(
+        name.as_str(),
+        "HashMap" | "BTreeMap" | "HashSet" | "BTreeSet"
+    ) {
+        return None;
+    }
+    ScalarTy::lower_segment(container)
+}
+
+/// The value type of an expression that syntactically builds a map, for the
+/// `map.get(k)` payload, read as literally as `element_ty`.
+fn map_value_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
+    match expr {
+        Expr::Paren(inner) => map_value_ty(&inner.expr, env),
+        Expr::Group(inner) => map_value_ty(&inner.expr, env),
+        Expr::Block(block) => block_tail(&block.block).and_then(|e| map_value_ty(e, env)),
+        // A bare name the program declared as `let m: HashMap<K, V>`.
+        Expr::Path(path) => {
+            let segment = path.path.segments.last()?;
+            match env.locals.get(&segment.ident.to_string()) {
+                Some(ScalarTy::Map(value)) => Some((**value).clone()),
+                _ => None,
+            }
+        }
+        // `HashMap::<K, V>::new()` states it in the turbofish.
+        Expr::Call(_) => match container_new_ty(expr) {
+            Some(ScalarTy::Map(value)) => Some(*value),
+            _ => None,
+        },
+        Expr::MethodCall(call) if call.method == "clone" => map_value_ty(&call.receiver, env),
+        _ => None,
+    }
 }
 
 /// A bare `None`, with or without a turbofish.

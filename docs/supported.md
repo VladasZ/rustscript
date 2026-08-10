@@ -94,7 +94,7 @@ the `supported_page_is_current` test enforces it.
 
 ## Iterator
 
-`all`, `any`, `as_str`, `by_ref`, `cloned`, `collect`, `collect_string`, `copied`, `filter`, `filter_map`, `find`, `for_each`, `last`, `map`, `max`, `min`, `next`, `peek`, `peekable`, `position`, `rev`, `skip_while`, `take_while`, `to_vec`
+`all`, `any`, `as_str`, `by_ref`, `cloned`, `collect`, `collect_map`, `collect_set`, `collect_string`, `copied`, `filter`, `filter_map`, `find`, `for_each`, `last`, `map`, `max`, `min`, `next`, `peek`, `peekable`, `position`, `rev`, `skip_while`, `take_while`, `to_vec`
 
 ## Line
 
@@ -206,7 +206,7 @@ the `supported_page_is_current` test enforces it.
 
 ## Vec
 
-`all`, `any`, `append`, `as_array`, `as_array_mut`, `as_object`, `as_object_mut`, `by_ref`, `clear`, `cloned`, `collect`, `collect_string`, `copied`, `copy_from_slice`, `dedup`, `extend`, `extend_from_slice`, `filter`, `filter_map`, `find`, `flat_map`, `flatten`, `fold`, `for_each`, `map`, `max`, `max_by_key`, `min`, `min_by_key`, `next`, `nth`, `partition`, `position`, `reduce`, `retain`, `reverse`, `skip_while`, `sort_by`, `sort_by_cached_key`, `sort_by_key`, `take_while`, `to_vec`, `truncate`
+`all`, `any`, `append`, `as_array`, `as_array_mut`, `as_object`, `as_object_mut`, `by_ref`, `clear`, `cloned`, `collect`, `collect_map`, `collect_set`, `collect_string`, `copied`, `copy_from_slice`, `dedup`, `extend`, `extend_from_slice`, `filter`, `filter_map`, `find`, `flat_map`, `flatten`, `fold`, `for_each`, `map`, `max`, `max_by_key`, `min`, `min_by_key`, `next`, `nth`, `partition`, `position`, `reduce`, `retain`, `reverse`, `skip_while`, `sort_by`, `sort_by_cached_key`, `sort_by_key`, `take_while`, `to_vec`, `truncate`
 
 ## WmiConnection
 
@@ -214,4 +214,4 @@ the `supported_page_is_current` test enforces it.
 
 ## builtin (dispatched by id on matching receivers)
 
-`all`, `and_modify`, `and_then`, `any`, `chars`, `clone`, `clone_from`, `cloned`, `concat`, `contains`, `contains_key`, `copied`, `count`, `ends_with`, `entry`, `enumerate`, `filter`, `filter_map`, `find`, `first`, `flat_map`, `fold`, `for_each`, `get`, `get_mut`, `insert`, `into_iter`, `is_empty`, `iter`, `iter_mut`, `join`, `keys`, `last`, `len`, `lines`, `map`, `map_err`, `map_or`, `max_by_key`, `min_by_key`, `ok_or_else`, `or_insert_with`, `or_insert_with_key`, `parse`, `partition`, `pop`, `position`, `product`, `push`, `push_str`, `reduce`, `remove`, `retain`, `rev`, `skip`, `skip_while`, `sort`, `sort_by`, `sort_by_cached_key`, `sort_by_key`, `sort_unstable`, `split`, `split_first`, `split_whitespace`, `starts_with`, `sum`, `take`, `take_while`, `then`, `to_string`, `trim`, `unwrap`, `unwrap_or`, `unwrap_or_else`, `values`, `with_context`
+`all`, `and_modify`, `and_then`, `any`, `chars`, `clone`, `clone_from`, `cloned`, `concat`, `contains`, `contains_key`, `copied`, `count`, `ends_with`, `entry`, `enumerate`, `filter`, `filter_map`, `find`, `first`, `flat_map`, `fold`, `for_each`, `get`, `get_mut`, `insert`, `into_iter`, `into_keys`, `into_values`, `is_empty`, `iter`, `iter_mut`, `join`, `keys`, `last`, `len`, `lines`, `map`, `map_err`, `map_or`, `max_by_key`, `min_by_key`, `ok_or_else`, `or_insert_with`, `or_insert_with_key`, `parse`, `partition`, `pop`, `position`, `product`, `push`, `push_str`, `reduce`, `remove`, `retain`, `rev`, `skip`, `skip_while`, `sort`, `sort_by`, `sort_by_cached_key`, `sort_by_key`, `sort_unstable`, `split`, `split_first`, `split_whitespace`, `starts_with`, `sum`, `take`, `take_while`, `then`, `to_string`, `trim`, `unwrap`, `unwrap_or`, `unwrap_or_else`, `values`, `with_context`

@@ -181,39 +181,44 @@ impl Vm {
             }
             bail!("std::thread is not supported beyond sleep, use tokio::spawn");
         }
-        // Namespaced calls reach native bridges that compute in i64 and f64,
-        // so width-tagged numbers pass their plain image.
-        let args: Vec<Value> = args
-            .into_iter()
+        // Namespaced calls reaching native bridges compute in i64 and f64, so
+        // width-tagged numbers pass those their plain image. The script-level
+        // targets below, a user chunk, a variant constructor, a payload
+        // passthrough, or the UFCS method fallback, hand values through, so
+        // they keep the real args and their width tags.
+        let images: Vec<Value> = args
+            .iter()
             .map(|arg| match arg.bridge_image() {
                 Some(image) => image,
-                None => arg,
+                None => arg.clone(),
             })
             .collect();
         if canon.first().map(String::as_str) == Some("reqwest") {
-            return super::http::reqwest_call(&canon, &args);
+            return super::http::reqwest_call(&canon, &images);
         }
         // Ahead of the match because `Widget::render` mutates the buffer it is
         // given, so it must run exactly once.
-        if let Some(v) = super::ratatui::ratatui_assoc(namespace, last, &args) {
+        if let Some(v) = super::ratatui::ratatui_assoc(namespace, last, &images) {
             return Ok(v);
         }
         match (namespace, last) {
-            ("serde_json", _) => super::json_bridge::bridge_serde_json(last, &args),
+            ("serde_json", _) => super::json_bridge::bridge_serde_json(last, &images),
             ("Utc" | "Local", "now") => Ok(now_datetime(namespace == "Local")),
-            ("DateTime", "parse_from_rfc3339") => Ok(match parse_rfc3339(&arg0(&args).display()) {
-                Ok((unix_secs, nanos, offset)) => {
-                    Value::ok(datetime_value(unix_secs, nanos, false, offset))
-                }
-                Err(e) => Value::err(Value::str(e)),
-            }),
-            ("time", "sleep") => Ok(sleep_future(&args)),
+            ("DateTime", "parse_from_rfc3339") => {
+                Ok(match parse_rfc3339(&arg0(&images).display()) {
+                    Ok((unix_secs, nanos, offset)) => {
+                        Value::ok(datetime_value(unix_secs, nanos, false, offset))
+                    }
+                    Err(e) => Value::err(Value::str(e)),
+                })
+            }
+            ("time", "sleep") => Ok(sleep_future(&images)),
             ("task", "yield_now") => Ok(yield_future()),
             _ => {
                 if let Some(chunk) = self.user_function(&canon.join("::")) {
                     return self.run_chunk(&chunk, &args, &[]);
                 }
-                if let Some(v) = super::std_bridge::native_call(namespace, last, &args)? {
+                if let Some(v) = super::std_bridge::native_call(namespace, last, &images)? {
                     return Ok(v);
                 }
                 // A method on a user type, `Type::assoc(..)` or UFCS
@@ -222,7 +227,7 @@ impl Vm {
                 if let Some(chunk) = self.user_method(namespace, last) {
                     return self.run_chunk(&chunk, &args, &[]);
                 }
-                if let Some(v) = super::assoc::assoc_fn(namespace, last, &args)? {
+                if let Some(v) = super::assoc::assoc_fn(namespace, last, &images)? {
                     return Ok(v);
                 }
                 if let Some(v) = self.make_tuple_variant(Some(namespace), last, &args) {
@@ -239,6 +244,9 @@ impl Vm {
                 // UFCS fallback: `Type::method(recv, ..)` dispatches `method`
                 // on the receiver. This is what makes a method reference used
                 // as a value, like `str::trim` handed to `map`, callable.
+                // `eval_method` takes the real args, it images them itself
+                // where a method needs that, so a width-aware method like
+                // `u8::saturating_add` still sees its real width.
                 if let Some((recv, rest)) = args.split_first() {
                     let recv = recv.clone();
                     let mut rest = rest.to_vec();
@@ -315,8 +323,9 @@ impl Vm {
         };
         // Option and Result methods hand arguments through to the caller,
         // `unwrap_or` for one, and `flag.then_some(x)` on a bool does the
-        // same, so their width tags must survive.
-        if !matches!(recv, Value::Enum { .. } | Value::Bool(_)) {
+        // same, so their width tags must survive. `fold` hands its initial
+        // value through the closure and the result the same way.
+        if !matches!(recv, Value::Enum { .. } | Value::Bool(_)) && name.id != BuiltinId::Fold {
             for arg in args.iter_mut() {
                 if let Some(image) = arg.bridge_image() {
                     *arg = image;

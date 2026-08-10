@@ -11,7 +11,7 @@ use super::bytecode::{BuiltinId, MethodName, ScalarTy};
 use super::iterator;
 use super::ops::compare_values;
 use super::shared::{self, CharOut, Parsed, StrOut, usize_i64};
-use super::value::{StructData, Value};
+use super::value::{StructData, Value, ValueRef};
 
 /// `std::cmp::Ordering` as the enum value scripts match on.
 pub(super) fn make_ordering(o: std::cmp::Ordering) -> Value {
@@ -43,6 +43,10 @@ pub(super) fn ordering_from_value(v: &Value) -> Option<std::cmp::Ordering> {
 }
 
 /// `map.entry(k).or_insert_with(Vec::new).push(x)` accumulates in place.
+///
+/// The insert forms answer a reference into the map, because in real Rust
+/// they answer `&mut V` and `*map.entry(k).or_insert(0) += x` writes through
+/// it. A plain clone would drop that write.
 pub(super) fn entry_method(s: &StructData, name: &str, args: &[Value]) -> Result<Value> {
     let key = s
         .get("key")
@@ -54,14 +58,14 @@ pub(super) fn entry_method(s: &StructData, name: &str, args: &[Value]) -> Result
     Ok(match name {
         "or_insert" => {
             let default = args.first().cloned().unwrap_or(Value::Unit);
-            let mut map = m.lock();
-            map.entry(key).or_insert(default).clone()
+            m.lock().entry(key.clone()).or_insert(default);
+            Value::Ref(Arc::new(ValueRef::map_entry(m.clone(), key)))
         }
         "or_default" => {
-            let mut map = m.lock();
-            map.entry(key)
-                .or_insert_with(|| Value::vec(Vec::new()))
-                .clone()
+            m.lock()
+                .entry(key.clone())
+                .or_insert_with(|| Value::vec(Vec::new()));
+            Value::Ref(Arc::new(ValueRef::map_entry(m.clone(), key)))
         }
         "key" => key.to_value(),
         _ => bail!("unknown method `{name}` on Entry"),
@@ -266,6 +270,8 @@ fn default_of(target: Option<&ScalarTy>) -> Value {
         Some(ScalarTy::Char) => Value::Char('\0'),
         Some(ScalarTy::Opt(_)) => Value::none(),
         Some(ScalarTy::List(_)) => Value::vec(Vec::new()),
+        Some(ScalarTy::Map(_)) => Value::map(),
+        Some(ScalarTy::Set(_)) => Value::set(),
         // `Other` is a type this model does not describe, so it is no better
         // informed than no type at all and keeps the same fallback.
         Some(ScalarTy::Str | ScalarTy::Other) | None => Value::str(String::new()),

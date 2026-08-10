@@ -83,4 +83,9 @@ fn main() {
     // knows its element is a Vec<i8>. From seed 20673216305.
     let cloned_vec: Vec<i8> = vec![(diff_opaque_i64(-127) as i8)];
     println!("{:?}", vec![cloned_vec.clone()].get((diff_opaque_u64(2) as usize)).cloned().unwrap_or_default());
+
+    // A `collect` turbofish states the element type, an Option here, so the
+    // default of a missing element is None rather than an empty string. From
+    // seed 20675204441.
+    println!("{:?}", Some(Some(diff_opaque_f32(1.0f32))).into_iter().collect::<Vec<Option<f32>>>().get((diff_opaque_u64(2) as usize)).cloned().unwrap_or_default());
 }

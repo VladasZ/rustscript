@@ -11,7 +11,7 @@ use super::iterator::{as_closure, option_inner};
 use super::methods::ordering_from_value;
 use super::native::Native;
 use super::shared::usize_i64;
-use super::value::{List, StructData, Value};
+use super::value::{List, StructData, Value, ValueRef};
 use super::vecmap::{SortKey, sort_key};
 use super::vm::Vm;
 
@@ -89,7 +89,12 @@ impl Vm {
                     let v = self.call_closure_data(&clo, &call_args)?;
                     map.lock().insert(key.clone(), v);
                 }
-                Ok(Some(map.lock().get(&key).cloned().unwrap_or(Value::Unit)))
+                // Real Rust answers `&mut V`, so writes through the result
+                // must reach the map.
+                Ok(Some(Value::Ref(Arc::new(ValueRef::map_entry(
+                    map.clone(),
+                    key,
+                )))))
             }
             "and_modify" => {
                 if map.lock().contains_key(&key) {
