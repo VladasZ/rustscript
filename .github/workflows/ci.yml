@@ -29,7 +29,7 @@ jobs:
       # system fontconfig the test job does.
       - name: Install fontconfig
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --features run-rs/deadlock-detection -- -D warnings
 
   test:
     name: Test ${{ matrix.os }}
@@ -46,4 +46,7 @@ jobs:
       - name: Install fontconfig
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
-      - run: cargo test --workspace
+      # The deadlock detector rides along in every suite that runs scripts,
+      # so a lock cycle aborts the run with backtraces instead of hanging
+      # until the harness timeout.
+      - run: cargo test --workspace --features run-rs/deadlock-detection

@@ -8,6 +8,8 @@ use std::process::Command;
 
 use pretty_assertions::assert_eq;
 
+mod common;
+
 /// Examples that cannot be compared byte for byte. Network ones depend on a
 /// live response, `args_echo` prints its own path as argv[0], which differs
 /// between the compiled binary and the script, `registry_demo` is gated
@@ -43,11 +45,6 @@ fn scripts_dir() -> PathBuf {
     workspace_root().join("crates/examples/examples")
 }
 
-fn run(cmd: &mut Command) -> (bool, Vec<u8>) {
-    let out = cmd.output().expect("failed to run command");
-    (out.status.success(), out.stdout)
-}
-
 #[test]
 fn interpreter_matches_compiler() {
     // Build every example as a real cargo binary first.
@@ -78,14 +75,28 @@ fn interpreter_matches_compiler() {
             continue;
         }
 
-        let (compiled_ok, compiled_out) = run(&mut Command::new(bin_dir.join(&name)));
-        let (script_ok, script_out) = run(Command::new(interp)
-            .arg("run")
-            .arg(&path)
-            .env("RUSTSCRIPT_SKIP_CHECK", "1"));
+        let (compiled_ok, compiled_out, compiled_err) = common::run(
+            &mut Command::new(bin_dir.join(&name)),
+            &format!("compiled {name}"),
+        );
+        let (script_ok, script_out, script_err) = common::run(
+            Command::new(interp)
+                .arg("run")
+                .arg(&path)
+                .env("RUSTSCRIPT_SKIP_CHECK", "1"),
+            &format!("script {name}"),
+        );
 
-        assert!(compiled_ok, "compiled example `{name}` exited with error");
-        assert!(script_ok, "script `{name}` exited with error");
+        assert!(
+            compiled_ok,
+            "compiled example `{name}` exited with error:\n{}",
+            String::from_utf8_lossy(&compiled_err)
+        );
+        assert!(
+            script_ok,
+            "script `{name}` exited with error:\n{}",
+            String::from_utf8_lossy(&script_err)
+        );
         assert_eq!(
             compiled_out,
             script_out,

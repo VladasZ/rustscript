@@ -166,7 +166,11 @@ fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
         // deciding and a prefix ordering before what extends it. Tuples order
         // the same way, field by field.
         (Value::Vec(a), Value::Vec(b)) | (Value::Tuple(a), Value::Tuple(b)) => {
-            let (a, b) = (a.lock().clone(), b.lock().clone());
+            // Two separate statements on purpose. In one statement both lock
+            // guards live to the end of it, so ordering a value against its
+            // own clone locks the same mutex twice and deadlocks.
+            let a = a.lock().clone();
+            let b = b.lock().clone();
             let mut order = None;
             for (left, right) in a.iter().zip(b.iter()) {
                 match partial_compare(left, right)? {

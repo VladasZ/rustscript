@@ -19,7 +19,40 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
+/// Watch for lock cycles in the value model and abort with the backtrace of
+/// every thread involved. A deadlock is an interpreter bug, never a script
+/// bug, and without this it shows up as a silent hang that only a harness
+/// timeout can catch, with nothing to say which locks are held where.
+#[cfg(feature = "deadlock-detection")]
+fn spawn_deadlock_watchdog() {
+    use std::process::abort;
+    use std::thread::{sleep, spawn};
+    use std::time::Duration;
+
+    use parking_lot::deadlock::check_deadlock;
+
+    spawn(|| {
+        loop {
+            sleep(Duration::from_secs(1));
+            let cycles = check_deadlock();
+            if cycles.is_empty() {
+                continue;
+            }
+            eprintln!("deadlock: {} cycle(s) detected", cycles.len());
+            for (i, cycle) in cycles.iter().enumerate() {
+                for thread in cycle {
+                    eprintln!("deadlock cycle {i}, thread {:#?}:", thread.thread_id());
+                    eprintln!("{:#?}", thread.backtrace());
+                }
+            }
+            abort();
+        }
+    });
+}
+
 fn main() {
+    #[cfg(feature = "deadlock-detection")]
+    spawn_deadlock_watchdog();
     if let Err(e) = real_main() {
         // A script runtime abort reports and exits like a compiled panic,
         // and a `Result::Err` out of main like a compiled anyhow main, so

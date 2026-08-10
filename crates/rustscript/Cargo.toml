@@ -52,6 +52,13 @@ crossterm = { workspace = true }
 terminal-light = { workspace = true }
 num-traits = { workspace = true }
 
+# Not a default feature on purpose. parking_lot's detector tracks the owner
+# of every lock, which costs on each acquisition, so only test builds carry
+# it. CI enables it so a lock cycle aborts with backtraces of every thread in
+# the cycle instead of hanging until the suite timeout fires.
+[features]
+deadlock-detection = ["parking_lot/deadlock_detection"]
+
 [dev-dependencies]
 pretty_assertions = { workspace = true }
 
