@@ -353,6 +353,30 @@ pub(super) fn native_method(
                 Err(e) => PValue::err(PValue::str(e.to_string())),
             }))
         }
+        // Keeps the delimiter in the buffer, as the real method does, so a
+        // caller can tell a final unterminated line from a terminated one.
+        "read_until" => {
+            let Some(PValue::Int(n)) = args.first() else {
+                bail!("read_until needs a byte as its first argument");
+            };
+            let Ok(delim) = u8::try_from(*n) else {
+                bail!("read_until got {n}, which is not a byte");
+            };
+            let mut h = handle.lock();
+            let Some(r) = h.as_buf_read() else {
+                bail!("read_until on a non-reader handle");
+            };
+            let mut buf = Vec::new();
+            return Ok(Some(match r.read_until(delim, &mut buf) {
+                Ok(n) => {
+                    if let Some(PValue::Vec(list)) = args.get(1) {
+                        list.lock().extend(buf.iter().map(|b| PValue::Int(i64::from(*b))));
+                    }
+                    PValue::ok(PValue::Int(usize_i64(n)))
+                }
+                Err(e) => PValue::err(PValue::str(e.to_string())),
+            }));
+        }
         "read_to_string" => {
             let mut h = handle.lock();
             let Some(r) = h.as_read() else {

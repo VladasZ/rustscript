@@ -126,7 +126,7 @@ selects. Unmarked methods run on both.
 
 ## native handles (files, sockets, readers, processes)
 
-`accept` (fast), `by_ref`, `close` (fast), `collect` (fast), `connect` (fast), `delete` (fast), `duration_since` (fast), `elapsed`, `flush`, `get` (fast), `head` (fast), `id` (fast), `incoming` (fast), `inner` (fast), `is_terminal`, `kill` (fast), `kind`, `lines`, `local_addr` (fast), `lock`, `metadata` (fast), `next`, `patch` (fast), `path` (fast), `peer_addr` (fast), `post` (fast), `put` (fast), `read` (fast), `read_line`, `read_to_end` (fast), `read_to_string`, `seek` (fast), `send` (fast), `send_to` (fast), `set_broadcast` (fast), `set_len` (fast), `set_modified` (fast), `shutdown` (fast), `stderr`, `stdin`, `sync_all` (fast), `sync_data` (fast), `try_clone` (fast), `try_wait` (fast), `wait` (fast), `wait_with_output` (fast), `write`, `write_all`
+`accept` (fast), `by_ref`, `close` (fast), `collect` (fast), `connect` (fast), `delete` (fast), `duration_since` (fast), `elapsed`, `flush`, `get` (fast), `head` (fast), `id` (fast), `incoming` (fast), `inner` (fast), `is_terminal`, `kill` (fast), `kind`, `lines`, `local_addr` (fast), `lock`, `metadata` (fast), `next`, `patch` (fast), `path` (fast), `peer_addr` (fast), `post` (fast), `put` (fast), `read` (fast), `read_line`, `read_to_end` (fast), `read_to_string`, `read_until`, `seek` (fast), `send` (fast), `send_to` (fast), `set_broadcast` (fast), `set_len` (fast), `set_modified` (fast), `shutdown` (fast), `stderr`, `stdin`, `sync_all` (fast), `sync_data` (fast), `try_clone` (fast), `try_wait` (fast), `wait` (fast), `wait_with_output` (fast), `write`, `write_all`
 
 ## OpenOptions
 

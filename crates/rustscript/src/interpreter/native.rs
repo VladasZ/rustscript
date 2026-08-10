@@ -141,6 +141,18 @@ fn append_string(target: &mut Value, text: &str) {
     }
 }
 
+/// A `u8` argument, which a script writes as `b'\n'` or as a plain integer and
+/// the vm carries as an Int either way.
+fn byte_arg(arg: Option<&Value>, method: &str) -> Result<u8> {
+    let Some(Value::Int(n)) = arg else {
+        bail!("{method} needs a byte as its first argument");
+    };
+    match u8::try_from(*n) {
+        Ok(b) => Ok(b),
+        Err(_) => bail!("{method} got {n}, which is not a byte"),
+    }
+}
+
 fn append_bytes(target: &Value, bytes: &[u8]) {
     if let Value::Vec(v) = target {
         v.borrow_mut()
@@ -260,6 +272,24 @@ fn reader_native_method(
             let mut buf = Vec::new();
             return Ok(Some(io_err(r.read_to_end(&mut buf), |n| {
                 if let Some(t) = args.first() {
+                    append_bytes(t, &buf);
+                }
+                Value::Int(int_len(n))
+            })));
+        }
+        // The byte oriented counterpart of read_line, for output that is not
+        // guaranteed to be UTF-8. The delimiter is kept in the buffer, as the
+        // real method does, so a caller can tell a final unterminated line from
+        // a terminated one.
+        "read_until" => {
+            let delim = byte_arg(args.first(), "read_until")?;
+            let mut h = handle.borrow_mut();
+            let Some(r) = as_read(&mut h) else {
+                bail!("read_until on non-reader {}", h.type_name());
+            };
+            let mut buf = Vec::new();
+            return Ok(Some(io_err(r.read_until(delim, &mut buf), |n| {
+                if let Some(t) = args.get(1) {
                     append_bytes(t, &buf);
                 }
                 Value::Int(int_len(n))

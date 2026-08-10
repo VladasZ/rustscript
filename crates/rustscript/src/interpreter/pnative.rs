@@ -4,7 +4,7 @@
 //! and stream its pipes from concurrent tasks the same way the fast engine does.
 
 use std::future::Future;
-use std::io::{BufReader, Read};
+use std::io::{BufRead, BufReader, Read};
 use std::pin::Pin;
 use std::process::{Child, ChildStdin};
 use std::sync::Arc;
@@ -76,6 +76,17 @@ impl PNative {
 
     /// The readable side of a handle, for the shared reader methods.
     pub fn as_read(&mut self) -> Option<&mut dyn Read> {
+        match self {
+            PNative::Reader(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    /// The buffered side of a handle, for the reader methods that need a
+    /// delimiter. The Reader variant already owns a BufReader, so this hands out
+    /// that buffer instead of wrapping a second one around it, which would eat
+    /// bytes the next call expects to still be there.
+    pub fn as_buf_read(&mut self) -> Option<&mut dyn BufRead> {
         match self {
             PNative::Reader(r) => Some(r),
             _ => None,
