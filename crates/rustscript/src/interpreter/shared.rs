@@ -55,6 +55,14 @@ pub(super) fn usize_i64(i: usize) -> i64 {
     i64::try_from(i).expect("value exceeds i64")
 }
 
+/// A length as a real `usize` value, width tag included. An untagged length
+/// ran `!` and underflow in i64, so `!v.len()` answered a small negative
+/// where compiled Rust answers a huge unsigned. Found by the differential
+/// campaign at seed 20675317577.
+pub(super) fn usize_value(i: usize) -> super::value::Value {
+    super::value::Value::int_of_width(i128::from(usize_i64(i)), IntWidth::USize)
+}
+
 fn float_arg(args: &impl Args, i: usize) -> Result<f64> {
     match args.float(i) {
         Some(f) => Ok(f),
@@ -349,7 +357,8 @@ pub(super) fn char_method(ch: char, name: &str, args: &impl Args) -> Option<Resu
 /// bump, never a copy.
 pub(super) enum StrOut {
     Bool(bool),
-    Int(i64),
+    /// A length or count, materialized with the real `usize` width.
+    USize(usize),
     Owned(String),
     Keep,
     OkKeep,
@@ -367,9 +376,9 @@ pub(super) fn str_core(s: &str, name: &str, args: &impl Args) -> Result<Option<S
     use StrOut as O;
     let a = |i: usize| args.text(i);
     Ok(Some(match name {
-        "len" => O::Int(usize_i64(s.len())),
+        "len" => O::USize(s.len()),
         "is_empty" => O::Bool(s.is_empty()),
-        "count" => O::Int(usize_i64(s.chars().count())),
+        "count" => O::USize(s.chars().count()),
         "contains" => O::Bool(s.contains(&a(0))),
         "eq_ignore_ascii_case" => O::Bool(s.eq_ignore_ascii_case(&a(0))),
         "starts_with" => O::Bool(s.starts_with(&a(0))),

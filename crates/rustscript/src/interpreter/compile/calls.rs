@@ -353,7 +353,14 @@ impl Compiler<'_> {
             };
             let from_tail = self.collect_tails.get(&std::ptr::from_ref(m)).copied();
             if let Some(target) = from_turbofish.or(from_let).or(from_tail) {
-                self.collect_let = None;
+                // Cleared only when this call consumed the pending `let`
+                // hint. A turbofish collect nested inside the annotated
+                // chain, say in one branch of its `if`, resolves through
+                // its own turbofish, and clearing here made the outer
+                // collect fall back to a vec of pairs.
+                if from_let.is_some() {
+                    self.collect_let = None;
+                }
                 method = target.method_name().to_string();
             }
         }

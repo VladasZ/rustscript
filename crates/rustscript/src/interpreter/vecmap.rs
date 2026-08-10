@@ -19,7 +19,7 @@ pub(super) type MapStore = IndexMap<MapKey, Value>;
 pub(super) fn vec_method(v: &List, method: &MethodName, args: &mut [Value]) -> Result<Value> {
     use BuiltinId as B;
     Ok(match method.id {
-        B::Len | B::Count => Value::Int(super::shared::usize_i64(v.lock().len())),
+        B::Len | B::Count => super::shared::usize_value(v.lock().len()),
         B::IsEmpty => Value::Bool(v.lock().is_empty()),
         B::Clone => Value::vec(v.lock().clone()),
         B::Iter => iterator::value_iter(v.clone()),
@@ -359,7 +359,7 @@ pub(super) fn map_method(
         Ok(f(m.lock().get(&k)))
     };
     Ok(match method.id {
-        B::Len | B::Count => Value::Int(super::shared::usize_i64(m.lock().len())),
+        B::Len | B::Count => super::shared::usize_value(m.lock().len()),
         B::IsEmpty => Value::Bool(m.lock().is_empty()),
         B::Clone => Value::Map(Arc::new(Mutex::new(m.lock().clone())), kind),
         B::Insert => {

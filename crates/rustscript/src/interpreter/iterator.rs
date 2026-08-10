@@ -589,11 +589,11 @@ impl Vm {
                 remaining: usize::try_from(int_arg(args)?)?,
             }),
             B::Count => {
-                let mut count = 0;
+                let mut count: usize = 0;
                 while self.iterator_next(iterator)?.is_some() {
                     count += 1;
                 }
-                Value::Int(count)
+                super::shared::usize_value(count)
             }
             B::Sum => self.iterator_sum(iterator, method.scalar.as_ref())?,
             B::Product => self.iterator_product(iterator)?,
