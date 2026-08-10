@@ -40,12 +40,12 @@ pub(super) fn wmi_method(s: &StructData, name: &str, args: &[Value]) -> Result<V
 mod imp {
 
     use std::collections::HashMap;
-    use std::sync::Arc;
 
     use anyhow::{Result, bail};
+    use indexmap::IndexMap;
     use wmi::{Variant, WMIConnection};
 
-    use super::super::value::{Map, MapKey, RStr, StructData, Value};
+    use super::super::value::{MapKey, StructData, Value};
 
     /// Nothing to check up front. A namespace that does not exist, or a COM
     /// that will not start, reports itself when the connection is opened.
@@ -90,7 +90,7 @@ mod imp {
         let mut map = IndexMap::default();
         for name in names {
             let Some(v) = row.get(name) else { continue };
-            map.insert(MapKey::Str(RStr::new(name.clone())), from_variant(v));
+            map.insert(MapKey::Str(name.as_str().into()), from_variant(v));
         }
         Value::map_of(map)
     }

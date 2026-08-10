@@ -37,9 +37,9 @@ samples that landed in each. Patterns that have come up so far:
 - `_nanov2_free`, `nanov2_malloc_type`, `_malloc_zone_malloc` high means the
   workload is allocation bound. Look for per-iteration `Value` allocations,
   string clones, or temporary containers.
-- `vm::exec` is the dispatch loop itself. A high share here with low malloc
-  means the remaining cost is opcode count, so fewer or fused instructions
-  help.
+- `vm::exec` and `vm_step::step` are the frame loop and the op dispatch. A
+  high share here with low malloc means the remaining cost is opcode count,
+  so fewer or fused instructions help.
 - `drop_in_place<Value>` and `Value as Clone::clone` mean register and value
   traffic. Look for clones that could be moves.
 - `sip..Hasher` means something fell back to the default SipHash hasher

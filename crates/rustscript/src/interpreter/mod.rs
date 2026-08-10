@@ -32,6 +32,8 @@ mod typeir;
 mod value;
 mod vecmap;
 mod vm;
+mod vm_method;
+mod vm_step;
 mod vm_support;
 mod winreg_bridge;
 mod wmi_bridge;
