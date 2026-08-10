@@ -137,7 +137,7 @@ fn both_print_the_panic_header() {
     );
 }
 
-/// Integer overflow aborts like debug Rust in both engines with the same
+/// Integer overflow aborts like debug Rust with the same
 /// message. The `keep` helper is not `const`, so the compiler cannot fold the
 /// operation and reject it, which leaves the overflow to happen at runtime.
 #[test]

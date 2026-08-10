@@ -1,4 +1,4 @@
-// `split(..).next()` on the parallel engine that `#[tokio::main]` selects.
+// `split(..).next()` under `#[tokio::main]`.
 // Iterators are eager lists there, so `next` answers the first element. st.rs
 // peels a worktree's canonical repo out of a git dir path exactly this way.
 

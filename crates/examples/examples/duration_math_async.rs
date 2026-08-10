@@ -1,5 +1,5 @@
-// Duration addition and subtraction on the parallel engine that
-// `#[tokio::main]` selects, the same checked std ops the fast engine uses. An
+// Duration addition and subtraction under `#[tokio::main]`, the same
+// checked std ops as everywhere else. An
 // accumulator built with `+=` used to die here with "expected a number".
 
 use std::time::Duration;

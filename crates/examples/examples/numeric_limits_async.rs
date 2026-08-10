@@ -1,5 +1,4 @@
-// Numeric limit constants on the parallel engine that `#[tokio::main]`
-// selects. The width tagged ones like `u16::MAX` used to fall through the
+// Numeric limit constants under `#[tokio::main]`. The width tagged ones like `u16::MAX` used to fall through the
 // bridge as an unsupported constant, so this pins every integer width and
 // both float precisions there.
 

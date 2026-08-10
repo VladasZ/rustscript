@@ -1,6 +1,5 @@
-// The same RFC 3339 parsing on the parallel engine that `#[tokio::main]`
-// selects. Both engines route through one shared core, so the numbers here
-// must match the fast engine and the compiled build alike.
+// The same RFC 3339 parsing under `#[tokio::main]`. Both engines route through one shared core, so the numbers here
+// must match the compiled build.
 
 use chrono::{DateTime, Timelike};
 

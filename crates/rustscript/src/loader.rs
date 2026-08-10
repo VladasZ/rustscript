@@ -48,7 +48,7 @@ pub struct Program {
     /// Local crates the script pulls in through a `path` dependency.
     pub crate_deps: Vec<CrateDep>,
     /// True when `fn main` carries `#[tokio::main]`, routing the script to the
-    /// parallel engine instead of the single threaded fast engine.
+    /// async surface: `.await`, `tokio::spawn`, and `join!`.
     pub tokio_main: bool,
 }
 

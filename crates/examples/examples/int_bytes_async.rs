@@ -1,5 +1,4 @@
-// Integer byte conversions on the parallel engine that `#[tokio::main]`
-// selects. The two engines answer these from one shared core, and this is what
+// Integer byte conversions under `#[tokio::main]`. The two engines answer these from one shared core, and this is what
 // proves the parallel one is wired to it, in both directions and both orders.
 
 fn hex(bytes: &[u8]) -> String {

@@ -1,5 +1,4 @@
-// The bare-function-as-value form on the parallel engine that `#[tokio::main]`
-// selects. Option::map is not bridged in tokio mode, so this uses the consumers
+// The bare-function-as-value form under `#[tokio::main]`. This uses the consumers
 // that are: binding the function to a variable and calling it, and handing it to
 // an iterator adaptor.
 

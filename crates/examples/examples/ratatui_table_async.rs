@@ -1,5 +1,5 @@
 //! The same ratatui table as `ratatui_table`, drawn from a `#[tokio::main]`
-//! script so the parallel engine renders through the same path.
+//! script so the async path renders through the same code.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint;

@@ -1,4 +1,4 @@
-//! Width-aware integer methods, written once for both engines.
+//! Width-aware integer methods, one table for the whole dispatch.
 //!
 //! These used to run on the i64 image that `bridge_image` produces, which lost
 //! two things. The width, so `200u8.saturating_add(100)` saturated at

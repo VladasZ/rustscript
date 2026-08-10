@@ -1,6 +1,6 @@
 #!/usr/bin/env rust
 
-// The tokio engine's copy of json_null_access, so both engines are held to the
+// The `#[tokio::main]` copy of json_null_access, so the async path is held to the
 // same serde_json behaviour on a null. A json null is Option::None inside the
 // interpreter, and the tokio engine used to fail with an unknown method there.
 // The myip script hit it for real: one address service answered nothing, the

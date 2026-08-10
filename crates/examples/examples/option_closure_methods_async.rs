@@ -1,5 +1,4 @@
-// Option's closure-taking methods on the parallel engine that `#[tokio::main]`
-// selects: map, map_or, and_then, filter, unwrap_or_else, is_some_and. The fast
+// Option's closure-taking methods under `#[tokio::main]`: map, map_or, and_then, filter, unwrap_or_else, is_some_and. The fast
 // engine already runs these, this proves the tokio engine matches.
 
 fn triple(x: i64) -> i64 {

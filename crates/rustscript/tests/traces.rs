@@ -1,5 +1,5 @@
 //! Runtime error traces. A failing script must name the failing line and the
-//! script call chain, on both engines, with deep recursion capped.
+//! script call chain, with deep recursion capped.
 
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
