@@ -141,6 +141,11 @@ pub(super) fn spawn_command(s: &StructData) -> Value {
         "Child",
         [
             ("handle".into(), Native::Child(child).wrap()),
+            // An alias of the stdin handle under a name no script can
+            // reach, `cargo check` rejects the field. `stdin.take()`
+            // empties the visible field for real, and the close on wait
+            // must still find the pipe, see `child_method`.
+            (STDIN_PIPE.into(), stdin.clone()),
             ("stdin".into(), stdin),
             ("stdout".into(), stdout),
             ("stderr".into(), stderr),
@@ -261,6 +266,11 @@ fn command_envs(s: &StructData) -> super::value::Map {
     }
 }
 
+/// The hidden alias of the child's stdin handle, see `spawn_command`. A
+/// constant rather than a literal so the surface harvest, which reads every
+/// string in `child_method`, does not list it as a callable method.
+const STDIN_PIPE: &str = "stdin_pipe";
+
 /// Drop the real `ChildStdin` inside a shared handle, closing the pipe. Walks a
 /// `Some(Native)` wrapper from `child.stdin.take()`.
 fn close_child_stdin(v: &Value) {
@@ -288,12 +298,15 @@ pub(super) fn child_method(recv: &Value, name: &str, args: &mut [Value]) -> Resu
     // Waiting on a child that was fed piped stdin must first close that pipe,
     // or the child blocks forever on EOF. Real Rust closes it when the taken
     // `ChildStdin` drops. The VM keeps every value alive in a register for the
-    // whole call, so close it through the shared handle instead.
+    // whole call, so close it through the shared handle instead. The hidden
+    // `stdin_pipe` alias reaches the pipe even after `stdin.take()` emptied
+    // the visible field.
     if matches!(name, "wait" | "wait_with_output") {
-        if let Some(v) = s.get("stdin") {
+        if let Some(v) = s.get(STDIN_PIPE) {
             close_child_stdin(&v);
         }
         s.set("stdin", Value::none());
+        s.set(STDIN_PIPE, Value::none());
     }
     if name == "wait_with_output" {
         let out = drain_child_pipe(s, "stdout");

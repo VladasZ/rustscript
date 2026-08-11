@@ -210,6 +210,17 @@ fn vec_method_by_name(v: &List, method: &MethodName, args: &mut [Value]) -> Resu
             Value::Unit
         }
         "copy_from_slice" => return vec_copy_from_slice(v, args),
+        "swap_remove" => {
+            let i = usize::try_from(int_arg(args, 0)?)?;
+            let mut items = v.lock();
+            if i >= items.len() {
+                bail!(
+                    "swap_remove index (is {i}) should be < len (is {})",
+                    items.len()
+                );
+            }
+            items.swap_remove(i)
+        }
         "truncate" => {
             let n = usize::try_from(int_arg(args, 0)?)?;
             v.lock().truncate(n);

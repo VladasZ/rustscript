@@ -279,6 +279,17 @@ impl Compiler<'_> {
             });
             return Ok(());
         }
+        // A zero-argument `take` is `Option::take` and must empty its place.
+        // It used to fall through to the generic clone answer, which left
+        // the source Some, a silent wrong answer that made
+        // `child.stdin.take()` keep the pipe.
+        if m.method == "take"
+            && m.args.is_empty()
+            && m.turbofish.is_none()
+            && self.lower_option_take(dst, &m.receiver)?
+        {
+            return Ok(());
+        }
         // Fuse `x.get(k).copied().unwrap_or(d)` into one op. The chain builds
         // and tears down an Option per call, which dominates counting loops.
         if dst != DISCARD
@@ -501,6 +512,78 @@ impl Compiler<'_> {
 
     /// Rust evaluates an assignment's right operand before the place, so a
     /// panic in the value fires before a panic in the place expression.
+    /// Lower a zero-argument `take` on a place expression: read the place
+    /// into `dst`, then store None back through the same registers, so every
+    /// part of the place is evaluated exactly once. True when the receiver
+    /// was such a place. A temporary receiver answers false and keeps the
+    /// generic clone answer, which matches real Rust observably, the emptied
+    /// temporary is gone either way.
+    fn lower_option_take(&mut self, dst: Reg, place: &Expr) -> Result<bool> {
+        match place {
+            Expr::Path(p) if p.qself.is_none() && p.path.segments.len() == 1 => {
+                let name = p.path.segments[0].ident.to_string();
+                if dst != DISCARD {
+                    self.load_name(&name, dst)?;
+                }
+                let location = self.resolve_for_write(&name);
+                let none = self.alloc();
+                self.load_name("None", none)?;
+                self.emit_name_store(location, none, &name)?;
+                Ok(true)
+            }
+            Expr::Field(f) => {
+                let base = self.compile_expr(&f.base)?;
+                let member = self.member_of(&f.member);
+                if dst != DISCARD {
+                    self.emit(Op::GetField { dst, base, member });
+                }
+                let none = self.alloc();
+                self.load_name("None", none)?;
+                self.emit(Op::SetField {
+                    base,
+                    member,
+                    val: none,
+                });
+                Ok(true)
+            }
+            Expr::Index(ix) => {
+                let base = self.compile_expr(&ix.expr)?;
+                let key = self.compile_expr(&ix.index)?;
+                if dst != DISCARD {
+                    self.emit(Op::Index { dst, base, key });
+                }
+                let none = self.alloc();
+                self.load_name("None", none)?;
+                self.emit(Op::SetIndex {
+                    base,
+                    key,
+                    val: none,
+                });
+                Ok(true)
+            }
+            Expr::Paren(p) => self.lower_option_take(dst, &p.expr),
+            _ => Ok(false),
+        }
+    }
+
+    /// The register of a `&mut` parameter named as a bare deref target,
+    /// `*seq` for a `seq: &mut usize` parameter of the current function.
+    /// Only a plain local parameter qualifies. A cell-promoted or captured
+    /// name keeps the strict reference-only op.
+    fn deref_param_reg(&self, expr: &Expr) -> Option<Reg> {
+        let Expr::Path(p) = expr else { return None };
+        if p.qself.is_some() || p.path.segments.len() != 1 {
+            return None;
+        }
+        let name = p.path.segments[0].ident.to_string();
+        let frame = self.frames.last()?;
+        let reg = frame.local_reg(&name)?;
+        if frame.mutable_locals.contains(&reg) {
+            return None;
+        }
+        ((reg as usize) < frame.num_params).then_some(reg)
+    }
+
     pub(super) fn compile_assign(&mut self, target: &Expr, value: &Expr) -> Result<()> {
         match target {
             Expr::Path(p) if p.path.segments.len() == 1 => {
@@ -523,8 +606,12 @@ impl Compiler<'_> {
             }
             Expr::Unary(u) if matches!(u.op, UnOp::Deref(_)) => {
                 let val = self.compile_expr(value)?;
-                let target = self.compile_expr(&u.expr)?;
-                self.emit(Op::SetDeref { target, val });
+                if let Some(target) = self.deref_param_reg(&u.expr) {
+                    self.emit(Op::SetDerefParam { target, val });
+                } else {
+                    let target = self.compile_expr(&u.expr)?;
+                    self.emit(Op::SetDeref { target, val });
+                }
             }
             Expr::Paren(p) => self.compile_assign(&p.expr, value)?,
             _ => bail!("invalid assignment target"),
@@ -615,26 +702,44 @@ impl Compiler<'_> {
                 });
             }
             Expr::Unary(u) if matches!(u.op, UnOp::Deref(_)) => {
-                let b = self.compile_expr(rhs)?;
-                let target = self.compile_expr(&u.expr)?;
-                let current = self.alloc();
-                self.emit(Op::Deref {
-                    dst: current,
-                    src: target,
-                });
-                let result = self.alloc();
-                self.emit(Op::Bin {
-                    dst: result,
-                    a: current,
-                    b,
-                    op,
-                });
-                self.emit(Op::SetDeref {
-                    target,
-                    val: result,
-                });
+                self.compile_compound_deref_assign(u, op, rhs)?;
             }
             _ => bail!("invalid compound assignment target"),
+        }
+        Ok(())
+    }
+
+    /// `*target op= rhs`, the deref arm of `compile_compound_assign`.
+    fn compile_compound_deref_assign(
+        &mut self,
+        u: &syn::ExprUnary,
+        op: BinKind,
+        rhs: &Expr,
+    ) -> Result<()> {
+        let b = self.compile_expr(rhs)?;
+        let param = self.deref_param_reg(&u.expr);
+        let target = self.compile_expr(&u.expr)?;
+        let current = self.alloc();
+        self.emit(Op::Deref {
+            dst: current,
+            src: target,
+        });
+        let result = self.alloc();
+        self.emit(Op::Bin {
+            dst: result,
+            a: current,
+            b,
+            op,
+        });
+        match param {
+            Some(target) => self.emit(Op::SetDerefParam {
+                target,
+                val: result,
+            }),
+            None => self.emit(Op::SetDeref {
+                target,
+                val: result,
+            }),
         }
         Ok(())
     }

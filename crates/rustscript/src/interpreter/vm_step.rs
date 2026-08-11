@@ -180,6 +180,7 @@ pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
         Op::SetIndex { base, key, val } => set_index(ctx, *base, *key, *val)?,
         Op::Deref { dst, src } => ctx.set(*dst, deref(ctx.get(*src))?),
         Op::SetDeref { target, val } => set_deref(ctx, *target, *val)?,
+        Op::SetDerefParam { target, val } => set_deref_param(ctx, *target, *val)?,
         Op::GetField { dst, base, member } => get_field_op(ctx, *dst, *base, *member)?,
         Op::SetField { base, member, val } => set_field_op(ctx, *base, *member, *val)?,
         Op::Try { dst, src } => try_op(ctx, *dst, *src),
@@ -518,6 +519,20 @@ fn set_deref(ctx: &StepCtx, target: u16, val: u16) -> Result<Flow> {
         bail!("assignment through a dangling reference");
     }
     Ok(Flow::Next)
+}
+
+/// `SetDerefParam`: a deref assignment whose target the compiler proved to be
+/// a `&mut` parameter. A real reference is set through, and a plain value is
+/// written into the parameter register, where the caller's writeback finds it.
+fn set_deref_param(ctx: &mut StepCtx, target: u16, val: u16) -> Result<Flow> {
+    if let Value::Ref(reference) = ctx.get(target) {
+        if !reference.set(ctx.get(val).clone()) {
+            bail!("assignment through a dangling reference");
+        }
+        return Ok(Flow::Next);
+    }
+    let value = ctx.get(val).clone();
+    Ok(ctx.set(target, value))
 }
 
 fn get_field_op(ctx: &mut StepCtx, dst: u16, base: u16, member: u16) -> Result<Flow> {
