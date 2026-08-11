@@ -11,6 +11,7 @@ use crate::interpreter::bytecode::{
 };
 use crate::interpreter::serde_attrs::serde_rename;
 
+use super::expr::annotation_scalar;
 use super::{
     CollectTarget, Compiler, FnState, HashMap, NameLoc, Res, TypeIr, collect_pattern_names,
     first_generic_type, idx16, int_literal,
@@ -463,6 +464,15 @@ impl Compiler<'_> {
         self.cur().num_params = params.len();
         for p in &params {
             let reg = self.alloc();
+            // An annotated param is a type the program wrote down, recorded
+            // like an annotated let, so a default built from the param in the
+            // closure body reads the right type.
+            if let Pat::Type(t) = p
+                && let Pat::Ident(id) = &*t.pat
+                && let Some(declared) = annotation_scalar(&t.ty)
+            {
+                self.typed_locals.insert(id.ident.to_string(), declared);
+            }
             match p {
                 Pat::Ident(id) if id.subpat.is_none() => self.define(&id.ident.to_string(), reg),
                 _ => self.bind_pattern_irrefutable(p, reg)?,
@@ -1223,8 +1233,17 @@ fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
             },
             _ => None,
         },
-        // `clone` hands the receiver's type through untouched.
-        Expr::MethodCall(call) if call.method == "clone" => written_ty(&call.receiver, env),
+        // `clone` hands the receiver's type through untouched. The ASCII case
+        // methods keep it too, char to char, u8 to u8, and both string forms
+        // answer a String.
+        Expr::MethodCall(call)
+            if matches!(
+                call.method.to_string().as_str(),
+                "clone" | "to_ascii_lowercase" | "to_ascii_uppercase"
+            ) =>
+        {
+            written_ty(&call.receiver, env)
+        }
         // `it.collect::<T>()` states its own type in the turbofish, which is
         // how a `map(|x| ...collect::<Vec<bool>>()).min()` chain learns what
         // its default is.

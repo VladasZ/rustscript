@@ -89,4 +89,22 @@ fn main() {
         .min()
         .unwrap_or_default();
     println!("min miss:     {smallest:?}");
+
+    // The ASCII case methods keep their receiver's type, so `then_some` of a
+    // lowered char states a char payload and its default is the nul char, not
+    // the empty string.
+    let initial: char = 'R';
+    let lowered = flag.then_some(initial.to_ascii_lowercase());
+    println!("then_some:    {:?}", lowered.unwrap_or_default());
+
+    // The annotated closure param is where this char is written down, kept
+    // through the ASCII case method, and `max` of no elements defaults from
+    // it.
+    let no_letters: Vec<char> = Vec::new();
+    let largest = no_letters
+        .into_iter()
+        .map(|letter: char| letter.to_ascii_uppercase())
+        .max()
+        .unwrap_or_default();
+    println!("max miss:     {largest:?}");
 }
