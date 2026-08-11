@@ -107,9 +107,9 @@ target from the turbofish, so `"300".parse::<u8>()` is an `Err` and a trailing
 space is not part of a number. `sum` takes its element type the same way, which
 is what tells an empty `sum::<f64>()` from an empty `sum::<i32>()`.
 `unwrap_or_default` builds its default from the payload the call site names,
-whether that is a `None::<T>`, the binding's own annotation, the argument
-that built the Option, or a `collect` turbofish on the chain that built the
-container.
+whether that is a `None::<T>`, the binding's or a closure param's annotation,
+the argument that built the Option, or a `collect` turbofish on the chain
+that built the container.
 
 ## Supported Rust
 
