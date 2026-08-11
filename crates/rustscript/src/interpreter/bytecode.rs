@@ -729,6 +729,15 @@ pub enum Op {
         target: Reg,
         val: Reg,
     },
+    /// `*param = v` where `param` is a `&mut` function parameter. Sets
+    /// through a real reference when the register holds one, otherwise
+    /// writes the register itself, which the caller's `&mut` arg writeback
+    /// hands back on return. Scalars arrive as plain copies rather than
+    /// references, so the strict op has nothing to assign through.
+    SetDerefParam {
+        target: Reg,
+        val: Reg,
+    },
     GetField {
         dst: Reg,
         base: Reg,

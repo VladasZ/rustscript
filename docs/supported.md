@@ -206,7 +206,7 @@ the `supported_page_is_current` test enforces it.
 
 ## Vec
 
-`all`, `any`, `append`, `as_array`, `as_array_mut`, `as_object`, `as_object_mut`, `by_ref`, `clear`, `cloned`, `collect`, `collect_map`, `collect_set`, `collect_string`, `copied`, `copy_from_slice`, `dedup`, `extend`, `extend_from_slice`, `filter`, `filter_map`, `find`, `flat_map`, `flatten`, `fold`, `for_each`, `map`, `max`, `max_by_key`, `min`, `min_by_key`, `next`, `nth`, `partition`, `position`, `reduce`, `retain`, `reverse`, `skip_while`, `sort_by`, `sort_by_cached_key`, `sort_by_key`, `take_while`, `to_vec`, `truncate`
+`all`, `any`, `append`, `as_array`, `as_array_mut`, `as_object`, `as_object_mut`, `by_ref`, `clear`, `cloned`, `collect`, `collect_map`, `collect_set`, `collect_string`, `copied`, `copy_from_slice`, `dedup`, `extend`, `extend_from_slice`, `filter`, `filter_map`, `find`, `flat_map`, `flatten`, `fold`, `for_each`, `map`, `max`, `max_by_key`, `min`, `min_by_key`, `next`, `nth`, `partition`, `position`, `reduce`, `retain`, `reverse`, `skip_while`, `sort_by`, `sort_by_cached_key`, `sort_by_key`, `swap_remove`, `take_while`, `to_vec`, `truncate`
 
 ## WmiConnection
 
