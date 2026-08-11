@@ -1187,6 +1187,35 @@ fn vec_macro_element(mac: &syn::Macro, env: &TyEnv) -> Option<ScalarTy> {
         .and_then(|e| written_ty(e, env))
 }
 
+/// A method whose answer has its receiver's own type. `clone` hands it
+/// through untouched, the ASCII case methods keep char as char and u8 as u8,
+/// and the arithmetic methods keep their receiver's width, which is how
+/// `(x as u8).saturating_mul(y)` in a map closure states a u8 element.
+fn keeps_receiver_ty(method: &str) -> bool {
+    matches!(
+        method,
+        "clone"
+            | "to_ascii_lowercase"
+            | "to_ascii_uppercase"
+            | "saturating_add"
+            | "saturating_sub"
+            | "saturating_mul"
+            | "wrapping_add"
+            | "wrapping_sub"
+            | "wrapping_mul"
+            | "rotate_left"
+            | "rotate_right"
+            | "rem_euclid"
+            | "div_euclid"
+            | "pow"
+            | "powi"
+            | "powf"
+            | "abs"
+            | "signum"
+            | "isqrt"
+    )
+}
+
 /// The type an expression states about itself, for the same narrow purpose.
 fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
     match expr {
@@ -1195,6 +1224,15 @@ fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
         // A block answers through its tail expression, which is how a
         // `({ let mut m: HashMap<K, V> = ...; m })` vec element states itself.
         Expr::Block(block) => block_tail(&block.block).and_then(|e| written_ty(e, env)),
+        // An if-else answers through whichever branch states its type, so
+        // `then_some(if flag { '9' } else { c })` knows it holds a char.
+        Expr::If(sel) => block_tail(&sel.then_branch)
+            .and_then(|e| written_ty(e, env))
+            .or_else(|| {
+                sel.else_branch
+                    .as_ref()
+                    .and_then(|(_, e)| written_ty(e, env))
+            }),
         // `value as u8` names the type at the cast.
         Expr::Cast(cast) => ScalarTy::lower(&cast.ty),
         // Arithmetic keeps its operands' type, so either side that states it
@@ -1233,15 +1271,9 @@ fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
             },
             _ => None,
         },
-        // `clone` hands the receiver's type through untouched. The ASCII case
-        // methods keep it too, char to char, u8 to u8, and both string forms
-        // answer a String.
-        Expr::MethodCall(call)
-            if matches!(
-                call.method.to_string().as_str(),
-                "clone" | "to_ascii_lowercase" | "to_ascii_uppercase"
-            ) =>
-        {
+        // These methods answer in their receiver's own type, so the receiver
+        // states it for the whole call.
+        Expr::MethodCall(call) if keeps_receiver_ty(&call.method.to_string()) => {
             written_ty(&call.receiver, env)
         }
         // `it.collect::<T>()` states its own type in the turbofish, which is
