@@ -107,4 +107,21 @@ fn main() {
         .max()
         .unwrap_or_default();
     println!("max miss:     {largest:?}");
+
+    // An if-else states its type through either branch, so a `then_some` of
+    // one holds a char and defaults to the nul char.
+    let fallback: char = 'x';
+    let chosen = flag.then_some(if flag { '9' } else { fallback });
+    println!("if branch:    {:?}", chosen.unwrap_or_default());
+
+    // The arithmetic methods answer in their receiver's width, so the u8
+    // param this closure multiplies is where the element type is written
+    // down and `max` of no elements defaults to 0u8.
+    let no_bytes: Vec<u8> = Vec::new();
+    let widest = no_bytes
+        .into_iter()
+        .map(|value: u8| value.saturating_mul(3))
+        .max()
+        .unwrap_or_default();
+    println!("arith miss:   {widest:?}");
 }
