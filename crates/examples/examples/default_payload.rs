@@ -4,9 +4,12 @@
 //! Option or Result it is called on. The method takes no turbofish, so the
 //! type has to come from wherever the source states it: the binding's
 //! annotation, the argument of the call that built the Option, a `None::<T>`,
-//! or the shape of the chain itself. Without that the default was an empty
-//! string whatever the real type was, which surfaced further along as a
-//! confusing "cannot cast String to integer".
+//! a `collect` turbofish on the chain that built the container, or the shape
+//! of the chain itself. Without that the default was an empty string whatever
+//! the real type was, which surfaced further along as a confusing "cannot
+//! cast String to integer".
+
+use std::collections::HashMap;
 
 fn main() {
     // Runtime false, so nothing here folds at compile time and every Option
@@ -60,4 +63,30 @@ fn main() {
         .copied()
         .unwrap_or_default();
     println!("collected:    {collected:?}");
+
+    // A map built by a `collect` turbofish states its value type there, so a
+    // missed `get` defaults to the empty vec, not the empty string.
+    let missed = vec![String::from("a"), String::from("b")]
+        .into_iter()
+        .map(|key: String| (key.clone(), vec![1i64, 2i64]))
+        .collect::<HashMap<String, Vec<i64>>>()
+        .get(&String::from("missing"))
+        .cloned()
+        .unwrap_or_default();
+    println!("map miss:     {missed:?}");
+
+    // The closure's own collect turbofish is the only place this element
+    // type is written down, and `min` of no elements defaults from it.
+    let empty: Vec<char> = Vec::new();
+    let smallest = empty
+        .into_iter()
+        .map(|letter: char| {
+            vec![letter.is_uppercase()]
+                .into_iter()
+                .rev()
+                .collect::<Vec<bool>>()
+        })
+        .min()
+        .unwrap_or_default();
+    println!("min miss:     {smallest:?}");
 }

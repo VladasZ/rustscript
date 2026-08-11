@@ -1225,6 +1225,14 @@ fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
         },
         // `clone` hands the receiver's type through untouched.
         Expr::MethodCall(call) if call.method == "clone" => written_ty(&call.receiver, env),
+        // `it.collect::<T>()` states its own type in the turbofish, which is
+        // how a `map(|x| ...collect::<Vec<bool>>()).min()` chain learns what
+        // its default is.
+        Expr::MethodCall(call)
+            if call.method == "collect" && turbofish_scalar(call.turbofish.as_ref()).is_some() =>
+        {
+            turbofish_scalar(call.turbofish.as_ref())
+        }
         // An unwrap's own value is the receiver's payload, so
         // `Some('\n').unwrap_or_default()` is a char, not an Option.
         Expr::MethodCall(call)
@@ -1365,6 +1373,14 @@ fn map_value_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
             _ => None,
         },
         Expr::MethodCall(call) if call.method == "clone" => map_value_ty(&call.receiver, env),
+        // `it.collect::<HashMap<K, V>>()` states its value type in the
+        // turbofish.
+        Expr::MethodCall(call) if call.method == "collect" => {
+            match turbofish_scalar(call.turbofish.as_ref()) {
+                Some(ScalarTy::Map(value)) => Some(*value),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
