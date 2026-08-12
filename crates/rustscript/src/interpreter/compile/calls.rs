@@ -9,6 +9,7 @@ use crate::interpreter::bytecode::StructShape;
 use crate::interpreter::bytecode::{
     BinKind, CapSource, DISCARD, Member, Op, PLit, PPat, PatInfo, Reg, ScalarTy, StructLit,
 };
+use crate::interpreter::numeric::IntWidth;
 use crate::interpreter::serde_attrs::serde_rename;
 
 use super::expr::annotation_scalar;
@@ -1189,6 +1190,13 @@ fn option_payload(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
             // reductions answer an `Option` of the vec's element type.
             // `map.get(k)` answers an `Option` of the map's value type.
             "get" => element_ty(&call.receiver, env).or_else(|| map_value_ty(&call.receiver, env)),
+            // `map.remove(k)` answers an `Option` of the map's value type. A
+            // vec's `remove` answers its element outright, not an `Option`,
+            // and a map receiver is the only kind this walk answers for.
+            "remove" => map_value_ty(&call.receiver, env),
+            // `ch.to_digit(radix)` answers an `Option<u32>` whatever the
+            // receiver, the one char method with an `Option` payload.
+            "to_digit" => Some(ScalarTy::Int(IntWidth::U32)),
             "first" | "last" | "pop" => element_ty(&call.receiver, env),
             "min" | "max" if call.args.is_empty() => element_ty(&call.receiver, env),
             // `x.checked_add(y)` answers an `Option` of the receiver's own
@@ -1366,9 +1374,7 @@ fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
             Lit::Str(_) => Some(ScalarTy::Str),
             Lit::Bool(_) => Some(ScalarTy::Bool),
             Lit::Char(_) => Some(ScalarTy::Char),
-            Lit::Int(int) => {
-                crate::interpreter::numeric::IntWidth::parse(int.suffix()).map(ScalarTy::Int)
-            }
+            Lit::Int(int) => IntWidth::parse(int.suffix()).map(ScalarTy::Int),
             Lit::Float(float) => match float.suffix() {
                 "f32" => Some(ScalarTy::F32),
                 "f64" => Some(ScalarTy::F64),
