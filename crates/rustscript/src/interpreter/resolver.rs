@@ -16,6 +16,9 @@ use anyhow::{Result, bail};
 pub(super) struct ModuleSyms {
     pub path: Vec<String>,
     pub parent: Option<usize>,
+    /// True for the script root and for grafted crate roots. `crate::` pins
+    /// here, and `super` stops here even when the module has a tree parent.
+    pub crate_root: bool,
     pub children: HashMap<String, usize>,
     /// Local name to global function index.
     pub fns: HashMap<String, u32>,
@@ -85,7 +88,7 @@ impl Resolver {
     /// `mod ctx`, which rustc resolves locally, so a submodule tries itself
     /// first and falls back to the crate root and the external prelude.
     fn resolve_use(&self, m: usize, segs: &[String], depth: usize) -> Result<Res> {
-        if let Some("self" | "super") = segs.first().map(String::as_str) {
+        if let Some("self" | "super" | "crate") = segs.first().map(String::as_str) {
             return self.resolve_at(m, segs, depth);
         }
         // Only submodules need the local-first try. At the crate root the two
@@ -100,6 +103,18 @@ impl Resolver {
         self.resolve_at(0, segs, depth)
     }
 
+    /// The root module of the crate holding `m`: the grafted root of a local
+    /// path dependency, or the script root for the script's own modules.
+    fn crate_root_of(&self, mut m: usize) -> usize {
+        while !self.modules[m].crate_root {
+            match self.modules[m].parent {
+                Some(p) => m = p,
+                None => break,
+            }
+        }
+        m
+    }
+
     fn resolve_at(&self, mut m: usize, segs: &[String], depth: usize) -> Result<Res> {
         if depth > MAX_DEPTH {
             bail!("import chain too deep resolving `{}`", segs.join("::"));
@@ -110,12 +125,14 @@ impl Resolver {
         let mut anchored = false;
         while i < segs.len() {
             match segs[i].as_str() {
-                "crate" => m = 0,
+                "crate" => m = self.crate_root_of(m),
                 "self" => {}
                 "super" => {
+                    // A grafted crate root has a tree parent, the script root,
+                    // but is still a crate root, so `super` may not cross it.
                     m = match self.modules[m].parent {
-                        Some(p) => p,
-                        None => bail!("`super` used at the crate root"),
+                        Some(p) if !self.modules[m].crate_root => p,
+                        _ => bail!("`super` used at the crate root"),
                     };
                 }
                 _ => break,

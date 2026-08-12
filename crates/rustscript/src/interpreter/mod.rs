@@ -383,6 +383,7 @@ fn build_module_tree(modules: &[ModuleSrc]) -> Resolver {
         .iter()
         .map(|m| ModuleSyms {
             path: m.path.clone(),
+            crate_root: m.crate_root,
             ..ModuleSyms::default()
         })
         .collect();
