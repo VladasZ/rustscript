@@ -38,11 +38,14 @@ edition = "2024"
         &root.join("shared/src/util.rs"),
         "pub fn who() -> String { \"world\".to_string() }\n",
     );
-    // A sibling module reaches another with `super::`, which must stay relative
-    // so it resolves both as a real crate and as a grafted module.
+    // A sibling module reaches another with `super::`, which must stay
+    // relative so it resolves both as a real crate and as a grafted module.
+    // `crate::` inside the grafted crate must pin to the grafted root, not the
+    // script root. Both the inline path and the `use crate::..` import form
+    // once fell through to bridge dispatch and died at runtime.
     write(
         &root.join("shared/src/greet.rs"),
-        "pub fn hi() -> String { format!(\"hi {}\", super::util::who()) }\n",
+        "use crate::util::who;\npub fn hi() -> String { format!(\"hi {}\", super::util::who()) }\npub fn yo() -> String { format!(\"yo {} {}\", who(), crate::util::who()) }\n",
     );
 
     write(
@@ -61,7 +64,7 @@ shared = { path = "../shared" }
     let bin = root.join("app/src/bin/foo.rs");
     write(
         &bin,
-        "#!/usr/bin/env rust\nuse shared::greet::hi;\nmod deep;\nfn main() {\n    println!(\"{}\", hi());\n    deep::go();\n}\n",
+        "#!/usr/bin/env rust\nuse shared::greet::{hi, yo};\nmod deep;\nfn main() {\n    println!(\"{}\", hi());\n    println!(\"{}\", yo());\n    deep::go();\n}\n",
     );
     write(
         &root.join("app/src/bin/deep/mod.rs"),
@@ -97,7 +100,7 @@ fn grafts_local_crate_at_runtime() {
     );
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        "hi world\ndeep world\n"
+        "hi world\nyo world world\ndeep world\n"
     );
 }
 

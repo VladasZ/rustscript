@@ -24,6 +24,10 @@ pub struct ModuleSrc {
     /// The file the module was read from, relative to the script directory.
     /// Inline modules carry their parent's file. Shown in error traces.
     pub file: Arc<str>,
+    /// True for the root module of a crate: the script root, or the grafted
+    /// root of a local path dependency. `crate::` paths pin here, and `super`
+    /// must not walk past it into the surrounding script.
+    pub crate_root: bool,
 }
 
 /// A local `path` dependency crate that the script uses, grafted in from
@@ -59,7 +63,7 @@ pub fn load(script_path: &Path, root_source: &str) -> Result<Program> {
     let root_file = root_file_name(script_path);
     let mut files: Vec<(PathBuf, String)> =
         vec![(PathBuf::from(&root_file), root_source.to_string())];
-    let root = collect(
+    let mut root = collect(
         &mut modules,
         &mut files,
         &dir,
@@ -68,6 +72,7 @@ pub fn load(script_path: &Path, root_source: &str) -> Result<Program> {
         Arc::from(root_file.as_str()),
         ast.items,
     )?;
+    root.crate_root = true;
     modules.insert(0, root);
     let tokio_main = detect_tokio_main(&modules[0].items)?;
     let crate_deps = graft_crate_deps(&mut modules, &files, script_path)?;
@@ -245,6 +250,7 @@ fn collect(
         path,
         items: kept,
         file,
+        crate_root: false,
     })
 }
 
@@ -357,7 +363,7 @@ fn graft_crate_deps(
         let ast = syn::parse_file(&source)
             .map_err(|e| anyhow!("parse error in {}: {e}", lib.display()))?;
         let mut crate_files: Vec<(PathBuf, String)> = vec![(PathBuf::from("lib.rs"), source)];
-        let root = collect(
+        let mut root = collect(
             modules,
             &mut crate_files,
             &src_dir,
@@ -366,6 +372,7 @@ fn graft_crate_deps(
             Arc::from("lib.rs"),
             ast.items,
         )?;
+        root.crate_root = true;
         modules.push(root);
         deps.push(CrateDep {
             name,

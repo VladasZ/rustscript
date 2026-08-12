@@ -209,7 +209,9 @@ tools/
 The grafted crate can have its own multi-file module tree, loaded by the same
 rules as a script's own modules. A change to any of its files re-triggers the
 check for every script that uses it, since the cache key hashes the crate's
-sources too.
+sources too. Inside the grafted crate, `crate::` and `super::` resolve against
+the crate's own root, never the script's, so its files mean the same thing
+interpreted as they do compiled.
 
 ## Not supported
 
