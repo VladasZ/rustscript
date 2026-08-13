@@ -278,6 +278,7 @@ pub enum BuiltinId {
     FlatMap,
     ForEach,
     Find,
+    FindMap,
     Position,
     Any,
     All,
@@ -308,8 +309,9 @@ impl BuiltinId {
     pub fn resolve(name: &str) -> BuiltinId {
         use BuiltinId::{
             All, AndModify, AndThen, Any, Chars, Clone, CloneFrom, Concat, Contains, ContainsKey,
-            Copied, Count, EndsWith, Entry, Enumerate, Filter, FilterMap, Find, First, FlatMap,
-            Fold, ForEach, Get, Insert, IsEmpty, Iter, IterMut, Join, Keys, Last, Len, Lines, Map,
+            Copied, Count, EndsWith, Entry, Enumerate, Filter, FilterMap, Find, FindMap, First,
+            FlatMap, Fold, ForEach, Get, Insert, IsEmpty, Iter, IterMut, Join, Keys, Last, Len,
+            Lines, Map,
             MapErr, MapOr, MaxByKey, MinByKey, OkOrElse, OrInsertWith, OrInsertWithKey, Other,
             Parse, Partition, Pop, Position, Product, Push, PushStr, Reduce, Remove, Retain, Rev,
             Skip, SkipWhile, Sort, SortBy, SortByCachedKey, SortByKey, Split, SplitFirst,
@@ -370,6 +372,7 @@ impl BuiltinId {
             "flat_map" => FlatMap,
             "for_each" => ForEach,
             "find" => Find,
+            "find_map" => FindMap,
             "position" => Position,
             "any" => Any,
             "all" => All,
@@ -401,7 +404,8 @@ impl BuiltinId {
     /// interpreter's higher-order dispatch.
     pub fn is_higher_order(self) -> bool {
         use BuiltinId::{
-            All, AndModify, AndThen, Any, Filter, FilterMap, Find, FlatMap, Fold, ForEach, Map,
+            All, AndModify, AndThen, Any, Filter, FilterMap, Find, FindMap, FlatMap, Fold, ForEach,
+            Map,
             MapErr, MapOr, MaxByKey, MinByKey, OkOrElse, OrInsertWith, OrInsertWithKey, Other,
             Partition, Position, Reduce, Retain, SkipWhile, SortBy, SortByCachedKey, SortByKey,
             TakeWhile, Then, UnwrapOrElse, WithContext,
@@ -414,6 +418,7 @@ impl BuiltinId {
                 | FlatMap
                 | ForEach
                 | Find
+                | FindMap
                 | Position
                 | Any
                 | All
