@@ -245,6 +245,17 @@ impl Vm {
                 }
                 found
             }
+            "find_map" => {
+                let f = clo(0)?;
+                let mut found = Value::none();
+                for x in list {
+                    if let Some(inner) = option_inner(&self.call_closure_data(&f, &[x])?) {
+                        found = Value::some(inner);
+                        break;
+                    }
+                }
+                found
+            }
             "position" => {
                 let f = clo(0)?;
                 let mut found = Value::none();

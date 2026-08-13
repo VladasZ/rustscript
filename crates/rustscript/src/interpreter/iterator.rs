@@ -710,7 +710,18 @@ impl Vm {
                 }
                 Value::Unit
             }
-            "find" | "position" | "any" | "all" => {
+            "find_map" => {
+                let closure = closure(0)?;
+                let mut found = Value::none();
+                while let Some(value) = self.iterator_next(iterator)? {
+                    if let Some(inner) = option_inner(&self.call_closure_data(&closure, &[value])?) {
+                        found = Value::some(inner);
+                        break;
+                    }
+                }
+                found
+            }
+            "find" | "position" | "rposition" | "any" | "all" => {
                 return self
                     .iterator_predicate(iterator, name, &closure(0)?)
                     .map(Some);
@@ -869,6 +880,10 @@ impl Vm {
         closure: &Arc<ClosureData>,
     ) -> Result<Value> {
         let mut index = 0;
+        // rposition is the only one here that cannot answer early. std walks it
+        // from the back, this walks to the end and keeps the last match, which
+        // gives the same index and needs no reversible iterator.
+        let mut last_match = None;
         while let Some(value) = self.iterator_next(iterator)? {
             let matches = self
                 .call_closure_data(closure, from_ref(&value))?
@@ -876,6 +891,7 @@ impl Vm {
             match name {
                 "find" if matches => return Ok(Value::some(value)),
                 "position" if matches => return Ok(Value::some(Value::Int(index))),
+                "rposition" if matches => last_match = Some(index),
                 "any" if matches => return Ok(Value::Bool(true)),
                 "all" if !matches => return Ok(Value::Bool(false)),
                 _ => {}
@@ -884,6 +900,7 @@ impl Vm {
         }
         Ok(match name {
             "find" | "position" => Value::none(),
+            "rposition" => last_match.map_or_else(Value::none, |i| Value::some(Value::Int(i))),
             "any" => Value::Bool(false),
             "all" => Value::Bool(true),
             _ => unreachable!(),
