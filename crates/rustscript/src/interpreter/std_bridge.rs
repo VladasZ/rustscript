@@ -394,8 +394,12 @@ pub(super) fn path_method(st: &Arc<StructData>, method: &str, args: &[Value]) ->
         }
         // Path compares whole components, so "/a/bc" does not start with "/a/b"
         // the way the str method would say it does.
-        "starts_with" => Value::Bool(p.starts_with(args.first().map(Value::display).unwrap_or_default())),
-        "ends_with" => Value::Bool(p.ends_with(args.first().map(Value::display).unwrap_or_default())),
+        "starts_with" => {
+            Value::Bool(p.starts_with(args.first().map(Value::display).unwrap_or_default()))
+        }
+        "ends_with" => {
+            Value::Bool(p.ends_with(args.first().map(Value::display).unwrap_or_default()))
+        }
         _ => bail!("unknown method `{method}` on Path"),
     })
 }

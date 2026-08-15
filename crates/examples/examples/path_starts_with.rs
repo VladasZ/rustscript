@@ -14,19 +14,34 @@ use std::path::Path;
 
 fn main() {
     let cmake_home = Path::new("/home/user/draco/mod18023/S30/cmake");
-    println!("inside sibling: {}", cmake_home.starts_with("/home/user/draco/mod18023"));
-    println!("inside canonical: {}", cmake_home.starts_with("/home/user/draco/modules"));
+    println!(
+        "inside sibling: {}",
+        cmake_home.starts_with("/home/user/draco/mod18023")
+    );
+    println!(
+        "inside canonical: {}",
+        cmake_home.starts_with("/home/user/draco/modules")
+    );
 
     // The component rule, where a character prefix test would be wrong.
     let sibling = Path::new("/home/user/draco/mod18023");
-    println!("component not char prefix: {}", sibling.starts_with("/home/user/draco/mod180"));
-    println!("str would say: {}", "/home/user/draco/mod18023".starts_with("/home/user/draco/mod180"));
+    println!(
+        "component not char prefix: {}",
+        sibling.starts_with("/home/user/draco/mod180")
+    );
+    println!(
+        "str would say: {}",
+        "/home/user/draco/mod18023".starts_with("/home/user/draco/mod180")
+    );
 
     // A path always starts with itself and with the root, and never with a
     // longer path.
     println!("self: {}", sibling.starts_with("/home/user/draco/mod18023"));
     println!("root: {}", sibling.starts_with("/"));
-    println!("longer: {}", sibling.starts_with("/home/user/draco/mod18023/S30"));
+    println!(
+        "longer: {}",
+        sibling.starts_with("/home/user/draco/mod18023/S30")
+    );
 
     // ends_with matches trailing components, so it takes a suffix of the path
     // rather than a file extension.

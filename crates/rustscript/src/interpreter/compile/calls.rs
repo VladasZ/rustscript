@@ -15,7 +15,7 @@ use crate::interpreter::serde_attrs::serde_rename;
 use super::expr::annotation_scalar;
 use super::{
     CollectTarget, Compiler, FnState, HashMap, NameLoc, Res, TypeIr, collect_pattern_names,
-    first_generic_type, idx16, int_literal,
+    first_generic_type, idx16, int_literal, numeric_annotation,
 };
 
 impl Compiler<'_> {
@@ -489,9 +489,34 @@ impl Compiler<'_> {
                 Pat::Ident(id) if id.subpat.is_none() => self.define(&id.ident.to_string(), reg),
                 _ => self.bind_pattern_irrefutable(p, reg)?,
             }
+            // A numeric param annotation retags the incoming value, the same
+            // rule as a fn param, so the body computes in the stated width.
+            if let Pat::Type(t) = p
+                && numeric_annotation(&t.ty).is_some()
+            {
+                let idx = self.add_cast(&t.ty);
+                self.emit(Op::Cast {
+                    dst: reg,
+                    src: reg,
+                    ty: idx,
+                });
+            }
+        }
+        if let syn::ReturnType::Type(_, ty) = &c.output
+            && numeric_annotation(ty).is_some()
+        {
+            let idx = self.add_cast(ty);
+            self.cur().ret_cast = Some(idx);
         }
         let ret = self.alloc();
         self.compile_into(ret, &c.body)?;
+        if let Some(idx) = self.cur().ret_cast {
+            self.emit(Op::Cast {
+                dst: ret,
+                src: ret,
+                ty: idx,
+            });
+        }
         self.emit(Op::Ret { src: ret });
         let child = self.frames.pop().unwrap();
         let caps: Vec<CapSource> = child.upvalues.iter().map(|(_, s)| *s).collect();
@@ -1394,6 +1419,12 @@ fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
             if call.method == "collect" && turbofish_scalar(call.turbofish.as_ref()).is_some() =>
         {
             turbofish_scalar(call.turbofish.as_ref())
+        }
+        // A fold answers in its init's type, which the accumulator keeps
+        // through every step, so `it.fold(0u8, ..).checked_mul(..)` knows
+        // its payload width even when the chain runs through a `map`.
+        Expr::MethodCall(call) if call.method == "fold" => {
+            call.args.first().and_then(|init| written_ty(init, env))
         }
         // An unwrap's own value is the receiver's payload, so
         // `Some('\n').unwrap_or_default()` is a char, not an Option.

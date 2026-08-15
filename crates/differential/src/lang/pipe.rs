@@ -11,8 +11,10 @@
 //! stage before anything order-sensitive, or ends in a terminal whose result
 //! cannot depend on order. Float items are the same problem one level down,
 //! float addition is not associative, so float-typed items are only allowed
-//! on ordered pipelines. `assert_deterministic` re-checks the invariant on
-//! every generated and every shrunk pipe.
+//! on ordered pipelines. A closure that can panic is order-sensitive too,
+//! the first item to panic decides the message, so a fallible closure body
+//! only runs after order is defined. `assert_deterministic` re-checks the
+//! invariant on every generated and every shrunk pipe.
 
 use std::collections::BTreeSet;
 
@@ -216,6 +218,17 @@ impl Stage {
         )
     }
 
+    /// Whether the stage carries a closure whose body can panic. On an
+    /// unordered stretch such a body observes arrival order, because the
+    /// first item to panic decides which message reaches stderr.
+    fn fallible(&self) -> bool {
+        match self {
+            Self::Map { body, .. } | Self::PairWith { body, .. } => body.has_fallible_op(),
+            Self::Filter { pred, .. } => pred.has_fallible_op(),
+            Self::Rev | Self::Take(_) | Self::Skip(_) | Self::Enumerate | Self::Sorted => false,
+        }
+    }
+
     fn render(&self, item: &Item) -> String {
         match self {
             Self::Map { bind, body } => {
@@ -322,6 +335,16 @@ impl Term {
         }
     }
 
+    /// Whether the terminal carries a closure whose body can panic, the same
+    /// arrival-order leak as `Stage::fallible`.
+    fn fallible(&self) -> bool {
+        match self {
+            Self::Any { pred, .. } | Self::Position { pred, .. } => pred.has_fallible_op(),
+            Self::Fold { init, body, .. } => init.has_fallible_op() || body.has_fallible_op(),
+            Self::Collect { .. } | Self::Sum { .. } | Self::Count | Self::Min | Self::Max => false,
+        }
+    }
+
     fn render(&self, item: &Item) -> String {
         match self {
             Self::Collect {
@@ -410,7 +433,7 @@ impl Pipe {
                 }
                 ordered = true;
             }
-            if !ordered && stage.order_sensitive() {
+            if !ordered && (stage.order_sensitive() || stage.fallible()) {
                 return false;
             }
             if matches!(stage, Stage::Map { .. }) {
@@ -424,7 +447,7 @@ impl Pipe {
             }
             item = stage.out(&item);
         }
-        if !ordered && self.term.order_sensitive(&item) {
+        if !ordered && (self.term.order_sensitive(&item) || self.term.fallible()) {
             return false;
         }
         true

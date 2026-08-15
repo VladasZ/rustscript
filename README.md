@@ -99,7 +99,10 @@ precision.
 Integer methods answer in the receiver's own width too, so `saturating_add`
 stops at that width's bound, `wrapping_add` wraps at it, `checked_add` reports
 overflow against it, and `pow` and `abs` panic where debug Rust panics. The bit
-methods count over the real width rather than over an i64.
+methods count over the real width rather than over an i64. A function's
+declared numeric types are widths as well, the parameter retags what the
+caller passed and the return type retags what the body produced, and closures
+with annotations follow the same rule.
 
 Where a method's result type is chosen by the caller rather than by the
 receiver, the interpreter honors what the source states. `parse` takes its

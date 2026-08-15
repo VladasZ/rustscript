@@ -532,6 +532,17 @@ pub(super) fn parse_core(text: &str, target: Option<&ScalarTy>) -> Parsed {
         };
     };
     match target {
+        // An unsigned target rejects a minus sign as an invalid digit before
+        // any range check, so `"-0"` is an error even though its value fits.
+        // Parsing through i128 accepted it by range, u128 refuses the sign
+        // with the real std message.
+        ScalarTy::Int(width) if !width.is_signed() => match text.parse::<u128>() {
+            Ok(value) => match i128::try_from(value) {
+                Ok(value) if value <= width.max() => Parsed::Int(value, *width),
+                _ => Parsed::Fail(out_of_range(false)),
+            },
+            Err(e) => fail(&e),
+        },
         ScalarTy::Int(width) => match text.parse::<i128>() {
             Ok(value) if value >= width.min() && value <= width.max() => Parsed::Int(value, *width),
             Ok(value) => Parsed::Fail(out_of_range(value < width.min())),

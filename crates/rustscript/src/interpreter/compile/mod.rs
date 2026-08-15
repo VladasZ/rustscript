@@ -17,7 +17,10 @@ use super::bytecode::{
 use super::numeric::IntWidth;
 use super::resolver::{Res, Resolver};
 use super::typeir::{CastIr, TypeIr, lower_cast, lower_type};
-use expr::{collect_return_target, returned_collects, returned_from_strs, returned_json_type};
+use expr::{
+    annotation_scalar, collect_return_target, returned_collects, returned_from_strs,
+    returned_json_type,
+};
 
 /// Program level facts the compiler needs, filled before any body is compiled.
 pub struct Ctx<'r> {
@@ -65,6 +68,10 @@ struct FnState {
     name: String,
     generics: Vec<Arc<str>>,
     call_type_args: Vec<Arc<[TypeIr]>>,
+    /// The cast every return value of this frame passes through, when the
+    /// signature declares a numeric scalar. Retagging on the way out keeps
+    /// the declared width without a cast at every call site.
+    ret_cast: Option<u16>,
 }
 
 impl FnState {
@@ -94,6 +101,7 @@ impl FnState {
             name,
             generics: Vec::new(),
             call_type_args: Vec::new(),
+            ret_cast: None,
         }
     }
 
@@ -270,15 +278,26 @@ impl<'a> Compiler<'a> {
         // Parameters occupy the first registers, self first if present.
         let mut params: Vec<Option<&Pat>> = Vec::new();
         let mut types: Vec<Option<String>> = Vec::new();
+        let mut annotations: Vec<Option<&syn::Type>> = Vec::new();
         for input in &sig.inputs {
             match input {
                 FnArg::Receiver(_) => {
                     params.push(None);
                     types.push(None);
+                    annotations.push(None);
                 }
                 FnArg::Typed(t) => {
+                    // A param annotation is a type the program wrote down,
+                    // recorded like an annotated let, so a default built from
+                    // the param in the body reads the right type.
+                    if let Pat::Ident(id) = &*t.pat
+                        && let Some(declared) = annotation_scalar(&t.ty)
+                    {
+                        self.typed_locals.insert(id.ident.to_string(), declared);
+                    }
                     params.push(Some(&t.pat));
                     types.push(type_head(&t.ty));
+                    annotations.push(Some(&t.ty));
                 }
             }
         }
@@ -294,6 +313,27 @@ impl<'a> Compiler<'a> {
                 }
                 Some(pat) => self.bind_pattern_irrefutable(pat, reg)?,
             }
+            // A numeric param annotation retags the incoming value, so u8
+            // arithmetic in the body panics at the u8 bound exactly like
+            // debug Rust even when the caller passed a bare literal.
+            if let Some(ty) = annotations[i]
+                && numeric_annotation(ty).is_some()
+            {
+                let idx = self.add_cast(ty);
+                self.emit(Op::Cast {
+                    dst: reg,
+                    src: reg,
+                    ty: idx,
+                });
+            }
+        }
+        // The declared numeric return type retags every value on the way
+        // out, the tail and each early `return` alike.
+        if let syn::ReturnType::Type(_, ty) = &sig.output
+            && numeric_annotation(ty).is_some()
+        {
+            let idx = self.add_cast(ty);
+            self.cur().ret_cast = Some(idx);
         }
         // A `-> String` (or map or set) signature names the target of every
         // `collect` this body returns, which is the third place that target is
@@ -322,6 +362,13 @@ impl<'a> Compiler<'a> {
         self.collect_tails = outer_collect_tails;
         self.json_tails = outer_json_tails;
         res?;
+        if let Some(idx) = self.cur().ret_cast {
+            self.emit(Op::Cast {
+                dst: ret,
+                src: ret,
+                ty: idx,
+            });
+        }
         self.emit(Op::Ret { src: ret });
         Ok(self.finish_chunk())
     }

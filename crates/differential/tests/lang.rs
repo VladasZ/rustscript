@@ -167,3 +167,49 @@ fn catalog_names_are_unique() {
         );
     }
 }
+
+/// A closure that can panic must not run on an unordered stretch. Which item
+/// panics first is the arrival order, and real Rust randomizes that order for
+/// maps and sets, so the same program can print two different panic messages.
+/// A nightly campaign hit exactly this: `into_values()` mapped through a
+/// fallible body, sorted only afterwards.
+#[test]
+fn fallible_closure_needs_defined_order() {
+    use rustscript_differential::lang::expr::{BinOp, Expr};
+    use rustscript_differential::lang::pipe::{Access, Bind, Pipe, Site, Source, Stage, Term};
+    use rustscript_differential::numeric::IntWidth;
+
+    let int = |value: i128| Expr::IntLit {
+        width: IntWidth::I64,
+        value,
+        opaque: true,
+    };
+    let fallible_map = Stage::Map {
+        bind: Bind::One("diff_x_0".to_string()),
+        body: Expr::Bin {
+            op: BinOp::Add,
+            left: Box::new(int(1)),
+            right: Box::new(int(2)),
+            ty: Ty::I64,
+        },
+    };
+    let pipe_with = |stages: Vec<Stage>| Pipe {
+        source: Source::Coll {
+            expr: Expr::SetLit {
+                elem: Ty::I64,
+                items: Vec::new(),
+            },
+            access: Access::SetInto,
+        },
+        stages,
+        term: Term::Collect {
+            target: Ty::vec_of(Ty::I64),
+            site: Site::Turbofish,
+        },
+    };
+
+    // Sorting only after the fallible map is the nightly's failing shape.
+    assert!(!pipe_with(vec![fallible_map.clone(), Stage::Sorted]).is_deterministic());
+    // Sorting first defines the order the body runs in.
+    assert!(pipe_with(vec![Stage::Sorted, fallible_map]).is_deterministic());
+}
