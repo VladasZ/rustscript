@@ -714,7 +714,8 @@ impl Vm {
                 let closure = closure(0)?;
                 let mut found = Value::none();
                 while let Some(value) = self.iterator_next(iterator)? {
-                    if let Some(inner) = option_inner(&self.call_closure_data(&closure, &[value])?) {
+                    if let Some(inner) = option_inner(&self.call_closure_data(&closure, &[value])?)
+                    {
                         found = Value::some(inner);
                         break;
                     }

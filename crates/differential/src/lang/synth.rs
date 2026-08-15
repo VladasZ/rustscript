@@ -976,7 +976,7 @@ impl<'a> Generator<'a> {
         site: Site,
         depth: usize,
     ) -> Option<Pipe> {
-        let (source, ordered) = self.scalar_source(depth);
+        let (source, mut ordered) = self.scalar_source(depth);
         let mut stages = Vec::new();
         let mut item = match source.item() {
             Item::Scalar(ty) => ty,
@@ -985,6 +985,9 @@ impl<'a> Generator<'a> {
         if item != *elem || self.rng.random_bool(0.3) {
             let bind = self.fresh_bind();
             let body = self.body_with(&bind, &item, elem, depth - 1);
+            if !sort_before_fallible(&mut stages, &mut ordered, &Item::Scalar(item), &body) {
+                return None;
+            }
             stages.push(Stage::Map {
                 bind: Bind::One(bind),
                 body,
@@ -994,6 +997,14 @@ impl<'a> Generator<'a> {
         if self.rng.random_bool(0.4) {
             let bind = self.fresh_bind();
             let pred = self.body_with(&bind, &item, &Ty::Bool, depth - 1);
+            if !sort_before_fallible(
+                &mut stages,
+                &mut ordered,
+                &Item::Scalar(item.clone()),
+                &pred,
+            ) {
+                return None;
+            }
             stages.push(Stage::Filter {
                 bind: Bind::One(bind),
                 pred,
@@ -1050,10 +1061,16 @@ impl<'a> Generator<'a> {
                 let pred = self.expr(&Ty::Bool, depth - 1);
                 self.scope.pop();
                 self.scope.pop();
-                stages.push(Stage::Filter {
-                    bind: Bind::Pair(key_bind, val_bind),
-                    pred,
-                });
+                let mut ordered = false;
+                let pair = Item::Pair(key.clone(), value.clone());
+                // A fallible predicate needs order, and when the pair cannot
+                // sort the filter is dropped rather than the whole pipe.
+                if sort_before_fallible(&mut stages, &mut ordered, &pair, &pred) {
+                    stages.push(Stage::Filter {
+                        bind: Bind::Pair(key_bind, val_bind),
+                        pred,
+                    });
+                }
             }
             return Pipe {
                 source: Source::Coll {
@@ -1094,7 +1111,7 @@ impl<'a> Generator<'a> {
 
     /// `sum`, `count`, or `fold` down to an integer.
     fn pipe_to_int(&mut self, want: &Ty, depth: usize) -> Option<Pipe> {
-        let (source, ordered) = self.scalar_source(depth);
+        let (source, mut ordered) = self.scalar_source(depth);
         let item = match source.item() {
             Item::Scalar(ty) => ty,
             Item::Pair(..) => return None,
@@ -1102,12 +1119,17 @@ impl<'a> Generator<'a> {
         if *want == Ty::USIZE && self.rng.random_bool(0.4) {
             let bind = self.fresh_bind();
             let pred = self.body_with(&bind, &item, &Ty::Bool, depth - 1);
+            let mut stages = Vec::new();
+            if !sort_before_fallible(&mut stages, &mut ordered, &Item::Scalar(item), &pred) {
+                return None;
+            }
+            stages.push(Stage::Filter {
+                bind: Bind::One(bind),
+                pred,
+            });
             return Some(Pipe {
                 source,
-                stages: vec![Stage::Filter {
-                    bind: Bind::One(bind),
-                    pred,
-                }],
+                stages,
                 term: Term::Count,
             });
         }
@@ -1116,6 +1138,9 @@ impl<'a> Generator<'a> {
         if item != *want {
             let bind = self.fresh_bind();
             let body = self.body_with(&bind, &item, want, depth - 1);
+            if !sort_before_fallible(&mut stages, &mut ordered, &Item::Scalar(item), &body) {
+                return None;
+            }
             stages.push(Stage::Map {
                 bind: Bind::One(bind),
                 body,
@@ -1161,16 +1186,20 @@ impl<'a> Generator<'a> {
     }
 
     fn pipe_any(&mut self, depth: usize) -> Option<Pipe> {
-        let (source, _) = self.scalar_source(depth);
+        let (source, mut ordered) = self.scalar_source(depth);
         let item = match source.item() {
             Item::Scalar(ty) => ty,
             Item::Pair(..) => return None,
         };
         let bind = self.fresh_bind();
         let pred = self.body_with(&bind, &item, &Ty::Bool, depth - 1);
+        let mut stages = Vec::new();
+        if !sort_before_fallible(&mut stages, &mut ordered, &Item::Scalar(item), &pred) {
+            return None;
+        }
         Some(Pipe {
             source,
-            stages: Vec::new(),
+            stages,
             term: Term::Any {
                 bind: Bind::One(bind),
                 pred,
@@ -1200,7 +1229,7 @@ impl<'a> Generator<'a> {
         if !ty_is_ord(inner) {
             return None;
         }
-        let (source, _) = self.scalar_source(depth);
+        let (source, mut ordered) = self.scalar_source(depth);
         let item = match source.item() {
             Item::Scalar(ty) => ty,
             Item::Pair(..) => return None,
@@ -1209,6 +1238,9 @@ impl<'a> Generator<'a> {
         if item != *inner {
             let bind = self.fresh_bind();
             let body = self.body_with(&bind, &item, inner, depth - 1);
+            if !sort_before_fallible(&mut stages, &mut ordered, &Item::Scalar(item), &body) {
+                return None;
+            }
             stages.push(Stage::Map {
                 bind: Bind::One(bind),
                 body,
@@ -1225,4 +1257,26 @@ impl<'a> Generator<'a> {
             term,
         })
     }
+}
+
+/// Guard for a closure the pipe is about to run on possibly unordered items.
+/// A body that can panic observes arrival order, the first item to panic
+/// decides the message, and real Rust randomizes that order for maps and
+/// sets. When the body is fallible and order is undefined, sort first. When
+/// the items cannot sort, report false so the caller gives the pipe up.
+fn sort_before_fallible(
+    stages: &mut Vec<Stage>,
+    ordered: &mut bool,
+    item: &Item,
+    body: &Expr,
+) -> bool {
+    if *ordered || !body.has_fallible_op() {
+        return true;
+    }
+    if !item.is_ord() {
+        return false;
+    }
+    stages.push(Stage::Sorted);
+    *ordered = true;
+    true
 }

@@ -9,6 +9,9 @@ fn main() {
     println!("u8 in range:    {:?}", "255".parse::<u8>());
     println!("u8 over range:  {:?}", "300".parse::<u8>().is_err());
     println!("u8 negative:    {:?}", "-1".parse::<u8>().is_err());
+    // A minus sign is an invalid digit for an unsigned target, so even a
+    // value that fits, like "-0", is an error.
+    println!("u64 minus zero: {:?}", "-0".parse::<u64>().is_err());
     println!("i8 min:         {:?}", "-128".parse::<i8>());
     println!("i8 under range: {:?}", "-129".parse::<i8>().is_err());
     println!("u32 leading nl: {:?}", "007".parse::<u32>());

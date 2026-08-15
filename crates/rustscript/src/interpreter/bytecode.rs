@@ -311,10 +311,9 @@ impl BuiltinId {
             All, AndModify, AndThen, Any, Chars, Clone, CloneFrom, Concat, Contains, ContainsKey,
             Copied, Count, EndsWith, Entry, Enumerate, Filter, FilterMap, Find, FindMap, First,
             FlatMap, Fold, ForEach, Get, Insert, IsEmpty, Iter, IterMut, Join, Keys, Last, Len,
-            Lines, Map,
-            MapErr, MapOr, MaxByKey, MinByKey, OkOrElse, OrInsertWith, OrInsertWithKey, Other,
-            Parse, Partition, Pop, Position, Product, Push, PushStr, Reduce, Remove, Retain, Rev,
-            Skip, SkipWhile, Sort, SortBy, SortByCachedKey, SortByKey, Split, SplitFirst,
+            Lines, Map, MapErr, MapOr, MaxByKey, MinByKey, OkOrElse, OrInsertWith, OrInsertWithKey,
+            Other, Parse, Partition, Pop, Position, Product, Push, PushStr, Reduce, Remove, Retain,
+            Rev, Skip, SkipWhile, Sort, SortBy, SortByCachedKey, SortByKey, Split, SplitFirst,
             SplitWhitespace, StartsWith, Sum, Take, TakeWhile, Then, ToString, Trim, Unwrap,
             UnwrapOr, UnwrapOrElse, Values, WithContext,
         };
@@ -405,8 +404,7 @@ impl BuiltinId {
     pub fn is_higher_order(self) -> bool {
         use BuiltinId::{
             All, AndModify, AndThen, Any, Filter, FilterMap, Find, FindMap, FlatMap, Fold, ForEach,
-            Map,
-            MapErr, MapOr, MaxByKey, MinByKey, OkOrElse, OrInsertWith, OrInsertWithKey, Other,
+            Map, MapErr, MapOr, MaxByKey, MinByKey, OkOrElse, OrInsertWith, OrInsertWithKey, Other,
             Partition, Position, Reduce, Retain, SkipWhile, SortBy, SortByCachedKey, SortByKey,
             TakeWhile, Then, UnwrapOrElse, WithContext,
         };

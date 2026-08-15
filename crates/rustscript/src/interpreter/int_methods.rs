@@ -262,11 +262,15 @@ fn int_arith_method(
             })
         }),
         "checked_rem" => arg(args, 0).map(|b| {
-            IntOut::Checked(if b == 0 {
-                None
-            } else {
-                in_range(width, recv % b)
-            })
+            // MIN % -1 overflows in the receiver's width even though the
+            // i128 remainder is 0, so real Rust answers None for it.
+            IntOut::Checked(
+                if b == 0 || (width.is_signed() && b == -1 && recv == width.min()) {
+                    None
+                } else {
+                    in_range(width, recv % b)
+                },
+            )
         }),
         // A shift is checked on the amount alone, `None` at the width and
         // beyond, and bits shifted past the width are simply dropped.
@@ -347,6 +351,12 @@ fn int_query_method(
         "rem_euclid" => arg(args, 0).and_then(|b| {
             if b == 0 {
                 bail!("attempt to calculate the remainder with a divisor of zero");
+            }
+            // Real Rust takes `self % rhs` first, and MIN % -1 overflows
+            // there even though the euclidean remainder itself would be 0.
+            // Computing in i128 hides that overflow, so it is checked here.
+            if width.is_signed() && b == -1 && recv == width.min() {
+                bail!("attempt to calculate the remainder with overflow");
             }
             match in_range(width, recv.rem_euclid(b)) {
                 Some(value) => Ok(IntOut::Same(value)),

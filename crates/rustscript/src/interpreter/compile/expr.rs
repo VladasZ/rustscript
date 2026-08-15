@@ -511,13 +511,25 @@ impl Compiler<'_> {
             Expr::Loop(l) => self.compile_loop(dst, l)?,
             Expr::Match(m) => self.compile_match(dst, m)?,
             Expr::Return(r) => {
-                let src = if let Some(e) = &r.expr {
+                let mut src = if let Some(e) = &r.expr {
                     self.compile_expr(e)?
                 } else {
                     let u = self.alloc();
                     self.emit(Op::LoadUnit { dst: u });
                     u
                 };
+                // A declared numeric return type retags an early return the
+                // same way it retags the tail. Into a fresh register, since
+                // `src` may be a named local's own slot.
+                if let Some(idx) = self.cur().ret_cast {
+                    let out = self.alloc();
+                    self.emit(Op::Cast {
+                        dst: out,
+                        src,
+                        ty: idx,
+                    });
+                    src = out;
+                }
                 self.emit(Op::Ret { src });
             }
             Expr::Break(b) => self.compile_break(b)?,

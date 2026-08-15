@@ -38,6 +38,9 @@ fn main() {
     let value: i32 = -17;
     println!("i32 div euclid:    {}", value.div_euclid(5));
     println!("i32 rem euclid:    {}", value.rem_euclid(5));
+    // MIN % -1 overflows, so the checked remainder answers None for it.
+    println!("i32 checked rem:   {:?}", i32::MIN.checked_rem(-1));
+    println!("i64 checked rem:   {:?}", i64::MIN.checked_rem(-1));
     println!("i32 clamp:         {}", value.clamp(-10, 10));
     println!("i32 pow:           {}", 3i32.pow(4));
     println!("i32 isqrt:         {}", 17i32.isqrt());
