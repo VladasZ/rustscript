@@ -53,7 +53,8 @@ impl Vm {
             // as an already unwrapped Some, so its Option closure methods route
             // here as Some. Unknown names fall through to plain dispatch.
             Value::Str(s) => {
-                let data: Arc<[Value]> = Arc::from([Value::Str(s.clone())]);
+                let data: super::value::List =
+                    Arc::new(parking_lot::Mutex::new(vec![Value::Str(s.clone())]));
                 self.option_higher_order("Some", &data, name, args)
             }
             _ => Ok(None),
@@ -404,12 +405,12 @@ impl Vm {
     pub(super) fn option_higher_order(
         self: &Arc<Self>,
         variant: &str,
-        data: &Arc<[Value]>,
+        data: &super::value::List,
         name: &str,
         args: &[Value],
     ) -> Result<Option<Value>> {
         let is_some = variant == "Some";
-        let inner = || data.first().cloned().unwrap_or(Value::Unit);
+        let inner = || data.lock().first().cloned().unwrap_or(Value::Unit);
         let clo = |i: usize| as_closure(args.get(i));
         let out = match name {
             "is_some_and" => {
@@ -487,12 +488,12 @@ impl Vm {
     pub(super) fn result_higher_order(
         self: &Arc<Self>,
         variant: &str,
-        data: &Arc<[Value]>,
+        data: &super::value::List,
         name: &str,
         args: &[Value],
     ) -> Result<Option<Value>> {
         let is_ok = variant == "Ok";
-        let inner = || data.first().cloned().unwrap_or(Value::Unit);
+        let inner = || data.lock().first().cloned().unwrap_or(Value::Unit);
         let clo = |i: usize| as_closure(args.get(i));
         let out = match name {
             "is_ok_and" => {

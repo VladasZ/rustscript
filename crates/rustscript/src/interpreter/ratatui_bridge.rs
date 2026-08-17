@@ -149,17 +149,14 @@ pub(super) fn color_value(c: Color) -> Value {
         ),
         Color::Indexed(i) => ("Indexed", vec![Value::Int(i64::from(i))]),
     };
-    Value::Enum {
-        enum_name: "Color".into(),
-        variant: variant.into(),
-        data: data.into(),
-    }
+    Value::enum_of("Color", variant, data)
 }
 
 pub(super) fn value_color(v: &Value) -> Color {
     let Value::Enum { variant, data, .. } = v else {
         return Color::Reset;
     };
+    let data = data.lock().clone();
     let at = |i: usize| -> u8 {
         data.get(i)
             .map_or(0, |v| u8::try_from(int_of(v)).unwrap_or(0))
@@ -298,17 +295,14 @@ pub(super) fn constraint_value(c: Constraint) -> Value {
             vec![Value::Int(i64::from(a)), Value::Int(i64::from(b))],
         ),
     };
-    Value::Enum {
-        enum_name: "Constraint".into(),
-        variant: variant.into(),
-        data: data.into(),
-    }
+    Value::enum_of("Constraint", variant, data)
 }
 
 pub(super) fn value_constraint(v: &Value) -> Constraint {
     let Value::Enum { variant, data, .. } = v else {
         return Constraint::Min(0);
     };
+    let data = data.lock().clone();
     let at = |i: usize| -> u16 {
         data.get(i)
             .map_or(0, |v| u16::try_from(int_of(v)).unwrap_or(0))
@@ -324,11 +318,7 @@ pub(super) fn value_constraint(v: &Value) -> Constraint {
 }
 
 pub(super) fn border_type_value(b: BorderType) -> Value {
-    Value::Enum {
-        enum_name: "BorderType".into(),
-        variant: border_type_name(b).into(),
-        data: Vec::new().into(),
-    }
+    Value::enum_of("BorderType", border_type_name(b), Vec::new())
 }
 
 pub(super) fn value_border_type(v: &Value) -> BorderType {
@@ -394,7 +384,7 @@ pub(super) fn items(v: &Value) -> Vec<Value> {
 /// an Option at all.
 pub(super) fn option_inner(v: Option<&Value>) -> Option<Value> {
     match v? {
-        Value::Enum { variant, data, .. } if &**variant == "Some" => data.first().cloned(),
+        Value::Enum { variant, data, .. } if &**variant == "Some" => data.lock().first().cloned(),
         Value::Enum { variant, .. } if &**variant == "None" => None,
         other => Some(other.clone()),
     }

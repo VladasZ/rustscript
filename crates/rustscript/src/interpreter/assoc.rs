@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
 
+use super::cell;
 use super::int_methods::{from_bytes, from_bytes_order};
 use super::jwt_bridge::jwt_assoc;
 use super::native::Native;
@@ -13,7 +14,7 @@ use super::numeric::IntWidth;
 use super::std_bridge::{
     arg_int, arg_str, as_i64, bytes_to_string, make_duration, make_path, open_file, path_like,
 };
-use super::value::Value;
+use super::value::{CellKind, Value};
 
 /// Associated functions like `String::new`, `Vec::new`, `HashMap::new`.
 pub(super) fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
@@ -91,9 +92,12 @@ fn conversion_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value
         // Numeric `T::from(x)`. Every integer is an i64 here, so a widening
         // conversion just carries the value. `from` on a bool gives 0 or 1,
         // the same as `usize::from(cond)` and the like.
+        ("u128" | "i128", "from") => {
+            let width = IntWidth::parse(ty).expect("128-bit width parses");
+            Value::int_of_width(i128::from(int_from_arg(ty, args.first())?), width)
+        }
         (
-            "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128"
-            | "usize",
+            "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize",
             "from",
         ) => Value::Int(int_from_arg(ty, args.first())?),
         ("f32" | "f64", "from") => match args.first() {
@@ -145,8 +149,40 @@ fn container_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value>
         },
         ("HashMap" | "BTreeMap", "new") | ("HashMap", "with_capacity") => Value::map(),
         ("HashSet" | "BTreeSet", "new") | ("HashSet", "with_capacity") => Value::set(),
-        ("Box" | "Rc" | "Arc" | "RefCell" | "Cell", "new") => {
-            args.first().cloned().unwrap_or(Value::Unit)
+        // `Rc::clone(&x)` is `x.clone()` spelled as the docs recommend,
+        // and a cell's clone shares its slot, so handing the value through
+        // is exactly right for both.
+        ("Box", "new") | ("Rc" | "Arc", "clone") => args.first().cloned().unwrap_or(Value::Unit),
+        // Real shared cells: cloning shares the slot and writes through one
+        // handle show through every handle. `Box` above stays transparent,
+        // ownership is what the value model already gives every value.
+        ("Rc", "new") => {
+            cell::make_cell(CellKind::Rc, args.first().cloned().unwrap_or(Value::Unit))
+        }
+        ("Arc", "new") => {
+            cell::make_cell(CellKind::Arc, args.first().cloned().unwrap_or(Value::Unit))
+        }
+        ("RefCell", "new") => cell::make_cell(
+            CellKind::RefCell,
+            args.first().cloned().unwrap_or(Value::Unit),
+        ),
+        ("Cell", "new") => {
+            cell::make_cell(CellKind::Cell, args.first().cloned().unwrap_or(Value::Unit))
+        }
+        ("Mutex", "new") => cell::make_cell(
+            CellKind::Mutex,
+            args.first().cloned().unwrap_or(Value::Unit),
+        ),
+        ("Rc" | "Arc", "strong_count") => {
+            let Some(Value::Cell(_, slot)) = args.first() else {
+                bail!("strong_count needs an Rc or Arc argument");
+            };
+            // Two in-flight copies exist during this call, the taken arg
+            // window value and the bridge's imaging clone of it, which real
+            // Rust's borrowed `&Rc` does not have. A borrow passed through
+            // further function hops is modeled as a clone per hop, so a
+            // count read deep in a call chain can still run high.
+            super::shared::usize_value(Arc::strong_count(slot) - 2)
         }
         // Our file and pipe readers are already buffered, so wrapping is a
         // pass-through; a raw socket is turned into a buffered reader.
@@ -304,17 +340,13 @@ fn misc_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
         // The real xmltree node enum, constructed like `SeekFrom` below since
         // no user declaration exists for it.
         ("XMLNode", "Element" | "Text" | "Comment" | "CData" | "ProcessingInstruction") => {
-            Value::Enum {
-                enum_name: Arc::from("XMLNode"),
-                variant: Arc::from(func),
-                data: args.iter().cloned().collect(),
-            }
+            Value::enum_of("XMLNode", func, args.to_vec())
         }
-        ("SeekFrom", "Start" | "End" | "Current") => Value::Enum {
-            enum_name: Arc::from("SeekFrom"),
-            variant: Arc::from(func),
-            data: Arc::from(vec![args.first().cloned().unwrap_or(Value::Int(0))]),
-        },
+        ("SeekFrom", "Start" | "End" | "Current") => Value::enum_of(
+            "SeekFrom",
+            func,
+            vec![args.first().cloned().unwrap_or(Value::Int(0))],
+        ),
         _ => return Ok(None),
     }))
 }
@@ -326,6 +358,14 @@ fn int_from_arg(ty: &str, v: Option<&Value>) -> Result<i64> {
         Some(Value::Int(n)) => Ok(*n),
         Some(Value::Bool(b)) => Ok(i64::from(*b)),
         Some(Value::Char(c)) => Ok(*c as i64),
+        // A width-tagged or 128-bit value converts when it fits an i64. The
+        // callers check the target's own range on top of this.
+        Some(tagged @ (Value::IntW(..) | Value::Big(..))) => match tagged.int_parts() {
+            Some((n, _)) => {
+                i64::try_from(n).map_err(|_| anyhow!("`{ty}` conversion out of range"))
+            }
+            None => bail!("`{ty}` conversion out of range"),
+        },
         _ => bail!("`{ty}` conversion needs an integer"),
     }
 }

@@ -15,8 +15,6 @@
 //! On a non-Windows host every entry point returns a plain error instead of
 //! being absent, so a script that reaches registry code by mistake says why.
 
-use std::sync::Arc;
-
 use anyhow::Result;
 
 use super::std_bridge::as_i64;
@@ -36,11 +34,7 @@ const REG_TYPES: [&str; 7] = [
 ];
 
 fn unit_enum(enum_name: &str, variant: &str) -> Value {
-    Value::Enum {
-        enum_name: Arc::from(enum_name),
-        variant: Arc::from(variant),
-        data: Arc::from([]),
-    }
+    Value::enum_of(enum_name, variant, Vec::new())
 }
 
 /// Recognize `HKEY_*` roots, `KEY_*` access flags, and `RegType` variants as

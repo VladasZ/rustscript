@@ -517,6 +517,12 @@ pub(super) fn parse_core(text: &str, target: Option<&ScalarTy>) -> Parsed {
         let trimmed = text.trim();
         return if let Ok(value) = trimmed.parse::<i64>() {
             Parsed::Int(i128::from(value), IntWidth::I64)
+        } else if let Ok(value) = trimmed.parse::<u128>() {
+            // An integer past i64 keeps its exact digits at 128 bits, a
+            // float fallback would round them away.
+            Parsed::Int(value.cast_signed(), IntWidth::U128)
+        } else if let Ok(value) = trimmed.parse::<i128>() {
+            Parsed::Int(value, IntWidth::I128)
         } else if let Ok(value) = trimmed.parse::<f64>() {
             Parsed::F64(value)
         } else if let Ok(value) = trimmed.parse::<bool>() {
@@ -532,6 +538,10 @@ pub(super) fn parse_core(text: &str, target: Option<&ScalarTy>) -> Parsed {
         // any range check, so `"-0"` is an error even though its value fits.
         // Parsing through i128 accepted it by range, u128 refuses the sign
         // with the real std message.
+        ScalarTy::Int(IntWidth::U128) => match text.parse::<u128>() {
+            Ok(value) => Parsed::Int(value.cast_signed(), IntWidth::U128),
+            Err(e) => fail(&e),
+        },
         ScalarTy::Int(width) if !width.is_signed() => match text.parse::<u128>() {
             Ok(value) => match i128::try_from(value) {
                 Ok(value) if value <= width.max() => Parsed::Int(value, *width),

@@ -29,6 +29,12 @@ pub enum IteratorState {
         values: List,
         index: usize,
     },
+    /// A user struct or enum with its own `Iterator` impl. Each pull calls
+    /// its `next` method, which mutates the held value in place through its
+    /// `&mut self`.
+    UserNext {
+        value: Value,
+    },
     /// A borrow of an eager vector taken with `by_ref`. It takes from the front
     /// of the shared vector rather than walking an index of its own, so
     /// whatever it hands out is gone from the borrowed iterator too.
@@ -114,6 +120,8 @@ pub enum IteratorState {
 
 enum Step {
     Ready(Option<Value>),
+    /// Pull the next item by calling the user type's own `next` method.
+    User(Value),
     Map(Handle, Arc<ClosureData>),
     Filter(Handle, Arc<ClosureData>),
     FilterMap(Handle, Arc<ClosureData>),
@@ -192,7 +200,7 @@ pub(super) fn option_inner(v: &Value) -> Option<Value> {
             variant,
             data,
         } if &**enum_name == "Option" && &**variant == "Some" => {
-            Some(data.first().cloned().unwrap_or(Value::Unit))
+            Some(data.lock().first().cloned().unwrap_or(Value::Unit))
         }
         _ => None,
     }
@@ -235,6 +243,7 @@ fn next_regex_offset(source: &str, start: usize, end: usize) -> usize {
 impl IteratorState {
     fn step(&mut self) -> Step {
         match self {
+            IteratorState::UserNext { value } => Step::User(value.clone()),
             IteratorState::Values { values, index } => {
                 let value = values.lock().get(*index).cloned();
                 *index += usize::from(value.is_some());
@@ -418,7 +427,37 @@ fn lines_next(handle: &Handle) -> Option<Value> {
 }
 
 impl Vm {
-    pub(super) fn iterator_value(value: Value) -> Result<Value> {
+    /// Call the user `next` impl of an iterator value held by `UserNext`.
+    /// The receiver mutates in place through its `&mut self`.
+    fn call_user_next(self: &Arc<Self>, value: &Value) -> Result<Value> {
+        let ty = match value {
+            Value::Struct(s) => s.name().to_string(),
+            Value::Enum { enum_name, .. } => enum_name.to_string(),
+            other => bail!("{} is not an iterator", other.type_name()),
+        };
+        let Some(chunk) = self.methods.get(&(ty.clone(), "next".to_string())) else {
+            bail!("no `next` method on `{ty}`");
+        };
+        let chunk = chunk.clone();
+        self.run_chunk(&chunk, from_ref(value), &[])
+    }
+
+    /// Whether the value's user type has its own `Iterator::next`, so a for
+    /// loop or an adaptor chain can drive it.
+    pub(super) fn has_user_next(&self, value: &Value) -> bool {
+        let ty = match value {
+            Value::Struct(s) => &**s.name(),
+            Value::Enum { enum_name, .. } => &**enum_name,
+            _ => return false,
+        };
+        self.methods
+            .contains_key(&(ty.to_string(), "next".to_string()))
+    }
+
+    pub(super) fn iterator_value(self: &Arc<Self>, value: Value) -> Result<Value> {
+        if self.has_user_next(&value) {
+            return Ok(wrap(IteratorState::UserNext { value }));
+        }
         Ok(match value {
             Value::Native(native)
                 if matches!(&*native.lock(), Native::Iterator(_) | Native::Lines(_)) =>
@@ -468,6 +507,15 @@ impl Vm {
         };
         match step {
             Step::Ready(value) => Ok(value),
+            Step::User(value) => {
+                let out = self.call_user_next(&value)?;
+                Ok(match out {
+                    Value::Enum { variant, data, .. } if &*variant == "Some" => {
+                        Some(data.lock().first().cloned().unwrap_or(Value::Unit))
+                    }
+                    _ => None,
+                })
+            }
             Step::Map(source, closure) => match self.iterator_next(&source)? {
                 Some(value) => Ok(Some(self.call_closure_data(&closure, &[value])?)),
                 None => Ok(None),
@@ -558,7 +606,7 @@ impl Vm {
 
     /// Drain any iterable, lazy iterators included, into a plain vec.
     pub(super) fn drain_items(self: &Arc<Self>, value: Value) -> Result<Vec<Value>> {
-        let Value::Native(iterator) = Self::iterator_value(value)? else {
+        let Value::Native(iterator) = self.iterator_value(value)? else {
             unreachable!();
         };
         let mut items = Vec::new();

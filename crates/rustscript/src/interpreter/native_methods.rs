@@ -46,7 +46,7 @@ fn int_len(n: usize) -> i64 {
 fn io_err<T>(r: std::io::Result<T>, on_ok: impl FnOnce(T) -> Value) -> Value {
     match r {
         Ok(v) => Value::ok(on_ok(v)),
-        Err(e) => Value::err(Value::str(e.to_string())),
+        Err(e) => Value::err(super::native::io_error_value(&e)),
     }
 }
 
@@ -100,6 +100,9 @@ pub(super) fn native_method(
     if let Some(v) = super::crates_bridge::sha256_method(handle, method, args)? {
         return Ok(Some(v));
     }
+    if let Some(v) = io_error_method(handle, method) {
+        return Ok(Some(v));
+    }
     // The families use disjoint method names, so the first helper that
     // recognizes the name answers. Handles that consume self or hand out
     // sub-handles move out of the Mutex inside their family helper.
@@ -125,6 +128,22 @@ pub(super) fn native_method(
         return Ok(Some(v));
     }
     temp_native_method(handle, method)
+}
+
+/// The accessors of a structured io error value.
+pub(super) fn io_error_method(handle: &Handle, method: &str) -> Option<Value> {
+    let h = handle.lock();
+    let Native::IoErr { kind, code, .. } = &*h else {
+        return None;
+    };
+    match method {
+        "kind" => Some(Value::enum_of("ErrorKind", kind.as_str(), Vec::new())),
+        "raw_os_error" => Some(match code {
+            Some(n) => Value::some(Value::Int(i64::from(*n))),
+            None => Value::none(),
+        }),
+        _ => None,
+    }
 }
 
 /// Readers: files, socket readers, and lazy line iterators.
@@ -275,6 +294,19 @@ fn lines_native_method(handle: &Handle, method: &str) -> Option<Value> {
 /// Writers shared by files, sockets, and process stdin.
 fn writer_native_method(handle: &Handle, method: &str, args: &mut [Value]) -> Option<Value> {
     match method {
+        // The formatter buffer of a user `fmt` impl. `write!` lowers to
+        // `write_all`, and `f.write_str(..)` is the same append. The answer
+        // is `fmt::Result`, which `?` in the impl body unwraps.
+        "write_all" | "write" | "write_str" | "write_fmt"
+            if matches!(&*handle.lock(), Native::Fmt(_)) =>
+        {
+            let text = args.first().map(Value::display).unwrap_or_default();
+            let mut h = handle.lock();
+            if let Native::Fmt(buffer) = &mut *h {
+                buffer.push_str(&text);
+            }
+            return Some(Value::ok(Value::Unit));
+        }
         "write_all" | "write" => {
             let bytes = value_to_bytes(args.first());
             let mut h = handle.lock();
@@ -651,7 +683,7 @@ fn seek_from(v: Option<&Value>) -> SeekFrom {
     // A script passes SeekFrom::Start(n) etc., which the interpreter models as
     // an enum value carrying the offset.
     if let Some(Value::Enum { variant, data, .. }) = v {
-        let n = data.first().and_then(|x| match x {
+        let n = data.lock().first().and_then(|x| match x {
             Value::Int(i) => Some(*i),
             _ => None,
         });

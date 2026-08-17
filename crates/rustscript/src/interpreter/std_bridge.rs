@@ -30,7 +30,7 @@ fn fs_native_call(func: &str, args: &[Value]) -> Result<Option<Value>> {
         "remove_dir" => wrap_unit(std::fs::remove_dir(s(0)?)),
         "copy" => match std::fs::copy(s(0)?, s(1)?) {
             Ok(n) => Value::ok(Value::Int(i64::try_from(n).unwrap_or(i64::MAX))),
-            Err(e) => Value::err(Value::str(e.to_string())),
+            Err(e) => Value::err(super::native::io_error_value(&e)),
         },
         "rename" => wrap_unit(std::fs::rename(s(0)?, s(1)?)),
         "read_dir" => match std::fs::read_dir(s(0)?) {
@@ -39,28 +39,28 @@ fn fs_native_call(func: &str, args: &[Value]) -> Result<Option<Value>> {
                 for e in rd {
                     match e {
                         Ok(entry) => items.push(Value::ok(make_dir_entry(&entry))),
-                        Err(err) => items.push(Value::err(Value::str(err.to_string()))),
+                        Err(err) => items.push(Value::err(super::native::io_error_value(&err))),
                     }
                 }
                 Value::ok(Value::vec(items))
             }
-            Err(e) => Value::err(Value::str(e.to_string())),
+            Err(e) => Value::err(super::native::io_error_value(&e)),
         },
         "canonicalize" => match std::fs::canonicalize(s(0)?) {
             Ok(p) => Value::ok(make_path(p.display().to_string())),
-            Err(e) => Value::err(Value::str(e.to_string())),
+            Err(e) => Value::err(super::native::io_error_value(&e)),
         },
         "metadata" => match std::fs::metadata(s(0)?) {
             Ok(m) => Value::ok(make_metadata(&m)),
-            Err(e) => Value::err(Value::str(e.to_string())),
+            Err(e) => Value::err(super::native::io_error_value(&e)),
         },
         "symlink_metadata" => match std::fs::symlink_metadata(s(0)?) {
             Ok(m) => Value::ok(make_metadata(&m)),
-            Err(e) => Value::err(Value::str(e.to_string())),
+            Err(e) => Value::err(super::native::io_error_value(&e)),
         },
         "read_link" => match std::fs::read_link(s(0)?) {
             Ok(p) => Value::ok(make_path(p.display().to_string())),
-            Err(e) => Value::err(Value::str(e.to_string())),
+            Err(e) => Value::err(super::native::io_error_value(&e)),
         },
         "hard_link" => wrap_unit(std::fs::hard_link(s(0)?, s(1)?)),
         // The platform specific names are aliased to one cross-platform
@@ -96,7 +96,7 @@ pub(super) fn native_call(module: &str, func: &str, args: &[Value]) -> Result<Op
         },
         ("env", "current_dir") => match std::env::current_dir() {
             Ok(p) => Value::ok(make_path(p.display().to_string())),
-            Err(e) => Value::err(Value::str(e.to_string())),
+            Err(e) => Value::err(super::native::io_error_value(&e)),
         },
         ("env", "set_var") => {
             // Safety: scripts treat the environment as script-wide state, the
@@ -450,7 +450,7 @@ pub(super) fn metadata_method(s: &Arc<StructData>, name: &str) -> Result<Value> 
 pub(super) fn wrap_io(r: std::io::Result<String>) -> Value {
     match r {
         Ok(s) => Value::ok(Value::str(s)),
-        Err(e) => Value::err(Value::str(e.to_string())),
+        Err(e) => Value::err(super::native::io_error_value(&e)),
     }
 }
 
@@ -462,14 +462,14 @@ pub(super) fn wrap_bytes(r: std::io::Result<Vec<u8>>) -> Value {
                 .map(|b| Value::Int(i64::from(b)))
                 .collect(),
         )),
-        Err(e) => Value::err(Value::str(e.to_string())),
+        Err(e) => Value::err(super::native::io_error_value(&e)),
     }
 }
 
 pub(super) fn wrap_unit(r: std::io::Result<()>) -> Value {
     match r {
         Ok(()) => Value::ok(Value::Unit),
-        Err(e) => Value::err(Value::str(e.to_string())),
+        Err(e) => Value::err(super::native::io_error_value(&e)),
     }
 }
 
@@ -494,7 +494,7 @@ pub(super) fn arg_int(args: &[Value], i: usize) -> i64 {
 pub(super) fn open_file(path: &str, opts: &std::fs::OpenOptions) -> Value {
     match opts.open(path) {
         Ok(f) => Value::ok(Native::File(std::io::BufReader::new(f)).wrap()),
-        Err(e) => Value::err(Value::str(e.to_string())),
+        Err(e) => Value::err(super::native::io_error_value(&e)),
     }
 }
 

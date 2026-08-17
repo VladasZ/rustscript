@@ -9,7 +9,8 @@ use anyhow::{Result, anyhow, bail};
 use super::bytecode::{BinKind, UnKind};
 use super::bytecode::{PLit, PPat};
 use super::numeric::{
-    float_arith, i64_arith, int_arith, int_bit, int_neg, int_not, int_shift, unify,
+    IntWidth, float_arith, i64_arith, int_arith, int_bit, int_neg, int_not, int_shift, u64_arith,
+    unify,
 };
 use super::shared::{duration_arith, usize_i64};
 use super::std_bridge::{duration_from_value, make_duration};
@@ -71,6 +72,21 @@ fn arith(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
     if let (Value::Int(a), Value::Int(b)) = (l, r) {
         return Ok(Value::Int(i64_arith(op, *a, *b)?));
     }
+    // A 64-bit unsigned pair, or one with a bare literal beside it, computes
+    // natively instead of through the i128 pipeline. Counting and checksum
+    // loops on `u64` and `usize` live here.
+    if let Value::IntW(a, wa @ (IntWidth::U64 | IntWidth::USize)) = l {
+        let rhs = match r {
+            Value::IntW(b, wb) if wa == wb => Some(b.cast_unsigned()),
+            Value::Int(b) if *b >= 0 => Some(b.cast_unsigned()),
+            _ => None,
+        };
+        if let Some(y) = rhs {
+            let x = a.cast_unsigned();
+            let out = u64_arith(op, x, y)?;
+            return Ok(Value::IntW(out.cast_signed(), *wa));
+        }
+    }
     if let (Value::Float(a), Value::Float(b)) = (l, r) {
         return Ok(Value::Float(float_arith(op, *a, *b)));
     }
@@ -86,6 +102,13 @@ fn arith(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
         && let (Some(a), Some(b)) = (duration_from_value(l), duration_from_value(r))
     {
         return Ok(make_duration(duration_arith(op, a, b)?));
+    }
+    if let Some(width) = big_operands(l, r) {
+        let (a, b) = (big_bits(l), big_bits(r));
+        return Ok(Value::Big(
+            super::numeric::big_arith(op, width, a, b)?,
+            width,
+        ));
     }
     if let (Some((a, wa)), Some((b, wb))) = (l.int_parts(), r.int_parts()) {
         let width = unify(wa, wb)?;
@@ -122,6 +145,13 @@ fn bit_bin(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
         let f = bit_i64(op);
         return Ok(Value::Bool(f(i64::from(*a), i64::from(*b)) != 0));
     }
+    if let Some(width) = big_operands(l, r) {
+        let (a, b) = (big_bits(l), big_bits(r));
+        return Ok(Value::Big(
+            super::numeric::big_arith(op, width, a, b)?,
+            width,
+        ));
+    }
     if let (Some((a, wa)), Some((b, wb))) = (l.int_parts(), r.int_parts()) {
         let width = unify(wa, wb)?;
         return Ok(Value::int_of_width(int_bit(op, a, b)?, width));
@@ -140,6 +170,12 @@ fn bit_i64(op: BinKind) -> fn(i64, i64) -> i64 {
 /// `<<` and `>>`, the amount only supplies the count and the result keeps
 /// the shifted side's width.
 fn shift_bin(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
+    if let Value::Big(a, w) = l {
+        let Some((amount, _)) = r.int_parts() else {
+            bail!("shift operators need integers");
+        };
+        return Ok(Value::Big(int_shift(op, *w, *a, amount)?, *w));
+    }
     let (Some((a, wa)), Some((b, _))) = (l.int_parts(), r.int_parts()) else {
         bail!("shift operators need integers");
     };
@@ -156,6 +192,20 @@ pub(super) fn compare_values(l: &Value, r: &Value) -> Result<Ordering> {
 fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
     Ok(match (l, r) {
         (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
+        (Value::Big(a, wa), Value::Big(b, _)) => Some(if *wa == super::numeric::IntWidth::U128 {
+            a.cast_unsigned().cmp(&b.cast_unsigned())
+        } else {
+            a.cmp(b)
+        }),
+        (Value::Big(..), Value::Int(_)) | (Value::Int(_), Value::Big(..)) => {
+            match (l.int_parts(), r.int_parts()) {
+                (Some((a, _)), Some((b, _))) => Some(a.cmp(&b)),
+                // The big side is a u128 past the i128 range, larger than
+                // any i64 the other side can hold.
+                (None, _) => Some(Ordering::Greater),
+                (_, None) => Some(Ordering::Less),
+            }
+        }
         (Value::IntW(..), Value::Int(_) | Value::IntW(..)) | (Value::Int(_), Value::IntW(..)) => {
             let (a, _) = l.int_parts().unwrap();
             let (b, _) = r.int_parts().unwrap();
@@ -215,6 +265,10 @@ fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
             };
             match rank(left_variant).cmp(&rank(right_variant)) {
                 Ordering::Equal => {
+                    // Snapshots, not held guards: comparing a value with its
+                    // own clone sees the same storage on both sides.
+                    let left_data = left_data.lock().clone();
+                    let right_data = right_data.lock().clone();
                     let mut order = None;
                     for (left, right) in left_data.iter().zip(right_data.iter()) {
                         match partial_compare(left, right)? {
@@ -252,11 +306,13 @@ pub(super) fn apply_un(op: UnKind, v: &Value) -> Result<Value> {
                 .ok_or_else(|| anyhow!("attempt to negate with overflow"))?,
         ),
         (UnKind::Neg, Value::IntW(v, w)) => Value::int_of_width(int_neg(*w, w.decode(*v))?, *w),
+        (UnKind::Neg, Value::Big(v, w)) => Value::Big(int_neg(*w, *v)?, *w),
         (UnKind::Neg, Value::Float(f)) => Value::Float(-*f),
         (UnKind::Neg, Value::F32(f)) => Value::F32(-*f),
         (UnKind::Not, Value::Bool(b)) => Value::Bool(!*b),
         (UnKind::Not, Value::Int(i)) => Value::Int(!*i),
         (UnKind::Not, Value::IntW(v, w)) => Value::int_of_width(int_not(*w, w.decode(*v)), *w),
+        (UnKind::Not, Value::Big(v, w)) => Value::Big(int_not(*w, *v), *w),
         (op, v) => bail!("cannot apply {:?} to {}", op, v.type_name()),
     })
 }
@@ -294,7 +350,8 @@ pub(super) fn try_bind(pat: &PPat, val: &Value, define: &mut dyn FnMut(&str, Val
         },
         PPat::TupleStruct { name, elems } => match val {
             Value::Enum { variant, data, .. } => {
-                name.as_deref() == Some(&**variant) && bind_seq(elems, data, define)
+                let payload = data.lock().clone();
+                name.as_deref() == Some(&**variant) && bind_seq(elems, &payload, define)
             }
             Value::Struct(st) => {
                 let vals: Vec<Value> = st.values.lock().clone();
@@ -373,6 +430,132 @@ fn endpoint_cmp(literal: &PLit, value: &Value) -> Option<Ordering> {
     }
 }
 
+/// Where a value being bound by reference lives, so the binding can anchor
+/// to that storage. A slotless value binds as a plain borrow wrapper when
+/// it is a composite, or as a copy when it is a scalar.
+enum BindSlot {
+    None,
+    Elem(super::value::List, usize),
+    Field(std::sync::Arc<super::value::StructData>, usize),
+}
+
+/// Define bindings for a pattern that already matched a `&mut` scrutinee.
+/// Every binding anchors to the matched value's own storage where one
+/// exists, so `*x += 1` and `v.push(..)` through the binding land in the
+/// borrowed place. Runs after `try_bind` said the pattern matches, and must
+/// walk the same shapes.
+fn bind_refs(pat: &PPat, val: &Value, slot: BindSlot, define: &mut dyn FnMut(&str, Value)) {
+    match pat {
+        PPat::Ident { name, sub } => {
+            let bound = match &slot {
+                BindSlot::Elem(list, i) => Value::Ref(std::sync::Arc::new(
+                    super::value::ValueRef::vec_element(list.clone(), *i),
+                )),
+                BindSlot::Field(data, i) => Value::Ref(std::sync::Arc::new(
+                    super::value::ValueRef::struct_field(data.clone(), *i),
+                )),
+                BindSlot::None => match val {
+                    Value::Vec(_)
+                    | Value::Map(..)
+                    | Value::Tuple(_)
+                    | Value::Struct(_)
+                    | Value::Enum { .. } => Value::Ref(std::sync::Arc::new(
+                        super::value::ValueRef::borrowed(val.clone()),
+                    )),
+                    other => other.clone(),
+                },
+            };
+            define(name, bound);
+            if let Some(s) = sub {
+                bind_refs(s, val, slot, define);
+            }
+        }
+        PPat::Tuple(elems) => {
+            if let Value::Tuple(items) = val {
+                bind_refs_seq(elems, items, define);
+            }
+        }
+        PPat::TupleStruct { elems, .. } => match val {
+            Value::Enum { data, .. } => bind_refs_seq(elems, data, define),
+            Value::Struct(st) => {
+                let vals: Vec<Value> = st.values.lock().clone();
+                for (i, (p, v)) in elems.iter().zip(vals.iter()).enumerate() {
+                    bind_refs(p, v, BindSlot::Field(st.clone(), i), define);
+                }
+            }
+            // The pre-unwrapped Some shapes bind the value itself.
+            other => {
+                if let Some(p) = elems.first() {
+                    bind_refs(p, other, BindSlot::None, define);
+                }
+            }
+        },
+        PPat::Struct { fields, .. } => {
+            if let Value::Struct(st) = val {
+                let vals: Vec<Value> = st.values.lock().clone();
+                for (fname, p) in fields {
+                    if let Some(i) = st.shape.slot(fname) {
+                        bind_refs(p, &vals[i], BindSlot::Field(st.clone(), i), define);
+                    }
+                }
+            }
+        }
+        PPat::Or(alts) => {
+            // The first alternative that matches is the one whose bindings
+            // are live, the same choice `try_bind` made.
+            for alt in alts {
+                if try_bind(alt, val, &mut |_, _| {}) {
+                    bind_refs(alt, val, slot, define);
+                    return;
+                }
+            }
+        }
+        PPat::Slice(elems) => {
+            if let Value::Vec(items) = val {
+                bind_refs_seq(elems, items, define);
+            }
+        }
+        PPat::Wild
+        | PPat::Rest
+        | PPat::Lit(_)
+        | PPat::Path { .. }
+        | PPat::Range { .. }
+        | PPat::Unsupported => {}
+    }
+}
+
+/// The element half of `bind_refs`: anchor each pattern to its element slot,
+/// with the same head-and-tail split around a `..` that `bind_seq` uses.
+fn bind_refs_seq(pats: &[PPat], list: &super::value::List, define: &mut dyn FnMut(&str, Value)) {
+    let vals: Vec<Value> = list.lock().clone();
+    if pats.iter().any(|p| matches!(p, PPat::Rest)) {
+        let head = pats.iter().take_while(|p| !matches!(p, PPat::Rest)).count();
+        for (i, p) in pats.iter().take(head).enumerate() {
+            if let Some(v) = vals.get(i) {
+                bind_refs(p, v, BindSlot::Elem(list.clone(), i), define);
+            }
+        }
+        let tail = &pats[head + 1..];
+        for (j, p) in tail.iter().enumerate() {
+            let Some(i) = (vals.len() - tail.len()).checked_add(j) else {
+                continue;
+            };
+            if let Some(v) = vals.get(i) {
+                bind_refs(p, v, BindSlot::Elem(list.clone(), i), define);
+            }
+        }
+        return;
+    }
+    for (i, (p, v)) in pats.iter().zip(vals.iter()).enumerate() {
+        bind_refs(p, v, BindSlot::Elem(list.clone(), i), define);
+    }
+}
+
+/// Entry for the VM: bindings for a matched `&mut` scrutinee.
+pub(super) fn bind_pattern_refs(pat: &PPat, val: &Value, define: &mut dyn FnMut(&str, Value)) {
+    bind_refs(pat, val, BindSlot::None, define);
+}
+
 fn bind_seq(pats: &[PPat], vals: &[Value], define: &mut dyn FnMut(&str, Value)) -> bool {
     if pats.iter().any(|p| matches!(p, PPat::Rest)) {
         let head = pats.iter().take_while(|p| !matches!(p, PPat::Rest)).count();
@@ -415,7 +598,32 @@ pub(super) fn int_of(v: &Value) -> Result<i64> {
         Value::IntW(..) => v
             .untag_int()
             .ok_or_else(|| anyhow!("integer out of the i64 range")),
+        Value::Big(..) => match v.int_parts() {
+            Some((n, _)) => i64::try_from(n).map_err(|_| anyhow!("integer out of the i64 range")),
+            None => bail!("integer out of the i64 range"),
+        },
         _ => bail!("range bound must be an integer"),
+    }
+}
+
+/// The shared 128-bit width of two operands when either is a `Value::Big`.
+/// The untagged side is a bare literal adopting the big side's width.
+fn big_operands(l: &Value, r: &Value) -> Option<super::numeric::IntWidth> {
+    match (l, r) {
+        (Value::Big(_, w), Value::Big(..) | Value::Int(_)) | (Value::Int(_), Value::Big(_, w)) => {
+            Some(*w)
+        }
+        _ => None,
+    }
+}
+
+/// An operand's raw 128-bit image for the big paths: a `Big` as stored, an
+/// untagged literal widened.
+fn big_bits(v: &Value) -> i128 {
+    match v {
+        Value::Big(bits, _) => *bits,
+        Value::Int(i) => i128::from(*i),
+        _ => 0,
     }
 }
 
@@ -466,6 +674,9 @@ pub(super) fn index(recv: &Value, key: &Value) -> Result<Value> {
 }
 
 fn slice_value(base: &Value, start: i64, end: i64, inclusive: bool) -> Result<Value> {
+    // The messages are the exact texts debug Rust panics with for each
+    // failure, checked in declaration order: inverted range, out of bounds,
+    // then a string's char boundary.
     let bounds = |len: usize| -> Result<(usize, usize)> {
         if start < 0 {
             bail!("negative slice start {start}");
@@ -477,8 +688,8 @@ fn slice_value(base: &Value, start: i64, end: i64, inclusive: bool) -> Result<Va
         } else {
             end
         };
-        if end < start || usize::try_from(end).is_ok_and(|e| e > len) {
-            bail!("slice {start}..{end} out of bounds (len {len})");
+        if end < start {
+            bail!("slice index starts at {start} but ends at {end}");
         }
         Ok((usize::try_from(start)?, usize::try_from(end)?))
     };
@@ -486,13 +697,39 @@ fn slice_value(base: &Value, start: i64, end: i64, inclusive: bool) -> Result<Va
         Value::Vec(items) => {
             let items = items.lock();
             let (a, b) = bounds(items.len())?;
+            if b > items.len() {
+                bail!(
+                    "range end index {b} out of range for slice of length {}",
+                    items.len()
+                );
+            }
             Ok(Value::vec(items[a..b].to_vec()))
         }
         Value::Str(s) => {
             let (a, b) = bounds(s.len())?;
-            match s.get(a..b) {
-                Some(sub) => Ok(Value::str(sub.to_string())),
-                None => bail!("slice {a}..{b} is not on a char boundary"),
+            if b > s.len() {
+                bail!(
+                    "end byte index {b} is out of bounds for string of length {}",
+                    s.len()
+                );
+            }
+            if let Some(sub) = s.get(a..b) {
+                Ok(Value::str(sub.to_string()))
+            } else {
+                let (side, bad) = if s.is_char_boundary(a) {
+                    ("end", b)
+                } else {
+                    ("start", a)
+                };
+                let mut at = bad;
+                while at > 0 && !s.is_char_boundary(at) {
+                    at -= 1;
+                }
+                let ch = s[at..].chars().next().unwrap_or('\u{FFFD}');
+                bail!(
+                    "{side} byte index {bad} is not a char boundary; it is inside {ch:?} (bytes {at}..{} of string)",
+                    at + ch.len_utf8()
+                )
             }
         }
         other => bail!("cannot slice {}", other.type_name()),
@@ -531,9 +768,12 @@ pub(super) fn eval_try(v: Value) -> Result<Value, Value> {
             data,
         } => match (&*enum_name, &*variant) {
             ("Result", "Ok") | ("Option", "Some") => {
-                Ok(data.first().cloned().unwrap_or(Value::Unit))
+                Ok(data.lock().first().cloned().unwrap_or(Value::Unit))
             }
-            ("Result", "Err") => Err(Value::err(data.first().cloned().unwrap_or(Value::Unit))),
+            ("Result", "Err") => {
+                let inner = data.lock().first().cloned().unwrap_or(Value::Unit);
+                Err(Value::err(inner))
+            }
             ("Option", "None") => Err(Value::none()),
             // Any other value acts as its own Some, matching eval_try in
             // eval.rs, see the comment there.

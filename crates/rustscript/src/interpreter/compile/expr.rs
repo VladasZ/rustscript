@@ -228,6 +228,11 @@ impl Compiler<'_> {
     pub(super) fn compile_block(&mut self, block: &Block, dst: Reg) -> Result<()> {
         self.push_scope();
         let res = self.compile_block_inner(block, dst);
+        // The block value already moved into `dst` before the scope ends, so
+        // a returned binding reads as still-shared and is not dropped here.
+        if res.is_ok() {
+            self.emit_scope_drops(1);
+        }
         self.pop_scope();
         res
     }
@@ -349,6 +354,13 @@ impl Compiler<'_> {
     /// A plain `let`, with the annotation-driven typing hints the comments
     /// inside explain.
     fn compile_let(&mut self, local: &syn::Local, dst: Reg, is_last: bool) -> Result<()> {
+        // `let r = &mut PLACE` binds a real borrow. A plain variable borrow
+        // becomes a name alias, so access through `r` is access to the
+        // variable. A projection borrow materializes a reference value into
+        // the element or field, split from value sharing first.
+        if self.compile_let_borrow(local, dst, is_last)? {
+            return Ok(());
+        }
         let val = self.alloc();
         // An annotated `let` whose init chain roots in a
         // `from_str` call hands its type to that call, so the
@@ -510,28 +522,7 @@ impl Compiler<'_> {
             Expr::ForLoop(f) => self.compile_for(dst, f)?,
             Expr::Loop(l) => self.compile_loop(dst, l)?,
             Expr::Match(m) => self.compile_match(dst, m)?,
-            Expr::Return(r) => {
-                let mut src = if let Some(e) = &r.expr {
-                    self.compile_expr(e)?
-                } else {
-                    let u = self.alloc();
-                    self.emit(Op::LoadUnit { dst: u });
-                    u
-                };
-                // A declared numeric return type retags an early return the
-                // same way it retags the tail. Into a fresh register, since
-                // `src` may be a named local's own slot.
-                if let Some(idx) = self.cur().ret_cast {
-                    let out = self.alloc();
-                    self.emit(Op::Cast {
-                        dst: out,
-                        src,
-                        ty: idx,
-                    });
-                    src = out;
-                }
-                self.emit(Op::Ret { src });
-            }
+            Expr::Return(r) => self.compile_return(r)?,
             Expr::Break(b) => self.compile_break(b)?,
             Expr::Continue(_) => self.compile_continue()?,
             Expr::Call(c) => self.compile_call(dst, c)?,
@@ -635,15 +626,41 @@ impl Compiler<'_> {
         annotation: Option<IntWidth>,
     ) -> Result<()> {
         let raw: u128 = lit.base10_parse()?;
+        // A literal past u64 can only be 128 bits wide in a valid program,
+        // so it survives as its raw bits with the width the source states.
         if raw > u128::from(u64::MAX) {
-            bail!("integer literal does not fit any supported width");
+            let stated = match lit.suffix() {
+                "" => annotation.unwrap_or(if negated {
+                    IntWidth::I128
+                } else {
+                    IntWidth::U128
+                }),
+                other => IntWidth::parse(other)
+                    .ok_or_else(|| anyhow!("unsupported literal suffix `{other}`"))?,
+            };
+            let value = if negated {
+                if stated != IntWidth::I128 || raw > 1u128 << 127 {
+                    bail!("integer literal does not fit any supported width");
+                }
+                // `wrapping_neg` turns 2^127 into i128::MIN exactly.
+                raw.cast_signed().wrapping_neg()
+            } else {
+                if !stated.is_big() || (stated == IntWidth::I128 && raw > i128::MAX.cast_unsigned())
+                {
+                    bail!("integer literal does not fit any supported width");
+                }
+                raw.cast_signed()
+            };
+            let k = self.add_const(Const::Big(value, stated));
+            self.emit(Op::LoadConst { dst, k });
+            return Ok(());
         }
         let mut value = i128::try_from(raw)?;
         if negated {
             value = -value;
         }
         let width = match lit.suffix() {
-            "" | "u128" | "i128" => annotation,
+            "" => annotation,
             suffix => Some(
                 IntWidth::parse(suffix)
                     .ok_or_else(|| anyhow!("unsupported literal suffix `{suffix}`"))?,
@@ -663,6 +680,10 @@ impl Compiler<'_> {
                 dst,
                 v: i64::try_from(value)?,
             }),
+            w if w.is_big() => {
+                let k = self.add_const(Const::Big(truncate(value, w), w));
+                self.emit(Op::LoadConst { dst, k });
+            }
             w => self.emit(Op::LoadIntW {
                 dst,
                 v: w.encode(truncate(value, w)),
@@ -890,6 +911,39 @@ impl Compiler<'_> {
 
     // -- control flow ------------------------------------------------------
 
+    /// An early `return`. A declared numeric return type retags the value
+    /// the same way it retags the tail, into a fresh register since the
+    /// source may be a named local's own slot. Every open scope ends here,
+    /// so its `Drop` impls run before the return, with the returned value
+    /// moved to a fresh register first so it stays shared past the drops.
+    fn compile_return(&mut self, r: &syn::ExprReturn) -> Result<()> {
+        let mut src = if let Some(e) = &r.expr {
+            self.compile_expr(e)?
+        } else {
+            let u = self.alloc();
+            self.emit(Op::LoadUnit { dst: u });
+            u
+        };
+        if let Some(idx) = self.cur().ret_cast {
+            let out = self.alloc();
+            self.emit(Op::Cast {
+                dst: out,
+                src,
+                ty: idx,
+            });
+            src = out;
+        }
+        if self.ctx.has_drop {
+            let out = self.alloc();
+            self.emit(Op::Move { dst: out, src });
+            src = out;
+            let depth = self.cur().scope_order.len();
+            self.emit_scope_drops(depth);
+        }
+        self.emit(Op::Ret { src });
+        Ok(())
+    }
+
     pub(super) fn compile_if(&mut self, dst: Reg, if_expr: &syn::ExprIf) -> Result<()> {
         // `if let PAT = EXPR { .. }` and let-chains like
         // `if let Some(x) = a && x > 0 && let Ok(y) = b { .. }`. The chain is a
@@ -902,7 +956,7 @@ impl Compiler<'_> {
             let mut else_jumps = Vec::new();
             for term in &terms {
                 if let Expr::Let(let_expr) = term {
-                    let scrut = self.compile_expr(&let_expr.expr)?;
+                    let scrut = self.compile_scrutinee(&let_expr.expr)?;
                     let matched = self.alloc();
                     let pat = self.pattern_info(&let_expr.pat)?;
                     self.emit(Op::TestBind {
@@ -922,6 +976,7 @@ impl Compiler<'_> {
                 }
             }
             self.compile_block_inner(&if_expr.then_branch, dst)?;
+            self.emit_scope_drops(1);
             self.pop_scope();
             let jmp_end = self.here();
             self.emit(Op::Jump { to: 0 });
@@ -956,7 +1011,8 @@ impl Compiler<'_> {
         let head = self.here();
         // `while let PAT = EXPR` support.
         if let Expr::Let(let_expr) = &*w.cond {
-            let scrut = self.compile_expr(&let_expr.expr)?;
+            let scrut = self.compile_scrutinee(&let_expr.expr)?;
+            let while_let_depth = self.cur().scope_order.len();
             self.push_scope();
             let matched = self.alloc();
             let pat = self.pattern_info(&let_expr.pat)?;
@@ -974,9 +1030,11 @@ impl Compiler<'_> {
                 breaks: vec![exit],
                 continue_to: head,
                 result: dst,
+                scope_depth: while_let_depth,
             });
             let body = self.alloc();
             self.compile_block_inner(&w.body, body)?;
+            self.emit_scope_drops(1);
             self.pop_scope();
             self.emit(Op::Jump {
                 to: u32::try_from(head)?,
@@ -990,10 +1048,12 @@ impl Compiler<'_> {
             return Ok(());
         }
         let exit = self.emit_cond_jump(&w.cond)?;
+        let scope_depth = self.cur().scope_order.len();
         self.loops.push(LoopCtx {
             breaks: vec![exit],
             continue_to: head,
             result: dst,
+            scope_depth,
         });
         let body = self.alloc();
         self.compile_block(&w.body, body)?;
@@ -1012,10 +1072,12 @@ impl Compiler<'_> {
     pub(super) fn compile_loop(&mut self, dst: Reg, l: &syn::ExprLoop) -> Result<()> {
         self.emit(Op::LoadUnit { dst });
         let head = self.here();
+        let scope_depth = self.cur().scope_order.len();
         self.loops.push(LoopCtx {
             breaks: Vec::new(),
             continue_to: head,
             result: dst,
+            scope_depth,
         });
         let body = self.alloc();
         self.compile_block(&l.body, body)?;
@@ -1031,7 +1093,25 @@ impl Compiler<'_> {
     }
 
     pub(super) fn compile_for(&mut self, dst: Reg, f: &syn::ExprForLoop) -> Result<()> {
-        let src = self.compile_expr(&f.expr)?;
+        // `for x in &mut place` iterates the place's own storage and yields
+        // references, real Rust's `IntoIterator for &mut Vec<T>`, so `*x`
+        // writes land in the elements. Lowered as `place.iter_mut()`.
+        let src = match &*f.expr {
+            Expr::Reference(r) if r.mutability.is_some() => {
+                let place = self.compile_mut_receiver(&r.expr)?;
+                let name = self.add_name("iter_mut".to_string());
+                let out = self.alloc();
+                self.emit(Op::Method {
+                    dst: out,
+                    recv: place.reg,
+                    name,
+                    base: place.reg,
+                    argc: 0,
+                });
+                out
+            }
+            _ => self.compile_expr(&f.expr)?,
+        };
         let iter = self.alloc();
         self.emit(Op::IterInit { dst: iter, src });
         let idx = self.alloc();
@@ -1045,15 +1125,19 @@ impl Compiler<'_> {
             val,
             to: 0,
         });
+        let scope_depth = self.cur().scope_order.len();
         self.push_scope();
         self.bind_pattern_irrefutable(&f.pat, val)?;
         self.loops.push(LoopCtx {
             breaks: vec![next],
             continue_to: head,
             result: dst,
+            scope_depth,
         });
         let body = self.alloc();
         self.compile_block_inner(&f.body, body)?;
+        // Body bindings drop at the end of every iteration.
+        self.emit_scope_drops(1);
         self.pop_scope();
         self.emit(Op::Jump {
             to: u32::try_from(head)?,
@@ -1076,6 +1160,7 @@ impl Compiler<'_> {
         } else {
             bail!("break outside a loop");
         }
+        self.emit_loop_exit_drops();
         let jmp = self.here();
         self.emit(Op::Jump { to: 0 });
         self.loops.last_mut().unwrap().breaks.push(jmp);
@@ -1088,14 +1173,28 @@ impl Compiler<'_> {
             .last()
             .map(|l| l.continue_to)
             .ok_or_else(|| anyhow!("continue outside a loop"))?;
+        self.emit_loop_exit_drops();
         self.emit(Op::Jump {
             to: u32::try_from(to)?,
         });
         Ok(())
     }
 
+    /// The scopes a `break` or `continue` jumps out of end at the jump, so
+    /// their `Drop` impls run first.
+    fn emit_loop_exit_drops(&mut self) {
+        if !self.ctx.has_drop {
+            return;
+        }
+        let Some(entry) = self.loops.last().map(|l| l.scope_depth) else {
+            return;
+        };
+        let depth = self.cur().scope_order.len().saturating_sub(entry);
+        self.emit_scope_drops(depth);
+    }
+
     pub(super) fn compile_match(&mut self, dst: Reg, m: &syn::ExprMatch) -> Result<()> {
-        let scrut = self.compile_expr(&m.expr)?;
+        let scrut = self.compile_scrutinee(&m.expr)?;
         let mut end_jumps = Vec::new();
         for arm in &m.arms {
             self.push_scope();
@@ -1125,6 +1224,7 @@ impl Compiler<'_> {
                 guard_skip = Some(gs);
             }
             self.compile_into(dst, &arm.body)?;
+            self.emit_scope_drops(1);
             let je = self.here();
             self.emit(Op::Jump { to: 0 });
             end_jumps.push(je);

@@ -40,6 +40,13 @@ pub struct Ctx<'r> {
     /// says so. A name defined more than once with differing returns is
     /// absent, since the call site cannot tell which one it reaches.
     pub fn_returns: &'r HashMap<String, ScalarTy>,
+    /// Names of user methods any impl declares with a `&mut self` receiver.
+    /// A call to one of these compiles its receiver as a place, split from
+    /// value sharing first, so the mutation stays private to the receiver.
+    pub mut_methods: &'r HashSet<String>,
+    /// Whether any type in the program has a `Drop` impl. False skips all
+    /// scope-drop bookkeeping, the common case pays nothing.
+    pub has_drop: bool,
 }
 
 /// Per function compilation state. A stack of these supports nested closures.
@@ -60,7 +67,17 @@ struct FnState {
     child_caps: Vec<Vec<CapSource>>,
     upvalues: Vec<(String, CapSource)>,
     mutable_locals: HashSet<Reg>,
+    /// Parameters that arrived as `&T` or `&mut T`. A mutable access through
+    /// one must not split its storage, the caller's place shares it and the
+    /// caller made it unique before the call.
+    borrow_params: HashSet<Reg>,
+    /// `let r = &mut v` bindings, name to borrowed name. Access through the
+    /// alias compiles as access to the borrowed variable itself.
+    aliases: HashMap<String, String>,
     scopes: Vec<HashMap<String, Reg>>,
+    /// Bindings per scope in declaration order, for scope-end `Drop` runs.
+    scope_order: Vec<Vec<Reg>>,
+    drop_lists: Vec<std::sync::Arc<[Reg]>>,
     reg_top: Reg,
     max_reg: Reg,
     num_params: usize,
@@ -93,7 +110,11 @@ impl FnState {
             child_caps: Vec::new(),
             upvalues: Vec::new(),
             mutable_locals: HashSet::new(),
+            borrow_params: HashSet::new(),
+            aliases: HashMap::default(),
             scopes: vec![HashMap::default()],
+            scope_order: vec![Vec::new()],
+            drop_lists: Vec::new(),
             reg_top: 0,
             max_reg: 0,
             num_params: 0,
@@ -136,6 +157,7 @@ impl FnState {
             children: self.children,
             child_caps: self.child_caps,
             generics: self.generics,
+            drop_lists: self.drop_lists,
             call_type_args: self.call_type_args,
             path_forwarder: false,
         }
@@ -150,6 +172,9 @@ struct LoopCtx {
     continue_to: usize,
     /// Register holding the loop value, for `loop { break v }`.
     result: Reg,
+    /// Open scope count at loop entry. A `break` or `continue` ends every
+    /// scope deeper than this, so their `Drop` impls run first.
+    scope_depth: usize,
 }
 
 /// The collect targets the compiler can name at the call site. `collect` is
@@ -279,12 +304,17 @@ impl<'a> Compiler<'a> {
         let mut params: Vec<Option<&Pat>> = Vec::new();
         let mut types: Vec<Option<String>> = Vec::new();
         let mut annotations: Vec<Option<&syn::Type>> = Vec::new();
+        // Whether each parameter arrived by reference. A mutable access
+        // through a borrow must reach the caller's storage, so it is never
+        // split from sharing inside the callee.
+        let mut borrows: Vec<bool> = Vec::new();
         for input in &sig.inputs {
             match input {
-                FnArg::Receiver(_) => {
+                FnArg::Receiver(r) => {
                     params.push(None);
                     types.push(None);
                     annotations.push(None);
+                    borrows.push(matches!(r.kind, syn::ReceiverKind::Reference(..)));
                 }
                 FnArg::Typed(t) => {
                     // A param annotation is a type the program wrote down,
@@ -298,6 +328,7 @@ impl<'a> Compiler<'a> {
                     params.push(Some(&t.pat));
                     types.push(type_head(&t.ty));
                     annotations.push(Some(&t.ty));
+                    borrows.push(matches!(&*t.ty, syn::Type::Reference(_)));
                 }
             }
         }
@@ -306,6 +337,9 @@ impl<'a> Compiler<'a> {
         for (i, p) in params.iter().enumerate() {
             let reg = self.alloc();
             debug_assert_eq!(reg as usize, i);
+            if borrows[i] {
+                self.cur().borrow_params.insert(reg);
+            }
             match p {
                 None => self.define("self", reg),
                 Some(Pat::Ident(id)) if id.subpat.is_none() => {
@@ -369,6 +403,9 @@ impl<'a> Compiler<'a> {
                 ty: idx,
             });
         }
+        // By-value parameters die with the function, so their `Drop` impls
+        // run before the frame returns.
+        self.emit_scope_drops(1);
         self.emit(Op::Ret { src: ret });
         Ok(self.finish_chunk())
     }
@@ -422,19 +459,55 @@ impl<'a> Compiler<'a> {
     }
 
     fn push_scope(&mut self) {
-        self.cur().scopes.push(HashMap::default());
+        let f = self.cur();
+        f.scopes.push(HashMap::default());
+        f.scope_order.push(Vec::new());
     }
 
     fn pop_scope(&mut self) {
-        self.cur().scopes.pop();
+        let f = self.cur();
+        f.scopes.pop();
+        f.scope_order.pop();
     }
 
     fn define(&mut self, name: &str, reg: Reg) {
-        self.cur()
-            .scopes
-            .last_mut()
-            .unwrap()
-            .insert(name.to_string(), reg);
+        let f = self.cur();
+        // A fresh binding shadows any `&mut` alias of the same name.
+        f.aliases.remove(name);
+        f.scopes.last_mut().unwrap().insert(name.to_string(), reg);
+        f.scope_order.last_mut().unwrap().push(reg);
+    }
+
+    /// Emit the `Drop` run for the innermost `depth` open scopes, innermost
+    /// first, without popping them. `depth` 1 is the current scope alone;
+    /// a `return` uses every open scope. Emits nothing when the program has
+    /// no `Drop` impl.
+    fn emit_scope_drops(&mut self, depth: usize) {
+        if !self.ctx.has_drop {
+            return;
+        }
+        let f = self.cur();
+        let total = f.scope_order.len();
+        let lists: Vec<Vec<Reg>> = f
+            .scope_order
+            .iter()
+            .skip(total.saturating_sub(depth))
+            .rev()
+            .cloned()
+            .collect();
+        for regs in lists {
+            let regs: Vec<Reg> = regs
+                .into_iter()
+                .filter(|r| !self.cur().borrow_params.contains(r))
+                .collect();
+            if regs.is_empty() {
+                continue;
+            }
+            let f = self.cur();
+            f.drop_lists.push(regs.into());
+            let list = idx16(f.drop_lists.len() - 1);
+            self.emit(Op::DropScope { list });
+        }
     }
 
     fn add_const(&mut self, c: Const) -> u16 {
@@ -522,6 +595,7 @@ impl<'a> Compiler<'a> {
     // -- name resolution ---------------------------------------------------
 
     fn resolve(&mut self, name: &str) -> NameLoc {
+        let name = &self.unalias(name);
         let depth = self.frames.len() - 1;
         if let Some(reg) = self.frames[depth].local_reg(name) {
             return if self.frames[depth].mutable_locals.contains(&reg) {
@@ -571,6 +645,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn resolve_for_write(&mut self, name: &str) -> NameLoc {
+        let name = &self.unalias(name);
         let depth = self.frames.len() - 1;
         if let Some(reg) = self.frames[depth].local_reg(name) {
             return if self.frames[depth].mutable_locals.contains(&reg) {
@@ -673,6 +748,22 @@ impl<'a> Compiler<'a> {
                     let info = self.add_enum_variant(variant);
                     self.emit(Op::LoadEnum { dst, info });
                     return Ok(());
+                }
+                // An associated const, `S::LIMIT`, registered at load as a
+                // `Type::NAME` global. The consts table that holds it is the
+                // impl's module, which may not be the module using it.
+                if rest.len() == 1 {
+                    let key = format!("{}::{}", crate::interpreter::resolver::bare(&c), rest[0]);
+                    let found = self
+                        .ctx
+                        .resolver
+                        .modules
+                        .iter()
+                        .find_map(|syms| syms.consts.get(&key).copied());
+                    if let Some(idx) = found {
+                        self.emit(Op::LoadGlobal { dst, idx });
+                        return Ok(());
+                    }
                 }
                 let mut segs = vec![c.to_string()];
                 segs.extend(rest);
@@ -980,6 +1071,7 @@ fn expr_kind(expr: &Expr) -> &'static str {
 mod calls;
 mod expr;
 mod macros;
+mod place;
 
 /// A table index as the u16 the bytecode stores. Every compiler table is
 /// interned under that limit, so blowing past it is a compiler bug and an

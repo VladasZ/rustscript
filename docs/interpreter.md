@@ -41,10 +41,13 @@ gets real concurrency, `tokio::spawn` puts a task on another worker thread,
 and `.await`, `join!`, timers, and async HTTP behave like they do in compiled
 Rust.
 
-The interpreter ignores ownership at runtime. Everything is shared and
-interior mutable, a `Vec` is an `Arc<Mutex<Vec<Value>>>`. That is safe
-because `rustc` has already proven the program obeys the borrow rules, the
-interpreter only needs to produce the same observable behavior.
+Composite values are copy on write. Assignment and `clone` are refcount
+bumps, and every mutable access site the compiler emits splits the value
+from any sharing first, so a clone and its source mutate independently at
+every depth while `&mut` borrows still write through to the borrowed place.
+Sharing is observable only through the types real Rust shares with: `Rc`,
+`Arc`, `RefCell`, `Cell`, and `Mutex` are real shared cells, and a write
+through one handle shows through every handle.
 
 Strings skip the mutex. A string is a shared `Arc<String>` buffer read
 lock free, and `push` or `push_str` grows it in place when it is the only
@@ -87,7 +90,21 @@ the same way. `unwrap_or_default` builds its default from whatever annotation
 the call site provides, a `None::<T>`, a binding annotation, or a `collect`
 turbofish earlier in the chain.
 
-`u128` and `i128` are the known gap, they compute in `i64`.
+`u128` and `i128` are real: their values live in dedicated 128-bit storage,
+arithmetic checks overflow natively at 128 bits, and casts, comparisons,
+parsing, and formatting keep the full range.
+
+## Traits
+
+Trait impls register their methods per concrete type, and default method
+bodies fill in for the methods an impl does not override, so dynamic
+dispatch picks the override where one exists. User `Display` and `Debug`
+impls drive `{}`, `{:?}`, `to_string`, and `format!`. Operator trait impls
+drive the operators, a user `Iterator` drives for loops and adaptor chains,
+associated consts resolve as `Type::NAME` globals, and `Drop` impls run at
+scope end in reverse declaration order, on explicit `drop`, and per loop
+iteration. The remaining drop timing gaps are listed in
+[roadmap.md](roadmap.md).
 
 ## Panics and errors
 

@@ -49,18 +49,9 @@ pub(super) fn vec_method(v: &List, method: &MethodName, args: &mut [Value]) -> R
             }
             items.remove(i)
         }
-        // A json array reads by index, and serde answers None for a key that
-        // is not one rather than failing, so a non-integer argument is None.
-        B::Get => match args.first().and_then(Value::int_parts) {
-            Some((index, _)) => match usize::try_from(index)
-                .ok()
-                .and_then(|i| v.lock().get(i).cloned())
-            {
-                Some(x) => Value::some(x),
-                None => Value::none(),
-            },
-            None => Value::none(),
-        },
+        B::Get => vec_get(v, method, args),
+        B::First if method.text == "first_mut" => edge_element_ref(v, true),
+        B::Last if method.text == "last_mut" => edge_element_ref(v, false),
         B::First => v
             .lock()
             .first()
@@ -114,6 +105,48 @@ pub(super) fn vec_method(v: &List, method: &MethodName, args: &mut [Value]) -> R
         }
         _ => return vec_method_by_name(v, method, args),
     })
+}
+
+/// `get` clones the element out; `get_mut` answers a real element
+/// reference, `&mut V` in real Rust, so writes through it land in the
+/// element. A json array reads by index, and serde answers None for a key
+/// that is not one rather than failing, so a non-integer argument is None.
+fn vec_get(v: &List, method: &MethodName, args: &[Value]) -> Value {
+    let index = args
+        .first()
+        .and_then(Value::int_parts)
+        .and_then(|(index, _)| usize::try_from(index).ok());
+    let Some(i) = index else {
+        return Value::none();
+    };
+    if method.text == "get_mut" {
+        return if i < v.lock().len() {
+            Value::some(Value::Ref(Arc::new(super::value::ValueRef::vec_element(
+                v.clone(),
+                i,
+            ))))
+        } else {
+            Value::none()
+        };
+    }
+    match v.lock().get(i).cloned() {
+        Some(x) => Value::some(x),
+        None => Value::none(),
+    }
+}
+
+/// `first_mut` and `last_mut` answer real element references, so writes
+/// through them land in the vec.
+fn edge_element_ref(v: &List, first: bool) -> Value {
+    let len = v.lock().len();
+    if len == 0 {
+        return Value::none();
+    }
+    let index = if first { 0 } else { len - 1 };
+    Value::some(Value::Ref(Arc::new(super::value::ValueRef::vec_element(
+        v.clone(),
+        index,
+    ))))
 }
 
 /// `sum` over the elements, with the -0.0 float identity and the width
@@ -249,8 +282,9 @@ fn vec_method_by_name(v: &List, method: &MethodName, args: &mut [Value]) -> Resu
                 match item {
                     Value::Vec(inner) => out.extend(inner.lock().iter().cloned()),
                     Value::Enum { variant, data, .. } if matches!(&**variant, "Some" | "Ok") => {
-                        if let Some(inner) = data.first() {
-                            out.push(inner.clone());
+                        let first = data.lock().first().cloned();
+                        if let Some(inner) = first {
+                            out.push(inner);
                         }
                     }
                     Value::Enum { variant, .. } if matches!(&**variant, "None" | "Err") => {}
@@ -277,7 +311,9 @@ fn vec_method_by_name(v: &List, method: &MethodName, args: &mut [Value]) -> Resu
         "as_array" => Value::some(Value::vec(v.lock().clone())),
         // The mut accessor has to hand back the same list, not a copy,
         // so a push through it reaches the value it was taken from.
-        "as_array_mut" => Value::some(Value::Vec(v.clone())),
+        "as_array_mut" => Value::some(Value::Ref(Arc::new(super::value::ValueRef::borrowed(
+            Value::Vec(v.clone()),
+        )))),
         "as_object" | "as_object_mut" => Value::none(),
         // Names that apply to any receiver, `clone` and `into` and the
         // rest, live in one place instead of being repeated per type.
@@ -400,6 +436,20 @@ pub(super) fn map_method(
                 None => Value::none(),
             }
         }
+        // `get_mut` answers `&mut V` in real Rust, so writes through the
+        // answer must land in the entry. A clone would drop them.
+        B::Get if method.text == "get_mut" => {
+            let arg = args.first().ok_or_else(|| anyhow!("invalid map key"))?;
+            let k = arg.as_key().ok_or_else(|| anyhow!("invalid map key"))?;
+            if m.lock().contains_key(&k) {
+                Value::some(Value::Ref(Arc::new(super::value::ValueRef::map_entry(
+                    m.clone(),
+                    k,
+                ))))
+            } else {
+                Value::none()
+            }
+        }
         B::Get => lookup(0, &|v| match v {
             Some(v) => Value::some(v.clone()),
             None => Value::none(),
@@ -437,7 +487,10 @@ pub(super) fn map_method(
             // A JSON object parsed by the interpreter is a Map, and it is Arc
             // shared, so the mut accessor is the same call: what it hands back
             // is the same map, and an insert through it reaches the original.
-            "as_object" | "as_object_mut" => Value::some(Value::Map(m.clone(), kind)),
+            "as_object" => Value::some(Value::Map(m.clone(), kind)),
+            "as_object_mut" => Value::some(Value::Ref(Arc::new(super::value::ValueRef::borrowed(
+                Value::Map(m.clone(), kind),
+            )))),
             "as_array" | "as_array_mut" => Value::none(),
             name => {
                 return super::methods::generic_method(&Value::Map(m.clone(), kind), name, args);

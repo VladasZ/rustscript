@@ -312,7 +312,7 @@ fn request_method(s: &Arc<StructData>, method: &str, args: &[Value]) -> Result<V
             let user = args.first().map(Value::display).unwrap_or_default();
             let pass = match args.get(1) {
                 Some(Value::Enum { data, .. }) => {
-                    data.first().map(Value::display).unwrap_or_default()
+                    data.lock().first().map(Value::display).unwrap_or_default()
                 }
                 Some(other) => other.display(),
                 None => String::new(),
@@ -561,7 +561,7 @@ fn header_pairs(pairs: Vec<(String, String)>) -> Value {
 fn duration_field(s: &StructData, field: &str) -> Option<Duration> {
     let v = s.get(field)?;
     if let Value::Enum { data, .. } = &v {
-        return data.first().and_then(duration_from_value);
+        return data.lock().first().and_then(duration_from_value);
     }
     duration_from_value(&v)
 }

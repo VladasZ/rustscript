@@ -33,6 +33,31 @@ pub(super) fn method_op(
         ctx.stack[base + recv] = src;
         return Ok(ctx.set_opt(dst, Value::Unit));
     }
+    // `Option::take` and `Option::replace` mutate their receiver place. The
+    // receiver register is the place, or a place-loaded copy whose writeback
+    // the compiler emits after this op, so writing the register is enough.
+    // Every other receiver falls through, a `RefCell::take` is the cell
+    // bridge's and an iterator `take(n)` is an adaptor.
+    if matches!(name.id, BuiltinId::Take)
+        && argc == 0
+        && matches!(&ctx.stack[base + recv], Value::Enum { enum_name, .. } if &**enum_name == "Option")
+    {
+        let old = take(&mut ctx.stack[base + recv]);
+        ctx.stack[base + recv] = Value::none();
+        return Ok(ctx.set_opt(dst, old));
+    }
+    if name.text == "replace"
+        && argc == 1
+        && matches!(&ctx.stack[base + recv], Value::Enum { enum_name, .. } if &**enum_name == "Option")
+    {
+        let new = ctx.stack[s..s + argc]
+            .first()
+            .cloned()
+            .unwrap_or(Value::Unit);
+        let old = take(&mut ctx.stack[base + recv]);
+        ctx.stack[base + recv] = Value::some(new);
+        return Ok(ctx.set_opt(dst, old));
+    }
     if matches!(name.id, BuiltinId::Push | BuiltinId::PushStr)
         && matches!(ctx.stack[base + recv], Value::Str(_))
     {
@@ -121,7 +146,7 @@ fn option_fast(
     match choice {
         1 => Some(ctx.stack[ctx.base + recv].clone()),
         2 => match &ctx.stack[ctx.base + recv] {
-            Value::Enum { data, .. } => Some(data.first().cloned().unwrap_or(Value::Unit)),
+            Value::Enum { data, .. } => Some(data.lock().first().cloned().unwrap_or(Value::Unit)),
             _ => unreachable!(),
         },
         3 => Some(if argc > 0 {
@@ -150,6 +175,9 @@ fn map_fast(
     ) || !matches!(ctx.stack[base + recv], Value::Map(_, MapKind::Map))
         || argc < 1
         || base + recv >= s
+        // `get_mut` shares the Get id but answers a reference, which only
+        // the slow path builds.
+        || name.text == "get_mut"
     {
         return Ok(None);
     }
@@ -209,7 +237,7 @@ pub(super) fn get_or_default(
     let opt = ctx.vm.eval_method(&recv_v, &get, &mut [key_v])?;
     let v = match opt {
         Value::Enum { variant, data, .. } if &*variant == "Some" => {
-            data.first().cloned().unwrap_or(Value::Unit)
+            data.lock().first().cloned().unwrap_or(Value::Unit)
         }
         _ => ctx.get(default).clone(),
     };

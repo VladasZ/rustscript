@@ -12,7 +12,7 @@ use anyhow::{Result, anyhow, bail};
 use num_traits::AsPrimitive;
 use parking_lot::Mutex;
 
-use super::bytecode::{CapSource, Chunk, MacroKind, Op, path_call_chunk};
+use super::bytecode::{CapSource, Chunk, MacroKind, Member, Op, path_call_chunk};
 use super::native::Native;
 use super::numeric::{float_to_int, truncate};
 use super::ops::{
@@ -114,33 +114,15 @@ pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
         Op::StoreCell { cell, src } => store_cell(ctx, *cell, *src)?,
         Op::StoreUpvalue { idx, src } => store_upvalue(ctx, *idx, *src)?,
         Op::Move { dst, src } => ctx.set(*dst, ctx.get(*src).clone()),
-        Op::Bin { dst, a, b, op } => ctx.set(*dst, apply_bin(*op, ctx.get(*a), ctx.get(*b))?),
-        Op::BinImm { dst, a, imm, op } => ctx.set(*dst, apply_bin_imm(*op, ctx.get(*a), *imm)?),
-        Op::Un { dst, a, op } => ctx.set(*dst, apply_un(*op, ctx.get(*a))?),
+        Op::Bin { dst, a, b, op } => bin_op(ctx, *dst, *a, *b, *op)?,
+        Op::BinImm { dst, a, imm, op } => bin_imm_op(ctx, *dst, *a, *imm, *op)?,
+        Op::Un { dst, a, op } => un_op(ctx, *dst, *a, *op)?,
         Op::Jump { to } => jump(ctx, *to as usize)?,
         Op::JumpIfFalse { cond, to } => branch(!ctx.get(*cond).is_truthy(), *to),
         Op::JumpIfTrue { cond, to } => branch(ctx.get(*cond).is_truthy(), *to),
         Op::CmpJump { a, b, op, to } => branch(!cmp_test(*op, ctx.get(*a), ctx.get(*b))?, *to),
         Op::CmpJumpImm { a, imm, op, to } => branch(!cmp_test_imm(*op, ctx.get(*a), *imm)?, *to),
-        Op::CallFn {
-            dst,
-            func,
-            base,
-            argc,
-            targ,
-        } => call_fn(ctx, *dst, *func, *base, *argc, *targ)?,
-        Op::CallValue {
-            dst,
-            callee,
-            base,
-            argc,
-        } => call_value(ctx, *dst, *callee, *base, *argc)?,
-        Op::CallPath {
-            dst,
-            path,
-            base,
-            argc,
-        } => call_path(ctx, *dst, *path, *base, *argc)?,
+        Op::CallFn { .. } | Op::CallValue { .. } | Op::CallPath { .. } => call_step(ctx, op)?,
         Op::PathValue { dst, path } => path_value(ctx, *dst, *path)?,
         Op::Method {
             dst,
@@ -165,7 +147,7 @@ pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
             end,
             inclusive,
         } => make_range(ctx, *dst, *start, *end, *inclusive)?,
-        Op::IterInit { dst, src } => ctx.set(*dst, Vm::iterator_value(ctx.get(*src).clone())?),
+        Op::IterInit { dst, src } => ctx.set(*dst, ctx.vm.iterator_value(ctx.get(*src).clone())?),
         Op::ForNext { iter, idx, val, to } => for_next(ctx, *iter, *idx, *val, *to)?,
         Op::MakeStruct { dst, info, base } => make_struct(ctx, *dst, *info, *base),
         Op::MakeEnum {
@@ -176,13 +158,23 @@ pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
         } => make_enum(ctx, *dst, *info, *base, *count),
         Op::LoadEnum { dst, info } => load_enum(ctx, *dst, *info),
         Op::MakeClosure { dst, child } => closure_op(ctx, *dst, *child),
-        Op::Index { dst, base, key } => ctx.set(*dst, ops::index(ctx.get(*base), ctx.get(*key))?),
-        Op::SetIndex { base, key, val } => set_index(ctx, *base, *key, *val)?,
-        Op::Deref { dst, src } => ctx.set(*dst, deref(ctx.get(*src))?),
-        Op::SetDeref { target, val } => set_deref(ctx, *target, *val)?,
-        Op::SetDerefParam { target, val } => set_deref_param(ctx, *target, *val)?,
-        Op::GetField { dst, base, member } => get_field_op(ctx, *dst, *base, *member)?,
-        Op::SetField { base, member, val } => set_field_op(ctx, *base, *member, *val)?,
+        Op::Index { .. }
+        | Op::SetIndex { .. }
+        | Op::Deref { .. }
+        | Op::SetDeref { .. }
+        | Op::SetDerefParam { .. }
+        | Op::GetField { .. }
+        | Op::SetField { .. } => access_step(ctx, op)?,
+        Op::UniqueReg { .. }
+        | Op::UniqueField { .. }
+        | Op::UniqueIndex { .. }
+        | Op::UniqueCell { .. }
+        | Op::UniqueUpvalue { .. }
+        | Op::RefIndex { .. }
+        | Op::RefField { .. }
+        | Op::DropScope { .. }
+        | Op::DefaultOf { .. }
+        | Op::MakeBorrow { .. } => place_step(ctx, op)?,
         Op::Try { dst, src } => try_op(ctx, *dst, *src),
         Op::Cast { dst, src, ty } => cast_op(ctx, *dst, *src, *ty)?,
         Op::Coerce { dst, src, ty } => coerce_op(ctx, *dst, *src, *ty),
@@ -193,6 +185,216 @@ pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
         Op::Spawn { dst, child } => spawn_op(ctx, *dst, *child),
         Op::Await { dst, src } => await_op(ctx, *dst, *src)?,
     })
+}
+
+/// Run user `Drop` impls for a finished scope's bindings, in reverse
+/// declaration order. A binding whose storage still has another holder was
+/// moved out or is still shared, its real owner drops it later.
+fn drop_scope(ctx: &mut StepCtx, list: u16) -> Result<()> {
+    let regs = ctx.cur.drop_lists[list as usize].clone();
+    for reg in regs.iter().rev() {
+        let value = ctx.take(*reg);
+        ctx.vm.run_user_drop(value)?;
+    }
+    Ok(())
+}
+
+/// The user type name an operator could dispatch on, for `impl Add for X`.
+fn user_op_type(v: &Value) -> Option<&str> {
+    match v {
+        Value::Struct(s) => Some(s.name()),
+        Value::Enum { enum_name, .. } => Some(enum_name),
+        _ => None,
+    }
+}
+
+/// A binary operator on a value whose type has the matching operator trait
+/// impl. `a + b` dispatches to the user `add`, and `a += b`, which the
+/// compiler lowers to `a = a + b`, falls back to a user `add_assign` that
+/// mutates its receiver in place and answers the mutated value.
+fn user_bin(
+    ctx: &StepCtx,
+    op: super::bytecode::BinKind,
+    a: Value,
+    b: Value,
+) -> Result<Option<Value>> {
+    use super::bytecode::BinKind as K;
+    if ctx.vm.methods.is_empty() {
+        return Ok(None);
+    }
+    let Some(ty) = user_op_type(&a).or_else(|| user_op_type(&b)) else {
+        return Ok(None);
+    };
+    let name = match op {
+        K::Add => "add",
+        K::Sub => "sub",
+        K::Mul => "mul",
+        K::Div => "div",
+        K::Rem => "rem",
+        K::BitAnd => "bitand",
+        K::BitOr => "bitor",
+        K::BitXor => "bitxor",
+        K::Shl => "shl",
+        K::Shr => "shr",
+        // Equality and ordering answer through `eq_value` and
+        // `partial_compare`, whose derived semantics `apply_bin` runs.
+        K::Eq | K::Ne | K::Lt | K::Le | K::Gt | K::Ge => return Ok(None),
+    };
+    let ty = ty.to_string();
+    if let Some(chunk) = ctx.vm.methods.get(&(ty.clone(), name.to_string())) {
+        let chunk = chunk.clone();
+        return Ok(Some(ctx.vm.run_chunk(&chunk, &[a, b], &[])?));
+    }
+    let assign = format!("{name}_assign");
+    if let Some(chunk) = ctx.vm.methods.get(&(ty, assign)) {
+        let chunk = chunk.clone();
+        // The receiver mutates in place through its `&mut self`, and the
+        // mutated value is the store-back result of the lowered `a = a + b`.
+        ctx.vm.run_chunk(&chunk, &[a.clone(), b], &[])?;
+        return Ok(Some(a));
+    }
+    Ok(None)
+}
+
+/// A unary operator with a user trait impl, `impl Neg for X`.
+fn user_un(ctx: &StepCtx, op: super::bytecode::UnKind, a: Value) -> Result<Option<Value>> {
+    use super::bytecode::UnKind as U;
+    if ctx.vm.methods.is_empty() {
+        return Ok(None);
+    }
+    let Some(ty) = user_op_type(&a) else {
+        return Ok(None);
+    };
+    let name = match op {
+        U::Neg => "neg",
+        U::Not => "not",
+    };
+    let Some(chunk) = ctx.vm.methods.get(&(ty.to_string(), name.to_string())) else {
+        return Ok(None);
+    };
+    let chunk = chunk.clone();
+    Ok(Some(ctx.vm.run_chunk(&chunk, &[a], &[])?))
+}
+
+/// The three call shapes, split from `step` to keep the dispatch match
+/// readable.
+fn call_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
+    match op {
+        Op::CallFn {
+            dst,
+            func,
+            base,
+            argc,
+            targ,
+        } => call_fn(ctx, *dst, *func, *base, *argc, *targ),
+        Op::CallValue {
+            dst,
+            callee,
+            base,
+            argc,
+        } => call_value(ctx, *dst, *callee, *base, *argc),
+        Op::CallPath {
+            dst,
+            path,
+            base,
+            argc,
+        } => call_path(ctx, *dst, *path, *base, *argc),
+        _ => unreachable!("call_step handles only the call ops"),
+    }
+}
+
+/// The field, index, and dereference ops, split from `step` to keep the
+/// dispatch match readable.
+fn access_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
+    match op {
+        Op::Index { dst, base, key } => index_op(ctx, *dst, *base, *key),
+        Op::SetIndex { base, key, val } => set_index(ctx, *base, *key, *val),
+        Op::Deref { dst, src } => deref_op(ctx, *dst, *src),
+        Op::SetDeref { target, val } => set_deref(ctx, *target, *val),
+        Op::SetDerefParam { target, val } => set_deref_param(ctx, *target, *val),
+        Op::GetField { dst, base, member } => get_field_op(ctx, *dst, *base, *member),
+        Op::SetField { base, member, val } => set_field_op(ctx, *base, *member, *val),
+        _ => unreachable!("access_step handles only the access ops"),
+    }
+}
+
+/// The place ops: uniqueness splits, reference builders, scope drops, and
+/// borrow wrapping. Split from `step` to keep the dispatch match readable.
+fn place_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
+    Ok(match op {
+        Op::UniqueReg { reg } => unique_reg(ctx, *reg),
+        Op::UniqueField { dst, base, member } => unique_field(ctx, *dst, *base, *member)?,
+        Op::UniqueIndex { dst, base, key } => unique_index(ctx, *dst, *base, *key)?,
+        Op::UniqueCell { dst, cell } => unique_cell(ctx, *dst, *cell)?,
+        Op::UniqueUpvalue { dst, idx } => unique_upvalue(ctx, *dst, *idx),
+        Op::RefIndex { dst, base, key } => ref_index(ctx, *dst, *base, *key)?,
+        Op::RefField { dst, base, member } => ref_field(ctx, *dst, *base, *member)?,
+        Op::DropScope { list } => {
+            drop_scope(ctx, *list)?;
+            Flow::Next
+        }
+        Op::DefaultOf { dst, src } => default_of(ctx, *dst, *src),
+        Op::MakeBorrow { dst, src } => make_borrow(ctx, *dst, *src),
+        _ => unreachable!("place_step handles only the place ops"),
+    })
+}
+
+fn bin_op(
+    ctx: &mut StepCtx,
+    dst: u16,
+    a: u16,
+    b: u16,
+    op: super::bytecode::BinKind,
+) -> Result<Flow> {
+    if let Some(v) = user_bin(ctx, op, ctx.get(a).clone(), ctx.get(b).clone())? {
+        Ok(ctx.set(dst, v))
+    } else {
+        Ok(ctx.set(dst, apply_bin(op, ctx.get(a), ctx.get(b))?))
+    }
+}
+
+fn bin_imm_op(
+    ctx: &mut StepCtx,
+    dst: u16,
+    a: u16,
+    imm: i64,
+    op: super::bytecode::BinKind,
+) -> Result<Flow> {
+    if let Some(v) = user_bin(ctx, op, ctx.get(a).clone(), Value::Int(imm))? {
+        Ok(ctx.set(dst, v))
+    } else {
+        Ok(ctx.set(dst, apply_bin_imm(op, ctx.get(a), imm)?))
+    }
+}
+
+fn un_op(ctx: &mut StepCtx, dst: u16, a: u16, op: super::bytecode::UnKind) -> Result<Flow> {
+    if let Some(v) = user_un(ctx, op, ctx.get(a).clone())? {
+        Ok(ctx.set(dst, v))
+    } else {
+        Ok(ctx.set(dst, apply_un(op, ctx.get(a))?))
+    }
+}
+
+/// A fresh value of the same shape as `src`, see `Value::default_like`.
+fn default_of(ctx: &mut StepCtx, dst: u16, src: u16) -> Flow {
+    let v = ctx.get(src).default_like();
+    ctx.set(dst, v)
+}
+
+/// Wrap a place-loaded value as a mutable borrow of its own storage. A
+/// value that already is a reference stays one.
+fn make_borrow(ctx: &mut StepCtx, dst: u16, src: u16) -> Flow {
+    let v = ctx.get(src).clone();
+    let wrapped = match v {
+        already @ Value::Ref(_) => already,
+        plain => Value::Ref(Arc::new(super::value::ValueRef::borrowed(plain))),
+    };
+    ctx.set(dst, wrapped)
+}
+
+fn index_op(ctx: &mut StepCtx, dst: u16, base: u16, key: u16) -> Result<Flow> {
+    let target = place_base(ctx.get(base))?;
+    Ok(ctx.set(dst, ops::index(&target, ctx.get(key))?))
 }
 
 fn branch(jump: bool, to: u32) -> Flow {
@@ -429,7 +631,7 @@ fn make_struct(ctx: &mut StepCtx, dst: u16, info: u16, first: u16) -> Flow {
 
 fn make_enum(ctx: &mut StepCtx, dst: u16, info: u16, first: u16, count: u16) -> Flow {
     let variant = &ctx.cur.enum_variants[info as usize];
-    let data = ctx.take_range(first as usize, count as usize).into();
+    let data = Arc::new(Mutex::new(ctx.take_range(first as usize, count as usize)));
     ctx.set(
         dst,
         Value::Enum {
@@ -447,7 +649,7 @@ fn load_enum(ctx: &mut StepCtx, dst: u16, info: u16) -> Flow {
         Value::Enum {
             enum_name: variant.enum_name.clone(),
             variant: variant.variant.clone(),
-            data: Vec::new().into(),
+            data: Arc::new(Mutex::new(Vec::new())),
         },
     )
 }
@@ -461,9 +663,32 @@ fn spawn_op(ctx: &mut StepCtx, dst: u16, child: u16) -> Flow {
     let clo = make_closure(ctx, child);
     let interp = ctx.vm.clone();
     let handle = ctx.vm.rt.spawn_blocking(move || {
-        interp
-            .run_chunk(&clo.chunk, &[], &clo.captured)
-            .unwrap_or_else(|e| Value::err(Value::str(e.to_string())))
+        match interp.run_chunk(&clo.chunk, &[], &clo.captured) {
+            Ok(v) => v,
+            // A panic inside a task prints when it happens and makes the
+            // join handle answer `Err(JoinError)`, the way real tokio does.
+            // `resume_unwind` skips the default panic hook, so the printed
+            // header is not doubled.
+            Err(e) => {
+                if let Some(p) = e.downcast_ref::<super::vm_support::ScriptPanic>() {
+                    if p.file.is_empty() {
+                        eprintln!("thread 'tokio-runtime-worker' panicked:");
+                    } else {
+                        eprintln!(
+                            "thread 'tokio-runtime-worker' panicked at {}:{}:",
+                            p.file, p.line
+                        );
+                    }
+                    eprintln!("{}", p.rendered);
+                    eprintln!(
+                        "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace"
+                    );
+                } else {
+                    eprintln!("rust error in task: {e:#}");
+                }
+                std::panic::resume_unwind(Box::new(format!("{e:#}")))
+            }
+        }
     });
     ctx.set(dst, Native::Task(handle).wrap())
 }
@@ -497,9 +722,28 @@ fn make_closure(ctx: &mut StepCtx, child: u16) -> Arc<ClosureData> {
     })
 }
 
+/// The storage a field or index access should hit. A reference base
+/// resolves to its referent and a shared pointer auto-derefs to its
+/// content, so `body.attributes` works when `body` is a borrow binding.
+fn place_base(v: &Value) -> Result<Value> {
+    Ok(match v {
+        Value::Ref(reference) => reference
+            .get()
+            .ok_or_else(|| anyhow!("access through a dangling reference"))?,
+        Value::Cell(_, slot) => slot.lock().clone(),
+        other => other.clone(),
+    })
+}
+
 fn set_index(ctx: &StepCtx, base: u16, key: u16, val: u16) -> Result<Flow> {
-    ops::set_index(ctx.get(base), ctx.get(key), ctx.get(val).clone())?;
+    let target = place_base(ctx.get(base))?;
+    ops::set_index(&target, ctx.get(key), ctx.get(val).clone())?;
     Ok(Flow::Next)
+}
+
+fn deref_op(ctx: &mut StepCtx, dst: u16, src: u16) -> Result<Flow> {
+    let v = deref(ctx.get(src))?;
+    Ok(ctx.set(dst, v))
 }
 
 fn deref(v: &Value) -> Result<Value> {
@@ -507,6 +751,8 @@ fn deref(v: &Value) -> Result<Value> {
         Value::Ref(reference) => reference
             .get()
             .ok_or_else(|| anyhow!("dereference of a dangling reference"))?,
+        // `*rc` reads the content, the way real Deref does.
+        Value::Cell(_, slot) => slot.lock().clone(),
         value => value.clone(),
     })
 }
@@ -536,17 +782,174 @@ fn set_deref_param(ctx: &mut StepCtx, target: u16, val: u16) -> Result<Flow> {
 }
 
 fn get_field_op(ctx: &mut StepCtx, dst: u16, base: u16, member: u16) -> Result<Flow> {
-    let v = Vm::get_field(ctx.get(base), &ctx.cur.members[member as usize])?;
+    let target = place_base(ctx.get(base))?;
+    let v = Vm::get_field(&target, &ctx.cur.members[member as usize])?;
     Ok(ctx.set(dst, v))
 }
 
 fn set_field_op(ctx: &StepCtx, base: u16, member: u16, val: u16) -> Result<Flow> {
+    let target = place_base(ctx.get(base))?;
     Vm::set_field(
-        ctx.get(base),
+        &target,
         &ctx.cur.members[member as usize],
         ctx.get(val).clone(),
     )?;
     Ok(Flow::Next)
+}
+
+/// Make the field's value unique inside `base` and load it into `dst`
+/// sharing the field's fresh storage. `base` was made unique by the ops the
+/// compiler emits before this one, so the split cannot leak into a sibling
+/// copy of the whole struct.
+fn unique_reg(ctx: &mut StepCtx, reg: u16) -> Flow {
+    ctx.stack[ctx.base + reg as usize].make_unique();
+    Flow::Next
+}
+
+fn unique_field(ctx: &mut StepCtx, dst: u16, base: u16, member: u16) -> Result<Flow> {
+    let member = &ctx.cur.members[member as usize];
+    let target = place_base(ctx.get(base))?;
+    let v = match (&target, member) {
+        (Value::Struct(s), Member::Named(n)) => {
+            let Some(i) = s.shape.slot(n) else {
+                bail!("no field `{n}`");
+            };
+            let mut values = s.values.lock();
+            values[i].make_unique();
+            values[i].clone()
+        }
+        (Value::Struct(s), Member::Indexed(i)) => {
+            let mut values = s.values.lock();
+            let Some(slot) = values.get_mut(*i) else {
+                bail!("no field {i}");
+            };
+            slot.make_unique();
+            slot.clone()
+        }
+        (Value::Tuple(t), Member::Indexed(i)) => {
+            let mut items = t.lock();
+            let Some(slot) = items.get_mut(*i) else {
+                bail!("no tuple index {i}");
+            };
+            slot.make_unique();
+            slot.clone()
+        }
+        (recv, _) => Vm::get_field(recv, member)?,
+    };
+    Ok(ctx.set(dst, v))
+}
+
+/// The indexed-element version of `unique_field`. Anything that is not a
+/// vec or map element read falls back to the plain index path, whose error
+/// wording stays authoritative.
+fn unique_index(ctx: &mut StepCtx, dst: u16, base: u16, key: u16) -> Result<Flow> {
+    let target = place_base(ctx.get(base))?;
+    let split = match (&target, ctx.get(key)) {
+        (Value::Vec(list), key_val) => {
+            match int_of(key_val).ok().and_then(|i| usize::try_from(i).ok()) {
+                Some(i) => {
+                    let mut items = list.lock();
+                    items.get_mut(i).map(|slot| {
+                        slot.make_unique();
+                        slot.clone()
+                    })
+                }
+                None => None,
+            }
+        }
+        (Value::Map(map, _), key_val) => match key_val.as_key() {
+            Some(k) => {
+                let mut entries = map.lock();
+                entries.get_mut(&k).map(|slot| {
+                    slot.make_unique();
+                    slot.clone()
+                })
+            }
+            None => None,
+        },
+        _ => None,
+    };
+    // Anything that was not a plain element hit falls back to the ordinary
+    // index path, whose error wording stays authoritative.
+    let v = match split {
+        Some(v) => v,
+        None => ops::index(&target, ctx.get(key))?,
+    };
+    Ok(ctx.set(dst, v))
+}
+
+fn unique_cell(ctx: &mut StepCtx, dst: u16, cell: u16) -> Result<Flow> {
+    let cell = ctx.cell(cell)?.clone();
+    let v = {
+        let mut slot = cell.lock();
+        slot.make_unique();
+        slot.clone()
+    };
+    Ok(ctx.set(dst, v))
+}
+
+fn unique_upvalue(ctx: &mut StepCtx, dst: u16, idx: u16) -> Flow {
+    let v = match &ctx.upvalues()[idx as usize] {
+        Upvalue::Value(v) => v.clone(),
+        Upvalue::Mutable(cell) => {
+            let mut slot = cell.lock();
+            slot.make_unique();
+            slot.clone()
+        }
+    };
+    ctx.set(dst, v)
+}
+
+/// `&mut base[key]` as a real reference value. The compiler makes the
+/// element unique first, so writes through the borrow stay private to the
+/// borrowed place.
+fn ref_index(ctx: &mut StepCtx, dst: u16, base: u16, key: u16) -> Result<Flow> {
+    let target = place_base(ctx.get(base))?;
+    let v = match (&target, ctx.get(key)) {
+        (Value::Vec(list), key_val) => {
+            let i = usize::try_from(int_of(key_val)?)?;
+            let len = list.lock().len();
+            if i >= len {
+                bail!("index out of bounds: the len is {len} but the index is {i}");
+            }
+            Value::Ref(Arc::new(super::value::ValueRef::vec_element(
+                list.clone(),
+                i,
+            )))
+        }
+        (Value::Map(map, _), key_val) => {
+            let k = key_val.as_key().ok_or_else(|| anyhow!("invalid map key"))?;
+            Value::Ref(Arc::new(super::value::ValueRef::map_entry(map.clone(), k)))
+        }
+        (recv, _) => bail!("cannot take `&mut` of an element of {}", recv.type_name()),
+    };
+    Ok(ctx.set(dst, v))
+}
+
+/// `&mut base.field` as a real reference value. A tuple field borrows as a
+/// list element, tuples share the vec storage shape.
+fn ref_field(ctx: &mut StepCtx, dst: u16, base: u16, member: u16) -> Result<Flow> {
+    let member = &ctx.cur.members[member as usize];
+    let target = place_base(ctx.get(base))?;
+    let v = match (&target, member) {
+        (Value::Struct(s), Member::Named(n)) => {
+            let Some(slot) = s.shape.slot(n) else {
+                bail!("no field `{n}`");
+            };
+            Value::Ref(Arc::new(super::value::ValueRef::struct_field(
+                s.clone(),
+                slot,
+            )))
+        }
+        (Value::Struct(s), Member::Indexed(i)) => Value::Ref(Arc::new(
+            super::value::ValueRef::struct_field(s.clone(), *i),
+        )),
+        (Value::Tuple(t), Member::Indexed(i)) => {
+            Value::Ref(Arc::new(super::value::ValueRef::vec_element(t.clone(), *i)))
+        }
+        (recv, _) => bail!("cannot take `&mut` of a field of {}", recv.type_name()),
+    };
+    Ok(ctx.set(dst, v))
 }
 
 fn try_op(ctx: &mut StepCtx, dst: u16, src: u16) -> Flow {
@@ -570,10 +973,34 @@ fn coerce_op(ctx: &mut StepCtx, dst: u16, src: u16, ty: u16) -> Flow {
 
 fn test_bind(ctx: &mut StepCtx, val: u16, pat: u16, dst: u16) -> Flow {
     let info = &ctx.cur.pats[pat as usize];
-    let value = ctx.get(val).clone();
+    let raw = ctx.get(val).clone();
+    // A reference scrutinee matches its referent, and its bindings borrow:
+    // a composite binds wrapped as a borrow of the payload's own storage,
+    // so mutation through the binding reaches the matched place, the way
+    // `if let Some(v) = &mut opt { v.push(..) }` writes into `opt`.
+    let (value, by_ref) = match &raw {
+        Value::Ref(reference) => match reference.get() {
+            Some(inner) => (inner, true),
+            None => (Value::Unit, false),
+        },
+        _ => (raw, false),
+    };
     let binds = &info.binds;
     let mut writes: Vec<(u16, Value)> = Vec::new();
-    let matched = {
+    let matched = if by_ref {
+        // Match first, then anchor each binding to the payload storage it
+        // came from, so writes through the binding land in the place.
+        let matched = try_bind(&info.pat, &value, &mut |_, _| {});
+        if matched {
+            let mut define = |name: &str, v: Value| {
+                if let Some((_, reg)) = binds.iter().find(|(n, _)| n == name) {
+                    writes.push((*reg, v));
+                }
+            };
+            ops::bind_pattern_refs(&info.pat, &value, &mut define);
+        }
+        matched
+    } else {
         let mut define = |name: &str, v: Value| {
             if let Some((_, reg)) = binds.iter().find(|(n, _)| n == name) {
                 writes.push((*reg, v));
@@ -588,12 +1015,12 @@ fn test_bind(ctx: &mut StepCtx, val: u16, pat: u16, dst: u16) -> Flow {
 }
 
 fn fmt_op(ctx: &mut StepCtx, dst: u16, spec: u16) -> Result<Flow> {
-    let text = Vm::render_fmt(ctx.cur, spec, &ctx.stack[ctx.base..])?;
+    let text = ctx.vm.render_fmt(ctx.cur, spec, &ctx.stack[ctx.base..])?;
     Ok(ctx.set(dst, Value::str(text)))
 }
 
 fn macro_call(ctx: &mut StepCtx, kind: MacroKind, dst: u16, spec: u16) -> Result<Flow> {
-    let text = Vm::render_fmt(ctx.cur, spec, &ctx.stack[ctx.base..])?;
+    let text = ctx.vm.render_fmt(ctx.cur, spec, &ctx.stack[ctx.base..])?;
     Ok(match kind {
         MacroKind::Println => {
             println!("{text}");
@@ -640,6 +1067,13 @@ fn eval_cast(target: &CastIr, v: Value) -> Result<Value> {
             return Ok(Value::Float(match v {
                 Value::Int(i) => AsPrimitive::<f64>::as_(i),
                 Value::IntW(..) => AsPrimitive::<f64>::as_(v.int_parts().unwrap().0),
+                Value::Big(bits, w) => {
+                    if w == super::numeric::IntWidth::U128 {
+                        AsPrimitive::<f64>::as_(bits.cast_unsigned())
+                    } else {
+                        AsPrimitive::<f64>::as_(bits)
+                    }
+                }
                 Value::Float(f) => f,
                 Value::F32(f) => f64::from(f),
                 other => bail!("cannot cast {} to float", other.type_name()),
@@ -672,6 +1106,9 @@ fn eval_cast(target: &CastIr, v: Value) -> Result<Value> {
     let value = match v {
         Value::Int(i) => truncate(i128::from(i), width),
         Value::IntW(..) => truncate(v.int_parts().unwrap().0, width),
+        // The stored i128 already carries the exact bit pattern, u128
+        // included, so a narrowing cast keeps the low bits directly.
+        Value::Big(bits, _) => truncate(bits, width),
         Value::Float(f) => float_to_int(f, width),
         Value::F32(f) => float_to_int(f64::from(f), width),
         Value::Char(c) => truncate(i128::from(c as u32), width),

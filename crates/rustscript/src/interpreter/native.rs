@@ -78,6 +78,19 @@ pub enum Native {
     /// A lazy iterator, shared like every other handle so `by_ref` and
     /// `peekable` keep their real semantics.
     Iterator(super::iterator::IteratorState),
+    /// An `std::io::Error` as scripts observe it: real `Display` and
+    /// `Debug` text captured at conversion, plus the kind and code its
+    /// accessor methods answer.
+    IoErr {
+        display: String,
+        debug: String,
+        kind: String,
+        code: Option<i32>,
+    },
+    /// The buffer behind a `fmt::Formatter` handed to a user `fmt` impl.
+    /// `write!` into it appends here, and the formatter reads it back as the
+    /// rendered text.
+    Fmt(String),
     /// A consumed handle, left behind after a task or future is taken to await,
     /// or after a stdin pipe is closed so the child sees EOF.
     Taken,
@@ -109,6 +122,8 @@ impl Native {
             Native::RegexMatch(_) => "Match",
             Native::RegexCaptures(_) => "Captures",
             Native::Iterator(_) => "Iterator",
+            Native::IoErr { .. } => "IoError",
+            Native::Fmt(_) => "Formatter",
             Native::Taken => "Taken",
         }
     }
@@ -137,4 +152,17 @@ impl Native {
     pub fn wrap(self) -> Value {
         Value::Native(Arc::new(Mutex::new(self)))
     }
+}
+
+/// An io error as the structured value scripts observe. Both format forms
+/// are captured from the real error, so `{:?}` prints the exact
+/// `Os { code: 2, kind: NotFound, .. }` shape compiled Rust prints.
+pub(super) fn io_error_value(e: &std::io::Error) -> Value {
+    Native::IoErr {
+        display: e.to_string(),
+        debug: format!("{e:?}"),
+        kind: format!("{:?}", e.kind()),
+        code: e.raw_os_error(),
+    }
+    .wrap()
 }

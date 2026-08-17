@@ -46,14 +46,14 @@ pub struct BridgeTable {
 pub struct Finding {
     pub method: String,
     /// The receiver type when it could be determined, for a sharper message.
-    pub recv: Option<&'static str>,
+    pub recv: Option<String>,
     /// The function the call sits in.
     pub func: String,
 }
 
 impl Finding {
     pub fn message(&self) -> String {
-        match self.recv {
+        match &self.recv {
             Some(recv) => format!(
                 "`{}` on {} is not implemented by the interpreter, in `{}`",
                 self.method, recv, self.func
@@ -68,7 +68,7 @@ impl Finding {
 
 /// A receiver type inferred from the op that produced the value.
 #[derive(Clone, Copy, PartialEq)]
-enum Ty {
+enum Ty<'a> {
     Str,
     Int,
     Float,
@@ -78,16 +78,19 @@ enum Ty {
     Map,
     /// A `serde_json::Value`, which is any json shape at runtime.
     Json,
+    /// A user struct or enum, checked against the script's own impls.
+    User(&'a str),
     Unknown,
 }
 
-impl Ty {
-    fn name(self) -> Option<&'static str> {
+impl<'a> Ty<'a> {
+    fn name(self) -> Option<&'a str> {
         match self {
             Ty::Str => Some("Str"),
             Ty::Vec => Some("Vec"),
             Ty::Map => Some("Map"),
             Ty::Json => Some("Value"),
+            Ty::User(name) => Some(name),
             // The scalar bridges share one table, so they are checked by name
             // rather than per type.
             Ty::Int | Ty::Float | Ty::Bool | Ty::Char | Ty::Unknown => None,
@@ -96,15 +99,49 @@ impl Ty {
 
     /// The type a written annotation names, for the parameters whose type the
     /// author spelled out. Only the shapes the tables can check are mapped,
-    /// everything else stays Unknown and is checked by name alone.
-    fn from_annotation(name: &str) -> Ty {
+    /// plus the script's own types; everything else stays Unknown and is
+    /// checked by name alone.
+    fn from_annotation(name: &'a str, user: &UserMethods) -> Ty<'a> {
         match name {
             "Value" => Ty::Json,
             "String" | "str" => Ty::Str,
             "Vec" | "VecDeque" => Ty::Vec,
             "HashMap" | "BTreeMap" | "IndexMap" => Ty::Map,
+            other if user.types.contains(other) => Ty::User(other),
             _ => Ty::Unknown,
         }
+    }
+}
+
+/// The script's own method surface: `(bare type name, method)` pairs from
+/// its impl blocks, and the bare type names that have any impl at all.
+pub struct UserMethods {
+    pairs: BTreeSet<(String, String)>,
+    types: BTreeSet<String>,
+    names: BTreeSet<String>,
+}
+
+impl UserMethods {
+    pub fn new(methods: impl Iterator<Item = (String, String)>) -> Self {
+        let mut pairs = BTreeSet::new();
+        let mut types = BTreeSet::new();
+        let mut names = BTreeSet::new();
+        for (ty, method) in methods {
+            let bare = super::resolver::bare(&ty).to_string();
+            types.insert(bare.clone());
+            names.insert(method.clone());
+            pairs.insert((bare, method));
+        }
+        Self {
+            pairs,
+            types,
+            names,
+        }
+    }
+
+    fn has(&self, ty: &str, method: &str) -> bool {
+        self.pairs
+            .contains(&(super::resolver::bare(ty).to_string(), method.to_string()))
     }
 }
 
@@ -187,25 +224,35 @@ pub fn surface() -> Vec<(&'static str, &'static str)> {
 }
 
 /// Walk a chunk and its nested closures, reporting unimplemented methods.
-fn walk(chunk: &Chunk, user: &BTreeSet<String>, out: &mut Vec<Finding>) {
+fn walk(chunk: &Chunk, user: &UserMethods, out: &mut Vec<Finding>) {
     for (index, op) in chunk.code.iter().enumerate() {
         if let Op::Method { recv, name, .. } = op {
             let method = &chunk.names[*name as usize].text;
-            if UNIVERSAL.contains(&method.as_str()) || user.contains(method) {
+            if UNIVERSAL.contains(&method.as_str()) {
                 continue;
             }
-            let ty = infer(chunk, index, *recv);
+            let ty = infer(chunk, index, *recv, user);
             let known = match ty {
                 Ty::Json => JSON_SHAPES.iter().all(|shape| on_recv(shape, method)),
+                // A user type answers from the script's own impls, plus the
+                // any-receiver bridge surface every value carries. A common
+                // bridge name on the wrong receiver is exactly what a
+                // name-only answer used to vouch for.
+                Ty::User(ty_name) => {
+                    user.has(ty_name, method)
+                        || BRIDGE_TABLES
+                            .iter()
+                            .any(|t| t.recv == "*" && t.names.contains(&method.as_str()))
+                }
                 _ => match ty.name() {
                     Some(recv_name) => on_recv(recv_name, method),
-                    None => any_name(method),
+                    None => user.names.contains(method) || any_name(method),
                 },
             };
             if !known {
                 out.push(Finding {
                     method: method.clone(),
-                    recv: ty.name(),
+                    recv: ty.name().map(str::to_string),
                     func: chunk.name.clone(),
                 });
             }
@@ -220,7 +267,7 @@ fn walk(chunk: &Chunk, user: &BTreeSet<String>, out: &mut Vec<Finding>) {
 /// parameter register nothing has written yet is the type the author wrote in
 /// the signature. Anything less direct is `Unknown`, which makes the check
 /// fall back to name only rather than guess.
-fn infer(chunk: &Chunk, before: usize, reg: u16) -> Ty {
+fn infer<'a>(chunk: &'a Chunk, before: usize, reg: u16, user: &UserMethods) -> Ty<'a> {
     for op in chunk.code[..before].iter().rev() {
         match op {
             Op::LoadConst { dst, k } if *dst == reg => {
@@ -229,12 +276,20 @@ fn infer(chunk: &Chunk, before: usize, reg: u16) -> Ty {
                     Const::Char(_) => Ty::Char,
                     Const::Float(_) | Const::F32(_) => Ty::Float,
                     Const::Bytes(_) => Ty::Vec,
+                    Const::Big(..) => Ty::Int,
                 };
             }
             Op::LoadInt { dst, .. } if *dst == reg => return Ty::Int,
             Op::LoadBool { dst, .. } if *dst == reg => return Ty::Bool,
             Op::MakeVec { dst, .. } if *dst == reg => return Ty::Vec,
             Op::Fmt { dst, .. } if *dst == reg => return Ty::Str,
+            // A freshly built user struct or enum names its type exactly.
+            Op::MakeStruct { dst, info, .. } if *dst == reg => {
+                return Ty::User(&chunk.struct_lits[*info as usize].shape.name);
+            }
+            Op::MakeEnum { dst, info, .. } | Op::LoadEnum { dst, info } if *dst == reg => {
+                return Ty::User(&chunk.enum_variants[*info as usize].enum_name);
+            }
             // Any other write to this register loses the trail.
             _ => {
                 if writes(op) == Some(reg) {
@@ -246,7 +301,7 @@ fn infer(chunk: &Chunk, before: usize, reg: u16) -> Ty {
     // Nothing wrote it, so a register inside the parameter block still holds
     // the argument, whose type is written down in the signature.
     match chunk.param_types.get(reg as usize) {
-        Some(Some(name)) => Ty::from_annotation(name),
+        Some(Some(name)) => Ty::from_annotation(name, user),
         _ => Ty::Unknown,
     }
 }
@@ -277,9 +332,9 @@ fn writes(op: &Op) -> Option<u16> {
 /// function of the program, executed or not.
 pub fn report(
     functions: &[std::sync::Arc<Chunk>],
-    methods: impl Iterator<Item = String>,
+    methods: impl Iterator<Item = (String, String)>,
 ) -> Vec<Finding> {
-    let user: BTreeSet<String> = methods.collect();
+    let user = UserMethods::new(methods);
     let mut out = Vec::new();
     for chunk in functions {
         walk(chunk, &user, &mut out);
@@ -287,7 +342,7 @@ pub fn report(
     // One report per distinct method, so a helper called in a loop does not
     // print the same line many times.
     let mut seen = BTreeSet::new();
-    out.retain(|f| seen.insert((f.method.clone(), f.recv)));
+    out.retain(|f| seen.insert((f.method.clone(), f.recv.clone())));
     out
 }
 

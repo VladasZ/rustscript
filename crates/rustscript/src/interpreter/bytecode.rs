@@ -15,6 +15,8 @@ pub type Reg = u16;
 /// are emitted as their own inline load ops, so they are not `Const` variants.
 #[derive(Clone)]
 pub enum Const {
+    /// A 128-bit integer literal, i128 exact or u128 as reinterpreted bits.
+    Big(i128, super::numeric::IntWidth),
     Float(f64),
     /// An f32 literal, parsed from its digits at f32 precision so the value
     /// never takes a detour through f64 rounding.
@@ -68,6 +70,67 @@ pub fn overflow_message(op: BinKind) -> &'static str {
 pub enum UnKind {
     Neg,
     Not,
+}
+
+/// Method names whose builtin receivers mutate in place. The compiler
+/// splits such a receiver from value sharing before the call, and the VM
+/// applies the same split when the receiver arrives through a reference.
+/// Read-only names must stay off this list, splitting is correct but wastes
+/// a copy when the receiver is shared.
+pub fn builtin_mutating(name: &str) -> bool {
+    matches!(
+        name,
+        "push"
+            | "pop"
+            | "insert"
+            | "insert_str"
+            | "remove"
+            | "swap_remove"
+            | "remove_entry"
+            | "push_str"
+            | "clear"
+            | "extend"
+            | "extend_from_slice"
+            | "append"
+            | "truncate"
+            | "retain"
+            | "retain_mut"
+            | "dedup"
+            | "dedup_by"
+            | "dedup_by_key"
+            | "sort"
+            | "sort_by"
+            | "sort_by_key"
+            | "sort_unstable"
+            | "sort_unstable_by"
+            | "sort_unstable_by_key"
+            | "reverse"
+            | "rotate_left"
+            | "rotate_right"
+            | "fill"
+            | "resize"
+            | "swap"
+            | "split_off"
+            | "drain"
+            | "iter_mut"
+            | "values_mut"
+            | "get_mut"
+            | "first_mut"
+            | "last_mut"
+            | "entry"
+            | "take"
+            | "replace"
+            | "get_or_insert"
+            | "get_or_insert_with"
+            | "make_ascii_uppercase"
+            | "make_ascii_lowercase"
+            | "clone_from"
+            | "copy_from_slice"
+            | "shuffle"
+            | "read_line"
+            | "read_to_string"
+            | "read_to_end"
+    )
 }
 
 /// A field being read or written, named for structs, positional for tuples.
@@ -337,8 +400,8 @@ impl BuiltinId {
             "iter_mut" => IterMut,
             "push" => Push,
             "pop" => Pop,
-            "first" => First,
-            "last" => Last,
+            "first" | "first_mut" => First,
+            "last" | "last_mut" => Last,
             "split_first" => SplitFirst,
             "contains" => Contains,
             "sort" | "sort_unstable" => Sort,
@@ -750,6 +813,70 @@ pub enum Op {
         val: Reg,
     },
 
+    /// Split the composite in `reg` from any sharing before an in-place
+    /// mutation, see `Value::make_unique`. Emitted at every mutable access
+    /// so a value clone is a cheap refcount bump until someone writes.
+    UniqueReg {
+        reg: Reg,
+    },
+    /// Make the field's current value unique inside `base`'s storage and
+    /// load it into `dst` still sharing that storage, so a mutation through
+    /// `dst` lands in the field. `base` must already be unique.
+    UniqueField {
+        dst: Reg,
+        base: Reg,
+        member: u16,
+    },
+    /// The indexed-element version of `UniqueField`.
+    UniqueIndex {
+        dst: Reg,
+        base: Reg,
+        key: Reg,
+    },
+    /// Make the value inside a promoted local's cell unique and load it
+    /// into `dst` still sharing the cell's storage.
+    UniqueCell {
+        dst: Reg,
+        cell: Reg,
+    },
+    /// The captured-variable version of `UniqueCell`.
+    UniqueUpvalue {
+        dst: Reg,
+        idx: u16,
+    },
+    /// Materialize `&mut base[key]` as a real reference value, so writes
+    /// through the borrow land in the element.
+    RefIndex {
+        dst: Reg,
+        base: Reg,
+        key: Reg,
+    },
+    /// Materialize `&mut base.field` as a real reference value.
+    RefField {
+        dst: Reg,
+        base: Reg,
+        member: u16,
+    },
+    /// Wrap a place-loaded value as a mutable borrow of its own storage,
+    /// for a `&mut place` match scrutinee. Pattern bindings through it
+    /// borrow instead of copying, see `test_bind`.
+    MakeBorrow {
+        dst: Reg,
+        src: Reg,
+    },
+    /// A fresh value of the same shape as `src`, for `mem::take` and
+    /// `RefCell::take`, whose `T::default()` has no type to read at runtime.
+    DefaultOf {
+        dst: Reg,
+        src: Reg,
+    },
+    /// Run user `Drop` impls for a scope's bindings, in reverse declaration
+    /// order, at the point the scope ends. `list` indexes the chunk's
+    /// `drop_lists`. Emitted only when the program has a `Drop` impl at all.
+    DropScope {
+        list: u16,
+    },
+
     /// The `?` operator. Unwraps Ok/Some into `dst`, or returns early on Err/None.
     Try {
         dst: Reg,
@@ -847,6 +974,8 @@ pub struct Chunk {
     /// Generic parameter names of this function, in order, e.g. `["T"]`. Used
     /// to bind a caller's turbofish type args when the body resolves them.
     pub generics: Vec<Arc<str>>,
+    /// Register lists for `DropScope`, one per scope that has bindings.
+    pub drop_lists: Vec<Arc<[Reg]>>,
     /// Turbofish type args recorded at `CallFn` sites, referenced by `targ`.
     pub call_type_args: Vec<Arc<[TypeIr]>>,
     /// True for the synthesized body behind a path used as a function value.
@@ -880,6 +1009,7 @@ impl Chunk {
             children: Vec::new(),
             child_caps: Vec::new(),
             generics: Vec::new(),
+            drop_lists: Vec::new(),
             call_type_args: Vec::new(),
             path_forwarder: false,
         }

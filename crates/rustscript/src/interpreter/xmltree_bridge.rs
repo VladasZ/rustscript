@@ -9,8 +9,6 @@
 use anyhow::{Result, bail};
 use xmltree::{Element, Namespace, XMLNode};
 
-use std::sync::Arc;
-
 use indexmap::IndexMap;
 
 use super::value::{StructData, Value};
@@ -100,11 +98,7 @@ fn node_to_value(node: &XMLNode) -> Value {
             vec![Value::str(target.clone()), opt_str(content.as_deref())],
         ),
     };
-    Value::Enum {
-        enum_name: Arc::from("XMLNode"),
-        variant: Arc::from(variant),
-        data: data.into(),
-    }
+    Value::enum_of("XMLNode", variant, data)
 }
 
 fn value_to_element(s: &StructData) -> Result<Element> {
@@ -148,6 +142,7 @@ fn value_to_node(v: &Value) -> Result<XMLNode> {
     let Value::Enum { variant, data, .. } = v else {
         bail!("an Element child must be an XMLNode");
     };
+    let data = data.lock().clone();
     let text = |i: usize| data.get(i).map(Value::display).unwrap_or_default();
     Ok(match &**variant {
         "Element" => match data.first() {
@@ -186,7 +181,7 @@ fn option_value(v: &Value) -> Option<Value> {
             enum_name,
             variant,
             data,
-        } if &**enum_name == "Option" && &**variant == "Some" => data.first().cloned(),
+        } if &**enum_name == "Option" && &**variant == "Some" => data.lock().first().cloned(),
         _ => None,
     }
 }

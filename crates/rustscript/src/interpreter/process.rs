@@ -281,8 +281,9 @@ fn close_child_stdin(v: &Value) {
             variant,
             data,
         } if &**enum_name == "Option" && &**variant == "Some" => {
-            if let Some(inner) = data.first() {
-                close_child_stdin(inner);
+            let first = data.lock().first().cloned();
+            if let Some(inner) = first {
+                close_child_stdin(&inner);
             }
         }
         _ => {}
@@ -349,8 +350,8 @@ fn child_handle(s: &StructData) -> Result<Arc<Mutex<Native>>> {
 /// Read a child's piped stdout/stderr field to the end as a string.
 fn drain_child_pipe(s: &StructData, key: &str) -> String {
     let handle = match s.get(key) {
-        Some(Value::Enum { data, .. }) => match data.first() {
-            Some(Value::Native(h)) => h.clone(),
+        Some(Value::Enum { data, .. }) => match data.lock().first().cloned() {
+            Some(Value::Native(h)) => h,
             _ => return String::new(),
         },
         _ => return String::new(),

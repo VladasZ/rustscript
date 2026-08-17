@@ -94,11 +94,7 @@ impl Vm {
                 .iter()
                 .any(|(name, unit)| &**name == variant && *unit)
             {
-                return Some(Value::Enum {
-                    enum_name: def.name.clone(),
-                    variant: Arc::from(variant),
-                    data: Arc::from(Vec::new()),
-                });
+                return Some(Value::enum_of(def.name.clone(), variant, Vec::new()));
             }
         }
         None
@@ -119,11 +115,7 @@ impl Vm {
                 continue;
             }
             if def.variants.iter().any(|(name, _)| &**name == variant) {
-                return Some(Value::Enum {
-                    enum_name: def.name.clone(),
-                    variant: Arc::from(variant),
-                    data: args.iter().cloned().collect(),
-                });
+                return Some(Value::enum_of(def.name.clone(), variant, args.to_vec()));
             }
         }
         None
@@ -328,6 +320,17 @@ impl Vm {
         self.fn_index
             .get(name)
             .map(|&i| self.functions[i as usize].clone())
+    }
+
+    /// Whether the value's user type declares this method itself.
+    pub(super) fn user_method_exists(&self, recv: &Value, name: &str) -> bool {
+        let ty = match recv {
+            Value::Struct(s) => &**s.name(),
+            Value::Enum { enum_name, .. } => &**enum_name,
+            _ => return false,
+        };
+        self.methods
+            .contains_key(&(ty.to_string(), name.to_string()))
     }
 
     pub(super) fn user_method(&self, ty: &str, name: &str) -> Option<Arc<Chunk>> {

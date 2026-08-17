@@ -14,8 +14,6 @@
 //!
 //! On a non-Windows host every call returns a plain error saying so.
 
-use std::sync::Arc;
-
 use anyhow::Result;
 
 use super::std_bridge::as_i64;
@@ -63,11 +61,7 @@ pub(super) fn service_variant(ty: &str, name: &str) -> Option<Value> {
     if !known.contains(&name) {
         return None;
     }
-    Some(Value::Enum {
-        enum_name: Arc::from(ty),
-        variant: Arc::from(name),
-        data: Arc::from([]),
-    })
+    Some(Value::enum_of(ty, name, Vec::new()))
 }
 
 /// `ServiceManager::local_computer(database, access)`. The database argument is

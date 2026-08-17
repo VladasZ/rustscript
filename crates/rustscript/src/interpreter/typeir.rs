@@ -36,7 +36,6 @@ pub fn lower_cast(ty: &syn::Type) -> CastIr {
         "char" => CastIr::Char,
         // u128 and i128 carry no runtime width yet and keep the old
         // i64-passthrough.
-        "u128" | "i128" => CastIr::Int(IntWidth::I64),
         _ => match IntWidth::parse(&name) {
             Some(w) => CastIr::Int(w),
             None => CastIr::Unsupported(Arc::from(name.as_str())),
