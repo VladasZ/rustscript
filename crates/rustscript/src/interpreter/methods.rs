@@ -11,7 +11,7 @@ use super::bytecode::{BuiltinId, MethodName, ScalarTy};
 use super::iterator;
 use super::ops::compare_values;
 use super::shared::{self, CharOut, Parsed, StrOut, usize_i64};
-use super::value::{StructData, Value, ValueRef};
+use super::value::{RsStr, StructData, Value, ValueRef};
 
 /// `std::cmp::Ordering` as the enum value scripts match on.
 pub(super) fn make_ordering(o: std::cmp::Ordering) -> Value {
@@ -206,7 +206,7 @@ fn str_slice(s: &str, start: i64, end: i64) -> Option<&str> {
     s.get(start..end)
 }
 
-pub(super) fn str_method(s: &Arc<str>, method: &MethodName, args: &[Value]) -> Result<Value> {
+pub(super) fn str_method(s: &RsStr, method: &MethodName, args: &[Value]) -> Result<Value> {
     use BuiltinId as B;
     let arg_str = |i: usize| -> String { args.get(i).map(Value::display).unwrap_or_default() };
     Ok(match method.id {
@@ -291,7 +291,7 @@ pub(super) fn parse_value(text: &str, target: Option<&ScalarTy>) -> Value {
     }
 }
 
-pub(super) fn str_method_slow(s: &Arc<str>, name: &str, args: &[Value]) -> Result<Value> {
+pub(super) fn str_method_slow(s: &RsStr, name: &str, args: &[Value]) -> Result<Value> {
     if let Some(out) = shared::str_core(s, name, &VArgs(args))? {
         return Ok(str_out(s, out));
     }
@@ -307,7 +307,7 @@ pub(super) fn str_method_slow(s: &Arc<str>, name: &str, args: &[Value]) -> Resul
 
 /// Turn a neutral string core answer into a runtime value. `Keep`
 /// clones the `Arc`, so handing the receiver back stays a refcount bump.
-fn str_out(s: &Arc<str>, out: StrOut) -> Value {
+fn str_out(s: &RsStr, out: StrOut) -> Value {
     match out {
         StrOut::Bool(b) => Value::Bool(b),
         StrOut::USize(n) => shared::usize_value(n),
@@ -472,7 +472,7 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
 /// `str::split` with either a string pattern or a set of chars. A char array
 /// like `['-', '_']` splits on any of them, which a plain string pattern would
 /// otherwise match only as the literal sequence.
-pub(super) fn split_value(s: &Arc<str>, pattern: Option<&Value>) -> Value {
+pub(super) fn split_value(s: &RsStr, pattern: Option<&Value>) -> Value {
     if let Some(Value::Vec(items)) = pattern {
         let chars: Vec<char> = items
             .lock()

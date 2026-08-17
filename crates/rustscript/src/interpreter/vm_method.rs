@@ -21,10 +21,10 @@ pub(super) fn method_op(
     let (recv, abase, argc) = (recv as usize, abase as usize, argc as usize);
     let name = &cur.names[name as usize];
     let s = base + abase;
-    // A string is an immutable `Arc<str>`, so a push has to rewrite the
-    // receiver register itself. The normal path hands the method a clone and
-    // the change would be lost. `clone_from` replaces the receiver outright,
-    // so it has to write the register rather than a copy of it.
+    // A push mutates the receiver register itself. The normal path hands the
+    // method a clone and the change would be lost. `clone_from` replaces the
+    // receiver outright, so it has to write the register rather than a copy
+    // of it.
     if name.id == BuiltinId::CloneFrom {
         let src = ctx.stack[s..s + argc]
             .first()
@@ -34,15 +34,23 @@ pub(super) fn method_op(
         return Ok(ctx.set_opt(dst, Value::Unit));
     }
     if matches!(name.id, BuiltinId::Push | BuiltinId::PushStr)
-        && let Value::Str(text) = &ctx.stack[base + recv]
+        && matches!(ctx.stack[base + recv], Value::Str(_))
     {
-        let mut out = text.to_string();
-        match (&name.id, ctx.stack[s..s + argc].first()) {
-            (BuiltinId::Push, Some(Value::Char(c))) => out.push(*c),
-            (BuiltinId::PushStr, Some(arg)) => out.push_str(&arg.display()),
-            _ => {}
+        // The argument is cloned out first so the receiver can be borrowed
+        // mutably. A string clone is a refcount bump, and it also keeps
+        // `s.push_str(&s)` sound: the snapshot survives the in-place append.
+        let arg = ctx.stack[s..s + argc]
+            .first()
+            .cloned()
+            .unwrap_or(Value::Unit);
+        if let Value::Str(text) = &mut ctx.stack[base + recv] {
+            match (&name.id, &arg) {
+                (BuiltinId::Push, Value::Char(c)) => text.push(*c),
+                (BuiltinId::PushStr, Value::Str(other)) => text.push_str(other),
+                (BuiltinId::PushStr, other) => text.push_str(&other.display()),
+                _ => {}
+            }
         }
-        ctx.stack[base + recv] = Value::str(out);
         return Ok(ctx.set_opt(dst, Value::Unit));
     }
     if vm.methods.is_empty()

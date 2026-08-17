@@ -16,7 +16,7 @@ use rustc_hash::FxHashMap;
 use super::Interp;
 use super::numeric::IntWidth;
 use super::typeir::{TypeIr, lower_type};
-use super::value::{MapKey, StructShape, Value};
+use super::value::{MapKey, RsStr, StructShape, Value};
 use super::vm::Vm;
 
 /// Everything the interpreter needs to know about one user struct,
@@ -199,7 +199,7 @@ impl Vm {
         let mut values = Vec::with_capacity(info.coerce.len());
         for (fname, ty) in info.shape.fields.iter().zip(&info.coerce) {
             let raw = map
-                .get(&MapKey::Str(fname.clone()))
+                .get(&MapKey::Str((&**fname).into()))
                 .cloned()
                 .unwrap_or_else(Value::none);
             let coerced = match ty {
@@ -300,7 +300,7 @@ pub(super) struct StructPlan {
 /// Object keys repeat for every array element, so each parse interns them,
 /// mirroring `JsonKeys` in `json_bridge.rs`. The parse runs on one thread, so
 /// a `RefCell` is fine even though the values are `Send`.
-type JsonKeys = RefCell<FxHashMap<String, Arc<str>>>;
+type JsonKeys = RefCell<FxHashMap<String, RsStr>>;
 
 pub(super) fn parse_json(text: &str) -> std::result::Result<Value, serde_json::Error> {
     use serde::de::DeserializeSeed;
@@ -351,39 +351,39 @@ struct KeySeed<'a> {
 }
 
 impl KeySeed<'_> {
-    fn intern(&self, s: &str) -> Arc<str> {
+    fn intern(&self, s: &str) -> RsStr {
         if let Some(k) = self.keys.borrow().get(s) {
             return k.clone();
         }
-        let k: Arc<str> = Arc::from(s);
+        let k = RsStr::from(s);
         self.keys.borrow_mut().insert(s.to_string(), k.clone());
         k
     }
 }
 
 impl<'de> serde::de::DeserializeSeed<'de> for KeySeed<'_> {
-    type Value = Arc<str>;
+    type Value = RsStr;
 
     fn deserialize<D: serde::Deserializer<'de>>(
         self,
         d: D,
-    ) -> std::result::Result<Arc<str>, D::Error> {
+    ) -> std::result::Result<RsStr, D::Error> {
         d.deserialize_str(self)
     }
 }
 
 impl serde::de::Visitor<'_> for KeySeed<'_> {
-    type Value = Arc<str>;
+    type Value = RsStr;
 
     fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         f.write_str("an object key")
     }
 
-    fn visit_str<E: serde::de::Error>(self, s: &str) -> std::result::Result<Arc<str>, E> {
+    fn visit_str<E: serde::de::Error>(self, s: &str) -> std::result::Result<RsStr, E> {
         Ok(self.intern(s))
     }
 
-    fn visit_string<E: serde::de::Error>(self, s: String) -> std::result::Result<Arc<str>, E> {
+    fn visit_string<E: serde::de::Error>(self, s: String) -> std::result::Result<RsStr, E> {
         Ok(self.intern(&s))
     }
 }

@@ -12,6 +12,7 @@ use parking_lot::Mutex;
 use super::bytecode::Const;
 use super::native::Native;
 use super::numeric::IntWidth;
+pub use super::rs_str::RsStr;
 
 /// Shared, growable list. `Arc` for cross thread sharing, `Mutex` for the
 /// interior mutation the interpreter needs since it ignores ownership.
@@ -142,7 +143,7 @@ pub enum Value {
     /// A real f32, kept at f32 precision, mirroring `Value::F32`.
     F32(f32),
     Char(char),
-    Str(Arc<str>),
+    Str(RsStr),
     Vec(List),
     Map(Map, MapKind),
     Tuple(List),
@@ -168,11 +169,11 @@ pub enum MapKey {
     Bool(bool),
     Int(i64),
     Char(char),
-    Str(Arc<str>),
+    Str(RsStr),
 }
 
 impl Value {
-    pub fn str(s: impl Into<Arc<str>>) -> Value {
+    pub fn str(s: impl Into<RsStr>) -> Value {
         Value::Str(s.into())
     }
 
