@@ -1,6 +1,6 @@
 [package]
 name = "run-rs"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 description = "Run a subset of Rust as an interpreted script"
 repository = "https://github.com/VladasZ/rustscript"
