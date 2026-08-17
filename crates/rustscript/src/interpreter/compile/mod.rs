@@ -613,12 +613,47 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// The `&mut` alias target of `name` in an enclosing frame, for a
+    /// closure dereferencing an alias it captured. A frame that defines
+    /// `name` as its own local or upvalue shadows any outer alias.
+    pub(super) fn enclosing_alias_target(&self, name: &str) -> Option<String> {
+        for frame in self.frames.iter().rev().skip(1) {
+            let mut seen = name;
+            while let Some(next) = frame.aliases.get(seen) {
+                seen = next;
+            }
+            if seen != name {
+                return Some(seen.to_string());
+            }
+            if frame.local_reg(name).is_some() || frame.upvalue_index(name).is_some() {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// Follow a parent frame's `&mut` aliases to the borrowed variable, so a
+    /// closure capturing `r` from `let r = &mut v` captures `v` itself.
+    fn parent_alias_target(&self, parent: usize, name: &str) -> Option<String> {
+        let aliases = &self.frames[parent].aliases;
+        let mut seen = aliases.get(name)?;
+        while let Some(next) = aliases.get(seen) {
+            seen = next;
+        }
+        Some(seen.clone())
+    }
+
     /// Capture `name` into frame `depth` as an upvalue, pulling it up the chain.
     fn capture(&mut self, depth: usize, name: &str) -> Option<u16> {
         if depth == 0 {
             return None;
         }
         let parent = depth - 1;
+        // Writes through a `&mut` alias must reach the borrowed variable
+        // across the frame boundary, so the capture is mutable.
+        if let Some(target) = self.parent_alias_target(parent, name) {
+            return self.capture_mutable_as(depth, &target, name);
+        }
         if let Some(reg) = self.frames[parent].local_reg(name) {
             let source = if self.frames[parent].mutable_locals.contains(&reg) {
                 CapSource::MutableLocal(reg)
@@ -665,20 +700,29 @@ impl<'a> Compiler<'a> {
     }
 
     fn capture_mutable(&mut self, depth: usize, name: &str) -> Option<u16> {
+        self.capture_mutable_as(depth, name, name)
+    }
+
+    /// Like `capture_mutable`, registering the upvalue under `register_as`.
+    /// The two names differ when an alias captures its borrowed variable.
+    fn capture_mutable_as(&mut self, depth: usize, name: &str, register_as: &str) -> Option<u16> {
         if depth == 0 {
             return None;
         }
         let parent = depth - 1;
+        if let Some(target) = self.parent_alias_target(parent, name) {
+            return self.capture_mutable_as(depth, &target, register_as);
+        }
         if let Some(reg) = self.frames[parent].local_reg(name) {
             self.frames[parent].mutable_locals.insert(reg);
-            return Some(self.add_upvalue(depth, name, CapSource::MutableLocal(reg)));
+            return Some(self.add_upvalue(depth, register_as, CapSource::MutableLocal(reg)));
         }
         if let Some(idx) = self.frames[parent].upvalue_index(name) {
             self.mark_upvalue_mutable(parent, idx);
-            return Some(self.add_upvalue(depth, name, CapSource::MutableUpvalue(idx)));
+            return Some(self.add_upvalue(depth, register_as, CapSource::MutableUpvalue(idx)));
         }
         let idx = self.capture_mutable(parent, name)?;
-        Some(self.add_upvalue(depth, name, CapSource::MutableUpvalue(idx)))
+        Some(self.add_upvalue(depth, register_as, CapSource::MutableUpvalue(idx)))
     }
 
     fn mark_upvalue_mutable(&mut self, depth: usize, idx: u16) {
@@ -796,7 +840,8 @@ impl<'a> Compiler<'a> {
             | Op::JumpIfTrue { to: t, .. }
             | Op::CmpJump { to: t, .. }
             | Op::CmpJumpImm { to: t, .. }
-            | Op::ForNext { to: t, .. } => *t = to,
+            | Op::ForNext { to: t, .. }
+            | Op::TryJump { to: t, .. } => *t = to,
             _ => panic!("patch target is not a jump"),
         }
     }

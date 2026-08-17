@@ -104,6 +104,11 @@ pub(crate) fn script_args() -> Vec<String> {
 /// and `join!` to compile.
 pub fn run(modules: &[ModuleSrc], async_mode: bool) -> Result<()> {
     let interp = Interp::load(modules, async_mode)?;
+    // The coverage walk runs before execution, so an unchecked script cannot
+    // die on a cold branch after doing half its side effects. It is one
+    // linear pass over the compiled bytecode, measured at well under a
+    // millisecond even on the thousand-line bench cases.
+    interp.coverage_gate()?;
     interp.run()
 }
 
@@ -300,6 +305,31 @@ impl Interp {
         coverage::report(&self.functions, user)
     }
 
+    /// The coverage walk as a gate: an error listing every method the
+    /// interpreter does not implement, or `Ok` when it implements them all.
+    /// `rust check` and every interpreted run share this exact report.
+    pub fn coverage_gate(&self) -> Result<()> {
+        let findings = self.coverage();
+        if findings.is_empty() {
+            return Ok(());
+        }
+        let mut out = String::new();
+        for finding in &findings {
+            out.push_str("  ");
+            out.push_str(&finding.message());
+            out.push('\n');
+        }
+        let (count, verb) = if findings.len() == 1 {
+            ("1 method".to_string(), "is")
+        } else {
+            (format!("{} methods", findings.len()), "are")
+        };
+        Err(anyhow!(
+            "{count} used by this script {verb} not implemented by the interpreter:\n{}",
+            out.trim_end()
+        ))
+    }
+
     /// Run `main` as a blocking task on a multi thread tokio runtime, so
     /// awaited futures can be driven with `block_on` from a worker thread.
     fn run(&self) -> Result<()> {
@@ -368,10 +398,24 @@ impl Interp {
             .ok_or_else(|| anyhow!("no `main` function found"))? as usize;
         let main_chunk = pinterp.functions[idx].clone();
         let runner = pinterp.clone();
-        let joined = rt.block_on(async move {
-            tokio::task::spawn_blocking(move || runner.run_chunk(&main_chunk, &[], &[])).await
-        });
-        let ret = joined.map_err(|e| anyhow!("main task panicked: {e}"))??;
+        // `main` runs on a plain thread rather than a blocking task, so it
+        // consumes no tokio task id and the script's first `tokio::spawn`
+        // gets the same id a compiled binary's first spawn gets. Awaits
+        // still work: the runtime keeps driving itself and the thread
+        // enters it through the stored handle.
+        let joined = std::thread::Builder::new()
+            .name("main".to_string())
+            .spawn(move || runner.run_chunk(&main_chunk, &[], &[]))
+            .map_err(|e| anyhow!("cannot start main thread: {e}"))?
+            .join();
+        let ret = joined.map_err(|payload| {
+            let msg = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(ToString::to_string))
+                .unwrap_or_else(|| "unknown panic".to_string());
+            anyhow!("main task panicked: {msg}")
+        })??;
         if let value::Value::Enum {
             enum_name,
             variant,

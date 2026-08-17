@@ -43,6 +43,10 @@ pub const BRIDGES: &[Bridge] = &[
     b("shared.rs", "exit_status_core", "ExitStatus"),
     b("shared.rs", "json_type_test", "*"),
     b("int_methods.rs", "int_method", "*"),
+    // `int_method` only routes; its dispatch literals live in the two halves.
+    b("int_methods.rs", "int_arith_method", "*"),
+    b("int_methods.rs", "int_query_method", "*"),
+    b("int_methods.rs", "big_int_method", "*"),
     // -- value methods ------------------------------------------------------
     b("methods.rs", "json_value_method", "*"),
     b("methods.rs", "str_method", "Str"),
@@ -52,6 +56,7 @@ pub const BRIDGES: &[Bridge] = &[
     b("methods.rs", "entry_method", "Entry"),
     b("cell.rs", "cell_method", "Cell"),
     b("native_methods.rs", "io_error_method", "Native"),
+    b("native_methods.rs", "joinerr_method", "Native"),
     b("methods.rs", "generic_method", "*"),
     b("vecmap.rs", "vec_method", "Vec"),
     b("vecmap.rs", "vec_get", "Vec"),

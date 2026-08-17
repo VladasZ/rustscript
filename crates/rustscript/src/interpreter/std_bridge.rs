@@ -92,7 +92,16 @@ pub(super) fn native_call(module: &str, func: &str, args: &[Value]) -> Result<Op
         ("env", "args") => Value::vec(super::script_args().into_iter().map(Value::str).collect()),
         ("env", "var") => match std::env::var(s(0)?) {
             Ok(v) => Value::ok(Value::str(v)),
-            Err(e) => Value::err(Value::str(e.to_string())),
+            // The structured `VarError`, so `Err(VarError::NotPresent)`
+            // matches and `{e:?}` prints `NotPresent` like real Rust.
+            Err(std::env::VarError::NotPresent) => {
+                Value::err(Value::enum_of("VarError", "NotPresent", Vec::new()))
+            }
+            Err(std::env::VarError::NotUnicode(os)) => Value::err(Value::enum_of(
+                "VarError",
+                "NotUnicode",
+                vec![Value::str(os.to_string_lossy().into_owned())],
+            )),
         },
         ("env", "current_dir") => match std::env::current_dir() {
             Ok(p) => Value::ok(make_path(p.display().to_string())),

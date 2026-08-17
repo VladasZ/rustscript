@@ -37,6 +37,9 @@ pub enum CellKind {
     RefCell,
     Cell,
     Mutex,
+    /// `tokio::sync::Mutex`, whose `lock` is awaited and answers the guard
+    /// without a `Result` layer.
+    TokioMutex,
 }
 
 impl CellKind {
@@ -495,7 +498,7 @@ impl Value {
                 CellKind::Arc => "Arc",
                 CellKind::RefCell => "RefCell",
                 CellKind::Cell => "Cell",
-                CellKind::Mutex => "Mutex",
+                CellKind::Mutex | CellKind::TokioMutex => "Mutex",
             },
             Value::Native(_) => "native",
         }
@@ -648,9 +651,23 @@ impl Value {
                 None => "<dangling reference>".to_string(),
             },
             Value::Native(n) => match &*n.lock() {
-                Native::IoErr { display, .. } => display.clone(),
+                Native::IoErr { display, .. } | Native::JoinErr { display, .. } => display.clone(),
                 other => format!("<{}>", other.type_name()),
             },
+            // `std::env::VarError` implements `Display` in real Rust, and
+            // its text is what scripts print with `{e}`.
+            Value::Enum {
+                enum_name,
+                variant,
+                data,
+            } if &**enum_name == "VarError" => {
+                if &**variant == "NotUnicode" {
+                    let payload = data.lock().first().map(Value::display).unwrap_or_default();
+                    format!("environment variable was not valid unicode: {payload:?}")
+                } else {
+                    "environment variable not found".to_string()
+                }
+            }
             other => other.debug(),
         }
     }
@@ -727,7 +744,7 @@ impl Value {
             },
             Value::Cell(kind, slot) => write_cell_debug(*kind, slot, out),
             Value::Native(n) => {
-                if let Native::IoErr { debug, .. } = &*n.lock() {
+                if let Native::IoErr { debug, .. } | Native::JoinErr { debug, .. } = &*n.lock() {
                     out.push_str(debug);
                 } else {
                     write!(out, "<{}>", n.lock().type_name()).unwrap();
@@ -772,6 +789,11 @@ fn write_cell_debug(kind: CellKind, slot: &Arc<Mutex<Value>>, out: &mut String) 
             out.push_str("Mutex { data: ");
             inner.write_debug(out);
             out.push_str(", poisoned: false, .. }");
+        }
+        CellKind::TokioMutex => {
+            out.push_str("Mutex { data: ");
+            inner.write_debug(out);
+            out.push_str(" }");
         }
     }
 }

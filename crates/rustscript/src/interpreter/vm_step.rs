@@ -13,6 +13,7 @@ use num_traits::AsPrimitive;
 use parking_lot::Mutex;
 
 use super::bytecode::{CapSource, Chunk, MacroKind, Member, Op, path_call_chunk};
+use super::iterator::FastNext;
 use super::native::Native;
 use super::numeric::{float_to_int, truncate};
 use super::ops::{
@@ -173,9 +174,11 @@ pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
         | Op::RefIndex { .. }
         | Op::RefField { .. }
         | Op::DropScope { .. }
+        | Op::MoveOut { .. }
         | Op::DefaultOf { .. }
         | Op::MakeBorrow { .. } => place_step(ctx, op)?,
         Op::Try { dst, src } => try_op(ctx, *dst, *src),
+        Op::TryJump { dst, src, to } => try_jump(ctx, *dst, *src, *to),
         Op::Cast { dst, src, ty } => cast_op(ctx, *dst, *src, *ty)?,
         Op::Coerce { dst, src, ty } => coerce_op(ctx, *dst, *src, *ty),
         Op::TestBind { val, pat, dst } => test_bind(ctx, *val, *pat, *dst),
@@ -185,6 +188,21 @@ pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
         Op::Spawn { dst, child } => spawn_op(ctx, *dst, *child),
         Op::Await { dst, src } => await_op(ctx, *dst, *src)?,
     })
+}
+
+/// Clear a moved-out binding register when its value has a user `Drop`
+/// impl, so the copy in the argument window is the last holder and the
+/// guard drops at the destination, not at this scope's end.
+fn move_out(ctx: &mut StepCtx, src: u16) -> Flow {
+    let ty = match ctx.get(src) {
+        Value::Struct(s) => s.name().to_string(),
+        Value::Enum { enum_name, .. } => enum_name.to_string(),
+        _ => return Flow::Next,
+    };
+    if ctx.vm.methods.contains_key(&(ty, "Drop::drop".to_string())) {
+        ctx.put(src, Value::Unit);
+    }
+    Flow::Next
 }
 
 /// Run user `Drop` impls for a finished scope's bindings, in reverse
@@ -333,6 +351,7 @@ fn place_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
             drop_scope(ctx, *list)?;
             Flow::Next
         }
+        Op::MoveOut { src } => move_out(ctx, *src),
         Op::DefaultOf { dst, src } => default_of(ctx, *dst, *src),
         Op::MakeBorrow { dst, src } => make_borrow(ctx, *dst, *src),
         _ => unreachable!("place_step handles only the place ops"),
@@ -585,9 +604,24 @@ fn for_next(ctx: &mut StepCtx, iter: u16, idx: u16, val: u16, to: u32) -> Result
         Value::Int(i) => *i,
         _ => unreachable!("for index is an integer"),
     };
-    let item = match ctx.get(iter).clone() {
-        Value::Native(iterator) => ctx.vm.iterator_next(&iterator)?,
-        other => bail!("{} is not an iterator", other.type_name()),
+    // The simple source states produce their item in place under one lock,
+    // so a tight loop skips the handle clone and the step dispatch of the
+    // full `iterator_next` machinery.
+    let item = {
+        let Value::Native(iterator) = ctx.get(iter) else {
+            bail!("{} is not an iterator", ctx.get(iter).type_name());
+        };
+        let fast = match &mut *iterator.lock() {
+            Native::Iterator(state) => state.fast_next(),
+            _ => FastNext::NotSimple,
+        };
+        match fast {
+            FastNext::Ready(item) => item,
+            FastNext::NotSimple => {
+                let iterator = iterator.clone();
+                ctx.vm.iterator_next(&iterator)?
+            }
+        }
     };
     let Some(v) = item else {
         return Ok(Flow::Jump(to as usize));
@@ -686,7 +720,17 @@ fn spawn_op(ctx: &mut StepCtx, dst: u16, child: u16) -> Flow {
                 } else {
                     eprintln!("rust error in task: {e:#}");
                 }
-                std::panic::resume_unwind(Box::new(format!("{e:#}")))
+                // The payload is the bare panic message, so the JoinError
+                // the join handle answers formats exactly like real tokio's:
+                // `task 11 panicked with message "boom"`.
+                let payload = match e.downcast_ref::<super::vm_support::ScriptPanic>() {
+                    Some(p) => {
+                        let first = p.rendered.lines().next().unwrap_or_default();
+                        first.strip_prefix("panicked: ").unwrap_or(first).to_string()
+                    }
+                    None => format!("{e:#}"),
+                };
+                std::panic::resume_unwind(Box::new(payload))
             }
         }
     });
@@ -956,6 +1000,18 @@ fn try_op(ctx: &mut StepCtx, dst: u16, src: u16) -> Flow {
     match ops::eval_try(ctx.get(src).clone()) {
         Ok(v) => ctx.set(dst, v),
         Err(early) => Flow::Ret(early),
+    }
+}
+
+fn try_jump(ctx: &mut StepCtx, dst: u16, src: u16, to: u32) -> Flow {
+    match ops::eval_try(ctx.get(src).clone()) {
+        Ok(v) => {
+            ctx.put(dst, v);
+            Flow::Jump(to as usize)
+        }
+        // Falls through into the scope drops and the `Ret` emitted after
+        // this op, with the early-return value ready in `dst`.
+        Err(early) => ctx.set(dst, early),
     }
 }
 

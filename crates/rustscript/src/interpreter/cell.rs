@@ -43,9 +43,25 @@ pub(super) fn cell_method(
             require(kind, CellKind::RefCell, name)?;
             Value::Ref(Arc::new(ValueRef::cell_slot(slot.clone())))
         }
-        "lock" | "try_lock" => {
-            require(kind, CellKind::Mutex, name)?;
-            Value::ok(Value::Ref(Arc::new(ValueRef::cell_slot(slot.clone()))))
+        "lock" | "try_lock" | "blocking_lock" => {
+            // The tokio mutex hands its guard out directly: `lock` is
+            // awaited and the await passes the guard through, and only
+            // `try_lock` wraps a `Result`. The std mutex wraps its
+            // `LockResult` either way and has no `blocking_lock`.
+            if kind == CellKind::TokioMutex {
+                let guard = Value::Ref(Arc::new(ValueRef::cell_slot(slot.clone())));
+                if name == "try_lock" {
+                    Value::ok(guard)
+                } else {
+                    guard
+                }
+            } else {
+                require(kind, CellKind::Mutex, name)?;
+                if name == "blocking_lock" {
+                    bail!("no method `blocking_lock` on std Mutex");
+                }
+                Value::ok(Value::Ref(Arc::new(ValueRef::cell_slot(slot.clone()))))
+            }
         }
         "get" if kind == CellKind::Cell => slot.lock().clone(),
         "set" => {
@@ -87,6 +103,7 @@ fn interior_method(name: &str) -> bool {
             | "borrow_mut"
             | "lock"
             | "try_lock"
+            | "blocking_lock"
             | "get"
             | "set"
             | "replace"
@@ -101,7 +118,7 @@ fn kind_name(kind: CellKind) -> &'static str {
         CellKind::Arc => "Arc",
         CellKind::RefCell => "RefCell",
         CellKind::Cell => "Cell",
-        CellKind::Mutex => "Mutex",
+        CellKind::Mutex | CellKind::TokioMutex => "Mutex",
     }
 }
 

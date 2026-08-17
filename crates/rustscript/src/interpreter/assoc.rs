@@ -72,20 +72,30 @@ fn conversion_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value
                 _ => Value::none(),
             }
         }
-        // Every integer type parses the same way here, values are untyped ints.
+        // Every 64-bit-and-under type parses the same way here, values are
+        // untyped ints. The 128-bit types parse in their real width below.
         (
-            "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128"
-            | "usize",
+            "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize",
             "from_str_radix",
         ) => {
             let text = args.first().map(Value::display).unwrap_or_default();
-            let radix = args
-                .get(1)
-                .and_then(as_i64)
-                .and_then(|r| u32::try_from(r).ok())
-                .unwrap_or(10);
+            let radix = radix_arg(args);
             match i64::from_str_radix(text.trim(), radix) {
                 Ok(n) => Value::ok(Value::Int(n)),
+                Err(e) => Value::err(Value::str(e.to_string())),
+            }
+        }
+        ("i128", "from_str_radix") => {
+            let text = args.first().map(Value::display).unwrap_or_default();
+            match i128::from_str_radix(text.trim(), radix_arg(args)) {
+                Ok(n) => Value::ok(Value::Big(n, IntWidth::I128)),
+                Err(e) => Value::err(Value::str(e.to_string())),
+            }
+        }
+        ("u128", "from_str_radix") => {
+            let text = args.first().map(Value::display).unwrap_or_default();
+            match u128::from_str_radix(text.trim(), radix_arg(args)) {
+                Ok(n) => Value::ok(Value::Big(n.cast_signed(), IntWidth::U128)),
                 Err(e) => Value::err(Value::str(e.to_string())),
             }
         }
@@ -127,7 +137,8 @@ fn conversion_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value
         // the named width, so a `u32` read stays a u32 and an `i32` read of
         // the same four bytes is negative where the top bit is set.
         (
-            "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize",
+            "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128"
+            | "usize",
             "from_le_bytes" | "from_be_bytes" | "from_ne_bytes",
         ) => int_from_bytes(ty, func, args)?,
         ("String", "from_utf8") => Value::ok(Value::str(bytes_to_string(args.first()))),
@@ -353,6 +364,14 @@ fn misc_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
 
 /// Pull an integer out of a `from`/`try_from` argument. Ints carry through,
 /// a bool becomes 0 or 1, and a char becomes its scalar value.
+/// The `u32` radix argument of `from_str_radix`, 10 when unreadable.
+fn radix_arg(args: &[Value]) -> u32 {
+    args.get(1)
+        .and_then(as_i64)
+        .and_then(|r| u32::try_from(r).ok())
+        .unwrap_or(10)
+}
+
 fn int_from_arg(ty: &str, v: Option<&Value>) -> Result<i64> {
     match v {
         Some(Value::Int(n)) => Ok(*n),
@@ -361,9 +380,7 @@ fn int_from_arg(ty: &str, v: Option<&Value>) -> Result<i64> {
         // A width-tagged or 128-bit value converts when it fits an i64. The
         // callers check the target's own range on top of this.
         Some(tagged @ (Value::IntW(..) | Value::Big(..))) => match tagged.int_parts() {
-            Some((n, _)) => {
-                i64::try_from(n).map_err(|_| anyhow!("`{ty}` conversion out of range"))
-            }
+            Some((n, _)) => i64::try_from(n).map_err(|_| anyhow!("`{ty}` conversion out of range")),
             None => bail!("`{ty}` conversion out of range"),
         },
         _ => bail!("`{ty}` conversion needs an integer"),

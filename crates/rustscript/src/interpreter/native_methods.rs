@@ -20,7 +20,7 @@ pub(super) fn lines_next(handle: &Handle) -> Option<Value> {
     if let Native::Lines(it) = &mut *h {
         match it.next() {
             Some(Ok(line)) => Some(Value::ok(Value::str(line))),
-            Some(Err(e)) => Some(Value::err(Value::str(e.to_string()))),
+            Some(Err(e)) => Some(Value::err(super::native::io_error_value(&e))),
             None => None,
         }
     } else {
@@ -103,6 +103,9 @@ pub(super) fn native_method(
     if let Some(v) = io_error_method(handle, method) {
         return Ok(Some(v));
     }
+    if let Some(v) = joinerr_method(handle, method) {
+        return Ok(Some(v));
+    }
     // The families use disjoint method names, so the first helper that
     // recognizes the name answers. Handles that consume self or hand out
     // sub-handles move out of the Mutex inside their family helper.
@@ -142,6 +145,21 @@ pub(super) fn io_error_method(handle: &Handle, method: &str) -> Option<Value> {
             Some(n) => Value::some(Value::Int(i64::from(*n))),
             None => Value::none(),
         }),
+        _ => None,
+    }
+}
+
+/// The accessors of a structured `JoinError` value. A task the interpreter
+/// runs can end early only by panicking, so cancellation always answers
+/// false, exactly like a program that never calls `abort`.
+pub(super) fn joinerr_method(handle: &Handle, method: &str) -> Option<Value> {
+    let h = handle.lock();
+    let Native::JoinErr { is_panic, .. } = &*h else {
+        return None;
+    };
+    match method {
+        "is_panic" => Some(Value::Bool(*is_panic)),
+        "is_cancelled" => Some(Value::Bool(false)),
         _ => None,
     }
 }

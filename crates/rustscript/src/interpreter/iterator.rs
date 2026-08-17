@@ -240,7 +240,30 @@ fn next_regex_offset(source: &str, start: usize, end: usize) -> usize {
     end + source[end..].chars().next().map_or(1, char::len_utf8)
 }
 
+/// What `fast_next` answered: an item or exhaustion produced in place, or
+/// a state that needs the full `iterator_next` machinery.
+pub(super) enum FastNext {
+    Ready(Option<Value>),
+    NotSimple,
+}
+
 impl IteratorState {
+    /// The items a `for` loop produces in place for the simple sources, so a
+    /// tight loop skips the handle clone and the `Step` indirection of the
+    /// full `iterator_next` machinery.
+    pub(super) fn fast_next(&mut self) -> FastNext {
+        FastNext::Ready(match self {
+            IteratorState::Range {
+                next,
+                end,
+                inclusive,
+            } => range_step(next, *end, *inclusive),
+            IteratorState::Bytes { source, index } => bytes_step(source, index),
+            IteratorState::Chars { source, offset } => chars_step(source, offset),
+            _ => return FastNext::NotSimple,
+        })
+    }
+
     fn step(&mut self) -> Step {
         match self {
             IteratorState::UserNext { value } => Step::User(value.clone()),
@@ -274,9 +297,9 @@ impl IteratorState {
                 next,
                 end,
                 inclusive,
-            } => range_step(next, *end, *inclusive),
-            IteratorState::Bytes { source, index } => bytes_step(source, index),
-            IteratorState::Chars { source, offset } => chars_step(source, offset),
+            } => Step::Ready(range_step(next, *end, *inclusive)),
+            IteratorState::Bytes { source, index } => Step::Ready(bytes_step(source, index)),
+            IteratorState::Chars { source, offset } => Step::Ready(chars_step(source, offset)),
             IteratorState::Lines { source, offset } => Step::Ready(next_line(source, offset)),
             IteratorState::SplitWhitespace { source, offset } => {
                 Step::Ready(next_word(source, offset))
@@ -341,30 +364,30 @@ impl IteratorState {
 }
 
 /// One step over a string's bytes.
-fn bytes_step(source: &str, index: &mut usize) -> Step {
+fn bytes_step(source: &str, index: &mut usize) -> Option<Value> {
     let value = source.as_bytes().get(*index).copied();
     *index += usize::from(value.is_some());
-    Step::Ready(value.map(|byte| Value::Int(i64::from(byte))))
+    value.map(|byte| Value::Int(i64::from(byte)))
 }
 
 /// One step over a string's chars, advancing by the char's own width.
-fn chars_step(source: &str, offset: &mut usize) -> Step {
+fn chars_step(source: &str, offset: &mut usize) -> Option<Value> {
     let value = source[*offset..].chars().next();
     if let Some(ch) = value {
         *offset += ch.len_utf8();
     }
-    Step::Ready(value.map(Value::Char))
+    value.map(Value::Char)
 }
 
 /// One step of an integer range, exclusive or inclusive.
-fn range_step(next: &mut i64, end: i64, inclusive: bool) -> Step {
+fn range_step(next: &mut i64, end: i64, inclusive: bool) -> Option<Value> {
     let done = if inclusive { *next > end } else { *next >= end };
     if done {
-        Step::Ready(None)
+        None
     } else {
         let value = *next;
         *next += 1;
-        Step::Ready(Some(Value::Int(value)))
+        Some(Value::Int(value))
     }
 }
 
@@ -421,7 +444,7 @@ fn lines_next(handle: &Handle) -> Option<Value> {
     };
     match lines.next() {
         Some(Ok(line)) => Some(Value::ok(Value::str(line))),
-        Some(Err(e)) => Some(Value::err(Value::str(e.to_string()))),
+        Some(Err(e)) => Some(Value::err(super::native::io_error_value(&e))),
         None => None,
     }
 }

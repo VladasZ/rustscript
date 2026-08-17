@@ -16,6 +16,13 @@ pub(super) enum SpecNumber {
         value: i128,
         bits: u32,
     },
+    /// A 128-bit integer as its raw storage bits, u128 reinterpreted. Radix
+    /// forms print the full two's complement image either way, only the
+    /// exponent forms need the sign.
+    Big {
+        bits: i128,
+        signed: bool,
+    },
     Float(f64),
     F32(f32),
 }
@@ -137,7 +144,10 @@ pub(super) fn apply_spec(
     }
     if parsed.alternate
         && let Some(ty @ ('x' | 'X' | 'o' | 'b')) = parsed.ty
-        && matches!(number, Some(SpecNumber::Int(_) | SpecNumber::Sized { .. }))
+        && matches!(
+            number,
+            Some(SpecNumber::Int(_) | SpecNumber::Sized { .. } | SpecNumber::Big { .. })
+        )
     {
         let prefix = match ty {
             'x' | 'X' => "0x",
@@ -214,6 +224,13 @@ fn render_base(
         (Some('b'), Some(SpecNumber::Sized { value, bits })) => {
             format!("{:b}", SpecNumber::radix_bits(value, bits))
         }
+        (Some('x'), Some(SpecNumber::Big { bits, .. })) => format!("{:x}", bits.cast_unsigned()),
+        (Some('X'), Some(SpecNumber::Big { bits, .. })) => format!("{:X}", bits.cast_unsigned()),
+        (Some('o'), Some(SpecNumber::Big { bits, .. })) => format!("{:o}", bits.cast_unsigned()),
+        (Some('b'), Some(SpecNumber::Big { bits, .. })) => format!("{:b}", bits.cast_unsigned()),
+        (Some(exp @ ('e' | 'E')), Some(SpecNumber::Big { bits, signed })) => {
+            big_exponent(bits, signed, exp == 'E', parsed.precision)
+        }
         (Some('e'), Some(SpecNumber::Int(i))) => match parsed.precision {
             Some(precision) => format!("{i:.precision$e}"),
             None => format!("{i:e}"),
@@ -255,12 +272,28 @@ fn render_base(
             None => display.to_string(),
         },
         // Integer Display ignores precision.
-        (_, Some(SpecNumber::Int(_) | SpecNumber::Sized { .. })) => display.to_string(),
+        (_, Some(SpecNumber::Int(_) | SpecNumber::Sized { .. } | SpecNumber::Big { .. })) => {
+            display.to_string()
+        }
         // String precision truncates to that many characters.
         (_, None) => match parsed.precision {
             Some(precision) => display.chars().take(precision).collect(),
             None => display.to_string(),
         },
+    }
+}
+
+/// `{:e}` and `{:E}` of a 128-bit integer, in the value's real sign.
+fn big_exponent(bits: i128, signed: bool, upper: bool, precision: Option<usize>) -> String {
+    match (signed, upper, precision) {
+        (true, false, Some(p)) => format!("{bits:.p$e}"),
+        (true, false, None) => format!("{bits:e}"),
+        (true, true, Some(p)) => format!("{bits:.p$E}"),
+        (true, true, None) => format!("{bits:E}"),
+        (false, false, Some(p)) => format!("{:.p$e}", bits.cast_unsigned()),
+        (false, false, None) => format!("{:e}", bits.cast_unsigned()),
+        (false, true, Some(p)) => format!("{:.p$E}", bits.cast_unsigned()),
+        (false, true, None) => format!("{:E}", bits.cast_unsigned()),
     }
 }
 

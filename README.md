@@ -102,8 +102,6 @@ under `crates/examples/examples`.
 - `HashMap` iterates in insertion order. Real Rust's order is arbitrary and
   unpromised, so a correct script cannot observe the difference, but an
   interpreted run is deterministic where a compiled one is not.
-- The smaller known gaps and the planned work are in
-  [docs/roadmap.md](docs/roadmap.md).
 
 ## Modules and local crates
 
