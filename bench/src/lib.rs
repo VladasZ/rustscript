@@ -46,7 +46,6 @@ impl MemStat {
 pub struct CaseResult {
     pub name: String,
     pub kind: String,
-    pub tier: String,
     pub parameters: Vec<String>,
     pub wall: Vec<TimeStat>,
     pub compute: Vec<TimeStat>,

@@ -29,9 +29,10 @@ fn main() -> anyhow::Result<()> {
     let after = fs::read_to_string(&path)?;
     println!("lines after append: {}", after.lines().count());
 
-    // Copy the file and stamp the source mtime onto it. The call is what exercises
-    // set_modified; SystemTime values are not printed because the two engines model
-    // their identity differently, which would break the byte-for-byte comparison.
+    // Copy the file and stamp the source mtime onto it. The call is what
+    // exercises set_modified. SystemTime values are not printed because the
+    // interpreter and compiled Rust model their identity differently, which
+    // would break the byte-for-byte comparison.
     let copy = std::env::temp_dir().join("rustscript_file_io_copy.txt");
     let copy = copy.to_string_lossy().to_string();
     fs::copy(&path, &copy)?;

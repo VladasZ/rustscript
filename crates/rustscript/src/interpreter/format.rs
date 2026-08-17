@@ -113,8 +113,7 @@ fn parse_spec(spec: &str) -> ParsedSpec {
     parsed
 }
 
-/// Apply a spec to a value that has already been rendered. Shared by both
-/// engines so a script formats the same whichever one runs it. Covers debug,
+/// Apply a spec to a value that has already been rendered. Covers debug,
 /// precision, width, fill, alignment, sign, sign-aware zero padding, radix
 /// and exponent types, and their `#` alternate forms.
 pub(super) fn apply_spec(

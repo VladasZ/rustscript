@@ -1,15 +1,12 @@
-//! Value model neutral method cores.
+//! Shared method cores for scalar receivers.
 //!
-//! The two engines this interpreter once had carried their own copy of
-//! every scalar method, and the copies drifted; these cores are what ended
-//! that. A core works on plain Rust types and answers through a small output
+//! A core works on plain Rust types and answers through a small output
 //! enum, so the dispatch layer only adapts arguments in and values out, and
 //! the coverage harvest reads each core exactly once.
 //!
 //! What stays out of the cores: anything lazy or stateful. The
 //! iterator forms of `chars`, `lines`, `bytes`, and `split_whitespace` cannot
-//! be expressed as a finished value, and containers live behind different
-//! cell types per engine.
+//! be expressed as a finished value.
 
 use num_traits::AsPrimitive;
 use std::cmp::Ordering;
@@ -20,8 +17,8 @@ use anyhow::{Result, anyhow, bail};
 use super::bytecode::{BinKind, ScalarTy};
 use super::numeric::IntWidth;
 
-/// Engine neutral view of a method's arguments. Each engine adapts its own
-/// value slice; the cores monomorphize over this, so the view costs nothing.
+/// View of a method's arguments. The dispatch layer adapts the value slice,
+/// and the cores monomorphize over this, so the view costs nothing.
 pub(super) trait Args {
     /// The argument rendered as text, what `Display` would print. Missing
     /// arguments render empty, the behavior scripts always saw.
@@ -78,7 +75,7 @@ pub(super) enum Num {
     Float(f64),
 }
 
-/// What a numeric method produced, materialized by each engine.
+/// What a numeric method produced, materialized into a value by the caller.
 pub(super) enum NumOut {
     Int(i64),
     Float(f64),
@@ -166,7 +163,7 @@ pub(super) fn num_core(recv: Num, name: &str, args: &impl Args) -> Result<Option
     }))
 }
 
-/// What an f32 method produced, materialized by each engine.
+/// What an f32 method produced, materialized into a value by the caller.
 pub(super) enum F32Out {
     Val(f32),
     Bool(bool),
@@ -212,8 +209,8 @@ pub(super) fn f32_core(recv: f32, name: &str, args: &impl Args) -> Result<Option
 
 /// The shape a decoded json value has once it is an interpreter value. A
 /// parsed json is held as plain values, an object as a map and a string as a
-/// string, so the serde type tests are shape tests. Each engine maps its own
-/// value onto this and both then answer from the same table.
+/// string, so the serde type tests are shape tests. The dispatch layer maps a
+/// value onto this and answers from one table.
 #[derive(Clone, Copy)]
 pub(super) enum JsonKind {
     Object,
@@ -227,8 +224,8 @@ pub(super) enum JsonKind {
     Other,
 }
 
-/// The `serde_json` `is_*` family. These apply to every receiver, so an engine
-/// answers them before its per type dispatch, which returns early for the hot
+/// The `serde_json` `is_*` family. These apply to every receiver, so they are
+/// answered before the per type dispatch, which returns early for the hot
 /// receivers and would otherwise never reach them.
 pub(super) fn json_type_test(kind: JsonKind, name: &str) -> Option<bool> {
     use JsonKind as K;
@@ -249,8 +246,8 @@ pub(super) fn json_type_test(kind: JsonKind, name: &str) -> Option<bool> {
 }
 
 /// The `serde_json` `as_*` family, by name only. A receiver of the wrong shape
-/// answers None rather than erroring, so an engine tests the name here and
-/// then decides whether its receiver matches.
+/// answers None rather than erroring, so the caller tests the name here and
+/// then decides whether the receiver matches.
 pub(super) fn json_accessor(name: &str) -> bool {
     matches!(
         name,
@@ -296,8 +293,8 @@ pub(super) fn json_pointer_index(token: &str) -> Option<usize> {
 
 // -- chars -----------------------------------------------------------------
 
-/// The result of a `char` method, in a form either engine can turn into its
-/// own value type. Keeps the classification table in one place.
+/// The result of a `char` method, in a form the caller turns into a value.
+/// Keeps the classification table in one place.
 pub(super) enum CharOut {
     Bool(bool),
     Char(char),
@@ -306,8 +303,7 @@ pub(super) enum CharOut {
     OptU32(Option<u32>),
 }
 
-/// The `char` classification and conversion methods, in one table so
-/// a script sees the same set whichever one runs it.
+/// The `char` classification and conversion methods.
 pub(super) fn char_method(ch: char, name: &str, args: &impl Args) -> Option<Result<CharOut>> {
     let b = |v: bool| Some(Ok(CharOut::Bool(v)));
     match name {
@@ -352,7 +348,7 @@ pub(super) fn char_method(ch: char, name: &str, args: &impl Args) -> Option<Resu
 
 // -- strings ---------------------------------------------------------------
 
-/// What a string method produced, materialized by each engine. `Keep` and
+/// What a string method produced, materialized by the caller. `Keep` and
 /// `OkKeep` hand the receiver back so the caller answers with a refcount
 /// bump, never a copy.
 pub(super) enum StrOut {
@@ -472,13 +468,13 @@ pub(super) fn str_core(s: &str, name: &str, args: &impl Args) -> Result<Option<S
             O::Owned(out.to_string())
         }
         "cmp" => O::Ordering(s.cmp(a(0).as_str())),
-        // `parse` without a turbofish is answered by the engines through
-        // `parse_core`, which is the only place that sees the target type.
+        // `parse` without a turbofish is answered through `parse_core`, which
+        // is the only place that sees the target type.
         _ => return Ok(None),
     }))
 }
 
-/// What `str::parse` produced, before either engine wraps it in an `Ok`.
+/// What `str::parse` produced, before the caller wraps it in an `Ok`.
 pub(super) enum Parsed {
     Int(i128, IntWidth),
     F32(f32),
@@ -569,11 +565,11 @@ pub(super) fn parse_core(text: &str, target: Option<&ScalarTy>) -> Parsed {
 // -- regex -----------------------------------------------------------------
 
 /// What a `Regex` method produced. Spans index into the source string the
-/// engine already holds, so each engine materializes its own match handles.
+/// caller already holds, so the caller materializes the match handles.
 pub(super) enum RegexOut {
     Bool(bool),
     Text(String),
-    /// The engine answers with its shared pattern handle.
+    /// Answered with the shared pattern handle.
     Pattern,
     /// `find`: the first match's span, if any.
     OptSpan(Option<(usize, usize)>),

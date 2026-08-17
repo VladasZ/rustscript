@@ -348,7 +348,6 @@ impl Runner {
     fn run_interpreted(&self, source_path: &Path, directory: &Path) -> Result<ProcessOutput> {
         run_command(
             Command::new(&self.interpreter)
-                .arg("run")
                 .arg(source_path)
                 .env("RUSTSCRIPT_SKIP_CHECK", "1")
                 .current_dir(directory),

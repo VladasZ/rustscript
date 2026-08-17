@@ -1,9 +1,9 @@
 use std::env;
 use std::fmt::Write;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 struct Lcg(u64);
 
@@ -77,11 +77,29 @@ fn big_script(dir: &Path) -> Result<()> {
         )?;
     }
 
+    // The Rust chain is split into stages of 75 calls so no function trips
+    // clippy's too-many-lines lint, which CI runs over the generated case.
+    let stage_size = 75;
+    let mut stage_count = 0;
+    for (stage, chunk) in (0..functions)
+        .collect::<Vec<_>>()
+        .chunks(stage_size)
+        .enumerate()
+    {
+        writeln!(rust, "fn stage{stage}(mut acc: i64) -> i64 {{")?;
+        for i in chunk {
+            writeln!(rust, "    acc = f{i:03}(acc);")?;
+        }
+        rust.push_str("    acc\n}\n\n");
+        stage_count = stage + 1;
+    }
     rust.push_str("fn main() {\n    let t = Instant::now();\n    let mut acc: i64 = 1;\n");
+    for stage in 0..stage_count {
+        writeln!(rust, "    acc = stage{stage}(acc);")?;
+    }
     typescript.push_str("const t = performance.now();\nlet acc = 1;\n");
     python.push_str("t = time.perf_counter_ns()\nacc = 1\n");
     for i in 0..functions {
-        writeln!(rust, "    acc = f{i:03}(acc);")?;
         writeln!(typescript, "acc = f{i:03}(acc);")?;
         writeln!(python, "acc = f{i:03}(acc)")?;
     }
@@ -204,22 +222,10 @@ fn multifile_script(dir: &Path) -> Result<()> {
 
 fn main() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let scratch = env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .context("pass an isolated scratch directory for large fixtures")?;
-    let word_scratch = scratch.join("word_count");
-    let json_scratch = scratch.join("json");
-    fs::create_dir_all(&word_scratch)?;
-    fs::create_dir_all(&json_scratch)?;
     let base_text = words(250_000)?;
-    let big_text = words(2_500_000)?;
     let base_json = json(200_000)?;
-    let big_json = json(2_000_000)?;
     fs::write(root.join("cases/word_count/data.txt"), &base_text)?;
-    fs::write(word_scratch.join("data_big.txt"), &big_text)?;
     fs::write(root.join("cases/json/data.json"), &base_json)?;
-    fs::write(json_scratch.join("data_big.json"), &big_json)?;
     fs::write(
         root.join("cases/automation/config.json"),
         r#"{"pattern":"w0\\d\\d","top":20}"#,
@@ -227,11 +233,9 @@ fn main() -> Result<()> {
     big_script(&root.join("cases/big_script"))?;
     multifile_script(&root.join("cases/multifile_startup"))?;
     println!(
-        "generated text {} / {} bytes and json {} / {} bytes",
+        "generated text {} bytes and json {} bytes",
         base_text.len(),
-        big_text.len(),
-        base_json.len(),
-        big_json.len()
+        base_json.len()
     );
     Ok(())
 }

@@ -1,5 +1,4 @@
-//! Operators and pattern binding for the parallel VM, the `Value` twin of
-//! `ops.rs`. Same logic, different value type.
+//! Operators and pattern binding for the VM.
 
 use num_traits::AsPrimitive;
 use std::cmp::Ordering;
@@ -253,8 +252,8 @@ pub(super) fn apply_un(op: UnKind, v: &Value) -> Result<Value> {
     })
 }
 
-/// The parallel-engine twin of the `serde_json` variant check in ops.rs. See the
-/// note there.
+/// Whether a `serde_json::Value` variant pattern like `Value::String(s)`
+/// matches the shape of the value, since decoded json is held as plain values.
 fn json_variant_kind_matches(name: Option<&str>, val: &Value) -> bool {
     matches!(
         (name, val),

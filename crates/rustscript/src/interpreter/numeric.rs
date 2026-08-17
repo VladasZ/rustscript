@@ -6,7 +6,7 @@
 //! Storage convention: a width-tagged value lives in one i64. Signed widths
 //! and unsigned widths up to u32 store the true value. U64 and `USize` store
 //! the raw bits, reinterpreted through `u64` on decode. `I64` never appears
-//! in a tag, a plain i64 stays the engine's untagged integer value.
+//! in a tag, a plain i64 stays the untagged integer value.
 
 use num_traits::AsPrimitive;
 use std::ops::{Add, Div, Mul, Rem, Sub};
@@ -42,7 +42,7 @@ impl IntWidth {
             "i8" => Self::I8,
             "i16" => Self::I16,
             "i32" => Self::I32,
-            // The engines run on 64-bit targets only, so isize is i64.
+            // The interpreter runs on 64-bit targets only, so isize is i64.
             "i64" | "isize" => Self::I64,
             _ => return None,
         })

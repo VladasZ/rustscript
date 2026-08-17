@@ -1,6 +1,6 @@
-//! The `Command`, `Child`, and process output bridge, ported from the fast
-//! engine's `process.rs`. Children and their pipes are native handles, so a
-//! spawned process can be driven from concurrent tasks.
+//! The `Command`, `Child`, and process output bridge. Children and their
+//! pipes are native handles, so a spawned process can be driven from
+//! concurrent tasks.
 
 use std::sync::Arc;
 

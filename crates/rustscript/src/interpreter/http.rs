@@ -3,9 +3,9 @@
 //! `Client`, request builders, and responses, but the network calls return
 //! futures so `.send().await` and `.text().await` drive on the tokio runtime.
 //!
-//! The request and response are modeled as plain structs, exactly like the fast
-//! engine, so a script reads the same either way. Only `.send()`, `.text()`, and
-//! `.json()` yield futures, because those are the awaited points in async code.
+//! The request and response are modeled as plain structs. Only `.send()`,
+//! `.text()`, and `.json()` yield futures, because those are the awaited
+//! points in async code.
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -54,7 +54,7 @@ fn build_blocking_client(
 
 /// A shared client for the `reqwest::blocking::get` free function, so a script
 /// that fires many one-off gets does not spin up a runtime thread per call.
-/// Safe on this engine because script code always runs on blocking threads.
+/// Safe because script code always runs on blocking threads.
 fn default_blocking_client() -> Result<reqwest::blocking::Client> {
     static C: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     if let Some(c) = C.get() {

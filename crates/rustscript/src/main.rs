@@ -93,10 +93,6 @@ fn real_main() -> Result<()> {
     let all: Vec<String> = env::args().skip(1).collect();
     let cmd = all.first().cloned().unwrap_or_default();
     match cmd.as_str() {
-        "run" => {
-            let file = all.get(1).ok_or_else(err_usage)?;
-            run(file, &all[2..])
-        }
         "check" => {
             let file = all.get(1).ok_or_else(err_usage)?;
             let source = fs::read_to_string(file)?;
@@ -272,13 +268,12 @@ fn print_usage() {
         r"rust - run a subset of Rust as a script
 
 usage:
-  rust run FILE.rs     interpret the script
-  rust FILE.rs         same as run
+  rust FILE.rs         interpret the script
   rust -e 'CODE'       run a snippet, arguments after CODE go to it
   rust FILE.rs cmp     compile and run, `cmp` first arg is reserved
   rust build FILE.rs   compile to a native binary, cache it, then run
   rust check FILE.rs   validate with cargo check, does not run
-  rust supported       list every bridged method per receiver and engine
+  rust supported       list every bridged method per receiver
   rust clean           clear the cache
   rust update [VER]    install a prebuilt release, the newest one by default,
                        --from-source builds it with cargo instead

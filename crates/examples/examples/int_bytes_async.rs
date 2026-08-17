@@ -1,5 +1,5 @@
-// Integer byte conversions under `#[tokio::main]`. The two engines answer these from one shared core, and this is what
-// proves the parallel one is wired to it, in both directions and both orders.
+// Integer byte conversions under `#[tokio::main]`, in both directions and
+// both byte orders.
 
 fn hex(bytes: &[u8]) -> String {
     let parts: Vec<String> = bytes.iter().map(|b| format!("{b:02x}")).collect();

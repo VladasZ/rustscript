@@ -1,7 +1,7 @@
-//! Render one PNG per benchmark case and tier, light themed, fixed color per
+//! Render one PNG per benchmark case, light themed, fixed color per
 //! language, linear scale. Each compute case gets three panels, wall-clock,
 //! self timed compute, and peak memory. The startup cases skip the compute
-//! panel. The big tier renders to `<case>_big.png`.
+//! panel.
 //!
 //! Usage: cargo run --release --bin chart
 
@@ -13,7 +13,15 @@ use anyhow::{Context, Result};
 use plotters::coord::Shift;
 use plotters::prelude::*;
 use plotters::style::text_anchor::{HPos, Pos, VPos};
-use rustscript_bench::{CaseResult, Meta, Report};
+use rustscript_bench::{CaseResult, Report};
+
+/// Pixel density. Layout is in logical units and everything is drawn at
+/// double resolution so the PNGs stay sharp on hidpi screens.
+const S: i32 = 2;
+
+fn s(v: i32) -> i32 {
+    v * S
+}
 
 const BG: RGBColor = RGBColor(252, 252, 250);
 const INK: RGBColor = RGBColor(40, 40, 44);
@@ -21,6 +29,16 @@ const MUTED: RGBColor = RGBColor(130, 130, 138);
 const GRID: RGBColor = RGBColor(224, 224, 228);
 
 const LANG_ORDER: [&str; 4] = ["native", "rustscript", "node", "python"];
+
+/// Bar geometry in logical units. Bars are packed 5 units apart and the
+/// panel width follows from the packed group, so there is no dead space.
+const BAR_W: i32 = 52;
+const BAR_GAP: i32 = 5;
+const PANEL_MARGIN: i32 = 16;
+
+fn panel_width(bars: i32) -> i32 {
+    bars * BAR_W + (bars - 1) * BAR_GAP + 2 * PANEL_MARGIN
+}
 
 fn display_name(lang: &str) -> &str {
     match lang {
@@ -62,19 +80,14 @@ fn main() -> Result<()> {
 
     let dir = root.join("bench/results");
     for c in &report.cases {
-        let file = if c.tier == "big" {
-            format!("{}_big.png", c.name)
-        } else {
-            format!("{}.png", c.name)
-        };
-        let out = dir.join(file);
-        render_case(&out, c, &report.meta)?;
+        let out = dir.join(format!("{}.png", c.name));
+        render_case(&out, c)?;
         println!("wrote {}", out.display());
     }
     Ok(())
 }
 
-/// One PNG for one case at one tier.
+/// One PNG for one case.
 /// The panels a case renders: wall-clock, compute-only when self timed, and
 /// peak memory when measured. The time panels share one axis so bar heights
 /// compare directly.
@@ -141,52 +154,43 @@ fn case_panels(c: &CaseResult) -> Vec<Panel> {
     panels
 }
 
-fn render_case(out: &Path, c: &CaseResult, meta: &Meta) -> Result<()> {
+fn render_case(out: &Path, c: &CaseResult) -> Result<()> {
     let panels = case_panels(c);
-    let w = match panels.len() {
-        1 => 620u32,
-        2 => 1080u32,
-        _ => 1500u32,
-    };
-    let h = 560u32;
-    let area = BitMapBackend::new(out, (w, h)).into_drawing_area();
+    let bars = i32::try_from(panels.first().map_or(4, |p| p.bars.len())).expect("bars fit i32");
+    let w = i32::try_from(panels.len()).expect("panel count fits i32") * panel_width(bars);
+    let h = 560i32;
+    let dims = (
+        u32::try_from(s(w)).expect("chart width fits u32"),
+        u32::try_from(s(h)).expect("chart height fits u32"),
+    );
+    let area = BitMapBackend::new(out, dims).into_drawing_area();
     area.fill(&BG)?;
 
-    let title = if c.tier == "big" {
-        format!("{}   10x size", c.name)
-    } else {
-        c.name.clone()
-    };
-    let (head, body) = area.split_vertically(96);
+    let title = c.name.clone();
+    let (head, body) = area.split_vertically(s(120));
     head.draw(&Text::new(
         title,
-        (28, 22),
-        ("sans-serif", 30).into_font().color(&INK),
+        (s(28), s(18)),
+        ("sans-serif", s(30)).into_font().color(&INK),
     ))?;
-    let commit = meta.git_commit.get(..8).unwrap_or(&meta.git_commit);
-    let state = if meta.git_dirty {
-        format!("{commit} DIRTY TREE")
-    } else {
-        commit.to_string()
-    };
     head.draw(&Text::new(
-        format!("same task, byte-identical output. medians. lower is better. {state}"),
-        (30, 62),
-        ("sans-serif", 15).into_font().color(&MUTED),
+        "same task, byte-identical output. medians. lower is better.",
+        (s(30), s(60)),
+        ("sans-serif", s(15)).into_font().color(&MUTED),
     ))?;
-    // Legend, top right.
-    let mut lx = i32::try_from(w).expect("chart width fits i32") - 470;
+    // Legend, its own header row so it fits the narrow images.
+    let mut lx = 30;
     for lang in LANG_ORDER {
         head.draw(&Rectangle::new(
-            [(lx, 20), (lx + 18, 36)],
+            [(s(lx), s(88)), (s(lx + 14), s(102))],
             color_for(lang).filled(),
         ))?;
         head.draw(&Text::new(
             display_name(lang),
-            (lx + 24, 22),
-            ("sans-serif", 14).into_font().color(&INK),
+            (s(lx + 20), s(88)),
+            ("sans-serif", s(13)).into_font().color(&INK),
         ))?;
-        lx += 118;
+        lx += 100;
     }
 
     let cols = body.split_evenly((1, panels.len()));
@@ -205,55 +209,57 @@ where
 {
     let de = |e: DrawingAreaErrorKind<<DB as DrawingBackend>::ErrorType>| anyhow::anyhow!("{e:?}");
     let (w, h) = area.dim_in_pixel();
-    let w = i32::try_from(w).expect("chart width fits i32");
-    let h = i32::try_from(h).expect("chart height fits i32");
-    let (left, right, top, bottom) = (24i32, 24i32, 46i32, 34i32);
-    let plot_l = left;
-    let plot_r = w - right;
+    let w = i32::try_from(w).expect("chart width fits i32") / S;
+    let h = i32::try_from(h).expect("chart height fits i32") / S;
+    let (top, bottom) = (46i32, 34i32);
+    let plot_l = PANEL_MARGIN;
+    let plot_r = w - PANEL_MARGIN;
     let plot_t = top;
     let plot_b = h - bottom;
-    let plot_w = plot_r - plot_l;
     let plot_h = plot_b - plot_t;
 
     area.draw(&Text::new(
         p.title.clone(),
-        (left, 16),
-        ("sans-serif", 16).into_font().color(&INK),
+        (s(plot_l), s(16)),
+        ("sans-serif", s(16)).into_font().color(&INK),
     ))
     .map_err(de)?;
     area.draw(&PathElement::new(
-        vec![(plot_l, plot_b), (plot_r, plot_b)],
-        GRID.stroke_width(1),
+        vec![(s(plot_l), s(plot_b)), (s(plot_r), s(plot_b))],
+        GRID.stroke_width(u32::try_from(S).expect("scale fits u32")),
     ))
     .map_err(de)?;
 
-    if p.bars.is_empty() {
-        return Ok(());
-    }
-    let n = i32::try_from(p.bars.len()).expect("bar count fits i32");
-    let slot = plot_w / n;
-    let bw = slot / 2;
     for (i, (label, value, color)) in p.bars.iter().enumerate() {
-        let cx = plot_l + slot * i32::try_from(i).expect("bar count fits i32") + slot / 2;
+        let x0 = plot_l + (BAR_W + BAR_GAP) * i32::try_from(i).expect("bar count fits i32");
+        let x1 = x0 + BAR_W;
         let bh = AsPrimitive::<i32>::as_(((value / p.axis_hi) * f64::from(plot_h)).round());
-        let x0 = cx - bw / 2;
-        let x1 = cx + bw / 2;
         let y0 = plot_b - bh.max(1);
-        area.draw(&Rectangle::new([(x0, y0), (x1, plot_b)], color.filled()))
-            .map_err(de)?;
+        area.draw(&Rectangle::new(
+            [(s(x0), s(y0)), (s(x1), s(plot_b))],
+            color.filled(),
+        ))
+        .map_err(de)?;
         area.draw(&Text::new(
             (p.fmt)(*value),
-            (cx, y0 - 16),
-            ("sans-serif", 14)
+            (s(x0 + BAR_W / 2), s(y0 - 16)),
+            ("sans-serif", s(13))
                 .into_font()
                 .color(&INK)
                 .pos(Pos::new(HPos::Center, VPos::Top)),
         ))
         .map_err(de)?;
+        // "native" instead of "native rust", the packed bars leave no room
+        // for the long form and the legend spells it out.
+        let short = if label == "native rust" {
+            "native"
+        } else {
+            label
+        };
         area.draw(&Text::new(
-            label.clone(),
-            (cx, plot_b + 8),
-            ("sans-serif", 14)
+            short.to_string(),
+            (s(x0 + BAR_W / 2), s(plot_b + 8)),
+            ("sans-serif", s(12))
                 .into_font()
                 .color(&MUTED)
                 .pos(Pos::new(HPos::Center, VPos::Top)),

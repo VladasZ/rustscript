@@ -11,7 +11,7 @@ Install only, then use `rust` from any later step in the job.
 steps:
   - uses: actions/checkout@v5
   - uses: VladasZ/rustscript@v0.2
-  - run: rust run tools/report.rs
+  - run: rust tools/report.rs
 ```
 
 Install and run in one step.

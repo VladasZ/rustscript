@@ -9,9 +9,7 @@ use super::typeir::{CastIr, TypeIr};
 
 pub type Reg = u16;
 
-/// A literal constant baked into a chunk, value model neutral so both the fast
-/// `Rc` engine and the parallel `Arc` engine share the same compiler output.
-/// Each engine materializes a `Const` into its own value type when a
+/// A literal constant baked into a chunk, materialized into a value when a
 /// `LoadConst` runs.
 /// Only literals that need a side table land here. Integers, booleans, and unit
 /// are emitted as their own inline load ops, so they are not `Const` variants.
@@ -796,13 +794,13 @@ pub enum Op {
     },
 
     /// Spawn child closure `child` as a tokio task, writing a `JoinHandle` into
-    /// `dst`. Emitted only for `#[tokio::main]` scripts, run by the parallel VM.
+    /// `dst`. Emitted only for `#[tokio::main]` scripts.
     Spawn {
         dst: Reg,
         child: u16,
     },
     /// Await the future or `JoinHandle` in `src`, writing its result into `dst`.
-    /// Parallel VM only.
+    /// Emitted only for `#[tokio::main]` scripts.
     Await {
         dst: Reg,
         src: Reg,

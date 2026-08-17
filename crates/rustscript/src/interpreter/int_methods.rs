@@ -16,8 +16,7 @@ use anyhow::{Result, bail};
 
 use super::numeric::IntWidth;
 
-/// What an integer method produced. Each engine materializes it into its own
-/// value type.
+/// What an integer method produced, materialized into a value by the caller.
 pub enum IntOut {
     /// A value in the receiver's own width.
     Same(i128),
@@ -189,8 +188,8 @@ fn count_arg(args: &[i128], index: usize) -> Result<u32> {
 /// Answer an integer method in its real width, or `None` when the name is not
 /// one of these so the caller falls through to its own dispatch.
 /// Methods whose argument is a `u32` amount of its own rather than a value of
-/// the receiver's type, so an engine must not unify the receiver's width with
-/// the argument's.
+/// the receiver's type, so the dispatch must not unify the receiver's width
+/// with the argument's.
 pub fn takes_amount_arg(name: &str) -> bool {
     matches!(
         name,

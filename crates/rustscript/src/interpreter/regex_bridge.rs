@@ -1,6 +1,6 @@
-//! The `Regex`, `Match` and `Captures` bridge. Mirrors
-//! `regex_bridge.rs` on the `Send + Sync` value model, so a `#[tokio::main]`
-//! script can compile a pattern once and match from concurrent tasks.
+//! The `Regex`, `Match` and `Captures` bridge on the `Send + Sync` value
+//! model, so a `#[tokio::main]` script can compile a pattern once and match
+//! from concurrent tasks.
 
 use std::sync::Arc;
 
@@ -89,8 +89,8 @@ enum Kind {
 
 fn regex_method(regex: &RegexValue, method: &str, args: &[Value]) -> Result<Value> {
     let source = text_arg(args, 0);
-    // The iterator forms are lazy walks over the source, engine specific by
-    // design, so they stay out of the shared core.
+    // The iterator forms are lazy walks over the source, so they stay out of
+    // the shared core.
     match method {
         "find_iter" => return Ok(super::iterator::regex_find(regex.clone(), source)),
         "captures_iter" => return Ok(super::iterator::regex_captures(regex.clone(), source)),

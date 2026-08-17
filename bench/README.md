@@ -22,9 +22,9 @@ in `results.json`. Timed stdout always goes to `/dev/null`, so wall and compute
 runs see the same output destination. Samples run round-robin with a rotating
 language order to spread temperature and background-system drift.
 
-The default is three warmups, ten wall samples, and ten compute/memory samples
-for every case and tier. `--quick` uses three samples per track. `--samples N`
-sets both sample counts explicitly.
+The default is one warmup, five wall samples, and five compute/memory samples
+for every case. `--quick` uses three samples per track. `--samples N` sets
+both sample counts explicitly.
 
 ## Runtime behavior
 
@@ -33,7 +33,8 @@ not receive an opt-in persistent compile cache. The harness builds and invokes
 the workspace's `target/release/rust` directly rather than trusting a `rust`
 binary from `PATH`.
 
-Script validation is not part of `rust run`, so it is reported separately. The
+Script validation is not part of an interpreted run, so it is reported
+separately. The
 suite records only an unchanged-script warm `rust check` cache hit. Priming and
 measurement use an isolated temporary cache and never touch the user's
 `~/.cache/rustscript`.
@@ -77,20 +78,18 @@ competent user would write, not equal VM instruction streams.
   with JSON responses.
 - `automation`: a mixed config, file, regex, map, sort, and JSON-report script.
 
-Every compute case has a base tier and a 10x-work tier. The exact arguments and
-fixture hashes are recorded in the report.
+The exact arguments and fixture hashes are recorded in the report.
 
 ## Fixtures and provenance
 
 `gendata` recreates all deterministic inputs and generated sources before every
-run. Committed base fixtures stay synchronized with the generator. Large inputs,
-temporary outputs, the HTTP server, and the check cache live under an isolated
-temporary benchmark directory.
+run. Committed fixtures stay synchronized with the generator. Temporary
+outputs, the HTTP server, and the check cache live under an isolated temporary
+benchmark directory.
 
 `results.json` records the Git commit and dirty state, RustScript binary hash,
 benchmark-source hash, fixture hashes, tool versions, machine information,
-settings, and all raw measurements. Charts include the commit and a visible
-dirty-tree label when applicable.
+settings, and all raw measurements.
 
 ## Running
 

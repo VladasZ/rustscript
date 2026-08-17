@@ -163,4 +163,10 @@ runs:
         if [ -n "$ARGS" ]; then
           read -ra extra <<< "$ARGS"
         fi
-        rust "$MODE" "$SCRIPT" ${extra[@]+"${extra[@]}"}
+        # Interpreting is the bare form, `rust FILE.rs`, there is no run
+        # subcommand.
+        if [ "$MODE" = run ]; then
+          rust "$SCRIPT" ${extra[@]+"${extra[@]}"}
+        else
+          rust "$MODE" "$SCRIPT" ${extra[@]+"${extra[@]}"}
+        fi

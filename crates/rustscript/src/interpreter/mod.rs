@@ -97,10 +97,9 @@ pub(crate) fn script_args() -> Vec<String> {
     SCRIPT_ARGS.get().cloned().unwrap_or_default()
 }
 
-/// Run a program. Every script runs on the one engine, a multi thread tokio
-/// runtime whose values are backed by `Arc`. `async_mode` marks the script as
-/// `#[tokio::main]`, which is what allows `.await`, `tokio::spawn`, and
-/// `join!` to compile.
+/// Run a program on a multi thread tokio runtime. `async_mode` marks the
+/// script as `#[tokio::main]`, which is what allows `.await`, `tokio::spawn`,
+/// and `join!` to compile.
 pub fn run(modules: &[ModuleSrc], async_mode: bool) -> Result<()> {
     let interp = Interp::load(modules, async_mode)?;
     interp.run()
