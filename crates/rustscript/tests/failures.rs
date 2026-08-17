@@ -211,6 +211,15 @@ fn integer_overflow_panics_like_rust() {
     );
 }
 
+/// The scalar while plan runs this loop unboxed until the multiplication
+/// overflows, then the generic path re-runs the failing iteration and must
+/// panic with the exact debug Rust message.
+#[test]
+fn while_plan_overflow_panics_like_rust() {
+    let src = "fn main() {\n    let mut n: i64 = 3;\n    let mut rounds: i64 = 0;\n    while n != 0 {\n        n *= 3;\n        rounds += 1;\n    }\n    println!(\"{rounds}\");\n}\n";
+    assert_parity(src, 101, "attempt to multiply with overflow");
+}
+
 #[test]
 fn process_exit_code_passes_through_alike() {
     assert_parity("fn main() {\n    std::process::exit(3);\n}\n", 3, "");

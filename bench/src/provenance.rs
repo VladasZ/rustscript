@@ -47,6 +47,8 @@ pub fn gather(
         } else {
             command_line(root, "uname", &["-p"])
         },
+        cpu_cores: std::thread::available_parallelism()
+            .map_or(0, |n| u32::try_from(n.get()).expect("core count fits u32")),
         settings,
     })
 }

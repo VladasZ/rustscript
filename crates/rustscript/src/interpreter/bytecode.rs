@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU8;
 
 use parking_lot::Mutex;
 
@@ -1039,6 +1040,15 @@ pub struct Chunk {
     /// records a loop that was analyzed and does not qualify, so the attempt
     /// happens once per loop.
     pub loop_plans: Mutex<HashMap<usize, Option<Arc<super::scalar_loop::LoopPlan>>>>,
+    /// Scalar plans for the backward-jump loops in this chunk, `while` and
+    /// `loop`, keyed by the index of each closing `Jump` op and built lazily
+    /// on the jump's first execution.
+    pub while_plans: Mutex<HashMap<usize, Arc<super::scalar_loop::WhilePlan>>>,
+    /// One flag per op, nonzero when the while plan keyed by that op index
+    /// was analyzed and does not qualify. A rejected loop's backward jump
+    /// runs per iteration, so the answer has to cost an atomic load, not
+    /// the mutex probe of the plan map.
+    pub while_rejected: Vec<AtomicU8>,
 }
 
 impl Chunk {
@@ -1069,6 +1079,8 @@ impl Chunk {
             call_type_args: Vec::new(),
             path_forwarder: false,
             loop_plans: Mutex::new(HashMap::new()),
+            while_plans: Mutex::new(HashMap::new()),
+            while_rejected: Vec::new(),
         }
     }
 }

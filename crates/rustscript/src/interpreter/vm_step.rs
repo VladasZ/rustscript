@@ -8,6 +8,7 @@ use std::iter::repeat_n;
 use std::mem::take;
 use std::slice::from_ref;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use anyhow::{Result, anyhow, bail};
 use num_traits::AsPrimitive;
@@ -430,12 +431,38 @@ fn branch(jump: bool, to: u32) -> Flow {
 }
 
 /// A backward jump closes a loop iteration, the moment to run a pending
-/// Ctrl-C handler.
-fn jump(ctx: &StepCtx, to: usize) -> Result<Flow> {
+/// Ctrl-C handler, and the moment the scalar while plan takes over the whole
+/// loop when its ops qualify, see `scalar_loop.rs`. A rejected loop's jump
+/// runs per iteration, so its whole cost here is the one atomic load.
+fn jump(ctx: &mut StepCtx, to: usize) -> Result<Flow> {
     if to <= ctx.ip {
         ctx.vm.run_pending_ctrlc()?;
+        if ctx
+            .cur
+            .while_rejected
+            .get(ctx.ip)
+            .is_some_and(|rejected| rejected.load(Ordering::Relaxed) == 0)
+            && let Some(flow) = loop_plan_jump(ctx, to)?
+        {
+            return Ok(flow);
+        }
     }
     Ok(Flow::Jump(to))
+}
+
+/// The not-yet-rejected side of a backward jump, out of the hot path: mark a
+/// `for` body's back jump rejected on first sight, the `for` plan already
+/// owns that loop, or hand the loop to the while plan. Cold because it runs
+/// once per loop entry, not per iteration.
+#[cold]
+fn loop_plan_jump(ctx: &mut StepCtx, to: usize) -> Result<Option<Flow>> {
+    if matches!(ctx.cur.code.get(to), Some(Op::ForNext { .. })) {
+        if let Some(rejected) = ctx.cur.while_rejected.get(ctx.ip) {
+            rejected.store(1, Ordering::Relaxed);
+        }
+        return Ok(None);
+    }
+    super::scalar_loop::try_run_while(ctx, to)
 }
 
 fn load_cell(ctx: &mut StepCtx, dst: u16, cell: u16) -> Result<Flow> {

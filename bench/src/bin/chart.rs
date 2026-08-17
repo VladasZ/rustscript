@@ -1,4 +1,4 @@
-//! Render one PNG per benchmark case, light themed, fixed color per
+//! Render one PNG per benchmark case, dark themed, fixed color per
 //! language, linear scale. Each compute case gets three panels, wall-clock,
 //! self timed compute, and peak memory. The startup cases skip the compute
 //! panel.
@@ -23,10 +23,10 @@ fn s(v: i32) -> i32 {
     v * S
 }
 
-const BG: RGBColor = RGBColor(252, 252, 250);
-const INK: RGBColor = RGBColor(40, 40, 44);
-const MUTED: RGBColor = RGBColor(130, 130, 138);
-const GRID: RGBColor = RGBColor(224, 224, 228);
+const BG: RGBColor = RGBColor(24, 25, 28);
+const INK: RGBColor = RGBColor(230, 230, 235);
+const MUTED: RGBColor = RGBColor(148, 150, 158);
+const GRID: RGBColor = RGBColor(62, 64, 70);
 
 const LANG_ORDER: [&str; 4] = ["native", "rustscript", "node", "python"];
 
@@ -178,11 +178,17 @@ fn case_panels(c: &CaseResult) -> Vec<Panel> {
     panels
 }
 
-/// The runtime versions stamped on every chart, "node v26.7.0  python 3.14.7".
-/// `meta.python` is the full `--version` line, its last word is the number.
+/// The processor and runtime versions stamped on every chart,
+/// "Apple M1 Pro 10 cores  node v26.7.0  python 3.14.7". `meta.python` is
+/// the full `--version` line, its last word is the number. Results recorded
+/// before the core count existed carry a zero, which stays off the label.
 fn versions_label(meta: &Meta) -> String {
     let python = meta.python.split_whitespace().last().unwrap_or("?");
-    format!("node {}  python {}", meta.node, python)
+    let cores = match meta.cpu_cores {
+        0 => String::new(),
+        n => format!(" {n} cores"),
+    };
+    format!("{}{cores}  node {}  python {}", meta.cpu, meta.node, python)
 }
 
 fn render_case(out: &Path, c: &CaseResult, meta: &Meta) -> Result<()> {

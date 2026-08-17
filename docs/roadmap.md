@@ -12,52 +12,58 @@ and Python.
 - The target. Faster than both rivals on wall clock.
 
 Numbers are wall-clock medians from the committed
-`bench/results/results.json`, one run on an Apple M1 Pro, 2026-08-17, with
-the scalar loop specialization included, Node v26.7.0, Python 3.14.7. Re-run
-the suite and update this file when the gaps change.
+`bench/results/results.json`, one run on an Apple M1 Pro, 2026-08-18, with
+the scalar while loop specialization included, Node v26.7.0, Python 3.14.7.
+Re-run the suite and update this file when the gaps change.
 
 ## Below the floor
 
-Nine cases where RustScript is the slowest of the three, worst first. Gap is
-the RustScript median divided by the slowest rival's median. The compute gap
-column shows the same ratio on the compute-only track, which tells how much
-of the loss is raw interpreter speed rather than startup.
+Eight cases where RustScript is the slowest of the three, worst first. Gap
+is the RustScript median divided by the slowest rival's median. The compute
+gap column shows the same ratio on the compute-only track, which tells how
+much of the loss is raw interpreter speed rather than startup.
 
 | case        | wall gap | rustscript | slowest rival | compute gap |
 | ----------- | -------- | ---------- | ------------- | ----------- |
-| collatz     | 2.1x     | 189 ms     | python 88 ms  | 3.0x        |
-| regex       | 1.7x     | 178 ms     | python 102 ms | 2.2x        |
-| nbody       | 1.6x     | 230 ms     | python 141 ms | 2.0x        |
-| fib         | 1.6x     | 98 ms      | node 63 ms    | 3.6x        |
-| automation  | 1.4x     | 146 ms     | python 103 ms | 1.8x        |
-| json        | 1.3x     | 167 ms     | python 129 ms | 1.8x        |
-| sieve       | 1.3x     | 90 ms      | python 71 ms  | 2.0x        |
-| mandelbrot  | 1.2x     | 224 ms     | python 184 ms | 1.4x        |
-| hashmap_int | 1.2x     | 97 ms      | node 83 ms    | 1.7x        |
+| regex       | 1.7x     | 179 ms     | python 106 ms | 2.3x        |
+| fib         | 1.6x     | 99 ms      | node 63 ms    | 3.6x        |
+| nbody       | 1.6x     | 232 ms     | python 142 ms | 2.0x        |
+| automation  | 1.4x     | 153 ms     | python 107 ms | 1.9x        |
+| sieve       | 1.3x     | 92 ms      | python 72 ms  | 1.8x        |
+| hashmap_int | 1.3x     | 107 ms     | node 85 ms    | 1.9x        |
+| json        | 1.3x     | 169 ms     | python 133 ms | 1.9x        |
+| mandelbrot  | 1.2x     | 227 ms     | python 193 ms | 1.4x        |
 
 ## On the floor, short of the target
 
-Three cases where RustScript beats the slowest rival but not both. Gap is
-against the fastest rival. `binary_trees` sits on the line, it trades places
-with Python between runs.
+Two cases where RustScript beats the slowest rival but not both. Gap is
+against the fastest rival.
 
 | case         | gap to fastest | rustscript | fastest rival |
 | ------------ | -------------- | ---------- | ------------- |
-| word_count   | 1.5x           | 91 ms      | python 60 ms  |
-| higher_order | 1.2x           | 72 ms      | python 59 ms  |
-| binary_trees | 1.0x           | 31 ms      | python 30 ms  |
+| word_count   | 1.5x           | 94 ms      | python 61 ms  |
+| higher_order | 1.2x           | 68 ms      | python 56 ms  |
 
 ## At the target
 
-Twelve cases beat both rivals on wall clock. All three startup cases,
-`string_builder`, both sort cases, `json_serialize`, `stdout_lines`,
-`file_transform`, `process_spawn`, `async_tasks`, and `http_local`.
+Fourteen cases beat both rivals on wall clock. All three startup cases,
+`collatz`, `string_builder`, both sort cases, `json_serialize`,
+`stdout_lines`, `file_transform`, `process_spawn`, `async_tasks`,
+`http_local`, and `binary_trees`, which sits on the line and trades places
+with Python between runs.
 
 `file_transform` got here through the scalar loop specialization in
 `interpreter/scalar_loop.rs`. Its byte checksum loop, one dispatched
 iteration per byte before, now runs unboxed inside one `ForNext` dispatch,
 which took the case from 126 ms wall, the slowest of the three, to 37 ms,
 ahead of both rivals.
+
+`collatz` got here through the scalar while loop specialization in the same
+module, the whole `while` region including the condition and the
+`is_multiple_of` call runs unboxed inside one dispatch. It was the worst
+case on this list at 2.1x and 189 ms, now 52 ms, ahead of both rivals. The
+same plan also cut `mandelbrot`'s compute by about a tenth through the
+integer part of its escape loop.
 
 ## Why the failing cases lose
 
@@ -71,13 +77,14 @@ compute loss grows past the lead.
 
 The work, grouped:
 
-- Integer and float loops, `collatz`, `sieve`, `nbody`, `mandelbrot`, `fib`,
-  `higher_order`. The scalar loop plan already runs int-only `for` bodies
-  over bytes and ranges unboxed, which is what fixed `file_transform`. The
-  losses left in this group are the shapes it does not cover yet: `while`
-  loops, a function call per iteration, vec indexing inside the body, float
-  arithmetic, and closure-driven adaptor chains. Extending the plan to those
-  shapes is the direction.
+- Integer and float loops, `sieve`, `nbody`, `mandelbrot`, `fib`,
+  `higher_order`. The scalar plans already run int-only `for`, `while`, and
+  `loop` bodies unboxed, which is what fixed `file_transform` and `collatz`.
+  The losses left in this group are the shapes the plans do not cover yet:
+  vec indexing inside the body, which blocks `sieve` and `mandelbrot`, a
+  function call per iteration, which blocks `fib`, float arithmetic, which
+  blocks `nbody` and the rest of `mandelbrot`, and closure-driven adaptor
+  chains. Extending the plans to those shapes is the direction.
 - Per-line and per-token string work, `word_count`, `regex`, `automation`.
   The regex engine itself is the native `regex` crate, the cost is the
   interpreted loop around it that touches every line.

@@ -136,6 +136,11 @@ impl FnState {
     }
 
     fn into_chunk(self, file: std::sync::Arc<str>) -> Chunk {
+        let while_rejected = self
+            .code
+            .iter()
+            .map(|_| std::sync::atomic::AtomicU8::new(0))
+            .collect();
         Chunk {
             code: self.code,
             lines: self.lines,
@@ -162,6 +167,8 @@ impl FnState {
             call_type_args: self.call_type_args,
             path_forwarder: false,
             loop_plans: Mutex::new(HashMap::new()),
+            while_plans: Mutex::new(HashMap::new()),
+            while_rejected,
         }
     }
 }

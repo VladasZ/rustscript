@@ -76,6 +76,16 @@ runtime surprise rebuilds the registers to the start of the failing
 iteration and hands that exact item to the generic loop, so a fallback is
 invisible, panic line included.
 
+Int-only `while` and `loop` loops specialize too. The backward jump that
+closes such a loop marks a region whose only exits are the jump back to the
+head and the jumps to the op right after it, so the whole region, condition
+included, runs as the same kind of plan inside one dispatch. Pure integer
+methods, `is_multiple_of`, `min`, `max`, `clamp`, the `saturating` and
+`wrapping` families and the bit counts, run inside plans through the same
+width-aware method table the generic dispatch uses. A loop that does not
+qualify records that in one atomic flag per op, so its backward jump costs
+one load per iteration and nothing else.
+
 ## No second type system
 
 The interpreter does not type check. `rustc` stays responsible for type,

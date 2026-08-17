@@ -1,4 +1,4 @@
-//! Scalar loop specialization for `for` bodies.
+//! Scalar loop specialization for `for` bodies and backward-jump loops.
 //!
 //! A `for` loop over a string's bytes or an integer range pays the full VM
 //! machinery per item: the iterator lock, a boxed `Value` per element, and
@@ -6,6 +6,11 @@
 //! booleans does not need any of that. This module translates such a body
 //! once per loop into a small plan over unboxed scalar registers and runs
 //! the whole loop inside one `ForNext` dispatch.
+//!
+//! A `while` or `loop` loop is the same story without an item source. Its
+//! backward jump closes a region whose only ways out are the jump back to
+//! the head and the jumps to the op after it, so the whole region runs as a
+//! plan inside one `Jump` dispatch, condition included.
 //!
 //! The subset is strict on purpose, and every runtime surprise falls back to
 //! the generic path with identical semantics. Register values are loaded at
@@ -18,6 +23,7 @@
 //! generic path panics on.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::Result;
 
@@ -26,7 +32,7 @@ use super::iterator::IteratorState;
 use super::native::Native;
 use super::numeric::IntWidth;
 use super::scalar_reads::chunk_reads;
-use super::scalar_val::{SVal, s_bin, s_cast, s_cmp, s_un, truthy};
+use super::scalar_val::{SVal, s_bin, s_cast, s_cmp, s_int_method, s_un, truthy};
 use super::typeir::CastIr;
 use super::value::Value;
 use super::vm_step::{Flow, StepCtx};
@@ -42,6 +48,25 @@ const MAX_BODY_STEPS: u32 = 65_536;
 
 /// Register cap per plan, bounding the entry load and writeback cost.
 const MAX_SLOTS: usize = 64;
+
+/// Backward jumps between Ctrl-C polls in a while plan. Unlike the `for`
+/// plan it holds no iterator lock, so it polls mid-run instead of failing
+/// the iteration over to the generic path.
+const WHILE_POLL: u32 = 65_536;
+
+/// Completed iterations between register snapshots in a while plan,
+/// bounding the replay a failure needs.
+const WHILE_SNAPSHOT: u32 = 4096;
+
+/// Zero-progress failures before a while plan stops being retried. A loop
+/// whose entry state never reads as scalars would otherwise pay the load
+/// and writeback on every backward jump.
+const MAX_ZERO_FAILS: u32 = 32;
+
+/// The plan slot sentinel for a discarded result, and the `val_slot` of a
+/// while plan, which has no item register. No real slot reaches it, the
+/// slot cap is far lower.
+const NO_SLOT: u16 = u16::MAX;
 
 /// A jump target inside the plan. `Next` is the loop head, one finished
 /// iteration, and `Exit` is the op after the loop, a `break` or exhaustion.
@@ -119,6 +144,50 @@ enum LOp {
         src: u16,
         w: IntWidth,
     },
+    /// A whitelisted integer method, `n.is_multiple_of(2)` for one. `dst` is
+    /// `NO_SLOT` when the compiler discarded the result.
+    IntMethod {
+        dst: u16,
+        recv: u16,
+        args: [u16; 2],
+        argc: u8,
+        name: Box<str>,
+    },
+}
+
+/// Integer methods a plan may run: pure, scalar in and out, and answered by
+/// `int_method` for every integer receiver, so the plan call and the generic
+/// call hit the same table. Names the table rejects at runtime, `abs` on an
+/// unsigned width for one, fail the iteration over to the generic path.
+fn scalar_int_method(name: &str) -> bool {
+    matches!(
+        name,
+        "is_multiple_of"
+            | "min"
+            | "max"
+            | "clamp"
+            | "abs"
+            | "signum"
+            | "pow"
+            | "isqrt"
+            | "div_euclid"
+            | "rem_euclid"
+            | "saturating_add"
+            | "saturating_sub"
+            | "saturating_mul"
+            | "wrapping_add"
+            | "wrapping_sub"
+            | "wrapping_mul"
+            | "wrapping_neg"
+            | "count_ones"
+            | "count_zeros"
+            | "leading_zeros"
+            | "trailing_zeros"
+            | "rotate_left"
+            | "rotate_right"
+            | "swap_bytes"
+            | "reverse_bits"
+    )
 }
 
 pub struct LoopPlan {
@@ -144,14 +213,17 @@ fn slot(regs: &mut Vec<u16>, r: u16) -> Option<u16> {
     u16::try_from(regs.len() - 1).ok()
 }
 
-fn target(head: usize, exit: usize, t: u32) -> Option<LTo> {
+/// Map a chunk jump target into the plan whose translated ops start at
+/// `body`. The `for` plan's body starts one past its `ForNext` head, the
+/// while plan's at the head itself.
+fn target(head: usize, body: usize, exit: usize, t: u32) -> Option<LTo> {
     let t = t as usize;
     if t == head {
         Some(LTo::Next)
     } else if t == exit {
         Some(LTo::Exit)
-    } else if t > head && t < exit {
-        u32::try_from(t - head - 1).ok().map(LTo::Op)
+    } else if t >= body && t < exit {
+        u32::try_from(t - body).ok().map(LTo::Op)
     } else {
         None
     }
@@ -159,7 +231,14 @@ fn target(head: usize, exit: usize, t: u32) -> Option<LTo> {
 
 /// Translate one bytecode op, or answer None when it falls outside the
 /// subset, which rejects the whole loop.
-fn translate(chunk: &Chunk, head: usize, exit: usize, regs: &mut Vec<u16>, op: &Op) -> Option<LOp> {
+fn translate(
+    chunk: &Chunk,
+    head: usize,
+    body: usize,
+    exit: usize,
+    regs: &mut Vec<u16>,
+    op: &Op,
+) -> Option<LOp> {
     Some(match op {
         Op::LoadUnit { dst } => LOp::LoadUnit {
             dst: slot(regs, *dst)?,
@@ -199,27 +278,27 @@ fn translate(chunk: &Chunk, head: usize, exit: usize, regs: &mut Vec<u16>, op: &
             op: *op,
         },
         Op::Jump { to } => LOp::Jump {
-            to: target(head, exit, *to)?,
+            to: target(head, body, exit, *to)?,
         },
         Op::JumpIfFalse { cond, to } => LOp::JumpIfFalse {
             cond: slot(regs, *cond)?,
-            to: target(head, exit, *to)?,
+            to: target(head, body, exit, *to)?,
         },
         Op::JumpIfTrue { cond, to } => LOp::JumpIfTrue {
             cond: slot(regs, *cond)?,
-            to: target(head, exit, *to)?,
+            to: target(head, body, exit, *to)?,
         },
         Op::CmpJump { a, b, op, to } => LOp::CmpJump {
             a: slot(regs, *a)?,
             b: slot(regs, *b)?,
             op: *op,
-            to: target(head, exit, *to)?,
+            to: target(head, body, exit, *to)?,
         },
         Op::CmpJumpImm { a, imm, op, to } => LOp::CmpJumpImm {
             a: slot(regs, *a)?,
             imm: *imm,
             op: *op,
-            to: target(head, exit, *to)?,
+            to: target(head, body, exit, *to)?,
         },
         Op::Cast { dst, src, ty } => match chunk.casts[*ty as usize] {
             CastIr::Int(w) if !w.is_big() => LOp::Cast {
@@ -229,11 +308,39 @@ fn translate(chunk: &Chunk, head: usize, exit: usize, regs: &mut Vec<u16>, op: &
             },
             _ => return None,
         },
+        Op::Method {
+            dst,
+            recv,
+            name,
+            base,
+            argc,
+        } => {
+            let method = &chunk.names[*name as usize];
+            if !scalar_int_method(&method.text) || method.scalar.is_some() || *argc > 2 {
+                return None;
+            }
+            let mut args = [0u16; 2];
+            for (arg, reg) in args.iter_mut().zip(*base..base.saturating_add(*argc)) {
+                *arg = slot(regs, reg)?;
+            }
+            LOp::IntMethod {
+                dst: if *dst == u16::MAX {
+                    NO_SLOT
+                } else {
+                    slot(regs, *dst)?
+                },
+                recv: slot(regs, *recv)?,
+                args,
+                argc: u8::try_from(*argc).ok()?,
+                name: method.text.clone().into_boxed_str(),
+            }
+        }
         _ => return None,
     })
 }
 
-/// The one slot an op writes, for the move-folding pass. Jumps write none.
+/// The one slot an op writes, for the move-folding pass. Jumps write none,
+/// and neither does a method whose result the compiler discarded.
 fn op_write(op: &LOp) -> Option<u16> {
     match op {
         LOp::LoadUnit { dst }
@@ -245,6 +352,7 @@ fn op_write(op: &LOp) -> Option<u16> {
         | LOp::BinImm { dst, .. }
         | LOp::Un { dst, .. }
         | LOp::Cast { dst, .. } => Some(*dst),
+        LOp::IntMethod { dst, .. } if *dst != NO_SLOT => Some(*dst),
         _ => None,
     }
 }
@@ -259,6 +367,14 @@ fn op_reads(op: &LOp, mut read: impl FnMut(u16)) {
         }
         LOp::BinImm { a, .. } | LOp::CmpJumpImm { a, .. } => read(*a),
         LOp::JumpIfFalse { cond, .. } | LOp::JumpIfTrue { cond, .. } => read(*cond),
+        LOp::IntMethod {
+            recv, args, argc, ..
+        } => {
+            read(*recv);
+            for arg in &args[..usize::from(*argc)] {
+                read(*arg);
+            }
+        }
         LOp::LoadUnit { .. }
         | LOp::LoadInt { .. }
         | LOp::LoadIntW { .. }
@@ -278,7 +394,8 @@ fn set_write(op: &mut LOp, to: u16) {
         | LOp::Bin { dst, .. }
         | LOp::BinImm { dst, .. }
         | LOp::Un { dst, .. }
-        | LOp::Cast { dst, .. } => *dst = to,
+        | LOp::Cast { dst, .. }
+        | LOp::IntMethod { dst, .. } => *dst = to,
         _ => unreachable!("only value ops fold"),
     }
 }
@@ -395,7 +512,7 @@ fn build(chunk: &Chunk, head: usize) -> Option<LoopPlan> {
     let val_slot = slot(&mut regs, *val)?;
     let mut ops = chunk.code[head + 1..exit]
         .iter()
-        .map(|op| translate(chunk, head, exit, &mut regs, op))
+        .map(|op| translate(chunk, head, head + 1, exit, &mut regs, op))
         .collect::<Option<Vec<_>>>()?;
     fold_moves(&mut ops, val_slot, &chunk_reads(chunk), &regs);
     let straight = ops.iter().enumerate().all(|(i, op)| match op {
@@ -495,6 +612,25 @@ fn eval_op(op: &LOp, regs: &mut [SVal]) -> OpOut {
             Some(v) => regs[usize::from(*dst)] = v,
             None => return OpOut::Fail,
         },
+        LOp::IntMethod {
+            dst,
+            recv,
+            args,
+            argc,
+            name,
+        } => {
+            // Unused arg entries are slot zero, which exists whenever a
+            // method op does, the receiver holds a slot itself.
+            let vals = [regs[usize::from(args[0])], regs[usize::from(args[1])]];
+            match s_int_method(name, regs[usize::from(*recv)], &vals[..usize::from(*argc)]) {
+                Some(v) => {
+                    if *dst != NO_SLOT {
+                        regs[usize::from(*dst)] = v;
+                    }
+                }
+                None => return OpOut::Fail,
+            }
+        }
     }
     OpOut::Fall
 }
@@ -671,8 +807,8 @@ fn usize_i64(v: usize) -> i64 {
     i64::try_from(v).unwrap_or(i64::MAX)
 }
 
-fn write_back(ctx: &mut StepCtx, plan: &LoopPlan, regs: &[SVal], idx: u16, consumed: i64) {
-    for (slot, &reg) in plan.regs.iter().enumerate() {
+fn write_regs(ctx: &mut StepCtx, plan_regs: &[u16], regs: &[SVal]) {
+    for (slot, &reg) in plan_regs.iter().enumerate() {
         match regs[slot] {
             SVal::Opaque => {}
             SVal::Unit => ctx.put(reg, Value::Unit),
@@ -681,6 +817,10 @@ fn write_back(ctx: &mut StepCtx, plan: &LoopPlan, regs: &[SVal], idx: u16, consu
             SVal::Bool(b) => ctx.put(reg, Value::Bool(b)),
         }
     }
+}
+
+fn write_back(ctx: &mut StepCtx, plan: &LoopPlan, regs: &[SVal], idx: u16, consumed: i64) {
+    write_regs(ctx, &plan.regs, regs);
     ctx.put(idx, Value::Int(consumed));
 }
 
@@ -740,6 +880,162 @@ pub(super) fn try_run(ctx: &mut StepCtx, iter: u16, idx: u16, to: u32) -> Result
                 write_back(ctx, &plan, &regs, idx, consumed);
                 ctx.vm.run_pending_ctrlc()?;
             }
+        }
+    }
+}
+
+/// A plan for a loop closed by a backward `Jump`: the whole region from the
+/// loop head to the jump, condition included. The only ways out of such a
+/// region are the jump back to the head, one finished iteration, and the
+/// jumps to the op right after it, the loop's exit, so the plan and the
+/// generic path leave the loop at the same single point.
+pub struct WhilePlan {
+    ops: Vec<LOp>,
+    /// The frame register behind each plan slot.
+    regs: Vec<u16>,
+    /// Runs that failed before finishing one iteration. Past
+    /// `MAX_ZERO_FAILS` the plan is dropped, so a loop whose entry state
+    /// never reads as scalars stops paying the attempt per backward jump.
+    fails: AtomicU32,
+}
+
+/// Translate the loop the backward `Jump` at `jump_ip` closes, or answer
+/// None when any op falls outside the subset. A jump leaving the region
+/// anywhere but the shared exit, a labeled break out of an outer loop for
+/// one, rejects the plan here through `target`.
+fn build_while(chunk: &Chunk, head: usize, jump_ip: usize) -> Option<WhilePlan> {
+    let exit = jump_ip + 1;
+    let mut regs: Vec<u16> = Vec::new();
+    let mut ops = chunk.code[head..exit]
+        .iter()
+        .map(|op| translate(chunk, head, head, exit, &mut regs, op))
+        .collect::<Option<Vec<_>>>()?;
+    fold_moves(&mut ops, NO_SLOT, &chunk_reads(chunk), &regs);
+    Some(WhilePlan {
+        ops,
+        regs,
+        fails: AtomicU32::new(0),
+    })
+}
+
+/// Rebuild the registers to the start of the failing iteration: the caller
+/// restores the snapshot, this re-runs the iterations that finished since it
+/// was taken. The body only touches registers, so the replay is
+/// deterministic and cannot exit or fail where the live run did not.
+fn replay_while(plan: &WhilePlan, regs: &mut [SVal], count: u32) {
+    let mut done = 0u32;
+    let mut ip = 0usize;
+    while done < count {
+        let Some(op) = plan.ops.get(ip) else {
+            unreachable!("replayed iteration diverged");
+        };
+        match eval_op(op, regs) {
+            OpOut::Fall => ip += 1,
+            OpOut::Jump(LTo::Next) => {
+                done += 1;
+                ip = 0;
+            }
+            OpOut::Jump(LTo::Op(t)) => ip = t as usize,
+            OpOut::Fail | OpOut::Jump(LTo::Exit) => unreachable!("replayed iteration diverged"),
+        }
+    }
+}
+
+enum WhileOut {
+    Exit,
+    Fail,
+}
+
+/// Try to run the loop the backward `Jump` under `ctx.ip` closes as a scalar
+/// plan, starting at the head the jump targets. `None` means the generic
+/// path should take the jump itself, with the frame rebuilt to the start of
+/// the iteration the plan could not finish, so the generic loop re-runs that
+/// iteration with identical semantics.
+pub(super) fn try_run_while(ctx: &mut StepCtx, head: usize) -> Result<Option<Flow>> {
+    let jump_ip = ctx.ip;
+    // The backward jump of a rejected loop runs once per iteration, so its
+    // answer is a plain atomic load, never the plan map's mutex.
+    let Some(rejected) = ctx.cur.while_rejected.get(jump_ip) else {
+        return Ok(None);
+    };
+    if rejected.load(Ordering::Relaxed) != 0 {
+        return Ok(None);
+    }
+    let plan = {
+        let mut plans = ctx.cur.while_plans.lock();
+        if let Some(cached) = plans.get(&jump_ip) {
+            Some(cached.clone())
+        } else {
+            let built = build_while(ctx.cur, head, jump_ip).map(Arc::new);
+            match &built {
+                Some(plan) => {
+                    plans.insert(jump_ip, plan.clone());
+                }
+                None => rejected.store(1, Ordering::Relaxed),
+            }
+            built
+        }
+    };
+    let Some(plan) = plan else { return Ok(None) };
+    let mut regs: Vec<SVal> = plan.regs.iter().map(|&r| SVal::of(ctx.get(r))).collect();
+    let mut snapshot = regs.clone();
+    let mut since_snapshot: u32 = 0;
+    let mut advanced = false;
+    let mut work: u32 = 0;
+    let mut ip = 0usize;
+    let out = loop {
+        // The plan holds no locks, so a long run polls Ctrl-C in place
+        // rather than failing over. The handler runs script in its own
+        // frame and cannot see this one's registers, but they are written
+        // back first so an interrupt error unwinds over a consistent frame.
+        if work >= WHILE_POLL {
+            write_regs(ctx, &plan.regs, &regs);
+            ctx.vm.run_pending_ctrlc()?;
+            work = 0;
+        }
+        // The last op is the loop's own backward jump, so `ip` cannot walk
+        // past the end; the lookup only guards a plan bug.
+        let Some(op) = plan.ops.get(ip) else {
+            break WhileOut::Fail;
+        };
+        match eval_op(op, &mut regs) {
+            OpOut::Fall => ip += 1,
+            OpOut::Fail => break WhileOut::Fail,
+            OpOut::Jump(LTo::Exit) => break WhileOut::Exit,
+            OpOut::Jump(LTo::Next) => {
+                advanced = true;
+                since_snapshot += 1;
+                work += 1;
+                if since_snapshot >= WHILE_SNAPSHOT {
+                    snapshot.copy_from_slice(&regs);
+                    since_snapshot = 0;
+                }
+                ip = 0;
+            }
+            OpOut::Jump(LTo::Op(t)) => {
+                let t = t as usize;
+                // Only backward jumps accrue poll work, the one way a run
+                // grows long, so straight runs pay no counter.
+                if t <= ip {
+                    work += 1;
+                }
+                ip = t;
+            }
+        }
+    };
+    match out {
+        WhileOut::Exit => {
+            write_regs(ctx, &plan.regs, &regs);
+            Ok(Some(Flow::Jump(jump_ip + 1)))
+        }
+        WhileOut::Fail => {
+            regs.copy_from_slice(&snapshot);
+            replay_while(&plan, &mut regs, since_snapshot);
+            write_regs(ctx, &plan.regs, &regs);
+            if !advanced && plan.fails.fetch_add(1, Ordering::Relaxed) + 1 >= MAX_ZERO_FAILS {
+                rejected.store(1, Ordering::Relaxed);
+            }
+            Ok(None)
         }
     }
 }
