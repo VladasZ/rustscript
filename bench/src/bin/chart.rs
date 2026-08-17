@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use plotters::coord::Shift;
 use plotters::prelude::*;
 use plotters::style::text_anchor::{HPos, Pos, VPos};
-use rustscript_bench::{CaseResult, Report};
+use rustscript_bench::{CaseResult, Meta, Report};
 
 /// Pixel density. Layout is in logical units and everything is drawn at
 /// double resolution so the PNGs stay sharp on hidpi screens.
@@ -105,7 +105,7 @@ fn main() -> Result<()> {
     let dir = root.join("bench/results");
     for c in &report.cases {
         let out = dir.join(format!("{}.png", c.name));
-        render_case(&out, c)?;
+        render_case(&out, c, &report.meta)?;
         println!("wrote {}", out.display());
     }
     Ok(())
@@ -178,7 +178,14 @@ fn case_panels(c: &CaseResult) -> Vec<Panel> {
     panels
 }
 
-fn render_case(out: &Path, c: &CaseResult) -> Result<()> {
+/// The runtime versions stamped on every chart, "node v26.7.0  python 3.14.7".
+/// `meta.python` is the full `--version` line, its last word is the number.
+fn versions_label(meta: &Meta) -> String {
+    let python = meta.python.split_whitespace().last().unwrap_or("?");
+    format!("node {}  python {}", meta.node, python)
+}
+
+fn render_case(out: &Path, c: &CaseResult, meta: &Meta) -> Result<()> {
     let panels = case_panels(c);
     let bars = i32::try_from(panels.first().map_or(4, |p| p.bars.len())).expect("bars fit i32");
     let w = i32::try_from(panels.len()).expect("panel count fits i32") * panel_width(bars);
@@ -195,6 +202,14 @@ fn render_case(out: &Path, c: &CaseResult) -> Result<()> {
         display_title(&c.name),
         (s(28), s(18)),
         ("sans-serif", s(30)).into_font().color(&INK),
+    ))?;
+    head.draw(&Text::new(
+        versions_label(meta),
+        (s(w - 28), s(28)),
+        ("sans-serif", s(15))
+            .into_font()
+            .color(&MUTED)
+            .pos(Pos::new(HPos::Right, VPos::Top)),
     ))?;
 
     let cols = body.split_evenly((1, panels.len()));

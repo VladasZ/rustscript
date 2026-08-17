@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use hex::encode;
 use sha2::{Digest, Sha256};
 
-use crate::{Meta, NamedHash, Settings};
+use crate::{Meta, NamedHash, PYTHON, Settings};
 
 pub fn gather(
     root: &Path,
@@ -39,7 +39,7 @@ pub fn gather(
         rustc: command_line(root, "rustc", &["--version"]),
         cargo: command_line(root, "cargo", &["--version"]),
         node: command_line(root, "node", &["--version"]),
-        python: command_line(root, "python3", &["--version"]),
+        python: command_line(root, PYTHON, &["--version"]),
         os: env::consts::OS.to_string(),
         arch: env::consts::ARCH.to_string(),
         cpu: if cfg!(target_os = "macos") {

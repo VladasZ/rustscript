@@ -1,6 +1,9 @@
 # bench
 
 Compares RustScript against native Rust, Node, and Python 3 on equivalent tasks.
+The Python interpreter is pinned to `python3.14`, not the plain `python3` name,
+because stock macOS still points `python3` at 3.9 and an old interpreter would
+skew every comparison. The pin is the `PYTHON` constant in `src/lib.rs`.
 The Rust file is both a compiled Cargo binary and the interpreted RustScript
 source. TypeScript and Python use normal idioms for their runtimes. Every case
 must print byte-identical stdout, and cases that write files must also produce
@@ -18,7 +21,8 @@ Each timed command runs as a fresh process. The harness records three tracks.
   `/usr/bin/time`.
 
 The report and charts use the median for every track and retain every raw sample
-in `results.json`. Timed stdout always goes to `/dev/null`, so wall and compute
+in `results.json`. Every chart carries the Node and Python versions the run
+measured, in the top right corner. Timed stdout always goes to `/dev/null`, so wall and compute
 runs see the same output destination. Samples run round-robin with a rotating
 language order to spread temperature and background-system drift.
 
@@ -93,13 +97,20 @@ settings, and all raw measurements.
 
 ## Running
 
-The suite needs `node` and `python3` on `PATH`. Cargo builds all Rust binaries
-it uses.
+The suite needs `node` and `python3.14` on `PATH`. Cargo builds all Rust
+binaries it uses.
 
 ```
 cargo run --release --bin bench
 cargo run --release --bin chart
 ```
+
+## Performance goal
+
+The goal is judged on wall clock, the whole run including startup. The floor
+is to never be the slowest interpreted runtime on any case, the target is to
+beat both Node and Python. [docs/roadmap.md](../docs/roadmap.md) tracks the
+cases that still miss, worst first.
 
 ## Scope limits
 
