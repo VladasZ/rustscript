@@ -67,7 +67,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          out=$(rust run .github/fixtures/hello.rs rustscript)
+          out=$(rust .github/fixtures/hello.rs rustscript)
           echo "$out"
           if [ "$out" != "hello from rustscript" ]; then
             echo "unexpected output: $out" >&2
@@ -94,7 +94,7 @@ jobs:
           set -euo pipefail
           rust --version
           printf 'fn main() { println!("published ref works"); }\n' > published.rs
-          out=$(rust run published.rs)
+          out=$(rust published.rs)
           echo "$out"
           if [ "$out" != "published ref works" ]; then
             echo "unexpected output: $out" >&2

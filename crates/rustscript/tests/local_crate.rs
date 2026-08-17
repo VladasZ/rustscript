@@ -81,7 +81,7 @@ fn write(path: &Path, body: &str) {
 
 fn run_bin(bin: &Path, skip_check: bool) -> std::process::Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rust"));
-    cmd.arg("run").arg(bin);
+    cmd.arg(bin);
     if skip_check {
         cmd.env("RUSTSCRIPT_SKIP_CHECK", "1");
     }

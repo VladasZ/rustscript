@@ -13,18 +13,12 @@ use rustscript_bench::{CaseResult, Gate, LANGS, MemStat, Report, Settings, TimeS
 #[derive(Clone, Copy)]
 enum Input {
     None,
-    Size { base: u64, big: u64 },
-    Data { base: &'static str, big: BigFixture },
+    Size(u64),
+    Data(&'static str),
     FileTransform,
-    Process { base: u64, big: u64 },
-    Http { base: u64, big: u64 },
+    Process(u64),
+    Http(u64),
     Automation,
-}
-
-#[derive(Clone, Copy)]
-enum BigFixture {
-    Words,
-    Json,
 }
 
 struct Case {
@@ -52,124 +46,82 @@ const CASES: &[Case] = &[
     Case {
         name: "fib",
         kind: "compute",
-        input: Input::Size { base: 27, big: 32 },
+        input: Input::Size(27),
     },
     Case {
         name: "sieve",
         kind: "compute",
-        input: Input::Size {
-            base: 250_000,
-            big: 2_500_000,
-        },
+        input: Input::Size(250_000),
     },
     Case {
         name: "mandelbrot",
         kind: "compute",
-        input: Input::Size {
-            base: 140,
-            big: 440,
-        },
+        input: Input::Size(140),
     },
     Case {
         name: "collatz",
         kind: "compute",
-        input: Input::Size {
-            base: 10_000,
-            big: 100_000,
-        },
+        input: Input::Size(10_000),
     },
     Case {
         name: "binary_trees",
         kind: "compute",
-        input: Input::Size { base: 11, big: 14 },
+        input: Input::Size(11),
     },
     Case {
         name: "string_builder",
         kind: "compute",
-        input: Input::Size {
-            base: 200_000,
-            big: 2_000_000,
-        },
+        input: Input::Size(200_000),
     },
     Case {
         name: "higher_order",
         kind: "compute",
-        input: Input::Size {
-            base: 100_000,
-            big: 1_000_000,
-        },
+        input: Input::Size(100_000),
     },
     Case {
         name: "sort",
         kind: "compute",
-        input: Input::Size {
-            base: 50_000,
-            big: 500_000,
-        },
+        input: Input::Size(50_000),
     },
     Case {
         name: "sort_key",
         kind: "compute",
-        input: Input::Size {
-            base: 50_000,
-            big: 500_000,
-        },
+        input: Input::Size(50_000),
     },
     Case {
         name: "hashmap_int",
         kind: "compute",
-        input: Input::Size {
-            base: 150_000,
-            big: 1_500_000,
-        },
+        input: Input::Size(150_000),
     },
     Case {
         name: "nbody",
         kind: "compute",
-        input: Input::Size {
-            base: 8_000,
-            big: 80_000,
-        },
+        input: Input::Size(8_000),
     },
     Case {
         name: "json_serialize",
         kind: "compute",
-        input: Input::Size {
-            base: 100_000,
-            big: 1_000_000,
-        },
+        input: Input::Size(100_000),
     },
     Case {
         name: "stdout_lines",
         kind: "compute",
-        input: Input::Size {
-            base: 20_000,
-            big: 200_000,
-        },
+        input: Input::Size(20_000),
     },
     Case {
         name: "word_count",
         kind: "compute",
-        input: Input::Data {
-            base: "word_count/data.txt",
-            big: BigFixture::Words,
-        },
+        input: Input::Data("word_count/data.txt"),
     },
     Case {
         name: "json",
         kind: "compute",
-        input: Input::Data {
-            base: "json/data.json",
-            big: BigFixture::Json,
-        },
+        input: Input::Data("json/data.json"),
     },
     Case {
         name: "regex",
         kind: "compute",
-        input: Input::Data {
-            base: "word_count/data.txt",
-            big: BigFixture::Words,
-        },
+        input: Input::Data("word_count/data.txt"),
     },
     Case {
         name: "file_transform",
@@ -179,20 +131,17 @@ const CASES: &[Case] = &[
     Case {
         name: "process_spawn",
         kind: "compute",
-        input: Input::Process { base: 20, big: 200 },
+        input: Input::Process(20),
     },
     Case {
         name: "async_tasks",
         kind: "compute",
-        input: Input::Size { base: 20, big: 200 },
+        input: Input::Size(20),
     },
     Case {
         name: "http_local",
         kind: "compute",
-        input: Input::Http {
-            base: 100,
-            big: 1_000,
-        },
+        input: Input::Http(100),
     },
     Case {
         name: "automation",
@@ -213,10 +162,6 @@ impl Scratch {
         }
         fs::create_dir_all(&root)?;
         Ok(Self { root })
-    }
-
-    fn fixtures(&self) -> PathBuf {
-        self.root.join("fixtures")
     }
 
     fn outputs(&self) -> PathBuf {
@@ -241,9 +186,9 @@ impl Drop for Scratch {
 
 fn main() -> Result<()> {
     let quick = env::args().any(|arg| arg == "--quick");
-    let samples = sample_override()?.unwrap_or(if quick { 3 } else { 10 });
+    let samples = sample_override()?.unwrap_or(if quick { 3 } else { 5 });
     let settings = Settings {
-        warmups: 3,
+        warmups: 1,
         wall_samples: samples,
         compute_samples: samples,
         quick,
@@ -254,7 +199,7 @@ fn main() -> Result<()> {
 
     ensure_tool("node")?;
     ensure_tool("python3")?;
-    generate_fixtures(&root, &scratch)?;
+    generate_fixtures(&root)?;
     build_binaries(&root)?;
 
     let rustscript = root.join("target/release/rust");
@@ -262,61 +207,55 @@ fn main() -> Result<()> {
     let server = root.join("target/release/bench-server");
     let mut results = Vec::new();
     for case in CASES {
-        for tier in ["base", "big"] {
-            if tier == "big" && matches!(case.input, Input::None) {
-                continue;
-            }
-            println!("\n== {} {} ==", case.name, tier);
-            let mut http = if matches!(case.input, Input::Http { .. }) {
-                Some(HttpServer::start(&server)?)
-            } else {
-                None
-            };
-            let url = http.as_ref().map(HttpServer::url);
-            let context = InvocationContext {
-                root: &root,
-                scratch: &scratch,
-                rustscript: &rustscript,
-                helper: &helper,
-                server_url: url,
-            };
-            let invocations: Vec<Invocation> = LANGS
-                .iter()
-                .map(|lang| invocation(&context, case, tier, lang))
-                .collect::<Result<_>>()?;
-            gate_check(case, &invocations)?;
-            let wall = wall_track(&invocations, &settings)?;
-            let (compute, memory) = if case.kind == "compute" {
-                compute_track(&invocations, settings.compute_samples)?
-            } else {
-                (
-                    Vec::new(),
-                    memory_track(&invocations, settings.compute_samples)?,
-                )
-            };
-            print_stats(&wall, &compute, &memory);
-            results.push(CaseResult {
-                name: case.name.to_string(),
-                kind: case.kind.to_string(),
-                tier: tier.to_string(),
-                parameters: case_parameters(case, tier),
-                wall,
-                compute,
-                memory,
-            });
-            if let Some(running) = http.take() {
-                running.stop()?;
-            }
+        println!("\n== {} ==", case.name);
+        let mut http = if matches!(case.input, Input::Http(_)) {
+            Some(HttpServer::start(&server)?)
+        } else {
+            None
+        };
+        let url = http.as_ref().map(HttpServer::url);
+        let context = InvocationContext {
+            root: &root,
+            scratch: &scratch,
+            rustscript: &rustscript,
+            helper: &helper,
+            server_url: url,
+        };
+        let invocations: Vec<Invocation> = LANGS
+            .iter()
+            .map(|lang| invocation(&context, case, lang))
+            .collect::<Result<_>>()?;
+        gate_check(case, &invocations)?;
+        let wall = wall_track(&invocations, &settings)?;
+        let (compute, memory) = if case.kind == "compute" {
+            compute_track(&invocations, settings.compute_samples)?
+        } else {
+            (
+                Vec::new(),
+                memory_track(&invocations, settings.compute_samples)?,
+            )
+        };
+        print_stats(&wall, &compute, &memory);
+        results.push(CaseResult {
+            name: case.name.to_string(),
+            kind: case.kind.to_string(),
+            parameters: case_parameters(case),
+            wall,
+            compute,
+            memory,
+        });
+        if let Some(running) = http.take() {
+            running.stop()?;
         }
     }
 
     println!("\n== warm check ==");
     let gate = warm_check(&root, &scratch, &rustscript, &settings)?;
     println!("  warm check {:>8.2} ms", gate.warm_median * 1e3);
-    let fixtures = fixture_paths(&root, &scratch);
+    let fixtures = fixture_paths(&root);
     let meta = rustscript_bench::provenance::gather(&root, &rustscript, &fixtures, settings)?;
     let report = Report {
-        schema_version: 2,
+        schema_version: 3,
         meta,
         cases: results,
         gate,
@@ -344,11 +283,10 @@ fn sample_override() -> Result<Option<u32>> {
     Ok(None)
 }
 
-fn generate_fixtures(root: &Path, scratch: &Scratch) -> Result<()> {
+fn generate_fixtures(root: &Path) -> Result<()> {
     println!("generating deterministic fixtures ...");
     let status = Command::new(env!("CARGO"))
-        .args(["run", "--release", "--bin", "gendata", "--"])
-        .arg(scratch.fixtures())
+        .args(["run", "--release", "--bin", "gendata"])
         .current_dir(root)
         .status()?;
     if !status.success() {
@@ -414,19 +352,13 @@ impl Invocation {
     }
 }
 
-fn invocation(
-    context: &InvocationContext<'_>,
-    case: &Case,
-    tier: &str,
-    lang: &str,
-) -> Result<Invocation> {
+fn invocation(context: &InvocationContext<'_>, case: &Case, lang: &str) -> Result<Invocation> {
     let case_dir = context.root.join("bench/cases").join(case.name);
     let (case_args, output_file) = case_args(
         context.root,
         context.scratch,
         context.helper,
         case,
-        tier,
         lang,
         context.server_url,
     )?;
@@ -437,10 +369,7 @@ fn invocation(
         ),
         "rustscript" => (
             context.rustscript.to_path_buf(),
-            vec![
-                "run".to_string(),
-                case_dir.join("case.rs").display().to_string(),
-            ],
+            vec![case_dir.join("case.rs").display().to_string()],
         ),
         "node" => (
             PathBuf::from("node"),
@@ -466,38 +395,22 @@ fn case_args(
     scratch: &Scratch,
     helper: &Path,
     case: &Case,
-    tier: &str,
     lang: &str,
     server_url: Option<&str>,
 ) -> Result<(Vec<String>, Option<PathBuf>)> {
-    let is_big = tier == "big";
-    let size = |base: u64, big: u64| if is_big { big } else { base };
-    let words = || {
-        if is_big {
-            scratch.fixtures().join("word_count/data_big.txt")
-        } else {
-            root.join("bench/cases/word_count/data.txt")
-        }
-    };
+    let words = || root.join("bench/cases/word_count/data.txt");
     let output = || {
         scratch
             .outputs()
-            .join(format!("{}_{}_{}.out", case.name, tier, lang))
+            .join(format!("{}_{}.out", case.name, lang))
     };
     let result = match case.input {
         Input::None => (Vec::new(), None),
-        Input::Size { base, big } => (vec![size(base, big).to_string()], None),
-        Input::Data { base, big } => {
-            let path = if is_big {
-                match big {
-                    BigFixture::Words => scratch.fixtures().join("word_count/data_big.txt"),
-                    BigFixture::Json => scratch.fixtures().join("json/data_big.json"),
-                }
-            } else {
-                root.join("bench/cases").join(base)
-            };
-            (vec![path.display().to_string()], None)
-        }
+        Input::Size(size) => (vec![size.to_string()], None),
+        Input::Data(fixture) => (
+            vec![root.join("bench/cases").join(fixture).display().to_string()],
+            None,
+        ),
         Input::FileTransform => {
             let destination = output();
             (
@@ -508,13 +421,10 @@ fn case_args(
                 Some(destination),
             )
         }
-        Input::Process { base, big } => (
-            vec![helper.display().to_string(), size(base, big).to_string()],
-            None,
-        ),
-        Input::Http { base, big } => {
+        Input::Process(runs) => (vec![helper.display().to_string(), runs.to_string()], None),
+        Input::Http(requests) => {
             let url = server_url.context("HTTP case needs server")?;
-            (vec![url.to_string(), size(base, big).to_string()], None)
+            (vec![url.to_string(), requests.to_string()], None)
         }
         Input::Automation => {
             let destination = output();
@@ -533,28 +443,18 @@ fn case_args(
     Ok(result)
 }
 
-fn case_parameters(case: &Case, tier: &str) -> Vec<String> {
-    let is_big = tier == "big";
-    let size = |base: u64, big: u64| if is_big { big } else { base };
-    let fixture = if is_big { "words_big" } else { "words_base" };
+fn case_parameters(case: &Case) -> Vec<String> {
     match case.input {
         Input::None => Vec::new(),
-        Input::Size { base, big } => vec![format!("size={}", size(base, big))],
-        Input::Data { big, .. } => {
-            let fixture = match (is_big, big) {
-                (false, BigFixture::Words) => "words_base",
-                (true, BigFixture::Words) => "words_big",
-                (false, BigFixture::Json) => "json_base",
-                (true, BigFixture::Json) => "json_big",
-            };
-            vec![format!("fixture={fixture}")]
-        }
-        Input::FileTransform => vec![format!("fixture={fixture}")],
-        Input::Process { base, big } => {
-            vec![format!("helper_runs={}", size(base, big))]
-        }
-        Input::Http { base, big } => vec![format!("requests={}", size(base, big))],
-        Input::Automation => vec![format!("fixture={fixture}"), "top=20".to_string()],
+        Input::Size(size) => vec![format!("size={size}")],
+        Input::Data(fixture) => vec![format!("fixture={fixture}")],
+        Input::FileTransform => vec!["fixture=word_count/data.txt".to_string()],
+        Input::Process(runs) => vec![format!("helper_runs={runs}")],
+        Input::Http(requests) => vec![format!("requests={requests}")],
+        Input::Automation => vec![
+            "fixture=word_count/data.txt".to_string(),
+            "top=20".to_string(),
+        ],
     }
 }
 
@@ -747,24 +647,13 @@ fn print_stats(wall: &[TimeStat], compute: &[TimeStat], memory: &[MemStat]) {
     }
 }
 
-fn fixture_paths(root: &Path, scratch: &Scratch) -> Vec<(String, PathBuf)> {
+fn fixture_paths(root: &Path) -> Vec<(String, PathBuf)> {
     vec![
         (
-            "words_base".to_string(),
+            "words".to_string(),
             root.join("bench/cases/word_count/data.txt"),
         ),
-        (
-            "words_big".to_string(),
-            scratch.fixtures().join("word_count/data_big.txt"),
-        ),
-        (
-            "json_base".to_string(),
-            root.join("bench/cases/json/data.json"),
-        ),
-        (
-            "json_big".to_string(),
-            scratch.fixtures().join("json/data_big.json"),
-        ),
+        ("json".to_string(), root.join("bench/cases/json/data.json")),
         (
             "automation_config".to_string(),
             root.join("bench/cases/automation/config.json"),

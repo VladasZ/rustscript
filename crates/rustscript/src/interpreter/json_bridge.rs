@@ -37,9 +37,8 @@ pub struct StructInfo {
 pub type Structs = HashMap<Arc<str>, Arc<StructInfo>>;
 
 impl Interp {
-    /// Build the parallel struct table from the AST, once at load on the main
-    /// thread. Mirrors what `struct_shape` and `json_plan` read lazily on the
-    /// AST lazily.
+    /// Build the struct table from the AST, once at load on the main thread.
+    /// Mirrors what `struct_shape` and `json_plan` read lazily from the AST.
     pub(super) fn build_structs(&self) -> Structs {
         let mut out = Structs::default();
         for (canon, def) in self.structs() {

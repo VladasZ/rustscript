@@ -1,7 +1,6 @@
-//! The `Send + Sync` value model, used by `#[tokio::main]`
-//! scripts. It mirrors `value.rs` but swaps `Rc` for `Arc` and `RefCell` for a
-//! `parking_lot::Mutex`, so a value can move between worker threads and be
-//! shared by concurrent tasks.
+//! The `Send + Sync` value model. `Arc` and `parking_lot::Mutex` back every
+//! shared value, so it can move between worker threads and be shared by
+//! concurrent tasks.
 
 use num_traits::AsPrimitive;
 use std::fmt::Write as _;

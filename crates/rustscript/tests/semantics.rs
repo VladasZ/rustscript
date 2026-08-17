@@ -54,7 +54,6 @@ fn semantics_cases_match_compiler() {
             common::run(&mut Command::new(&binary), &format!("compiled {name}"));
         let (script_ok, script_out, script_err) = common::run(
             Command::new(interp)
-                .arg("run")
                 .arg(&path)
                 .env("RUSTSCRIPT_SKIP_CHECK", "1"),
             &format!("script {name}"),

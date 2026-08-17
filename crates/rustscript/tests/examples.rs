@@ -42,7 +42,6 @@ fn every_example_runs() {
         let label = stem.unwrap_or("example");
         let (ok, _, err) = common::run(
             Command::new(env!("CARGO_BIN_EXE_rust"))
-                .arg("run")
                 .arg(&path)
                 .env("RUSTSCRIPT_SKIP_CHECK", "1"),
             label,

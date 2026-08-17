@@ -8,7 +8,7 @@ use std::sync::Arc;
 use super::numeric::IntWidth;
 use super::resolver::{Res, Resolver};
 
-/// Target of an `as` cast, reduced to what the engines act on.
+/// Target of an `as` cast, reduced to what the VM acts on.
 #[derive(Clone)]
 pub enum CastIr {
     F64,

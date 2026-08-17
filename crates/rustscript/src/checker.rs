@@ -393,7 +393,7 @@ mod tests {
     /// A grafted `path` crate must be an all-target dependency. A regression
     /// once appended it as a bare key after the Windows target table, so it
     /// became Windows only and `use shared::..` failed to compile on macOS and
-    /// Linux while `rust run` still worked through the interpreter.
+    /// Linux while the interpreted run still worked.
     #[test]
     fn graft_dep_is_all_target_not_windows_only() {
         let dep = CrateDep {

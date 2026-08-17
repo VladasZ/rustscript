@@ -1,5 +1,5 @@
-//! Lazy, stateful iterators, ported from the fast
-//! engine's `iterator.rs`. The states live inside a `Native::Iterator`, so an
+//! Lazy, stateful iterators.
+//! The states live inside a `Native::Iterator`, so an
 //! iterator is a shared handle exactly like every other native resource, and
 //! `by_ref`, `peekable`, and open-ended ranges keep their real semantics.
 

@@ -146,7 +146,7 @@ impl Vm {
 }
 
 /// A binding of a generic parameter name to the lowered concrete type a
-/// caller passed by turbofish, the parallel twin of `TypeEnv` in vm.rs.
+/// caller passed by turbofish.
 pub(super) type TypeEnv = Arc<[(Arc<str>, TypeIr)]>;
 
 pub(super) fn empty_type_env() -> TypeEnv {
@@ -363,7 +363,7 @@ impl Vm {
     }
 }
 
-/// A field access on a struct or tuple, the parallel twin of `get_field`.
+/// A field access on a struct or tuple.
 impl Vm {
     pub(super) fn get_field(recv: &Value, member: &Member) -> Result<Value> {
         match (recv, member) {

@@ -86,7 +86,7 @@ fn collect_files(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) -> Result<()
         }
         if path.is_dir() {
             collect_files(root, &path, files)?;
-        } else if !name.starts_with("data_big.") {
+        } else {
             files.push(path.strip_prefix(root)?.to_path_buf());
         }
     }

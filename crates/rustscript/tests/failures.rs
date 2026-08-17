@@ -19,7 +19,6 @@ fn temp_script(src: &str) -> PathBuf {
 
 fn run_interpreted(path: &PathBuf) -> Output {
     Command::new(env!("CARGO_BIN_EXE_rust"))
-        .arg("run")
         .arg(path)
         .env("RUSTSCRIPT_SKIP_CHECK", "1")
         .output()

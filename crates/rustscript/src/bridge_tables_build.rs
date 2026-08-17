@@ -28,7 +28,7 @@ pub struct Bridge {
 }
 
 pub const BRIDGES: &[Bridge] = &[
-    // -- engine neutral method cores ---------------------------------------
+    // -- shared method cores ------------------------------------------------
     b("shared.rs", "str_core", "Str"),
     b("shared.rs", "color_core", "Str"),
     b("shared.rs", "num_core", "*"),

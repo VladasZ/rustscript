@@ -27,7 +27,7 @@
 //! the check had just vouched for.
 //!
 //! Where the type is not knowable, the check falls back to asking whether any
-//! bridge in this engine implements that name at all. That direction is
+//! bridge implements that name at all. That direction is
 //! deliberate: an unknown receiver reports nothing rather than guessing, so
 //! the check never invents a problem.
 
@@ -114,7 +114,7 @@ impl Ty {
 /// Option and did not, so `rust check` passed a script that then aborted.
 const JSON_SHAPES: &[&str] = &["Map", "Vec", "Str", "Option"];
 
-/// Every name any bridge in this engine implements. `BUILTIN_IDS` is harvested
+/// Every name any bridge implements. `BUILTIN_IDS` is harvested
 /// from the shared id resolver, so it says a name has a fast dispatch id, not
 /// which dispatch path implements it. Much of the surface dispatches by name, so
 /// its tables are its whole surface and the id list must not vouch for it.
@@ -124,14 +124,12 @@ fn any_name(method: &str) -> bool {
         || BRIDGE_TABLES.iter().any(|t| t.names.contains(&method))
 }
 
-/// Methods both VMs answer themselves, before any bridge is reached, because
+/// Methods the VM answers itself, before any bridge is reached, because
 /// they rewrite the receiver register rather than return a value. They are
 /// dispatched by `BuiltinId` rather than by name, so the harvest cannot see
-/// them in either engine's tables and they are listed here instead.
-/// `parse` is here for the same reason. Both engines answer it from the
-/// turbofish before name dispatch, and neither writes the name as a literal on
-/// purpose, since a literal in the parallel bridge would make the supported
-/// page claim `parse` is tokio only.
+/// them in the bridge tables and they are listed here instead.
+/// `parse` is here for the same reason. It is answered from the turbofish
+/// before name dispatch, so the name never appears in a table.
 const VM_BUILTINS: &[&str] = &["clone_from", "push", "push_str", "parse"];
 
 /// Whether the bridge for this receiver implements the method.
@@ -153,8 +151,8 @@ fn on_recv(recv: &str, method: &str) -> bool {
             return true;
         }
     }
-    // With no table for this receiver there is nothing to say, so defer to the
-    // engine wide answer rather than reporting.
+    // With no table for this receiver there is nothing to say, so defer to
+    // `any_name` rather than reporting.
     if !saw_table {
         return any_name(method);
     }

@@ -1,6 +1,5 @@
 //! Bridges for the extra crates a script may use: base64, chrono, rand, sha2,
-//! hex, toml, yaml, glob, dirs, tempfile and friends. Ported from the fast
-//! engine's `crates_bridge.rs`.
+//! hex, toml, yaml, glob, dirs, tempfile and friends.
 
 use num_traits::AsPrimitive;
 use std::sync::Arc;

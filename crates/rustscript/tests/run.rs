@@ -31,7 +31,6 @@ fn embed_path(path: &std::path::Path) -> String {
 fn run(src: &str) -> String {
     let path = temp_script(src);
     let out = Command::new(env!("CARGO_BIN_EXE_rust"))
-        .arg("run")
         .arg(&path)
         .env("RUSTSCRIPT_SKIP_CHECK", "1")
         .output()
@@ -49,7 +48,6 @@ fn run(src: &str) -> String {
 fn run_fail(src: &str) -> String {
     let path = temp_script(src);
     let out = Command::new(env!("CARGO_BIN_EXE_rust"))
-        .arg("run")
         .arg(&path)
         .env("RUSTSCRIPT_SKIP_CHECK", "1")
         .output()
