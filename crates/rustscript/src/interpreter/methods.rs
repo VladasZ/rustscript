@@ -13,14 +13,22 @@ use super::ops::compare_values;
 use super::shared::{self, CharOut, Parsed, StrOut, usize_i64};
 use super::value::{RsStr, StructData, Value, ValueRef};
 
-/// `std::cmp::Ordering` as the enum value scripts match on.
+/// `std::cmp::Ordering` as the enum value scripts match on. A comparator
+/// sort builds one per comparison, so the three values are built once and
+/// cloned. A unit variant's payload list stays empty forever, which makes
+/// the shared storage safe.
 pub(super) fn make_ordering(o: std::cmp::Ordering) -> Value {
-    let variant = match o {
-        std::cmp::Ordering::Less => "Less",
-        std::cmp::Ordering::Equal => "Equal",
-        std::cmp::Ordering::Greater => "Greater",
-    };
-    Value::enum_of("Ordering", variant, Vec::new())
+    use std::sync::LazyLock;
+    static LESS: LazyLock<Value> = LazyLock::new(|| Value::enum_of("Ordering", "Less", Vec::new()));
+    static EQUAL: LazyLock<Value> =
+        LazyLock::new(|| Value::enum_of("Ordering", "Equal", Vec::new()));
+    static GREATER: LazyLock<Value> =
+        LazyLock::new(|| Value::enum_of("Ordering", "Greater", Vec::new()));
+    match o {
+        std::cmp::Ordering::Less => LESS.clone(),
+        std::cmp::Ordering::Equal => EQUAL.clone(),
+        std::cmp::Ordering::Greater => GREATER.clone(),
+    }
 }
 
 pub(super) fn ordering_from_value(v: &Value) -> Option<std::cmp::Ordering> {
@@ -191,6 +199,14 @@ pub(super) fn generic_method(recv: &Value, name: &str, args: &[Value]) -> Result
                 _ => other.clone(),
             })
         }
+        // `std::cmp::Ordering` chaining and tests. `then_with` takes a
+        // closure and answers from the higher order path instead.
+        (Value::Enum { enum_name, .. }, _)
+            if &**enum_name == "Ordering" && ordering_from_value(recv).is_some() =>
+        {
+            let ordering = ordering_from_value(recv).expect("checked by the guard");
+            ordering_method(ordering, name, args)
+        }
         // An enum names itself, so an unknown method on an Option says Option
         // and not the bare word enum. A struct names itself the same way.
         (Value::Enum { enum_name, .. }, _) => {
@@ -201,6 +217,28 @@ pub(super) fn generic_method(recv: &Value, name: &str, args: &[Value]) -> Result
         }
         _ => bail!("unknown method `{name}` on {}", recv.type_name()),
     }
+}
+
+/// The value-taking `std::cmp::Ordering` methods.
+fn ordering_method(o: std::cmp::Ordering, name: &str, args: &[Value]) -> Result<Value> {
+    let chained = || args.first().cloned().unwrap_or_else(|| make_ordering(o));
+    Ok(match name {
+        "then" => {
+            if o == std::cmp::Ordering::Equal {
+                chained()
+            } else {
+                make_ordering(o)
+            }
+        }
+        "reverse" => make_ordering(o.reverse()),
+        "is_lt" => Value::Bool(o.is_lt()),
+        "is_le" => Value::Bool(o.is_le()),
+        "is_gt" => Value::Bool(o.is_gt()),
+        "is_ge" => Value::Bool(o.is_ge()),
+        "is_eq" => Value::Bool(o.is_eq()),
+        "is_ne" => Value::Bool(o.is_ne()),
+        _ => bail!("unknown method `{name}` on Ordering"),
+    })
 }
 
 /// A `str::get(range)` slice, None when the bounds are out of range or land

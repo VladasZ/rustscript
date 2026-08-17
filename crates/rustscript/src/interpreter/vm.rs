@@ -19,6 +19,17 @@ use super::vm_support::trace_error;
 
 const MAX_CALL_DEPTH: usize = 100_000;
 
+/// Deeper nesting than this returns buffers to the allocator, so a burst of
+/// recursion does not pin its high-water memory forever.
+const MAX_POOLED_STACKS: usize = 32;
+
+thread_local! {
+    /// Reusable value stacks for `run_chunk`, one popped per live call on
+    /// this thread.
+    static STACK_POOL: std::cell::RefCell<Vec<Vec<Value>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 fn swap_option<T>(current: &mut Option<T>, next: Option<T>) -> Option<T> {
     match next {
         Some(value) => current.replace(value),
@@ -183,11 +194,26 @@ impl Vm {
                 args.len()
             );
         }
-        let mut stack = vec![Value::Unit; chunk.num_regs.max(chunk.num_params)];
+        // A closure called per element allocated a fresh stack per call,
+        // which dominated comparator sorts. The pool hands the buffer back
+        // for the next call on this thread instead. Nested calls each pop
+        // their own buffer, so re-entrancy just deepens the pool.
+        let mut stack = STACK_POOL
+            .with(|pool| pool.borrow_mut().pop())
+            .unwrap_or_default();
+        stack.resize(chunk.num_regs.max(chunk.num_params), Value::Unit);
         for (i, a) in args.iter().enumerate() {
             stack[i] = a.clone();
         }
-        self.exec(chunk, &mut stack, upvalues)
+        let result = self.exec(chunk, &mut stack, upvalues);
+        stack.clear();
+        STACK_POOL.with(|pool| {
+            let mut pool = pool.borrow_mut();
+            if pool.len() < MAX_POOLED_STACKS {
+                pool.push(stack);
+            }
+        });
+        result
     }
 
     fn exec(

@@ -58,6 +58,14 @@ Iterators are lazy and stateful, an iterator is a shared native resource like
 a file handle. So `by_ref`, `peekable`, and open ended ranges keep their real
 semantics instead of being faked with collected vectors.
 
+Comparator sorts over plain ints specialize. When every element is an int
+and the closure body compiles to int-only bytecode, `sort_by` translates
+the body once into a small plan over flat `i64` registers in
+`interpreter/scalar.rs` and sorts unboxed, skipping the closure call
+machinery per comparison. Anything outside that subset, mutable captures
+and arithmetic failures included, falls back to the generic path, so the
+output never changes.
+
 ## No second type system
 
 The interpreter does not type check. `rustc` stays responsible for type,
