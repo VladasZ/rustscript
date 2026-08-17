@@ -3,7 +3,10 @@
 //! ever touching the parse tree again. Registers are numbered slots in a flat
 //! frame, so variable access is an array read, not a name lookup.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use super::typeir::{CastIr, TypeIr};
 
@@ -1031,6 +1034,11 @@ pub struct Chunk {
     /// has no known parameter count, so a call with a different count rebuilds
     /// the body for the count actually passed instead of failing.
     pub path_forwarder: bool,
+    /// Scalar plans for the `for` loops in this chunk, keyed by the index of
+    /// each `ForNext` op and built lazily on the loop's first entry. `None`
+    /// records a loop that was analyzed and does not qualify, so the attempt
+    /// happens once per loop.
+    pub loop_plans: Mutex<HashMap<usize, Option<Arc<super::scalar_loop::LoopPlan>>>>,
 }
 
 impl Chunk {
@@ -1060,6 +1068,7 @@ impl Chunk {
             drop_lists: Vec::new(),
             call_type_args: Vec::new(),
             path_forwarder: false,
+            loop_plans: Mutex::new(HashMap::new()),
         }
     }
 }

@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
+use parking_lot::Mutex;
 use syn::punctuated::Punctuated;
 use syn::{BinOp, Block, Expr, FnArg, Lit, Pat, UnOp};
 
@@ -160,6 +161,7 @@ impl FnState {
             drop_lists: self.drop_lists,
             call_type_args: self.call_type_args,
             path_forwarder: false,
+            loop_plans: Mutex::new(HashMap::new()),
         }
     }
 }

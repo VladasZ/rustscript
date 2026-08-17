@@ -66,6 +66,16 @@ machinery per comparison. Anything outside that subset, mutable captures
 and arithmetic failures included, falls back to the generic path, so the
 output never changes.
 
+Int-only `for` loops specialize the same way. When the body compiles to
+integer and bool bytecode and the source is a string's `bytes()` or an
+integer range, `interpreter/scalar_loop.rs` translates the body once into a
+plan over unboxed values and runs the whole loop inside one dispatch, no
+`Value` per item and no per-op dispatch. Arithmetic runs through the same
+width-checked cores, so overflow still panics where debug Rust panics. Any
+runtime surprise rebuilds the registers to the start of the failing
+iteration and hands that exact item to the generic loop, so a fallback is
+invisible, panic line included.
+
 ## No second type system
 
 The interpreter does not type check. `rustc` stays responsible for type,
