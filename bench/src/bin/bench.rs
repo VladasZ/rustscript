@@ -8,7 +8,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use rustscript_bench::http_server::HttpServer;
 use rustscript_bench::sample::{parse_compute_ns, parse_rss_bytes, rotated_indices};
-use rustscript_bench::{CaseResult, Gate, LANGS, MemStat, Report, Settings, TimeStat};
+use rustscript_bench::{CaseResult, Gate, LANGS, MemStat, PYTHON, Report, Settings, TimeStat};
 
 #[derive(Clone, Copy)]
 enum Input {
@@ -198,7 +198,7 @@ fn main() -> Result<()> {
     fs::create_dir_all(scratch.outputs())?;
 
     ensure_tool("node")?;
-    ensure_tool("python3")?;
+    ensure_tool(PYTHON)?;
     generate_fixtures(&root)?;
     build_binaries(&root)?;
 
@@ -376,7 +376,7 @@ fn invocation(context: &InvocationContext<'_>, case: &Case, lang: &str) -> Resul
             vec![case_dir.join("case.ts").display().to_string()],
         ),
         "python" => (
-            PathBuf::from("python3"),
+            PathBuf::from(PYTHON),
             vec![case_dir.join("case.py").display().to_string()],
         ),
         _ => unreachable!(),

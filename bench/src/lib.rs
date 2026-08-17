@@ -6,6 +6,11 @@ pub mod sample;
 
 pub const LANGS: [&str; 4] = ["native", "rustscript", "node", "python"];
 
+/// The exact interpreter the suite runs. Pinned so results stay comparable
+/// across machines where the plain `python3` name points at an old system
+/// build, macOS still ships 3.9.
+pub const PYTHON: &str = "python3.14";
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TimeStat {
     pub lang: String,
