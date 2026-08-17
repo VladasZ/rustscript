@@ -50,6 +50,37 @@ fn color_for(lang: &str) -> RGBColor {
     }
 }
 
+/// The chart title: the case name spelled out so the task is obvious.
+/// File names keep the short case name from `results.json`.
+fn display_title(name: &str) -> &'static str {
+    match name {
+        "hello" => "hello world",
+        "big_script" => "big script startup",
+        "multifile_startup" => "multi-file startup",
+        "fib" => "recursive fibonacci",
+        "sieve" => "sieve of eratosthenes",
+        "mandelbrot" => "mandelbrot",
+        "collatz" => "collatz",
+        "binary_trees" => "binary trees",
+        "string_builder" => "string building",
+        "higher_order" => "map filter fold",
+        "sort" => "comparator sort",
+        "sort_key" => "sort by key",
+        "hashmap_int" => "int hashmap",
+        "nbody" => "n-body",
+        "json_serialize" => "json serialize",
+        "stdout_lines" => "stdout lines",
+        "word_count" => "word count",
+        "json" => "json parse",
+        "regex" => "regex",
+        "file_transform" => "file transform",
+        "process_spawn" => "process spawn",
+        "async_tasks" => "async tasks",
+        "http_local" => "local http",
+        _ => "automation script",
+    }
+}
+
 /// One bar panel, values in the unit `fmt` renders.
 struct Panel {
     title: String,
@@ -151,7 +182,7 @@ fn render_case(out: &Path, c: &CaseResult) -> Result<()> {
     let panels = case_panels(c);
     let bars = i32::try_from(panels.first().map_or(4, |p| p.bars.len())).expect("bars fit i32");
     let w = i32::try_from(panels.len()).expect("panel count fits i32") * panel_width(bars);
-    let h = 530i32;
+    let h = 500i32;
     let dims = (
         u32::try_from(s(w)).expect("chart width fits u32"),
         u32::try_from(s(h)).expect("chart height fits u32"),
@@ -159,17 +190,11 @@ fn render_case(out: &Path, c: &CaseResult) -> Result<()> {
     let area = BitMapBackend::new(out, dims).into_drawing_area();
     area.fill(&BG)?;
 
-    let title = c.name.clone();
-    let (head, body) = area.split_vertically(s(90));
+    let (head, body) = area.split_vertically(s(60));
     head.draw(&Text::new(
-        title,
+        display_title(&c.name),
         (s(28), s(18)),
         ("sans-serif", s(30)).into_font().color(&INK),
-    ))?;
-    head.draw(&Text::new(
-        "same task, byte-identical output. medians. lower is better.",
-        (s(30), s(60)),
-        ("sans-serif", s(15)).into_font().color(&MUTED),
     ))?;
 
     let cols = body.split_evenly((1, panels.len()));
