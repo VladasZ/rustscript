@@ -107,6 +107,10 @@ pub struct Meta {
     pub os: String,
     pub arch: String,
     pub cpu: String,
+    /// Logical core count of the machine the run measured. Zero in results
+    /// recorded before the field existed.
+    #[serde(default)]
+    pub cpu_cores: u32,
     pub settings: Settings,
 }
 

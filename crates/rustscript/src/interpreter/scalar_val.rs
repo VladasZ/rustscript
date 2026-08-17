@@ -9,6 +9,7 @@ use std::cmp::Ordering;
 
 use super::bytecode::BinKind;
 use super::bytecode::UnKind;
+use super::int_methods::{IntOut, int_method, takes_amount_arg};
 use super::numeric::{
     IntWidth, i64_arith, int_arith, int_bit, int_neg, int_not, int_shift, truncate, u64_arith,
     unify,
@@ -177,6 +178,38 @@ pub(super) fn s_cast(v: SVal, w: IntWidth) -> Option<SVal> {
         SVal::Opaque | SVal::Unit => return None,
     };
     from_i128(value, w)
+}
+
+/// An integer method call, mirroring the integer arm of the generic method
+/// dispatch: the same width unification `bridge::int_method` applies, then
+/// the same `int_methods::int_method` table. A `None` answer, an unknown
+/// name, a non-integer operand, or an error, sends the call to the generic
+/// path, which reproduces its exact result or panic.
+pub(super) fn s_int_method(name: &str, recv: SVal, args: &[SVal]) -> Option<SVal> {
+    let (value, mut width) = parts(recv)?;
+    let mut decoded = [0i128; 2];
+    for (slot, arg) in decoded.iter_mut().zip(args) {
+        let (arg_value, arg_width) = parts(*arg)?;
+        *slot = arg_value;
+        // Receiver and argument share one type in real Rust, so a width
+        // either side states answers for both, except an amount argument
+        // whose own u32 must not redefine the receiver.
+        if !takes_amount_arg(name)
+            && let Ok(unified) = unify(width, arg_width)
+        {
+            width = unified;
+        }
+    }
+    if width.is_big() {
+        return None;
+    }
+    match int_method(name, width, value, &decoded[..args.len()])?.ok()? {
+        IntOut::Same(v) => from_i128(v, width),
+        // The counting family answers u32 in real Rust, see `int_out`.
+        IntOut::Count(count) => from_i128(i128::from(count), IntWidth::U32),
+        IntOut::Bool(b) => Some(SVal::Bool(b)),
+        _ => None,
+    }
 }
 
 /// The generic `is_truthy` over a slot. An `Opaque` frame value is never a
