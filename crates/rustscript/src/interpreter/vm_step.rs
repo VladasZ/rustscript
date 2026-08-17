@@ -605,6 +605,16 @@ fn make_range(ctx: &mut StepCtx, dst: u16, start: u16, end: u16, inclusive: bool
 }
 
 fn for_next(ctx: &mut StepCtx, iter: u16, idx: u16, val: u16, to: u32) -> Result<Flow> {
+    // The first iteration tries the scalar plan, which runs the whole loop
+    // on unboxed values when the body is int-only bytecode over a bytes or
+    // range source, see scalar_loop.rs. A fallback mid-loop leaves the index
+    // register at the consumed count, so the attempt happens once and the
+    // index is re-read below.
+    if matches!(ctx.get(idx), Value::Int(0))
+        && let Some(flow) = super::scalar_loop::try_run(ctx, iter, idx, to)?
+    {
+        return Ok(flow);
+    }
     let i = match ctx.get(idx) {
         Value::Int(i) => *i,
         _ => unreachable!("for index is an integer"),
