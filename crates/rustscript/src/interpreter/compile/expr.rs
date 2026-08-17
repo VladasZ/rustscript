@@ -14,6 +14,24 @@ use super::{
     first_generic_type, int_literal, is_assign_op, macro_yields_value, numeric_annotation,
 };
 
+/// Operators whose operands share the annotated integer type in real Rust.
+/// Comparisons answer bool and never sit under a numeric annotation.
+fn propagates_annotation(op: BinKind) -> bool {
+    matches!(
+        op,
+        BinKind::Add
+            | BinKind::Sub
+            | BinKind::Mul
+            | BinKind::Div
+            | BinKind::Rem
+            | BinKind::BitAnd
+            | BinKind::BitOr
+            | BinKind::BitXor
+            | BinKind::Shl
+            | BinKind::Shr
+    )
+}
+
 /// Flatten a left-nested `&&` chain into its terms, in source order. A cond
 /// that is not an `&&` is returned as a single term. Used to compile let-chains
 /// in `if let A = x && cond && let B = y`.
@@ -563,7 +581,19 @@ impl Compiler<'_> {
             Expr::Range(r) => self.compile_range(dst, r)?,
             Expr::Try(t) => {
                 let src = self.compile_expr(&t.expr)?;
-                self.emit(Op::Try { dst, src });
+                if self.ctx.has_drop {
+                    // The early return runs the scope drops it would
+                    // otherwise skip by leaving the frame from inside the VM.
+                    let site = self.here();
+                    self.emit(Op::TryJump { dst, src, to: 0 });
+                    let depth = self.cur().scope_order.len();
+                    self.emit_scope_drops(depth);
+                    self.emit(Op::Ret { src: dst });
+                    let ok = self.mark()?;
+                    self.patch_jump(site, ok);
+                } else {
+                    self.emit(Op::Try { dst, src });
+                }
             }
             Expr::Cast(c) => {
                 let src = self.compile_expr(&c.expr)?;
@@ -739,8 +769,40 @@ impl Compiler<'_> {
             Expr::Unary(u) if matches!(u.op, UnOp::Neg(_)) => {
                 self.compile_numeric_lit(dst, &u.expr, true, target)
             }
+            // An integer annotation reaches into the init's arithmetic, so
+            // `let b: u128 = 1 << 100` computes at 128 bits instead of
+            // overflowing an untagged i64 shift.
+            Expr::Binary(b)
+                if matches!(target, NumericTy::Int(_))
+                    && !is_assign_op(&b.op)
+                    && bin_kind(&b.op).is_some_and(propagates_annotation) =>
+            {
+                let op = bin_kind(&b.op).expect("operator kind just matched");
+                let a = self.alloc();
+                self.compile_numeric_operand(a, &b.left, target)?;
+                let rhs = self.alloc();
+                // A shift amount is its own type in real Rust and never
+                // adopts the annotated width.
+                if matches!(op, BinKind::Shl | BinKind::Shr) {
+                    self.compile_into(rhs, &b.right)?;
+                } else {
+                    self.compile_numeric_operand(rhs, &b.right, target)?;
+                }
+                self.emit(Op::Bin { dst, a, b: rhs, op });
+                Ok(true)
+            }
             other => self.compile_numeric_lit(dst, other, false, target),
         }
+    }
+
+    /// One operand under a numeric annotation: a literal adopts the width, a
+    /// nested arithmetic expression propagates it further, anything else
+    /// compiles as itself.
+    fn compile_numeric_operand(&mut self, dst: Reg, expr: &Expr, target: NumericTy) -> Result<()> {
+        if !self.compile_numeric_annotated(dst, expr, target)? {
+            self.compile_into(dst, expr)?;
+        }
+        Ok(())
     }
 
     fn compile_numeric_lit(

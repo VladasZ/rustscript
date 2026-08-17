@@ -33,7 +33,7 @@
 
 use std::collections::BTreeSet;
 
-use super::bytecode::{Chunk, Const, Op};
+use super::bytecode::{BuiltinId, Chunk, Const, Op};
 
 include!(concat!(env!("OUT_DIR"), "/bridge_tables.rs"));
 
@@ -171,9 +171,6 @@ const VM_BUILTINS: &[&str] = &["clone_from", "push", "push_str", "parse"];
 
 /// Whether the bridge for this receiver implements the method.
 fn on_recv(recv: &str, method: &str) -> bool {
-    if VM_BUILTINS.contains(&method) {
-        return true;
-    }
     let mut saw_table = false;
     for table in BRIDGE_TABLES {
         if table.recv == recv {
@@ -193,10 +190,12 @@ fn on_recv(recv: &str, method: &str) -> bool {
     if !saw_table {
         return any_name(method);
     }
-    // A table exists for the receiver and the method is not in it. Many
-    // methods resolve through `BuiltinId` outside the string tables, the VM's
-    // inline fast paths among them, so the id list still vouches for a name.
-    BUILTIN_IDS.contains(&method)
+    // A table exists for the receiver and the method is not in it. Methods
+    // that resolve through `BuiltinId` outside the string tables carry their
+    // own receiver tags, so a `Vec`-only name no longer vouches for a
+    // `String` receiver.
+    let tagged = BuiltinId::resolve(method).receivers();
+    tagged.contains(&"*") || tagged.contains(&recv)
 }
 
 /// Methods every value carries, handled before bridge dispatch.
@@ -237,12 +236,15 @@ fn walk(chunk: &Chunk, user: &UserMethods, out: &mut Vec<Finding>) {
                 // A user type answers from the script's own impls, plus the
                 // any-receiver bridge surface every value carries. A common
                 // bridge name on the wrong receiver is exactly what a
-                // name-only answer used to vouch for.
+                // name-only answer used to vouch for. A type with its own
+                // `next` is an iterator, so the whole adaptor surface
+                // applies to it and the check falls back to name only.
                 Ty::User(ty_name) => {
                     user.has(ty_name, method)
                         || BRIDGE_TABLES
                             .iter()
                             .any(|t| t.recv == "*" && t.names.contains(&method.as_str()))
+                        || (user.has(ty_name, "next") && any_name(method))
                 }
                 _ => match ty.name() {
                     Some(recv_name) => on_recv(recv_name, method),
@@ -289,6 +291,17 @@ fn infer<'a>(chunk: &'a Chunk, before: usize, reg: u16, user: &UserMethods) -> T
             }
             Op::MakeEnum { dst, info, .. } | Op::LoadEnum { dst, info } if *dst == reg => {
                 return Ty::User(&chunk.enum_variants[*info as usize].enum_name);
+            }
+            // A one-segment path value naming a script type is a unit
+            // struct, `let d = Dog;`, so the report can name the type.
+            Op::PathValue { dst, path } if *dst == reg => {
+                let segs = &chunk.paths[*path as usize].0;
+                if let [name] = segs.as_slice()
+                    && user.types.contains(name)
+                {
+                    return Ty::User(name);
+                }
+                return Ty::Unknown;
             }
             // Any other write to this register loses the trail.
             _ => {

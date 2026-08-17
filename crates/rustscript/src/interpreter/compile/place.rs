@@ -65,6 +65,11 @@ impl Compiler<'_> {
                     if target != name {
                         return Ok(self.compile_name_place(&target));
                     }
+                    // A closure dereferencing an alias it captured finds the
+                    // alias in an enclosing function's frame.
+                    if let Some(target) = self.enclosing_alias_target(&name) {
+                        return Ok(self.compile_name_place(&target));
+                    }
                 }
                 Ok(None)
             }

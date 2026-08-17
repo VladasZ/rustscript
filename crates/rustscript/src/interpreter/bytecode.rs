@@ -460,6 +460,37 @@ impl BuiltinId {
         }
     }
 
+    /// The checker-visible receivers this id-dispatched method works on:
+    /// the types the coverage walk can infer, `Str`, `Vec`, `Map`, and
+    /// `Option`, or `*` for every receiver. Names the interpreter answers
+    /// only on iterators, results, entries, or scalars list nothing here,
+    /// because the walk never infers those types and checks them by name.
+    /// This is what stops a `Vec`-only name from vouching for a `String`.
+    pub fn receivers(self) -> &'static [&'static str] {
+        use BuiltinId::{
+            AndThen, Chars, Clone, CloneFrom, Concat, Contains, ContainsKey, Copied, EndsWith,
+            Entry, Filter, First, Get, Insert, IsEmpty, Iter, IterMut, Join, Keys, Last, Len,
+            Lines, Map, MapOr, OkOrElse, Parse, Pop, Push, PushStr, Remove, Retain, Sort, SortBy,
+            SortByCachedKey, SortByKey, Split, SplitFirst, SplitWhitespace, StartsWith, Take,
+            ToString, Trim, Unwrap, UnwrapOr, UnwrapOrElse, Values,
+        };
+        match self {
+            Clone | ToString | CloneFrom => &["*"],
+            Len | IsEmpty | Get => &["Str", "Vec", "Map"],
+            Insert | Remove => &["Vec", "Map"],
+            ContainsKey | Entry | Keys | Values => &["Map"],
+            Iter => &["Vec", "Map", "Option"],
+            IterMut | Pop | First | Last | SplitFirst | Sort | SortByKey | SortByCachedKey
+            | SortBy | Join | Concat | Retain => &["Vec"],
+            Push | Contains => &["Str", "Vec"],
+            PushStr | SplitWhitespace | Split | Chars | Lines | Trim | StartsWith | EndsWith
+            | Parse => &["Str"],
+            Take | Unwrap | UnwrapOr | UnwrapOrElse | Copied | Map | Filter | AndThen | MapOr
+            | OkOrElse => &["Option"],
+            _ => &[],
+        }
+    }
+
     /// Whether this method takes a closure and must run through the
     /// interpreter's higher-order dispatch.
     pub fn is_higher_order(self) -> bool {
@@ -876,11 +907,28 @@ pub enum Op {
     DropScope {
         list: u16,
     },
+    /// Clear `src` when the value it holds has a user `Drop` impl. Emitted
+    /// after a by-value argument copy, so the new holder is the last one
+    /// and the guard drops where the move sent it, not at the caller's
+    /// scope end. `Drop` types are never `Copy`, so a later use of the
+    /// moved name cannot exist in a script that passed the real checker.
+    MoveOut {
+        src: Reg,
+    },
 
     /// The `?` operator. Unwraps Ok/Some into `dst`, or returns early on Err/None.
     Try {
         dst: Reg,
         src: Reg,
+    },
+    /// The `?` operator in a program with `Drop` impls. Ok/Some jumps to
+    /// `to` with the unwrapped payload in `dst`. Err/None falls through
+    /// with the early-return value in `dst`, into the scope drops and the
+    /// `Ret` the compiler emits at the site, so `?` cannot skip drops.
+    TryJump {
+        dst: Reg,
+        src: Reg,
+        to: u32,
     },
     Cast {
         dst: Reg,
@@ -1064,19 +1112,28 @@ impl StructShape {
 /// `num_params` is only a default, a call with a different count rebuilds the
 /// forwarder for the count actually passed.
 pub fn path_call_chunk(segs: Vec<String>, num_params: usize) -> Arc<Chunk> {
-    let dst = u16::try_from(num_params).expect("parameter count fits u16");
+    let count = u16::try_from(num_params).expect("parameter count fits u16");
+    let dst = count * 2;
     let mut chunk = Chunk::empty("<pathfn>");
     chunk.path_forwarder = true;
     chunk.num_params = num_params;
-    chunk.num_regs = num_params + 1;
+    chunk.num_regs = num_params * 2 + 1;
     chunk.paths.push((segs, None));
-    // Arguments land in registers 0..num_params, the result goes just past
-    // them.
+    // Arguments land in registers 0..count. The path call consumes its
+    // window, and the frame loop hands the parameter registers back to the
+    // caller on return, so the call runs on copies in count..2*count and
+    // the result goes just past them.
+    for i in 0..count {
+        chunk.code.push(Op::Move {
+            dst: count + i,
+            src: i,
+        });
+    }
     chunk.code.push(Op::CallPath {
         dst,
         path: 0,
-        base: 0,
-        argc: dst,
+        base: count,
+        argc: count,
     });
     chunk.code.push(Op::Ret { src: dst });
     Arc::new(chunk)

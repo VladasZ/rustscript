@@ -4,6 +4,7 @@
 
 use num_traits::AsPrimitive;
 use std::f64::consts::PI;
+use std::mem::take;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -64,20 +65,90 @@ impl Vm {
         Ok(Some(text))
     }
 
-    /// Run the value's user `Drop::drop` when this is its last holder.
-    /// Another holder means the value was moved or is still shared, and the
-    /// real owner drops it at its own end of life.
+    /// Run the value's user `Drop::drop` when this is its last holder, then
+    /// drop what it contains. Another holder means the value was moved or is
+    /// still shared, and the real owner drops it at its own end of life.
+    /// Containers, cells, and `Rc` hand their contents on when they die, so
+    /// a guard inside them still drops. A shared cycle never reaches one
+    /// holder, so it leaks exactly like real `Rc` cycles do.
     pub(super) fn run_user_drop(self: &Arc<Self>, value: Value) -> Result<()> {
-        let (ty, unique) = match &value {
-            Value::Struct(s) => (s.name().to_string(), Arc::strong_count(s) == 1),
+        match value {
+            Value::Struct(s) => {
+                if Arc::strong_count(&s) != 1 {
+                    return Ok(());
+                }
+                self.run_drop_impl(s.name().to_string(), Value::Struct(s.clone()))?;
+                // The impl could have stored a clone of self somewhere, in
+                // which case the fields live on with it.
+                if Arc::strong_count(&s) != 1 {
+                    return Ok(());
+                }
+                // Fields drop after the type's own `Drop::drop`, in
+                // declaration order, like real Rust.
+                let fields = take(&mut *s.values.lock());
+                for field in fields {
+                    self.run_user_drop(field)?;
+                }
+                Ok(())
+            }
             Value::Enum {
-                enum_name, data, ..
-            } => (enum_name.to_string(), Arc::strong_count(data) == 1),
-            _ => return Ok(()),
-        };
-        if !unique {
-            return Ok(());
+                enum_name,
+                variant,
+                data,
+            } => {
+                if Arc::strong_count(&data) != 1 {
+                    return Ok(());
+                }
+                self.run_drop_impl(
+                    enum_name.to_string(),
+                    Value::Enum {
+                        enum_name,
+                        variant,
+                        data: data.clone(),
+                    },
+                )?;
+                if Arc::strong_count(&data) != 1 {
+                    return Ok(());
+                }
+                let payload = take(&mut *data.lock());
+                for field in payload {
+                    self.run_user_drop(field)?;
+                }
+                Ok(())
+            }
+            Value::Vec(list) | Value::Tuple(list) => {
+                if Arc::strong_count(&list) != 1 {
+                    return Ok(());
+                }
+                let items = take(&mut *list.lock());
+                for item in items {
+                    self.run_user_drop(item)?;
+                }
+                Ok(())
+            }
+            Value::Map(map, _) => {
+                if Arc::strong_count(&map) != 1 {
+                    return Ok(());
+                }
+                let entries = take(&mut *map.lock());
+                for (_, entry) in entries {
+                    self.run_user_drop(entry)?;
+                }
+                Ok(())
+            }
+            Value::Cell(_, slot) => {
+                if Arc::strong_count(&slot) != 1 {
+                    return Ok(());
+                }
+                let inner = take(&mut *slot.lock());
+                self.run_user_drop(inner)
+            }
+            _ => Ok(()),
         }
+    }
+
+    /// Run `ty`'s own `Drop::drop` on `value`, when the script defines one.
+    fn run_drop_impl(self: &Arc<Self>, ty: String, value: Value) -> Result<()> {
         let Some(chunk) = self.methods.get(&(ty, "Drop::drop".to_string())) else {
             return Ok(());
         };
@@ -234,6 +305,15 @@ impl Vm {
                 return Ok(Value::Unit);
             }
             bail!("std::thread is not supported beyond sleep, use tokio::spawn");
+        }
+        // `tokio::sync::Mutex` is its own kind: its `lock` is awaited and
+        // answers the guard with no `Result` layer, unlike `std::sync`.
+        if namespace == "Mutex" && last == "new" && canon.iter().any(|s| s == "tokio") {
+            let inner = args.into_iter().next().unwrap_or(Value::Unit);
+            return Ok(super::cell::make_cell(
+                super::value::CellKind::TokioMutex,
+                inner,
+            ));
         }
         // Namespaced calls reaching native bridges compute in i64 and f64, so
         // width-tagged numbers pass those their plain image. The script-level
@@ -829,10 +909,17 @@ fn duration_method(s: &Arc<super::value::StructData>, m: &str, args: &[Value]) -
 
 /// Width-aware integer methods.
 fn int_method(recv: &Value, m: &str, args: &[Value]) -> Option<Result<Value>> {
-    let (value, mut width) = recv.int_parts()?;
+    // An operand with no i128 image is a u128 past `i128::MAX`; it answers
+    // on the native 128-bit cores over raw bits. Checking through the
+    // `int_parts` failure keeps this off the hot 64-bit dispatch path.
+    let Some((value, mut width)) = recv.int_parts() else {
+        return big_int_route(recv, m, args);
+    };
     let mut decoded = Vec::with_capacity(args.len());
     for arg in args {
-        let (arg_value, arg_width) = arg.int_parts()?;
+        let Some((arg_value, arg_width)) = arg.int_parts() else {
+            return big_int_route(recv, m, args);
+        };
         decoded.push(arg_value);
         // Receiver and argument share one type in real Rust, so a width
         // either side states answers for both. A shift amount's own u32 must not redefine the receiver.
@@ -842,12 +929,53 @@ fn int_method(recv: &Value, m: &str, args: &[Value]) -> Option<Result<Value>> {
             width = unified;
         }
     }
+    // The in-range 128-bit values decode losslessly, so `value` is already
+    // the raw bit pattern the native cores take.
+    if width.is_big() {
+        let out = super::int_methods::big_int_method(m, width, value, &decoded)?;
+        return Some(out.map(|o| int_out(o, width)));
+    }
     Some(
         match super::int_methods::int_method(m, width, value, &decoded)? {
             Ok(out) => Ok(int_out(out, width)),
             Err(error) => Err(error),
         },
     )
+}
+
+/// The 128-bit method route for a call whose receiver or argument has no
+/// i128 image. Answers `None` when no 128-bit operand is present at all,
+/// which is any non-integer receiver. Cold: the hot integer dispatch calls
+/// it only through the `int_parts` failure path.
+#[cold]
+fn big_int_route(recv: &Value, m: &str, args: &[Value]) -> Option<Result<Value>> {
+    let mut width = match recv {
+        Value::Big(_, w) => Some(*w),
+        _ => None,
+    };
+    if width.is_none() {
+        width = args.iter().find_map(|v| match v {
+            Value::Big(_, w) => Some(*w),
+            _ => None,
+        });
+    }
+    let width = width?;
+    let bits = big_bits(recv)?;
+    let decoded: Option<Vec<i128>> = args.iter().map(big_bits).collect();
+    let out = super::int_methods::big_int_method(m, width, bits, &decoded?)?;
+    Some(out.map(|o| int_out(o, width)))
+}
+
+/// Storage bits of an operand in a 128-bit method call: a `Big` carries
+/// them directly, an untagged literal or a tagged value by its value, which
+/// is the same bit pattern for everything valid Rust can mix with a
+/// 128-bit operand.
+fn big_bits(v: &Value) -> Option<i128> {
+    match v {
+        Value::Big(bits, _) => Some(*bits),
+        Value::Int(i) => Some(i128::from(*i)),
+        other => other.int_parts().map(|(value, _)| value),
+    }
 }
 
 /// Materialize an f32 core answer as a runtime value. Called before
@@ -1116,6 +1244,10 @@ fn render_template(
                     Value::IntW(v, w) => Some(super::format::SpecNumber::Sized {
                         value: w.decode(*v),
                         bits: w.bits(),
+                    }),
+                    Value::Big(v, w) => Some(super::format::SpecNumber::Big {
+                        bits: *v,
+                        signed: w.is_signed(),
                     }),
                     _ => None,
                 };

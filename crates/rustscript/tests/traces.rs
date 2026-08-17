@@ -100,8 +100,10 @@ fn main() {
 }
 "#,
     );
+    // The coverage gate refuses the script before it runs, and its report
+    // names the receiver type.
     assert!(
-        err.contains("unknown method `fly` on struct `Dog`"),
+        err.contains("`fly` on Dog is not implemented by the interpreter"),
         "stderr was: {err}"
     );
 }

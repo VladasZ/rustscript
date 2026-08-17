@@ -153,26 +153,7 @@ fn real_main() -> Result<()> {
 /// could make, on every branch, without executing a line.
 fn check_coverage(program: &loader::Program) -> Result<()> {
     let interp = interpreter::Interp::load(&program.modules, program.tokio_main)?;
-    let findings = interp.coverage();
-    if findings.is_empty() {
-        return Ok(());
-    }
-    let mut out = String::new();
-    for finding in &findings {
-        out.push_str("  ");
-        out.push_str(&finding.message());
-        out.push('\n');
-    }
-    let engine_name = "the interpreter";
-    let (count, verb) = if findings.len() == 1 {
-        ("1 method".to_string(), "is")
-    } else {
-        (format!("{} methods", findings.len()), "are")
-    };
-    Err(anyhow!(
-        "{count} used by this script {verb} not implemented by {engine_name}:\n{}",
-        out.trim_end()
-    ))
+    interp.coverage_gate()
 }
 
 fn run(file: &str, script_args: &[String]) -> Result<()> {

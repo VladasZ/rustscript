@@ -280,6 +280,7 @@ impl Vm {
             }
         })();
         result.map_err(|e| {
+            self.unwind_drops(&cur, base, &frames, stack);
             let trace = std::iter::once(frame_line(&cur, ip)).chain(
                 frames
                     .iter()
@@ -288,6 +289,36 @@ impl Vm {
             );
             trace_error(e, trace)
         })
+    }
+
+    /// Run user `Drop` impls for every live local of every frame being
+    /// unwound by a panic, innermost frame first and highest register first,
+    /// the way real Rust unwinding drops locals in reverse declaration
+    /// order. A register whose storage has another holder was moved or is
+    /// still shared, so its real owner drops it, exactly like a scope-end
+    /// drop. A panic inside one of these drops cannot unwind again, real
+    /// Rust would abort there, so it is reported and the original panic
+    /// keeps propagating.
+    fn unwind_drops(
+        self: &Arc<Self>,
+        cur: &Arc<Chunk>,
+        base: usize,
+        frames: &[Frame],
+        stack: &mut [Value],
+    ) {
+        let spans = std::iter::once((base, cur.num_regs))
+            .chain(frames.iter().rev().map(|f| (f.base, f.chunk.num_regs)));
+        for (base, num_regs) in spans {
+            for reg in (0..num_regs).rev() {
+                let Some(slot) = stack.get_mut(base + reg) else {
+                    continue;
+                };
+                let value = take(slot);
+                if let Err(e) = self.run_user_drop(value) {
+                    eprintln!("panic in drop during unwinding: {e:#}");
+                }
+            }
+        }
     }
 
     /// Drive an awaited value to its result. A `JoinHandle` joins, a future is
@@ -301,7 +332,17 @@ impl Vm {
             // `.await.unwrap()`, and both need the Ok layer to be here.
             Native::Task(h) => Ok(match self.rt.block_on(h) {
                 Ok(v) => Value::ok(v),
-                Err(e) => Value::err(Value::str(e.to_string())),
+                // The real JoinError renders both its format forms here, so
+                // `{e:?}` prints the same `JoinError::Panic(Id(11), "boom",
+                // ...)` a compiled binary prints.
+                Err(e) => Value::err(
+                    Native::JoinErr {
+                        display: e.to_string(),
+                        debug: format!("{e:?}"),
+                        is_panic: e.is_panic(),
+                    }
+                    .wrap(),
+                ),
             }),
             // Awaiting a plain future yields its output directly, no wrapper.
             Native::Future(f) => Ok(self.rt.block_on(f)),

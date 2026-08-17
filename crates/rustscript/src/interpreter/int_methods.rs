@@ -123,9 +123,13 @@ fn to_bytes(width: IntWidth, value: i128, order: ByteOrder) -> Vec<u8> {
     out
 }
 
-/// Raw bits of a value in its width, for the bit twiddling methods.
+/// Raw bits of a value in its width, for the bit twiddling methods. A
+/// 128-bit value already stores its raw bits, and its mask would not fit.
 fn raw(width: IntWidth, value: i128) -> u128 {
     let bits = width.bits();
+    if bits == 128 {
+        return value.cast_unsigned();
+    }
     let mask = (1u128 << bits) - 1;
     AsPrimitive::<u128>::as_(value) & mask
 }
@@ -135,6 +139,9 @@ fn raw(width: IntWidth, value: i128) -> u128 {
 /// through.
 fn from_raw(width: IntWidth, bits_value: u128) -> i128 {
     let bits = width.bits();
+    if bits == 128 {
+        return bits_value.cast_signed();
+    }
     let mask = (1u128 << bits) - 1;
     let truncated = bits_value & mask;
     if width.is_signed() && truncated >> (bits - 1) & 1 == 1 {
@@ -193,7 +200,13 @@ fn count_arg(args: &[i128], index: usize) -> Result<u32> {
 pub fn takes_amount_arg(name: &str) -> bool {
     matches!(
         name,
-        "pow" | "powi" | "rotate_left" | "rotate_right" | "checked_shl" | "checked_shr"
+        "pow"
+            | "powi"
+            | "checked_pow"
+            | "rotate_left"
+            | "rotate_right"
+            | "checked_shl"
+            | "checked_shr"
     )
 }
 
@@ -204,6 +217,141 @@ pub fn int_method(
     args: &[i128],
 ) -> Option<Result<IntOut>> {
     int_arith_method(name, width, recv, args).or_else(|| int_query_method(name, width, recv, args))
+}
+
+/// Stamps the shared native method body for one 128-bit type. `$decode`
+/// turns raw storage bits into the type, `$encode` a result back into bits.
+/// The names here mirror the i128 pipeline above; new names must go into
+/// both, and the coverage harvest reads the pipeline's two halves.
+macro_rules! big_methods {
+    ($fn_name:ident, $ty:ty, $decode:expr, $encode:expr) => {
+        fn $fn_name(name: &str, recv_bits: i128, args: &[i128]) -> Option<Result<IntOut>> {
+            let decode = $decode;
+            let encode = $encode;
+            let recv: $ty = decode(recv_bits);
+            let val = |i: usize| -> Result<$ty> { Ok(decode(arg(args, i)?)) };
+            let same = |v: $ty| IntOut::Same(encode(v));
+            let checked = |v: Option<$ty>| IntOut::Checked(v.map(encode));
+            let out: Result<IntOut> = match name {
+                "saturating_add" => val(0).map(|b| same(recv.saturating_add(b))),
+                "saturating_sub" => val(0).map(|b| same(recv.saturating_sub(b))),
+                "saturating_mul" => val(0).map(|b| same(recv.saturating_mul(b))),
+                "wrapping_add" => val(0).map(|b| same(recv.wrapping_add(b))),
+                "wrapping_sub" => val(0).map(|b| same(recv.wrapping_sub(b))),
+                "wrapping_mul" => val(0).map(|b| same(recv.wrapping_mul(b))),
+                "wrapping_neg" => Ok(same(recv.wrapping_neg())),
+                "checked_add" => val(0).map(|b| checked(recv.checked_add(b))),
+                "checked_sub" => val(0).map(|b| checked(recv.checked_sub(b))),
+                "checked_mul" => val(0).map(|b| checked(recv.checked_mul(b))),
+                "checked_neg" => Ok(checked(recv.checked_neg())),
+                "checked_div" => val(0).map(|b| checked(recv.checked_div(b))),
+                "checked_rem" => val(0).map(|b| checked(recv.checked_rem(b))),
+                "checked_shl" => count_arg(args, 0).map(|n| checked(recv.checked_shl(n))),
+                "checked_shr" => count_arg(args, 0).map(|n| checked(recv.checked_shr(n))),
+                "pow" => count_arg(args, 0).and_then(|e| match recv.checked_pow(e) {
+                    Some(v) => Ok(same(v)),
+                    None => bail!("attempt to multiply with overflow"),
+                }),
+                "checked_pow" => count_arg(args, 0).map(|e| checked(recv.checked_pow(e))),
+                "div_euclid" => val(0).and_then(|b| {
+                    if b == 0 {
+                        bail!("attempt to divide by zero");
+                    }
+                    match recv.checked_div_euclid(b) {
+                        Some(v) => Ok(same(v)),
+                        None => bail!("attempt to divide with overflow"),
+                    }
+                }),
+                "rem_euclid" => val(0).and_then(|b| {
+                    if b == 0 {
+                        bail!("attempt to calculate the remainder with a divisor of zero");
+                    }
+                    match recv.checked_rem_euclid(b) {
+                        Some(v) => Ok(same(v)),
+                        None => bail!("attempt to calculate the remainder with overflow"),
+                    }
+                }),
+                "min" => val(0).map(|b| same(recv.min(b))),
+                "max" => val(0).map(|b| same(recv.max(b))),
+                "clamp" => val(0).and_then(|low| {
+                    let high = val(1)?;
+                    if low > high {
+                        bail!("min > max. min = {low}, max = {high}");
+                    }
+                    Ok(same(recv.clamp(low, high)))
+                }),
+                "cmp" => val(0).map(|b| IntOut::Ordering(recv.cmp(&b))),
+                "is_multiple_of" => val(0).map(|b| {
+                    IntOut::Bool(match b {
+                        0 => recv == 0,
+                        // The only `None` remainder is MIN % -1, which is 0.
+                        _ => recv.checked_rem(b).is_none_or(|r| r == 0),
+                    })
+                }),
+                "count_ones" => Ok(IntOut::Count(recv.count_ones())),
+                "count_zeros" => Ok(IntOut::Count(recv.count_zeros())),
+                "leading_zeros" => Ok(IntOut::Count(recv.leading_zeros())),
+                "trailing_zeros" => Ok(IntOut::Count(recv.trailing_zeros())),
+                "rotate_left" => count_arg(args, 0).map(|n| same(recv.rotate_left(n))),
+                "rotate_right" => count_arg(args, 0).map(|n| same(recv.rotate_right(n))),
+                "swap_bytes" => Ok(same(recv.swap_bytes())),
+                "reverse_bits" => Ok(same(recv.reverse_bits())),
+                "to_le_bytes" => Ok(IntOut::Bytes(recv.to_le_bytes().to_vec())),
+                "to_be_bytes" => Ok(IntOut::Bytes(recv.to_be_bytes().to_vec())),
+                "to_ne_bytes" => Ok(IntOut::Bytes(recv.to_ne_bytes().to_vec())),
+                "as_i64" => Ok(IntOut::Checked(i64::try_from(recv).ok().map(i128::from))),
+                "as_u64" => Ok(IntOut::Checked(u64::try_from(recv).ok().map(i128::from))),
+                "as_f64" => Ok(IntOut::SomeFloat(AsPrimitive::<f64>::as_(recv))),
+                _ => return None,
+            };
+            Some(out)
+        }
+    };
+}
+
+big_methods!(
+    u128_method,
+    u128,
+    |bits: i128| bits.cast_unsigned(),
+    |v: u128| { v.cast_signed() }
+);
+big_methods!(i128_method, i128, |bits: i128| bits, |v: i128| v);
+
+/// Native method cores for the 128-bit receivers. The i128 pipeline above
+/// cannot host them: a `u128` past `i128::MAX` stores as negative bits and
+/// its bounds do not fit an i128. `recv` and every `Same` or `Checked`
+/// payload are raw storage bits, u128 reinterpreted, exactly what
+/// `Value::Big` carries. The signed-only names live here because the
+/// stamped body must compile for u128 too.
+pub fn big_int_method(
+    name: &str,
+    width: IntWidth,
+    recv: i128,
+    args: &[i128],
+) -> Option<Result<IntOut>> {
+    match width {
+        IntWidth::U128 => match name {
+            "isqrt" => Some(Ok(IntOut::Same(recv.cast_unsigned().isqrt().cast_signed()))),
+            _ => u128_method(name, recv, args),
+        },
+        IntWidth::I128 => match name {
+            "isqrt" => Some(if recv < 0 {
+                Err(anyhow::anyhow!(
+                    "argument of integer square root cannot be negative"
+                ))
+            } else {
+                Ok(IntOut::Same(recv.isqrt()))
+            }),
+            "abs" => Some(if recv == i128::MIN {
+                Err(anyhow::anyhow!("attempt to negate with overflow"))
+            } else {
+                Ok(IntOut::Same(recv.abs()))
+            }),
+            "signum" => Some(Ok(IntOut::Same(recv.signum()))),
+            _ => i128_method(name, recv, args),
+        },
+        _ => None,
+    }
 }
 
 /// The arithmetic families: saturating, wrapping, checked, pow, abs, signum.
@@ -285,6 +433,7 @@ fn int_arith_method(
             }))
         }),
         "pow" => count_arg(args, 0).and_then(|e| pow(width, recv, e).map(IntOut::Same)),
+        "checked_pow" => count_arg(args, 0).map(|e| IntOut::Checked(pow(width, recv, e).ok())),
         "abs" => {
             if !width.is_signed() {
                 return None;

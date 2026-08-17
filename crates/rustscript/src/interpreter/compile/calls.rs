@@ -11,6 +11,7 @@ use crate::interpreter::bytecode::{
 };
 use crate::interpreter::numeric::IntWidth;
 use crate::interpreter::serde_attrs::serde_rename;
+use crate::interpreter::typeir::CastIr;
 
 use super::expr::annotation_scalar;
 use super::place;
@@ -31,8 +32,33 @@ impl Compiler<'_> {
         }
         for (i, a) in list.iter().enumerate() {
             self.compile_into(base + idx16(i), a)?;
+            self.emit_arg_move_out(a);
         }
         Ok(base)
+    }
+
+    /// A plain-path by-value argument is a move in real Rust. When the
+    /// program has `Drop` impls, clear the binding register after the copy
+    /// when the value's type has a user `Drop` impl, so the guard drops
+    /// where the move sent it. A reference argument compiles as
+    /// `Expr::Reference` and never reaches this.
+    fn emit_arg_move_out(&mut self, arg: &Expr) {
+        if !self.ctx.has_drop {
+            return;
+        }
+        let Some(name) = place::single_path_name(arg) else {
+            return;
+        };
+        if self.cur().aliases.contains_key(&name) {
+            return;
+        }
+        if let NameLoc::Local(reg) = self.resolve(&name)
+            // A borrow parameter forwards a reference, not ownership, so the
+            // caller keeps its handle and the borrow take covers the call.
+            && !self.cur().borrow_params.contains(&reg)
+        {
+            self.emit(Op::MoveOut { src: reg });
+        }
     }
 
     /// Record the turbofish type args on a call path, e.g. the `AppList` in
@@ -63,6 +89,7 @@ impl Compiler<'_> {
         let Expr::Path(path_expr) = &*c.func else {
             let callee = self.compile_expr(&c.func)?;
             let base = self.compile_args(c.args.iter())?;
+            self.emit_borrow_takes(c.args.iter());
             self.emit(Op::CallValue {
                 dst,
                 callee,
@@ -113,6 +140,7 @@ impl Compiler<'_> {
             Res::Fn(idx) => {
                 let targ = self.record_call_type_args(path);
                 let base = self.compile_args(c.args.iter())?;
+                self.emit_borrow_takes(c.args.iter());
                 self.emit(Op::CallFn {
                     dst,
                     func: idx,
@@ -168,6 +196,18 @@ impl Compiler<'_> {
                 if let Some(kind) = self.mem_intrinsic(&segs)
                     && self.compile_mem_intrinsic(dst, kind, c)?
                 {
+                    return Ok(());
+                }
+                // Numeric `T::from(x)` lowers to the same cast op as `x as T`.
+                // rustc has already proven the conversion lossless, so the
+                // widening cast computes the same value without the dynamic
+                // path dispatch.
+                if let Some(ir) = numeric_from_cast(&segs, c.args.len()) {
+                    let src = self.compile_expr(&c.args[0])?;
+                    let f = self.cur();
+                    f.casts.push(ir);
+                    let ty = idx16(f.casts.len() - 1);
+                    self.emit(Op::Cast { dst, src, ty });
                     return Ok(());
                 }
                 segs
@@ -255,6 +295,7 @@ impl Compiler<'_> {
             return Ok(false);
         };
         let base = self.compile_args(c.args.iter())?;
+        self.emit_borrow_takes(c.args.iter());
         self.emit(Op::CallValue {
             dst,
             callee,
@@ -496,9 +537,55 @@ impl Compiler<'_> {
                 let name = p.path.segments[0].ident.to_string();
                 let location = self.resolve_for_write(&name);
                 self.emit_name_store(location, base + idx16(i), &name)?;
+                continue;
+            }
+            // A register cleared by the borrow take gets its handle back
+            // from the callee's returned parameter window. The window slot
+            // clears after the move, a stale copy there would inflate
+            // `Rc::strong_count` on the next call.
+            if let Some(reg) = self.borrowed_local(arg) {
+                self.emit(Op::Move {
+                    dst: reg,
+                    src: base + idx16(i),
+                });
+                self.emit(Op::LoadUnit {
+                    dst: base + idx16(i),
+                });
             }
         }
         Ok(())
+    }
+
+    /// The plain immutable local a call argument borrows: `&name`,
+    /// `&mut name`, or a plain path forwarding one of this function's own
+    /// borrow parameters. A mutable local lives in a cell and a `&mut`
+    /// alias points elsewhere, so both stay out.
+    fn borrowed_local(&mut self, arg: &Expr) -> Option<Reg> {
+        let (name, forwarded) = match arg {
+            Expr::Reference(r) => (place::single_path_name(&r.expr)?, false),
+            other => (place::single_path_name(other)?, true),
+        };
+        if self.cur().aliases.contains_key(&name) {
+            return None;
+        }
+        let NameLoc::Local(reg) = self.resolve(&name) else {
+            return None;
+        };
+        if forwarded && !self.cur().borrow_params.contains(&reg) {
+            return None;
+        }
+        Some(reg)
+    }
+
+    /// Clear the registers a call borrows, for the call's duration. The
+    /// callee then holds the only live handle, so `Rc::strong_count` reads
+    /// the same at any call depth, and the writebacks after the call
+    /// restore every cleared register from the returned parameter window.
+    fn emit_borrow_takes<'e>(&mut self, args: impl Iterator<Item = &'e Expr>) {
+        let regs: Vec<Reg> = args.filter_map(|arg| self.borrowed_local(arg)).collect();
+        for reg in regs {
+            self.emit(Op::LoadUnit { dst: reg });
+        }
     }
 
     /// Compile an `async { .. }` block from `tokio::spawn` into a zero argument
@@ -639,10 +726,14 @@ impl Compiler<'_> {
             }
             Expr::Unary(u) if matches!(u.op, UnOp::Deref(_)) => {
                 // `*r = v` where `r` is a `&mut variable` alias writes the
-                // variable itself.
+                // variable itself. The alias may live in this frame or, for
+                // a closure that captured it, in an enclosing function's.
                 if let Some(name) = place::single_path_name(&u.expr) {
-                    let target = self.unalias(&name);
-                    if target != name {
+                    let target = match self.unalias(&name) {
+                        same if same == name => self.enclosing_alias_target(&name),
+                        target => Some(target),
+                    };
+                    if let Some(target) = target {
                         let location = self.resolve_for_write(&target);
                         let val = self.compile_expr(value)?;
                         self.emit_name_store(location, val, &target)?;
@@ -763,8 +854,13 @@ impl Compiler<'_> {
         // `*r op= rhs` where `r` is a `&mut variable` alias reads and writes
         // the variable itself.
         if let Some(name) = place::single_path_name(&u.expr) {
-            let target = self.unalias(&name);
-            if target != name {
+            let target = match self.unalias(&name) {
+                // A closure dereferencing an alias it captured finds the
+                // alias in an enclosing function's frame.
+                same if same == name => self.enclosing_alias_target(&name),
+                target => Some(target),
+            };
+            if let Some(target) = target {
                 let b = self.compile_expr(rhs)?;
                 let location = self.resolve_for_write(&target);
                 let current = self.load_name_location(location, &target)?;
@@ -999,6 +1095,26 @@ fn is_transparent_new(segments: &[String]) -> bool {
     (prefix.is_empty() || matches!(prefix.first().map(String::as_str), Some("std" | "alloc")))
         && method == "new"
         && receiver == "Box"
+}
+
+/// The cast target of a numeric `T::from(x)` call, when the whole call is
+/// exactly that shape. A `std` or `core` prefix still names the primitive.
+fn numeric_from_cast(segments: &[String], argc: usize) -> Option<CastIr> {
+    if argc != 1 {
+        return None;
+    }
+    let (prefix, [receiver, method]) = segments.split_last_chunk::<2>()?;
+    if method != "from"
+        || !(prefix.is_empty()
+            || matches!(prefix.first().map(String::as_str), Some("std" | "core")))
+    {
+        return None;
+    }
+    match receiver.as_str() {
+        "f64" => Some(CastIr::F64),
+        "f32" => Some(CastIr::F32),
+        name => IntWidth::parse(name).map(CastIr::Int),
+    }
 }
 
 // A bare identifier pattern that names a unit variant, not a new binding. Real Rust tells the two

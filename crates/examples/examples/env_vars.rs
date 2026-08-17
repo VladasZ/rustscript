@@ -1,8 +1,10 @@
 #!/usr/bin/env rust
 
-// Set, read, enumerate, and remove environment variables.
+// Set, read, enumerate, and remove environment variables. A missing
+// variable answers the structured `VarError::NotPresent`.
 
 use std::env;
+use std::env::VarError;
 
 fn main() {
     unsafe {
@@ -17,4 +19,14 @@ fn main() {
         env::remove_var("RUSTSCRIPT_DEMO");
     }
     println!("after remove: {:?}", env::var("RUSTSCRIPT_DEMO").ok());
+
+    let missing = env::var("RUSTSCRIPT_DEMO");
+    println!("error: {missing:?}");
+    match missing {
+        Err(VarError::NotPresent) => println!("not present"),
+        other => println!("unexpected: {other:?}"),
+    }
+    if let Err(e) = env::var("RUSTSCRIPT_DEMO") {
+        println!("display: {e}");
+    }
 }

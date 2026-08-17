@@ -6,7 +6,7 @@ the `supported_page_is_current` test enforces it.
 
 ## any value
 
-`abs`, `as_array`, `as_array_mut`, `as_bool`, `as_f64`, `as_i128`, `as_i64`, `as_object`, `as_object_mut`, `as_str`, `as_u64`, `as_usize`, `ceil`, `clamp`, `clone`, `cmp`, `extend`, `extend_from_slice`, `floor`, `fract`, `get`, `into`, `is_array`, `is_boolean`, `is_f64`, `is_finite`, `is_i64`, `is_infinite`, `is_multiple_of`, `is_nan`, `is_null`, `is_number`, `is_object`, `is_sign_negative`, `is_sign_positive`, `is_string`, `is_u64`, `max`, `min`, `mode`, `mul_add`, `partial_cmp`, `pointer`, `pointer_mut`, `pow`, `powf`, `powi`, `readonly`, `recip`, `round`, `saturating_add`, `saturating_mul`, `saturating_sub`, `set_readonly`, `signum`, `sqrt`, `then`, `then_some`, `to_string`, `trunc`
+`abs`, `as_array`, `as_array_mut`, `as_bool`, `as_f64`, `as_i128`, `as_i64`, `as_object`, `as_object_mut`, `as_str`, `as_u64`, `as_usize`, `ceil`, `checked_add`, `checked_div`, `checked_mul`, `checked_neg`, `checked_pow`, `checked_rem`, `checked_shl`, `checked_shr`, `checked_sub`, `clamp`, `clone`, `cmp`, `count_ones`, `count_zeros`, `div_euclid`, `extend`, `extend_from_slice`, `floor`, `fract`, `get`, `into`, `is_array`, `is_boolean`, `is_f64`, `is_finite`, `is_i64`, `is_infinite`, `is_multiple_of`, `is_nan`, `is_null`, `is_number`, `is_object`, `is_sign_negative`, `is_sign_positive`, `is_string`, `is_u64`, `isqrt`, `leading_zeros`, `max`, `min`, `mode`, `mul_add`, `partial_cmp`, `pointer`, `pointer_mut`, `pow`, `powf`, `powi`, `readonly`, `recip`, `rem_euclid`, `reverse_bits`, `rotate_left`, `rotate_right`, `round`, `saturating_add`, `saturating_mul`, `saturating_sub`, `set_readonly`, `signum`, `sqrt`, `swap_bytes`, `then`, `then_some`, `to_be_bytes`, `to_le_bytes`, `to_ne_bytes`, `to_string`, `trailing_zeros`, `trunc`, `wrapping_add`, `wrapping_mul`, `wrapping_neg`, `wrapping_sub`
 
 ## Base64
 
@@ -34,7 +34,7 @@ the `supported_page_is_current` test enforces it.
 
 ## Cell
 
-`borrow`, `borrow_mut`, `clone`, `get`, `get_mut`, `into_inner`, `lock`, `replace`, `set`, `style`, `take`, `try_lock`
+`blocking_lock`, `borrow`, `borrow_mut`, `clone`, `get`, `get_mut`, `into_inner`, `lock`, `replace`, `set`, `style`, `take`, `try_lock`
 
 ## Char
 
@@ -118,7 +118,7 @@ the `supported_page_is_current` test enforces it.
 
 ## native handles (files, sockets, readers, processes)
 
-`accept`, `by_ref`, `close`, `collect`, `connect`, `duration_since`, `elapsed`, `flush`, `id`, `incoming`, `inner`, `is_terminal`, `kill`, `kind`, `lines`, `local_addr`, `lock`, `metadata`, `next`, `path`, `peer_addr`, `raw_os_error`, `read`, `read_line`, `read_to_end`, `read_to_string`, `read_until`, `seek`, `send`, `send_to`, `set_broadcast`, `set_len`, `set_modified`, `shutdown`, `stderr`, `stdin`, `sync_all`, `sync_data`, `try_clone`, `try_wait`, `wait`, `wait_with_output`, `write`, `write_all`, `write_fmt`, `write_str`
+`accept`, `by_ref`, `close`, `collect`, `connect`, `duration_since`, `elapsed`, `flush`, `id`, `incoming`, `inner`, `is_cancelled`, `is_panic`, `is_terminal`, `kill`, `kind`, `lines`, `local_addr`, `lock`, `metadata`, `next`, `path`, `peer_addr`, `raw_os_error`, `read`, `read_line`, `read_to_end`, `read_to_string`, `read_until`, `seek`, `send`, `send_to`, `set_broadcast`, `set_len`, `set_modified`, `shutdown`, `stderr`, `stdin`, `sync_all`, `sync_data`, `try_clone`, `try_wait`, `wait`, `wait_with_output`, `write`, `write_all`, `write_fmt`, `write_str`
 
 ## OpenOptions
 

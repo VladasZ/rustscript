@@ -92,7 +92,12 @@ turbofish earlier in the chain.
 
 `u128` and `i128` are real: their values live in dedicated 128-bit storage,
 arithmetic checks overflow natively at 128 bits, and casts, comparisons,
-parsing, and formatting keep the full range.
+parsing, and formatting keep the full range. The method surface runs in
+native 128-bit cores too, so `checked_*`, `wrapping_*`, the bit counts, and
+the byte views answer correctly past `i64::MAX`, and the radix format specs
+like `{:x}` print the full two's complement image. An integer annotation
+reaches into its init's arithmetic, so `let b: u128 = 1 << 100` computes at
+128 bits.
 
 ## Traits
 
@@ -101,10 +106,16 @@ bodies fill in for the methods an impl does not override, so dynamic
 dispatch picks the override where one exists. User `Display` and `Debug`
 impls drive `{}`, `{:?}`, `to_string`, and `format!`. Operator trait impls
 drive the operators, a user `Iterator` drives for loops and adaptor chains,
-associated consts resolve as `Type::NAME` globals, and `Drop` impls run at
-scope end in reverse declaration order, on explicit `drop`, and per loop
-iteration. The remaining drop timing gaps are listed in
-[roadmap.md](roadmap.md).
+and associated consts resolve as `Type::NAME` globals.
+
+`Drop` impls run where real Rust runs them: at scope end in reverse
+declaration order, on explicit `drop`, per loop iteration, on `break`,
+`continue`, `return`, and `?` early returns, and during panic unwinding for
+every live local of every frame, innermost first. A guard passed by value
+into a call drops at the callee's end, and guards inside containers, cells,
+and `Rc` drop when their container dies. A value whose storage still has
+another holder was moved or is still shared, so its real owner drops it,
+which is also why a shared `Rc` cycle leaks exactly like real Rust's.
 
 ## Panics and errors
 
@@ -134,5 +145,12 @@ only proves it for the lines that actually execute.
 So the coverage pass in `interpreter/coverage.rs` walks the compiled
 bytecode instead. Every method call the VM could ever make is a single op
 with a name, so every one is visible on every branch without executing
-anything. Known gap, only method calls are checked, not path calls like
-`std::process::exit`.
+anything. Where the receiver's type is knowable, the method is checked
+against that receiver's own surface, and the fast-dispatch method ids carry
+receiver tags, so a `Vec` name called on a `String` is caught. Known gap,
+only method calls are checked, not path calls like `std::process::exit`.
+
+The same walk runs before every interpreted run, not only in `rust check`,
+so an unchecked script cannot die on a cold branch after doing half its
+side effects. It is one linear pass over the compiled bytecode and costs
+less than measurement noise even on thousand-line scripts.

@@ -87,6 +87,13 @@ pub enum Native {
         kind: String,
         code: Option<i32>,
     },
+    /// A tokio `JoinError` as scripts observe it: real `Display` and
+    /// `Debug` text captured at conversion, plus what its accessors answer.
+    JoinErr {
+        display: String,
+        debug: String,
+        is_panic: bool,
+    },
     /// The buffer behind a `fmt::Formatter` handed to a user `fmt` impl.
     /// `write!` into it appends here, and the formatter reads it back as the
     /// rendered text.
@@ -123,6 +130,7 @@ impl Native {
             Native::RegexCaptures(_) => "Captures",
             Native::Iterator(_) => "Iterator",
             Native::IoErr { .. } => "IoError",
+            Native::JoinErr { .. } => "JoinError",
             Native::Fmt(_) => "Formatter",
             Native::Taken => "Taken",
         }
