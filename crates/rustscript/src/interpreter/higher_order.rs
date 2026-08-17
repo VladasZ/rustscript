@@ -10,6 +10,7 @@ use anyhow::{Result, anyhow, bail};
 use super::iterator::{as_closure, option_inner};
 use super::methods::ordering_from_value;
 use super::native::Native;
+use super::scalar::scalar_sort_by;
 use super::shared::usize_i64;
 use super::value::{List, StructData, Value, ValueRef};
 use super::vecmap::{SortKey, sort_key};
@@ -33,6 +34,17 @@ impl Vm {
                 }
                 let f = as_closure(args.first())?;
                 Ok(Some(Value::some(self.call_closure_data(&f, &[])?)))
+            }
+            // `Ordering::then_with` calls its closure only on Equal.
+            Value::Enum {
+                enum_name, variant, ..
+            } if &**enum_name == "Ordering" && name == "then_with" => {
+                if &**variant == "Equal" {
+                    let f = as_closure(args.first())?;
+                    Ok(Some(self.call_closure_data(&f, &[])?))
+                } else {
+                    Ok(Some(recv.clone()))
+                }
             }
             Value::Vec(items) => self.vec_higher_order(items, name, args),
             Value::Native(iterator) if matches!(&*iterator.lock(), Native::Iterator(_)) => {
@@ -352,6 +364,12 @@ impl Vm {
             }
             "sort_by" => {
                 let f = clo(0)?;
+                // An all-int list with an int-only comparator sorts unboxed,
+                // skipping the closure call machinery per comparison.
+                if let Some(sorted) = scalar_sort_by(self, &list, &f) {
+                    *items.lock() = sorted;
+                    return Ok(Some(Value::Unit));
+                }
                 let mut sorted = list;
                 let mut err = None;
                 sorted.sort_by(|a, b| {

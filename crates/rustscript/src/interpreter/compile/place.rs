@@ -25,10 +25,15 @@ pub(super) enum PlaceBack {
     Field {
         base: Reg,
         member: u16,
+        /// How the base itself stores back, so a projection whose base is
+        /// not its own storage, a cell or another projection, still lands.
+        parent: Box<PlaceBack>,
     },
     Index {
         base: Reg,
         key: Reg,
+        /// See `Field::parent`.
+        parent: Box<PlaceBack>,
     },
 }
 
@@ -78,23 +83,31 @@ impl Compiler<'_> {
                 Ok(self.compile_name_place(&name))
             }
             Expr::Field(f) => {
-                let base = self.compile_place_base(&f.base)?;
+                let (base, parent) = self.compile_base_with_back(&f.base)?;
                 let member = self.member_of(&f.member);
                 let dst = self.alloc();
                 self.emit(Op::UniqueField { dst, base, member });
                 Ok(Some(Place {
                     reg: dst,
-                    back: PlaceBack::Field { base, member },
+                    back: PlaceBack::Field {
+                        base,
+                        member,
+                        parent: Box::new(parent),
+                    },
                 }))
             }
             Expr::Index(ix) => {
-                let base = self.compile_place_base(&ix.expr)?;
+                let (base, parent) = self.compile_base_with_back(&ix.expr)?;
                 let key = self.compile_expr(&ix.index)?;
                 let dst = self.alloc();
                 self.emit(Op::UniqueIndex { dst, base, key });
                 Ok(Some(Place {
                     reg: dst,
-                    back: PlaceBack::Index { base, key },
+                    back: PlaceBack::Index {
+                        base,
+                        key,
+                        parent: Box::new(parent),
+                    },
                 }))
             }
             _ => Ok(None),
@@ -140,36 +153,60 @@ impl Compiler<'_> {
     /// but it may still share storage with what produced it, so it is
     /// split too.
     pub(super) fn compile_place_base(&mut self, expr: &Expr) -> Result<Reg> {
+        Ok(self.compile_base_with_back(expr)?.0)
+    }
+
+    /// `compile_place_base` plus how that base stores back into its own
+    /// place, kept by projections so the writeback can walk the chain.
+    fn compile_base_with_back(&mut self, expr: &Expr) -> Result<(Reg, PlaceBack)> {
         if let Some(place) = self.compile_place(expr)? {
-            return Ok(place.reg);
+            return Ok((place.reg, place.back));
         }
         let reg = self.compile_expr(expr)?;
         self.emit(Op::UniqueReg { reg });
-        Ok(reg)
+        Ok((reg, PlaceBack::None))
     }
 
     /// Land a mutated place value back where it lives.
     pub(super) fn emit_place_writeback(&mut self, place: &Place) {
-        match place.back {
+        self.emit_back(place.reg, &place.back);
+    }
+
+    /// One level of writeback, then the base's own. Composite storage makes
+    /// the parent stores refcount moves, but a string projection replaces
+    /// its base register's buffer, and only the parent chain lands that in
+    /// a cell, an upvalue, or an enclosing projection.
+    fn emit_back(&mut self, reg: Reg, back: &PlaceBack) {
+        match back {
             PlaceBack::None => {}
             PlaceBack::Cell(cell) => self.emit(Op::StoreCell {
-                cell,
-                src: place.reg,
+                cell: *cell,
+                src: reg,
             }),
             PlaceBack::Upvalue(idx) => self.emit(Op::StoreUpvalue {
-                idx,
-                src: place.reg,
+                idx: *idx,
+                src: reg,
             }),
-            PlaceBack::Field { base, member } => self.emit(Op::SetField {
+            PlaceBack::Field {
                 base,
                 member,
-                val: place.reg,
-            }),
-            PlaceBack::Index { base, key } => self.emit(Op::SetIndex {
-                base,
-                key,
-                val: place.reg,
-            }),
+                parent,
+            } => {
+                self.emit(Op::SetField {
+                    base: *base,
+                    member: *member,
+                    val: reg,
+                });
+                self.emit_back(*base, parent);
+            }
+            PlaceBack::Index { base, key, parent } => {
+                self.emit(Op::SetIndex {
+                    base: *base,
+                    key: *key,
+                    val: reg,
+                });
+                self.emit_back(*base, parent);
+            }
         }
     }
 
@@ -222,12 +259,12 @@ impl Compiler<'_> {
         };
         let reg = self.alloc();
         match place.back {
-            PlaceBack::Index { base, key } => self.emit(Op::RefIndex {
+            PlaceBack::Index { base, key, .. } => self.emit(Op::RefIndex {
                 dst: reg,
                 base,
                 key,
             }),
-            PlaceBack::Field { base, member } => self.emit(Op::RefField {
+            PlaceBack::Field { base, member, .. } => self.emit(Op::RefField {
                 dst: reg,
                 base,
                 member,

@@ -6,7 +6,7 @@ the `supported_page_is_current` test enforces it.
 
 ## any value
 
-`abs`, `as_array`, `as_array_mut`, `as_bool`, `as_f64`, `as_i128`, `as_i64`, `as_object`, `as_object_mut`, `as_str`, `as_u64`, `as_usize`, `ceil`, `checked_add`, `checked_div`, `checked_mul`, `checked_neg`, `checked_pow`, `checked_rem`, `checked_shl`, `checked_shr`, `checked_sub`, `clamp`, `clone`, `cmp`, `count_ones`, `count_zeros`, `div_euclid`, `extend`, `extend_from_slice`, `floor`, `fract`, `get`, `into`, `is_array`, `is_boolean`, `is_f64`, `is_finite`, `is_i64`, `is_infinite`, `is_multiple_of`, `is_nan`, `is_null`, `is_number`, `is_object`, `is_sign_negative`, `is_sign_positive`, `is_string`, `is_u64`, `isqrt`, `leading_zeros`, `max`, `min`, `mode`, `mul_add`, `partial_cmp`, `pointer`, `pointer_mut`, `pow`, `powf`, `powi`, `readonly`, `recip`, `rem_euclid`, `reverse_bits`, `rotate_left`, `rotate_right`, `round`, `saturating_add`, `saturating_mul`, `saturating_sub`, `set_readonly`, `signum`, `sqrt`, `swap_bytes`, `then`, `then_some`, `to_be_bytes`, `to_le_bytes`, `to_ne_bytes`, `to_string`, `trailing_zeros`, `trunc`, `wrapping_add`, `wrapping_mul`, `wrapping_neg`, `wrapping_sub`
+`abs`, `as_array`, `as_array_mut`, `as_bool`, `as_f64`, `as_i128`, `as_i64`, `as_object`, `as_object_mut`, `as_str`, `as_u64`, `as_usize`, `ceil`, `checked_add`, `checked_div`, `checked_mul`, `checked_neg`, `checked_pow`, `checked_rem`, `checked_shl`, `checked_shr`, `checked_sub`, `clamp`, `clone`, `cmp`, `count_ones`, `count_zeros`, `div_euclid`, `extend`, `extend_from_slice`, `floor`, `fract`, `get`, `into`, `is_array`, `is_boolean`, `is_f64`, `is_finite`, `is_i64`, `is_infinite`, `is_multiple_of`, `is_nan`, `is_null`, `is_number`, `is_object`, `is_sign_negative`, `is_sign_positive`, `is_string`, `is_u64`, `isqrt`, `leading_zeros`, `make_ascii_lowercase`, `make_ascii_uppercase`, `max`, `min`, `mode`, `mul_add`, `partial_cmp`, `pointer`, `pointer_mut`, `pow`, `powf`, `powi`, `readonly`, `recip`, `rem_euclid`, `reverse_bits`, `rotate_left`, `rotate_right`, `round`, `saturating_add`, `saturating_mul`, `saturating_sub`, `set_readonly`, `signum`, `sqrt`, `swap_bytes`, `then`, `then_some`, `then_with`, `to_be_bytes`, `to_le_bytes`, `to_ne_bytes`, `to_string`, `trailing_zeros`, `trunc`, `wrapping_add`, `wrapping_mul`, `wrapping_neg`, `wrapping_sub`
 
 ## Base64
 
@@ -127,6 +127,10 @@ the `supported_page_is_current` test enforces it.
 ## Option
 
 `and_then`, `as_deref`, `as_mut`, `as_ref`, `context`, `expect`, `filter`, `get`, `into_iter`, `is_none`, `is_some`, `is_some_and`, `iter`, `map`, `map_or`, `map_or_else`, `ok_or`, `ok_or_else`, `or`, `or_else`, `take`, `unwrap_or_default`, `unwrap_or_else`, `with_context`
+
+## Ordering
+
+`is_eq`, `is_ge`, `is_gt`, `is_le`, `is_lt`, `is_ne`, `reverse`, `then`
 
 ## OsString
 

@@ -54,6 +54,7 @@ pub const BRIDGES: &[Bridge] = &[
     b("methods.rs", "opt_method", "Option"),
     b("methods.rs", "res_method", "Result"),
     b("methods.rs", "entry_method", "Entry"),
+    b("methods.rs", "ordering_method", "Ordering"),
     b("cell.rs", "cell_method", "Cell"),
     b("native_methods.rs", "io_error_method", "Native"),
     b("native_methods.rs", "joinerr_method", "Native"),

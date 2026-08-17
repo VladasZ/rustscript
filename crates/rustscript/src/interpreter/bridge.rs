@@ -1188,6 +1188,29 @@ fn deref_receiver(
         reference.set(Value::Str(grown));
         return Ok(RefRead::StrGrown);
     }
+    // In-place ascii casing through a `&mut` receiver stores back the same
+    // way a grow does. The upper flag reuses the harvested arm literal, a
+    // partial literal here would leak a bogus name into the bridge tables.
+    if matches!(&*name.text, "make_ascii_uppercase" | "make_ascii_lowercase") {
+        let upper = &*name.text == "make_ascii_uppercase";
+        let cased = match &value {
+            Value::Str(s) => Some(Value::str(if upper {
+                s.to_ascii_uppercase()
+            } else {
+                s.to_ascii_lowercase()
+            })),
+            Value::Char(c) => Some(Value::Char(if upper {
+                c.to_ascii_uppercase()
+            } else {
+                c.to_ascii_lowercase()
+            })),
+            _ => None,
+        };
+        if let Some(cased) = cased {
+            reference.set(cased);
+            return Ok(RefRead::StrGrown);
+        }
+    }
     Ok(RefRead::Value(value))
 }
 

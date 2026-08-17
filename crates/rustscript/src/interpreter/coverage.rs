@@ -167,7 +167,14 @@ fn any_name(method: &str) -> bool {
 /// them in the bridge tables and they are listed here instead.
 /// `parse` is here for the same reason. It is answered from the turbofish
 /// before name dispatch, so the name never appears in a table.
-const VM_BUILTINS: &[&str] = &["clone_from", "push", "push_str", "parse"];
+const VM_BUILTINS: &[&str] = &[
+    "clone_from",
+    "push",
+    "push_str",
+    "parse",
+    "make_ascii_uppercase",
+    "make_ascii_lowercase",
+];
 
 /// Whether the bridge for this receiver implements the method.
 fn on_recv(recv: &str, method: &str) -> bool {

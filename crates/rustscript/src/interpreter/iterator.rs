@@ -623,8 +623,7 @@ impl Vm {
         clo: &Arc<ClosureData>,
         args: &[Value],
     ) -> Result<Value> {
-        let chunk = clo.chunk.clone();
-        self.run_chunk(&chunk, args, &clo.captured)
+        self.run_chunk(&clo.chunk, args, &clo.captured)
     }
 
     /// Drain any iterable, lazy iterators included, into a plain vec.

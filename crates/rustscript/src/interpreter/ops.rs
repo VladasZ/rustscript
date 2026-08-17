@@ -673,30 +673,49 @@ pub(super) fn index(recv: &Value, key: &Value) -> Result<Value> {
     }
 }
 
-fn slice_value(base: &Value, start: i64, end: i64, inclusive: bool) -> Result<Value> {
-    // The messages are the exact texts debug Rust panics with for each
-    // failure, checked in declaration order: inverted range, out of bounds,
-    // then a string's char boundary.
-    let bounds = |len: usize| -> Result<(usize, usize)> {
-        if start < 0 {
-            bail!("negative slice start {start}");
-        }
-        let end = if end == i64::MAX {
-            usize_i64(len)
-        } else if inclusive {
-            end + 1
-        } else {
-            end
-        };
-        if end < start {
-            bail!("slice index starts at {start} but ends at {end}");
-        }
-        Ok((usize::try_from(start)?, usize::try_from(end)?))
+/// A range key resolved against a length. The messages are the exact texts
+/// debug Rust panics with, checked in declaration order: inverted range
+/// here, out of bounds and a string's char boundary at the use site.
+fn range_bounds(len: usize, start: i64, end: i64, inclusive: bool) -> Result<(usize, usize)> {
+    if start < 0 {
+        bail!("negative slice start {start}");
+    }
+    let end = if end == i64::MAX {
+        usize_i64(len)
+    } else if inclusive {
+        end + 1
+    } else {
+        end
     };
+    if end < start {
+        bail!("slice index starts at {start} but ends at {end}");
+    }
+    Ok((usize::try_from(start)?, usize::try_from(end)?))
+}
+
+/// The debug Rust panic text for a byte range off a char boundary.
+fn char_boundary_error(s: &str, a: usize, b: usize) -> anyhow::Error {
+    let (side, bad) = if s.is_char_boundary(a) {
+        ("end", b)
+    } else {
+        ("start", a)
+    };
+    let mut at = bad;
+    while at > 0 && !s.is_char_boundary(at) {
+        at -= 1;
+    }
+    let ch = s[at..].chars().next().unwrap_or('\u{FFFD}');
+    anyhow!(
+        "{side} byte index {bad} is not a char boundary; it is inside {ch:?} (bytes {at}..{} of string)",
+        at + ch.len_utf8()
+    )
+}
+
+fn slice_value(base: &Value, start: i64, end: i64, inclusive: bool) -> Result<Value> {
     match base {
         Value::Vec(items) => {
             let items = items.lock();
-            let (a, b) = bounds(items.len())?;
+            let (a, b) = range_bounds(items.len(), start, end, inclusive)?;
             if b > items.len() {
                 bail!(
                     "range end index {b} out of range for slice of length {}",
@@ -706,34 +725,48 @@ fn slice_value(base: &Value, start: i64, end: i64, inclusive: bool) -> Result<Va
             Ok(Value::vec(items[a..b].to_vec()))
         }
         Value::Str(s) => {
-            let (a, b) = bounds(s.len())?;
+            let (a, b) = range_bounds(s.len(), start, end, inclusive)?;
             if b > s.len() {
                 bail!(
                     "end byte index {b} is out of bounds for string of length {}",
                     s.len()
                 );
             }
-            if let Some(sub) = s.get(a..b) {
-                Ok(Value::str(sub.to_string()))
-            } else {
-                let (side, bad) = if s.is_char_boundary(a) {
-                    ("end", b)
-                } else {
-                    ("start", a)
-                };
-                let mut at = bad;
-                while at > 0 && !s.is_char_boundary(at) {
-                    at -= 1;
-                }
-                let ch = s[at..].chars().next().unwrap_or('\u{FFFD}');
-                bail!(
-                    "{side} byte index {bad} is not a char boundary; it is inside {ch:?} (bytes {at}..{} of string)",
-                    at + ch.len_utf8()
-                )
+            match s.get(a..b) {
+                Some(sub) => Ok(Value::str(sub.to_string())),
+                None => Err(char_boundary_error(s, a, b)),
             }
         }
         other => bail!("cannot slice {}", other.type_name()),
     }
+}
+
+/// The writeback of a mutating method called on a string slice, like
+/// `s[2..].make_ascii_uppercase()`. The slice arrived as a copied temporary,
+/// so the mutated bytes are spliced back into the base string here.
+pub(super) fn splice_str(
+    s: &str,
+    start: i64,
+    end: i64,
+    inclusive: bool,
+    val: &Value,
+) -> Result<String> {
+    let Value::Str(new) = val else {
+        bail!("cannot write {} back into a string slice", val.type_name());
+    };
+    let (a, b) = range_bounds(s.len(), start, end, inclusive)?;
+    if b > s.len() {
+        bail!(
+            "end byte index {b} is out of bounds for string of length {}",
+            s.len()
+        );
+    }
+    if s.get(a..b).is_none() {
+        return Err(char_boundary_error(s, a, b));
+    }
+    let mut out = s.to_string();
+    out.replace_range(a..b, new);
+    Ok(out)
 }
 
 pub(super) fn set_index(recv: &Value, key: &Value, v: Value) -> Result<()> {

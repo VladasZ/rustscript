@@ -6,6 +6,7 @@ use std::mem::take;
 use anyhow::{Result, bail};
 
 use super::bytecode::{BuiltinId, MethodName};
+use super::methods::make_ordering;
 use super::value::{MapKind, Value};
 use super::vm_step::{Flow, StepCtx};
 
@@ -58,6 +59,14 @@ pub(super) fn method_op(
         ctx.stack[base + recv] = Value::some(new);
         return Ok(ctx.set_opt(dst, old));
     }
+    // In-place ascii casing mutates the receiver register and returns unit,
+    // like a push. A slice, cell, or field receiver lands through the place
+    // writeback the compiler emits after this op.
+    if matches!(&*name.text, "make_ascii_uppercase" | "make_ascii_lowercase")
+        && ascii_case_fast(ctx, recv, name)
+    {
+        return Ok(ctx.set_opt(dst, Value::Unit));
+    }
     if matches!(name.id, BuiltinId::Push | BuiltinId::PushStr)
         && matches!(ctx.stack[base + recv], Value::Str(_))
     {
@@ -95,6 +104,9 @@ pub(super) fn method_op(
         let v = Value::Str(v.clone());
         return Ok(ctx.set_opt(dst, v));
     }
+    if let Some(v) = int_cmp_fast(ctx, recv, name, s, argc) {
+        return Ok(ctx.set_opt(dst, v));
+    }
     if let Some(v) = map_fast(ctx, recv, name, s, argc, dst)? {
         return Ok(ctx.set_opt(dst, v));
     }
@@ -111,6 +123,47 @@ pub(super) fn method_op(
         vm.eval_method(&recv_v, name, &mut ctx.stack[s..s + argc])?
     };
     Ok(ctx.set_opt(dst, v))
+}
+
+/// Rewrite a string or char receiver register through the ascii casing
+/// methods. Answers false for other receivers, which fall to plain dispatch.
+fn ascii_case_fast(ctx: &mut StepCtx, recv: usize, name: &MethodName) -> bool {
+    let upper = &*name.text == "make_ascii_uppercase";
+    let slot = &mut ctx.stack[ctx.base + recv];
+    let new = match &*slot {
+        Value::Str(text) => Value::str(if upper {
+            text.to_ascii_uppercase()
+        } else {
+            text.to_ascii_lowercase()
+        }),
+        Value::Char(c) => Value::Char(if upper {
+            c.to_ascii_uppercase()
+        } else {
+            c.to_ascii_lowercase()
+        }),
+        _ => return false,
+    };
+    *slot = new;
+    true
+}
+
+/// A comparator sort calls `cmp` once per comparison, so the plain int
+/// form answers here without the bridge walk or its argument decode.
+fn int_cmp_fast(
+    ctx: &StepCtx,
+    recv: usize,
+    name: &MethodName,
+    s: usize,
+    argc: usize,
+) -> Option<Value> {
+    if argc == 1
+        && name.text == "cmp"
+        && let Value::Int(a) = ctx.stack[ctx.base + recv]
+        && let Value::Int(b) = ctx.stack[s]
+    {
+        return Some(make_ordering(a.cmp(&b)));
+    }
+    None
 }
 
 /// Option and Result accessors dominate counting loops, so their success

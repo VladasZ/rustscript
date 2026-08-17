@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::iter::repeat_n;
 use std::mem::take;
+use std::slice::from_ref;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
@@ -233,14 +234,14 @@ fn user_op_type(v: &Value) -> Option<&str> {
 fn user_bin(
     ctx: &StepCtx,
     op: super::bytecode::BinKind,
-    a: Value,
-    b: Value,
+    a: &Value,
+    b: &Value,
 ) -> Result<Option<Value>> {
     use super::bytecode::BinKind as K;
     if ctx.vm.methods.is_empty() {
         return Ok(None);
     }
-    let Some(ty) = user_op_type(&a).or_else(|| user_op_type(&b)) else {
+    let Some(ty) = user_op_type(a).or_else(|| user_op_type(b)) else {
         return Ok(None);
     };
     let name = match op {
@@ -261,26 +262,30 @@ fn user_bin(
     let ty = ty.to_string();
     if let Some(chunk) = ctx.vm.methods.get(&(ty.clone(), name.to_string())) {
         let chunk = chunk.clone();
-        return Ok(Some(ctx.vm.run_chunk(&chunk, &[a, b], &[])?));
+        return Ok(Some(ctx.vm.run_chunk(
+            &chunk,
+            &[a.clone(), b.clone()],
+            &[],
+        )?));
     }
     let assign = format!("{name}_assign");
     if let Some(chunk) = ctx.vm.methods.get(&(ty, assign)) {
         let chunk = chunk.clone();
         // The receiver mutates in place through its `&mut self`, and the
         // mutated value is the store-back result of the lowered `a = a + b`.
-        ctx.vm.run_chunk(&chunk, &[a.clone(), b], &[])?;
-        return Ok(Some(a));
+        ctx.vm.run_chunk(&chunk, &[a.clone(), b.clone()], &[])?;
+        return Ok(Some(a.clone()));
     }
     Ok(None)
 }
 
 /// A unary operator with a user trait impl, `impl Neg for X`.
-fn user_un(ctx: &StepCtx, op: super::bytecode::UnKind, a: Value) -> Result<Option<Value>> {
+fn user_un(ctx: &StepCtx, op: super::bytecode::UnKind, a: &Value) -> Result<Option<Value>> {
     use super::bytecode::UnKind as U;
     if ctx.vm.methods.is_empty() {
         return Ok(None);
     }
-    let Some(ty) = user_op_type(&a) else {
+    let Some(ty) = user_op_type(a) else {
         return Ok(None);
     };
     let name = match op {
@@ -291,7 +296,7 @@ fn user_un(ctx: &StepCtx, op: super::bytecode::UnKind, a: Value) -> Result<Optio
         return Ok(None);
     };
     let chunk = chunk.clone();
-    Ok(Some(ctx.vm.run_chunk(&chunk, &[a], &[])?))
+    Ok(Some(ctx.vm.run_chunk(&chunk, from_ref(a), &[])?))
 }
 
 /// The three call shapes, split from `step` to keep the dispatch match
@@ -365,7 +370,7 @@ fn bin_op(
     b: u16,
     op: super::bytecode::BinKind,
 ) -> Result<Flow> {
-    if let Some(v) = user_bin(ctx, op, ctx.get(a).clone(), ctx.get(b).clone())? {
+    if let Some(v) = user_bin(ctx, op, ctx.get(a), ctx.get(b))? {
         Ok(ctx.set(dst, v))
     } else {
         Ok(ctx.set(dst, apply_bin(op, ctx.get(a), ctx.get(b))?))
@@ -379,7 +384,7 @@ fn bin_imm_op(
     imm: i64,
     op: super::bytecode::BinKind,
 ) -> Result<Flow> {
-    if let Some(v) = user_bin(ctx, op, ctx.get(a).clone(), Value::Int(imm))? {
+    if let Some(v) = user_bin(ctx, op, ctx.get(a), &Value::Int(imm))? {
         Ok(ctx.set(dst, v))
     } else {
         Ok(ctx.set(dst, apply_bin_imm(op, ctx.get(a), imm)?))
@@ -387,7 +392,7 @@ fn bin_imm_op(
 }
 
 fn un_op(ctx: &mut StepCtx, dst: u16, a: u16, op: super::bytecode::UnKind) -> Result<Flow> {
-    if let Some(v) = user_un(ctx, op, ctx.get(a).clone())? {
+    if let Some(v) = user_un(ctx, op, ctx.get(a))? {
         Ok(ctx.set(dst, v))
     } else {
         Ok(ctx.set(dst, apply_un(op, ctx.get(a))?))
@@ -779,7 +784,36 @@ fn place_base(v: &Value) -> Result<Value> {
     })
 }
 
-fn set_index(ctx: &StepCtx, base: u16, key: u16, val: u16) -> Result<Flow> {
+fn set_index(ctx: &mut StepCtx, base: u16, key: u16, val: u16) -> Result<Flow> {
+    // A range write into a string is the writeback of a mutating method
+    // called on a string slice, like `s[2..].make_ascii_uppercase()`. A
+    // string has no interior mutability, so the spliced value is stored
+    // through the base itself: its register, its cell, or its reference.
+    if let &Value::Range {
+        start,
+        end,
+        inclusive,
+    } = ctx.get(key)
+    {
+        let target = place_base(ctx.get(base))?;
+        if let Value::Str(s) = &target {
+            let new = Value::str(ops::splice_str(s, start, end, inclusive, ctx.get(val))?);
+            let flow = match ctx.get(base).clone() {
+                Value::Cell(_, slot) => {
+                    *slot.lock() = new;
+                    Flow::Next
+                }
+                Value::Ref(reference) => {
+                    if !reference.set(new) {
+                        bail!("assignment through a dangling reference");
+                    }
+                    Flow::Next
+                }
+                _ => ctx.set(base, new),
+            };
+            return Ok(flow);
+        }
+    }
     let target = place_base(ctx.get(base))?;
     ops::set_index(&target, ctx.get(key), ctx.get(val).clone())?;
     Ok(Flow::Next)
