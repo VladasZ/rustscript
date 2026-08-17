@@ -15,7 +15,7 @@ use super::native::Native;
 use super::ops::compare_values;
 use super::regex_bridge::{CapturesValue, MatchValue, RegexValue};
 use super::shared::usize_i64;
-use super::value::{ClosureData, List, MapKind, Value, ValueRef};
+use super::value::{ClosureData, List, MapKind, RsStr, Value, ValueRef};
 use super::vm::Vm;
 
 type Handle = Arc<Mutex<Native>>;
@@ -45,29 +45,29 @@ pub enum IteratorState {
         inclusive: bool,
     },
     Bytes {
-        source: Arc<str>,
+        source: RsStr,
         index: usize,
     },
     Chars {
-        source: Arc<str>,
+        source: RsStr,
         offset: usize,
     },
     Lines {
-        source: Arc<str>,
+        source: RsStr,
         offset: usize,
     },
     SplitWhitespace {
-        source: Arc<str>,
+        source: RsStr,
         offset: usize,
     },
     RegexFind {
         regex: RegexValue,
-        source: Arc<str>,
+        source: RsStr,
         offset: usize,
     },
     RegexCaptures {
         regex: RegexValue,
-        source: Arc<str>,
+        source: RsStr,
         offset: usize,
     },
     Map {
@@ -146,23 +146,23 @@ pub(super) fn draining_iter(items: List) -> Value {
     wrap(IteratorState::DrainingValues { values: items })
 }
 
-pub(super) fn bytes(source: Arc<str>) -> Value {
+pub(super) fn bytes(source: RsStr) -> Value {
     wrap(IteratorState::Bytes { source, index: 0 })
 }
 
-pub(super) fn chars(source: Arc<str>) -> Value {
+pub(super) fn chars(source: RsStr) -> Value {
     wrap(IteratorState::Chars { source, offset: 0 })
 }
 
-pub(super) fn lines(source: Arc<str>) -> Value {
+pub(super) fn lines(source: RsStr) -> Value {
     wrap(IteratorState::Lines { source, offset: 0 })
 }
 
-pub(super) fn split_whitespace(source: Arc<str>) -> Value {
+pub(super) fn split_whitespace(source: RsStr) -> Value {
     wrap(IteratorState::SplitWhitespace { source, offset: 0 })
 }
 
-pub(super) fn regex_find(regex: RegexValue, source: Arc<str>) -> Value {
+pub(super) fn regex_find(regex: RegexValue, source: RsStr) -> Value {
     wrap(IteratorState::RegexFind {
         regex,
         source,
@@ -170,7 +170,7 @@ pub(super) fn regex_find(regex: RegexValue, source: Arc<str>) -> Value {
     })
 }
 
-pub(super) fn regex_captures(regex: RegexValue, source: Arc<str>) -> Value {
+pub(super) fn regex_captures(regex: RegexValue, source: RsStr) -> Value {
     wrap(IteratorState::RegexCaptures {
         regex,
         source,
@@ -360,7 +360,7 @@ fn range_step(next: &mut i64, end: i64, inclusive: bool) -> Step {
 }
 
 /// One `find_iter` step, advancing past the match or an empty match's char.
-fn regex_find_step(regex: &RegexValue, source: &Arc<str>, offset: &mut usize) -> Step {
+fn regex_find_step(regex: &RegexValue, source: &RsStr, offset: &mut usize) -> Step {
     if *offset > source.len() {
         return Step::Ready(None);
     }
@@ -379,7 +379,7 @@ fn regex_find_step(regex: &RegexValue, source: &Arc<str>, offset: &mut usize) ->
 }
 
 /// One `captures_iter` step, the groups as spans over the same source.
-fn regex_captures_step(regex: &RegexValue, source: &Arc<str>, offset: &mut usize) -> Step {
+fn regex_captures_step(regex: &RegexValue, source: &RsStr, offset: &mut usize) -> Step {
     if *offset > source.len() {
         return Step::Ready(None);
     }

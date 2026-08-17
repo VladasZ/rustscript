@@ -40,13 +40,6 @@ fn panel_width(bars: i32) -> i32 {
     bars * BAR_W + (bars - 1) * BAR_GAP + 2 * PANEL_MARGIN
 }
 
-fn display_name(lang: &str) -> &str {
-    match lang {
-        "native" => "native rust",
-        other => other,
-    }
-}
-
 fn color_for(lang: &str) -> RGBColor {
     match lang {
         "native" => RGBColor(64, 110, 180),
@@ -98,14 +91,14 @@ fn case_panels(c: &CaseResult) -> Vec<Panel> {
         .iter()
         .filter_map(|l| {
             c.wall_of(l)
-                .map(|w| (display_name(l).to_string(), w.median, color_for(l)))
+                .map(|w| ((*l).to_string(), w.median, color_for(l)))
         })
         .collect();
     let comp: Vec<_> = LANG_ORDER
         .iter()
         .filter_map(|l| {
             c.compute_of(l)
-                .map(|w| (display_name(l).to_string(), w.median, color_for(l)))
+                .map(|w| ((*l).to_string(), w.median, color_for(l)))
         })
         .collect();
     // The time panels share one axis so bar heights compare directly.
@@ -135,7 +128,7 @@ fn case_panels(c: &CaseResult) -> Vec<Panel> {
         .filter_map(|l| {
             c.memory_of(l).map(|m| {
                 (
-                    display_name(l).to_string(),
+                    (*l).to_string(),
                     AsPrimitive::<f64>::as_(m.median_bytes),
                     color_for(l),
                 )
@@ -158,7 +151,7 @@ fn render_case(out: &Path, c: &CaseResult) -> Result<()> {
     let panels = case_panels(c);
     let bars = i32::try_from(panels.first().map_or(4, |p| p.bars.len())).expect("bars fit i32");
     let w = i32::try_from(panels.len()).expect("panel count fits i32") * panel_width(bars);
-    let h = 560i32;
+    let h = 530i32;
     let dims = (
         u32::try_from(s(w)).expect("chart width fits u32"),
         u32::try_from(s(h)).expect("chart height fits u32"),
@@ -167,7 +160,7 @@ fn render_case(out: &Path, c: &CaseResult) -> Result<()> {
     area.fill(&BG)?;
 
     let title = c.name.clone();
-    let (head, body) = area.split_vertically(s(120));
+    let (head, body) = area.split_vertically(s(90));
     head.draw(&Text::new(
         title,
         (s(28), s(18)),
@@ -178,20 +171,6 @@ fn render_case(out: &Path, c: &CaseResult) -> Result<()> {
         (s(30), s(60)),
         ("sans-serif", s(15)).into_font().color(&MUTED),
     ))?;
-    // Legend, its own header row so it fits the narrow images.
-    let mut lx = 30;
-    for lang in LANG_ORDER {
-        head.draw(&Rectangle::new(
-            [(s(lx), s(88)), (s(lx + 14), s(102))],
-            color_for(lang).filled(),
-        ))?;
-        head.draw(&Text::new(
-            display_name(lang),
-            (s(lx + 20), s(88)),
-            ("sans-serif", s(13)).into_font().color(&INK),
-        ))?;
-        lx += 100;
-    }
 
     let cols = body.split_evenly((1, panels.len()));
     for (cell, p) in cols.iter().zip(panels.iter()) {
@@ -249,15 +228,8 @@ where
                 .pos(Pos::new(HPos::Center, VPos::Top)),
         ))
         .map_err(de)?;
-        // "native" instead of "native rust", the packed bars leave no room
-        // for the long form and the legend spells it out.
-        let short = if label == "native rust" {
-            "native"
-        } else {
-            label
-        };
         area.draw(&Text::new(
-            short.to_string(),
+            label.clone(),
             (s(x0 + BAR_W / 2), s(plot_b + 8)),
             ("sans-serif", s(12))
                 .into_font()

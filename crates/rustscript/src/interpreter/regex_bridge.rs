@@ -10,27 +10,27 @@ use parking_lot::Mutex;
 use super::bridge::VArgs;
 use super::native::Native;
 use super::shared::{CapturesOut, MatchOut, RegexOut, captures_core, match_core, regex_core};
-use super::value::Value;
+use super::value::{RsStr, Value};
 
 type CaptureNames = Arc<Vec<(Arc<str>, usize)>>;
 
 #[derive(Clone)]
 pub struct RegexValue {
     pub compiled: Arc<regex::Regex>,
-    pattern: Arc<str>,
+    pattern: RsStr,
     pub names: CaptureNames,
 }
 
 #[derive(Clone)]
 pub struct MatchValue {
-    pub source: Arc<str>,
+    pub source: RsStr,
     pub start: usize,
     pub end: usize,
 }
 
 #[derive(Clone)]
 pub struct CapturesValue {
-    pub source: Arc<str>,
+    pub source: RsStr,
     pub groups: Vec<Option<(usize, usize)>>,
     pub names: CaptureNames,
 }
@@ -43,21 +43,21 @@ pub(super) fn make_regex(compiled: regex::Regex, pattern: &str) -> Value {
         .collect();
     Native::Regex(RegexValue {
         compiled: Arc::new(compiled),
-        pattern: Arc::from(pattern),
+        pattern: pattern.into(),
         names: Arc::new(names),
     })
     .wrap()
 }
 
-fn text_arg(args: &[Value], index: usize) -> Arc<str> {
+fn text_arg(args: &[Value], index: usize) -> RsStr {
     match args.get(index) {
         Some(Value::Str(text)) => text.clone(),
-        Some(value) => Arc::from(value.display().as_str()),
-        None => Arc::from(""),
+        Some(value) => value.display().into(),
+        None => "".into(),
     }
 }
 
-fn match_value(source: Arc<str>, start: usize, end: usize) -> Value {
+fn match_value(source: RsStr, start: usize, end: usize) -> Value {
     Native::RegexMatch(MatchValue { source, start, end }).wrap()
 }
 

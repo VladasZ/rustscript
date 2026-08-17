@@ -24,6 +24,7 @@ mod ratatui_bridge;
 mod ratatui_render;
 mod regex_bridge;
 mod resolver;
+mod rs_str;
 mod serde_attrs;
 mod service_bridge;
 mod shared;

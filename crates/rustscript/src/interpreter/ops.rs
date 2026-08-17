@@ -66,17 +66,26 @@ pub(super) fn cmp_test_imm(op: BinKind, l: &Value, imm: i64) -> Result<bool> {
 }
 
 fn arith(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
+    // Same-type numbers first, they dominate hot loops. The remaining
+    // patterns are disjoint from these two, so the order change is safe.
+    if let (Value::Int(a), Value::Int(b)) = (l, r) {
+        return Ok(Value::Int(i64_arith(op, *a, *b)?));
+    }
+    if let (Value::Float(a), Value::Float(b)) = (l, r) {
+        return Ok(Value::Float(float_arith(op, *a, *b)));
+    }
     if let (BinKind::Add, Value::Str(a), Value::Str(b)) = (op, l, r) {
         let mut out = String::with_capacity(a.len() + b.len());
         out.push_str(a);
         out.push_str(b);
         return Ok(Value::str(out));
     }
-    if let (Some(a), Some(b)) = (duration_from_value(l), duration_from_value(r)) {
+    // Only a struct can be a Duration, so the discriminant check keeps the
+    // probe off every numeric op.
+    if matches!(l, Value::Struct(_))
+        && let (Some(a), Some(b)) = (duration_from_value(l), duration_from_value(r))
+    {
         return Ok(make_duration(duration_arith(op, a, b)?));
-    }
-    if let (Value::Int(a), Value::Int(b)) = (l, r) {
-        return Ok(Value::Int(i64_arith(op, *a, *b)?));
     }
     if let (Some((a, wa)), Some((b, wb))) = (l.int_parts(), r.int_parts()) {
         let width = unify(wa, wb)?;

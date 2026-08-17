@@ -46,6 +46,11 @@ interior mutable, a `Vec` is an `Arc<Mutex<Vec<Value>>>`. That is safe
 because `rustc` has already proven the program obeys the borrow rules, the
 interpreter only needs to produce the same observable behavior.
 
+Strings skip the mutex. A string is a shared `Arc<String>` buffer read
+lock free, and `push` or `push_str` grows it in place when it is the only
+handle, so a build up loop stays linear. A shared buffer is copied once on
+the first append, which keeps value semantics.
+
 Iterators are lazy and stateful, an iterator is a shared native resource like
 a file handle. So `by_ref`, `peekable`, and open ended ranges keep their real
 semantics instead of being faked with collected vectors.
