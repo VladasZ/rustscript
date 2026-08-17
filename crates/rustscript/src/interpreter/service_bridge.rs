@@ -203,13 +203,13 @@ mod imp {
         };
         let account = match info.get("account_name") {
             Some(Value::Enum { variant, data, .. }) if &*variant == "Some" => {
-                data.first().map(|v| v.display().into())
+                data.lock().first().map(|v| v.display().into())
             }
             _ => None,
         };
         let password = match info.get("account_password") {
             Some(Value::Enum { variant, data, .. }) if &*variant == "Some" => {
-                data.first().map(|v| v.display().into())
+                data.lock().first().map(|v| v.display().into())
             }
             _ => None,
         };
