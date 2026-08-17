@@ -69,6 +69,11 @@ own first argument as `cmp`, that word is reserved.
 Functions, closures, structs, enums, patterns, loops, iterators, `Vec`,
 strings, maps, sets, `Option`, `Result`, `?`, formatting, modules, local path
 crates, and async with `#[tokio::main]`, spawned tasks, timers, and HTTP.
+Traits with default methods, user `Display`, `Debug`, `Drop`, operator, and
+`Iterator` impls, associated consts, `u128` and `i128`, `mem::swap` and its
+siblings, and real sharing through `Rc`, `Arc`, `RefCell`, `Cell`, and
+`Mutex`. Values copy on write, so clones and `Copy` assignments mutate
+independently, exactly like compiled Rust.
 
 The standard library bridge covers files, paths, stdin and stdout, processes,
 TCP sockets, environment, time, and collections. Bridged crates include
@@ -91,9 +96,14 @@ under `crates/examples/examples`.
 - Crates without a bridge stop with an `unsupported crate` error.
 - `std::thread` is not supported, use `tokio` tasks.
 - `static mut` is rejected. Plain statics behave like constants.
-- `u128` and `i128` compute in `i64`.
-- Lifetimes and generics are accepted but mean nothing at runtime.
+- Lifetimes are accepted but mean nothing at runtime. Generic bounds
+  dispatch by the value's runtime type.
 - Glob imports from script modules are not supported.
+- `HashMap` iterates in insertion order. Real Rust's order is arbitrary and
+  unpromised, so a correct script cannot observe the difference, but an
+  interpreted run is deterministic where a compiled one is not.
+- The smaller known gaps and the planned work are in
+  [docs/roadmap.md](docs/roadmap.md).
 
 ## Modules and local crates
 

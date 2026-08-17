@@ -21,7 +21,12 @@ use super::vm::Vm;
 impl Vm {
     // -- format ------------------------------------------------------------
 
-    pub(super) fn render_fmt(chunk: &Chunk, spec: u16, regs: &[Value]) -> Result<String> {
+    pub(super) fn render_fmt(
+        self: &Arc<Self>,
+        chunk: &Chunk,
+        spec: u16,
+        regs: &[Value],
+    ) -> Result<String> {
         let f = &chunk.fmts[spec as usize];
         let positional: Vec<Value> = f
             .positional
@@ -33,7 +38,52 @@ impl Vm {
             .iter()
             .map(|(n, r)| (n.as_str(), regs[*r as usize].clone()))
             .collect();
-        render_template(&f.template, &positional, &named)
+        render_template(self, &f.template, &positional, &named)
+    }
+
+    /// The text a user `Display` or `Debug` impl renders for this value, or
+    /// None when the value's type has no such impl. The impl runs with the
+    /// value and a formatter buffer, and the buffer is the answer.
+    pub(super) fn user_fmt_text(self: &Arc<Self>, v: &Value, key: &str) -> Result<Option<String>> {
+        let ty: &str = match v {
+            Value::Struct(s) => s.name(),
+            Value::Enum { enum_name, .. } => enum_name,
+            _ => return Ok(None),
+        };
+        let Some(chunk) = self.methods.get(&(ty.to_string(), key.to_string())) else {
+            return Ok(None);
+        };
+        let chunk = chunk.clone();
+        let handle = Arc::new(parking_lot::Mutex::new(Native::Fmt(String::new())));
+        let args = vec![v.clone(), Value::Native(handle.clone())];
+        self.run_chunk(&chunk, &args, &[])?;
+        let text = match &*handle.lock() {
+            Native::Fmt(s) => s.clone(),
+            _ => String::new(),
+        };
+        Ok(Some(text))
+    }
+
+    /// Run the value's user `Drop::drop` when this is its last holder.
+    /// Another holder means the value was moved or is still shared, and the
+    /// real owner drops it at its own end of life.
+    pub(super) fn run_user_drop(self: &Arc<Self>, value: Value) -> Result<()> {
+        let (ty, unique) = match &value {
+            Value::Struct(s) => (s.name().to_string(), Arc::strong_count(s) == 1),
+            Value::Enum {
+                enum_name, data, ..
+            } => (enum_name.to_string(), Arc::strong_count(data) == 1),
+            _ => return Ok(()),
+        };
+        if !unique {
+            return Ok(());
+        }
+        let Some(chunk) = self.methods.get(&(ty, "Drop::drop".to_string())) else {
+            return Ok(());
+        };
+        let chunk = chunk.clone();
+        self.run_chunk(&chunk, &[value], &[])?;
+        Ok(())
     }
 
     // -- path values -------------------------------------------------------
@@ -127,9 +177,13 @@ impl Vm {
             "Some" => return Ok(Value::some(one(args)?)),
             "Ok" => return Ok(Value::ok(one(args)?)),
             "Err" => return Ok(Value::err(one(args)?)),
-            // Values die with their register and file writes are
-            // unbuffered, so discarding is enough.
-            "drop" => return Ok(Value::Unit),
+            // A user type with a `Drop` impl runs it now, its register was
+            // cleared at the call site so this is the last holder. Anything
+            // else dies with its register, file writes are unbuffered.
+            "drop" => {
+                self.run_user_drop(one(args)?)?;
+                return Ok(Value::Unit);
+            }
             _ => {}
         }
         if let Some(chunk) = self.user_function(name) {
@@ -264,30 +318,54 @@ impl Vm {
 
     // -- methods -----------------------------------------------------------
 
+    /// The dispatch steps that run before any per-receiver bridge: a shared
+    /// cell's own wrapper methods and its auto-deref, `to_string` through a
+    /// user `Display` impl, and the width-tagged number shortcuts.
+    fn pre_dispatch(
+        self: &Arc<Self>,
+        recv: &Value,
+        name: &MethodName,
+        args: &mut [Value],
+    ) -> Result<Option<Value>> {
+        if let Value::Cell(kind, slot) = recv {
+            if let Some(v) = super::cell::cell_method(*kind, slot, &name.text, args)? {
+                return Ok(Some(v));
+            }
+            let inner = slot.lock().clone();
+            return self.eval_method(&inner, name, args).map(Some);
+        }
+        if name.id == BuiltinId::ToString
+            && let Some(text) = self.user_fmt_text(recv, "Display::fmt")?
+        {
+            return Ok(Some(Value::str(text)));
+        }
+        if matches!(recv, Value::IntW(..) | Value::F32(_))
+            && matches!(name.id, BuiltinId::ToString | BuiltinId::Clone)
+        {
+            return Ok(Some(match name.id {
+                BuiltinId::ToString => Value::str(recv.display()),
+                _ => recv.clone(),
+            }));
+        }
+        Ok(None)
+    }
+
     pub(super) fn eval_method(
         self: &Arc<Self>,
         recv: &Value,
         name: &MethodName,
         args: &mut [Value],
     ) -> Result<Value> {
-        let dereferenced = if let Value::Ref(reference) = recv {
-            let Some(value) = reference.get() else {
-                bail!("method call through a dangling reference");
-            };
-            Some(value)
-        } else {
-            None
+        let dereferenced = match recv {
+            Value::Ref(reference) => match deref_receiver(reference, name, args)? {
+                RefRead::Value(value) => Some(value),
+                RefRead::StrGrown => return Ok(Value::Unit),
+            },
+            _ => None,
         };
         let recv = dereferenced.as_ref().unwrap_or(recv);
-        // A width-tagged number renders from its real width, and everything
-        // else on it falls back to the i64/f64 image the method surface
-        // computes in.
-        if matches!(recv, Value::IntW(..) | Value::F32(_)) {
-            match name.id {
-                BuiltinId::ToString => return Ok(Value::str(recv.display())),
-                BuiltinId::Clone => return Ok(recv.clone()),
-                _ => {}
-            }
+        if let Some(v) = self.pre_dispatch(recv, name, args)? {
+            return Ok(v);
         }
         // The serde type tests and the pointer lookup apply to any receiver,
         // so they are answered before the per type dispatch below, which
@@ -346,10 +424,14 @@ impl Vm {
         if let Some(v) = range_builtin(recv, name, args)? {
             return Ok(v);
         }
-        // A method on a range acts on its iterator value.
+        // A method on a range acts on its iterator value, and so does an
+        // adaptor chain on a user type with its own `Iterator` impl, unless
+        // the call is the user type's own method.
         let expanded;
-        let recv = if matches!(recv, Value::Range { .. }) {
-            expanded = Self::iterator_value(recv.clone())?;
+        let recv = if matches!(recv, Value::Range { .. })
+            || (self.has_user_next(recv) && !self.user_method_exists(recv, &name.text))
+        {
+            expanded = self.iterator_value(recv.clone())?;
             &expanded
         } else {
             recv
@@ -477,6 +559,10 @@ impl Vm {
 /// constants that hang off a type name. The widths that tag their values,
 /// `u16::MAX`, carry the tag so the constant keeps its real width.
 fn typed_path_constant(ty: &str, name: &str) -> Option<Value> {
+    // `ErrorKind::NotFound` and friends compare against `e.kind()` answers.
+    if ty == "ErrorKind" {
+        return Some(Value::enum_of("ErrorKind", name, Vec::new()));
+    }
     if ty == "consts" {
         let text = match name {
             "OS" => std::env::consts::OS,
@@ -598,30 +684,31 @@ fn int_limit(ty: &str, name: &str) -> Option<Value> {
         };
         return Some(Value::F32(v));
     }
-    // u128 and i128 carry no runtime width and keep their old i64 clamp.
-    let clamp = match ty {
-        "i128" => Some((i128::from(i64::MIN), i128::from(i64::MAX))),
-        "u128" => Some((0, i128::from(i64::MAX))),
-        _ => None,
-    };
-    let Some((min, max)) = clamp else {
-        let w = super::numeric::IntWidth::parse(ty)?;
-        let value = match name {
-            "MAX" => w.max(),
-            "MIN" => w.min(),
-            _ => return None,
+    // The 128-bit bounds live in `Value::Big`, u128's as reinterpreted bits.
+    if ty == "i128" {
+        return match name {
+            "MAX" => Some(Value::Big(i128::MAX, super::numeric::IntWidth::I128)),
+            "MIN" => Some(Value::Big(i128::MIN, super::numeric::IntWidth::I128)),
+            _ => None,
         };
-        return Some(Value::int_of_width(value, w));
-    };
-    match name {
-        "MAX" => Some(Value::Int(
-            i64::try_from(max).expect("clamped to i64 range"),
-        )),
-        "MIN" => Some(Value::Int(
-            i64::try_from(min).expect("clamped to i64 range"),
-        )),
-        _ => None,
     }
+    if ty == "u128" {
+        return match name {
+            "MAX" => Some(Value::Big(
+                u128::MAX.cast_signed(),
+                super::numeric::IntWidth::U128,
+            )),
+            "MIN" => Some(Value::Big(0, super::numeric::IntWidth::U128)),
+            _ => None,
+        };
+    }
+    let w = super::numeric::IntWidth::parse(ty)?;
+    let value = match name {
+        "MAX" => w.max(),
+        "MIN" => w.min(),
+        _ => return None,
+    };
+    Some(Value::int_of_width(value, w))
 }
 
 fn exitstatus_method(s: &Arc<super::value::StructData>, m: &str) -> Result<Value> {
@@ -934,9 +1021,52 @@ impl Args for VArgs<'_> {
     }
 }
 
+/// What reading a method receiver through a reference produced.
+enum RefRead {
+    Value(Value),
+    /// A string grow method already ran and stored back through the
+    /// reference, nothing further to dispatch.
+    StrGrown,
+}
+
+/// Read a method's receiver through its reference. A mutating method splits
+/// the referenced slot from value sharing first, so the in-place mutation
+/// stays private to the borrowed place. A string mutates by growing its own
+/// buffer rather than shared storage, so the grown buffer stores back
+/// through the reference to land in the borrowed place.
+fn deref_receiver(
+    reference: &super::value::ValueRef,
+    name: &MethodName,
+    args: &[Value],
+) -> Result<RefRead> {
+    let read = if super::bytecode::builtin_mutating(&name.text) {
+        reference.get_unique()
+    } else {
+        reference.get()
+    };
+    let Some(value) = read else {
+        bail!("method call through a dangling reference");
+    };
+    if let Value::Str(s) = &value
+        && matches!(name.id, BuiltinId::Push | BuiltinId::PushStr)
+    {
+        let mut grown = s.clone();
+        match (&name.id, args.first()) {
+            (BuiltinId::Push, Some(Value::Char(c))) => grown.push(*c),
+            (BuiltinId::PushStr, Some(Value::Str(other))) => grown.push_str(other),
+            (BuiltinId::PushStr, Some(other)) => grown.push_str(&other.display()),
+            _ => {}
+        }
+        reference.set(Value::Str(grown));
+        return Ok(RefRead::StrGrown);
+    }
+    Ok(RefRead::Value(value))
+}
+
 // -- template rendering ----------------------------------------------------
 
 fn render_template(
+    vm: &Arc<Vm>,
     template: &str,
     positional: &[Value],
     named: &[(&str, Value)],
@@ -989,10 +1119,30 @@ fn render_template(
                     }),
                     _ => None,
                 };
+                // A user `Display` or `Debug` impl overrides the built-in
+                // rendering. Only the form the spec asks for runs, an impl
+                // may have side effects.
+                let wants_debug = fmt.contains('?');
+                let display_text = if wants_debug {
+                    String::new()
+                } else {
+                    match vm.user_fmt_text(&value, "Display::fmt")? {
+                        Some(text) => text,
+                        None => value.display(),
+                    }
+                };
+                let debug_text = if wants_debug {
+                    match vm.user_fmt_text(&value, "Debug::fmt")? {
+                        Some(text) => text,
+                        None => value.debug(),
+                    }
+                } else {
+                    String::new()
+                };
                 out.push_str(&super::format::apply_spec(
                     &fmt,
-                    &value.display(),
-                    &value.debug(),
+                    &display_text,
+                    &debug_text,
                     number,
                 ));
             }

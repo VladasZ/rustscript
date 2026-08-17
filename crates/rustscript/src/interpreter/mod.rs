@@ -1,6 +1,7 @@
 mod assoc;
 mod bridge;
 mod bytecode;
+mod cell;
 mod compile;
 mod console;
 pub mod coverage;
@@ -41,7 +42,7 @@ mod wmi_bridge;
 mod xmltree_bridge;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -179,6 +180,17 @@ impl Interp {
         let mut pending_impls: Vec<(usize, Rc<syn::ItemImpl>)> = Vec::new();
         let mut pending_consts: Vec<(usize, Rc<syn::Expr>)> = Vec::new();
 
+        // Trait definitions by bare name, so an impl can pull in the default
+        // method bodies its block does not override.
+        let mut traits: HashMap<String, (usize, Rc<syn::ItemTrait>)> = HashMap::default();
+        for (m, src) in modules.iter().enumerate() {
+            for item in &src.items {
+                if let Item::Trait(t) = item {
+                    traits.insert(t.ident.to_string(), (m, Rc::new(t.clone())));
+                }
+            }
+        }
+
         for (m, src) in modules.iter().enumerate() {
             for item in &src.items {
                 register_item(
@@ -193,24 +205,29 @@ impl Interp {
         }
         resolver.reject_module_globs()?;
 
-        // Impl targets resolve only after every module registered its types.
-        let mut pending_methods: Vec<(String, String, usize, Rc<syn::ImplItemFn>)> = Vec::new();
-        for (m, imp) in &pending_impls {
-            let type_name = impl_target(&resolver, *m, &imp.self_ty)
-                .ok_or_else(|| anyhow!("unsupported impl target"))?;
-            for it in &imp.items {
-                if let syn::ImplItem::Fn(f) = it {
-                    pending_methods.push((
-                        type_name.clone(),
-                        f.sig.ident.to_string(),
-                        *m,
-                        Rc::new(f.clone()),
-                    ));
-                }
-            }
-        }
+        let pending_methods =
+            collect_impl_items(&mut resolver, &pending_impls, &traits, &mut pending_consts)?;
 
         let fn_returns = collect_fn_returns(&pending_fns);
+
+        // Method names any impl declares with a `&mut self` receiver. A call
+        // to one of these compiles its receiver as a place, split from value
+        // sharing first, so the mutation stays private to the receiver. The
+        // set is by name because the receiver's runtime type is not known at
+        // compile time; splitting a receiver that resolves to a `&self`
+        // method of the same name is wasted work, never wrong.
+        let has_drop = pending_methods
+            .iter()
+            .any(|(_, name, _, _)| name == "Drop::drop");
+        let mut_methods: HashSet<String> = pending_methods
+            .iter()
+            .filter(|(_, _, _, f)| {
+                f.sig
+                    .receiver()
+                    .is_some_and(|r| matches!(r.kind, syn::ReceiverKind::Reference(_, _, Some(_))))
+            })
+            .map(|(_, name, _, _)| name.clone())
+            .collect();
 
         let mut functions = Vec::with_capacity(pending_fns.len());
         for (m, f) in &pending_fns {
@@ -221,6 +238,8 @@ impl Interp {
                 async_mode,
                 impl_type: None,
                 fn_returns: &fn_returns,
+                mut_methods: &mut_methods,
+                has_drop,
             };
             let mut c = Compiler::new(&ctx);
             functions.push(Arc::new(c.compile_fn(&f.sig, &f.block)?));
@@ -234,6 +253,8 @@ impl Interp {
                 async_mode,
                 impl_type: Some(ty),
                 fn_returns: &fn_returns,
+                mut_methods: &mut_methods,
+                has_drop,
             };
             let mut c = Compiler::new(&ctx);
             methods.insert(
@@ -250,6 +271,8 @@ impl Interp {
                 async_mode,
                 impl_type: None,
                 fn_returns: &fn_returns,
+                mut_methods: &mut_methods,
+                has_drop,
             };
             let mut c = Compiler::new(&ctx);
             globals.push(GlobalSlot::Todo(Arc::new(c.compile_const(expr)?)));
@@ -273,7 +296,7 @@ impl Interp {
     /// Report methods the interpreter does not implement, without running
     /// anything. Used by `rust check`.
     pub fn coverage(&self) -> Vec<coverage::Finding> {
-        let user = self.methods.keys().map(|(_, m)| m.clone());
+        let user = self.methods.keys().cloned();
         coverage::report(&self.functions, user)
     }
 
@@ -357,7 +380,11 @@ impl Interp {
             && &**enum_name == "Result"
             && &**variant == "Err"
         {
-            let msg = data.first().map(value::Value::display).unwrap_or_default();
+            let msg = data
+                .lock()
+                .first()
+                .map(value::Value::display)
+                .unwrap_or_default();
             return Err(anyhow::Error::new(vm_support::ErrReturn(msg)));
         }
         Ok(())
@@ -469,6 +496,86 @@ fn register_item(
         other => bail!("unsupported item: {}", quote_kind(other)),
     }
     Ok(())
+}
+
+/// One method to compile: its target type, method key, defining module,
+/// and body.
+type PendingMethod = (String, String, usize, Rc<syn::ImplItemFn>);
+
+/// Register every impl block's methods and consts, resolving impl targets
+/// after all modules registered their types. A trait impl also brings in the
+/// trait's default bodies for methods it does not override, compiled against
+/// the trait's module.
+fn collect_impl_items(
+    resolver: &mut Resolver,
+    pending_impls: &[(usize, Rc<syn::ItemImpl>)],
+    traits: &HashMap<String, (usize, Rc<syn::ItemTrait>)>,
+    pending_consts: &mut Vec<(usize, Rc<syn::Expr>)>,
+) -> Result<Vec<PendingMethod>> {
+    let mut pending_methods: Vec<PendingMethod> = Vec::new();
+    for (m, imp) in pending_impls {
+        let type_name = impl_target(resolver, *m, &imp.self_ty)
+            .ok_or_else(|| anyhow!("unsupported impl target"))?;
+        let trait_name = imp
+            .trait_
+            .as_ref()
+            .and_then(|(path, _)| path.segments.last())
+            .map(|seg| seg.ident.to_string());
+        let mut written: Vec<String> = Vec::new();
+        for it in &imp.items {
+            match it {
+                syn::ImplItem::Fn(f) => {
+                    let method = f.sig.ident.to_string();
+                    written.push(method.clone());
+                    // Both `Display` and `Debug` define `fmt`, so their impls
+                    // are stored trait-qualified and looked up by the
+                    // formatter, never by a plain method call. `Drop::drop`
+                    // runs only at end of life, a plain `x.drop()` call must
+                    // never reach it.
+                    let key = match trait_name.as_deref() {
+                        Some(t @ ("Display" | "Debug")) if method == "fmt" => {
+                            format!("{t}::fmt")
+                        }
+                        Some("Drop") if method == "drop" => "Drop::drop".to_string(),
+                        _ => method,
+                    };
+                    pending_methods.push((type_name.clone(), key, *m, Rc::new(f.clone())));
+                }
+                syn::ImplItem::Const(c) => {
+                    let key = format!("{}::{}", resolver::bare(&type_name), c.ident);
+                    resolver.modules[*m].consts.insert(
+                        key,
+                        u32::try_from(pending_consts.len()).expect("table fits u32"),
+                    );
+                    pending_consts.push((*m, Rc::new(c.expr.clone())));
+                }
+                _ => {}
+            }
+        }
+        if let Some((trait_module, def)) = trait_name.as_ref().and_then(|t| traits.get(t)) {
+            for ti in &def.items {
+                if let syn::TraitItem::Fn(tf) = ti
+                    && let Some(body) = &tf.default
+                    && !written.iter().any(|w| tf.sig.ident == w.as_str())
+                {
+                    let synthesized = syn::ImplItemFn {
+                        attrs: tf.attrs.clone(),
+                        vis: syn::Visibility::Inherited,
+                        modifiers: syn::FnModifiers::default(),
+                        sig: tf.sig.clone(),
+                        block: body.clone(),
+                    };
+                    pending_methods.push((
+                        type_name.clone(),
+                        tf.sig.ident.to_string(),
+                        *trait_module,
+                        Rc::new(synthesized),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(pending_methods)
 }
 
 /// Canonical name of the type an `impl` block targets.

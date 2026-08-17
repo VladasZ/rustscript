@@ -72,6 +72,51 @@ fn assert_parity(src: &str, code: i32, needle: &str) {
 }
 
 #[test]
+fn char_boundary_slice_panics_alike() {
+    assert_parity(
+        "fn main() {\n    let s = \"h\u{e9}llo\";\n    println!(\"{}\", &s[0..2]);\n}\n",
+        101,
+        "end byte index 2 is not a char boundary; it is inside '\u{e9}' (bytes 1..3 of string)",
+    );
+}
+
+#[test]
+fn string_slice_out_of_bounds_panics_alike() {
+    assert_parity(
+        "fn main() {\n    let s = \"hello\";\n    println!(\"{}\", &s[0..10]);\n}\n",
+        101,
+        "end byte index 10 is out of bounds for string of length 5",
+    );
+}
+
+#[test]
+fn slice_range_out_of_bounds_panics_alike() {
+    assert_parity(
+        "fn main() {\n    let v = vec![1, 2, 3];\n    println!(\"{:?}\", &v[1..9]);\n}\n",
+        101,
+        "range end index 9 out of range for slice of length 3",
+    );
+}
+
+#[test]
+fn inverted_slice_range_panics_alike() {
+    assert_parity(
+        "fn main() {\n    let v = vec![1, 2, 3];\n    let a = 3;\n    println!(\"{:?}\", &v[a..1]);\n}\n",
+        101,
+        "slice index starts at 3 but ends at 1",
+    );
+}
+
+#[test]
+fn unwrap_on_err_panics_with_debug_payload_alike() {
+    assert_parity(
+        "fn main() {\n    let r: Result<i32, String> = Err(\"bad\".to_string());\n    println!(\"{}\", r.unwrap());\n}\n",
+        101,
+        "called `Result::unwrap()` on an `Err` value: \"bad\"",
+    );
+}
+
+#[test]
 fn index_out_of_bounds_panics_alike() {
     assert_parity(
         "fn main() {\n    let v = vec![1, 2, 3];\n    let i = 10;\n    println!(\"{}\", v[i]);\n}\n",

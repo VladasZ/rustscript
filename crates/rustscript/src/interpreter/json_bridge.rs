@@ -162,8 +162,8 @@ impl Vm {
                     && &**enum_name == "Option"
                     && &**variant == "Some"
                 {
-                    let coerced =
-                        self.coerce_value(data.first().cloned().unwrap_or(Value::Unit), inner);
+                    let coerced = self
+                        .coerce_value(data.lock().first().cloned().unwrap_or(Value::Unit), inner);
                     return Value::some(coerced);
                 }
                 value
@@ -189,7 +189,7 @@ impl Vm {
             && &**enum_name == "Result"
             && &**variant == "Ok"
         {
-            let inner = data.first().cloned().unwrap_or(Value::Unit);
+            let inner = data.lock().first().cloned().unwrap_or(Value::Unit);
             return Value::ok(self.coerce_value(inner, ty));
         }
         self.coerce_value(value, ty)
@@ -588,6 +588,19 @@ pub(super) fn pvalue_to_json(v: &Value) -> Result<serde_json::Value> {
                 )),
             }
         }
+        // Serde represents a 128-bit integer as a number only while it fits
+        // the u64/i64 json range, the same bound `serde_json` enforces.
+        Value::Big(raw, w) => {
+            let as_i64 = if *w == super::numeric::IntWidth::U128 {
+                i64::try_from(raw.cast_unsigned()).map_err(|_| ())
+            } else {
+                i64::try_from(*raw).map_err(|_| ())
+            };
+            match as_i64 {
+                Ok(small) => J::Number(serde_json::Number::from(small)),
+                Err(()) => bail!("128-bit integer does not fit a json number"),
+            }
+        }
         Value::Float(f) => serde_json::Number::from_f64(*f).map_or(J::Null, J::Number),
         Value::F32(f) => serde_json::Number::from_f64(f64::from(*f)).map_or(J::Null, J::Number),
         Value::Char(c) => J::String(c.to_string()),
@@ -625,24 +638,30 @@ pub(super) fn pvalue_to_json(v: &Value) -> Result<serde_json::Value> {
             variant,
             data,
         } => {
+            let payload = data.lock().clone();
             if &**enum_name == "Option" {
                 match &**variant {
-                    "Some" => pvalue_to_json(&data[0])?,
+                    "Some" => pvalue_to_json(&payload[0])?,
                     _ => J::Null,
                 }
-            } else if data.is_empty() {
+            } else if payload.is_empty() {
                 J::String(variant.to_string())
             } else {
                 let mut obj = serde_json::Map::default();
                 obj.insert(
                     variant.to_string(),
-                    J::Array(data.iter().map(pvalue_to_json).collect::<Result<_>>()?),
+                    J::Array(payload.iter().map(pvalue_to_json).collect::<Result<_>>()?),
                 );
                 J::Object(obj)
             }
         }
         Value::Range { .. } => bail!("cannot serialize a range to json"),
         Value::Closure(_) => bail!("cannot serialize a closure to json"),
+        // Serde serializes Rc, Arc, RefCell, and Mutex by content.
+        Value::Cell(_, slot) => {
+            let inner = slot.lock().clone();
+            pvalue_to_json(&inner)?
+        }
         Value::Ref(reference) => {
             let Some(value) = reference.get() else {
                 bail!("cannot serialize a dangling reference to json");

@@ -36,6 +36,9 @@ enum CollectRoute {
     Plain,
     BareLet,
     Helper,
+    /// `let x: T = existing.clone();`, so later mutations of either binding
+    /// must stay private to the one they hit.
+    CloneOf,
 }
 
 pub struct Generator<'a> {
@@ -70,6 +73,9 @@ impl<'a> Generator<'a> {
             // of a helper whose return type states it.
             let expr = match self.collection_route(&ty) {
                 CollectRoute::Plain => self.expr(&ty, MAX_EXPR_DEPTH),
+                CollectRoute::CloneOf => self
+                    .clone_source(&ty)
+                    .unwrap_or_else(|| self.expr(&ty, MAX_EXPR_DEPTH)),
                 CollectRoute::BareLet => self
                     .pipe_collect(&ty, Site::Bare, MAX_EXPR_DEPTH)
                     .unwrap_or_else(|| self.expr(&ty, MAX_EXPR_DEPTH)),
@@ -143,11 +149,34 @@ impl<'a> Generator<'a> {
         if !matches!(ty, Ty::Vec(_) | Ty::Map(..) | Ty::Set(_)) {
             return CollectRoute::Plain;
         }
-        match self.rng.random_range(0..4) {
+        match self.rng.random_range(0..5) {
             0 => CollectRoute::BareLet,
             1 => CollectRoute::Helper,
+            2 => CollectRoute::CloneOf,
             _ => CollectRoute::Plain,
         }
+    }
+
+    /// An existing binding of exactly this type, for a clone-initialized
+    /// `let`. Mutations that later hit the original or the clone must stay
+    /// private to the binding they hit, the copy-on-write regression the
+    /// aliasing value model once had.
+    fn clone_source(&mut self, ty: &Ty) -> Option<Expr> {
+        let candidates: Vec<usize> = self
+            .scope
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| &b.ty == ty)
+            .map(|(i, _)| i)
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        let index = candidates[self.rng.random_range(0..candidates.len())];
+        Some(Expr::Var {
+            name: self.scope[index].name.clone(),
+            ty: ty.clone(),
+        })
     }
 
     fn next_label(&mut self) -> String {

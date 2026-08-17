@@ -2,7 +2,6 @@
 //! `EncodingKey` construction, and `encode` for signing tokens.
 
 use std::str::FromStr;
-use std::sync::Arc;
 
 use anyhow::{Result, bail};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
@@ -17,11 +16,7 @@ pub(super) fn jwt_algorithm(ty: &str, variant: &str) -> Option<Value> {
     if ty != "Algorithm" || Algorithm::from_str(variant).is_err() {
         return None;
     }
-    Some(Value::Enum {
-        enum_name: Arc::from("Algorithm"),
-        variant: Arc::from(variant),
-        data: Arc::from(Vec::new()),
-    })
+    Some(Value::enum_of("Algorithm", variant, Vec::new()))
 }
 
 pub(super) fn jwt_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {

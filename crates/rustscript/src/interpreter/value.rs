@@ -28,9 +28,48 @@ pub enum MapKind {
     Set,
 }
 
+/// Which wrapper type a `Value::Cell` models. The kind picks the method
+/// surface and the debug rendering, the storage is the same shared slot.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CellKind {
+    Rc,
+    Arc,
+    RefCell,
+    Cell,
+    Mutex,
+}
+
+impl CellKind {
+    /// Rc and Arc share, they have no interior mutability of their own.
+    pub fn is_shared_pointer(self) -> bool {
+        matches!(self, CellKind::Rc | CellKind::Arc)
+    }
+}
+
 pub enum ValueRef {
-    VecElement { values: List, index: usize },
-    MapEntry { map: Map, key: MapKey },
+    VecElement {
+        values: List,
+        index: usize,
+    },
+    MapEntry {
+        map: Map,
+        key: MapKey,
+    },
+    StructField {
+        data: Arc<StructData>,
+        slot: usize,
+    },
+    /// The inside of a `Value::Cell`, handed out by `borrow_mut` and `lock`.
+    CellSlot {
+        slot: Arc<Mutex<Value>>,
+    },
+    /// A mutable borrow of the wrapped value's own storage, handed out by
+    /// accessors like `as_object_mut`. Mutating through it must reach that
+    /// storage, so the mutation split never applies. It has no anchor to
+    /// assign a whole new value into, only in-place mutation goes through.
+    Borrowed {
+        value: Value,
+    },
 }
 
 impl ValueRef {
@@ -42,10 +81,46 @@ impl ValueRef {
         Self::MapEntry { map, key }
     }
 
+    pub fn struct_field(data: Arc<StructData>, slot: usize) -> Self {
+        Self::StructField { data, slot }
+    }
+
+    pub fn cell_slot(slot: Arc<Mutex<Value>>) -> Self {
+        Self::CellSlot { slot }
+    }
+
+    pub fn borrowed(value: Value) -> Self {
+        Self::Borrowed { value }
+    }
+
     pub fn get(&self) -> Option<Value> {
         match self {
             Self::VecElement { values, index } => values.lock().get(*index).cloned(),
             Self::MapEntry { map, key } => map.lock().get(key).cloned(),
+            Self::StructField { data, slot } => data.values.lock().get(*slot).cloned(),
+            Self::CellSlot { slot } => Some(slot.lock().clone()),
+            Self::Borrowed { value } => Some(value.clone()),
+        }
+    }
+
+    /// Like `get`, but splits the referenced slot from value sharing first,
+    /// so an in-place mutation of the returned value stays private to the
+    /// slot. Used for mutating access through the reference.
+    pub fn get_unique(&self) -> Option<Value> {
+        let unique = |slot: Option<&mut Value>| {
+            slot.map(|v| {
+                v.make_unique();
+                v.clone()
+            })
+        };
+        match self {
+            Self::VecElement { values, index } => unique(values.lock().get_mut(*index)),
+            Self::MapEntry { map, key } => unique(map.lock().get_mut(key)),
+            Self::StructField { data, slot } => unique(data.values.lock().get_mut(*slot)),
+            Self::CellSlot { slot } => unique(Some(&mut *slot.lock())),
+            // The wrapped value IS the borrowed storage, splitting it would
+            // disconnect the mutation from the borrow's referent.
+            Self::Borrowed { value } => Some(value.clone()),
         }
     }
 
@@ -63,6 +138,19 @@ impl ValueRef {
                 map.lock().insert(key.clone(), value);
                 true
             }
+            Self::StructField { data, slot } => {
+                let mut values = data.values.lock();
+                let Some(target) = values.get_mut(*slot) else {
+                    return false;
+                };
+                *target = value;
+                true
+            }
+            Self::CellSlot { slot } => {
+                *slot.lock() = value;
+                true
+            }
+            Self::Borrowed { .. } => false,
         }
     }
 }
@@ -139,6 +227,8 @@ pub enum Value {
     /// An integer with a real width other than i64, in the storage form
     /// described in `numeric`.
     IntW(i64, IntWidth),
+    /// A 128-bit integer, i128 exactly or u128 as reinterpreted bits.
+    Big(i128, IntWidth),
     Float(f64),
     /// A real f32, kept at f32 precision, mirroring `Value::F32`.
     F32(f32),
@@ -148,10 +238,12 @@ pub enum Value {
     Map(Map, MapKind),
     Tuple(List),
     Struct(Arc<StructData>),
+    /// The payload shares the list storage shape, so a `&mut` binding into
+    /// a payload slot is an addressable element reference.
     Enum {
         enum_name: Arc<str>,
         variant: Arc<str>,
-        data: Arc<[Value]>,
+        data: List,
     },
     Range {
         start: i64,
@@ -160,6 +252,10 @@ pub enum Value {
     },
     Closure(Arc<ClosureData>),
     Ref(Arc<ValueRef>),
+    /// A real shared cell: `Rc`, `Arc`, `RefCell`, `Cell`, or `Mutex`.
+    /// Cloning shares the slot on purpose, these are the types real Rust
+    /// uses when sharing is the point, so `make_unique` leaves them alone.
+    Cell(CellKind, Arc<Mutex<Value>>),
     Native(Arc<Mutex<Native>>),
 }
 
@@ -217,19 +313,24 @@ impl Value {
     }
 
     pub fn some(v: Value) -> Value {
+        Value::enum_of("Option", "Some", vec![v])
+    }
+
+    /// An enum value with its payload in fresh list storage.
+    pub fn enum_of(
+        enum_name: impl Into<Arc<str>>,
+        variant: impl Into<Arc<str>>,
+        data: Vec<Value>,
+    ) -> Value {
         Value::Enum {
-            enum_name: Arc::from("Option"),
-            variant: Arc::from("Some"),
-            data: Arc::from(vec![v]),
+            enum_name: enum_name.into(),
+            variant: variant.into(),
+            data: Arc::new(Mutex::new(data)),
         }
     }
 
     pub fn none() -> Value {
-        Value::Enum {
-            enum_name: Arc::from("Option"),
-            variant: Arc::from("None"),
-            data: Arc::from(Vec::new()),
-        }
+        Value::enum_of("Option", "None", Vec::new())
     }
 
     /// True for `Option::None`, used to keep a null json value as None rather
@@ -240,27 +341,81 @@ impl Value {
     }
 
     pub fn ok(v: Value) -> Value {
-        Value::Enum {
-            enum_name: Arc::from("Result"),
-            variant: Arc::from("Ok"),
-            data: Arc::from(vec![v]),
-        }
+        Value::enum_of("Result", "Ok", vec![v])
     }
 
     pub fn err(v: Value) -> Value {
-        Value::Enum {
-            enum_name: Arc::from("Result"),
-            variant: Arc::from("Err"),
-            data: Arc::from(vec![v]),
-        }
+        Value::enum_of("Result", "Err", vec![v])
     }
 
     pub fn is_truthy(&self) -> bool {
         matches!(self, Value::Bool(true))
     }
 
+    /// A fresh value of the same shape as this one, standing in for
+    /// `T::default()` where the runtime has no type: `mem::take` and
+    /// `RefCell::take`.
+    pub(super) fn default_like(&self) -> Value {
+        match self {
+            Value::Bool(_) => Value::Bool(false),
+            Value::Int(_) => Value::Int(0),
+            Value::IntW(_, w) => Value::IntW(0, *w),
+            Value::Big(_, w) => Value::Big(0, *w),
+            Value::Float(_) => Value::Float(0.0),
+            Value::F32(_) => Value::F32(0.0),
+            Value::Char(_) => Value::Char('\0'),
+            Value::Str(_) => Value::str(""),
+            Value::Vec(_) => Value::vec(Vec::new()),
+            Value::Map(_, MapKind::Map) => Value::map(),
+            Value::Map(_, MapKind::Set) => Value::set(),
+            Value::Enum { enum_name, .. } if &**enum_name == "Option" => Value::none(),
+            _ => Value::Unit,
+        }
+    }
+
+    /// Split this value from any sharing so an in-place mutation stays
+    /// private: when the backing storage has another holder, replace it with
+    /// a fresh copy. One level deep on purpose, nested values split at their
+    /// own mutable access, so a chain of these along an access path behaves
+    /// like a deep copy paid lazily.
+    ///
+    /// Scalars and strings need nothing, a string splits inside its own
+    /// mutating methods via `Arc::make_mut`. Native handles and closures
+    /// keep their identity, sharing is their meaning.
+    pub(super) fn make_unique(&mut self) {
+        match self {
+            Value::Vec(list) | Value::Tuple(list) => {
+                if Arc::strong_count(list) > 1 {
+                    let copy = list.lock().clone();
+                    *list = Arc::new(Mutex::new(copy));
+                }
+            }
+            Value::Map(map, _) => {
+                if Arc::strong_count(map) > 1 {
+                    let copy = map.lock().clone();
+                    *map = Arc::new(Mutex::new(copy));
+                }
+            }
+            Value::Struct(data) => {
+                if Arc::strong_count(data) > 1 {
+                    let values = data.values.lock().clone();
+                    *data = Arc::new(StructData {
+                        shape: data.shape.clone(),
+                        values: Mutex::new(values),
+                    });
+                }
+            }
+            Value::Enum { data, .. } if Arc::strong_count(data) > 1 => {
+                let copy = data.lock().clone();
+                *data = Arc::new(Mutex::new(copy));
+            }
+            _ => {}
+        }
+    }
+
     pub fn from_const(c: &Const) -> Value {
         match c {
+            Const::Big(v, w) => Value::Big(*v, *w),
             Const::Float(f) => Value::Float(*f),
             Const::F32(f) => Value::F32(*f),
             Const::Char(ch) => Value::Char(*ch),
@@ -276,6 +431,10 @@ impl Value {
         match self {
             Value::Int(i) => Some((i128::from(*i), IntWidth::I64)),
             Value::IntW(v, w) => Some((w.decode(*v), *w)),
+            Value::Big(v, IntWidth::I128) => Some((*v, IntWidth::I128)),
+            // A u128 fits the i128 pipeline only while its top bit is clear.
+            // Bigger values answer through the dedicated big paths instead.
+            Value::Big(v, IntWidth::U128) if *v >= 0 => Some((*v, IntWidth::U128)),
             _ => None,
         }
     }
@@ -284,6 +443,7 @@ impl Value {
     pub(super) fn int_of_width(value: i128, width: IntWidth) -> Value {
         match width {
             IntWidth::I64 => Value::Int(i64::try_from(value).expect("truncated to width")),
+            IntWidth::I128 | IntWidth::U128 => Value::Big(value, width),
             other => Value::IntW(other.encode(value), other),
         }
     }
@@ -315,7 +475,7 @@ impl Value {
         match self {
             Value::Unit => "()",
             Value::Bool(_) => "bool",
-            Value::Int(_) | Value::IntW(..) => "integer",
+            Value::Int(_) | Value::IntW(..) | Value::Big(..) => "integer",
             Value::Float(_) | Value::F32(_) => "float",
             Value::Char(_) => "char",
             Value::Str(_) => "String",
@@ -330,6 +490,13 @@ impl Value {
             Value::Ref(reference) => reference
                 .get()
                 .map_or("reference", |value| value.type_name()),
+            Value::Cell(kind, _) => match kind {
+                CellKind::Rc => "Rc",
+                CellKind::Arc => "Arc",
+                CellKind::RefCell => "RefCell",
+                CellKind::Cell => "Cell",
+                CellKind::Mutex => "Mutex",
+            },
             Value::Native(_) => "native",
         }
     }
@@ -367,6 +534,17 @@ impl Value {
         if let Value::Ref(reference) = other {
             return reference.get().is_some_and(|value| self.eq_value(&value));
         }
+        // Cells compare by content, the way Rc and RefCell equality does.
+        // Snapshots, not held guards, comparing a cell with itself would
+        // relock its own mutex.
+        if let Value::Cell(_, slot) = self {
+            let inner = slot.lock().clone();
+            return inner.eq_value(other);
+        }
+        if let Value::Cell(_, slot) = other {
+            let inner = slot.lock().clone();
+            return self.eq_value(&inner);
+        }
         match (self, other) {
             (Value::Unit, Value::Unit) => true,
             (Value::Bool(a), Value::Bool(b)) => a == b,
@@ -374,6 +552,15 @@ impl Value {
             (Value::IntW(..), Value::Int(_) | Value::IntW(..))
             | (Value::Int(_), Value::IntW(..)) => {
                 self.int_parts().map(|(a, _)| a) == other.int_parts().map(|(b, _)| b)
+            }
+            (Value::Big(a, wa), Value::Big(b, wb)) => a == b && wa == wb,
+            (Value::Big(..), Value::Int(_)) | (Value::Int(_), Value::Big(..)) => {
+                match (self.int_parts(), other.int_parts()) {
+                    (Some((a, _)), Some((b, _))) => a == b,
+                    // One side is a u128 past the i128 range, the other an
+                    // i64, so they cannot be equal.
+                    _ => false,
+                }
             }
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::F32(a), Value::F32(b)) => a == b,
@@ -408,6 +595,9 @@ impl Value {
                     data: db,
                 },
             ) => {
+                // Snapshots, not held guards, see the container arms above.
+                let da = da.lock().clone();
+                let db = db.lock().clone();
                 ea == eb
                     && va == vb
                     && da.len() == db.len()
@@ -441,10 +631,26 @@ impl Value {
             Value::Bool(b) => b.to_string(),
             Value::Int(i) => i.to_string(),
             Value::IntW(v, w) => w.decode(*v).to_string(),
+            Value::Big(v, w) => big_text(*v, *w),
             Value::Float(f) => format_float(*f),
             Value::F32(f) => f.to_string(),
             Value::Char(c) => c.to_string(),
             Value::Str(s) => s.to_string(),
+            // Rc and Arc pass Display through to their content.
+            Value::Cell(kind, slot) if kind.is_shared_pointer() => {
+                let inner = slot.lock().clone();
+                inner.display()
+            }
+            // A reference displays what it points at, `{}` through a `&mut`
+            // borrow or a lock guard formats the content.
+            Value::Ref(reference) => match reference.get() {
+                Some(value) => value.display(),
+                None => "<dangling reference>".to_string(),
+            },
+            Value::Native(n) => match &*n.lock() {
+                Native::IoErr { display, .. } => display.clone(),
+                other => format!("<{}>", other.type_name()),
+            },
             other => other.debug(),
         }
     }
@@ -462,6 +668,7 @@ impl Value {
             Value::Bool(b) => write!(out, "{b}").unwrap(),
             Value::Int(i) => write!(out, "{i}").unwrap(),
             Value::IntW(v, w) => write!(out, "{}", w.decode(*v)).unwrap(),
+            Value::Big(v, w) => out.push_str(&big_text(*v, *w)),
             Value::Float(f) => out.push_str(&format_float_debug(*f)),
             Value::F32(f) => write!(out, "{f:?}").unwrap(),
             Value::Char(c) => write!(out, "{c:?}").unwrap(),
@@ -518,9 +725,17 @@ impl Value {
                 Some(value) => value.write_debug(out),
                 None => out.push_str("<dangling reference>"),
             },
-            Value::Native(n) => write!(out, "<{}>", n.lock().type_name()).unwrap(),
+            Value::Cell(kind, slot) => write_cell_debug(*kind, slot, out),
+            Value::Native(n) => {
+                if let Native::IoErr { debug, .. } = &*n.lock() {
+                    out.push_str(debug);
+                } else {
+                    write!(out, "<{}>", n.lock().type_name()).unwrap();
+                }
+            }
             Value::Enum { variant, data, .. } => {
                 write!(out, "{variant}").unwrap();
+                let data = data.lock().clone();
                 if !data.is_empty() {
                     out.push('(');
                     for (i, v) in data.iter().enumerate() {
@@ -533,6 +748,40 @@ impl Value {
                 }
             }
         }
+    }
+}
+
+/// A shared cell's debug form, each wrapper rendering the way its real
+/// derive does. The slot is snapshotted, not held, so a nested read cannot
+/// relock it.
+fn write_cell_debug(kind: CellKind, slot: &Arc<Mutex<Value>>, out: &mut String) {
+    let inner = slot.lock().clone();
+    match kind {
+        CellKind::Rc | CellKind::Arc => inner.write_debug(out),
+        CellKind::RefCell => {
+            out.push_str("RefCell { value: ");
+            inner.write_debug(out);
+            out.push_str(" }");
+        }
+        CellKind::Cell => {
+            out.push_str("Cell { value: ");
+            inner.write_debug(out);
+            out.push_str(" }");
+        }
+        CellKind::Mutex => {
+            out.push_str("Mutex { data: ");
+            inner.write_debug(out);
+            out.push_str(", poisoned: false, .. }");
+        }
+    }
+}
+
+/// A 128-bit value as text, u128 through its reinterpreted bits.
+fn big_text(v: i128, w: IntWidth) -> String {
+    if w == IntWidth::U128 {
+        v.cast_unsigned().to_string()
+    } else {
+        v.to_string()
     }
 }
 

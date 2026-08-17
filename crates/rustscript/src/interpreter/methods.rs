@@ -20,11 +20,7 @@ pub(super) fn make_ordering(o: std::cmp::Ordering) -> Value {
         std::cmp::Ordering::Equal => "Equal",
         std::cmp::Ordering::Greater => "Greater",
     };
-    Value::Enum {
-        enum_name: Arc::from("Ordering"),
-        variant: Arc::from(variant),
-        data: Arc::from(Vec::new()),
-    }
+    Value::enum_of("Ordering", variant, Vec::new())
 }
 
 pub(super) fn ordering_from_value(v: &Value) -> Option<std::cmp::Ordering> {
@@ -116,6 +112,11 @@ pub(super) fn json_value_method(recv: &Value, name: &str, args: &[Value]) -> Opt
             None => return Some(Value::none()),
         }
     }
+    // `pointer_mut` answers a borrow into the tree, so a mutation through it
+    // must reach the tree and the mutation split never applies.
+    if name == "pointer_mut" {
+        return Some(Value::some(Value::Ref(Arc::new(ValueRef::borrowed(here)))));
+    }
     Some(Value::some(here))
 }
 
@@ -168,7 +169,11 @@ pub(super) fn generic_method(recv: &Value, name: &str, args: &[Value]) -> Result
             Value::none()
         }),
         (Value::Vec(v), "as_array") => Ok(Value::some(Value::vec(v.lock().clone()))),
-        (Value::Vec(v), "as_array_mut") => Ok(Value::some(Value::Vec(v.clone()))),
+        // `_mut` accessors answer a borrow of the receiver's own storage,
+        // so the mutation split never applies to what they hand back.
+        (Value::Vec(v), "as_array_mut") => Ok(Value::some(Value::Ref(Arc::new(
+            ValueRef::borrowed(Value::Vec(v.clone())),
+        )))),
         // Serde accessors on a value that is not the matching type, for example
         // as_str on Null, are None rather than an error.
         (_, name) if shared::json_accessor(name) => Ok(Value::none()),
@@ -345,7 +350,7 @@ pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
         return Ok(recv.clone());
     }
     let (is_some, inner) = match recv {
-        Value::Enum { variant, data, .. } => (&**variant == "Some", data.first().cloned()),
+        Value::Enum { variant, data, .. } => (&**variant == "Some", data.lock().first().cloned()),
         _ => unreachable!(),
     };
     match method.id {
@@ -383,7 +388,7 @@ pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
 
 pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> Result<Value> {
     let (is_ok, inner) = match recv {
-        Value::Enum { variant, data, .. } => (&**variant == "Ok", data.first().cloned()),
+        Value::Enum { variant, data, .. } => (&**variant == "Ok", data.lock().first().cloned()),
         _ => unreachable!(),
     };
     let name = method.text.as_str();

@@ -25,10 +25,14 @@ pub enum IntWidth {
     U32,
     U64,
     USize,
+    /// Stored in a `Value::Big`, never in the one-i64 `IntW` form.
+    U128,
     I8,
     I16,
     I32,
     I64,
+    /// Stored in a `Value::Big`, never in the one-i64 `IntW` form.
+    I128,
 }
 
 impl IntWidth {
@@ -38,10 +42,12 @@ impl IntWidth {
             "u16" => Self::U16,
             "u32" => Self::U32,
             "u64" => Self::U64,
+            "u128" => Self::U128,
             "usize" => Self::USize,
             "i8" => Self::I8,
             "i16" => Self::I16,
             "i32" => Self::I32,
+            "i128" => Self::I128,
             // The interpreter runs on 64-bit targets only, so isize is i64.
             "i64" | "isize" => Self::I64,
             _ => return None,
@@ -56,16 +62,27 @@ impl IntWidth {
             Self::U16 => "u16",
             Self::U32 => "u32",
             Self::U64 => "u64",
+            Self::U128 => "u128",
             Self::USize => "usize",
             Self::I8 => "i8",
             Self::I16 => "i16",
             Self::I32 => "i32",
             Self::I64 => "i64",
+            Self::I128 => "i128",
         }
     }
 
     pub fn is_signed(self) -> bool {
-        matches!(self, Self::I8 | Self::I16 | Self::I32 | Self::I64)
+        matches!(
+            self,
+            Self::I8 | Self::I16 | Self::I32 | Self::I64 | Self::I128
+        )
+    }
+
+    /// Whether values of this width live in `Value::Big` rather than the
+    /// one-i64 `IntW` storage.
+    pub fn is_big(self) -> bool {
+        matches!(self, Self::I128 | Self::U128)
     }
 
     pub fn bits(self) -> u32 {
@@ -74,22 +91,28 @@ impl IntWidth {
             Self::U16 | Self::I16 => 16,
             Self::U32 | Self::I32 => 32,
             Self::U64 | Self::USize | Self::I64 => 64,
+            Self::U128 | Self::I128 => 128,
         }
     }
 
+    /// The smallest value, for the widths whose bounds fit an i128. `U128`
+    /// never asks, its arithmetic runs natively in u128.
     pub fn min(self) -> i128 {
-        if self.is_signed() {
-            -(1i128 << (self.bits() - 1))
-        } else {
-            0
+        match self {
+            Self::I128 => i128::MIN,
+            _ if self.is_signed() => -(1i128 << (self.bits() - 1)),
+            _ => 0,
         }
     }
 
+    /// The largest value. `U128`'s does not fit an i128, so its arithmetic
+    /// runs natively in u128 and never asks.
     pub fn max(self) -> i128 {
-        if self.is_signed() {
-            (1i128 << (self.bits() - 1)) - 1
-        } else {
-            (1i128 << self.bits()) - 1
+        match self {
+            Self::I128 => i128::MAX,
+            Self::U128 => unreachable!("u128 bounds do not fit the i128 pipeline"),
+            _ if self.is_signed() => (1i128 << (self.bits() - 1)) - 1,
+            _ => (1i128 << self.bits()) - 1,
         }
     }
 
@@ -97,6 +120,7 @@ impl IntWidth {
     pub fn decode(self, stored: i64) -> i128 {
         match self {
             Self::U64 | Self::USize => i128::from(stored.cast_unsigned()),
+            Self::U128 | Self::I128 => unreachable!("128-bit values live in Value::Big"),
             _ => i128::from(stored),
         }
     }
@@ -105,9 +129,76 @@ impl IntWidth {
     pub fn encode(self, value: i128) -> i64 {
         match self {
             Self::U64 | Self::USize => AsPrimitive::<u64>::as_(value).cast_signed(),
+            Self::U128 | Self::I128 => unreachable!("128-bit values live in Value::Big"),
             _ => AsPrimitive::<i64>::as_(value),
         }
     }
+}
+
+/// `+ - * / % | & ^ << >>` and comparisons at 128 bits, natively checked in
+/// the real width so overflow panics land exactly where debug Rust panics.
+/// `U128` stores its bits reinterpreted in the i128, decoded here.
+pub fn big_arith(op: BinKind, width: IntWidth, a: i128, b: i128) -> Result<i128> {
+    if width == IntWidth::U128 {
+        let (x, y) = (a.cast_unsigned(), b.cast_unsigned());
+        let out: u128 = match op {
+            BinKind::Add => x
+                .checked_add(y)
+                .ok_or_else(|| anyhow!("{}", overflow_message(op)))?,
+            BinKind::Sub => x
+                .checked_sub(y)
+                .ok_or_else(|| anyhow!("{}", overflow_message(op)))?,
+            BinKind::Mul => x
+                .checked_mul(y)
+                .ok_or_else(|| anyhow!("{}", overflow_message(op)))?,
+            BinKind::Div => {
+                if y == 0 {
+                    bail!("attempt to divide by zero");
+                }
+                x / y
+            }
+            BinKind::Rem => {
+                if y == 0 {
+                    bail!("attempt to calculate the remainder with a divisor of zero");
+                }
+                x % y
+            }
+            BinKind::BitAnd => x & y,
+            BinKind::BitOr => x | y,
+            BinKind::BitXor => x ^ y,
+            _ => bail!("not an arithmetic operator"),
+        };
+        return Ok(out.cast_signed());
+    }
+    Ok(match op {
+        BinKind::Add => a
+            .checked_add(b)
+            .ok_or_else(|| anyhow!("{}", overflow_message(op)))?,
+        BinKind::Sub => a
+            .checked_sub(b)
+            .ok_or_else(|| anyhow!("{}", overflow_message(op)))?,
+        BinKind::Mul => a
+            .checked_mul(b)
+            .ok_or_else(|| anyhow!("{}", overflow_message(op)))?,
+        BinKind::Div => {
+            if b == 0 {
+                bail!("attempt to divide by zero");
+            }
+            a.checked_div(b)
+                .ok_or_else(|| anyhow!("{}", overflow_message(op)))?
+        }
+        BinKind::Rem => {
+            if b == 0 {
+                bail!("attempt to calculate the remainder with a divisor of zero");
+            }
+            a.checked_rem(b)
+                .ok_or_else(|| anyhow!("{}", overflow_message(op)))?
+        }
+        BinKind::BitAnd => a & b,
+        BinKind::BitOr => a | b,
+        BinKind::BitXor => a ^ b,
+        _ => bail!("not an arithmetic operator"),
+    })
 }
 
 /// The width two operands of one binary op compute in. Equal widths agree,
@@ -156,6 +247,36 @@ pub fn int_arith(op: BinKind, width: IntWidth, a: i128, b: i128) -> Result<i128>
         bail!("{}", overflow_message(op));
     }
     Ok(result)
+}
+
+/// `+ - * / %` on u64 values, panicking exactly like debug Rust. The native
+/// fast path of the tagged 64-bit unsigned widths.
+#[inline]
+pub fn u64_arith(op: BinKind, a: u64, b: u64) -> Result<u64> {
+    Ok(match op {
+        BinKind::Add => a
+            .checked_add(b)
+            .ok_or_else(|| anyhow!("attempt to add with overflow"))?,
+        BinKind::Sub => a
+            .checked_sub(b)
+            .ok_or_else(|| anyhow!("attempt to subtract with overflow"))?,
+        BinKind::Mul => a
+            .checked_mul(b)
+            .ok_or_else(|| anyhow!("attempt to multiply with overflow"))?,
+        BinKind::Div => {
+            if b == 0 {
+                bail!("attempt to divide by zero");
+            }
+            a / b
+        }
+        BinKind::Rem => {
+            if b == 0 {
+                bail!("attempt to calculate the remainder with a divisor of zero");
+            }
+            a % b
+        }
+        _ => unreachable!(),
+    })
 }
 
 /// `+ - * / %` on untagged i64 values, panicking exactly like debug Rust.
@@ -219,6 +340,13 @@ pub fn int_shift(op: BinKind, width: IntWidth, value: i128, amount: i128) -> Res
     if amount < 0 || amount >= i128::from(width.bits()) {
         bail!("attempt to shift {verb} with overflow");
     }
+    // u128 shifts logically over its reinterpreted bits, an arithmetic
+    // i128 shift would smear the sign bit across the high half.
+    if width == IntWidth::U128 {
+        let bits = value.cast_unsigned();
+        let shifted = if left { bits << amount } else { bits >> amount };
+        return Ok(shifted.cast_signed());
+    }
     let shifted = if left {
         truncate(value << amount, width)
     } else {
@@ -266,6 +394,8 @@ pub fn truncate(value: i128, target: IntWidth) -> i128 {
         IntWidth::I16 => i128::from(AsPrimitive::<i16>::as_(value)),
         IntWidth::I32 => i128::from(AsPrimitive::<i32>::as_(value)),
         IntWidth::I64 => i128::from(AsPrimitive::<i64>::as_(value)),
+        // The 128-bit widths keep the whole i128, U128 as raw bits.
+        IntWidth::U128 | IntWidth::I128 => value,
     }
 }
 
@@ -282,6 +412,8 @@ pub fn float_to_int(value: f64, target: IntWidth) -> i128 {
         IntWidth::I16 => i128::from(AsPrimitive::<i16>::as_(value)),
         IntWidth::I32 => i128::from(AsPrimitive::<i32>::as_(value)),
         IntWidth::I64 => i128::from(AsPrimitive::<i64>::as_(value)),
+        IntWidth::I128 => AsPrimitive::<i128>::as_(value),
+        IntWidth::U128 => AsPrimitive::<u128>::as_(value).cast_signed(),
     }
 }
 

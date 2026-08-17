@@ -13,6 +13,7 @@ use crate::interpreter::numeric::IntWidth;
 use crate::interpreter::serde_attrs::serde_rename;
 
 use super::expr::annotation_scalar;
+use super::place;
 use super::{
     CollectTarget, Compiler, FnState, HashMap, NameLoc, Res, TypeIr, collect_pattern_names,
     first_generic_type, idx16, int_literal, numeric_annotation,
@@ -88,6 +89,19 @@ impl Compiler<'_> {
         if self.try_compile_closure_call(dst, c, path, argc)? {
             return Ok(());
         }
+        self.compile_resolved_call(dst, c, path, coerce, argc)
+    }
+
+    /// The path-resolved half of `compile_call`: a known function by id, a
+    /// constructor, an associated function, or an external bridge path.
+    fn compile_resolved_call(
+        &mut self,
+        dst: Reg,
+        c: &syn::ExprCall,
+        path: &syn::Path,
+        coerce: Option<TypeIr>,
+        argc: u16,
+    ) -> Result<()> {
         let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
         let resolved = match self.resolve_path_res(&segs) {
             Ok(r) => r,
@@ -149,11 +163,35 @@ impl Compiler<'_> {
                 if is_transparent_new(&segs) && c.args.len() == 1 {
                     return self.compile_into(dst, &c.args[0]);
                 }
+                // The mem place functions move whole values between places,
+                // which only the compiler can express.
+                if let Some(kind) = self.mem_intrinsic(&segs)
+                    && self.compile_mem_intrinsic(dst, kind, c)?
+                {
+                    return Ok(());
+                }
                 segs
             }
         };
+        // Explicit `drop(x)` moves `x` out, so its register clears before
+        // the call and the callee sees the last holder, which is what lets
+        // a user `Drop` impl run at the call.
+        let cleared = if path_segs.len() == 1 && path_segs[0] == "drop" && c.args.len() == 1 {
+            place::single_path_name(&c.args[0]).and_then(|n| {
+                let n = self.unalias(&n);
+                match self.resolve(&n) {
+                    NameLoc::Local(reg) => Some(reg),
+                    _ => None,
+                }
+            })
+        } else {
+            None
+        };
         let p = self.add_path(path_segs, coerce);
         let base = self.compile_args(c.args.iter())?;
+        if let Some(reg) = cleared {
+            self.emit(Op::LoadUnit { dst: reg });
+        }
         self.emit(Op::CallPath {
             dst,
             path: p,
@@ -233,64 +271,13 @@ impl Compiler<'_> {
         // against the base vec with the bounds as leading arguments instead.
         // An open end becomes the max sentinel the bridge clamps to the len.
         if m.method == "copy_from_slice" {
-            let Expr::Index(ix) = &*m.receiver else {
-                bail!("copy_from_slice is only supported on a `v[a..b]` receiver");
-            };
-            let Expr::Range(r) = &*ix.index else {
-                bail!("copy_from_slice is only supported on a `v[a..b]` receiver");
-            };
-            let Some(src) = m.args.first() else {
-                bail!("copy_from_slice takes the source slice");
-            };
-            let recv = self.compile_expr(&ix.expr)?;
-            let base = self.cur().reg_top;
-            for _ in 0..3 {
-                self.alloc();
-            }
-            match &r.start {
-                Some(e) => self.compile_into(base, e)?,
-                None => self.emit(Op::LoadInt { dst: base, v: 0 }),
-            }
-            match &r.end {
-                Some(e) => {
-                    self.compile_into(base + 1, e)?;
-                    if matches!(r.limits, syn::RangeLimits::Closed(_)) {
-                        self.emit(Op::BinImm {
-                            dst: base + 1,
-                            a: base + 1,
-                            imm: 1,
-                            op: BinKind::Add,
-                        });
-                    }
-                }
-                None => self.emit(Op::LoadInt {
-                    dst: base + 1,
-                    v: i64::MAX,
-                }),
-            }
-            self.compile_into(base + 2, src)?;
-            let name = self.add_name("copy_from_slice".to_string());
-            self.set_line(m.method.span());
-            self.emit(Op::Method {
-                dst,
-                recv,
-                name,
-                base,
-                argc: 3,
-            });
-            return Ok(());
+            return self.compile_copy_from_slice(dst, m);
         }
-        // A zero-argument `take` is `Option::take` and must empty its place.
-        // It used to fall through to the generic clone answer, which left
-        // the source Some, a silent wrong answer that made
-        // `child.stdin.take()` keep the pipe.
-        if m.method == "take"
-            && m.args.is_empty()
-            && m.turbofish.is_none()
-            && self.lower_option_take(dst, &m.receiver)?
-        {
-            return Ok(());
-        }
+        // A zero-argument `take` empties its place: `Option::take` leaves
+        // None behind and `RefCell::take` leaves a default. The receiver
+        // compiles as a place below because `take` is in the mutating set,
+        // and the VM writes the emptied receiver back through it, so the
+        // type decides at runtime and `child.stdin.take()` drops the pipe.
         // Fuse `x.get(k).copied().unwrap_or(d)` into one op. The chain builds
         // and tears down an Option per call, which dominates counting loops.
         if dst != DISCARD
@@ -326,7 +313,18 @@ impl Compiler<'_> {
         {
             self.option_result = Some(std::ptr::from_ref(inner));
         }
-        let recv = self.compile_expr(&m.receiver)?;
+        // A mutating method's receiver is a place: its storage splits from
+        // any value sharing first, and the receiver value stores back after,
+        // which lands the split buffer of a string mutation in its place.
+        let method_text = m.method.to_string();
+        let mutating =
+            place::builtin_mutating(&method_text) || self.ctx.mut_methods.contains(&method_text);
+        let (recv, receiver_place) = if mutating {
+            let p = self.compile_mut_receiver(&m.receiver)?;
+            (p.reg, Some(p))
+        } else {
+            (self.compile_expr(&m.receiver)?, None)
+        };
         self.option_result = outer_option_hint;
         let base = self.compile_args(m.args.iter())?;
         let (method, scalar) = self.method_name_and_scalar(m);
@@ -342,10 +340,66 @@ impl Compiler<'_> {
             base,
             argc: idx16(m.args.len()),
         });
+        if let Some(p) = &receiver_place {
+            self.emit_place_writeback(p);
+        }
         // Methods that fill a `&mut` argument, like read_line, write the new
         // value into the arg window. The window slot is only a copy of the
         // variable, so move the result back into the variable register.
         self.emit_mut_arg_writebacks(m.args.iter(), base)?;
+        Ok(())
+    }
+
+    /// `v[a..b].copy_from_slice(src)` must write through to `v`. Indexing
+    /// with a range builds a copied temporary, so the call is compiled
+    /// against the base vec with the bounds as leading arguments instead.
+    /// An open end becomes the max sentinel the bridge clamps to the len.
+    fn compile_copy_from_slice(&mut self, dst: Reg, m: &syn::ExprMethodCall) -> Result<()> {
+        let Expr::Index(ix) = &*m.receiver else {
+            bail!("copy_from_slice is only supported on a `v[a..b]` receiver");
+        };
+        let Expr::Range(r) = &*ix.index else {
+            bail!("copy_from_slice is only supported on a `v[a..b]` receiver");
+        };
+        let Some(src) = m.args.first() else {
+            bail!("copy_from_slice takes the source slice");
+        };
+        let recv = self.compile_expr(&ix.expr)?;
+        let base = self.cur().reg_top;
+        for _ in 0..3 {
+            self.alloc();
+        }
+        match &r.start {
+            Some(e) => self.compile_into(base, e)?,
+            None => self.emit(Op::LoadInt { dst: base, v: 0 }),
+        }
+        match &r.end {
+            Some(e) => {
+                self.compile_into(base + 1, e)?;
+                if matches!(r.limits, syn::RangeLimits::Closed(_)) {
+                    self.emit(Op::BinImm {
+                        dst: base + 1,
+                        a: base + 1,
+                        imm: 1,
+                        op: BinKind::Add,
+                    });
+                }
+            }
+            None => self.emit(Op::LoadInt {
+                dst: base + 1,
+                v: i64::MAX,
+            }),
+        }
+        self.compile_into(base + 2, src)?;
+        let name = self.add_name("copy_from_slice".to_string());
+        self.set_line(m.method.span());
+        self.emit(Op::Method {
+            dst,
+            recv,
+            name,
+            base,
+            argc: 3,
+        });
         Ok(())
     }
 
@@ -485,6 +539,13 @@ impl Compiler<'_> {
             {
                 self.typed_locals.insert(id.ident.to_string(), declared);
             }
+            // A reference param shares the caller's storage on purpose, so
+            // mutable access through it never splits, same rule as fn params.
+            if let Pat::Type(t) = p
+                && matches!(&*t.ty, syn::Type::Reference(_))
+            {
+                self.cur().borrow_params.insert(reg);
+            }
             match p {
                 Pat::Ident(id) if id.subpat.is_none() => self.define(&id.ident.to_string(), reg),
                 _ => self.bind_pattern_irrefutable(p, reg)?,
@@ -536,62 +597,6 @@ impl Compiler<'_> {
 
     // -- assignment --------------------------------------------------------
 
-    /// Rust evaluates an assignment's right operand before the place, so a
-    /// panic in the value fires before a panic in the place expression.
-    /// Lower a zero-argument `take` on a place expression: read the place
-    /// into `dst`, then store None back through the same registers, so every
-    /// part of the place is evaluated exactly once. True when the receiver
-    /// was such a place. A temporary receiver answers false and keeps the
-    /// generic clone answer, which matches real Rust observably, the emptied
-    /// temporary is gone either way.
-    fn lower_option_take(&mut self, dst: Reg, place: &Expr) -> Result<bool> {
-        match place {
-            Expr::Path(p) if p.qself.is_none() && p.path.segments.len() == 1 => {
-                let name = p.path.segments[0].ident.to_string();
-                if dst != DISCARD {
-                    self.load_name(&name, dst)?;
-                }
-                let location = self.resolve_for_write(&name);
-                let none = self.alloc();
-                self.load_name("None", none)?;
-                self.emit_name_store(location, none, &name)?;
-                Ok(true)
-            }
-            Expr::Field(f) => {
-                let base = self.compile_expr(&f.base)?;
-                let member = self.member_of(&f.member);
-                if dst != DISCARD {
-                    self.emit(Op::GetField { dst, base, member });
-                }
-                let none = self.alloc();
-                self.load_name("None", none)?;
-                self.emit(Op::SetField {
-                    base,
-                    member,
-                    val: none,
-                });
-                Ok(true)
-            }
-            Expr::Index(ix) => {
-                let base = self.compile_expr(&ix.expr)?;
-                let key = self.compile_expr(&ix.index)?;
-                if dst != DISCARD {
-                    self.emit(Op::Index { dst, base, key });
-                }
-                let none = self.alloc();
-                self.load_name("None", none)?;
-                self.emit(Op::SetIndex {
-                    base,
-                    key,
-                    val: none,
-                });
-                Ok(true)
-            }
-            Expr::Paren(p) => self.lower_option_take(dst, &p.expr),
-            _ => Ok(false),
-        }
-    }
-
     /// The register of a `&mut` parameter named as a bare deref target,
     /// `*seq` for a `seq: &mut usize` parameter of the current function.
     /// Only a plain local parameter qualifies. A cell-promoted or captured
@@ -620,17 +625,30 @@ impl Compiler<'_> {
             }
             Expr::Index(idx) => {
                 let val = self.compile_expr(value)?;
-                let base = self.compile_expr(&idx.expr)?;
+                // The base splits from value sharing before the write, so
+                // the new element cannot leak into a clone of the container.
+                let base = self.compile_place_base(&idx.expr)?;
                 let key = self.compile_expr(&idx.index)?;
                 self.emit(Op::SetIndex { base, key, val });
             }
             Expr::Field(f) => {
                 let val = self.compile_expr(value)?;
-                let base = self.compile_expr(&f.base)?;
+                let base = self.compile_place_base(&f.base)?;
                 let member = self.member_of(&f.member);
                 self.emit(Op::SetField { base, member, val });
             }
             Expr::Unary(u) if matches!(u.op, UnOp::Deref(_)) => {
+                // `*r = v` where `r` is a `&mut variable` alias writes the
+                // variable itself.
+                if let Some(name) = place::single_path_name(&u.expr) {
+                    let target = self.unalias(&name);
+                    if target != name {
+                        let location = self.resolve_for_write(&target);
+                        let val = self.compile_expr(value)?;
+                        self.emit_name_store(location, val, &target)?;
+                        return Ok(());
+                    }
+                }
                 let val = self.compile_expr(value)?;
                 if let Some(target) = self.deref_param_reg(&u.expr) {
                     self.emit(Op::SetDerefParam { target, val });
@@ -683,7 +701,7 @@ impl Compiler<'_> {
             }
             Expr::Index(idx) => {
                 let b = self.compile_expr(rhs)?;
-                let base = self.compile_expr(&idx.expr)?;
+                let base = self.compile_place_base(&idx.expr)?;
                 let key = self.compile_expr(&idx.index)?;
                 let cur = self.alloc();
                 self.emit(Op::Index {
@@ -706,7 +724,7 @@ impl Compiler<'_> {
             }
             Expr::Field(f) => {
                 let b = self.compile_expr(rhs)?;
-                let base = self.compile_expr(&f.base)?;
+                let base = self.compile_place_base(&f.base)?;
                 let member = self.member_of(&f.member);
                 let cur = self.alloc();
                 self.emit(Op::GetField {
@@ -742,6 +760,25 @@ impl Compiler<'_> {
         op: BinKind,
         rhs: &Expr,
     ) -> Result<()> {
+        // `*r op= rhs` where `r` is a `&mut variable` alias reads and writes
+        // the variable itself.
+        if let Some(name) = place::single_path_name(&u.expr) {
+            let target = self.unalias(&name);
+            if target != name {
+                let b = self.compile_expr(rhs)?;
+                let location = self.resolve_for_write(&target);
+                let current = self.load_name_location(location, &target)?;
+                let result = self.alloc();
+                self.emit(Op::Bin {
+                    dst: result,
+                    a: current,
+                    b,
+                    op,
+                });
+                self.emit_name_store(location, result, &target)?;
+                return Ok(());
+            }
+        }
         let b = self.compile_expr(rhs)?;
         let param = self.deref_param_reg(&u.expr);
         let target = self.compile_expr(&u.expr)?;
@@ -951,13 +988,17 @@ impl Compiler<'_> {
     // -- macros ------------------------------------------------------------
 }
 
+// Only `Box::new` stays a compile-time pass-through: a box is pure
+// ownership, which the value model already gives every value. Rc, Arc,
+// RefCell, Cell, and Mutex build real shared cells at runtime, their
+// sharing is the point of the type.
 fn is_transparent_new(segments: &[String]) -> bool {
     let Some((prefix, [receiver, method])) = segments.split_last_chunk::<2>() else {
         return false;
     };
     (prefix.is_empty() || matches!(prefix.first().map(String::as_str), Some("std" | "alloc")))
         && method == "new"
-        && matches!(receiver.as_str(), "Box" | "Rc" | "Arc" | "RefCell" | "Cell")
+        && receiver == "Box"
 }
 
 // A bare identifier pattern that names a unit variant, not a new binding. Real Rust tells the two
