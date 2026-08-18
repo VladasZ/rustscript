@@ -21,16 +21,34 @@ pub(super) fn op_write(op: &LOp) -> Option<u16> {
         | LOp::CastF64 { dst, .. }
         | LOp::VecGet { dst, .. }
         | LOp::CallSelf { dst, .. }
+        | LOp::MapGetOr { dst, .. }
+        | LOp::MapGetOpt { dst, .. }
+        | LOp::MapHas { dst, .. }
+        | LOp::TestSome { dst, .. }
+        | LOp::LoadStr { dst, .. }
+        | LOp::ItemIndex { dst, .. }
         | LOp::FieldGet { dst, .. } => Some(*dst),
         LOp::NumMethod { dst, .. }
         | LOp::F64From { dst, .. }
         | LOp::MatchGet { dst, .. }
+        | LOp::AsStr { dst, .. }
         | LOp::IntTryFrom { dst, .. }
         | LOp::UnwrapOk { dst, .. }
+        | LOp::MapInsert { dst, .. }
             if *dst != NO_SLOT =>
         {
             Some(*dst)
         }
+        _ => None,
+    }
+}
+
+/// The extra slot an op writes besides `op_write`'s, only the conditional
+/// payload binding of a `TestSome`, so the fold's write counting stays
+/// honest about it.
+pub(super) fn op_write_extra(op: &LOp) -> Option<u16> {
+    match op {
+        LOp::TestSome { bind, .. } => Some(*bind),
         _ => None,
     }
 }
@@ -44,6 +62,7 @@ fn op_reads(op: &LOp, mut read: impl FnMut(u16)) {
         | LOp::CastF64 { src, .. }
         | LOp::F64From { src, .. }
         | LOp::MatchGet { recv: src, .. }
+        | LOp::AsStr { src, .. }
         | LOp::IntTryFrom { src, .. }
         | LOp::UnwrapOk { src, .. }
         | LOp::Ret { src } => read(*src),
@@ -73,12 +92,28 @@ fn op_reads(op: &LOp, mut read: impl FnMut(u16)) {
             read(*idx);
             read(*val);
         }
-        LOp::VecPush { val, .. } | LOp::FieldSet { val, .. } => read(*val),
+        LOp::VecPush { val, .. } | LOp::FieldSet { val, .. } | LOp::TestSome { val, .. } => {
+            read(*val);
+        }
+        LOp::MapGetOr { key, default, .. } => {
+            read(*key);
+            read(*default);
+        }
+        LOp::MapGetOpt { key, .. } | LOp::MapHas { key, .. } => read(*key),
+        LOp::MapInsert { key, val, .. } => {
+            read(*key);
+            read(*val);
+        }
+        LOp::ItemIndex { item, key, .. } => {
+            read(*item);
+            read(*key);
+        }
         LOp::LoadUnit { .. }
         | LOp::LoadInt { .. }
         | LOp::LoadIntW { .. }
         | LOp::LoadFloat { .. }
         | LOp::LoadBool { .. }
+        | LOp::LoadStr { .. }
         | LOp::FieldGet { .. }
         | LOp::Jump { .. }
         | LOp::Nop => {}
@@ -102,10 +137,18 @@ fn set_write(op: &mut LOp, to: u16) {
         | LOp::F64From { dst, .. }
         | LOp::NumMethod { dst, .. }
         | LOp::MatchGet { dst, .. }
+        | LOp::AsStr { dst, .. }
         | LOp::IntTryFrom { dst, .. }
         | LOp::UnwrapOk { dst, .. }
         | LOp::VecGet { dst, .. }
         | LOp::CallSelf { dst, .. }
+        | LOp::MapGetOr { dst, .. }
+        | LOp::MapGetOpt { dst, .. }
+        | LOp::MapHas { dst, .. }
+        | LOp::MapInsert { dst, .. }
+        | LOp::TestSome { dst, .. }
+        | LOp::LoadStr { dst, .. }
+        | LOp::ItemIndex { dst, .. }
         | LOp::FieldGet { dst, .. } => *dst = to,
         _ => unreachable!("only value ops fold"),
     }
@@ -131,6 +174,9 @@ pub(super) fn fold_moves(
         for op in ops.iter() {
             if let Some(dst) = op_write(op) {
                 writes[usize::from(dst)] += 1;
+            }
+            if let Some(extra) = op_write_extra(op) {
+                writes[usize::from(extra)] += 1;
             }
             op_reads(op, |r| reads[usize::from(r)] += 1);
             let jump_to = match op {

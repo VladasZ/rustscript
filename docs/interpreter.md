@@ -91,6 +91,45 @@ aliased pair of bases, or a value the plan cannot box fails over the same
 way, and a loop that keeps failing before any progress drops its plan
 after a small budget, so it stops paying the setup per iteration.
 
+For plans run map work the same way, the hashmap_int shape of
+`counts.get(&k).copied().unwrap_or(0)` and `counts.insert(k, n)` over a
+range source. The body's map receivers form a map table like the vec
+push table: each inserted map splits from sharing once at entry and its
+storage stays locked for the chunk. The fused `GetOrDefault` probe, the
+plain `get` whose `Some(n)` answers an option slot that only the
+`Some(x)` pattern test and `unwrap` read, `contains_key`, and `insert`
+with a kept or discarded old value all run as plan ops, keys hashing by
+the same storage form `Value::as_key` uses. Inserts go into a journal,
+undone newest first when an iteration fails, a fresh key by popping the
+map's tail it was appended to, so the generic re-run sees the exact
+entry state, kept old values included. A non-map base, a hit the slots
+cannot hold, or any other method on a map base fails over to the
+generic path unchanged.
+
+String keys probe those maps without leaving the plan. A
+`split_whitespace` loop's item is an unboxed slice span over the locked
+source, the word_count shape, and a `find_iter` match answers the same
+span through `as_str`, the automation shape, with `to_string` and
+`to_owned` on a span staying a span, since the owned copy only matters
+at a use site. A map probe with a span key hashes the slice in place
+through a borrowed key that `MapKey`'s manual `Hash` pins byte for byte,
+and only an insert materializes the owned string, the one copy the
+generic `to_string` made. A failing iteration rewinds the source offset
+so the generic loop re-pulls the identical word or match, and writeback
+materializes span registers exactly as the generic binding would, a
+match value or the owned slice.
+
+Loops over parsed json items run as plans too, the json shape of
+`it["key"].as_i64().unwrap()` over a vec of dynamic values. The item
+stays boxed in the source and its slot only names the position, the
+`it["key"]` probe reads the item map in place with the plan's string
+constant as a borrowed key, and serde's `as_i64` and the checked integer
+family answer the same option slots map probes use, so the `unwrap` and
+the `Some(x)` test run unboxed. A non-map item, a missing key, or a hit
+the slots cannot hold fails the iteration over, and writeback lands the
+boxed item in its register by position, exactly what the generic
+`ForNext` bound.
+
 Closure adaptor chains reduce unboxed too, in
 `interpreter/scalar_chain.rs`. A `sum`, `count`, `any`, or `all` driving
 `map` and `filter` stages over a vec or range source translates each

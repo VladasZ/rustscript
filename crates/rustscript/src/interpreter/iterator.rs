@@ -223,12 +223,20 @@ fn next_line(source: &str, offset: &mut usize) -> Option<Value> {
     Some(Value::str(line))
 }
 
-fn next_word(source: &str, offset: &mut usize) -> Option<Value> {
+/// The next `split_whitespace` word span at `offset`, advancing past it.
+/// Shared by the generic step and the scalar for plan's chunks, so both
+/// walk the source identically.
+pub(super) fn next_word_span(source: &str, offset: &mut usize) -> Option<(usize, usize)> {
     let rest = &source[*offset..];
     let word = rest.split_whitespace().next()?;
-    let start = word.as_ptr() as usize - rest.as_ptr() as usize;
-    *offset += start + word.len();
-    Some(Value::str(word))
+    let start = *offset + (word.as_ptr() as usize - rest.as_ptr() as usize);
+    *offset = start + word.len();
+    Some((start, *offset))
+}
+
+fn next_word(source: &str, offset: &mut usize) -> Option<Value> {
+    let (start, end) = next_word_span(source, offset)?;
+    Some(Value::str(&source[start..end]))
 }
 
 fn next_regex_offset(source: &str, start: usize, end: usize) -> usize {

@@ -28,14 +28,14 @@
 
 use std::sync::atomic::AtomicU32;
 
-use super::bytecode::{BinKind, BuiltinId, Chunk, Const, Member, Op, UnKind};
+use super::bytecode::{BinKind, BuiltinId, Chunk, Const, Member, Op, PPat, UnKind};
 use super::numeric::IntWidth;
 use super::scalar_fold::{fold_moves, op_write};
 use super::scalar_reads::chunk_reads;
 use super::scalar_val::{
-    SVal, TryFits, s_bin, s_cast, s_cast_f64, s_cmp, s_f64_from, s_float_method, s_int_method,
-    s_match_get, s_try_from, s_un, s_unwrap_ok, s_value, scalar_float_method, scalar_int_method,
-    truthy, try_fits_of,
+    SVal, TryFits, s_as_str, s_bin, s_cast, s_cast_f64, s_cmp, s_f64_from, s_float_method,
+    s_int_method, s_match_get, s_try_from, s_un, s_unwrap_ok, s_value, scalar_float_method,
+    scalar_int_method, truthy, try_fits_of,
 };
 use super::typeir::CastIr;
 use super::vm::Vm;
@@ -152,6 +152,13 @@ pub(super) enum LOp {
         recv: u16,
         end: bool,
     },
+    /// `s.as_str()`, `s.to_string()`, or `s.to_owned()` on a span slot,
+    /// answering the same slice as a `StrSpan`, see `s_as_str`. Any other
+    /// receiver fails the iteration over to the generic path.
+    AsStr {
+        dst: u16,
+        src: u16,
+    },
     /// An unshadowed integer `T::try_from(x)` call whose fitting value
     /// answers an `OkInt` slot, see `s_try_from`.
     IntTryFrom {
@@ -227,6 +234,61 @@ pub(super) enum LOp {
         vec: u16,
         val: u16,
     },
+    /// The fused `map.get(k).copied().unwrap_or(d)` on one of a for plan's
+    /// locked maps. `map` indexes the plan's map table. A non-scalar hit
+    /// fails the iteration over to the generic path.
+    MapGetOr {
+        dst: u16,
+        map: u16,
+        key: u16,
+        default: u16,
+    },
+    /// `map.get(&k)` on a locked map, answering a `SomeInt` or `NoneOpt`
+    /// slot. A hit whose value is not a plain int fails the iteration over.
+    MapGetOpt {
+        dst: u16,
+        map: u16,
+        key: u16,
+    },
+    /// `map.contains_key(&k)` on a locked map.
+    MapHas {
+        dst: u16,
+        map: u16,
+        key: u16,
+    },
+    /// `map.insert(k, v)` on a locked map, journaled so a failing iteration
+    /// can undo it. `dst` is `NO_SLOT` when the compiler discarded the old
+    /// value, and a kept old value that is not a plain int fails over.
+    MapInsert {
+        dst: u16,
+        map: u16,
+        key: u16,
+        val: u16,
+    },
+    /// A `TestBind` against the pattern `Some(x)` on a `SomeInt` or
+    /// `NoneOpt` slot: `dst` gets the match flag, and `bind` gets the
+    /// payload on a match, untouched otherwise like the generic bind. Any
+    /// other tested slot fails the iteration over to the generic path.
+    TestSome {
+        dst: u16,
+        val: u16,
+        bind: u16,
+    },
+    /// A string literal into a `StrConst` slot naming the plan's string
+    /// table entry, an `it["key"]` key for one.
+    LoadStr {
+        dst: u16,
+        id: u16,
+    },
+    /// `dst = item[key]` where `item` is an `Item` slot of the effects
+    /// runner's source walk, a parsed json object for one. The runner
+    /// probes the boxed map item; a non-map item, a missing key, or a
+    /// non-scalar hit fails the iteration over to the generic path.
+    ItemIndex {
+        dst: u16,
+        item: u16,
+        key: u16,
+    },
     /// A `UniqueReg` on a vec base. The plan split the vec from sharing
     /// once at entry, so per-write splits inside the loop have nothing to
     /// do, but the op keeps its position for jump targets.
@@ -249,12 +311,23 @@ pub struct LoopPlan {
     /// The frame register behind each plan slot.
     pub(super) regs: Vec<u16>,
     /// The frame register behind each vec table entry, the bases the body
-    /// pushes into. Non-empty plans run through the push runner, which locks
-    /// each base's storage for the chunk.
+    /// pushes into. Non-empty plans run through the effects runner, which
+    /// locks each base's storage for the chunk.
     pub(super) vecs: Vec<u16>,
-    /// Push-runner runs that failed before finishing one iteration. Past
+    /// The frame register behind each map table entry, the maps the body
+    /// probes or inserts into, plus whether the body inserts, which decides
+    /// the entry split. Non-empty plans run through the effects runner.
+    pub(super) maps: Vec<u16>,
+    pub(super) maps_written: Vec<bool>,
+    /// The plan's string constants, the table `StrConst` slots index.
+    pub(super) strs: Vec<Box<str>>,
+    /// Whether the body probes loop items in place through `ItemIndex`,
+    /// which only the effects runner can serve.
+    pub(super) needs_items: bool,
+    /// Effects-runner runs that failed before finishing one iteration. Past
     /// the budget the plan is dropped from the cache, so a loop whose entry
-    /// state never runs as a push plan stops paying the setup per iteration.
+    /// state never runs as an effects plan stops paying the setup per
+    /// iteration.
     pub(super) fails: AtomicU32,
     /// The slot of the `ForNext` value register, written per item.
     pub(super) val_slot: u16,
@@ -334,7 +407,11 @@ pub(super) fn translate(
 fn update_try_mask(try_mask: &mut u64, lop: &LOp) {
     let bit = |slot: u16| 1u64.checked_shl(u32::from(slot)).unwrap_or(0);
     match lop {
-        LOp::IntTryFrom { dst, .. } if *dst != NO_SLOT => *try_mask |= bit(*dst),
+        LOp::IntTryFrom { dst, .. } | LOp::NumMethod { dst, .. } | LOp::MapGetOpt { dst, .. }
+            if *dst != NO_SLOT =>
+        {
+            *try_mask |= bit(*dst);
+        }
         LOp::Move { dst, src } => {
             if *try_mask & bit(*src) != 0 {
                 *try_mask |= bit(*dst);
@@ -457,10 +534,47 @@ fn translate_op(
         },
         Op::Method { .. } => return translate_method(vm, chunk, regs, try_mask, op),
         Op::CallPath { .. } => return translate_call(vm, chunk, regs, op),
+        Op::TestBind { val, pat, dst } => return translate_test(chunk, regs, *val, *pat, *dst),
         // A nested loop's entry hook has nothing to do inside a plan, which
         // already runs the nested loop unboxed, but keeps its position.
         Op::LoopHead { .. } => LOp::Nop,
         _ => return None,
+    })
+}
+
+/// The `Op::TestBind` arm of `translate`: only the pattern `Some(x)` with a
+/// single plain binding maps, onto a `TestSome` whose run-time check keeps
+/// any other tested value on the generic path. The plan op mirrors the
+/// generic `try_bind` on an Option exactly: flag plus payload on a match,
+/// flag alone otherwise.
+fn translate_test(chunk: &Chunk, regs: &mut Vec<u16>, val: u16, pat: u16, dst: u16) -> Option<LOp> {
+    let info = &chunk.pats[pat as usize];
+    let PPat::TupleStruct {
+        name: Some(name),
+        elems,
+    } = &info.pat
+    else {
+        return None;
+    };
+    let [
+        PPat::Ident {
+            name: elem,
+            sub: None,
+        },
+    ] = elems.as_slice()
+    else {
+        return None;
+    };
+    let [(bind, reg)] = info.binds.as_slice() else {
+        return None;
+    };
+    if name != "Some" || bind != elem {
+        return None;
+    }
+    Some(LOp::TestSome {
+        dst: slot(regs, dst)?,
+        val: slot(regs, val)?,
+        bind: slot(regs, *reg)?,
     })
 }
 
@@ -536,9 +650,16 @@ fn translate_method(
             }
         };
         match method.text.as_str() {
-            // Only a `Span` receiver answers at run time, so a same-named
+            // Only a span receiver answers at run time, so a same-named
             // method on any other receiver fails its iteration over to the
             // generic path, whose own dispatch resolves it.
+            "as_str" | "to_string" | "to_owned" => {
+                let recv = slot(regs, *recv)?;
+                return Some(LOp::AsStr {
+                    dst: dst_slot(regs)?,
+                    src: recv,
+                });
+            }
             "start" | "end" => {
                 let end = method.text.as_str() == "end";
                 let recv = slot(regs, *recv)?;
@@ -548,13 +669,16 @@ fn translate_method(
                     end,
                 });
             }
-            // Only when the receiver is statically an `IntTryFrom` result,
-            // so an `unwrap` on anything else keeps rejecting the loop, and
-            // only while no user method on `Result` shadows the builtin.
+            // Only when the receiver statically holds an unwrappable plan
+            // result, an `IntTryFrom`, a checked numeric method, or a map
+            // probe, so an `unwrap` on anything else keeps rejecting the
+            // loop, and only while no user method on `Result` or `Option`
+            // shadows the builtin. The live slot decides at run time.
             "unwrap" => {
                 let recv = slot(regs, *recv)?;
                 if try_mask & 1u64.checked_shl(u32::from(recv)).unwrap_or(0) == 0
                     || vm.user_method("Result", "unwrap").is_some()
+                    || vm.user_method("Option", "unwrap").is_some()
                 {
                     return None;
                 }
@@ -708,6 +832,198 @@ fn push_bases(vm: &Vm, chunk: &Chunk, body: usize, exit: usize) -> Option<Vec<u1
     Some(bases)
 }
 
+/// Map table cap for a for plan's probed maps, bounding the entry split and
+/// lock cost.
+pub(super) const MAX_MAPS: usize = 4;
+
+/// The body's map receivers in first-appearance order, the map table the
+/// plan's map ops index, plus whether the body inserts into each. Every
+/// `GetOrDefault`, `get`, `contains_key`, and two-argument `insert` receiver
+/// counts: whether it really is a map only the runner's entry check knows,
+/// and a base that is not one fails the run over before any iteration.
+fn map_bases(chunk: &Chunk, body: usize, exit: usize) -> Option<(Vec<u16>, Vec<bool>)> {
+    let mut bases: Vec<u16> = Vec::new();
+    let mut written: Vec<bool> = Vec::new();
+    for op in &chunk.code[body..exit] {
+        let (base, writes) = match op {
+            Op::GetOrDefault { recv, .. } => (*recv, false),
+            Op::Method {
+                dst,
+                recv,
+                name,
+                argc,
+                ..
+            } => {
+                let name = &chunk.names[*name as usize];
+                if name.scalar.is_some() {
+                    continue;
+                }
+                match name.id {
+                    BuiltinId::Insert if *argc == 2 => (*recv, true),
+                    BuiltinId::Get if *argc == 1 && *dst != u16::MAX && name.text == "get" => {
+                        (*recv, false)
+                    }
+                    BuiltinId::ContainsKey if *argc == 1 && *dst != u16::MAX => (*recv, false),
+                    _ => continue,
+                }
+            }
+            _ => continue,
+        };
+        if let Some(i) = bases.iter().position(|&r| r == base) {
+            written[i] = written[i] || writes;
+            continue;
+        }
+        if bases.len() >= MAX_MAPS {
+            return None;
+        }
+        bases.push(base);
+        written.push(writes);
+    }
+    Some((bases, written))
+}
+
+/// Translate one map op of the `build` closure below, whose receiver the
+/// base scan already put in the map table.
+fn translate_map(chunk: &Chunk, regs: &mut Vec<u16>, maps: &[u16], op: &Op) -> Option<LOp> {
+    let map_of = |r: u16| {
+        maps.iter()
+            .position(|&base| base == r)
+            .and_then(|i| u16::try_from(i).ok())
+    };
+    match op {
+        Op::GetOrDefault {
+            dst,
+            recv,
+            key,
+            default,
+        } => Some(LOp::MapGetOr {
+            dst: slot(regs, *dst)?,
+            map: map_of(*recv)?,
+            key: slot(regs, *key)?,
+            default: slot(regs, *default)?,
+        }),
+        Op::Method {
+            dst,
+            recv,
+            name,
+            base,
+            argc,
+        } => {
+            let map = map_of(*recv)?;
+            let name = &chunk.names[*name as usize];
+            let dst_slot = |regs: &mut Vec<u16>| {
+                if *dst == u16::MAX {
+                    Some(NO_SLOT)
+                } else {
+                    slot(regs, *dst)
+                }
+            };
+            match name.id {
+                BuiltinId::Insert if *argc == 2 => Some(LOp::MapInsert {
+                    dst: dst_slot(regs)?,
+                    map,
+                    key: slot(regs, *base)?,
+                    val: slot(regs, base.checked_add(1)?)?,
+                }),
+                BuiltinId::Get if *argc == 1 && *dst != u16::MAX && name.text == "get" => {
+                    Some(LOp::MapGetOpt {
+                        dst: slot(regs, *dst)?,
+                        map,
+                        key: slot(regs, *base)?,
+                    })
+                }
+                BuiltinId::ContainsKey if *argc == 1 && *dst != u16::MAX => Some(LOp::MapHas {
+                    dst: slot(regs, *dst)?,
+                    map,
+                    key: slot(regs, *base)?,
+                }),
+                // Any other method on a map base, a `len` or an `iter`, has
+                // no plan op, and slotting the base as a scalar would only
+                // fail every iteration, so the loop stays generic.
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The mutable state the for-plan translation threads through its linear
+/// op walk, see `build`.
+struct ForBuild<'a> {
+    vm: &'a Vm,
+    chunk: &'a Chunk,
+    region: Region,
+    bases: &'a [u16],
+    maps: &'a [u16],
+    val: u16,
+    regs: Vec<u16>,
+    strs: Vec<Box<str>>,
+    try_mask: u64,
+}
+
+impl ForBuild<'_> {
+    /// Translate one body op. The push shape was checked by the base scan,
+    /// and the generic `UniqueReg` before a push or an insert is the entry
+    /// split the effects runner performs once. Any other method on a base
+    /// falls to `translate_op`, which slots the receiver, and the role
+    /// check in `build` rejects the plan.
+    fn translate(&mut self, op: &Op) -> Option<LOp> {
+        let lop = match op {
+            Op::Method {
+                recv, base, name, ..
+            } if self.bases.contains(recv)
+                && self.chunk.names[*name as usize].id == BuiltinId::Push =>
+            {
+                Some(LOp::VecPush {
+                    vec: u16::try_from(self.bases.iter().position(|r| r == recv)?).ok()?,
+                    val: slot(&mut self.regs, *base)?,
+                })
+            }
+            Op::UniqueReg { reg } if self.bases.contains(reg) || self.maps.contains(reg) => {
+                Some(LOp::Nop)
+            }
+            Op::GetOrDefault { recv, .. } | Op::Method { recv, .. } if self.maps.contains(recv) => {
+                translate_map(self.chunk, &mut self.regs, self.maps, op)
+            }
+            // A string literal, an `it["key"]` key for one, into the plan's
+            // string table. Only the runner's probe ops read the slot,
+            // anything else fails its iteration over.
+            Op::LoadConst { dst, k }
+                if matches!(&self.chunk.consts[*k as usize], Const::Str(_)) =>
+            {
+                let Const::Str(text) = &self.chunk.consts[*k as usize] else {
+                    return None;
+                };
+                let id = u16::try_from(self.strs.len()).ok()?;
+                self.strs.push(Box::from(&**text));
+                Some(LOp::LoadStr {
+                    dst: slot(&mut self.regs, *dst)?,
+                    id,
+                })
+            }
+            // Indexing the loop item itself, the json shape of `it["key"]`.
+            // The item slot holds the source position the effects runner
+            // probes the boxed item through.
+            Op::Index { dst, base, key } if *base == self.val => Some(LOp::ItemIndex {
+                dst: slot(&mut self.regs, *dst)?,
+                item: slot(&mut self.regs, *base)?,
+                key: slot(&mut self.regs, *key)?,
+            }),
+            other => translate_op(
+                self.vm,
+                self.chunk,
+                &self.region,
+                &mut self.regs,
+                None,
+                self.try_mask,
+                other,
+            ),
+        }?;
+        update_try_mask(&mut self.try_mask, &lop);
+        Some(lop)
+    }
+}
+
 /// Translate the body of the `for` loop whose `ForNext` sits at `head`, or
 /// answer None when any op falls outside the subset.
 pub(super) fn build(vm: &Vm, chunk: &Chunk, head: usize) -> Option<LoopPlan> {
@@ -719,47 +1035,38 @@ pub(super) fn build(vm: &Vm, chunk: &Chunk, head: usize) -> Option<LoopPlan> {
         return None;
     }
     let bases = push_bases(vm, chunk, head + 1, exit)?;
-    let mut regs: Vec<u16> = Vec::new();
-    let val_slot = slot(&mut regs, *val)?;
-    let mut try_mask = 0u64;
+    let (maps, maps_written) = map_bases(chunk, head + 1, exit)?;
+    if maps.iter().any(|m| bases.contains(m)) {
+        return None;
+    }
+    let mut build = ForBuild {
+        vm,
+        chunk,
+        region: Region {
+            head,
+            body: head + 1,
+            exit,
+        },
+        bases: &bases,
+        maps: &maps,
+        val: *val,
+        regs: Vec::new(),
+        strs: Vec::new(),
+        try_mask: 0,
+    };
+    let val_slot = slot(&mut build.regs, *val)?;
     let mut ops = chunk.code[head + 1..exit]
         .iter()
-        .map(|op| {
-            // The push shape was checked by the base scan, and the generic
-            // `UniqueReg` before a push is the entry split the push runner
-            // performs once. Neither writes a slot, so the try mask carries.
-            // Any other method on a base falls to `translate`, which slots
-            // the receiver, and the role check below rejects the plan.
-            match op {
-                Op::Method {
-                    recv, base, name, ..
-                } if bases.contains(recv) && chunk.names[*name as usize].id == BuiltinId::Push => {
-                    Some(LOp::VecPush {
-                        vec: u16::try_from(bases.iter().position(|r| r == recv)?).ok()?,
-                        val: slot(&mut regs, *base)?,
-                    })
-                }
-                Op::UniqueReg { reg } if bases.contains(reg) => Some(LOp::Nop),
-                other => translate(
-                    vm,
-                    chunk,
-                    &Region {
-                        head,
-                        body: head + 1,
-                        exit,
-                    },
-                    &mut regs,
-                    None,
-                    &mut try_mask,
-                    other,
-                ),
-            }
-        })
+        .map(|op| build.translate(op))
         .collect::<Option<Vec<_>>>()?;
-    // A register cannot serve two tables at once: a locked pushed vec and a
-    // scalar slot are disjoint roles, and a body that also moves a base
-    // around stays generic.
-    if regs.iter().any(|reg| bases.contains(reg)) {
+    let (regs, strs) = (build.regs, build.strs);
+    // A register cannot serve two tables at once: a locked pushed vec, a
+    // locked map, and a scalar slot are disjoint roles, and a body that
+    // also moves a base around stays generic.
+    if regs
+        .iter()
+        .any(|reg| bases.contains(reg) || maps.contains(reg))
+    {
         return None;
     }
     fold_moves(&mut ops, val_slot, &chunk_reads(chunk), &regs);
@@ -776,10 +1083,15 @@ pub(super) fn build(vm: &Vm, chunk: &Chunk, head: usize) -> Option<LoopPlan> {
     if straight && matches!(ops.last(), Some(LOp::Jump { to: LTo::Next })) {
         ops.pop();
     }
+    let needs_items = ops.iter().any(|op| matches!(op, LOp::ItemIndex { .. }));
     Some(LoopPlan {
         ops,
         regs,
         vecs: bases,
+        maps,
+        maps_written,
+        strs,
+        needs_items,
         fails: AtomicU32::new(0),
         val_slot,
         straight,
@@ -828,6 +1140,21 @@ fn land(regs: &mut [SVal], dst: u16, v: Option<SVal>) -> OpOut {
     }
 }
 
+/// The conditional-jump arms of `eval_op`: jump when the condition's truth
+/// matches `want`, and fail over on an `Opaque` condition the way any other
+/// read of one does.
+#[inline]
+fn eval_cond_jump(regs: &[SVal], cond: u16, to: LTo, want: bool) -> OpOut {
+    if matches!(regs[usize::from(cond)], SVal::Opaque) {
+        return OpOut::Fail;
+    }
+    if truthy(regs[usize::from(cond)]) == want {
+        OpOut::Jump(to)
+    } else {
+        OpOut::Fall
+    }
+}
+
 #[inline]
 pub(super) fn eval_op(op: &LOp, regs: &mut [SVal]) -> OpOut {
     match op {
@@ -853,22 +1180,8 @@ pub(super) fn eval_op(op: &LOp, regs: &mut [SVal]) -> OpOut {
         }
         LOp::Un { dst, a, op } => return land(regs, *dst, s_un(*op, regs[usize::from(*a)])),
         LOp::Jump { to } => return OpOut::Jump(*to),
-        LOp::JumpIfFalse { cond, to } => {
-            if matches!(regs[usize::from(*cond)], SVal::Opaque) {
-                return OpOut::Fail;
-            }
-            if !truthy(regs[usize::from(*cond)]) {
-                return OpOut::Jump(*to);
-            }
-        }
-        LOp::JumpIfTrue { cond, to } => {
-            if matches!(regs[usize::from(*cond)], SVal::Opaque) {
-                return OpOut::Fail;
-            }
-            if truthy(regs[usize::from(*cond)]) {
-                return OpOut::Jump(*to);
-            }
-        }
+        LOp::JumpIfFalse { cond, to } => return eval_cond_jump(regs, *cond, *to, false),
+        LOp::JumpIfTrue { cond, to } => return eval_cond_jump(regs, *cond, *to, true),
         LOp::CmpJump { a, b, op, to } => {
             let (x, y) = (regs[usize::from(*a)], regs[usize::from(*b)]);
             match s_cmp(*op, x, y) {
@@ -898,6 +1211,9 @@ pub(super) fn eval_op(op: &LOp, regs: &mut [SVal]) -> OpOut {
         LOp::MatchGet { dst, recv, end } => {
             return land(regs, *dst, s_match_get(regs[usize::from(*recv)], *end));
         }
+        LOp::AsStr { dst, src } => {
+            return land(regs, *dst, s_as_str(regs[usize::from(*src)]));
+        }
         LOp::IntTryFrom { dst, src, fits } => {
             return land(regs, *dst, s_try_from(*fits, regs[usize::from(*src)]));
         }
@@ -915,20 +1231,46 @@ pub(super) fn eval_op(op: &LOp, regs: &mut [SVal]) -> OpOut {
             return land(regs, *dst, v);
         }
         LOp::Nop => {}
+        LOp::TestSome { dst, val, bind } => return eval_test_some(regs, *dst, *val, *bind),
+        LOp::LoadStr { dst, id } => regs[usize::from(*dst)] = SVal::StrConst(*id),
         // Vec and field ops need the locked vec table and the handle table,
         // which only the journaled while runner holds, see
-        // `scalar_while::run_vec_span`. Call and return ops need the frame
-        // stack only the `scalar_fn` runner holds. None of them can appear
-        // in the plans the other runners execute.
+        // `scalar_while::run_vec_span`. Map ops need the locked map table
+        // only the effects runner holds, see `scalar_for::run_effects`.
+        // Call and return ops need the frame stack only the `scalar_fn`
+        // runner holds. None of them can appear in the plans the other
+        // runners execute.
         LOp::VecGet { .. }
         | LOp::VecSet { .. }
         | LOp::VecPush { .. }
+        | LOp::MapGetOr { .. }
+        | LOp::MapGetOpt { .. }
+        | LOp::MapHas { .. }
+        | LOp::MapInsert { .. }
+        | LOp::ItemIndex { .. }
         | LOp::ElemRef { .. }
         | LOp::FieldGet { .. }
         | LOp::FieldSet { .. }
         | LOp::ElemBack { .. }
         | LOp::CallSelf { .. }
         | LOp::Ret { .. } => return OpOut::Fail,
+    }
+    OpOut::Fall
+}
+
+/// The `TestSome` arm of `eval_op`: the pattern `Some(x)` against a scalar
+/// map probe's answer, mirroring the generic `try_bind` on an Option
+/// exactly. The binding lands only on a match, and any other tested value
+/// fails the iteration over to the generic path.
+#[inline]
+fn eval_test_some(regs: &mut [SVal], dst: u16, val: u16, bind: u16) -> OpOut {
+    match regs[usize::from(val)] {
+        SVal::SomeInt(n) => {
+            regs[usize::from(bind)] = SVal::Int(n);
+            regs[usize::from(dst)] = SVal::Bool(true);
+        }
+        SVal::NoneOpt => regs[usize::from(dst)] = SVal::Bool(false),
+        _ => return OpOut::Fail,
     }
     OpOut::Fall
 }
