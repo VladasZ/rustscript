@@ -9,7 +9,7 @@
 //! the real type was, which surfaced further along as a confusing "cannot
 //! cast String to integer".
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 fn main() {
     // Runtime false, so nothing here folds at compile time and every Option
@@ -124,4 +124,132 @@ fn main() {
         .max()
         .unwrap_or_default();
     println!("arith miss:   {widest:?}");
+
+    chain_shapes();
+}
+
+/// The shapes where nothing in the source names the payload type outright and
+/// the chain itself is the only thing that states it.
+fn chain_shapes() {
+    // `position` counts items, so it is a usize whatever the items are, and
+    // a string's `find` answers a byte offset the same way. Neither type
+    // appears anywhere in the source.
+    let empty_floats: Vec<f32> = Vec::new();
+    let at = empty_floats
+        .iter()
+        .position(|value| *value > 0.5)
+        .unwrap_or_default();
+    println!("position:     {at:?}");
+    println!("str find:     {:?}", "rust".find('z').unwrap_or_default());
+
+    // The middle of a chain drops and reorders items without changing what
+    // they are, so the element type survives every stage to the default.
+    let no_ints: Vec<i32> = Vec::new();
+    let through = no_ints
+        .iter()
+        .copied()
+        .rev()
+        .filter(|value| *value > 0)
+        .take(3)
+        .skip(1)
+        .take_while(|value| *value < 9)
+        .min()
+        .unwrap_or_default();
+    println!("chain miss:   {through:?}");
+
+    // An unannotated closure param takes the item type from the chain that
+    // feeds it, which is the only place this i32 is written down.
+    let mapped = no_ints
+        .iter()
+        .map(|value| value + 1)
+        .min()
+        .unwrap_or_default();
+    println!("closure item: {mapped:?}");
+
+    // `find` on an iterator answers an item, unlike the string method of the
+    // same name, and `next` and `reduce` answer one too.
+    println!(
+        "iter find:    {:?}",
+        no_ints
+            .iter()
+            .copied()
+            .find(|value| *value > 0)
+            .unwrap_or_default()
+    );
+    println!(
+        "iter next:    {:?}",
+        no_ints.iter().copied().next().unwrap_or_default()
+    );
+    println!(
+        "reduce:       {:?}",
+        no_ints
+            .iter()
+            .copied()
+            .reduce(|left, right| left + right)
+            .unwrap_or_default()
+    );
+    println!(
+        "min_by_key:   {:?}",
+        no_ints
+            .iter()
+            .copied()
+            .min_by_key(|value| *value)
+            .unwrap_or_default()
+    );
+
+    // A string iterates chars, and its bytes are u8, so an empty one
+    // defaults to the nul char and to 0u8.
+    let blank = String::new();
+    println!(
+        "chars next:   {:?}",
+        blank.chars().next().unwrap_or_default()
+    );
+    println!(
+        "bytes max:    {:?}",
+        blank.bytes().max().unwrap_or_default()
+    );
+
+    // A range iterates whatever its ends are, and a set iterates its
+    // element type, both stated by the source.
+    println!("range min:    {:?}", (0i16..0i16).min().unwrap_or_default());
+    let no_keys: HashSet<u32> = HashSet::new();
+    println!(
+        "set min:      {:?}",
+        no_keys.iter().copied().min().unwrap_or_default()
+    );
+
+    // A map's values iterate its value type, which its annotation states.
+    let scores: HashMap<String, i8> = HashMap::new();
+    println!(
+        "values min:   {:?}",
+        scores.values().copied().min().unwrap_or_default()
+    );
+
+    // An Option's own `map` rewraps whatever its closure states, and
+    // `and_then` keeps the Option that closure already builds. Both read
+    // their unannotated param as the payload the receiver carries.
+    let absent: Option<u8> = None;
+    println!(
+        "opt map:      {:?}",
+        absent
+            .map(|value| value.saturating_mul(3))
+            .unwrap_or_default()
+    );
+    println!(
+        "opt and_then: {:?}",
+        absent
+            .and_then(|value| value.checked_add(1))
+            .unwrap_or_default()
+    );
+
+    // `filter_map` yields the payload of the Option its closure builds, one
+    // layer in from `map`.
+    let no_bytes: Vec<u8> = Vec::new();
+    let picked = no_bytes
+        .iter()
+        .copied()
+        .filter_map(|value| value.checked_mul(2))
+        .min()
+        .unwrap_or_default();
+    println!("filter_map:   {picked:?}");
 }
