@@ -33,7 +33,8 @@ fn mark_reads(chunk: &Chunk, op: &Op, mark: &mut impl FnMut(u16)) {
         | Op::LoadEnum { .. }
         | Op::PathValue { .. }
         | Op::UniqueUpvalue { .. }
-        | Op::Jump { .. } => {}
+        | Op::Jump { .. }
+        | Op::LoopHead { .. } => {}
         Op::LoadCell { cell, .. } | Op::UniqueCell { cell, .. } => mark(*cell),
         Op::StoreCell { cell, src } => mark_each(mark, [*cell, *src]),
         Op::StoreUpvalue { src, .. }

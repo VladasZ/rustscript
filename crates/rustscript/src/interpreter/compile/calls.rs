@@ -1022,11 +1022,18 @@ impl Compiler<'_> {
             self.compile_into(base + idx16(order.len()), rest)?;
         }
         let info = {
-            let shape = StructShape::with_renames(
-                name,
-                order.into_iter().map(Into::into).collect(),
-                renames,
-            );
+            let fields: Vec<Arc<str>> = order.into_iter().map(Into::into).collect();
+            let known = self
+                .shapes
+                .iter()
+                .find(|s| *s.name == name && s.fields == fields && s.renames == renames);
+            let shape = if let Some(shared) = known {
+                shared.clone()
+            } else {
+                let built = StructShape::with_renames(name, fields, renames);
+                self.shapes.push(built.clone());
+                built
+            };
             let f = self.cur();
             f.struct_lits.push(StructLit { shape, has_rest });
             idx16(f.struct_lits.len() - 1)

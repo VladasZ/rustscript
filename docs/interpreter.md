@@ -66,27 +66,33 @@ machinery per comparison. Anything outside that subset, mutable captures
 and arithmetic failures included, falls back to the generic path, so the
 output never changes.
 
-Int-only `for` loops specialize the same way. When the body compiles to
-integer and bool bytecode and the source is a string's `bytes()`, an
-integer range, or a vec of scalars, `.iter()` and a pending `.skip(n)`
+Scalar `for` loops specialize the same way. When the body compiles to
+integer, float, and bool bytecode and the source is a string's `bytes()`,
+an integer range, or a vec of scalars, `.iter()` and a pending `.skip(n)`
 included, `interpreter/scalar_loop.rs` translates the body once into a
 plan over unboxed values and `interpreter/scalar_for.rs` runs the whole
 loop inside one dispatch, no `Value` per item and no per-op dispatch.
 Arithmetic runs through the same width-checked cores, so overflow still
-panics where debug Rust panics. Any runtime surprise rebuilds the
-registers to the start of the failing iteration and hands that exact item
-to the generic loop, so a fallback is invisible, panic line included.
+panics where debug Rust panics, and f64 math mirrors the generic float
+paths, NaN comparison semantics included. Any runtime surprise rebuilds
+the registers to the start of the failing iteration and hands that exact
+item to the generic loop, so a fallback is invisible, panic line included.
 
-Int-only `while` and `loop` loops specialize too, in
-`interpreter/scalar_while.rs`. The backward jump that closes such a loop
-marks a region whose only exits are the jump back to the head and the
-jumps to the op right after it, so the whole region, condition included,
-runs as the same kind of plan inside one dispatch. Pure integer methods,
-`is_multiple_of`, `min`, `max`, `clamp`, the `saturating` and `wrapping`
-families and the bit counts, run inside plans through the same width-aware
-method table the generic dispatch uses. A loop that does not qualify
-records that in one atomic flag per op, so its backward jump costs one
-load per iteration and nothing else.
+Scalar `while` and `loop` loops specialize too, in
+`interpreter/scalar_while.rs`. A `LoopHead` op sits right before every
+loop head carrying the loop's backward jump, so the plan takes over at
+loop entry and the first iteration already runs unboxed. The backward jump
+that closes such a loop marks a region whose only exits are the jump back
+to the head and the jumps to the op right after it, so the whole region,
+condition included, runs as the same kind of plan inside one dispatch.
+Pure numeric methods run inside plans through the same tables the generic
+dispatch uses: the width-aware integer table for `is_multiple_of`, `min`,
+`max`, `clamp`, the `saturating` and `wrapping` families and the bit
+counts, and the f64 table for `sqrt`, rounding, and the sign and NaN
+tests, picked by the receiver at run time. `as` casts between integer
+widths and f64 and unshadowed `f64::from` calls run in plans too. A loop
+that does not qualify records that in one atomic flag per op, so its
+backward jump costs one load per iteration and nothing else.
 
 While plans also run vec indexing, the sieve shape of `v[i]` reads and
 `v[i] = x` writes. The region's vec bases resolve once at loop entry, each
@@ -95,8 +101,19 @@ and their storage stays locked while the plan runs, dropping around Ctrl-C
 polls. Writes land immediately and go into a journal, and the registers
 snapshot at every iteration boundary, so a failing iteration restores both
 to its exact entry state and the generic loop re-runs it, out-of-bounds
-panic line included. A non-scalar element, a non-vec base, or two bases
-sharing one storage fail over to the generic path unchanged.
+panic line included. A non-vec base or two bases sharing one storage fail
+over to the generic path unchanged.
+
+Struct elements inside those vecs run unboxed too, the nbody shape of
+`bodies[i].x` reads and `bodies[i].vx -= e` writes. An index whose value
+the region reads fields through becomes an element handle holding the
+struct's arc, field reads and journaled field writes go through it, and a
+written element splits from sharing on its first write, once per run,
+which leaves the same observable state as the generic per-access split. A
+build-time check proves every handle use is preceded by its index in the
+same iteration, so a failing iteration still re-runs generically with
+identical state. A non-scalar field or element fails the iteration over
+the same way.
 
 ## No second type system
 

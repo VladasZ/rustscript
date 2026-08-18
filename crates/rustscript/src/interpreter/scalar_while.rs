@@ -18,11 +18,14 @@ use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use anyhow::Result;
 use parking_lot::MutexGuard;
 
-use super::bytecode::{Chunk, Op};
-use super::scalar_loop::{LOp, LTo, NO_SLOT, OpOut, eval_op, fold_moves, translate, write_regs};
+use super::bytecode::{Chunk, Member, Op};
+use super::scalar_loop::{
+    LOp, LTo, NO_SLOT, OpOut, PlanVecs, Region, eval_op, fold_moves, translate, write_regs,
+};
 use super::scalar_reads::chunk_reads;
 use super::scalar_val::{SVal, s_index, s_value};
-use super::value::{List, Value};
+use super::value::{List, StructData, Value};
+use super::vm::Vm;
 use super::vm_step::{Flow, StepCtx};
 
 /// Backward jumps between Ctrl-C polls. The plan holds no iterator lock, so
@@ -42,6 +45,11 @@ const MAX_ZERO_FAILS: u32 = 32;
 /// Vec table cap per plan, bounding the entry split and lock cost.
 const MAX_VECS: usize = 8;
 
+/// Handle table cap per plan, bounding the run state. Every field access
+/// site holds its own element temporary, so a body touching a few structs
+/// still needs a dozen or more handles.
+const MAX_HANDLES: usize = 32;
+
 /// A plan for a loop closed by a backward `Jump`: the whole region from the
 /// loop head to the jump, condition included. The only ways out of such a
 /// region are the jump back to the head, one finished iteration, and the
@@ -55,6 +63,8 @@ pub struct WhilePlan {
     /// region writes it, which decides the entry split.
     vecs: Vec<u16>,
     written: Vec<bool>,
+    /// Entries in the run's struct element handle table, see `handle_regs`.
+    num_handles: usize,
     /// Runs that failed before finishing one iteration. Past
     /// `MAX_ZERO_FAILS` the plan is dropped, so a loop whose entry state
     /// never reads as scalars stops paying the attempt per backward jump.
@@ -72,7 +82,11 @@ fn vec_bases(chunk: &Chunk, head: usize, exit: usize) -> Option<(Vec<u16>, Vec<b
     for op in &chunk.code[head..exit] {
         let (base, writes) = match op {
             Op::Index { base, .. } => (*base, false),
-            Op::SetIndex { base, .. } | Op::UniqueReg { reg: base } => (*base, true),
+            // A `UniqueIndex` splits the element it loads, so its base
+            // counts as written even when nothing stores back.
+            Op::SetIndex { base, .. }
+            | Op::UniqueIndex { base, .. }
+            | Op::UniqueReg { reg: base } => (*base, true),
             _ => continue,
         };
         if let Some(i) = vecs.iter().position(|&r| r == base) {
@@ -88,29 +102,128 @@ fn vec_bases(chunk: &Chunk, head: usize, exit: usize) -> Option<(Vec<u16>, Vec<b
     Some((vecs, written))
 }
 
+/// The registers that hold a struct element pulled out of a vec base: each
+/// `dst` of an index into a base whose value the region then reads or
+/// writes fields through. A field access through any other register rejects
+/// the plan in `translate_vec`.
+fn handle_regs(chunk: &Chunk, head: usize, exit: usize, bases: &[u16]) -> Option<Vec<u16>> {
+    let mut field_bases: Vec<u16> = Vec::new();
+    for op in &chunk.code[head..exit] {
+        let (Op::GetField { base, .. } | Op::UniqueField { base, .. } | Op::SetField { base, .. }) =
+            op
+        else {
+            continue;
+        };
+        if !field_bases.contains(base) {
+            field_bases.push(*base);
+        }
+    }
+    let mut handles: Vec<u16> = Vec::new();
+    for op in &chunk.code[head..exit] {
+        let (Op::Index { dst, base, .. } | Op::UniqueIndex { dst, base, .. }) = op else {
+            continue;
+        };
+        if bases.contains(base) && field_bases.contains(dst) && !handles.contains(dst) {
+            if handles.len() >= MAX_HANDLES {
+                return None;
+            }
+            handles.push(*dst);
+        }
+    }
+    Some(handles)
+}
+
+/// Whether every field-op use of a handle is preceded, on every path from
+/// an iteration's start, by an `ElemRef` writing it: walking the ops in
+/// order, a jump-target position invalidates every handle, since control
+/// can land there without executing the def above it. This matters on
+/// failure, where the generic path re-runs the iteration from its start
+/// with the frame's handle registers holding pre-loop values, so a use the
+/// plan could reach without a def in the same iteration would read a value
+/// the live generic run would not.
+fn handles_dominated(ops: &[LOp], num_handles: usize) -> bool {
+    let mut targets = vec![false; ops.len() + 1];
+    for op in ops {
+        let (LOp::Jump { to }
+        | LOp::JumpIfFalse { to, .. }
+        | LOp::JumpIfTrue { to, .. }
+        | LOp::CmpJump { to, .. }
+        | LOp::CmpJumpImm { to, .. }) = op
+        else {
+            continue;
+        };
+        if let LTo::Op(t) = to {
+            targets[*t as usize] = true;
+        }
+    }
+    let mut defined = vec![false; num_handles];
+    for (i, op) in ops.iter().enumerate() {
+        if targets[i] {
+            defined.fill(false);
+        }
+        match op {
+            LOp::ElemRef { handle, .. } => defined[usize::from(*handle)] = true,
+            LOp::FieldGet { handle, .. }
+            | LOp::FieldSet { handle, .. }
+            | LOp::ElemBack { handle, .. }
+                if !defined[usize::from(*handle)] =>
+            {
+                return false;
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
 /// Translate the loop the backward `Jump` at `jump_ip` closes, or answer
 /// None when any op falls outside the subset. A jump leaving the region
 /// anywhere but the shared exit, a labeled break out of an outer loop for
 /// one, rejects the plan here through `target`.
-fn build_while(chunk: &Chunk, head: usize, jump_ip: usize) -> Option<WhilePlan> {
+fn build_while(vm: &Vm, chunk: &Chunk, head: usize, jump_ip: usize) -> Option<WhilePlan> {
     let exit = jump_ip + 1;
     let (vecs, written) = vec_bases(chunk, head, exit)?;
+    let handles = handle_regs(chunk, head, exit, &vecs)?;
     let mut regs: Vec<u16> = Vec::new();
     let mut ops = chunk.code[head..exit]
         .iter()
-        .map(|op| translate(chunk, head, head, exit, &mut regs, Some(&vecs), op))
+        .map(|op| {
+            translate(
+                vm,
+                chunk,
+                &Region {
+                    head,
+                    body: head,
+                    exit,
+                },
+                &mut regs,
+                Some(&PlanVecs {
+                    bases: &vecs,
+                    handles: &handles,
+                }),
+                op,
+            )
+        })
         .collect::<Option<Vec<_>>>()?;
-    // A register cannot be a locked vec and a scalar slot at once; a region
-    // that moves a base around or overwrites it stays generic.
+    // A register cannot serve two tables at once: a locked vec, a scalar
+    // slot, and a handle are disjoint roles, and a region that mixes them,
+    // moving a base or a handle around for one, stays generic.
     if regs.iter().any(|reg| vecs.contains(reg)) {
         return None;
     }
+    if handles.iter().any(|h| vecs.contains(h) || regs.contains(h)) {
+        return None;
+    }
     fold_moves(&mut ops, NO_SLOT, &chunk_reads(chunk), &regs);
+    if !handles_dominated(&ops, handles.len()) {
+        return None;
+    }
     Some(WhilePlan {
         ops,
         regs,
         vecs,
         written,
+        num_handles: handles.len(),
         fails: AtomicU32::new(0),
     })
 }
@@ -159,6 +272,19 @@ enum WhileOut {
 /// iteration with identical semantics.
 pub(super) fn try_run_while(ctx: &mut StepCtx, head: usize) -> Result<Option<Flow>> {
     let jump_ip = ctx.ip;
+    try_run(ctx, head, jump_ip)
+}
+
+/// The `LoopHead` entry into the same machinery: `ctx.ip` sits on the
+/// `LoopHead` op right before the head, and the operand carries the backward
+/// jump, so the plan takes over before the first iteration runs. `None`
+/// falls through into the head generically.
+pub(super) fn try_run_entry(ctx: &mut StepCtx, jump_ip: usize) -> Result<Option<Flow>> {
+    let head = ctx.ip + 1;
+    try_run(ctx, head, jump_ip)
+}
+
+fn try_run(ctx: &mut StepCtx, head: usize, jump_ip: usize) -> Result<Option<Flow>> {
     // The backward jump of a rejected loop runs once per iteration, so its
     // answer is a plain atomic load, never the plan map's mutex.
     let Some(rejected) = ctx.cur.while_rejected.get(jump_ip) else {
@@ -172,7 +298,7 @@ pub(super) fn try_run_while(ctx: &mut StepCtx, head: usize) -> Result<Option<Flo
         if let Some(cached) = plans.get(&jump_ip) {
             Some(cached.clone())
         } else {
-            let built = build_while(ctx.cur, head, jump_ip).map(Arc::new);
+            let built = build_while(ctx.vm, ctx.cur, head, jump_ip).map(Arc::new);
             match &built {
                 Some(plan) => {
                     plans.insert(jump_ip, plan.clone());
@@ -260,13 +386,39 @@ fn run_scalar(
     }
 }
 
+/// One journaled write of the current iteration, undone newest first on
+/// failure so a doubly-written location ends on its original value.
+enum Undo {
+    /// A vec element replaced through `VecSet` or `ElemBack`.
+    Elem { vec: u16, idx: usize, old: Value },
+    /// A struct field replaced through `FieldSet`. The arc keeps the write
+    /// undoable even after an `ElemBack` moved the element around.
+    Field {
+        data: Arc<StructData>,
+        slot: usize,
+        old: Value,
+    },
+}
+
 /// The live state of one vec plan run, kept across lock drops for Ctrl-C
-/// polls: the registers, their copy from the current iteration's entry, and
-/// the journal of this iteration's vec writes.
+/// polls: the registers, their copy from the current iteration's entry, the
+/// struct element handles, and the journal of this iteration's writes.
 struct VecRun {
     regs: Vec<SVal>,
     snapshot: Vec<SVal>,
-    undo: Vec<(u16, usize, Value)>,
+    handles: Vec<Option<Arc<StructData>>>,
+    undo: Vec<Undo>,
+    /// Elements already split this run, one lazy bitmap per vec. The handle
+    /// table and the journal hold plan-internal references the script never
+    /// sees, so splitting per generic `UniqueIndex` would clone the struct
+    /// on every write access. One split per element per run is the same
+    /// observable state.
+    split: Vec<Vec<bool>>,
+    /// Per-op member slot cache: the shape address the op last resolved
+    /// against, and the values slot it found. Field names resolve by string
+    /// against a shape, which is per-access cost the loop pays millions of
+    /// times for the same handful of sites.
+    slots: Vec<(usize, u32)>,
     ip: usize,
     work: u32,
     advanced: bool,
@@ -317,7 +469,10 @@ fn run_vec(
     let mut run = VecRun {
         snapshot: regs.clone(),
         regs,
+        handles: vec![None; plan.num_handles],
         undo: Vec::new(),
+        split: vec![Vec::new(); plan.vecs.len()],
+        slots: vec![(0, 0); plan.ops.len()],
         ip: 0,
         work: 0,
         advanced: false,
@@ -360,29 +515,54 @@ fn run_vec_span(
         };
         match op {
             LOp::VecGet { dst, vec, idx } => {
-                let elem = s_index(run.regs[usize::from(*idx)])
-                    .and_then(|i| guards[usize::from(*vec)].get(i))
-                    .map(SVal::of);
-                // A non-scalar element fails over instead of loading as
-                // `Opaque`: a slot the loop never reads again would skip
-                // writeback and leave the frame register stale.
-                let Some(v @ (SVal::Unit | SVal::Int(_) | SVal::IntW(..) | SVal::Bool(_))) = elem
-                else {
+                if !vec_get(run, guards, *dst, *vec, *idx) {
                     return fail_vec(run, guards);
-                };
-                run.regs[usize::from(*dst)] = v;
+                }
                 run.ip += 1;
             }
             LOp::VecSet { vec, idx, val } => {
-                let target = s_index(run.regs[usize::from(*idx)]);
-                let new = s_value(run.regs[usize::from(*val)]);
-                let (Some(i), Some(new)) = (target, new) else {
+                if !vec_set(run, guards, *vec, *idx, *val) {
                     return fail_vec(run, guards);
-                };
-                let Some(slot) = guards[usize::from(*vec)].get_mut(i) else {
+                }
+                run.ip += 1;
+            }
+            LOp::ElemRef {
+                handle,
+                vec,
+                idx,
+                unique,
+            } => {
+                if !elem_ref(run, guards, *handle, *vec, *idx, *unique) {
                     return fail_vec(run, guards);
-                };
-                run.undo.push((*vec, i, replace(slot, new)));
+                }
+                run.ip += 1;
+            }
+            LOp::FieldGet {
+                dst,
+                handle,
+                member,
+            } => {
+                let ip = run.ip;
+                if !field_get(run, ip, *dst, *handle, member) {
+                    return fail_vec(run, guards);
+                }
+                run.ip += 1;
+            }
+            LOp::FieldSet {
+                handle,
+                member,
+                val,
+            } => {
+                let ip = run.ip;
+                if !field_set(run, ip, *handle, member, *val) {
+                    return fail_vec(run, guards);
+                }
+                run.ip += 1;
+            }
+            LOp::ElemBack { vec, idx, handle } => {
+                if !elem_back(run, guards, *vec, *idx, *handle) {
+                    return fail_vec(run, guards);
+                }
                 run.ip += 1;
             }
             other => match eval_op(other, &mut run.regs) {
@@ -408,13 +588,219 @@ fn run_vec_span(
     }
 }
 
+/// The values slot a member names inside a struct, mirroring the member
+/// resolution of the generic `Vm::get_field` and `Vm::set_field`. An
+/// out-of-range indexed member is caught by the values access itself.
+fn member_slot(data: &StructData, member: &Member) -> Option<usize> {
+    match member {
+        Member::Named(name) => data.shape.slot(name),
+        Member::Indexed(i) => Some(*i),
+    }
+}
+
+/// The values slot a member names against the op's cache: the handle table
+/// and the journal make field names resolve by string against a shape,
+/// which is per-access cost the loop pays millions of times for the same
+/// handful of sites, so each op remembers the slot it found for a shape.
+fn cached_slot(
+    run: &mut VecRun,
+    ip: usize,
+    data: &Arc<StructData>,
+    member: &Member,
+) -> Option<usize> {
+    let shape_addr = Arc::as_ptr(&data.shape).addr();
+    let (addr, slot) = run.slots[ip];
+    if addr == shape_addr {
+        return Some(slot as usize);
+    }
+    let found = member_slot(data, member)?;
+    run.slots[ip] = (shape_addr, u32::try_from(found).ok()?);
+    Some(found)
+}
+
+/// The `VecGet` arm of `run_vec_span`. A non-scalar element fails over
+/// instead of loading as `Opaque`: a slot the loop never reads again would
+/// skip writeback and leave the frame register stale.
+#[inline]
+fn vec_get(
+    run: &mut VecRun,
+    guards: &mut [MutexGuard<'_, Vec<Value>>],
+    dst: u16,
+    vec: u16,
+    idx: u16,
+) -> bool {
+    let elem = s_index(run.regs[usize::from(idx)])
+        .and_then(|i| guards[usize::from(vec)].get(i))
+        .map(SVal::of);
+    let Some(v @ (SVal::Unit | SVal::Int(_) | SVal::IntW(..) | SVal::Float(_) | SVal::Bool(_))) =
+        elem
+    else {
+        return false;
+    };
+    run.regs[usize::from(dst)] = v;
+    true
+}
+
+/// The `VecSet` arm of `run_vec_span`, journaled so a failing iteration
+/// can undo it.
+#[inline]
+fn vec_set(
+    run: &mut VecRun,
+    guards: &mut [MutexGuard<'_, Vec<Value>>],
+    vec: u16,
+    idx: u16,
+    val: u16,
+) -> bool {
+    let target = s_index(run.regs[usize::from(idx)]);
+    let new = s_value(run.regs[usize::from(val)]);
+    let (Some(i), Some(new)) = (target, new) else {
+        return false;
+    };
+    let Some(slot) = guards[usize::from(vec)].get_mut(i) else {
+        return false;
+    };
+    run.undo.push(Undo::Elem {
+        vec,
+        idx: i,
+        old: replace(slot, new),
+    });
+    true
+}
+
+/// The `ElemRef` arm of `run_vec_span`: the element arc of `vec[idx]` into
+/// the handle table, split from sharing first when the generic op was a
+/// `UniqueIndex`, so field writes cannot leak into a sibling copy. The
+/// split runs once per element per run, see `VecRun::split`: after it, the
+/// only extra references are the plan's own handle and journal entries,
+/// which the generic per-access split would otherwise count as sharing and
+/// clone the struct on every write. A pure split needs no undo entry.
+/// False fails the iteration over.
+#[inline]
+fn elem_ref(
+    run: &mut VecRun,
+    guards: &mut [MutexGuard<'_, Vec<Value>>],
+    handle: u16,
+    vec: u16,
+    idx: u16,
+    unique: bool,
+) -> bool {
+    let Some(i) = s_index(run.regs[usize::from(idx)]) else {
+        return false;
+    };
+    let Some(slot) = guards[usize::from(vec)].get_mut(i) else {
+        return false;
+    };
+    if unique {
+        let flags = &mut run.split[usize::from(vec)];
+        if flags.len() <= i {
+            flags.resize(i + 1, false);
+        }
+        if !flags[i] {
+            slot.make_unique();
+            flags[i] = true;
+        }
+    }
+    let Value::Struct(data) = &*slot else {
+        return false;
+    };
+    run.handles[usize::from(handle)] = Some(data.clone());
+    true
+}
+
+/// The `FieldGet` arm of `run_vec_span`. A non-scalar field fails over
+/// instead of loading as `Opaque`, for the same writeback reason as
+/// `VecGet`.
+#[inline]
+fn field_get(run: &mut VecRun, ip: usize, dst: u16, handle: u16, member: &Member) -> bool {
+    let Some(data) = &run.handles[usize::from(handle)] else {
+        return false;
+    };
+    // The slot cache inline, on split field borrows, so the read path pays
+    // no arc clone, see `cached_slot`.
+    let shape_addr = Arc::as_ptr(&data.shape).addr();
+    let (addr, cached) = run.slots[ip];
+    let slot = if addr == shape_addr {
+        cached as usize
+    } else {
+        let Some(found) = member_slot(data, member) else {
+            return false;
+        };
+        let Ok(compact) = u32::try_from(found) else {
+            return false;
+        };
+        run.slots[ip] = (shape_addr, compact);
+        found
+    };
+    let field = data.values.lock().get(slot).map(SVal::of);
+    let Some(v @ (SVal::Unit | SVal::Int(_) | SVal::IntW(..) | SVal::Float(_) | SVal::Bool(_))) =
+        field
+    else {
+        return false;
+    };
+    run.regs[usize::from(dst)] = v;
+    true
+}
+
+/// The `FieldSet` arm of `run_vec_span`, journaled so a failing iteration
+/// can undo it.
+#[inline]
+fn field_set(run: &mut VecRun, ip: usize, handle: u16, member: &Member, val: u16) -> bool {
+    let Some(data) = run.handles[usize::from(handle)].clone() else {
+        return false;
+    };
+    let new = s_value(run.regs[usize::from(val)]);
+    let (Some(slot), Some(new)) = (cached_slot(run, ip, &data, member), new) else {
+        return false;
+    };
+    let old = {
+        let mut values = data.values.lock();
+        let Some(field) = values.get_mut(slot) else {
+            return false;
+        };
+        replace(field, new)
+    };
+    run.undo.push(Undo::Field { data, slot, old });
+    true
+}
+
+/// The `ElemBack` arm of `run_vec_span`: the `SetIndex` writeback of a
+/// place chain stores the held element back into its vec slot, journaled
+/// like a vec write.
+#[inline]
+fn elem_back(
+    run: &mut VecRun,
+    guards: &mut [MutexGuard<'_, Vec<Value>>],
+    vec: u16,
+    idx: u16,
+    handle: u16,
+) -> bool {
+    let Some(i) = s_index(run.regs[usize::from(idx)]) else {
+        return false;
+    };
+    let Some(data) = &run.handles[usize::from(handle)] else {
+        return false;
+    };
+    let Some(slot) = guards[usize::from(vec)].get_mut(i) else {
+        return false;
+    };
+    run.undo.push(Undo::Elem {
+        vec,
+        idx: i,
+        old: replace(slot, Value::Struct(data.clone())),
+    });
+    true
+}
+
 /// Restore the failing iteration's entry state: registers from the
-/// snapshot, vec elements by unwinding the write journal newest first, so
-/// a doubly-written element ends on its original value.
+/// snapshot, vec elements and struct fields by unwinding the write journal
+/// newest first, so a doubly-written location ends on its original value.
 fn fail_vec(run: &mut VecRun, guards: &mut [MutexGuard<'_, Vec<Value>>]) -> SpanOut {
     run.regs.copy_from_slice(&run.snapshot);
-    while let Some((vec, i, old)) = run.undo.pop() {
-        guards[usize::from(vec)][i] = old;
+    while let Some(entry) = run.undo.pop() {
+        match entry {
+            Undo::Elem { vec, idx, old } => guards[usize::from(vec)][idx] = old,
+            Undo::Field { data, slot, old } => data.values.lock()[slot] = old,
+        }
     }
     SpanOut::Fail
 }

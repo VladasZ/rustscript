@@ -2,8 +2,8 @@
 //!
 //! A `for` loop over a string's bytes or an integer range pays the full VM
 //! machinery per item: the iterator lock, a boxed `Value` per element, and
-//! one dispatch per body op. A body that only moves plain integers and
-//! booleans does not need any of that. This module translates such a body
+//! one dispatch per body op. A body that only moves plain integers, floats,
+//! and booleans does not need any of that. This module translates such a body
 //! once per loop into a small plan over unboxed scalar registers and runs
 //! the whole loop inside one `ForNext` dispatch.
 //!
@@ -25,11 +25,15 @@
 //! from bytecode, the move-folding cleanup, and the op evaluator. The
 //! runners live in `scalar_for` and `scalar_while`.
 
-use super::bytecode::{BinKind, Chunk, Op, UnKind};
+use super::bytecode::{BinKind, Chunk, Const, Member, Op, UnKind};
 use super::numeric::IntWidth;
 use super::scalar_reads::chunk_reads;
-use super::scalar_val::{SVal, s_bin, s_cast, s_cmp, s_int_method, s_un, s_value, truthy};
+use super::scalar_val::{
+    SVal, s_bin, s_cast, s_cast_f64, s_cmp, s_f64_from, s_float_method, s_int_method, s_un,
+    s_value, truthy,
+};
 use super::typeir::CastIr;
+use super::vm::Vm;
 use super::vm_step::StepCtx;
 
 /// Register cap per plan, bounding the entry load and writeback cost.
@@ -62,6 +66,11 @@ pub(super) enum LOp {
         dst: u16,
         v: i64,
         w: IntWidth,
+    },
+    /// An f64 literal, from a `LoadConst` whose constant is a `Const::Float`.
+    LoadFloat {
+        dst: u16,
+        v: f64,
     },
     LoadBool {
         dst: u16,
@@ -116,9 +125,23 @@ pub(super) enum LOp {
         src: u16,
         w: IntWidth,
     },
-    /// A whitelisted integer method, `n.is_multiple_of(2)` for one. `dst` is
-    /// `NO_SLOT` when the compiler discarded the result.
-    IntMethod {
+    /// An `as f64` cast.
+    CastF64 {
+        dst: u16,
+        src: u16,
+    },
+    /// An unshadowed `f64::from(x)` call, whose saturating image conversion
+    /// differs from the exact `as` cast, see `s_f64_from`.
+    F64From {
+        dst: u16,
+        src: u16,
+    },
+    /// A whitelisted numeric method, `n.is_multiple_of(2)` or `f.sqrt()`.
+    /// The receiver decides the table at run time, integers answer from
+    /// `s_int_method` and floats from `s_float_method`, the same split the
+    /// generic dispatch makes. `dst` is `NO_SLOT` when the compiler
+    /// discarded the result.
+    NumMethod {
         dst: u16,
         recv: u16,
         args: [u16; 2],
@@ -138,6 +161,35 @@ pub(super) enum LOp {
         vec: u16,
         idx: u16,
         val: u16,
+    },
+    /// The element `Arc` of `vec[idx]` into the run's handle table, split
+    /// from sharing first when the generic op was a `UniqueIndex`. A
+    /// non-struct element or a bad index fails the iteration over to the
+    /// generic path.
+    ElemRef {
+        handle: u16,
+        vec: u16,
+        idx: u16,
+        unique: bool,
+    },
+    /// `dst = handle.member`, a scalar field of a held element.
+    FieldGet {
+        dst: u16,
+        handle: u16,
+        member: Member,
+    },
+    /// `handle.member = val`, journaled so a failing iteration can undo it.
+    FieldSet {
+        handle: u16,
+        member: Member,
+        val: u16,
+    },
+    /// The `SetIndex` writeback of a place chain: store the held element
+    /// back into its vec slot, journaled like a vec write.
+    ElemBack {
+        vec: u16,
+        idx: u16,
+        handle: u16,
     },
     /// A `UniqueReg` on a vec base. The plan split the vec from sharing
     /// once at entry, so per-write splits inside the loop have nothing to
@@ -180,6 +232,30 @@ fn scalar_int_method(name: &str) -> bool {
     )
 }
 
+/// Float methods a plan may run on an f64 receiver: pure, scalar in and
+/// out, and answered by `s_float_method`, which mirrors the float arms of
+/// `shared::num_core`.
+fn scalar_float_method(name: &str) -> bool {
+    matches!(
+        name,
+        "sqrt"
+            | "floor"
+            | "ceil"
+            | "round"
+            | "trunc"
+            | "fract"
+            | "recip"
+            | "powi"
+            | "powf"
+            | "mul_add"
+            | "is_nan"
+            | "is_finite"
+            | "is_infinite"
+            | "is_sign_positive"
+            | "is_sign_negative"
+    )
+}
+
 pub struct LoopPlan {
     pub(super) ops: Vec<LOp>,
     /// The frame register behind each plan slot.
@@ -203,40 +279,61 @@ fn slot(regs: &mut Vec<u16>, r: u16) -> Option<u16> {
     u16::try_from(regs.len() - 1).ok()
 }
 
+/// The chunk region one plan translates: the loop head, the first
+/// translated op, and the exit one past the region. The `for` plan's body
+/// starts one past its `ForNext` head, the while plan's at the head itself.
+pub(super) struct Region {
+    pub(super) head: usize,
+    pub(super) body: usize,
+    pub(super) exit: usize,
+}
+
 /// Map a chunk jump target into the plan whose translated ops start at
-/// `body`. The `for` plan's body starts one past its `ForNext` head, the
-/// while plan's at the head itself.
-fn target(head: usize, body: usize, exit: usize, t: u32) -> Option<LTo> {
+/// `region.body`.
+fn target(region: &Region, t: u32) -> Option<LTo> {
     let t = t as usize;
-    if t == head {
+    if t == region.head {
         Some(LTo::Next)
-    } else if t == exit {
+    } else if t == region.exit {
         Some(LTo::Exit)
-    } else if t >= body && t < exit {
-        u32::try_from(t - body).ok().map(LTo::Op)
+    } else if t >= region.body && t < region.exit {
+        u32::try_from(t - region.body).ok().map(LTo::Op)
     } else {
         None
     }
 }
 
+/// The vec context of a while plan: the region's vec base registers, and
+/// the handle registers, each the `dst` of an index into a base whose value
+/// the region reads or writes fields through.
+pub(super) struct PlanVecs<'a> {
+    pub(super) bases: &'a [u16],
+    pub(super) handles: &'a [u16],
+}
+
 /// Translate one bytecode op, or answer None when it falls outside the
-/// subset, which rejects the whole loop. `vecs` is the region's vec base
-/// registers when the plan supports vec indexing, the while plan does, and
-/// `None` for the `for` plan, which rejects vec ops.
+/// subset, which rejects the whole loop. `vecs` is the region's vec context
+/// when the plan supports vec indexing, the while plan does, and `None` for
+/// the `for` plan, which rejects vec ops.
 pub(super) fn translate(
+    vm: &Vm,
     chunk: &Chunk,
-    head: usize,
-    body: usize,
-    exit: usize,
+    region: &Region,
     regs: &mut Vec<u16>,
-    vecs: Option<&[u16]>,
+    vecs: Option<&PlanVecs>,
     op: &Op,
 ) -> Option<LOp> {
     if matches!(
         op,
-        Op::Index { .. } | Op::SetIndex { .. } | Op::UniqueReg { .. }
+        Op::Index { .. }
+            | Op::UniqueIndex { .. }
+            | Op::SetIndex { .. }
+            | Op::UniqueReg { .. }
+            | Op::GetField { .. }
+            | Op::UniqueField { .. }
+            | Op::SetField { .. }
     ) {
-        return translate_vec(regs, vecs, op);
+        return translate_vec(chunk, regs, vecs, op);
     }
     Some(match op {
         Op::LoadUnit { dst } => LOp::LoadUnit {
@@ -250,6 +347,13 @@ pub(super) fn translate(
             dst: slot(regs, *dst)?,
             v: *v,
             w: *w,
+        },
+        Op::LoadConst { dst, k } => match chunk.consts[*k as usize] {
+            Const::Float(v) => LOp::LoadFloat {
+                dst: slot(regs, *dst)?,
+                v,
+            },
+            _ => return None,
         },
         Op::LoadBool { dst, v } => LOp::LoadBool {
             dst: slot(regs, *dst)?,
@@ -281,27 +385,27 @@ pub(super) fn translate(
             op: *op,
         },
         Op::Jump { to } => LOp::Jump {
-            to: target(head, body, exit, *to)?,
+            to: target(region, *to)?,
         },
         Op::JumpIfFalse { cond, to } => LOp::JumpIfFalse {
             cond: slot(regs, *cond)?,
-            to: target(head, body, exit, *to)?,
+            to: target(region, *to)?,
         },
         Op::JumpIfTrue { cond, to } => LOp::JumpIfTrue {
             cond: slot(regs, *cond)?,
-            to: target(head, body, exit, *to)?,
+            to: target(region, *to)?,
         },
         Op::CmpJump { a, b, op, to } => LOp::CmpJump {
             a: slot(regs, *a)?,
             b: slot(regs, *b)?,
             op: *op,
-            to: target(head, body, exit, *to)?,
+            to: target(region, *to)?,
         },
         Op::CmpJumpImm { a, imm, op, to } => LOp::CmpJumpImm {
             a: slot(regs, *a)?,
             imm: *imm,
             op: *op,
-            to: target(head, body, exit, *to)?,
+            to: target(region, *to)?,
         },
         Op::Cast { dst, src, ty } => match chunk.casts[*ty as usize] {
             CastIr::Int(w) if !w.is_big() => LOp::Cast {
@@ -309,14 +413,61 @@ pub(super) fn translate(
                 src: slot(regs, *src)?,
                 w,
             },
+            CastIr::F64 => LOp::CastF64 {
+                dst: slot(regs, *dst)?,
+                src: slot(regs, *src)?,
+            },
             _ => return None,
         },
         Op::Method { .. } => return translate_method(chunk, regs, op),
+        Op::CallPath { .. } => return translate_call(vm, chunk, regs, op),
+        // A nested loop's entry hook has nothing to do inside a plan, which
+        // already runs the nested loop unboxed, but keeps its position.
+        Op::LoopHead { .. } => LOp::Nop,
         _ => return None,
     })
 }
 
-/// The `Op::Method` arm of `translate`: a whitelisted integer method whose
+/// The `Op::CallPath` arm of `translate`: only a plain `f64::from(x)` call
+/// maps, and only while nothing shadows the bridge arm `s_f64_from` mirrors.
+/// A user function or user method named `f64::from` resolves first on the
+/// generic path, and a coercion on the call site has no plan equivalent, so
+/// either rejects the loop.
+fn translate_call(vm: &Vm, chunk: &Chunk, regs: &mut Vec<u16>, op: &Op) -> Option<LOp> {
+    let Op::CallPath {
+        dst,
+        path,
+        base,
+        argc,
+    } = op
+    else {
+        return None;
+    };
+    let (segs, coerce) = &chunk.paths[*path as usize];
+    if coerce.is_some() || *argc != 1 {
+        return None;
+    }
+    let canon = vm.canonical(segs);
+    let [ty, func] = canon.as_slice() else {
+        return None;
+    };
+    if ty != "f64" || func != "from" {
+        return None;
+    }
+    if vm.user_function("f64::from").is_some() || vm.user_method("f64", "from").is_some() {
+        return None;
+    }
+    Some(LOp::F64From {
+        dst: if *dst == u16::MAX {
+            NO_SLOT
+        } else {
+            slot(regs, *dst)?
+        },
+        src: slot(regs, *base)?,
+    })
+}
+
+/// The `Op::Method` arm of `translate`: a whitelisted numeric method whose
 /// receiver and arguments read as slots.
 fn translate_method(chunk: &Chunk, regs: &mut Vec<u16>, op: &Op) -> Option<LOp> {
     let Op::Method {
@@ -330,14 +481,15 @@ fn translate_method(chunk: &Chunk, regs: &mut Vec<u16>, op: &Op) -> Option<LOp> 
         return None;
     };
     let method = &chunk.names[*name as usize];
-    if !scalar_int_method(&method.text) || method.scalar.is_some() || *argc > 2 {
+    let known = scalar_int_method(&method.text) || scalar_float_method(&method.text);
+    if !known || method.scalar.is_some() || *argc > 2 {
         return None;
     }
     let mut args = [0u16; 2];
     for (arg, reg) in args.iter_mut().zip(*base..base.saturating_add(*argc)) {
         *arg = slot(regs, reg)?;
     }
-    Some(LOp::IntMethod {
+    Some(LOp::NumMethod {
         dst: if *dst == u16::MAX {
             NO_SLOT
         } else {
@@ -350,26 +502,78 @@ fn translate_method(chunk: &Chunk, regs: &mut Vec<u16>, op: &Op) -> Option<LOp> 
     })
 }
 
-/// The vec-op arms of `translate`. They map only when the plan carries a
-/// vec table, the while plan does, and the base register is in it.
-fn translate_vec(regs: &mut Vec<u16>, vecs: Option<&[u16]>, op: &Op) -> Option<LOp> {
+/// The vec-op and field-op arms of `translate`. They map only when the plan
+/// carries a vec context, the while plan does, and the base register is one
+/// of its vec bases, or, for a field op, one of its handle registers.
+fn translate_vec(
+    chunk: &Chunk,
+    regs: &mut Vec<u16>,
+    vecs: Option<&PlanVecs>,
+    op: &Op,
+) -> Option<LOp> {
+    let ctx = vecs?;
     let vec_of = |r: u16| {
-        vecs?
+        ctx.bases
             .iter()
             .position(|&base| base == r)
             .and_then(|i| u16::try_from(i).ok())
     };
+    let handle_of = |r: u16| {
+        ctx.handles
+            .iter()
+            .position(|&h| h == r)
+            .and_then(|i| u16::try_from(i).ok())
+    };
     Some(match op {
-        Op::Index { dst, base, key } => LOp::VecGet {
-            dst: slot(regs, *dst)?,
-            vec: vec_of(*base)?,
-            idx: slot(regs, *key)?,
-        },
-        Op::SetIndex { base, key, val } => LOp::VecSet {
-            vec: vec_of(*base)?,
-            idx: slot(regs, *key)?,
+        Op::Index { dst, base, key } | Op::UniqueIndex { dst, base, key } => {
+            let unique = matches!(op, Op::UniqueIndex { .. });
+            let vec = vec_of(*base)?;
+            match handle_of(*dst) {
+                Some(handle) => LOp::ElemRef {
+                    handle,
+                    vec,
+                    idx: slot(regs, *key)?,
+                    unique,
+                },
+                // The generic `UniqueIndex` also splits the element, which
+                // is a no-op for the scalar elements `VecGet` can read, and
+                // a non-scalar element fails the iteration over anyway.
+                None => LOp::VecGet {
+                    dst: slot(regs, *dst)?,
+                    vec,
+                    idx: slot(regs, *key)?,
+                },
+            }
+        }
+        Op::GetField { dst, base, member } | Op::UniqueField { dst, base, member } => {
+            // The generic `UniqueField` also splits the field's storage,
+            // which is a no-op for the scalar fields `FieldGet` can read.
+            LOp::FieldGet {
+                dst: slot(regs, *dst)?,
+                handle: handle_of(*base)?,
+                member: chunk.members[*member as usize].clone(),
+            }
+        }
+        Op::SetField { base, member, val } => LOp::FieldSet {
+            handle: handle_of(*base)?,
+            member: chunk.members[*member as usize].clone(),
             val: slot(regs, *val)?,
         },
+        Op::SetIndex { base, key, val } => {
+            let vec = vec_of(*base)?;
+            match handle_of(*val) {
+                Some(handle) => LOp::ElemBack {
+                    vec,
+                    idx: slot(regs, *key)?,
+                    handle,
+                },
+                None => LOp::VecSet {
+                    vec,
+                    idx: slot(regs, *key)?,
+                    val: slot(regs, *val)?,
+                },
+            }
+        }
         Op::UniqueReg { reg } => {
             vec_of(*reg)?;
             LOp::Nop
@@ -385,14 +589,17 @@ fn op_write(op: &LOp) -> Option<u16> {
         LOp::LoadUnit { dst }
         | LOp::LoadInt { dst, .. }
         | LOp::LoadIntW { dst, .. }
+        | LOp::LoadFloat { dst, .. }
         | LOp::LoadBool { dst, .. }
         | LOp::Move { dst, .. }
         | LOp::Bin { dst, .. }
         | LOp::BinImm { dst, .. }
         | LOp::Un { dst, .. }
         | LOp::Cast { dst, .. }
-        | LOp::VecGet { dst, .. } => Some(*dst),
-        LOp::IntMethod { dst, .. } if *dst != NO_SLOT => Some(*dst),
+        | LOp::CastF64 { dst, .. }
+        | LOp::VecGet { dst, .. }
+        | LOp::FieldGet { dst, .. } => Some(*dst),
+        LOp::NumMethod { dst, .. } | LOp::F64From { dst, .. } if *dst != NO_SLOT => Some(*dst),
         _ => None,
     }
 }
@@ -400,14 +607,18 @@ fn op_write(op: &LOp) -> Option<u16> {
 /// Every slot an op reads, for the move-folding pass.
 fn op_reads(op: &LOp, mut read: impl FnMut(u16)) {
     match op {
-        LOp::Move { src, .. } | LOp::Un { a: src, .. } | LOp::Cast { src, .. } => read(*src),
+        LOp::Move { src, .. }
+        | LOp::Un { a: src, .. }
+        | LOp::Cast { src, .. }
+        | LOp::CastF64 { src, .. }
+        | LOp::F64From { src, .. } => read(*src),
         LOp::Bin { a, b, .. } | LOp::CmpJump { a, b, .. } => {
             read(*a);
             read(*b);
         }
         LOp::BinImm { a, .. } | LOp::CmpJumpImm { a, .. } => read(*a),
         LOp::JumpIfFalse { cond, .. } | LOp::JumpIfTrue { cond, .. } => read(*cond),
-        LOp::IntMethod {
+        LOp::NumMethod {
             recv, args, argc, ..
         } => {
             read(*recv);
@@ -415,15 +626,20 @@ fn op_reads(op: &LOp, mut read: impl FnMut(u16)) {
                 read(*arg);
             }
         }
-        LOp::VecGet { idx, .. } => read(*idx),
+        LOp::VecGet { idx, .. } | LOp::ElemRef { idx, .. } | LOp::ElemBack { idx, .. } => {
+            read(*idx);
+        }
         LOp::VecSet { idx, val, .. } => {
             read(*idx);
             read(*val);
         }
+        LOp::FieldSet { val, .. } => read(*val),
         LOp::LoadUnit { .. }
         | LOp::LoadInt { .. }
         | LOp::LoadIntW { .. }
+        | LOp::LoadFloat { .. }
         | LOp::LoadBool { .. }
+        | LOp::FieldGet { .. }
         | LOp::Jump { .. }
         | LOp::Nop => {}
     }
@@ -435,14 +651,18 @@ fn set_write(op: &mut LOp, to: u16) {
         LOp::LoadUnit { dst }
         | LOp::LoadInt { dst, .. }
         | LOp::LoadIntW { dst, .. }
+        | LOp::LoadFloat { dst, .. }
         | LOp::LoadBool { dst, .. }
         | LOp::Move { dst, .. }
         | LOp::Bin { dst, .. }
         | LOp::BinImm { dst, .. }
         | LOp::Un { dst, .. }
         | LOp::Cast { dst, .. }
-        | LOp::IntMethod { dst, .. }
-        | LOp::VecGet { dst, .. } => *dst = to,
+        | LOp::CastF64 { dst, .. }
+        | LOp::F64From { dst, .. }
+        | LOp::NumMethod { dst, .. }
+        | LOp::VecGet { dst, .. }
+        | LOp::FieldGet { dst, .. } => *dst = to,
         _ => unreachable!("only value ops fold"),
     }
 }
@@ -512,6 +732,7 @@ pub(super) fn fold_moves(
                 LOp::LoadUnit { .. }
                     | LOp::LoadInt { .. }
                     | LOp::LoadIntW { .. }
+                    | LOp::LoadFloat { .. }
                     | LOp::LoadBool { .. }
             );
             constant
@@ -552,7 +773,7 @@ fn remove_op(ops: &mut Vec<LOp>, at: usize) {
 
 /// Translate the body of the `for` loop whose `ForNext` sits at `head`, or
 /// answer None when any op falls outside the subset.
-pub(super) fn build(chunk: &Chunk, head: usize) -> Option<LoopPlan> {
+pub(super) fn build(vm: &Vm, chunk: &Chunk, head: usize) -> Option<LoopPlan> {
     let Some(Op::ForNext { val, to, .. }) = chunk.code.get(head) else {
         return None;
     };
@@ -564,7 +785,20 @@ pub(super) fn build(chunk: &Chunk, head: usize) -> Option<LoopPlan> {
     let val_slot = slot(&mut regs, *val)?;
     let mut ops = chunk.code[head + 1..exit]
         .iter()
-        .map(|op| translate(chunk, head, head + 1, exit, &mut regs, None, op))
+        .map(|op| {
+            translate(
+                vm,
+                chunk,
+                &Region {
+                    head,
+                    body: head + 1,
+                    exit,
+                },
+                &mut regs,
+                None,
+                op,
+            )
+        })
         .collect::<Option<Vec<_>>>()?;
     fold_moves(&mut ops, val_slot, &chunk_reads(chunk), &regs);
     let straight = ops.iter().enumerate().all(|(i, op)| match op {
@@ -595,12 +829,32 @@ pub(super) enum OpOut {
     Fail,
 }
 
+/// The `NumMethod` arm of `eval_op`. Unused arg entries are slot zero,
+/// which exists whenever a method op does, the receiver holds a slot
+/// itself. The receiver picks the table, the same split the generic
+/// dispatch makes between `int_methods` and `num_core`.
+fn eval_num_method(
+    regs: &[SVal],
+    recv: u16,
+    args: [u16; 2],
+    count: u8,
+    name: &str,
+) -> Option<SVal> {
+    let vals = [regs[usize::from(args[0])], regs[usize::from(args[1])]];
+    let receiver = regs[usize::from(recv)];
+    match receiver {
+        SVal::Float(_) => s_float_method(name, receiver, &vals[..usize::from(count)]),
+        _ => s_int_method(name, receiver, &vals[..usize::from(count)]),
+    }
+}
+
 #[inline]
 pub(super) fn eval_op(op: &LOp, regs: &mut [SVal]) -> OpOut {
     match op {
         LOp::LoadUnit { dst } => regs[usize::from(*dst)] = SVal::Unit,
         LOp::LoadInt { dst, v } => regs[usize::from(*dst)] = SVal::Int(*v),
         LOp::LoadIntW { dst, v, w } => regs[usize::from(*dst)] = SVal::IntW(*v, *w),
+        LOp::LoadFloat { dst, v } => regs[usize::from(*dst)] = SVal::Float(*v),
         LOp::LoadBool { dst, v } => regs[usize::from(*dst)] = SVal::Bool(*v),
         LOp::Move { dst, src } => regs[usize::from(*dst)] = regs[usize::from(*src)],
         LOp::Bin { dst, a, b, op } => {
@@ -658,30 +912,43 @@ pub(super) fn eval_op(op: &LOp, regs: &mut [SVal]) -> OpOut {
             Some(v) => regs[usize::from(*dst)] = v,
             None => return OpOut::Fail,
         },
-        LOp::IntMethod {
+        LOp::CastF64 { dst, src } => match s_cast_f64(regs[usize::from(*src)]) {
+            Some(v) => regs[usize::from(*dst)] = v,
+            None => return OpOut::Fail,
+        },
+        LOp::F64From { dst, src } => match s_f64_from(regs[usize::from(*src)]) {
+            Some(v) => {
+                if *dst != NO_SLOT {
+                    regs[usize::from(*dst)] = v;
+                }
+            }
+            None => return OpOut::Fail,
+        },
+        LOp::NumMethod {
             dst,
             recv,
             args,
             argc,
             name,
-        } => {
-            // Unused arg entries are slot zero, which exists whenever a
-            // method op does, the receiver holds a slot itself.
-            let vals = [regs[usize::from(args[0])], regs[usize::from(args[1])]];
-            match s_int_method(name, regs[usize::from(*recv)], &vals[..usize::from(*argc)]) {
-                Some(v) => {
-                    if *dst != NO_SLOT {
-                        regs[usize::from(*dst)] = v;
-                    }
+        } => match eval_num_method(regs, *recv, *args, *argc, name) {
+            Some(v) => {
+                if *dst != NO_SLOT {
+                    regs[usize::from(*dst)] = v;
                 }
-                None => return OpOut::Fail,
             }
-        }
+            None => return OpOut::Fail,
+        },
         LOp::Nop => {}
-        // Vec ops need the locked vec table, which only the journaled while
-        // runner holds, see `scalar_while::run_vec_span`. They cannot appear
-        // in the plans the other runners execute.
-        LOp::VecGet { .. } | LOp::VecSet { .. } => return OpOut::Fail,
+        // Vec and field ops need the locked vec table and the handle table,
+        // which only the journaled while runner holds, see
+        // `scalar_while::run_vec_span`. They cannot appear in the plans the
+        // other runners execute.
+        LOp::VecGet { .. }
+        | LOp::VecSet { .. }
+        | LOp::ElemRef { .. }
+        | LOp::FieldGet { .. }
+        | LOp::FieldSet { .. }
+        | LOp::ElemBack { .. } => return OpOut::Fail,
     }
     OpOut::Fall
 }

@@ -300,7 +300,7 @@ pub(super) fn try_run(ctx: &mut StepCtx, iter: u16, idx: u16, to: u32) -> Result
         if let Some(cached) = plans.get(&head) {
             cached.clone()
         } else {
-            let built = build(ctx.cur, head).map(Arc::new);
+            let built = build(ctx.vm, ctx.cur, head).map(Arc::new);
             plans.insert(head, built.clone());
             built
         }
