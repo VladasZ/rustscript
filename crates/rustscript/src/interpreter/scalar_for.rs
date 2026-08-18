@@ -8,11 +8,12 @@ use std::sync::Arc;
 use anyhow::Result;
 use parking_lot::Mutex;
 
-use super::iterator::IteratorState;
+use super::iterator::{IteratorState, regex_find_span};
 use super::native::Native;
+use super::regex_bridge::{RegexValue, match_value};
 use super::scalar_loop::{LTo, LoopPlan, OpOut, build, eval_op, write_regs};
 use super::scalar_val::SVal;
-use super::value::Value;
+use super::value::{RsStr, Value};
 use super::vm_step::{Flow, StepCtx};
 
 type Handle = Arc<Mutex<Native>>;
@@ -249,6 +250,57 @@ fn values_chunk(
     out(advanced, ChunkState::More)
 }
 
+/// A chunk over `find_iter` matches, each item a `Span` over the locked
+/// source. A failing iteration rewinds the offset to before its match, so
+/// the generic `ForNext` re-pulls the same match through the same shared
+/// span walk.
+fn regex_chunk(
+    plan: &LoopPlan,
+    regs: &mut [SVal],
+    snapshot: &mut Vec<SVal>,
+    regex: &RegexValue,
+    source: &RsStr,
+    offset: &mut usize,
+) -> ChunkOut {
+    snapshot.clear();
+    snapshot.extend_from_slice(regs);
+    let mut items: Vec<SVal> = Vec::new();
+    let mut advanced = 0i64;
+    let out = |advanced, state| ChunkOut { advanced, state };
+    let fail = |regs: &mut [SVal], items: &[SVal], advanced| {
+        replay(plan, regs, snapshot, |k| items[k], items.len());
+        out(advanced, ChunkState::Failed)
+    };
+    for _ in 0..CHUNK {
+        let before = *offset;
+        let Some((start, end)) = regex_find_span(regex, source, offset) else {
+            return out(advanced, ChunkState::Done);
+        };
+        // A span past the u32 range has no slot form, so its iteration
+        // fails over unconsumed and the generic loop binds the real match.
+        let (Ok(start), Ok(end)) = (u32::try_from(start), u32::try_from(end)) else {
+            *offset = before;
+            return fail(regs, &items, advanced);
+        };
+        let item = SVal::Span { start, end };
+        match run_body(plan, regs, item) {
+            BodyOut::Next => {
+                advanced += 1;
+                items.push(item);
+            }
+            BodyOut::Exit => {
+                advanced += 1;
+                return out(advanced, ChunkState::Exited);
+            }
+            BodyOut::Fail => {
+                *offset = before;
+                return fail(regs, &items, advanced);
+            }
+        }
+    }
+    out(advanced, ChunkState::More)
+}
+
 /// If the iterator is a `skip` over a simple vec source, fold the pending
 /// skip into the inner index once and answer the inner handle, so the
 /// chunks run on the source directly. The generic path sees exactly the
@@ -285,7 +337,26 @@ fn usize_i64(v: usize) -> i64 {
     i64::try_from(v).unwrap_or(i64::MAX)
 }
 
-fn write_back(ctx: &mut StepCtx, plan: &LoopPlan, regs: &[SVal], idx: u16, consumed: i64) {
+fn write_back(
+    ctx: &mut StepCtx,
+    plan: &LoopPlan,
+    regs: &[SVal],
+    idx: u16,
+    consumed: i64,
+    match_source: Option<&RsStr>,
+) {
+    // A `Span` slot has no boxed form of its own, `s_value` skips it, so
+    // its register gets the real match value here, source included, exactly
+    // what the generic `ForNext` would have bound.
+    if let Some(source) = match_source {
+        for (slot, sval) in regs.iter().enumerate() {
+            if let SVal::Span { start, end } = *sval {
+                let start = usize::try_from(start).expect("u32 fits usize");
+                let end = usize::try_from(end).expect("u32 fits usize");
+                ctx.put(plan.regs[slot], match_value(source.clone(), start, end));
+            }
+        }
+    }
     write_regs(ctx, &plan.regs, regs);
     ctx.put(idx, Value::Int(consumed));
 }
@@ -313,6 +384,7 @@ pub(super) fn try_run(ctx: &mut StepCtx, iter: u16, idx: u16, to: u32) -> Result
     let mut regs: Vec<SVal> = plan.regs.iter().map(|&r| SVal::of(ctx.get(r))).collect();
     let mut snapshot: Vec<SVal> = Vec::with_capacity(regs.len());
     let mut consumed = 0i64;
+    let mut match_source: Option<RsStr> = None;
     loop {
         let out = {
             let mut native = handle.lock();
@@ -332,6 +404,16 @@ pub(super) fn try_run(ctx: &mut StepCtx, iter: u16, idx: u16, to: u32) -> Result
                     let items = values.lock();
                     values_chunk(&plan, &mut regs, &mut snapshot, &items, index)
                 }
+                Native::Iterator(IteratorState::RegexFind {
+                    regex,
+                    source,
+                    offset,
+                }) => {
+                    if match_source.is_none() {
+                        match_source = Some(source.clone());
+                    }
+                    regex_chunk(&plan, &mut regs, &mut snapshot, regex, source, offset)
+                }
                 _ => ChunkOut {
                     advanced: 0,
                     state: ChunkState::NotSimple,
@@ -342,15 +424,15 @@ pub(super) fn try_run(ctx: &mut StepCtx, iter: u16, idx: u16, to: u32) -> Result
         match out.state {
             ChunkState::NotSimple if consumed == 0 => return Ok(None),
             ChunkState::NotSimple | ChunkState::Failed => {
-                write_back(ctx, &plan, &regs, idx, consumed);
+                write_back(ctx, &plan, &regs, idx, consumed, match_source.as_ref());
                 return Ok(None);
             }
             ChunkState::Done | ChunkState::Exited => {
-                write_back(ctx, &plan, &regs, idx, consumed);
+                write_back(ctx, &plan, &regs, idx, consumed, match_source.as_ref());
                 return Ok(Some(Flow::Jump(to as usize)));
             }
             ChunkState::More => {
-                write_back(ctx, &plan, &regs, idx, consumed);
+                write_back(ctx, &plan, &regs, idx, consumed, match_source.as_ref());
                 ctx.vm.run_pending_ctrlc()?;
             }
         }

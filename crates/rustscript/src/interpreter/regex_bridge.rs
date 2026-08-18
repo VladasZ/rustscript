@@ -57,7 +57,7 @@ fn text_arg(args: &[Value], index: usize) -> RsStr {
     }
 }
 
-fn match_value(source: RsStr, start: usize, end: usize) -> Value {
+pub(super) fn match_value(source: RsStr, start: usize, end: usize) -> Value {
     Native::RegexMatch(MatchValue { source, start, end }).wrap()
 }
 

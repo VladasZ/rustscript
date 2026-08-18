@@ -3,9 +3,10 @@
 
 use super::scalar_loop::{LOp, LTo, MAX_SLOTS, NO_SLOT};
 
-/// The one slot an op writes, for the move-folding pass. Jumps write none,
-/// and neither does a method whose result the compiler discarded.
-fn op_write(op: &LOp) -> Option<u16> {
+/// The one slot an op writes, for the move-folding pass and the try-mask in
+/// `translate`. Jumps write none, and neither does a method whose result
+/// the compiler discarded.
+pub(super) fn op_write(op: &LOp) -> Option<u16> {
     match op {
         LOp::LoadUnit { dst }
         | LOp::LoadInt { dst, .. }
@@ -21,7 +22,15 @@ fn op_write(op: &LOp) -> Option<u16> {
         | LOp::VecGet { dst, .. }
         | LOp::CallSelf { dst, .. }
         | LOp::FieldGet { dst, .. } => Some(*dst),
-        LOp::NumMethod { dst, .. } | LOp::F64From { dst, .. } if *dst != NO_SLOT => Some(*dst),
+        LOp::NumMethod { dst, .. }
+        | LOp::F64From { dst, .. }
+        | LOp::MatchGet { dst, .. }
+        | LOp::IntTryFrom { dst, .. }
+        | LOp::UnwrapOk { dst, .. }
+            if *dst != NO_SLOT =>
+        {
+            Some(*dst)
+        }
         _ => None,
     }
 }
@@ -34,6 +43,9 @@ fn op_reads(op: &LOp, mut read: impl FnMut(u16)) {
         | LOp::Cast { src, .. }
         | LOp::CastF64 { src, .. }
         | LOp::F64From { src, .. }
+        | LOp::MatchGet { recv: src, .. }
+        | LOp::IntTryFrom { src, .. }
+        | LOp::UnwrapOk { src, .. }
         | LOp::Ret { src } => read(*src),
         LOp::Bin { a, b, .. } | LOp::CmpJump { a, b, .. } => {
             read(*a);
@@ -89,6 +101,9 @@ fn set_write(op: &mut LOp, to: u16) {
         | LOp::CastF64 { dst, .. }
         | LOp::F64From { dst, .. }
         | LOp::NumMethod { dst, .. }
+        | LOp::MatchGet { dst, .. }
+        | LOp::IntTryFrom { dst, .. }
+        | LOp::UnwrapOk { dst, .. }
         | LOp::VecGet { dst, .. }
         | LOp::CallSelf { dst, .. }
         | LOp::FieldGet { dst, .. } => *dst = to,

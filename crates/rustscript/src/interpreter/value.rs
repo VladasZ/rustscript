@@ -127,6 +127,22 @@ impl ValueRef {
         }
     }
 
+    /// Run `f` on the referenced slot under its lock, one atomic
+    /// read-modify-write for a fused compound assignment. `None` for a
+    /// dangling reference and for a `Borrowed` view, which has no
+    /// assignable slot, the caller then runs the unfused sequence and gets
+    /// its exact error. `f` must not run user code or lock other values,
+    /// the referent's lock is held across it.
+    pub fn update<T>(&self, f: impl FnOnce(&mut Value) -> T) -> Option<T> {
+        match self {
+            Self::VecElement { values, index } => values.lock().get_mut(*index).map(f),
+            Self::MapEntry { map, key } => map.lock().get_mut(key).map(f),
+            Self::StructField { data, slot } => data.values.lock().get_mut(*slot).map(f),
+            Self::CellSlot { slot } => Some(f(&mut slot.lock())),
+            Self::Borrowed { .. } => None,
+        }
+    }
+
     pub fn set(&self, value: Value) -> bool {
         match self {
             Self::VecElement { values, index } => {

@@ -34,6 +34,18 @@ pub(super) enum SVal {
     /// rounding rules live on the generic path.
     Float(f64),
     Bool(bool),
+    /// A regex match item of a `find_iter` chunk, the span over the locked
+    /// source. Only the `MatchGet` op reads one, everything else fails the
+    /// iteration over to the generic path. The u32 bound keeps the slot
+    /// small, a match past 4 GiB fails over before it becomes an item.
+    Span {
+        start: u32,
+        end: u32,
+    },
+    /// An `Ok(n)` result of a scalar `IntTryFrom`, mirroring
+    /// `Value::ok(Value::Int(n))`. Only `UnwrapOk` reads one, everything
+    /// else fails the iteration over to the generic path.
+    OkInt(i64),
 }
 
 impl SVal {
@@ -53,12 +65,16 @@ impl SVal {
 /// plan never read.
 pub(super) fn s_value(v: SVal) -> Option<Value> {
     match v {
-        SVal::Opaque => None,
+        // A span also answers `None`: it needs its source string, which
+        // only the `scalar_for` runner holds. It materializes every span
+        // before `write_regs` runs, and no other runner can produce one.
+        SVal::Opaque | SVal::Span { .. } => None,
         SVal::Unit => Some(Value::Unit),
         SVal::Int(i) => Some(Value::Int(i)),
         SVal::IntW(s, w) => Some(Value::IntW(s, w)),
         SVal::Float(f) => Some(Value::Float(f)),
         SVal::Bool(b) => Some(Value::Bool(b)),
+        SVal::OkInt(n) => Some(Value::ok(Value::Int(n))),
     }
 }
 
@@ -254,7 +270,7 @@ pub(super) fn s_cast(v: SVal, w: IntWidth) -> Option<SVal> {
         SVal::IntW(s, ww) => truncate(ww.decode(s), w),
         SVal::Float(f) => float_to_int(f, w),
         SVal::Bool(b) => i128::from(b),
-        SVal::Opaque | SVal::Unit => return None,
+        SVal::Opaque | SVal::Unit | SVal::Span { .. } | SVal::OkInt(_) => return None,
     };
     from_i128(value, w)
 }
@@ -267,7 +283,7 @@ pub(super) fn s_cast_f64(v: SVal) -> Option<SVal> {
         SVal::Int(i) => Some(SVal::Float(AsPrimitive::<f64>::as_(i))),
         SVal::IntW(s, w) => Some(SVal::Float(AsPrimitive::<f64>::as_(w.decode(s)))),
         SVal::Float(f) => Some(SVal::Float(f)),
-        SVal::Opaque | SVal::Unit | SVal::Bool(_) => None,
+        SVal::Opaque | SVal::Unit | SVal::Bool(_) | SVal::Span { .. } | SVal::OkInt(_) => None,
     }
 }
 
@@ -284,8 +300,86 @@ pub(super) fn s_f64_from(v: SVal) -> Option<SVal> {
             Some(SVal::Float(AsPrimitive::<f64>::as_(image)))
         }
         SVal::Bool(b) => Some(SVal::Float(if b { 1.0 } else { 0.0 })),
-        SVal::Opaque | SVal::Unit => None,
+        SVal::Opaque | SVal::Unit | SVal::Span { .. } | SVal::OkInt(_) => None,
     }
+}
+
+/// The target range of a scalar integer `T::try_from` call, one variant per
+/// distinct arm of `assoc::int_fits`.
+#[derive(Clone, Copy)]
+pub(super) enum TryFits {
+    I8,
+    I16,
+    I32,
+    U8,
+    U16,
+    U32,
+    NonNeg,
+    Any,
+}
+
+/// The fit check of an integer `T::try_from` target type, mirroring the
+/// type list and the ranges of `assoc::int_fits`.
+pub(super) fn try_fits_of(ty: &str) -> Option<TryFits> {
+    Some(match ty {
+        "i8" => TryFits::I8,
+        "i16" => TryFits::I16,
+        "i32" => TryFits::I32,
+        "u8" => TryFits::U8,
+        "u16" => TryFits::U16,
+        "u32" => TryFits::U32,
+        "u64" | "u128" | "usize" => TryFits::NonNeg,
+        "i64" | "i128" | "isize" => TryFits::Any,
+        _ => return None,
+    })
+}
+
+/// `m.start()` or `m.end()` on a `Span` slot, mirroring the `MatchOut::Int`
+/// arms of `shared::match_core`, which nothing intercepts for a regex match
+/// handle. Any other receiver answers `None` and fails the iteration over
+/// to the generic path, whose own dispatch resolves it.
+pub(super) fn s_match_get(v: SVal, end: bool) -> Option<SVal> {
+    match v {
+        SVal::Span { start, end: stop } => {
+            Some(SVal::Int(i64::from(if end { stop } else { start })))
+        }
+        _ => None,
+    }
+}
+
+/// `.unwrap()` on an `OkInt` slot, mirroring the `unwrap` arm of
+/// `methods::res_method` on an `Ok`. Any other receiver answers `None` and
+/// fails the iteration over to the generic path.
+pub(super) fn s_unwrap_ok(v: SVal) -> Option<SVal> {
+    match v {
+        SVal::OkInt(n) => Some(SVal::Int(n)),
+        _ => None,
+    }
+}
+
+/// A fitting integer `T::try_from(x)`, mirroring the `try_from` arm of
+/// `assoc::conversion_assoc`: `int_from_arg` for the types an `SVal` can
+/// hold, then `int_fits`, then `Value::ok(Value::Int(n))`. A `None` answer,
+/// a value out of range or an argument the conversion rejects, sends the
+/// call to the generic path, which builds the real `Err` or error.
+pub(super) fn s_try_from(fits: TryFits, v: SVal) -> Option<SVal> {
+    let n = match v {
+        SVal::Int(n) => n,
+        SVal::Bool(b) => i64::from(b),
+        SVal::IntW(s, w) => i64::try_from(w.decode(s)).ok()?,
+        _ => return None,
+    };
+    let ok = match fits {
+        TryFits::I8 => i8::try_from(n).is_ok(),
+        TryFits::I16 => i16::try_from(n).is_ok(),
+        TryFits::I32 => i32::try_from(n).is_ok(),
+        TryFits::U8 => u8::try_from(n).is_ok(),
+        TryFits::U16 => u16::try_from(n).is_ok(),
+        TryFits::U32 => u32::try_from(n).is_ok(),
+        TryFits::NonNeg => n >= 0,
+        TryFits::Any => true,
+    };
+    ok.then_some(SVal::OkInt(n))
 }
 
 /// Integer methods a plan may run: pure, scalar in and out, and answered by

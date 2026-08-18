@@ -96,9 +96,9 @@ fn mark_reads(chunk: &Chunk, op: &Op, mark: &mut impl FnMut(u16)) {
         | Op::UniqueIndex { base, key, .. }
         | Op::RefIndex { base, key, .. } => mark_each(mark, [*base, *key]),
         Op::SetIndex { base, key, val } => mark_each(mark, [*base, *key, *val]),
-        Op::SetDeref { target, val } | Op::SetDerefParam { target, val } => {
-            mark_each(mark, [*target, *val]);
-        }
+        Op::SetDeref { target, val }
+        | Op::SetDerefParam { target, val }
+        | Op::DerefBinAssign { target, val, .. } => mark_each(mark, [*target, *val]),
         Op::GetField { base, .. } | Op::UniqueField { base, .. } | Op::RefField { base, .. } => {
             mark(*base);
         }

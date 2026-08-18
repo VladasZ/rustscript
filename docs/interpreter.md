@@ -47,7 +47,10 @@ from any sharing first, so a clone and its source mutate independently at
 every depth while `&mut` borrows still write through to the borrowed place.
 Sharing is observable only through the types real Rust shares with: `Rc`,
 `Arc`, `RefCell`, `Cell`, and `Mutex` are real shared cells, and a write
-through one handle shows through every handle.
+through one handle shows through every handle. A compound assignment
+through a lock guard, `*guard += n`, compiles to one fused op that holds
+the cell's lock across the scalar read-modify-write, so parallel tasks
+adding to a shared counter cannot lose updates.
 
 Strings skip the mutex. A string is a shared `Arc<String>` buffer read
 lock free, and `push` or `push_str` grows it in place when it is the only
@@ -77,6 +80,17 @@ panics where debug Rust panics, and f64 math mirrors the generic float
 paths, NaN comparison semantics included. Any runtime surprise rebuilds
 the registers to the start of the failing iteration and hands that exact
 item to the generic loop, so a fallback is invisible, panic line included.
+
+Regex `find_iter` loops run as such plans too. Each match is an unboxed
+span over the locked source, `m.start()` and `m.end()` read it directly,
+and an integer `T::try_from(x)` whose value fits, plus the `.unwrap()` on
+its result, run as plan ops mirroring the assoc conversion and the
+`Result` method exactly. The chunks pull matches through the same span
+walk the generic iterator uses, and a failing iteration rewinds the
+offset so the generic loop re-pulls the identical match. A value out of
+range, a `Span` used any other way, or a match past the u32 span bound
+all fail the iteration over, so the `Err` value, the unwrap panic, and
+the boxed match a later use needs come from the generic path unchanged.
 
 Scalar `while` and `loop` loops specialize too, in
 `interpreter/scalar_while.rs`. A `LoopHead` op sits right before every

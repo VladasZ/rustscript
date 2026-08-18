@@ -75,6 +75,7 @@ fn build(vm: &Vm, chunk: &Arc<Chunk>) -> Option<FnPlan> {
         exit: chunk.code.len(),
     };
     let mut recursive = false;
+    let mut try_mask = 0u64;
     let mut ops = Vec::with_capacity(chunk.code.len());
     for op in &chunk.code {
         let lop = match op {
@@ -106,7 +107,7 @@ fn build(vm: &Vm, chunk: &Arc<Chunk>) -> Option<FnPlan> {
             Op::Ret { src } => LOp::Ret {
                 src: slot(&mut regs, *src)?,
             },
-            other => translate(vm, chunk, &region, &mut regs, None, other)?,
+            other => translate(vm, chunk, &region, &mut regs, None, &mut try_mask, other)?,
         };
         ops.push(lop);
     }

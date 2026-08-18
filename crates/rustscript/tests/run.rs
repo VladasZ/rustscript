@@ -1062,3 +1062,35 @@ async fn main() {
 "#);
     assert_eq!(out, "xy\n");
 }
+
+#[test]
+fn tokio_mutex_concurrent_compound_assign() {
+    // Eight parallel tasks each add to one shared counter. A compound
+    // assignment through the guard that reads and writes the slot as two
+    // separate steps loses updates under this load, which is what the
+    // fused `DerefBinAssign` op prevents.
+    let out = run(r#"
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+#[tokio::main]
+async fn main() {
+    let shared = Arc::new(Mutex::new(0i64));
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let m = Arc::clone(&shared);
+        handles.push(tokio::spawn(async move {
+            for _ in 0..500 {
+                let mut guard = m.lock().await;
+                *guard += 1;
+            }
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+    println!("total {}", *shared.lock().await);
+}
+"#);
+    assert_eq!(out, "total 4000\n");
+}

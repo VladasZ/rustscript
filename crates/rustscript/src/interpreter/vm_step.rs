@@ -171,6 +171,7 @@ pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
         | Op::SetDerefParam { .. }
         | Op::GetField { .. }
         | Op::SetField { .. } => access_step(ctx, op)?,
+        Op::DerefBinAssign { target, val, op } => deref_bin_assign(ctx, *target, *val, *op)?,
         Op::UniqueReg { .. }
         | Op::UniqueField { .. }
         | Op::UniqueIndex { .. }
@@ -911,6 +912,62 @@ fn set_deref(ctx: &StepCtx, target: u16, val: u16) -> Result<Flow> {
         bail!("assignment through a non-reference value");
     };
     if !reference.set(ctx.get(val).clone()) {
+        bail!("assignment through a dangling reference");
+    }
+    Ok(Flow::Next)
+}
+
+/// A value a fused compound assignment may read and write under the
+/// referent's held lock: `apply_bin` on these is pure, it takes no lock and
+/// runs no user code, and `user_op_type` never answers for them, so the
+/// generic `Bin` op computes the identical result.
+fn fusable_scalar(v: &Value) -> bool {
+    matches!(
+        v,
+        Value::Int(_) | Value::IntW(..) | Value::Float(_) | Value::F32(_) | Value::Bool(_)
+    )
+}
+
+/// `DerefBinAssign`: `*r op= v` as one op. When the slot and the operand
+/// are both plain scalars the read-modify-write runs under the referent's
+/// lock, so concurrent compound assignments through a shared cell, a tokio
+/// mutex guard for one, cannot lose updates. Everything else runs the exact
+/// sequence the unfused `Deref`, `Bin`, `SetDeref` ops ran, errors and
+/// their order included.
+fn deref_bin_assign(
+    ctx: &mut StepCtx,
+    target: u16,
+    val: u16,
+    op: super::bytecode::BinKind,
+) -> Result<Flow> {
+    if let Value::Ref(reference) = ctx.get(target)
+        && fusable_scalar(ctx.get(val))
+    {
+        let reference = reference.clone();
+        let b = ctx.get(val).clone();
+        let fused = reference.update(|current| {
+            if !fusable_scalar(current) {
+                return Ok(false);
+            }
+            *current = apply_bin(op, current, &b)?;
+            Ok(true)
+        });
+        match fused {
+            Some(Ok(true)) => return Ok(Flow::Next),
+            Some(Err(e)) => return Err(e),
+            Some(Ok(false)) | None => {}
+        }
+    }
+    let current = deref(ctx.get(target))?;
+    let b = ctx.get(val).clone();
+    let result = match user_bin(ctx, op, &current, &b)? {
+        Some(v) => v,
+        None => apply_bin(op, &current, &b)?,
+    };
+    let Value::Ref(reference) = ctx.get(target) else {
+        bail!("assignment through a non-reference value");
+    };
+    if !reference.set(result) {
         bail!("assignment through a dangling reference");
     }
     Ok(Flow::Next)

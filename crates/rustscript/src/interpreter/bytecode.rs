@@ -835,6 +835,15 @@ pub enum Op {
         target: Reg,
         val: Reg,
     },
+    /// A compound assignment through a dereference, `*r op= v`. Fused into
+    /// one op so a scalar read-modify-write can hold the referent's lock
+    /// once, which keeps concurrent compound assignments through a shared
+    /// cell from losing updates, see `deref_bin_assign`.
+    DerefBinAssign {
+        target: Reg,
+        val: Reg,
+        op: BinKind,
+    },
     /// `*param = v` where `param` is a `&mut` function parameter. Sets
     /// through a real reference when the register holds one, otherwise
     /// writes the register itself, which the caller's `&mut` arg writeback
