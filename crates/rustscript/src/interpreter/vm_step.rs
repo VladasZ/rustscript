@@ -4,6 +4,7 @@
 //! stays in `exec`, the op bodies live here.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::iter::repeat_n;
 use std::mem::take;
 use std::slice::from_ref;
@@ -93,10 +94,19 @@ impl StepCtx<'_> {
         }
     }
 
-    pub(super) fn cell(&self, reg: u16) -> Result<&Arc<Mutex<Value>>> {
-        self.local_cells
-            .get(&(self.base + reg as usize))
-            .ok_or_else(|| anyhow!("missing mutable capture cell"))
+    /// The cell a mutably captured local lives in, built on first use.
+    /// The local keeps living in its register until some closure captures
+    /// it, so a branch that never runs leaves no cell behind and the first
+    /// read or write that lands here builds one from the register.
+    pub(super) fn cell(&mut self, reg: u16) -> &Arc<Mutex<Value>> {
+        let slot = self.base + reg as usize;
+        match self.local_cells.entry(slot) {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => {
+                let value = self.stack[slot].clone();
+                e.insert(Arc::new(Mutex::new(value)))
+            }
+        }
     }
 
     /// Move a run of registers out of the frame, `first` relative to `base`.
@@ -115,8 +125,9 @@ pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
         Op::LoadUnit { dst } => ctx.set(*dst, Value::Unit),
         Op::LoadGlobal { dst, idx } => ctx.set(*dst, ctx.vm.global(*idx as usize)?),
         Op::LoadUpvalue { dst, idx } => ctx.set(*dst, ctx.upvalues()[*idx as usize].get()),
-        Op::LoadCell { dst, cell } => load_cell(ctx, *dst, *cell)?,
-        Op::StoreCell { cell, src } => store_cell(ctx, *cell, *src)?,
+        Op::LoadCell { dst, cell } => load_cell(ctx, *dst, *cell),
+        Op::StoreCell { cell, src } => store_cell(ctx, *cell, *src),
+        Op::DropCell { cell } => drop_cell(ctx, *cell),
         Op::StoreUpvalue { idx, src } => store_upvalue(ctx, *idx, *src)?,
         Op::Move { dst, src } => ctx.set(*dst, ctx.get(*src).clone()),
         Op::Bin { dst, a, b, op } => bin_op(ctx, *dst, *a, *b, *op)?,
@@ -353,7 +364,7 @@ fn place_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
         Op::UniqueReg { reg } => unique_reg(ctx, *reg),
         Op::UniqueField { dst, base, member } => unique_field(ctx, *dst, *base, *member)?,
         Op::UniqueIndex { dst, base, key } => unique_index(ctx, *dst, *base, *key)?,
-        Op::UniqueCell { dst, cell } => unique_cell(ctx, *dst, *cell)?,
+        Op::UniqueCell { dst, cell } => unique_cell(ctx, *dst, *cell),
         Op::UniqueUpvalue { dst, idx } => unique_upvalue(ctx, *dst, *idx),
         Op::RefIndex { dst, base, key } => ref_index(ctx, *dst, *base, *key)?,
         Op::RefField { dst, base, member } => ref_field(ctx, *dst, *base, *member)?,
@@ -486,14 +497,23 @@ fn loop_head(ctx: &mut StepCtx, jump: u32) -> Result<Flow> {
     Ok(Flow::Next)
 }
 
-fn load_cell(ctx: &mut StepCtx, dst: u16, cell: u16) -> Result<Flow> {
-    let v = ctx.cell(cell)?.lock().clone();
-    Ok(ctx.set(dst, v))
+fn load_cell(ctx: &mut StepCtx, dst: u16, cell: u16) -> Flow {
+    let v = ctx.cell(cell).lock().clone();
+    ctx.set(dst, v)
 }
 
-fn store_cell(ctx: &StepCtx, cell: u16, src: u16) -> Result<Flow> {
-    *ctx.cell(cell)?.lock() = ctx.get(src).clone();
-    Ok(Flow::Next)
+fn store_cell(ctx: &mut StepCtx, cell: u16, src: u16) -> Flow {
+    let v = ctx.get(src).clone();
+    *ctx.cell(cell).lock() = v;
+    Flow::Next
+}
+
+/// A binding of a mutably captured local starts a new variable, so the cell
+/// the last one shared is forgotten here. The register still holds the new
+/// value, and the next read, write, or capture builds the cell from it.
+fn drop_cell(ctx: &mut StepCtx, cell: u16) -> Flow {
+    ctx.local_cells.remove(&(ctx.base + cell as usize));
+    Flow::Next
 }
 
 fn store_upvalue(ctx: &StepCtx, idx: u16, src: u16) -> Result<Flow> {
@@ -825,16 +845,7 @@ fn make_closure(ctx: &mut StepCtx, child: u16) -> Arc<ClosureData> {
             CapSource::Upvalue(idx) | CapSource::MutableUpvalue(idx) => {
                 ctx.upvalues()[*idx as usize].clone()
             }
-            CapSource::MutableLocal(reg) => {
-                let slot = ctx.base + *reg as usize;
-                let value = ctx.stack[slot].clone();
-                let cell = ctx
-                    .local_cells
-                    .entry(slot)
-                    .or_insert_with(|| Arc::new(Mutex::new(value)))
-                    .clone();
-                Upvalue::Mutable(cell)
-            }
+            CapSource::MutableLocal(reg) => Upvalue::Mutable(ctx.cell(*reg).clone()),
         })
         .collect();
     Arc::new(ClosureData {
@@ -1084,14 +1095,14 @@ fn unique_index(ctx: &mut StepCtx, dst: u16, base: u16, key: u16) -> Result<Flow
     Ok(ctx.set(dst, v))
 }
 
-fn unique_cell(ctx: &mut StepCtx, dst: u16, cell: u16) -> Result<Flow> {
-    let cell = ctx.cell(cell)?.clone();
+fn unique_cell(ctx: &mut StepCtx, dst: u16, cell: u16) -> Flow {
+    let cell = ctx.cell(cell).clone();
     let v = {
         let mut slot = cell.lock();
         slot.make_unique();
         slot.clone()
     };
-    Ok(ctx.set(dst, v))
+    ctx.set(dst, v)
 }
 
 fn unique_upvalue(ctx: &mut StepCtx, dst: u16, idx: u16) -> Flow {

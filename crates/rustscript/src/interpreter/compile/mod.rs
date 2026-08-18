@@ -4,6 +4,7 @@
 //! and the common macros are lowered inline.
 
 use std::collections::{HashMap, HashSet};
+use std::mem::take;
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
@@ -68,6 +69,12 @@ struct FnState {
     child_caps: Vec<Vec<CapSource>>,
     upvalues: Vec<(String, CapSource)>,
     mutable_locals: HashSet<Reg>,
+    /// Every binding site in the frame, as the code position the binding
+    /// takes effect at and the register it binds. Whether a register needs
+    /// a capture cell is only known once the whole frame is compiled, so the
+    /// sites are collected here and `into_chunk` turns the ones that do into
+    /// `DropCell` ops.
+    binding_sites: Vec<(usize, Reg)>,
     /// Parameters that arrived as `&T` or `&mut T`. A mutable access through
     /// one must not split its storage, the caller's place shares it and the
     /// caller made it unique before the call.
@@ -111,6 +118,7 @@ impl FnState {
             child_caps: Vec::new(),
             upvalues: Vec::new(),
             mutable_locals: HashSet::new(),
+            binding_sites: Vec::new(),
             borrow_params: HashSet::new(),
             aliases: HashMap::default(),
             scopes: vec![HashMap::default()],
@@ -135,13 +143,69 @@ impl FnState {
         self.upvalues.iter().position(|(n, _)| n == name).map(idx16)
     }
 
-    fn into_chunk(self, file: std::sync::Arc<str>) -> Chunk {
+    /// Put a `DropCell` in front of every binding of a mutably captured
+    /// local. The op is inserted rather than reserved up front, because the
+    /// binding compiles long before the closure that makes the capture
+    /// mutable, so every jump target past an insertion shifts with it. A
+    /// jump keeps pointing at the op it always pointed at, never at an
+    /// inserted `DropCell`, so only the fall through from the binding above
+    /// it reaches one.
+    fn insert_cell_drops(&mut self) -> Result<()> {
+        let mut sites: Vec<(usize, Reg)> = self
+            .binding_sites
+            .iter()
+            .copied()
+            .filter(|(_, reg)| self.mutable_locals.contains(reg))
+            .collect();
+        if sites.is_empty() {
+            return Ok(());
+        }
+        sites.sort_unstable();
+        let mut code = Vec::with_capacity(self.code.len() + sites.len());
+        let mut lines = Vec::with_capacity(self.lines.len() + sites.len());
+        // Position each old op lands at, one entry longer than the code so a
+        // jump to the end of the frame remaps too.
+        let mut moved = Vec::with_capacity(self.code.len() + 1);
+        let mut next = 0;
+        for (at, op) in take(&mut self.code).into_iter().enumerate() {
+            while sites.get(next).is_some_and(|(site, _)| *site == at) {
+                code.push(Op::DropCell {
+                    cell: sites[next].1,
+                });
+                lines.push(self.lines[at]);
+                next += 1;
+            }
+            moved.push(u32::try_from(code.len())?);
+            code.push(op);
+            lines.push(self.lines[at]);
+        }
+        moved.push(u32::try_from(code.len())?);
+        for op in &mut code {
+            match op {
+                Op::Jump { to: t }
+                | Op::JumpIfFalse { to: t, .. }
+                | Op::JumpIfTrue { to: t, .. }
+                | Op::CmpJump { to: t, .. }
+                | Op::CmpJumpImm { to: t, .. }
+                | Op::ForNext { to: t, .. }
+                | Op::TryJump { to: t, .. }
+                | Op::LoopHead { jump: t } => *t = moved[*t as usize],
+                _ => {}
+            }
+        }
+        self.code = code;
+        self.lines = lines;
+        Ok(())
+    }
+
+    fn into_chunk(mut self, file: std::sync::Arc<str>) -> Result<Chunk> {
+        self.insert_cell_drops()?;
         let while_rejected = self
             .code
             .iter()
             .map(|_| std::sync::atomic::AtomicU8::new(0))
             .collect();
-        Chunk {
+        Ok(Chunk {
             code: self.code,
             lines: self.lines,
             file,
@@ -171,7 +235,7 @@ impl FnState {
             while_rejected,
             fn_plan: Mutex::new(None),
             fn_rejected: std::sync::atomic::AtomicU8::new(0),
-        }
+        })
     }
 }
 
@@ -423,7 +487,7 @@ impl<'a> Compiler<'a> {
         // run before the frame returns.
         self.emit_scope_drops(1);
         self.emit(Op::Ret { src: ret });
-        Ok(self.finish_chunk())
+        self.finish_chunk()
     }
 
     /// Compile a const or static initializer expression into a chunk.
@@ -432,13 +496,17 @@ impl<'a> Compiler<'a> {
         let ret = self.alloc();
         self.compile_into(ret, expr)?;
         self.emit(Op::Ret { src: ret });
-        Ok(self.finish_chunk())
+        self.finish_chunk()
     }
 
-    fn finish_chunk(&mut self) -> Chunk {
-        let mut chunk = self.frames.pop().unwrap().into_chunk(self.ctx.file.clone());
+    fn finish_chunk(&mut self) -> Result<Chunk> {
+        let mut chunk = self
+            .frames
+            .pop()
+            .unwrap()
+            .into_chunk(self.ctx.file.clone())?;
         chunk.module = idx16(self.ctx.module);
-        chunk
+        Ok(chunk)
     }
 
     // -- frame helpers -----------------------------------------------------
@@ -492,6 +560,7 @@ impl<'a> Compiler<'a> {
         f.aliases.remove(name);
         f.scopes.last_mut().unwrap().insert(name.to_string(), reg);
         f.scope_order.last_mut().unwrap().push(reg);
+        f.binding_sites.push((f.code.len(), reg));
     }
 
     /// Emit the `Drop` run for the innermost `depth` open scopes, innermost

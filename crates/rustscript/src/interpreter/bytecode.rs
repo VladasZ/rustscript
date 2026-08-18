@@ -647,6 +647,13 @@ pub enum Op {
         cell: Reg,
         src: Reg,
     },
+    /// Forget the capture cell of a mutably captured local, so the next use
+    /// builds a fresh one from the register. Sits at every binding site of
+    /// such a local, which is what makes a `let` inside a loop bind a new
+    /// variable each iteration instead of writing on the last one's cell.
+    DropCell {
+        cell: Reg,
+    },
     StoreUpvalue {
         idx: u16,
         src: Reg,

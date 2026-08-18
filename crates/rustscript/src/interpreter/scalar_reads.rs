@@ -35,7 +35,12 @@ fn mark_reads(chunk: &Chunk, op: &Op, mark: &mut impl FnMut(u16)) {
         | Op::UniqueUpvalue { .. }
         | Op::Jump { .. }
         | Op::LoopHead { .. } => {}
-        Op::LoadCell { cell, .. } | Op::UniqueCell { cell, .. } => mark(*cell),
+        // `DropCell` touches no register itself, but it sends the next read
+        // of the local back to the register, so the write that fills it is
+        // not dead.
+        Op::LoadCell { cell, .. } | Op::UniqueCell { cell, .. } | Op::DropCell { cell } => {
+            mark(*cell);
+        }
         Op::StoreCell { cell, src } => mark_each(mark, [*cell, *src]),
         Op::StoreUpvalue { src, .. }
         | Op::Move { src, .. }
@@ -80,17 +85,9 @@ fn mark_reads(chunk: &Chunk, op: &Op, mark: &mut impl FnMut(u16)) {
         Op::MakeArrayRepeat { val, count, .. } => mark_each(mark, [*val, *count]),
         Op::MakeRange { start, end, .. } => mark_each(mark, [*start, *end]),
         Op::ForNext { iter, idx, .. } => mark_each(mark, [*iter, *idx]),
-        Op::MakeStruct { info, base, .. } => {
-            let lit = &chunk.struct_lits[*info as usize];
-            let count = lit.shape.fields.len() + usize::from(lit.has_rest);
-            mark_range(mark, *base, u16::try_from(count).unwrap_or(u16::MAX));
-        }
+        Op::MakeStruct { info, base, .. } => mark_struct(chunk, mark, *info, *base),
         Op::MakeClosure { child, .. } | Op::Spawn { child, .. } => {
-            for cap in &chunk.child_caps[*child as usize] {
-                if let CapSource::Local(reg) | CapSource::MutableLocal(reg) = cap {
-                    mark(*reg);
-                }
-            }
+            mark_captures(chunk, mark, *child);
         }
         Op::Index { base, key, .. }
         | Op::UniqueIndex { base, key, .. }
@@ -104,22 +101,44 @@ fn mark_reads(chunk: &Chunk, op: &Op, mark: &mut impl FnMut(u16)) {
         }
         Op::SetField { base, val, .. } => mark_each(mark, [*base, *val]),
         Op::UniqueReg { reg } => mark(*reg),
-        Op::DropScope { list } => {
-            for reg in chunk.drop_lists[*list as usize].iter() {
-                mark(*reg);
-            }
-        }
+        Op::DropScope { list } => mark_drop_list(chunk, mark, *list),
         Op::TestBind { val, .. } => mark(*val),
-        Op::Fmt { spec, .. } | Op::MacroCall { spec, .. } => {
-            let fmt = &chunk.fmts[*spec as usize];
-            for reg in fmt
-                .positional
-                .iter()
-                .chain(fmt.named.iter().map(|(_, r)| r))
-            {
-                mark(*reg);
-            }
+        Op::Fmt { spec, .. } | Op::MacroCall { spec, .. } => mark_fmt(chunk, mark, *spec),
+    }
+}
+
+/// Mark the field window a struct literal builds from.
+fn mark_struct(chunk: &Chunk, mark: &mut impl FnMut(u16), info: u16, base: u16) {
+    let lit = &chunk.struct_lits[info as usize];
+    let count = lit.shape.fields.len() + usize::from(lit.has_rest);
+    mark_range(mark, base, u16::try_from(count).unwrap_or(u16::MAX));
+}
+
+/// Mark the locals a closure or task chunk captures from this frame.
+fn mark_captures(chunk: &Chunk, mark: &mut impl FnMut(u16), child: u16) {
+    for cap in &chunk.child_caps[child as usize] {
+        if let CapSource::Local(reg) | CapSource::MutableLocal(reg) = cap {
+            mark(*reg);
         }
+    }
+}
+
+/// Mark the bindings a scope end runs `Drop` on.
+fn mark_drop_list(chunk: &Chunk, mark: &mut impl FnMut(u16), list: u16) {
+    for reg in chunk.drop_lists[list as usize].iter() {
+        mark(*reg);
+    }
+}
+
+/// Mark the arguments a format spec reads, positional and named alike.
+fn mark_fmt(chunk: &Chunk, mark: &mut impl FnMut(u16), spec: u16) {
+    let fmt = &chunk.fmts[spec as usize];
+    for reg in fmt
+        .positional
+        .iter()
+        .chain(fmt.named.iter().map(|(_, r)| r))
+    {
+        mark(*reg);
     }
 }
 
