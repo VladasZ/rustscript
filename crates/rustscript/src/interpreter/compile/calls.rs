@@ -593,7 +593,7 @@ impl Compiler<'_> {
         self.emit(Op::Ret { src: ret });
         let child = self.frames.pop().unwrap();
         let caps: Vec<CapSource> = child.upvalues.iter().map(|(_, s)| *s).collect();
-        let mut chunk = child.into_chunk(self.ctx.file.clone());
+        let mut chunk = child.into_chunk(self.ctx.file.clone())?;
         chunk.module = idx16(self.ctx.module);
         let parent = self.cur();
         let child_idx = idx16(parent.children.len());
@@ -663,7 +663,7 @@ impl Compiler<'_> {
         self.emit(Op::Ret { src: ret });
         let child = self.frames.pop().unwrap();
         let caps: Vec<CapSource> = child.upvalues.iter().map(|(_, s)| *s).collect();
-        let mut chunk = child.into_chunk(self.ctx.file.clone());
+        let mut chunk = child.into_chunk(self.ctx.file.clone())?;
         chunk.module = idx16(self.ctx.module);
         let chunk = Arc::new(chunk);
         let parent = self.cur();
