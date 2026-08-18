@@ -73,7 +73,7 @@ fn op_reads(op: &LOp, mut read: impl FnMut(u16)) {
             read(*idx);
             read(*val);
         }
-        LOp::FieldSet { val, .. } => read(*val),
+        LOp::VecPush { val, .. } | LOp::FieldSet { val, .. } => read(*val),
         LOp::LoadUnit { .. }
         | LOp::LoadInt { .. }
         | LOp::LoadIntW { .. }
