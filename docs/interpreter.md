@@ -204,6 +204,22 @@ loop's call depth cap sits, polls Ctrl-C mid-run, and a function that
 does not qualify records that in one atomic flag, so its calls pay one
 load each.
 
+Recursive enums run inside those plans too, the binary-trees shape of
+`Tree::Node(Box::new(l), Box::new(r))` built and folded by self-recursive
+functions. A constructed value goes into a run-local boxed table and its
+slot only names the entry, `Box::new` is the identity its bridge is, and
+a match against a unit variant or a tuple variant of plain bindings
+tests the variant name and binds the payload straight out of the locked
+storage, scalars unboxed and subtrees as new table entries, mirroring
+the enum arms of the generic `try_bind`. A payload argument is moved in
+real Rust, so construction takes the consumed entry instead of cloning
+it, and a unit variant clones one prebuilt value, whose empty payload a
+mutation would split from anyway. An enum argument crosses into the plan
+the same way, and a returned entry leaves the table as the call's boxed
+result. A non-enum value under a variant test, a pattern outside the
+subset, or a payload the slots cannot hold fails the run over to the
+generic path unchanged, the exhaustive-match fallthrough panic included.
+
 ## No second type system
 
 The interpreter does not type check. `rustc` stays responsible for type,
