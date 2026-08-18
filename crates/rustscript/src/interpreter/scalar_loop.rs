@@ -22,22 +22,27 @@
 //! exact op and line the generic path panics on.
 //!
 //! This module holds the shared machinery: the plan IR, its translation
-//! from bytecode, the move-folding cleanup, and the op evaluator. The
-//! runners live in `scalar_for` and `scalar_while`.
+//! from bytecode, and the op evaluator. The move-folding cleanup lives in
+//! `scalar_fold`, and the runners in `scalar_for`, `scalar_while`, and
+//! `scalar_fn`.
 
 use super::bytecode::{BinKind, Chunk, Const, Member, Op, UnKind};
 use super::numeric::IntWidth;
+use super::scalar_fold::fold_moves;
 use super::scalar_reads::chunk_reads;
 use super::scalar_val::{
     SVal, s_bin, s_cast, s_cast_f64, s_cmp, s_f64_from, s_float_method, s_int_method, s_un,
-    s_value, truthy,
+    s_value, scalar_float_method, scalar_int_method, truthy,
 };
 use super::typeir::CastIr;
 use super::vm::Vm;
 use super::vm_step::StepCtx;
 
 /// Register cap per plan, bounding the entry load and writeback cost.
-const MAX_SLOTS: usize = 64;
+pub(super) const MAX_SLOTS: usize = 64;
+
+/// Argument slots a plan's self call carries, see `scalar_fn`.
+pub(super) const MAX_CALL_ARGS: usize = 4;
 
 /// The plan slot sentinel for a discarded result, and the `val_slot` of a
 /// while plan, which has no item register. No real slot reaches it, the
@@ -195,65 +200,17 @@ pub(super) enum LOp {
     /// once at entry, so per-write splits inside the loop have nothing to
     /// do, but the op keeps its position for jump targets.
     Nop,
-}
-
-/// Integer methods a plan may run: pure, scalar in and out, and answered by
-/// `int_method` for every integer receiver, so the plan call and the generic
-/// call hit the same table. Names the table rejects at runtime, `abs` on an
-/// unsigned width for one, fail the iteration over to the generic path.
-fn scalar_int_method(name: &str) -> bool {
-    matches!(
-        name,
-        "is_multiple_of"
-            | "min"
-            | "max"
-            | "clamp"
-            | "abs"
-            | "signum"
-            | "pow"
-            | "isqrt"
-            | "div_euclid"
-            | "rem_euclid"
-            | "saturating_add"
-            | "saturating_sub"
-            | "saturating_mul"
-            | "wrapping_add"
-            | "wrapping_sub"
-            | "wrapping_mul"
-            | "wrapping_neg"
-            | "count_ones"
-            | "count_zeros"
-            | "leading_zeros"
-            | "trailing_zeros"
-            | "rotate_left"
-            | "rotate_right"
-            | "swap_bytes"
-            | "reverse_bits"
-    )
-}
-
-/// Float methods a plan may run on an f64 receiver: pure, scalar in and
-/// out, and answered by `s_float_method`, which mirrors the float arms of
-/// `shared::num_core`.
-fn scalar_float_method(name: &str) -> bool {
-    matches!(
-        name,
-        "sqrt"
-            | "floor"
-            | "ceil"
-            | "round"
-            | "trunc"
-            | "fract"
-            | "recip"
-            | "powi"
-            | "powf"
-            | "mul_add"
-            | "is_nan"
-            | "is_finite"
-            | "is_infinite"
-            | "is_sign_positive"
-            | "is_sign_negative"
-    )
+    /// A recursive call back into the same function plan, run by the
+    /// `scalar_fn` runner on its own frame stack.
+    CallSelf {
+        dst: u16,
+        args: [u16; MAX_CALL_ARGS],
+        argc: u8,
+    },
+    /// A function body's `Ret`, only in function plans, see `scalar_fn`.
+    Ret {
+        src: u16,
+    },
 }
 
 pub struct LoopPlan {
@@ -268,7 +225,7 @@ pub struct LoopPlan {
     pub(super) straight: bool,
 }
 
-fn slot(regs: &mut Vec<u16>, r: u16) -> Option<u16> {
+pub(super) fn slot(regs: &mut Vec<u16>, r: u16) -> Option<u16> {
     if let Some(i) = regs.iter().position(|&x| x == r) {
         return u16::try_from(i).ok();
     }
@@ -582,195 +539,6 @@ fn translate_vec(
     })
 }
 
-/// The one slot an op writes, for the move-folding pass. Jumps write none,
-/// and neither does a method whose result the compiler discarded.
-fn op_write(op: &LOp) -> Option<u16> {
-    match op {
-        LOp::LoadUnit { dst }
-        | LOp::LoadInt { dst, .. }
-        | LOp::LoadIntW { dst, .. }
-        | LOp::LoadFloat { dst, .. }
-        | LOp::LoadBool { dst, .. }
-        | LOp::Move { dst, .. }
-        | LOp::Bin { dst, .. }
-        | LOp::BinImm { dst, .. }
-        | LOp::Un { dst, .. }
-        | LOp::Cast { dst, .. }
-        | LOp::CastF64 { dst, .. }
-        | LOp::VecGet { dst, .. }
-        | LOp::FieldGet { dst, .. } => Some(*dst),
-        LOp::NumMethod { dst, .. } | LOp::F64From { dst, .. } if *dst != NO_SLOT => Some(*dst),
-        _ => None,
-    }
-}
-
-/// Every slot an op reads, for the move-folding pass.
-fn op_reads(op: &LOp, mut read: impl FnMut(u16)) {
-    match op {
-        LOp::Move { src, .. }
-        | LOp::Un { a: src, .. }
-        | LOp::Cast { src, .. }
-        | LOp::CastF64 { src, .. }
-        | LOp::F64From { src, .. } => read(*src),
-        LOp::Bin { a, b, .. } | LOp::CmpJump { a, b, .. } => {
-            read(*a);
-            read(*b);
-        }
-        LOp::BinImm { a, .. } | LOp::CmpJumpImm { a, .. } => read(*a),
-        LOp::JumpIfFalse { cond, .. } | LOp::JumpIfTrue { cond, .. } => read(*cond),
-        LOp::NumMethod {
-            recv, args, argc, ..
-        } => {
-            read(*recv);
-            for arg in &args[..usize::from(*argc)] {
-                read(*arg);
-            }
-        }
-        LOp::VecGet { idx, .. } | LOp::ElemRef { idx, .. } | LOp::ElemBack { idx, .. } => {
-            read(*idx);
-        }
-        LOp::VecSet { idx, val, .. } => {
-            read(*idx);
-            read(*val);
-        }
-        LOp::FieldSet { val, .. } => read(*val),
-        LOp::LoadUnit { .. }
-        | LOp::LoadInt { .. }
-        | LOp::LoadIntW { .. }
-        | LOp::LoadFloat { .. }
-        | LOp::LoadBool { .. }
-        | LOp::FieldGet { .. }
-        | LOp::Jump { .. }
-        | LOp::Nop => {}
-    }
-}
-
-/// Retarget an op's write, for the move-folding pass.
-fn set_write(op: &mut LOp, to: u16) {
-    match op {
-        LOp::LoadUnit { dst }
-        | LOp::LoadInt { dst, .. }
-        | LOp::LoadIntW { dst, .. }
-        | LOp::LoadFloat { dst, .. }
-        | LOp::LoadBool { dst, .. }
-        | LOp::Move { dst, .. }
-        | LOp::Bin { dst, .. }
-        | LOp::BinImm { dst, .. }
-        | LOp::Un { dst, .. }
-        | LOp::Cast { dst, .. }
-        | LOp::CastF64 { dst, .. }
-        | LOp::F64From { dst, .. }
-        | LOp::NumMethod { dst, .. }
-        | LOp::VecGet { dst, .. }
-        | LOp::FieldGet { dst, .. } => *dst = to,
-        _ => unreachable!("only value ops fold"),
-    }
-}
-
-/// Fold `op -> Move` pairs where the op's destination is an expression
-/// temporary: written only by that op and read only by that move. The
-/// compiler never reuses a register, so such a temporary is dead once the
-/// move consumed it, and the producing op can write the move's destination
-/// directly. Also drops constant loads into registers nothing in the whole
-/// chunk reads, the per-statement unit results. Runs to a fixpoint so a
-/// chain of moves collapses.
-pub(super) fn fold_moves(
-    ops: &mut Vec<LOp>,
-    val_slot: u16,
-    frame_read: &[bool],
-    slot_regs: &[u16],
-) {
-    loop {
-        let mut writes = vec![0u32; MAX_SLOTS];
-        let mut reads = vec![0u32; MAX_SLOTS];
-        let mut targets = vec![false; ops.len() + 1];
-        for op in ops.iter() {
-            if let Some(dst) = op_write(op) {
-                writes[usize::from(dst)] += 1;
-            }
-            op_reads(op, |r| reads[usize::from(r)] += 1);
-            let jump_to = match op {
-                LOp::Jump { to }
-                | LOp::JumpIfFalse { to, .. }
-                | LOp::JumpIfTrue { to, .. }
-                | LOp::CmpJump { to, .. }
-                | LOp::CmpJumpImm { to, .. } => Some(to),
-                _ => None,
-            };
-            if let Some(LTo::Op(t)) = jump_to {
-                targets[*t as usize] = true;
-            }
-        }
-        let foldable = |i: usize, ops: &[LOp]| {
-            let LOp::Move { dst, src } = ops[i + 1] else {
-                return None;
-            };
-            let temp = op_write(&ops[i])?;
-            let ok = temp == src
-                && temp != dst
-                && temp != val_slot
-                && writes[usize::from(temp)] == 1
-                && reads[usize::from(temp)] == 1
-                && !targets[i + 1];
-            ok.then_some(dst)
-        };
-        if let Some((at, dst)) =
-            (0..ops.len().saturating_sub(1)).find_map(|i| foldable(i, ops).map(|dst| (i, dst)))
-        {
-            set_write(&mut ops[at], dst);
-            remove_op(ops, at + 1);
-            continue;
-        }
-        // A constant load into a register nothing in the plan and nothing in
-        // the whole chunk reads is a dead store, the per-statement unit
-        // results. Jumps that targeted it run its successor, which is what
-        // executing a dead store followed by the successor did.
-        let dead = |i: &usize| {
-            let op = &ops[*i];
-            let constant = matches!(
-                op,
-                LOp::LoadUnit { .. }
-                    | LOp::LoadInt { .. }
-                    | LOp::LoadIntW { .. }
-                    | LOp::LoadFloat { .. }
-                    | LOp::LoadBool { .. }
-            );
-            constant
-                && op_write(op).is_some_and(|dst| {
-                    reads[usize::from(dst)] == 0
-                        && !frame_read
-                            .get(usize::from(slot_regs[usize::from(dst)]))
-                            .copied()
-                            .unwrap_or(true)
-                })
-        };
-        let Some(at) = (0..ops.len()).find(dead) else {
-            return;
-        };
-        remove_op(ops, at);
-    }
-}
-
-/// Remove one op, sliding every jump target past it down one.
-fn remove_op(ops: &mut Vec<LOp>, at: usize) {
-    ops.remove(at);
-    for op in ops.iter_mut() {
-        let (LOp::Jump { to }
-        | LOp::JumpIfFalse { to, .. }
-        | LOp::JumpIfTrue { to, .. }
-        | LOp::CmpJump { to, .. }
-        | LOp::CmpJumpImm { to, .. }) = op
-        else {
-            continue;
-        };
-        if let LTo::Op(t) = to
-            && *t as usize > at
-        {
-            *to = LTo::Op(*t - 1);
-        }
-    }
-}
-
 /// Translate the body of the `for` loop whose `ForNext` sits at `head`, or
 /// answer None when any op falls outside the subset.
 pub(super) fn build(vm: &Vm, chunk: &Chunk, head: usize) -> Option<LoopPlan> {
@@ -941,14 +709,17 @@ pub(super) fn eval_op(op: &LOp, regs: &mut [SVal]) -> OpOut {
         LOp::Nop => {}
         // Vec and field ops need the locked vec table and the handle table,
         // which only the journaled while runner holds, see
-        // `scalar_while::run_vec_span`. They cannot appear in the plans the
-        // other runners execute.
+        // `scalar_while::run_vec_span`. Call and return ops need the frame
+        // stack only the `scalar_fn` runner holds. None of them can appear
+        // in the plans the other runners execute.
         LOp::VecGet { .. }
         | LOp::VecSet { .. }
         | LOp::ElemRef { .. }
         | LOp::FieldGet { .. }
         | LOp::FieldSet { .. }
-        | LOp::ElemBack { .. } => return OpOut::Fail,
+        | LOp::ElemBack { .. }
+        | LOp::CallSelf { .. }
+        | LOp::Ret { .. } => return OpOut::Fail,
     }
     OpOut::Fall
 }

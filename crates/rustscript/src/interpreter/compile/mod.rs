@@ -169,6 +169,8 @@ impl FnState {
             loop_plans: Mutex::new(HashMap::new()),
             while_plans: Mutex::new(HashMap::new()),
             while_rejected,
+            fn_plan: Mutex::new(None),
+            fn_rejected: std::sync::atomic::AtomicU8::new(0),
         }
     }
 }

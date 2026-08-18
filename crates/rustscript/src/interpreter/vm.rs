@@ -17,7 +17,7 @@ use super::value::{ClosureData, StructShape, Upvalue, Value};
 use super::vm_step::{Flow, StepCtx, step};
 use super::vm_support::trace_error;
 
-const MAX_CALL_DEPTH: usize = 100_000;
+pub(super) const MAX_CALL_DEPTH: usize = 100_000;
 
 /// Deeper nesting than this returns buffers to the allocator, so a burst of
 /// recursion does not pin its high-water memory forever.
@@ -249,6 +249,7 @@ impl Vm {
                             stack: &mut *stack,
                             base,
                             ip,
+                            depth: frames.len(),
                         },
                         op,
                     )?,

@@ -19,8 +19,9 @@ use anyhow::Result;
 use parking_lot::MutexGuard;
 
 use super::bytecode::{Chunk, Member, Op};
+use super::scalar_fold::fold_moves;
 use super::scalar_loop::{
-    LOp, LTo, NO_SLOT, OpOut, PlanVecs, Region, eval_op, fold_moves, translate, write_regs,
+    LOp, LTo, NO_SLOT, OpOut, PlanVecs, Region, eval_op, translate, write_regs,
 };
 use super::scalar_reads::chunk_reads;
 use super::scalar_val::{SVal, s_index, s_value};

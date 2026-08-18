@@ -55,6 +55,8 @@ pub(super) struct StepCtx<'a> {
     pub stack: &'a mut Vec<Value>,
     pub base: usize,
     pub ip: usize,
+    /// Call frames below this one, for the function plan's depth budget.
+    pub depth: usize,
 }
 
 impl StepCtx<'_> {
@@ -500,8 +502,22 @@ fn store_upvalue(ctx: &StepCtx, idx: u16, src: u16) -> Result<Flow> {
     Ok(Flow::Next)
 }
 
-fn call_fn(ctx: &StepCtx, dst: u16, func: u32, abase: u16, argc: u16, targ: u32) -> Result<Flow> {
+fn call_fn(
+    ctx: &mut StepCtx,
+    dst: u16,
+    func: u32,
+    abase: u16,
+    argc: u16,
+    targ: u32,
+) -> Result<Flow> {
     let callee = ctx.vm.functions[func as usize].clone();
+    // A self-recursive scalar function runs its whole call tree unboxed
+    // inside this dispatch, see `scalar_fn`.
+    if targ == u32::MAX
+        && let Some(v) = super::scalar_fn::try_call(ctx, &callee, abase, argc)?
+    {
+        return Ok(ctx.set(dst, v));
+    }
     // Bind the call's turbofish type args to the callee's generic parameters.
     let type_env: TypeEnv = if targ == u32::MAX {
         empty_type_env()
