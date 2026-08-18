@@ -121,6 +121,7 @@ pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
         Op::BinImm { dst, a, imm, op } => bin_imm_op(ctx, *dst, *a, *imm, *op)?,
         Op::Un { dst, a, op } => un_op(ctx, *dst, *a, *op)?,
         Op::Jump { to } => jump(ctx, *to as usize)?,
+        Op::LoopHead { jump } => loop_head(ctx, *jump)?,
         Op::JumpIfFalse { cond, to } => branch(!ctx.get(*cond).is_truthy(), *to),
         Op::JumpIfTrue { cond, to } => branch(ctx.get(*cond).is_truthy(), *to),
         Op::CmpJump { a, b, op, to } => branch(!cmp_test(*op, ctx.get(*a), ctx.get(*b))?, *to),
@@ -463,6 +464,23 @@ fn loop_plan_jump(ctx: &mut StepCtx, to: usize) -> Result<Option<Flow>> {
         return Ok(None);
     }
     super::scalar_while::try_run_while(ctx, to)
+}
+
+/// A `LoopHead` at a loop entry: hand the loop to the while plan before the
+/// first iteration runs, or fall through into the head when the loop has no
+/// plan.
+fn loop_head(ctx: &mut StepCtx, jump: u32) -> Result<Flow> {
+    let jump_ip = jump as usize;
+    if ctx
+        .cur
+        .while_rejected
+        .get(jump_ip)
+        .is_some_and(|rejected| rejected.load(Ordering::Relaxed) == 0)
+        && let Some(flow) = super::scalar_while::try_run_entry(ctx, jump_ip)?
+    {
+        return Ok(flow);
+    }
+    Ok(Flow::Next)
 }
 
 fn load_cell(ctx: &mut StepCtx, dst: u16, cell: u16) -> Result<Flow> {

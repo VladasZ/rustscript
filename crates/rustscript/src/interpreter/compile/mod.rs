@@ -259,6 +259,10 @@ pub struct Compiler<'a> {
     /// from the type the binding was declared with. Only ever read to pick a
     /// `Default`.
     pub(super) typed_locals: HashMap<String, ScalarTy>,
+    /// One shape per distinct literal layout in this compiler, so every
+    /// instance of the same struct shares one arc and shape identity means
+    /// layout identity, which the scalar plan's member slot cache keys on.
+    pub(super) shapes: Vec<std::sync::Arc<crate::interpreter::bytecode::StructShape>>,
 }
 
 /// Where a referenced name lives.
@@ -285,6 +289,7 @@ impl<'a> Compiler<'a> {
             option_result: None,
             default_let: None,
             typed_locals: HashMap::new(),
+            shapes: Vec::new(),
         }
     }
 
@@ -850,7 +855,8 @@ impl<'a> Compiler<'a> {
             | Op::CmpJump { to: t, .. }
             | Op::CmpJumpImm { to: t, .. }
             | Op::ForNext { to: t, .. }
-            | Op::TryJump { to: t, .. } => *t = to,
+            | Op::TryJump { to: t, .. }
+            | Op::LoopHead { jump: t } => *t = to,
             _ => panic!("patch target is not a jump"),
         }
     }

@@ -1070,6 +1070,15 @@ impl Compiler<'_> {
     }
 
     pub(super) fn compile_while(&mut self, dst: Reg, w: &syn::ExprWhile) -> Result<()> {
+        // A `while let` head tests and binds, which the scalar while plan
+        // never runs, so only the plain form gets a `LoopHead`.
+        let entry = if matches!(&*w.cond, Expr::Let(_)) {
+            None
+        } else {
+            let at = self.here();
+            self.emit(Op::LoopHead { jump: 0 });
+            Some(at)
+        };
         let head = self.here();
         // `while let PAT = EXPR` support.
         if let Expr::Let(let_expr) = &*w.cond {
@@ -1119,9 +1128,13 @@ impl Compiler<'_> {
         });
         let body = self.alloc();
         self.compile_block(&w.body, body)?;
+        let jump_ip = self.mark()?;
         self.emit(Op::Jump {
             to: u32::try_from(head)?,
         });
+        if let Some(at) = entry {
+            self.patch_jump(at, jump_ip);
+        }
         let end = self.mark()?;
         let lc = self.loops.pop().unwrap();
         for b in lc.breaks {
@@ -1133,6 +1146,8 @@ impl Compiler<'_> {
 
     pub(super) fn compile_loop(&mut self, dst: Reg, l: &syn::ExprLoop) -> Result<()> {
         self.emit(Op::LoadUnit { dst });
+        let entry = self.here();
+        self.emit(Op::LoopHead { jump: 0 });
         let head = self.here();
         let scope_depth = self.cur().scope_order.len();
         self.loops.push(LoopCtx {
@@ -1143,9 +1158,11 @@ impl Compiler<'_> {
         });
         let body = self.alloc();
         self.compile_block(&l.body, body)?;
+        let jump_ip = self.mark()?;
         self.emit(Op::Jump {
             to: u32::try_from(head)?,
         });
+        self.patch_jump(entry, jump_ip);
         let end = self.mark()?;
         let lc = self.loops.pop().unwrap();
         for b in lc.breaks {

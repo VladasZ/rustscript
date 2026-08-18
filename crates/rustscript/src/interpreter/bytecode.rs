@@ -683,6 +683,13 @@ pub enum Op {
     Jump {
         to: u32,
     },
+    /// Sits right before a `while` or `loop` head, carrying the position of
+    /// the loop's own backward jump, so the scalar while plan can take over
+    /// at loop entry instead of after the first generic iteration. Falls
+    /// through into the head when the loop has no plan.
+    LoopHead {
+        jump: u32,
+    },
     JumpIfFalse {
         cond: Reg,
         to: u32,

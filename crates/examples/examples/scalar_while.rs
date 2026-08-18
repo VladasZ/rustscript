@@ -2,7 +2,7 @@
 //! regions closed by a backward jump, condition included. Each block also
 //! exercises one edge the plan must keep identical to the generic path:
 //! width-tagged registers, integer methods in the body, break and continue,
-//! nested while loops, a mid-loop fallback on a float read, and shapes that
+//! nested while loops, a mid-loop fallback on a string read, and shapes that
 //! stay generic, a call in the body and a `while let` head.
 
 fn steps(start: u64) -> u64 {
@@ -92,17 +92,16 @@ fn main() {
     }
     println!("clamped {clamped_sum} edges {edges} bits {bits}");
 
-    // The plan runs until the branch compares two float registers it
+    // The plan runs until the branch compares two string registers it
     // cannot read, then the generic path must resume with every register
-    // exactly where the plan left them. A float literal in the loop would
-    // reject the plan outright, registers loaded outside it do not.
-    let scale = 2.5f64;
-    let half = 2.0f64;
+    // exactly where the plan left them.
+    let low = String::from("aa");
+    let high = String::from("zz");
     let mut caught: i64 = 0;
     let mut ticks: i64 = 0;
     while ticks < 300 {
         ticks += 1;
-        if ticks == 290 && scale > half {
+        if ticks == 290 && low < high {
             caught = 1;
         }
     }
