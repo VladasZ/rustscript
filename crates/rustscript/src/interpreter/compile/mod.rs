@@ -1134,6 +1134,7 @@ mod calls;
 mod expr;
 mod macros;
 mod place;
+mod written;
 
 /// A table index as the u16 the bytecode stores. Every compiler table is
 /// interned under that limit, so blowing past it is a compiler bug and an
