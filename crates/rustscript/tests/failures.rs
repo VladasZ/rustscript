@@ -245,6 +245,23 @@ fn while_plan_vec_read_oob_panics_like_rust() {
     );
 }
 
+/// The function plan runs this recursion unboxed until the multiplication
+/// overflows, then the plan discards the run and the generic path runs the
+/// whole call again, which must panic with the exact debug Rust message.
+#[test]
+fn fn_plan_overflow_panics_like_rust() {
+    let src = "fn grow(n: i64) -> i64 {\n    if n <= 0 { 1 } else { grow(n - 1) * 3 }\n}\nfn main() {\n    println!(\"{}\", grow(45));\n}\n";
+    assert_parity(src, 101, "attempt to multiply with overflow");
+}
+
+/// The u64 twin: the width-tagged subtraction underflows mid-tree and the
+/// generic re-run must panic on the exact op.
+#[test]
+fn fn_plan_underflow_panics_like_rust() {
+    let src = "fn down(n: u64) -> u64 {\n    if n == 0 { 0 } else { down(n - 2) }\n}\nfn main() {\n    println!(\"{}\", down(5));\n}\n";
+    assert_parity(src, 101, "attempt to subtract with overflow");
+}
+
 #[test]
 fn process_exit_code_passes_through_alike() {
     assert_parity("fn main() {\n    std::process::exit(3);\n}\n", 3, "");

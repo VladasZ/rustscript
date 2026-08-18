@@ -1056,6 +1056,13 @@ pub struct Chunk {
     /// runs per iteration, so the answer has to cost an atomic load, not
     /// the mutex probe of the plan map.
     pub while_rejected: Vec<AtomicU8>,
+    /// Scalar plan for this whole function body, built lazily on its first
+    /// direct call, see `scalar_fn`.
+    pub fn_plan: Mutex<Option<Arc<super::scalar_fn::FnPlan>>>,
+    /// Nonzero when the function plan was analyzed and does not qualify, or
+    /// failed too often. A rejected function's direct calls pay one atomic
+    /// load each, not the mutex probe.
+    pub fn_rejected: AtomicU8,
 }
 
 impl Chunk {
@@ -1088,6 +1095,8 @@ impl Chunk {
             loop_plans: Mutex::new(HashMap::new()),
             while_plans: Mutex::new(HashMap::new()),
             while_rejected: Vec::new(),
+            fn_plan: Mutex::new(None),
+            fn_rejected: AtomicU8::new(0),
         }
     }
 }

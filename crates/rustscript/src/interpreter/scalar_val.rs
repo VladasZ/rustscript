@@ -288,6 +288,65 @@ pub(super) fn s_f64_from(v: SVal) -> Option<SVal> {
     }
 }
 
+/// Integer methods a plan may run: pure, scalar in and out, and answered by
+/// `int_method` for every integer receiver, so the plan call and the generic
+/// call hit the same table. Names the table rejects at runtime, `abs` on an
+/// unsigned width for one, fail the iteration over to the generic path.
+pub(super) fn scalar_int_method(name: &str) -> bool {
+    matches!(
+        name,
+        "is_multiple_of"
+            | "min"
+            | "max"
+            | "clamp"
+            | "abs"
+            | "signum"
+            | "pow"
+            | "isqrt"
+            | "div_euclid"
+            | "rem_euclid"
+            | "saturating_add"
+            | "saturating_sub"
+            | "saturating_mul"
+            | "wrapping_add"
+            | "wrapping_sub"
+            | "wrapping_mul"
+            | "wrapping_neg"
+            | "count_ones"
+            | "count_zeros"
+            | "leading_zeros"
+            | "trailing_zeros"
+            | "rotate_left"
+            | "rotate_right"
+            | "swap_bytes"
+            | "reverse_bits"
+    )
+}
+
+/// Float methods a plan may run on an f64 receiver: pure, scalar in and
+/// out, and answered by `s_float_method`, which mirrors the float arms of
+/// `shared::num_core`.
+pub(super) fn scalar_float_method(name: &str) -> bool {
+    matches!(
+        name,
+        "sqrt"
+            | "floor"
+            | "ceil"
+            | "round"
+            | "trunc"
+            | "fract"
+            | "recip"
+            | "powi"
+            | "powf"
+            | "mul_add"
+            | "is_nan"
+            | "is_finite"
+            | "is_infinite"
+            | "is_sign_positive"
+            | "is_sign_negative"
+    )
+}
+
 /// An integer method call, mirroring the integer arm of the generic method
 /// dispatch: the same width unification `bridge::int_method` applies, then
 /// the same `int_methods::int_method` table. A `None` answer, an unknown

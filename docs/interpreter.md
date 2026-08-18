@@ -115,6 +115,19 @@ same iteration, so a failing iteration still re-runs generically with
 identical state. A non-scalar field or element fails the iteration over
 the same way.
 
+Self-recursive scalar functions specialize as whole bodies, in
+`interpreter/scalar_fn.rs`. When a function's recursion targets only
+itself and every op of its body fits the plan subset, the fib shape, a
+direct call runs the entire call tree unboxed inside one `CallFn`
+dispatch, on a flat frame stack with no boxed values and no generic frame
+machinery per call. The subset makes such a body pure, so recovery needs
+no journal: any surprise, an overflow, a non-scalar argument, discards
+the run and the generic path runs the whole call from scratch, panic op
+and line included. The plan caps its depth exactly where the generic
+loop's call depth cap sits, polls Ctrl-C mid-run, and a function that
+does not qualify records that in one atomic flag, so its calls pay one
+load each.
+
 ## No second type system
 
 The interpreter does not type check. `rustc` stays responsible for type,

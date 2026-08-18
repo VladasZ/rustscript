@@ -13,23 +13,24 @@ and Python.
 
 Numbers are wall-clock medians from the committed
 `bench/results/results.json`, one run on an Apple M1 Pro, 2026-08-18, with
-float and struct-field support in the scalar plans included, Node v26.7.0,
-Python 3.14.7. Re-run the suite and update this file when the gaps change.
+function plans included, Node v26.7.0, Python 3.14.7. This run happened
+with light desktop activity, so its absolute numbers read a few percent
+above the previous run across every case. Re-run the suite and update this
+file when the gaps change.
 
 ## Below the floor
 
-Five cases where RustScript is the slowest of the three, worst first. Gap
+Four cases where RustScript is the slowest of the three, worst first. Gap
 is the RustScript median divided by the slowest rival's median. The compute
 gap column shows the same ratio on the compute-only track, which tells how
 much of the loss is raw interpreter speed rather than startup.
 
 | case        | wall gap | rustscript | slowest rival | compute gap |
 | ----------- | -------- | ---------- | ------------- | ----------- |
-| regex       | 1.7x     | 176 ms     | python 107 ms | 2.3x        |
-| fib         | 1.6x     | 97 ms      | node 62 ms    | 3.6x        |
-| automation  | 1.4x     | 147 ms     | python 104 ms | 1.9x        |
-| json        | 1.3x     | 164 ms     | python 131 ms | 1.9x        |
-| hashmap_int | 1.2x     | 98 ms      | node 80 ms    | 1.8x        |
+| regex       | 1.7x     | 191 ms     | python 110 ms | 2.3x        |
+| automation  | 1.4x     | 149 ms     | python 105 ms | 1.8x        |
+| hashmap_int | 1.3x     | 117 ms     | node 90 ms    | 1.8x        |
+| json        | 1.3x     | 177 ms     | python 137 ms | 1.8x        |
 
 ## On the floor, short of the target
 
@@ -38,15 +39,22 @@ against the fastest rival.
 
 | case         | gap to fastest | rustscript | fastest rival |
 | ------------ | -------------- | ---------- | ------------- |
-| word_count   | 1.5x           | 92 ms      | python 60 ms  |
-| higher_order | 1.2x           | 67 ms      | python 55 ms  |
+| word_count   | 1.6x           | 97 ms      | python 62 ms  |
+| higher_order | 1.2x           | 72 ms      | python 60 ms  |
 
 ## At the target
 
-Seventeen cases beat both rivals on wall clock. All three startup cases,
-`collatz`, `string_builder`, both sort cases, `json_serialize`,
+Eighteen cases beat both rivals on wall clock. All three startup cases,
+`fib`, `collatz`, `string_builder`, both sort cases, `json_serialize`,
 `stdout_lines`, `file_transform`, `process_spawn`, `async_tasks`,
 `http_local`, `sieve`, `binary_trees`, `mandelbrot`, and `nbody`.
+
+`fib` got here through the scalar function plans in
+`interpreter/scalar_fn.rs`. A self-recursive function whose whole body
+compiles to scalar bytecode runs its entire call tree unboxed inside one
+`CallFn` dispatch, on a flat frame stack with no boxed `Value` anywhere.
+It was 1.6x at 97 ms wall, the second worst case on the list, now 38 ms,
+ahead of both rivals.
 
 `file_transform` got here through the scalar loop specialization in
 `interpreter/scalar_for.rs`. Its byte checksum loop, one dispatched
@@ -90,14 +98,13 @@ compute loss grows past the lead.
 
 The work, grouped:
 
-- Calls and closures, `fib` and `higher_order`. The scalar plans run int
-  and float `for`, `while`, and `loop` bodies unboxed, vec indexing, vec
-  iteration, and struct fields in vecs included, which is what fixed
-  `file_transform`, `collatz`, `sieve`, `mandelbrot`, and `nbody`. The
-  losses left in this group are the shapes the plans do not cover yet: a
-  function call per iteration, which blocks `fib`, and closure-driven
-  adaptor chains, which block `higher_order`. Extending the plans to those
-  shapes is the direction.
+- Closures, `higher_order`. The scalar plans run int and float loop
+  bodies unboxed, vec indexing, struct fields in vecs, and now whole
+  self-recursive function bodies, which is what fixed `file_transform`,
+  `collatz`, `sieve`, `mandelbrot`, `nbody`, and `fib`. The loss left in
+  this group is closure-driven adaptor chains, `map`, `filter`, `sum`
+  over a vec with a closure call per element. Extending the plans to
+  closure bodies is the direction.
 - Per-line and per-token string work, `word_count`, `regex`, `automation`.
   The regex engine itself is the native `regex` crate, the cost is the
   interpreted loop around it that touches every line.
