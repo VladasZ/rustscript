@@ -27,6 +27,9 @@ pub(super) fn op_write(op: &LOp) -> Option<u16> {
         | LOp::TestSome { dst, .. }
         | LOp::LoadStr { dst, .. }
         | LOp::ItemIndex { dst, .. }
+        | LOp::NewEnum { dst, .. }
+        | LOp::UnitEnum { dst, .. }
+        | LOp::TestVariant { dst, .. }
         | LOp::FieldGet { dst, .. } => Some(*dst),
         LOp::NumMethod { dst, .. }
         | LOp::F64From { dst, .. }
@@ -43,13 +46,18 @@ pub(super) fn op_write(op: &LOp) -> Option<u16> {
     }
 }
 
-/// The extra slot an op writes besides `op_write`'s, only the conditional
-/// payload binding of a `TestSome`, so the fold's write counting stays
-/// honest about it.
-pub(super) fn op_write_extra(op: &LOp) -> Option<u16> {
+/// The extra slots an op writes besides `op_write`'s, the conditional
+/// payload bindings of a `TestSome` or `TestVariant`, so the fold's write
+/// counting stays honest about them.
+pub(super) fn op_write_extras(op: &LOp, mut write: impl FnMut(u16)) {
     match op {
-        LOp::TestSome { bind, .. } => Some(*bind),
-        _ => None,
+        LOp::TestSome { bind, .. } => write(*bind),
+        LOp::TestVariant { binds, .. } => {
+            for bind in binds {
+                write(*bind);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -80,11 +88,12 @@ fn op_reads(op: &LOp, mut read: impl FnMut(u16)) {
                 read(*arg);
             }
         }
-        LOp::CallSelf { args, argc, .. } => {
+        LOp::CallSelf { args, argc, .. } | LOp::NewEnum { args, argc, .. } => {
             for arg in &args[..usize::from(*argc)] {
                 read(*arg);
             }
         }
+        LOp::TestVariant { val, .. } => read(*val),
         LOp::VecGet { idx, .. } | LOp::ElemRef { idx, .. } | LOp::ElemBack { idx, .. } => {
             read(*idx);
         }
@@ -115,8 +124,10 @@ fn op_reads(op: &LOp, mut read: impl FnMut(u16)) {
         | LOp::LoadBool { .. }
         | LOp::LoadStr { .. }
         | LOp::FieldGet { .. }
+        | LOp::UnitEnum { .. }
         | LOp::Jump { .. }
-        | LOp::Nop => {}
+        | LOp::Nop
+        | LOp::FailOver => {}
     }
 }
 
@@ -149,6 +160,9 @@ fn set_write(op: &mut LOp, to: u16) {
         | LOp::TestSome { dst, .. }
         | LOp::LoadStr { dst, .. }
         | LOp::ItemIndex { dst, .. }
+        | LOp::NewEnum { dst, .. }
+        | LOp::UnitEnum { dst, .. }
+        | LOp::TestVariant { dst, .. }
         | LOp::FieldGet { dst, .. } => *dst = to,
         _ => unreachable!("only value ops fold"),
     }
@@ -175,9 +189,7 @@ pub(super) fn fold_moves(
             if let Some(dst) = op_write(op) {
                 writes[usize::from(dst)] += 1;
             }
-            if let Some(extra) = op_write_extra(op) {
-                writes[usize::from(extra)] += 1;
-            }
+            op_write_extras(op, |extra| writes[usize::from(extra)] += 1);
             op_reads(op, |r| reads[usize::from(r)] += 1);
             let jump_to = match op {
                 LOp::Jump { to }

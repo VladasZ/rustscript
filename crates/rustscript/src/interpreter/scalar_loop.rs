@@ -26,6 +26,7 @@
 //! `scalar_fold`, and the runners in `scalar_for`, `scalar_while`, and
 //! `scalar_fn`.
 
+use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 
 use super::bytecode::{BinKind, BuiltinId, Chunk, Const, Member, Op, PPat, UnKind};
@@ -38,6 +39,7 @@ use super::scalar_val::{
     scalar_int_method, truthy, try_fits_of,
 };
 use super::typeir::CastIr;
+use super::value::Value;
 use super::vm::Vm;
 use super::vm_step::StepCtx;
 
@@ -46,6 +48,9 @@ pub(super) const MAX_SLOTS: usize = 64;
 
 /// Argument slots a plan's self call carries, see `scalar_fn`.
 pub(super) const MAX_CALL_ARGS: usize = 4;
+
+/// Payload slots a plan's `NewEnum` carries, see `scalar_fn`.
+pub(super) const MAX_ENUM_ARGS: usize = 4;
 
 /// The plan slot sentinel for a discarded result, and the `val_slot` of a
 /// while plan, which has no item register. No real slot reaches it, the
@@ -293,6 +298,41 @@ pub(super) enum LOp {
     /// once at entry, so per-write splits inside the loop have nothing to
     /// do, but the op keeps its position for jump targets.
     Nop,
+    /// The compiler-internal `::unreachable_match` call after a match's
+    /// arms. Reached only when no arm matched, and fails the run over so
+    /// the generic path reproduces its exact panic.
+    FailOver,
+    /// A user enum value into the function runner's boxed table, built the
+    /// way the generic `make_enum` builds one: fresh list storage holding
+    /// the payload slots' values. Only in function plans, whose runner
+    /// holds the table, see `scalar_fn`.
+    NewEnum {
+        dst: u16,
+        enum_name: Arc<str>,
+        variant: Arc<str>,
+        args: [u16; MAX_ENUM_ARGS],
+        argc: u8,
+    },
+    /// A unit variant value into the boxed table, a clone of one prebuilt
+    /// value per op. The clone shares the empty payload storage, which
+    /// mutation would split from anyway, so it is indistinguishable from
+    /// the fresh value `load_enum` builds. Only in function plans.
+    UnitEnum {
+        dst: u16,
+        value: Value,
+    },
+    /// A `TestBind` against a unit variant pattern or a tuple variant whose
+    /// elements are all plain bindings, on a `Boxed` enum slot: `dst` gets
+    /// the match flag, and the payload lands in `binds` in order on a
+    /// match, untouched otherwise, mirroring the enum arms of the generic
+    /// `try_bind`. Any other tested slot fails the run over to the generic
+    /// path. Only in function plans, see `scalar_fn`.
+    TestVariant {
+        dst: u16,
+        val: u16,
+        name: Arc<str>,
+        binds: Box<[u16]>,
+    },
     /// A recursive call back into the same function plan, run by the
     /// `scalar_fn` runner on its own frame stack.
     CallSelf {
@@ -594,6 +634,9 @@ fn translate_call(vm: &Vm, chunk: &Chunk, regs: &mut Vec<u16>, op: &Op) -> Optio
         return None;
     };
     let (segs, coerce) = &chunk.paths[*path as usize];
+    if segs.len() == 1 && segs[0] == "::unreachable_match" {
+        return Some(LOp::FailOver);
+    }
     if coerce.is_some() || *argc != 1 {
         return None;
     }
@@ -1237,9 +1280,9 @@ pub(super) fn eval_op(op: &LOp, regs: &mut [SVal]) -> OpOut {
         // which only the journaled while runner holds, see
         // `scalar_while::run_vec_span`. Map ops need the locked map table
         // only the effects runner holds, see `scalar_for::run_effects`.
-        // Call and return ops need the frame stack only the `scalar_fn`
-        // runner holds. None of them can appear in the plans the other
-        // runners execute.
+        // Enum, call, and return ops need the boxed table and the frame
+        // stack only the `scalar_fn` runner holds. None of them can appear
+        // in the plans the other runners execute.
         LOp::VecGet { .. }
         | LOp::VecSet { .. }
         | LOp::VecPush { .. }
@@ -1252,8 +1295,12 @@ pub(super) fn eval_op(op: &LOp, regs: &mut [SVal]) -> OpOut {
         | LOp::FieldGet { .. }
         | LOp::FieldSet { .. }
         | LOp::ElemBack { .. }
+        | LOp::NewEnum { .. }
+        | LOp::UnitEnum { .. }
+        | LOp::TestVariant { .. }
         | LOp::CallSelf { .. }
-        | LOp::Ret { .. } => return OpOut::Fail,
+        | LOp::Ret { .. }
+        | LOp::FailOver => return OpOut::Fail,
     }
     OpOut::Fall
 }

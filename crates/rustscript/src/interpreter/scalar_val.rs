@@ -69,6 +69,11 @@ pub(super) enum SVal {
     /// the `ItemIndex` op reads one, everything else fails the iteration
     /// over.
     Item(u32),
+    /// A boxed value in the function runner's run-local table, a user enum
+    /// a `NewEnum` built or a `TestVariant` bound, see `scalar_fn`. Only
+    /// the enum ops and a self call read one, everything else fails the
+    /// run over.
+    Boxed(u32),
 }
 
 impl SVal {
@@ -95,7 +100,8 @@ pub(super) fn s_value(v: SVal) -> Option<Value> {
         | SVal::Span { .. }
         | SVal::StrSpan { .. }
         | SVal::StrConst(_)
-        | SVal::Item(_) => None,
+        | SVal::Item(_)
+        | SVal::Boxed(_) => None,
         SVal::Unit => Some(Value::Unit),
         SVal::Int(i) => Some(Value::Int(i)),
         SVal::IntW(s, w) => Some(Value::IntW(s, w)),
@@ -320,7 +326,8 @@ pub(super) fn s_cast(v: SVal, w: IntWidth) -> Option<SVal> {
         | SVal::SomeInt(_)
         | SVal::NoneOpt
         | SVal::StrConst(_)
-        | SVal::Item(_) => return None,
+        | SVal::Item(_)
+        | SVal::Boxed(_) => return None,
     };
     from_i128(value, w)
 }
@@ -342,7 +349,8 @@ pub(super) fn s_cast_f64(v: SVal) -> Option<SVal> {
         | SVal::SomeInt(_)
         | SVal::NoneOpt
         | SVal::StrConst(_)
-        | SVal::Item(_) => None,
+        | SVal::Item(_)
+        | SVal::Boxed(_) => None,
     }
 }
 
@@ -367,7 +375,8 @@ pub(super) fn s_f64_from(v: SVal) -> Option<SVal> {
         | SVal::SomeInt(_)
         | SVal::NoneOpt
         | SVal::StrConst(_)
-        | SVal::Item(_) => None,
+        | SVal::Item(_)
+        | SVal::Boxed(_) => None,
     }
 }
 
