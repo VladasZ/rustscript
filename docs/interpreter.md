@@ -81,6 +81,29 @@ paths, NaN comparison semantics included. Any runtime surprise rebuilds
 the registers to the start of the failing iteration and hands that exact
 item to the generic loop, so a fallback is invisible, panic line included.
 
+For plans also run vec pushes, the fill-loop shape of `v.push(x % 1000)`
+over a range source. Each pushed base splits from sharing once at entry,
+the split the generic `UniqueReg` amounts to, and its storage stays locked
+for the chunk. The registers snapshot at every iteration and each vec
+records its entry length, so a failing iteration restores both by a
+truncate and stays unconsumed for the generic loop. A non-vec base, an
+aliased pair of bases, or a value the plan cannot box fails over the same
+way, and a loop that keeps failing before any progress drops its plan
+after a small budget, so it stops paying the setup per iteration.
+
+Closure adaptor chains reduce unboxed too, in
+`interpreter/scalar_chain.rs`. A `sum`, `count`, `any`, or `all` driving
+`map` and `filter` stages over a vec or range source translates each
+closure body once into a plan and runs the whole chain element by
+element with no boxed value and no closure frame anywhere. The subset
+makes every stage pure, immutable scalar captures included, so nothing
+advances the source until the whole reduction succeeds: any surprise, a
+non-scalar element, an overflow, a mutable capture, discards the run and
+the generic path re-runs the reduction from the untouched source, panic
+op and line included. An early `any` or `all` exit commits exactly the
+elements the generic pulls would have consumed, so `by_ref` chains keep
+their real semantics.
+
 Regex `find_iter` loops run as such plans too. Each match is an unboxed
 span over the locked source, `m.start()` and `m.end()` read it directly,
 and an integer `T::try_from(x)` whose value fits, plus the `.unwrap()` on

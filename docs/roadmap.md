@@ -13,9 +13,8 @@ and Python.
 
 Numbers are wall-clock medians from the committed
 `bench/results/results.json`, one run on an Apple M1 Pro, 2026-08-18, with
-regex loop plans included, Node v26.7.0, Python 3.14.7. This run happened
-with light desktop activity. Re-run the suite and update this file when
-the gaps change.
+closure chain plans included, Node v26.7.0, Python 3.14.7. Re-run the
+suite and update this file when the gaps change.
 
 ## Below the floor
 
@@ -26,27 +25,26 @@ much of the loss is raw interpreter speed rather than startup.
 
 | case        | wall gap | rustscript | slowest rival | compute gap |
 | ----------- | -------- | ---------- | ------------- | ----------- |
-| automation  | 1.4x     | 151 ms     | python 107 ms | 1.8x        |
-| hashmap_int | 1.3x     | 123 ms     | python 91 ms  | 1.8x        |
-| json        | 1.3x     | 173 ms     | python 134 ms | 1.8x        |
+| automation  | 1.4x     | 148 ms     | python 106 ms | 1.9x        |
+| json        | 1.3x     | 167 ms     | python 128 ms | 1.8x        |
+| hashmap_int | 1.2x     | 96 ms      | node 80 ms    | 1.9x        |
 
 ## On the floor, short of the target
 
-Two cases where RustScript beats the slowest rival but not both. Gap is
+One case where RustScript beats the slowest rival but not both. Gap is
 against the fastest rival.
 
-| case         | gap to fastest | rustscript | fastest rival |
-| ------------ | -------------- | ---------- | ------------- |
-| word_count   | 1.6x           | 97 ms      | python 62 ms  |
-| higher_order | 1.2x           | 71 ms      | python 60 ms  |
+| case       | gap to fastest | rustscript | fastest rival |
+| ---------- | -------------- | ---------- | ------------- |
+| word_count | 1.5x           | 93 ms      | python 61 ms  |
 
 ## At the target
 
-Nineteen cases beat both rivals on wall clock. All three startup cases,
+Twenty cases beat both rivals on wall clock. All three startup cases,
 `fib`, `collatz`, `string_builder`, both sort cases, `json_serialize`,
 `stdout_lines`, `file_transform`, `process_spawn`, `async_tasks`,
-`http_local`, `sieve`, `binary_trees`, `mandelbrot`, `nbody`, and
-`regex`.
+`http_local`, `sieve`, `binary_trees`, `mandelbrot`, `nbody`, `regex`,
+and `higher_order`.
 
 `fib` got here through the scalar function plans in
 `interpreter/scalar_fn.rs`. A self-recursive function whose whole body
@@ -92,6 +90,15 @@ match is a span slot, and the span read, the conversion, and the unwrap
 are plan ops. It was the worst case on this list at 1.7x and 191 ms wall,
 now 56 ms, ahead of both rivals.
 
+`higher_order` got here through two pieces. The closure chain plans in
+`interpreter/scalar_chain.rs` run a `sum`, `count`, `any`, or `all`
+driving `map` and `filter` stages unboxed: each closure body translates
+once into a plan, and the whole chain runs element by element with no
+boxed value and no closure frame anywhere. And vec `push` in the for
+plans runs its fill loop, `v.push(x % 1000)` over a range, unboxed with
+truncate-based undo. It was 1.2x at 71 ms wall, now 16 ms, ahead of both
+rivals.
+
 ## Why the failing cases lose
 
 The pattern is one pattern. Python and Node win exactly where their hot path
@@ -104,16 +111,13 @@ compute loss grows past the lead.
 
 The work, grouped:
 
-- Closures, `higher_order`. The scalar plans run int and float loop
-  bodies unboxed, vec indexing, struct fields in vecs, whole
-  self-recursive function bodies, and now regex match loops, which is
-  what fixed `file_transform`, `collatz`, `sieve`, `mandelbrot`, `nbody`,
-  `fib`, and `regex`. The loss left in this group is closure-driven
-  adaptor chains, `map`, `filter`, `sum` over a vec with a closure call
-  per element. Extending the plans to closure bodies is the direction.
 - Per-line and per-token string work, `word_count` and `automation`. The
-  cost is the interpreted loop that touches every line and token, boxed
-  strings included.
+  scalar plans now run loop bodies, vec indexing, struct fields in vecs,
+  whole self-recursive function bodies, regex match loops, closure
+  adaptor chains, and vec pushes, which is what fixed every numeric case
+  and `higher_order`. The loss left is the interpreted loop that touches
+  every line and token, boxed strings included. Extending the plans to
+  string items is the direction.
 - Map and JSON traversal, `hashmap_int` and `json`. Boxed keys and values
   against C dict internals.
 

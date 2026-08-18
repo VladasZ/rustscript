@@ -26,7 +26,9 @@
 //! `scalar_fold`, and the runners in `scalar_for`, `scalar_while`, and
 //! `scalar_fn`.
 
-use super::bytecode::{BinKind, Chunk, Const, Member, Op, UnKind};
+use std::sync::atomic::AtomicU32;
+
+use super::bytecode::{BinKind, BuiltinId, Chunk, Const, Member, Op, UnKind};
 use super::numeric::IntWidth;
 use super::scalar_fold::{fold_moves, op_write};
 use super::scalar_reads::chunk_reads;
@@ -218,6 +220,13 @@ pub(super) enum LOp {
         idx: u16,
         handle: u16,
     },
+    /// `vec.push(val)` on one of a for plan's locked vecs. `vec` indexes the
+    /// plan's vec table. Undo for a failing iteration is a truncate back to
+    /// the iteration's entry length, pushes only append.
+    VecPush {
+        vec: u16,
+        val: u16,
+    },
     /// A `UniqueReg` on a vec base. The plan split the vec from sharing
     /// once at entry, so per-write splits inside the loop have nothing to
     /// do, but the op keeps its position for jump targets.
@@ -239,6 +248,14 @@ pub struct LoopPlan {
     pub(super) ops: Vec<LOp>,
     /// The frame register behind each plan slot.
     pub(super) regs: Vec<u16>,
+    /// The frame register behind each vec table entry, the bases the body
+    /// pushes into. Non-empty plans run through the push runner, which locks
+    /// each base's storage for the chunk.
+    pub(super) vecs: Vec<u16>,
+    /// Push-runner runs that failed before finishing one iteration. Past
+    /// the budget the plan is dropped from the cache, so a loop whose entry
+    /// state never runs as a push plan stops paying the setup per iteration.
+    pub(super) fails: AtomicU32,
     /// The slot of the `ForNext` value register, written per item.
     pub(super) val_slot: u16,
     /// True when the body is one basic block: no jump ops except the final
@@ -650,6 +667,47 @@ fn translate_vec(
     })
 }
 
+/// Vec table cap for a for plan's push bases, bounding the entry split and
+/// lock cost.
+pub(super) const MAX_PUSH_VECS: usize = 4;
+
+/// The body's push receivers in first-appearance order, the vec table the
+/// plan's `VecPush` ops index. A push shape the plan cannot run, an extra
+/// argument, a kept result, or a user method shadowing the builtin, rejects
+/// the whole loop.
+fn push_bases(vm: &Vm, chunk: &Chunk, body: usize, exit: usize) -> Option<Vec<u16>> {
+    let mut bases: Vec<u16> = Vec::new();
+    for op in &chunk.code[body..exit] {
+        let Op::Method {
+            dst,
+            recv,
+            name,
+            argc,
+            ..
+        } = op
+        else {
+            continue;
+        };
+        let name = &chunk.names[*name as usize];
+        if name.id != BuiltinId::Push {
+            continue;
+        }
+        if *argc != 1 || *dst != u16::MAX || name.scalar.is_some() {
+            return None;
+        }
+        if !bases.contains(recv) {
+            if bases.len() >= MAX_PUSH_VECS {
+                return None;
+            }
+            bases.push(*recv);
+        }
+    }
+    if !bases.is_empty() && vm.user_method("Vec", "push").is_some() {
+        return None;
+    }
+    Some(bases)
+}
+
 /// Translate the body of the `for` loop whose `ForNext` sits at `head`, or
 /// answer None when any op falls outside the subset.
 pub(super) fn build(vm: &Vm, chunk: &Chunk, head: usize) -> Option<LoopPlan> {
@@ -660,27 +718,50 @@ pub(super) fn build(vm: &Vm, chunk: &Chunk, head: usize) -> Option<LoopPlan> {
     if exit <= head + 1 || exit > chunk.code.len() {
         return None;
     }
+    let bases = push_bases(vm, chunk, head + 1, exit)?;
     let mut regs: Vec<u16> = Vec::new();
     let val_slot = slot(&mut regs, *val)?;
     let mut try_mask = 0u64;
     let mut ops = chunk.code[head + 1..exit]
         .iter()
         .map(|op| {
-            translate(
-                vm,
-                chunk,
-                &Region {
-                    head,
-                    body: head + 1,
-                    exit,
-                },
-                &mut regs,
-                None,
-                &mut try_mask,
-                op,
-            )
+            // The push shape was checked by the base scan, and the generic
+            // `UniqueReg` before a push is the entry split the push runner
+            // performs once. Neither writes a slot, so the try mask carries.
+            // Any other method on a base falls to `translate`, which slots
+            // the receiver, and the role check below rejects the plan.
+            match op {
+                Op::Method {
+                    recv, base, name, ..
+                } if bases.contains(recv) && chunk.names[*name as usize].id == BuiltinId::Push => {
+                    Some(LOp::VecPush {
+                        vec: u16::try_from(bases.iter().position(|r| r == recv)?).ok()?,
+                        val: slot(&mut regs, *base)?,
+                    })
+                }
+                Op::UniqueReg { reg } if bases.contains(reg) => Some(LOp::Nop),
+                other => translate(
+                    vm,
+                    chunk,
+                    &Region {
+                        head,
+                        body: head + 1,
+                        exit,
+                    },
+                    &mut regs,
+                    None,
+                    &mut try_mask,
+                    other,
+                ),
+            }
         })
         .collect::<Option<Vec<_>>>()?;
+    // A register cannot serve two tables at once: a locked pushed vec and a
+    // scalar slot are disjoint roles, and a body that also moves a base
+    // around stays generic.
+    if regs.iter().any(|reg| bases.contains(reg)) {
+        return None;
+    }
     fold_moves(&mut ops, val_slot, &chunk_reads(chunk), &regs);
     let straight = ops.iter().enumerate().all(|(i, op)| match op {
         LOp::Jump { to: LTo::Next } => i == ops.len() - 1,
@@ -698,6 +779,8 @@ pub(super) fn build(vm: &Vm, chunk: &Chunk, head: usize) -> Option<LoopPlan> {
     Some(LoopPlan {
         ops,
         regs,
+        vecs: bases,
+        fails: AtomicU32::new(0),
         val_slot,
         straight,
     })
@@ -839,6 +922,7 @@ pub(super) fn eval_op(op: &LOp, regs: &mut [SVal]) -> OpOut {
         // in the plans the other runners execute.
         LOp::VecGet { .. }
         | LOp::VecSet { .. }
+        | LOp::VecPush { .. }
         | LOp::ElemRef { .. }
         | LOp::FieldGet { .. }
         | LOp::FieldSet { .. }

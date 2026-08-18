@@ -14,6 +14,7 @@ use super::bytecode::{BuiltinId, MethodName, ScalarTy};
 use super::native::Native;
 use super::ops::compare_values;
 use super::regex_bridge::{CapturesValue, MatchValue, RegexValue};
+use super::scalar_chain::{ChainReduce, try_reduce};
 use super::shared::usize_i64;
 use super::value::{ClosureData, List, MapKind, RsStr, Value, ValueRef};
 use super::vm::Vm;
@@ -671,13 +672,22 @@ impl Vm {
                 remaining: usize::try_from(int_arg(args)?)?,
             }),
             B::Count => {
-                let mut count: usize = 0;
-                while self.iterator_next(iterator)?.is_some() {
-                    count += 1;
+                if let Some(v) = try_reduce(self, iterator, &ChainReduce::Count)? {
+                    v
+                } else {
+                    let mut count: usize = 0;
+                    while self.iterator_next(iterator)?.is_some() {
+                        count += 1;
+                    }
+                    super::shared::usize_value(count)
                 }
-                super::shared::usize_value(count)
             }
-            B::Sum => self.iterator_sum(iterator, method.scalar.as_ref())?,
+            B::Sum => {
+                match try_reduce(self, iterator, &ChainReduce::Sum(method.scalar.as_ref()))? {
+                    Some(v) => v,
+                    None => self.iterator_sum(iterator, method.scalar.as_ref())?,
+                }
+            }
             B::Product => self.iterator_product(iterator)?,
             _ => match method.text.as_str() {
                 "next" => self
@@ -805,9 +815,18 @@ impl Vm {
                 found
             }
             "find" | "position" | "rposition" | "any" | "all" => {
-                return self
-                    .iterator_predicate(iterator, name, &closure(0)?)
-                    .map(Some);
+                let closure = closure(0)?;
+                let reduce = match name {
+                    "any" => Some(ChainReduce::Any(&closure)),
+                    "all" => Some(ChainReduce::All(&closure)),
+                    _ => None,
+                };
+                if let Some(reduce) = reduce
+                    && let Some(v) = try_reduce(self, iterator, &reduce)?
+                {
+                    return Ok(Some(v));
+                }
+                return self.iterator_predicate(iterator, name, &closure).map(Some);
             }
             _ => return self.iterator_reduce_ho(iterator, name, args),
         };

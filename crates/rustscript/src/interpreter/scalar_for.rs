@@ -4,16 +4,17 @@
 //! its translation, and the op evaluator live in `scalar_loop`.
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use anyhow::Result;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
 
 use super::iterator::{IteratorState, regex_find_span};
 use super::native::Native;
 use super::regex_bridge::{RegexValue, match_value};
-use super::scalar_loop::{LTo, LoopPlan, OpOut, build, eval_op, write_regs};
-use super::scalar_val::SVal;
-use super::value::{RsStr, Value};
+use super::scalar_loop::{LOp, LTo, LoopPlan, MAX_PUSH_VECS, OpOut, build, eval_op, write_regs};
+use super::scalar_val::{SVal, s_value};
+use super::value::{List, RsStr, Value};
 use super::vm_step::{Flow, StepCtx};
 
 type Handle = Arc<Mutex<Native>>;
@@ -377,6 +378,9 @@ pub(super) fn try_run(ctx: &mut StepCtx, iter: u16, idx: u16, to: u32) -> Result
         }
     };
     let Some(plan) = plan else { return Ok(None) };
+    if !plan.vecs.is_empty() {
+        return run_push(ctx, &plan, head, iter, idx, to);
+    }
     let Value::Native(handle) = ctx.get(iter) else {
         return Ok(None);
     };
@@ -433,6 +437,213 @@ pub(super) fn try_run(ctx: &mut StepCtx, iter: u16, idx: u16, to: u32) -> Result
             }
             ChunkState::More => {
                 write_back(ctx, &plan, &regs, idx, consumed, match_source.as_ref());
+                ctx.vm.run_pending_ctrlc()?;
+            }
+        }
+    }
+}
+
+/// One iteration of a push plan. Failure recovery is the caller's: it
+/// restores the register snapshot and truncates each vec to its entry
+/// length, so it needs no replay.
+#[inline]
+fn run_body_push(
+    plan: &LoopPlan,
+    regs: &mut [SVal],
+    item: SVal,
+    guards: &mut [MutexGuard<'_, Vec<Value>>],
+) -> BodyOut {
+    regs[usize::from(plan.val_slot)] = item;
+    let mut ip = 0usize;
+    let mut steps = 0u32;
+    loop {
+        let Some(op) = plan.ops.get(ip) else {
+            // A straight body's trailing back jump was trimmed at build, so
+            // the end of the slice is the next iteration.
+            return if plan.straight {
+                BodyOut::Next
+            } else {
+                BodyOut::Fail
+            };
+        };
+        if let LOp::VecPush { vec, val } = op {
+            let Some(v) = s_value(regs[usize::from(*val)]) else {
+                return BodyOut::Fail;
+            };
+            guards[usize::from(*vec)].push(v);
+            ip += 1;
+            continue;
+        }
+        match eval_op(op, regs) {
+            OpOut::Fall => ip += 1,
+            OpOut::Fail => return BodyOut::Fail,
+            OpOut::Jump(LTo::Next) => return BodyOut::Next,
+            OpOut::Jump(LTo::Exit) => return BodyOut::Exit,
+            OpOut::Jump(LTo::Op(t)) => {
+                let t = t as usize;
+                if t <= ip {
+                    steps += 1;
+                    if steps > MAX_BODY_STEPS {
+                        return BodyOut::Fail;
+                    }
+                }
+                ip = t;
+            }
+        }
+    }
+}
+
+/// A chunk of range items through a push plan. The registers snapshot at
+/// every iteration and each vec records its entry length, so a failing
+/// iteration restores both exactly and stays unconsumed for the generic
+/// loop.
+fn range_push_chunk(
+    plan: &LoopPlan,
+    regs: &mut [SVal],
+    snapshot: &mut Vec<SVal>,
+    guards: &mut [MutexGuard<'_, Vec<Value>>],
+    next: &mut i64,
+    end: i64,
+    inclusive: bool,
+) -> ChunkOut {
+    let mut lens = [0usize; MAX_PUSH_VECS];
+    let mut advanced = 0i64;
+    let out = |advanced, state| ChunkOut { advanced, state };
+    for _ in 0..CHUNK {
+        let done = if inclusive { *next > end } else { *next >= end };
+        if done {
+            return out(advanced, ChunkState::Done);
+        }
+        let item = *next;
+        snapshot.clear();
+        snapshot.extend_from_slice(regs);
+        for (len, guard) in lens.iter_mut().zip(guards.iter()) {
+            *len = guard.len();
+        }
+        match run_body_push(plan, regs, SVal::Int(item), guards) {
+            BodyOut::Next => {
+                // Wrapping mirrors the release-built generic `range_step`,
+                // whose bare `+= 1` wraps at the inclusive i64::MAX end.
+                *next = next.wrapping_add(1);
+                advanced += 1;
+            }
+            BodyOut::Exit => {
+                *next = next.wrapping_add(1);
+                advanced += 1;
+                return out(advanced, ChunkState::Exited);
+            }
+            BodyOut::Fail => {
+                regs.copy_from_slice(snapshot);
+                for (guard, len) in guards.iter_mut().zip(lens) {
+                    guard.truncate(len);
+                }
+                return out(advanced, ChunkState::Failed);
+            }
+        }
+    }
+    out(advanced, ChunkState::More)
+}
+
+/// Zero-progress push-runner failures before the plan is dropped from the
+/// cache, so a loop whose entry state never runs as a push plan stops
+/// paying the setup per iteration.
+const MAX_ZERO_FAILS: u32 = 32;
+
+/// Count one zero-progress failure, and past the budget drop the plan from
+/// the cache for good.
+fn note_push_fail(ctx: &StepCtx, plan: &LoopPlan, head: usize) {
+    if plan.fails.fetch_add(1, Ordering::Relaxed) + 1 >= MAX_ZERO_FAILS {
+        ctx.cur.loop_plans.lock().insert(head, None);
+    }
+}
+
+/// Run a plan whose body pushes into vecs, over a range source. Each pushed
+/// base splits from sharing once at entry, the split the generic path's
+/// per-iteration `UniqueReg` amounts to, and its storage stays locked for
+/// the chunk. The locks drop around every Ctrl-C poll.
+fn run_push(
+    ctx: &mut StepCtx,
+    plan: &LoopPlan,
+    head: usize,
+    iter: u16,
+    idx: u16,
+    to: u32,
+) -> Result<Option<Flow>> {
+    let Value::Native(handle) = ctx.get(iter) else {
+        return Ok(None);
+    };
+    let handle = handle.clone();
+    // The source check comes first, so an unsupported source costs one lock
+    // per iteration and no setup, like the plain runner's `NotSimple` path.
+    if !matches!(
+        &*handle.lock(),
+        Native::Iterator(IteratorState::Range { .. })
+    ) {
+        note_push_fail(ctx, plan, head);
+        return Ok(None);
+    }
+    let mut lists: Vec<List> = Vec::with_capacity(plan.vecs.len());
+    for &reg in &plan.vecs {
+        ctx.stack[ctx.base + usize::from(reg)].make_unique();
+        let Value::Vec(list) = ctx.get(reg) else {
+            note_push_fail(ctx, plan, head);
+            return Ok(None);
+        };
+        lists.push(list.clone());
+    }
+    // Two bases sharing one storage would deadlock the chunk's second lock,
+    // and the generic path handles that aliasing fine.
+    let aliased = (1..lists.len()).any(|i| lists[..i].iter().any(|h| Arc::ptr_eq(h, &lists[i])));
+    if aliased {
+        note_push_fail(ctx, plan, head);
+        return Ok(None);
+    }
+    let mut regs: Vec<SVal> = plan.regs.iter().map(|&r| SVal::of(ctx.get(r))).collect();
+    let mut snapshot: Vec<SVal> = Vec::with_capacity(regs.len());
+    let mut consumed = 0i64;
+    loop {
+        let out = {
+            let mut native = handle.lock();
+            let mut guards: Vec<_> = lists.iter().map(|l| l.lock()).collect();
+            match &mut *native {
+                Native::Iterator(IteratorState::Range {
+                    next,
+                    end,
+                    inclusive,
+                }) => range_push_chunk(
+                    plan,
+                    &mut regs,
+                    &mut snapshot,
+                    &mut guards,
+                    next,
+                    *end,
+                    *inclusive,
+                ),
+                _ => ChunkOut {
+                    advanced: 0,
+                    state: ChunkState::NotSimple,
+                },
+            }
+        };
+        consumed += out.advanced;
+        match out.state {
+            ChunkState::NotSimple if consumed == 0 => {
+                note_push_fail(ctx, plan, head);
+                return Ok(None);
+            }
+            ChunkState::NotSimple | ChunkState::Failed => {
+                if consumed == 0 {
+                    note_push_fail(ctx, plan, head);
+                }
+                write_back(ctx, plan, &regs, idx, consumed, None);
+                return Ok(None);
+            }
+            ChunkState::Done | ChunkState::Exited => {
+                write_back(ctx, plan, &regs, idx, consumed, None);
+                return Ok(Some(Flow::Jump(to as usize)));
+            }
+            ChunkState::More => {
+                write_back(ctx, plan, &regs, idx, consumed, None);
                 ctx.vm.run_pending_ctrlc()?;
             }
         }

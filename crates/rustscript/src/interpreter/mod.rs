@@ -27,6 +27,7 @@ mod regex_bridge;
 mod resolver;
 mod rs_str;
 mod scalar;
+mod scalar_chain;
 mod scalar_fn;
 mod scalar_fold;
 mod scalar_for;
