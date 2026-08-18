@@ -186,6 +186,7 @@ fn build_while(vm: &Vm, chunk: &Chunk, head: usize, jump_ip: usize) -> Option<Wh
     let (vecs, written) = vec_bases(chunk, head, exit)?;
     let handles = handle_regs(chunk, head, exit, &vecs)?;
     let mut regs: Vec<u16> = Vec::new();
+    let mut try_mask = 0u64;
     let mut ops = chunk.code[head..exit]
         .iter()
         .map(|op| {
@@ -202,6 +203,7 @@ fn build_while(vm: &Vm, chunk: &Chunk, head: usize, jump_ip: usize) -> Option<Wh
                     bases: &vecs,
                     handles: &handles,
                 }),
+                &mut try_mask,
                 op,
             )
         })

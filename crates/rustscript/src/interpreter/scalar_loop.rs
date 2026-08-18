@@ -28,11 +28,12 @@
 
 use super::bytecode::{BinKind, Chunk, Const, Member, Op, UnKind};
 use super::numeric::IntWidth;
-use super::scalar_fold::fold_moves;
+use super::scalar_fold::{fold_moves, op_write};
 use super::scalar_reads::chunk_reads;
 use super::scalar_val::{
-    SVal, s_bin, s_cast, s_cast_f64, s_cmp, s_f64_from, s_float_method, s_int_method, s_un,
-    s_value, scalar_float_method, scalar_int_method, truthy,
+    SVal, TryFits, s_bin, s_cast, s_cast_f64, s_cmp, s_f64_from, s_float_method, s_int_method,
+    s_match_get, s_try_from, s_un, s_unwrap_ok, s_value, scalar_float_method, scalar_int_method,
+    truthy, try_fits_of,
 };
 use super::typeir::CastIr;
 use super::vm::Vm;
@@ -138,6 +139,27 @@ pub(super) enum LOp {
     /// An unshadowed `f64::from(x)` call, whose saturating image conversion
     /// differs from the exact `as` cast, see `s_f64_from`.
     F64From {
+        dst: u16,
+        src: u16,
+    },
+    /// `m.start()` or `m.end()` on a `Span` slot, a regex match item of a
+    /// `find_iter` chunk. Any other receiver fails the iteration over to
+    /// the generic path, whose own dispatch answers it.
+    MatchGet {
+        dst: u16,
+        recv: u16,
+        end: bool,
+    },
+    /// An unshadowed integer `T::try_from(x)` call whose fitting value
+    /// answers an `OkInt` slot, see `s_try_from`.
+    IntTryFrom {
+        dst: u16,
+        src: u16,
+        fits: TryFits,
+    },
+    /// `.unwrap()` on an `OkInt` slot, the dst of an earlier `IntTryFrom`.
+    /// Any other receiver fails the iteration over to the generic path.
+    UnwrapOk {
         dst: u16,
         src: u16,
     },
@@ -271,13 +293,53 @@ pub(super) struct PlanVecs<'a> {
 /// Translate one bytecode op, or answer None when it falls outside the
 /// subset, which rejects the whole loop. `vecs` is the region's vec context
 /// when the plan supports vec indexing, the while plan does, and `None` for
-/// the `for` plan, which rejects vec ops.
+/// the `for` plan, which rejects vec ops. `try_mask` carries one bit per
+/// slot statically known to hold an `IntTryFrom` result at this point of
+/// the linear op walk, the gate for translating `.unwrap()`.
 pub(super) fn translate(
     vm: &Vm,
     chunk: &Chunk,
     region: &Region,
     regs: &mut Vec<u16>,
     vecs: Option<&PlanVecs>,
+    try_mask: &mut u64,
+    op: &Op,
+) -> Option<LOp> {
+    let lop = translate_op(vm, chunk, region, regs, vecs, *try_mask, op)?;
+    update_try_mask(try_mask, &lop);
+    Some(lop)
+}
+
+/// Track which slots hold an `IntTryFrom` result through the linear op
+/// walk: set by the conversion, carried by a move, cleared by any other
+/// write. The mask only gates plan building, the `UnwrapOk` op checks the
+/// live slot at run time either way.
+fn update_try_mask(try_mask: &mut u64, lop: &LOp) {
+    let bit = |slot: u16| 1u64.checked_shl(u32::from(slot)).unwrap_or(0);
+    match lop {
+        LOp::IntTryFrom { dst, .. } if *dst != NO_SLOT => *try_mask |= bit(*dst),
+        LOp::Move { dst, src } => {
+            if *try_mask & bit(*src) != 0 {
+                *try_mask |= bit(*dst);
+            } else {
+                *try_mask &= !bit(*dst);
+            }
+        }
+        _ => {
+            if let Some(dst) = op_write(lop) {
+                *try_mask &= !bit(dst);
+            }
+        }
+    }
+}
+
+fn translate_op(
+    vm: &Vm,
+    chunk: &Chunk,
+    region: &Region,
+    regs: &mut Vec<u16>,
+    vecs: Option<&PlanVecs>,
+    try_mask: u64,
     op: &Op,
 ) -> Option<LOp> {
     if matches!(
@@ -376,7 +438,7 @@ pub(super) fn translate(
             },
             _ => return None,
         },
-        Op::Method { .. } => return translate_method(chunk, regs, op),
+        Op::Method { .. } => return translate_method(vm, chunk, regs, try_mask, op),
         Op::CallPath { .. } => return translate_call(vm, chunk, regs, op),
         // A nested loop's entry hook has nothing to do inside a plan, which
         // already runs the nested loop unboxed, but keeps its position.
@@ -385,11 +447,11 @@ pub(super) fn translate(
     })
 }
 
-/// The `Op::CallPath` arm of `translate`: only a plain `f64::from(x)` call
-/// maps, and only while nothing shadows the bridge arm `s_f64_from` mirrors.
-/// A user function or user method named `f64::from` resolves first on the
-/// generic path, and a coercion on the call site has no plan equivalent, so
-/// either rejects the loop.
+/// The `Op::CallPath` arm of `translate`: only a plain `f64::from(x)` or an
+/// integer `T::try_from(x)` call maps, and only while nothing shadows the
+/// bridge arm it mirrors. A user function or user method of the same name
+/// resolves first on the generic path, and a coercion on the call site has
+/// no plan equivalent, so either rejects the loop.
 fn translate_call(vm: &Vm, chunk: &Chunk, regs: &mut Vec<u16>, op: &Op) -> Option<LOp> {
     let Op::CallPath {
         dst,
@@ -408,25 +470,35 @@ fn translate_call(vm: &Vm, chunk: &Chunk, regs: &mut Vec<u16>, op: &Op) -> Optio
     let [ty, func] = canon.as_slice() else {
         return None;
     };
-    if ty != "f64" || func != "from" {
+    if vm.user_function(&format!("{ty}::{func}")).is_some() || vm.user_method(ty, func).is_some() {
         return None;
     }
-    if vm.user_function("f64::from").is_some() || vm.user_method("f64", "from").is_some() {
-        return None;
+    let dst = if *dst == u16::MAX {
+        NO_SLOT
+    } else {
+        slot(regs, *dst)?
+    };
+    let src = slot(regs, *base)?;
+    if ty == "f64" && func == "from" {
+        return Some(LOp::F64From { dst, src });
     }
-    Some(LOp::F64From {
-        dst: if *dst == u16::MAX {
-            NO_SLOT
-        } else {
-            slot(regs, *dst)?
-        },
-        src: slot(regs, *base)?,
-    })
+    if func == "try_from" {
+        let fits = try_fits_of(ty)?;
+        return Some(LOp::IntTryFrom { dst, src, fits });
+    }
+    None
 }
 
 /// The `Op::Method` arm of `translate`: a whitelisted numeric method whose
-/// receiver and arguments read as slots.
-fn translate_method(chunk: &Chunk, regs: &mut Vec<u16>, op: &Op) -> Option<LOp> {
+/// receiver and arguments read as slots, a match span accessor, or an
+/// `unwrap` of an `IntTryFrom` result.
+fn translate_method(
+    vm: &Vm,
+    chunk: &Chunk,
+    regs: &mut Vec<u16>,
+    try_mask: u64,
+    op: &Op,
+) -> Option<LOp> {
     let Op::Method {
         dst,
         recv,
@@ -438,6 +510,45 @@ fn translate_method(chunk: &Chunk, regs: &mut Vec<u16>, op: &Op) -> Option<LOp> 
         return None;
     };
     let method = &chunk.names[*name as usize];
+    if method.scalar.is_none() && *argc == 0 {
+        let dst_slot = |regs: &mut Vec<u16>| {
+            if *dst == u16::MAX {
+                Some(NO_SLOT)
+            } else {
+                slot(regs, *dst)
+            }
+        };
+        match method.text.as_str() {
+            // Only a `Span` receiver answers at run time, so a same-named
+            // method on any other receiver fails its iteration over to the
+            // generic path, whose own dispatch resolves it.
+            "start" | "end" => {
+                let end = method.text.as_str() == "end";
+                let recv = slot(regs, *recv)?;
+                return Some(LOp::MatchGet {
+                    dst: dst_slot(regs)?,
+                    recv,
+                    end,
+                });
+            }
+            // Only when the receiver is statically an `IntTryFrom` result,
+            // so an `unwrap` on anything else keeps rejecting the loop, and
+            // only while no user method on `Result` shadows the builtin.
+            "unwrap" => {
+                let recv = slot(regs, *recv)?;
+                if try_mask & 1u64.checked_shl(u32::from(recv)).unwrap_or(0) == 0
+                    || vm.user_method("Result", "unwrap").is_some()
+                {
+                    return None;
+                }
+                return Some(LOp::UnwrapOk {
+                    dst: dst_slot(regs)?,
+                    src: recv,
+                });
+            }
+            _ => {}
+        }
+    }
     let known = scalar_int_method(&method.text) || scalar_float_method(&method.text);
     if !known || method.scalar.is_some() || *argc > 2 {
         return None;
@@ -551,6 +662,7 @@ pub(super) fn build(vm: &Vm, chunk: &Chunk, head: usize) -> Option<LoopPlan> {
     }
     let mut regs: Vec<u16> = Vec::new();
     let val_slot = slot(&mut regs, *val)?;
+    let mut try_mask = 0u64;
     let mut ops = chunk.code[head + 1..exit]
         .iter()
         .map(|op| {
@@ -564,6 +676,7 @@ pub(super) fn build(vm: &Vm, chunk: &Chunk, head: usize) -> Option<LoopPlan> {
                 },
                 &mut regs,
                 None,
+                &mut try_mask,
                 op,
             )
         })
@@ -616,6 +729,22 @@ fn eval_num_method(
     }
 }
 
+/// Land a method or conversion result: `None` fails the iteration over to
+/// the generic path, and a `NO_SLOT` dst discards the value the way the
+/// compiler discarded the generic result.
+#[inline]
+fn land(regs: &mut [SVal], dst: u16, v: Option<SVal>) -> OpOut {
+    match v {
+        Some(v) => {
+            if dst != NO_SLOT {
+                regs[usize::from(dst)] = v;
+            }
+            OpOut::Fall
+        }
+        None => OpOut::Fail,
+    }
+}
+
 #[inline]
 pub(super) fn eval_op(op: &LOp, regs: &mut [SVal]) -> OpOut {
     match op {
@@ -639,10 +768,7 @@ pub(super) fn eval_op(op: &LOp, regs: &mut [SVal]) -> OpOut {
                 None => return OpOut::Fail,
             }
         }
-        LOp::Un { dst, a, op } => match s_un(*op, regs[usize::from(*a)]) {
-            Some(v) => regs[usize::from(*dst)] = v,
-            None => return OpOut::Fail,
-        },
+        LOp::Un { dst, a, op } => return land(regs, *dst, s_un(*op, regs[usize::from(*a)])),
         LOp::Jump { to } => return OpOut::Jump(*to),
         LOp::JumpIfFalse { cond, to } => {
             if matches!(regs[usize::from(*cond)], SVal::Opaque) {
@@ -676,36 +802,35 @@ pub(super) fn eval_op(op: &LOp, regs: &mut [SVal]) -> OpOut {
                 None => return OpOut::Fail,
             }
         }
-        LOp::Cast { dst, src, w } => match s_cast(regs[usize::from(*src)], *w) {
-            Some(v) => regs[usize::from(*dst)] = v,
-            None => return OpOut::Fail,
-        },
-        LOp::CastF64 { dst, src } => match s_cast_f64(regs[usize::from(*src)]) {
-            Some(v) => regs[usize::from(*dst)] = v,
-            None => return OpOut::Fail,
-        },
-        LOp::F64From { dst, src } => match s_f64_from(regs[usize::from(*src)]) {
-            Some(v) => {
-                if *dst != NO_SLOT {
-                    regs[usize::from(*dst)] = v;
-                }
-            }
-            None => return OpOut::Fail,
-        },
+        LOp::Cast { dst, src, w } => {
+            return land(regs, *dst, s_cast(regs[usize::from(*src)], *w));
+        }
+        LOp::CastF64 { dst, src } => {
+            return land(regs, *dst, s_cast_f64(regs[usize::from(*src)]));
+        }
+        LOp::F64From { dst, src } => {
+            let v = s_f64_from(regs[usize::from(*src)]);
+            return land(regs, *dst, v);
+        }
+        LOp::MatchGet { dst, recv, end } => {
+            return land(regs, *dst, s_match_get(regs[usize::from(*recv)], *end));
+        }
+        LOp::IntTryFrom { dst, src, fits } => {
+            return land(regs, *dst, s_try_from(*fits, regs[usize::from(*src)]));
+        }
+        LOp::UnwrapOk { dst, src } => {
+            return land(regs, *dst, s_unwrap_ok(regs[usize::from(*src)]));
+        }
         LOp::NumMethod {
             dst,
             recv,
             args,
             argc,
             name,
-        } => match eval_num_method(regs, *recv, *args, *argc, name) {
-            Some(v) => {
-                if *dst != NO_SLOT {
-                    regs[usize::from(*dst)] = v;
-                }
-            }
-            None => return OpOut::Fail,
-        },
+        } => {
+            let v = eval_num_method(regs, *recv, *args, *argc, name);
+            return land(regs, *dst, v);
+        }
         LOp::Nop => {}
         // Vec and field ops need the locked vec table and the handle table,
         // which only the journaled while runner holds, see

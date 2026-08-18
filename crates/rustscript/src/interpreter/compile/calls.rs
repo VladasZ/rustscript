@@ -878,6 +878,14 @@ impl Compiler<'_> {
         let b = self.compile_expr(rhs)?;
         let param = self.deref_param_reg(&u.expr);
         let target = self.compile_expr(&u.expr)?;
+        let Some(target) = param else {
+            // Not a `&mut` parameter: the fused op holds the referent's
+            // lock across a scalar read-modify-write, so concurrent
+            // compound assignments through a shared cell cannot lose
+            // updates.
+            self.emit(Op::DerefBinAssign { target, val: b, op });
+            return Ok(());
+        };
         let current = self.alloc();
         self.emit(Op::Deref {
             dst: current,
@@ -890,16 +898,10 @@ impl Compiler<'_> {
             b,
             op,
         });
-        match param {
-            Some(target) => self.emit(Op::SetDerefParam {
-                target,
-                val: result,
-            }),
-            None => self.emit(Op::SetDeref {
-                target,
-                val: result,
-            }),
-        }
+        self.emit(Op::SetDerefParam {
+            target,
+            val: result,
+        });
         Ok(())
     }
 

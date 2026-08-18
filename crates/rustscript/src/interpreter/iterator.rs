@@ -391,20 +391,32 @@ fn range_step(next: &mut i64, end: i64, inclusive: bool) -> Option<Value> {
     }
 }
 
-/// One `find_iter` step, advancing past the match or an empty match's char.
-fn regex_find_step(regex: &RegexValue, source: &RsStr, offset: &mut usize) -> Step {
+/// The next `find_iter` span at `offset`, advancing past the match or an
+/// empty match's char. Shared by the generic step and the scalar for plan's
+/// regex chunks, so both walk the source identically.
+pub(super) fn regex_find_span(
+    regex: &RegexValue,
+    source: &str,
+    offset: &mut usize,
+) -> Option<(usize, usize)> {
     if *offset > source.len() {
-        return Step::Ready(None);
+        return None;
     }
-    let Some(found) = regex.compiled.find_at(source, *offset) else {
+    let found = regex.compiled.find_at(source, *offset)?;
+    *offset = next_regex_offset(source, found.start(), found.end());
+    Some((found.start(), found.end()))
+}
+
+/// One `find_iter` step over the shared span walk.
+fn regex_find_step(regex: &RegexValue, source: &RsStr, offset: &mut usize) -> Step {
+    let Some((start, end)) = regex_find_span(regex, source, offset) else {
         return Step::Ready(None);
     };
-    *offset = next_regex_offset(source, found.start(), found.end());
     Step::Ready(Some(
         Native::RegexMatch(MatchValue {
             source: source.clone(),
-            start: found.start(),
-            end: found.end(),
+            start,
+            end,
         })
         .wrap(),
     ))
