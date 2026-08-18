@@ -220,6 +220,31 @@ fn while_plan_overflow_panics_like_rust() {
     assert_parity(src, 101, "attempt to multiply with overflow");
 }
 
+/// The vec while plan journals writes; an out-of-bounds store fails the
+/// iteration over to the generic path, which must panic with the exact
+/// debug Rust message on the exact write.
+#[test]
+fn while_plan_vec_write_oob_panics_like_rust() {
+    let src = "fn main() {\n    let mut v = vec![1i64, 2, 3];\n    let mut i: usize = 0;\n    while i < 5 {\n        v[i] = 0;\n        i += 1;\n    }\n    println!(\"{}\", v[0]);\n}\n";
+    assert_parity(
+        src,
+        101,
+        "index out of bounds: the len is 3 but the index is 3",
+    );
+}
+
+/// The read twin: the element load past the end fails over and the generic
+/// path panics.
+#[test]
+fn while_plan_vec_read_oob_panics_like_rust() {
+    let src = "fn main() {\n    let v = vec![5i64, 6];\n    let mut sum: i64 = 0;\n    let mut i: usize = 0;\n    while i < 4 {\n        sum += v[i];\n        i += 1;\n    }\n    println!(\"{sum}\");\n}\n";
+    assert_parity(
+        src,
+        101,
+        "index out of bounds: the len is 2 but the index is 2",
+    );
+}
+
 #[test]
 fn process_exit_code_passes_through_alike() {
     assert_parity("fn main() {\n    std::process::exit(3);\n}\n", 3, "");

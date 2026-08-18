@@ -1043,7 +1043,7 @@ pub struct Chunk {
     /// Scalar plans for the backward-jump loops in this chunk, `while` and
     /// `loop`, keyed by the index of each closing `Jump` op and built lazily
     /// on the jump's first execution.
-    pub while_plans: Mutex<HashMap<usize, Arc<super::scalar_loop::WhilePlan>>>,
+    pub while_plans: Mutex<HashMap<usize, Arc<super::scalar_while::WhilePlan>>>,
     /// One flag per op, nonzero when the while plan keyed by that op index
     /// was analyzed and does not qualify. A rejected loop's backward jump
     /// runs per iteration, so the answer has to cost an atomic load, not
