@@ -233,6 +233,15 @@ fn while_plan_vec_write_oob_panics_like_rust() {
     );
 }
 
+/// The map effects plan journals inserts; an overflow after an insert in
+/// the same iteration fails over, the undo removes the insert, and the
+/// generic re-run must panic with the exact debug Rust message.
+#[test]
+fn map_plan_overflow_after_insert_panics_like_rust() {
+    let src = "use std::collections::HashMap;\nfn main() {\n    let mut m: HashMap<i64, i64> = HashMap::new();\n    let mut acc: i64 = i64::MAX - 5;\n    for k in 0..10 {\n        m.insert(k, k);\n        acc += 1;\n    }\n    println!(\"{} {acc}\", m.len());\n}\n";
+    assert_parity(src, 101, "attempt to add with overflow");
+}
+
 /// The read twin: the element load past the end fails over and the generic
 /// path panics.
 #[test]

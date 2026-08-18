@@ -4,6 +4,7 @@
 
 use num_traits::AsPrimitive;
 use std::fmt::Write as _;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use indexmap::IndexMap;
@@ -278,13 +279,55 @@ pub enum Value {
     Native(Arc<Mutex<Native>>),
 }
 
-/// Hashable map key, the subset of values that may be keys.
-#[derive(Clone, PartialEq, Eq, Hash)]
+/// Hashable map key, the subset of values that may be keys. The manual
+/// `Hash` pins the exact bytes each variant feeds the hasher, so the
+/// borrowed `StrKey` below can probe a map without building an owned key.
+#[derive(Clone, PartialEq, Eq)]
 pub enum MapKey {
     Bool(bool),
     Int(i64),
     Char(char),
     Str(RsStr),
+}
+
+impl Hash for MapKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            MapKey::Bool(b) => {
+                state.write_u8(0);
+                b.hash(state);
+            }
+            MapKey::Int(i) => {
+                state.write_u8(1);
+                i.hash(state);
+            }
+            MapKey::Char(c) => {
+                state.write_u8(2);
+                c.hash(state);
+            }
+            MapKey::Str(s) => {
+                state.write_u8(3);
+                (**s).hash(state);
+            }
+        }
+    }
+}
+
+/// A borrowed string key for map probes that hold the slice but not an
+/// owned `RsStr`, hashing and comparing exactly like `MapKey::Str`.
+pub struct StrKey<'a>(pub &'a str);
+
+impl Hash for StrKey<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u8(3);
+        self.0.hash(state);
+    }
+}
+
+impl indexmap::Equivalent<MapKey> for StrKey<'_> {
+    fn equivalent(&self, key: &MapKey) -> bool {
+        matches!(key, MapKey::Str(s) if **s == *self.0)
+    }
 }
 
 impl Value {

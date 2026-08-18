@@ -110,7 +110,7 @@ cargo run --release --bin chart
 The goal is judged on wall clock, the whole run including startup. The floor
 is to never be the slowest interpreted runtime on any case, the target is to
 beat both Node and Python. [docs/roadmap.md](../docs/roadmap.md) tracks the
-cases that still miss, worst first.
+standing of every case against that goal.
 
 ## Scope limits
 

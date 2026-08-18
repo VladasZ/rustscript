@@ -16,7 +16,7 @@ use super::numeric::{
     IntWidth, float_arith, float_to_int, i64_arith, int_arith, int_bit, int_neg, int_not,
     int_shift, truncate, u64_arith, unify,
 };
-use super::value::Value;
+use super::value::{MapKey, Value};
 
 /// An unboxed register value. `Opaque` stands for a frame value the plan
 /// cannot read: reading it fails the iteration, overwriting it is fine, and
@@ -42,10 +42,33 @@ pub(super) enum SVal {
         start: u32,
         end: u32,
     },
+    /// A string slice of the same locked source: a `split_whitespace` item,
+    /// or the `AsStr` image of a match span. The runner's map ops read one
+    /// as a borrowed key, everything else fails the iteration over.
+    StrSpan {
+        start: u32,
+        end: u32,
+    },
     /// An `Ok(n)` result of a scalar `IntTryFrom`, mirroring
     /// `Value::ok(Value::Int(n))`. Only `UnwrapOk` reads one, everything
     /// else fails the iteration over to the generic path.
     OkInt(i64),
+    /// A `Some(n)` answer of a scalar map probe or a checked integer
+    /// method, mirroring `Value::some(Value::Int(n))`. Only `TestSome` and
+    /// `UnwrapOk` read one, everything else fails the iteration over.
+    SomeInt(i64),
+    /// The `None` twin of `SomeInt`, mirroring `Value::none()`.
+    NoneOpt,
+    /// A string constant of the plan's string table, from a `LoadConst`
+    /// whose constant is a string, an `it["key"]` key for one. Only the
+    /// runner's probe ops read one, everything else fails the iteration
+    /// over.
+    StrConst(u16),
+    /// The current chunk's item at this index, boxed and held by the
+    /// source the effects runner walks, a parsed json object for one. Only
+    /// the `ItemIndex` op reads one, everything else fails the iteration
+    /// over.
+    Item(u32),
 }
 
 impl SVal {
@@ -68,13 +91,32 @@ pub(super) fn s_value(v: SVal) -> Option<Value> {
         // A span also answers `None`: it needs its source string, which
         // only the `scalar_for` runner holds. It materializes every span
         // before `write_regs` runs, and no other runner can produce one.
-        SVal::Opaque | SVal::Span { .. } => None,
+        SVal::Opaque
+        | SVal::Span { .. }
+        | SVal::StrSpan { .. }
+        | SVal::StrConst(_)
+        | SVal::Item(_) => None,
         SVal::Unit => Some(Value::Unit),
         SVal::Int(i) => Some(Value::Int(i)),
         SVal::IntW(s, w) => Some(Value::IntW(s, w)),
         SVal::Float(f) => Some(Value::Float(f)),
         SVal::Bool(b) => Some(Value::Bool(b)),
         SVal::OkInt(n) => Some(Value::ok(Value::Int(n))),
+        SVal::SomeInt(n) => Some(Value::some(Value::Int(n))),
+        SVal::NoneOpt => Some(Value::none()),
+    }
+}
+
+/// A slot as a map key, mirroring the arms of `Value::as_key` for the types
+/// an `SVal` can hold, the width-tagged storage form included. `None` sends
+/// the access to the generic path, which reproduces the exact error for a
+/// value that cannot be a key.
+pub(super) fn s_map_key(v: SVal) -> Option<MapKey> {
+    match v {
+        SVal::Int(i) => Some(MapKey::Int(i)),
+        SVal::IntW(s, _) => Some(MapKey::Int(s)),
+        SVal::Bool(b) => Some(MapKey::Bool(b)),
+        _ => None,
     }
 }
 
@@ -270,7 +312,15 @@ pub(super) fn s_cast(v: SVal, w: IntWidth) -> Option<SVal> {
         SVal::IntW(s, ww) => truncate(ww.decode(s), w),
         SVal::Float(f) => float_to_int(f, w),
         SVal::Bool(b) => i128::from(b),
-        SVal::Opaque | SVal::Unit | SVal::Span { .. } | SVal::OkInt(_) => return None,
+        SVal::Opaque
+        | SVal::Unit
+        | SVal::Span { .. }
+        | SVal::StrSpan { .. }
+        | SVal::OkInt(_)
+        | SVal::SomeInt(_)
+        | SVal::NoneOpt
+        | SVal::StrConst(_)
+        | SVal::Item(_) => return None,
     };
     from_i128(value, w)
 }
@@ -283,7 +333,16 @@ pub(super) fn s_cast_f64(v: SVal) -> Option<SVal> {
         SVal::Int(i) => Some(SVal::Float(AsPrimitive::<f64>::as_(i))),
         SVal::IntW(s, w) => Some(SVal::Float(AsPrimitive::<f64>::as_(w.decode(s)))),
         SVal::Float(f) => Some(SVal::Float(f)),
-        SVal::Opaque | SVal::Unit | SVal::Bool(_) | SVal::Span { .. } | SVal::OkInt(_) => None,
+        SVal::Opaque
+        | SVal::Unit
+        | SVal::Bool(_)
+        | SVal::Span { .. }
+        | SVal::StrSpan { .. }
+        | SVal::OkInt(_)
+        | SVal::SomeInt(_)
+        | SVal::NoneOpt
+        | SVal::StrConst(_)
+        | SVal::Item(_) => None,
     }
 }
 
@@ -300,7 +359,15 @@ pub(super) fn s_f64_from(v: SVal) -> Option<SVal> {
             Some(SVal::Float(AsPrimitive::<f64>::as_(image)))
         }
         SVal::Bool(b) => Some(SVal::Float(if b { 1.0 } else { 0.0 })),
-        SVal::Opaque | SVal::Unit | SVal::Span { .. } | SVal::OkInt(_) => None,
+        SVal::Opaque
+        | SVal::Unit
+        | SVal::Span { .. }
+        | SVal::StrSpan { .. }
+        | SVal::OkInt(_)
+        | SVal::SomeInt(_)
+        | SVal::NoneOpt
+        | SVal::StrConst(_)
+        | SVal::Item(_) => None,
     }
 }
 
@@ -334,6 +401,21 @@ pub(super) fn try_fits_of(ty: &str) -> Option<TryFits> {
     })
 }
 
+/// `s.as_str()`, `s.to_string()`, or `s.to_owned()` on a span slot: the
+/// same slice of the same locked source, so the plan defers the owned copy
+/// to the site that needs one, a map key or the writeback. The generic
+/// results agree, a match's `as_str` is its slice and a str's `to_string`
+/// is an equal string. Any other receiver answers `None` and fails the
+/// iteration over to the generic path, whose own dispatch resolves it.
+pub(super) fn s_as_str(v: SVal) -> Option<SVal> {
+    match v {
+        SVal::Span { start, end } | SVal::StrSpan { start, end } => {
+            Some(SVal::StrSpan { start, end })
+        }
+        _ => None,
+    }
+}
+
 /// `m.start()` or `m.end()` on a `Span` slot, mirroring the `MatchOut::Int`
 /// arms of `shared::match_core`, which nothing intercepts for a regex match
 /// handle. Any other receiver answers `None` and fails the iteration over
@@ -347,12 +429,13 @@ pub(super) fn s_match_get(v: SVal, end: bool) -> Option<SVal> {
     }
 }
 
-/// `.unwrap()` on an `OkInt` slot, mirroring the `unwrap` arm of
-/// `methods::res_method` on an `Ok`. Any other receiver answers `None` and
-/// fails the iteration over to the generic path.
+/// `.unwrap()` on an `OkInt` or `SomeInt` slot, mirroring the `unwrap`
+/// arms of the generic `Result` and `Option` methods on a payload-carrying
+/// variant. Any other receiver answers `None` and fails the iteration over
+/// to the generic path, an `Err` or `None` panic included.
 pub(super) fn s_unwrap_ok(v: SVal) -> Option<SVal> {
     match v {
-        SVal::OkInt(n) => Some(SVal::Int(n)),
+        SVal::OkInt(n) | SVal::SomeInt(n) => Some(SVal::Int(n)),
         _ => None,
     }
 }
@@ -414,6 +497,8 @@ pub(super) fn scalar_int_method(name: &str) -> bool {
             | "rotate_right"
             | "swap_bytes"
             | "reverse_bits"
+            | "as_i64"
+            | "as_u64"
     )
 }
 
@@ -469,6 +554,12 @@ pub(super) fn s_int_method(name: &str, recv: SVal, args: &[SVal]) -> Option<SVal
         // The counting family answers u32 in real Rust, see `int_out`.
         IntOut::Count(count) => from_i128(i128::from(count), IntWidth::U32),
         IntOut::Bool(b) => Some(SVal::Bool(b)),
+        // The generic path boxes a checked answer in the receiver's width,
+        // so only the plain-int width has the `SomeInt` slot form.
+        IntOut::Checked(opt) if width == IntWidth::I64 => Some(match opt {
+            Some(v) => SVal::SomeInt(i64::try_from(v).ok()?),
+            None => SVal::NoneOpt,
+        }),
         _ => None,
     }
 }
