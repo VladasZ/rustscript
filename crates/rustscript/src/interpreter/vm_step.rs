@@ -462,7 +462,7 @@ fn loop_plan_jump(ctx: &mut StepCtx, to: usize) -> Result<Option<Flow>> {
         }
         return Ok(None);
     }
-    super::scalar_loop::try_run_while(ctx, to)
+    super::scalar_while::try_run_while(ctx, to)
 }
 
 fn load_cell(ctx: &mut StepCtx, dst: u16, cell: u16) -> Result<Flow> {
@@ -638,7 +638,7 @@ fn for_next(ctx: &mut StepCtx, iter: u16, idx: u16, val: u16, to: u32) -> Result
     // register at the consumed count, so the attempt happens once and the
     // index is re-read below.
     if matches!(ctx.get(idx), Value::Int(0))
-        && let Some(flow) = super::scalar_loop::try_run(ctx, iter, idx, to)?
+        && let Some(flow) = super::scalar_for::try_run(ctx, iter, idx, to)?
     {
         return Ok(flow);
     }

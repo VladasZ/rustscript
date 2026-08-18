@@ -43,6 +43,29 @@ impl SVal {
     }
 }
 
+/// The boxed value of a slot, `None` for `Opaque`, whose frame value the
+/// plan never read.
+pub(super) fn s_value(v: SVal) -> Option<Value> {
+    match v {
+        SVal::Opaque => None,
+        SVal::Unit => Some(Value::Unit),
+        SVal::Int(i) => Some(Value::Int(i)),
+        SVal::IntW(s, w) => Some(Value::IntW(s, w)),
+        SVal::Bool(b) => Some(Value::Bool(b)),
+    }
+}
+
+/// A slot as a vec index, mirroring the `usize::try_from(int_of(key))` the
+/// generic `ops::index` applies. `None` sends the access to the generic
+/// path, which reproduces the exact error for a negative or non-integer key.
+pub(super) fn s_index(v: SVal) -> Option<usize> {
+    match v {
+        SVal::Int(i) => usize::try_from(i).ok(),
+        SVal::IntW(s, w) => usize::try_from(w.decode(s)).ok(),
+        _ => None,
+    }
+}
+
 /// The decoded value and width of an integer slot, mirroring
 /// `Value::int_parts` for the widths an `SVal` can hold.
 fn parts(v: SVal) -> Option<(i128, IntWidth)> {
