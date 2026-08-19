@@ -15,6 +15,7 @@ jobs:
   fmt:
     name: Format
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - run: cargo fmt --all -- --check
@@ -22,18 +23,16 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
-      # Clippy covers the whole workspace, so it builds bench and needs the same
-      # system fontconfig the test job does.
-      - name: Install fontconfig
-        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
       - run: cargo clippy --workspace --all-targets --features run-rs/deadlock-detection -- -D warnings
 
   test:
     name: Test ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -41,11 +40,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
-      # The bench crate draws charts with plotters, which links system
-      # fontconfig on Linux. macOS and Windows use their own font stacks.
-      - name: Install fontconfig
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
       # The deadlock detector rides along in every suite that runs scripts,
       # so a lock cycle aborts the run with backtraces instead of hanging
       # until the harness timeout.
