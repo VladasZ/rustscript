@@ -57,6 +57,15 @@ fn color_for(lang: &str) -> RGBColor {
     }
 }
 
+/// The name under a bar. The `native` key in `results.json` is the compiled
+/// Rust binary, so the bar names the language instead.
+fn bar_label(lang: &str) -> String {
+    match lang {
+        "native" => "rust".to_string(),
+        _ => lang.to_string(),
+    }
+}
+
 /// The chart title: the case name spelled out so the task is obvious.
 /// File names keep the short case name from `results.json`.
 fn display_title(name: &str) -> &'static str {
@@ -151,6 +160,11 @@ charts themselves. Edit that tool, not this file.
         writeln!(out, "## {title}\n")?;
         writeln!(out, "{}\n", case_line(c))?;
         writeln!(out, "![{title}](results/{}.png)\n", c.name)?;
+        writeln!(
+            out,
+            "Scripts: [cases/{name}](cases/{name})\n",
+            name = c.name
+        )?;
     }
     Ok(out)
 }
@@ -203,14 +217,14 @@ fn case_panels(c: &CaseResult) -> Vec<Panel> {
         .iter()
         .filter_map(|l| {
             c.total_of(l)
-                .map(|w| ((*l).to_string(), w.median, color_for(l)))
+                .map(|w| (bar_label(l), w.median, color_for(l)))
         })
         .collect();
     let comp: Vec<_> = LANG_ORDER
         .iter()
         .filter_map(|l| {
             c.compute_of(l)
-                .map(|w| ((*l).to_string(), w.median, color_for(l)))
+                .map(|w| (bar_label(l), w.median, color_for(l)))
         })
         .collect();
     // The time panels share one axis so bar heights compare directly.
@@ -240,7 +254,7 @@ fn case_panels(c: &CaseResult) -> Vec<Panel> {
         .filter_map(|l| {
             c.memory_of(l).map(|m| {
                 (
-                    (*l).to_string(),
+                    bar_label(l),
                     AsPrimitive::<f64>::as_(m.median_bytes),
                     color_for(l),
                 )
