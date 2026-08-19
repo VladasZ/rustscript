@@ -120,9 +120,9 @@ See [docs/github-actions.md](docs/github-actions.md).
 ## Benchmarks
 
 RustScript is compared with native Rust, Node, and Python on equivalent
-programs. See the [benchmark guide](bench/README.md) for methodology and
-results, and the [profiling guide](docs/profiling.md) for finding interpreter
-hot spots.
+programs. See [all benchmark charts](bench/RESULTS.md) for every case, the
+[benchmark guide](bench/README.md) for methodology, and the
+[profiling guide](docs/profiling.md) for finding interpreter hot spots.
 
 ![regex benchmark](bench/results/regex.png)
 

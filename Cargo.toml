@@ -28,11 +28,14 @@ lopdf = "0.44"
 mimalloc = "0.1"
 num-traits = "0.2"
 parking_lot = "0.12"
+# ab_glyph rasterizes text in pure Rust. The ttf feature would pull font-kit,
+# which links system freetype and fontconfig and makes the build depend on
+# what each machine happens to have installed.
 plotters = { version = "0.3", default-features = false, features = [
+    "ab_glyph",
     "all_series",
     "bitmap_backend",
     "bitmap_encoder",
-    "ttf",
 ] }
 pretty_assertions = "1.4"
 proc-macro2 = { version = "1.0", features = ["span-locations"] }

@@ -142,10 +142,9 @@ Windows. Clippy runs with `-D warnings`, so a warning fails the build.
 
 Every job sets `timeout-minutes`, so a step that hangs on the runner fails in
 minutes instead of burning to the six hour job limit. No job installs system
-packages. The bench crate draws charts with `plotters`, which reaches for
-fontconfig on Linux, and `bench/Cargo.toml` turns on the `fontconfig-dlopen`
-feature there so the library is loaded at runtime rather than linked. That
-removes the build time need for `libfontconfig1-dev`.
+packages. The bench crate draws charts with `plotters`, and it uses the
+`ab_glyph` text renderer with a font embedded in the binary, so no platform
+needs system font libraries to build.
 
 ## Marketplace
 

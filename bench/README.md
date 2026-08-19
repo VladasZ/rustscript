@@ -106,6 +106,11 @@ cargo run --release --bin bench
 cargo run --release --bin chart
 ```
 
+The chart run writes one PNG per case into `results/` and rewrites
+[RESULTS.md](RESULTS.md), the document that collects every chart. Text is drawn
+with Roboto, embedded from `fonts/`, so the tool needs no system fonts and
+renders the same on every machine.
+
 ## Performance goal
 
 The goal is judged on total time, the whole run including startup. The floor

@@ -16,11 +16,6 @@ reqwest = { workspace = true }
 sha2 = { workspace = true }
 tokio = { workspace = true }
 
-# fontconfig-dlopen makes font-kit load libfontconfig at runtime instead of
-# linking it, so building on Linux needs no libfontconfig1-dev package.
-[target.'cfg(target_os = "linux")'.dependencies]
-plotters = { workspace = true, features = ["fontconfig-dlopen"] }
-
 [[bin]]
 name = "bench"
 path = "src/bin/bench.rs"
