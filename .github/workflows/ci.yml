@@ -20,6 +20,14 @@ jobs:
       - uses: actions/checkout@v7
       - run: cargo fmt --all -- --check
 
+  typos:
+    name: Typos
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: crate-ci/typos@v1.49.0
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
