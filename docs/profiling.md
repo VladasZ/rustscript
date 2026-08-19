@@ -62,7 +62,7 @@ around it and do not trust best-of-N under load.
 
 ## Timing
 
-Do not take wall-clock numbers from the profiler. Every bench case prints
+Do not take total time numbers from the profiler. Every bench case prints
 `COMPUTE_NS` to stderr around the compute part only. Run the case a few times
 and take the best:
 

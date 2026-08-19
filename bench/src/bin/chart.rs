@@ -1,5 +1,5 @@
 //! Render one PNG per benchmark case, dark themed, fixed color per
-//! language, linear scale. Each compute case gets three panels, wall-clock,
+//! language, linear scale. Each compute case gets three panels, total time,
 //! self timed compute, and peak memory. The startup cases skip the compute
 //! panel.
 //!
@@ -112,16 +112,16 @@ fn main() -> Result<()> {
 }
 
 /// One PNG for one case.
-/// The panels a case renders: wall-clock, compute-only when self timed, and
+/// The panels a case renders: total time, compute-only when self timed, and
 /// peak memory when measured. The time panels share one axis so bar heights
 /// compare directly.
 fn case_panels(c: &CaseResult) -> Vec<Panel> {
     let mut panels: Vec<Panel> = Vec::new();
 
-    let wall: Vec<_> = LANG_ORDER
+    let total: Vec<_> = LANG_ORDER
         .iter()
         .filter_map(|l| {
-            c.wall_of(l)
+            c.total_of(l)
                 .map(|w| ((*l).to_string(), w.median, color_for(l)))
         })
         .collect();
@@ -133,15 +133,15 @@ fn case_panels(c: &CaseResult) -> Vec<Panel> {
         })
         .collect();
     // The time panels share one axis so bar heights compare directly.
-    let tmax = wall
+    let tmax = total
         .iter()
         .chain(comp.iter())
         .map(|b| b.1)
         .fold(0f64, f64::max);
     let taxis = if tmax > 0.0 { tmax * 1.18 } else { 1.0 };
     panels.push(Panel {
-        title: "wall-clock   startup plus run".to_string(),
-        bars: wall,
+        title: "total time   startup plus run".to_string(),
+        bars: total,
         axis_hi: taxis,
         fmt: fmt_time,
     });

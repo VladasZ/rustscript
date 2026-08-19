@@ -1,7 +1,7 @@
 // Covers two std bridges the board tooling leans on: PathBuf::from of an OsString (from env::var_os)
 // must unwrap the inner path rather than Debug-print the struct, and std::time::UNIX_EPOCH must resolve
 // as a SystemTime so duration_since math works. Output is deterministic: it prints only booleans and a
-// zero delta, never the machine-specific path or the wall clock, so compiled and interpreted match.
+// zero delta, never the machine-specific path or the system clock, so compiled and interpreted match.
 
 use std::env;
 use std::path::PathBuf;
