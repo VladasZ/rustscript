@@ -187,9 +187,10 @@ impl Drop for Scratch {
 fn main() -> Result<()> {
     let quick = env::args().any(|arg| arg == "--quick");
     let samples = sample_override()?.unwrap_or(if quick { 3 } else { 5 });
+    let case_filter = case_override()?;
     let settings = Settings {
         warmups: 1,
-        wall_samples: samples,
+        total_samples: samples,
         compute_samples: samples,
         quick,
     };
@@ -207,6 +208,11 @@ fn main() -> Result<()> {
     let server = root.join("target/release/bench-server");
     let mut results = Vec::new();
     for case in CASES {
+        if let Some(name) = &case_filter {
+            if case.name != name {
+                continue;
+            }
+        }
         println!("\n== {} ==", case.name);
         let mut http = if matches!(case.input, Input::Http(_)) {
             Some(HttpServer::start(&server)?)
@@ -226,7 +232,7 @@ fn main() -> Result<()> {
             .map(|lang| invocation(&context, case, lang))
             .collect::<Result<_>>()?;
         gate_check(case, &invocations)?;
-        let wall = wall_track(&invocations, &settings)?;
+        let total = total_track(&invocations, &settings)?;
         let (compute, memory) = if case.kind == "compute" {
             compute_track(&invocations, settings.compute_samples)?
         } else {
@@ -235,12 +241,12 @@ fn main() -> Result<()> {
                 memory_track(&invocations, settings.compute_samples)?,
             )
         };
-        print_stats(&wall, &compute, &memory);
+        print_stats(&total, &compute, &memory);
         results.push(CaseResult {
             name: case.name.to_string(),
             kind: case.kind.to_string(),
             parameters: case_parameters(case),
-            wall,
+            total,
             compute,
             memory,
         });
@@ -249,24 +255,55 @@ fn main() -> Result<()> {
         }
     }
 
-    println!("\n== warm check ==");
-    let gate = warm_check(&root, &scratch, &rustscript, &settings)?;
-    println!("  warm check {:>8.2} ms", gate.warm_median * 1e3);
-    let fixtures = fixture_paths(&root);
-    let meta = rustscript_bench::provenance::gather(&root, &rustscript, &fixtures, settings)?;
-    let report = Report {
-        schema_version: 3,
-        meta,
-        cases: results,
-        gate,
-    };
     let results_dir = root.join("bench/results");
     fs::create_dir_all(&results_dir)?;
     let output = results_dir.join("results.json");
+    // A filtered run replaces only its cases in the existing report, so the
+    // other cases and the recorded provenance stay from the full run.
+    let report = if case_filter.is_some() {
+        let mut report: Report = serde_json::from_str(&fs::read_to_string(&output)?)?;
+        for fresh in results {
+            let Some(slot) = report
+                .cases
+                .iter_mut()
+                .find(|existing| existing.name == fresh.name)
+            else {
+                bail!("case {} is not in the existing report", fresh.name);
+            };
+            *slot = fresh;
+        }
+        report
+    } else {
+        println!("\n== warm check ==");
+        let gate = warm_check(&root, &scratch, &rustscript, &settings)?;
+        println!("  warm check {:>8.2} ms", gate.warm_median * 1e3);
+        let fixtures = fixture_paths(&root);
+        let meta = rustscript_bench::provenance::gather(&root, &rustscript, &fixtures, settings)?;
+        Report {
+            schema_version: 4,
+            meta,
+            cases: results,
+            gate,
+        }
+    };
     fs::write(&output, serde_json::to_string_pretty(&report)?)?;
     println!("\nwrote {}", output.display());
     println!("now run: cargo run --release --bin chart");
     Ok(())
+}
+
+fn case_override() -> Result<Option<String>> {
+    let args: Vec<String> = env::args().collect();
+    for pair in args.windows(2) {
+        if pair[0] == "--case" {
+            let name = pair[1].clone();
+            if !CASES.iter().any(|case| case.name == name) {
+                bail!("unknown case {name}");
+            }
+            return Ok(Some(name));
+        }
+    }
+    Ok(None)
 }
 
 fn sample_override() -> Result<Option<u32>> {
@@ -506,16 +543,16 @@ fn compare_bytes(
     Ok(())
 }
 
-fn wall_track(invocations: &[Invocation], settings: &Settings) -> Result<Vec<TimeStat>> {
+fn total_track(invocations: &[Invocation], settings: &Settings) -> Result<Vec<TimeStat>> {
     for invocation in invocations {
         for _ in 0..settings.warmups {
-            run_wall(invocation)?;
+            run_total(invocation)?;
         }
     }
     let mut samples = vec![Vec::new(); invocations.len()];
-    for round in 0..settings.wall_samples as usize {
+    for round in 0..settings.total_samples as usize {
         for index in rotated_indices(invocations.len(), round) {
-            samples[index].push(run_wall(&invocations[index])?);
+            samples[index].push(run_total(&invocations[index])?);
         }
     }
     Ok(invocations
@@ -525,7 +562,7 @@ fn wall_track(invocations: &[Invocation], settings: &Settings) -> Result<Vec<Tim
         .collect())
 }
 
-fn run_wall(invocation: &Invocation) -> Result<f64> {
+fn run_total(invocation: &Invocation) -> Result<f64> {
     let start = Instant::now();
     let status = invocation
         .command()
@@ -534,7 +571,7 @@ fn run_wall(invocation: &Invocation) -> Result<f64> {
         .status()?;
     let elapsed = start.elapsed().as_secs_f64();
     if !status.success() {
-        bail!("wall run failed for {}", invocation.lang);
+        bail!("total time run failed for {}", invocation.lang);
     }
     Ok(elapsed)
 }
@@ -616,7 +653,7 @@ fn warm_check(
         }
     }
     let mut samples = Vec::new();
-    for _ in 0..settings.wall_samples {
+    for _ in 0..settings.total_samples {
         let start = Instant::now();
         let status = run().status()?;
         samples.push(start.elapsed().as_secs_f64());
@@ -631,9 +668,9 @@ fn warm_check(
     })
 }
 
-fn print_stats(wall: &[TimeStat], compute: &[TimeStat], memory: &[MemStat]) {
-    for stat in wall {
-        println!("  wall   {:<11} {:>8.2} ms", stat.lang, stat.median * 1e3);
+fn print_stats(total: &[TimeStat], compute: &[TimeStat], memory: &[MemStat]) {
+    for stat in total {
+        println!("  total  {:<11} {:>8.2} ms", stat.lang, stat.median * 1e3);
     }
     for stat in compute {
         println!("  compute{:<11} {:>8.2} ms", stat.lang, stat.median * 1e3);

@@ -36,7 +36,7 @@ pub enum Native {
     BlockingHttpClient(reqwest::blocking::Client),
     /// A monotonic clock reading used by timed async scripts.
     Instant(Instant),
-    /// A wall clock reading, `SystemTime::now` or a file timestamp.
+    /// A system clock reading, `SystemTime::now` or a file timestamp.
     SystemTime(SystemTime),
     /// A spawned child process, waited on through its `Child` value.
     Child(Child),

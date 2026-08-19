@@ -103,43 +103,30 @@ under `crates/examples/examples`.
   unpromised, so a correct script cannot observe the difference, but an
   interpreted run is deterministic where a compiled one is not.
 
-## Modules and local crates
-
-`mod name;`, nested modules, and `crate::`, `self::`, `super::` imports work
-as in normal Rust. A script inside a Cargo project can use local library
-crates declared as path dependencies in the nearest `Cargo.toml`. See
-[docs/multifile.md](docs/multifile.md) for layout rules and a complete
-example.
-
-## Caching
-
-Checks, compiled binaries, and shared Cargo dependencies live under
-`~/.cache/rustscript`. Entries are keyed by source hash and interpreter
-version, unused ones are swept after 30 days. `rust clean` removes everything
-at once.
-
 ## GitHub Actions
 
 The repository is also a GitHub Action:
 
 ```yaml
-- uses: VladasZ/rustscript@v0.2
+- uses: VladasZ/rustscript@v0.6
   with:
     script: tools/release.rs
-    args: --dry-run
 ```
 
-It downloads a checksum verified prebuilt binary, so setup takes seconds
-instead of compiling the crate. Linux, macOS, and Windows on x86_64 and
-arm64. See [docs/github-actions.md](docs/github-actions.md).
+It downloads a prebuilt binary.
+Linux, macOS, and Windows on x86_64 and arm64 supported.
+See [docs/github-actions.md](docs/github-actions.md).
 
 ## Benchmarks
 
 RustScript is compared with native Rust, Node, and Python on equivalent
 programs. See the [benchmark guide](bench/README.md) for methodology and
 results, and the [profiling guide](docs/profiling.md) for finding interpreter
-hot spots. The [roadmap](docs/roadmap.md) tracks the wall-clock goal, beat
-both interpreted rivals on every case, startup included.
+hot spots.
+
+![regex benchmark](bench/results/regex.png)
+
+![json parse benchmark](bench/results/json.png)
 
 ## Licence
 

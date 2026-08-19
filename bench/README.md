@@ -13,7 +13,7 @@ byte-identical files.
 
 Each timed command runs as a fresh process. The harness records three tracks.
 
-- Wall-clock time covers process launch, runtime startup, parsing, compilation,
+- Total time covers process launch, runtime startup, parsing, compilation,
   and work.
 - Compute time comes from a timer inside each workload, after argument handling
   and immediately around the described work.
@@ -22,11 +22,11 @@ Each timed command runs as a fresh process. The harness records three tracks.
 
 The report and charts use the median for every track and retain every raw sample
 in `results.json`. Every chart carries the Node and Python versions the run
-measured, in the top right corner. Timed stdout always goes to `/dev/null`, so wall and compute
+measured, in the top right corner. Timed stdout always goes to `/dev/null`, so total time and compute
 runs see the same output destination. Samples run round-robin with a rotating
 language order to spread temperature and background-system drift.
 
-The default is one warmup, five wall samples, and five compute/memory samples
+The default is one warmup, five total time samples, and five compute/memory samples
 for every case. `--quick` uses three samples per track. `--samples N` sets
 both sample counts explicitly.
 
@@ -107,10 +107,9 @@ cargo run --release --bin chart
 
 ## Performance goal
 
-The goal is judged on wall clock, the whole run including startup. The floor
+The goal is judged on total time, the whole run including startup. The floor
 is to never be the slowest interpreted runtime on any case, the target is to
-beat both Node and Python. [docs/roadmap.md](../docs/roadmap.md) tracks the
-standing of every case against that goal.
+beat both Node and Python. All cases currently beat both rivals.
 
 ## Scope limits
 

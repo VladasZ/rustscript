@@ -52,14 +52,14 @@ pub struct CaseResult {
     pub name: String,
     pub kind: String,
     pub parameters: Vec<String>,
-    pub wall: Vec<TimeStat>,
+    pub total: Vec<TimeStat>,
     pub compute: Vec<TimeStat>,
     pub memory: Vec<MemStat>,
 }
 
 impl CaseResult {
-    pub fn wall_of(&self, lang: &str) -> Option<&TimeStat> {
-        self.wall.iter().find(|sample| sample.lang == lang)
+    pub fn total_of(&self, lang: &str) -> Option<&TimeStat> {
+        self.total.iter().find(|sample| sample.lang == lang)
     }
 
     pub fn compute_of(&self, lang: &str) -> Option<&TimeStat> {
@@ -86,7 +86,7 @@ pub struct NamedHash {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Settings {
     pub warmups: u32,
-    pub wall_samples: u32,
+    pub total_samples: u32,
     pub compute_samples: u32,
     pub quick: bool,
 }
