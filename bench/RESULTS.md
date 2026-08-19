@@ -17,11 +17,15 @@ charts themselves. Edit that tool, not this file.
 
 ![hello world](results/hello.png)
 
+Scripts: [cases/hello](cases/hello)
+
 ## big script startup
 
 `big_script`, startup
 
 ![big script startup](results/big_script.png)
+
+Scripts: [cases/big_script](cases/big_script)
 
 ## multi-file startup
 
@@ -29,11 +33,15 @@ charts themselves. Edit that tool, not this file.
 
 ![multi-file startup](results/multifile_startup.png)
 
+Scripts: [cases/multifile_startup](cases/multifile_startup)
+
 ## recursive fibonacci
 
 `fib`, compute, `size=27`
 
 ![recursive fibonacci](results/fib.png)
+
+Scripts: [cases/fib](cases/fib)
 
 ## sieve of eratosthenes
 
@@ -41,11 +49,15 @@ charts themselves. Edit that tool, not this file.
 
 ![sieve of eratosthenes](results/sieve.png)
 
+Scripts: [cases/sieve](cases/sieve)
+
 ## mandelbrot
 
 `mandelbrot`, compute, `size=140`
 
 ![mandelbrot](results/mandelbrot.png)
+
+Scripts: [cases/mandelbrot](cases/mandelbrot)
 
 ## collatz
 
@@ -53,11 +65,15 @@ charts themselves. Edit that tool, not this file.
 
 ![collatz](results/collatz.png)
 
+Scripts: [cases/collatz](cases/collatz)
+
 ## binary trees
 
 `binary_trees`, compute, `size=11`
 
 ![binary trees](results/binary_trees.png)
+
+Scripts: [cases/binary_trees](cases/binary_trees)
 
 ## string building
 
@@ -65,11 +81,15 @@ charts themselves. Edit that tool, not this file.
 
 ![string building](results/string_builder.png)
 
+Scripts: [cases/string_builder](cases/string_builder)
+
 ## map filter fold
 
 `higher_order`, compute, `size=100000`
 
 ![map filter fold](results/higher_order.png)
+
+Scripts: [cases/higher_order](cases/higher_order)
 
 ## comparator sort
 
@@ -77,11 +97,15 @@ charts themselves. Edit that tool, not this file.
 
 ![comparator sort](results/sort.png)
 
+Scripts: [cases/sort](cases/sort)
+
 ## sort by key
 
 `sort_key`, compute, `size=50000`
 
 ![sort by key](results/sort_key.png)
+
+Scripts: [cases/sort_key](cases/sort_key)
 
 ## int hashmap
 
@@ -89,11 +113,15 @@ charts themselves. Edit that tool, not this file.
 
 ![int hashmap](results/hashmap_int.png)
 
+Scripts: [cases/hashmap_int](cases/hashmap_int)
+
 ## n-body
 
 `nbody`, compute, `size=8000`
 
 ![n-body](results/nbody.png)
+
+Scripts: [cases/nbody](cases/nbody)
 
 ## json serialize
 
@@ -101,11 +129,15 @@ charts themselves. Edit that tool, not this file.
 
 ![json serialize](results/json_serialize.png)
 
+Scripts: [cases/json_serialize](cases/json_serialize)
+
 ## stdout lines
 
 `stdout_lines`, compute, `size=20000`
 
 ![stdout lines](results/stdout_lines.png)
+
+Scripts: [cases/stdout_lines](cases/stdout_lines)
 
 ## word count
 
@@ -113,11 +145,15 @@ charts themselves. Edit that tool, not this file.
 
 ![word count](results/word_count.png)
 
+Scripts: [cases/word_count](cases/word_count)
+
 ## json parse
 
 `json`, compute, `fixture=json/data.json`
 
 ![json parse](results/json.png)
+
+Scripts: [cases/json](cases/json)
 
 ## regex
 
@@ -125,11 +161,15 @@ charts themselves. Edit that tool, not this file.
 
 ![regex](results/regex.png)
 
+Scripts: [cases/regex](cases/regex)
+
 ## file transform
 
 `file_transform`, compute, `fixture=word_count/data.txt`
 
 ![file transform](results/file_transform.png)
+
+Scripts: [cases/file_transform](cases/file_transform)
 
 ## process spawn
 
@@ -137,11 +177,15 @@ charts themselves. Edit that tool, not this file.
 
 ![process spawn](results/process_spawn.png)
 
+Scripts: [cases/process_spawn](cases/process_spawn)
+
 ## async tasks
 
 `async_tasks`, compute, `size=20`
 
 ![async tasks](results/async_tasks.png)
+
+Scripts: [cases/async_tasks](cases/async_tasks)
 
 ## local http
 
@@ -149,9 +193,13 @@ charts themselves. Edit that tool, not this file.
 
 ![local http](results/http_local.png)
 
+Scripts: [cases/http_local](cases/http_local)
+
 ## automation script
 
 `automation`, compute, `fixture=word_count/data.txt`, `top=20`
 
 ![automation script](results/automation.png)
+
+Scripts: [cases/automation](cases/automation)
 
