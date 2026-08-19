@@ -140,6 +140,13 @@ a bare `rust update`. Naming it installs it, `rust update v0.2.0-rc.1`.
 formatting and clippy on Linux, and runs the full test suite on Linux, macOS and
 Windows. Clippy runs with `-D warnings`, so a warning fails the build.
 
+Every job sets `timeout-minutes`, so a step that hangs on the runner fails in
+minutes instead of burning to the six hour job limit. No job installs system
+packages. The bench crate draws charts with `plotters`, which reaches for
+fontconfig on Linux, and `bench/Cargo.toml` turns on the `fontconfig-dlopen`
+feature there so the library is loaded at runtime rather than linked. That
+removes the build time need for `libfontconfig1-dev`.
+
 ## Marketplace
 
 Listing on the GitHub Marketplace is a manual step. It needs the repository to
