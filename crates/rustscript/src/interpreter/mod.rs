@@ -18,6 +18,7 @@ mod native;
 mod native_methods;
 mod numeric;
 mod ops;
+mod pattern;
 mod pdf_bridge;
 mod process;
 mod ratatui;
@@ -141,6 +142,68 @@ pub struct Interp {
     /// Root module imports, used by the bridge dispatch to expand aliases.
     uses: HashMap<String, Vec<String>>,
     main_index: Option<u32>,
+    /// Whether an `Err` out of `main` prints its `Display` text rather than
+    /// its `Debug` form, decided by `main`'s written error type.
+    main_err_display: bool,
+}
+
+/// Whether `main`'s declared error type prints as `Display` when it falls out
+/// of `main`. Real Rust prints the `Debug` form of the error value, and the
+/// one common exception is `anyhow::Error`, whose own `Debug` prints the bare
+/// message. `anyhow::Result<()>` carries no written error type, so a `Result`
+/// with fewer than two type arguments is the anyhow shape too, unless the
+/// imports say the name means something else.
+fn main_err_uses_display(output: &syn::ReturnType, uses: &HashMap<String, Vec<String>>) -> bool {
+    let from_anyhow = |segs: &[String]| -> bool {
+        match segs {
+            [one] => uses
+                .get(one)
+                .is_some_and(|full| full.first().is_some_and(|s| s == "anyhow")),
+            [first, ..] => first == "anyhow",
+            [] => false,
+        }
+    };
+    let syn::ReturnType::Type(_, ty) = output else {
+        return false;
+    };
+    let syn::Type::Path(p) = &**ty else {
+        return false;
+    };
+    let Some(last) = p.path.segments.last() else {
+        return false;
+    };
+    if last.ident != "Result" {
+        return false;
+    }
+    let mut types = Vec::new();
+    if let syn::PathArguments::AngleBracketed(ab) = &last.arguments {
+        for a in &ab.args {
+            if let syn::GenericArgument::Type(t) = a {
+                types.push(t);
+            }
+        }
+    }
+    let Some(err_ty) = types.get(1) else {
+        // No written error type. A plain `Result<()>` resolves through the
+        // imports, `use anyhow::Result` being the common way to write it.
+        let segs: Vec<String> = p
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect();
+        return from_anyhow(&segs);
+    };
+    let syn::Type::Path(ep) = err_ty else {
+        return false;
+    };
+    let segs: Vec<String> = ep
+        .path
+        .segments
+        .iter()
+        .map(|s| s.ident.to_string())
+        .collect();
+    from_anyhow(&segs)
 }
 
 /// Stated return scalars of the script's own functions, one more place a
@@ -224,24 +287,7 @@ impl Interp {
 
         let fn_returns = collect_fn_returns(&pending_fns);
 
-        // Method names any impl declares with a `&mut self` receiver. A call
-        // to one of these compiles its receiver as a place, split from value
-        // sharing first, so the mutation stays private to the receiver. The
-        // set is by name because the receiver's runtime type is not known at
-        // compile time; splitting a receiver that resolves to a `&self`
-        // method of the same name is wasted work, never wrong.
-        let has_drop = pending_methods
-            .iter()
-            .any(|(_, name, _, _)| name == "Drop::drop");
-        let mut_methods: HashSet<String> = pending_methods
-            .iter()
-            .filter(|(_, _, _, f)| {
-                f.sig
-                    .receiver()
-                    .is_some_and(|r| matches!(r.kind, syn::ReceiverKind::Reference(_, _, Some(_))))
-            })
-            .map(|(_, name, _, _)| name.clone())
-            .collect();
+        let (has_drop, mut_methods) = collect_mut_methods(&pending_methods);
 
         let mut functions = Vec::with_capacity(pending_fns.len());
         for (m, f) in &pending_fns {
@@ -295,6 +341,9 @@ impl Interp {
         let fn_index = build_fn_index(&resolver);
         let main_index = resolver.modules[0].fns.get("main").copied();
         let uses = resolver.modules[0].uses.clone();
+        let main_err_display = main_index
+            .and_then(|i| pending_fns.get(i as usize))
+            .is_some_and(|(_, f)| main_err_uses_display(&f.sig.output, &uses));
         Ok(Interp {
             functions,
             fn_index,
@@ -303,6 +352,7 @@ impl Interp {
             globals: RefCell::new(globals),
             uses,
             main_index,
+            main_err_display,
         })
     }
 
@@ -433,11 +483,15 @@ impl Interp {
             && &**enum_name == "Result"
             && &**variant == "Err"
         {
-            let msg = data
-                .lock()
-                .first()
-                .map(value::Value::display)
-                .unwrap_or_default();
+            // A compiled binary prints the `Debug` form of the error here.
+            // An `anyhow::Error` is the exception, its own `Debug` prints
+            // the bare message, which `display` mirrors.
+            let render: fn(&value::Value) -> String = if self.main_err_display {
+                value::Value::display
+            } else {
+                value::Value::debug
+            };
+            let msg = data.lock().first().map(render).unwrap_or_default();
             return Err(anyhow::Error::new(vm_support::ErrReturn(msg)));
         }
         Ok(())
@@ -559,6 +613,28 @@ type PendingMethod = (String, String, usize, Rc<syn::ImplItemFn>);
 /// after all modules registered their types. A trait impl also brings in the
 /// trait's default bodies for methods it does not override, compiled against
 /// the trait's module.
+/// Whether any impl defines `Drop::drop`, and the method names any impl
+/// declares with a `&mut self` receiver. A call to one of the latter compiles
+/// its receiver as a place, split from value sharing first, so the mutation
+/// stays private to the receiver. The set is by name because the receiver's
+/// runtime type is not known at compile time; splitting a receiver that
+/// resolves to a `&self` method of the same name is wasted work, never wrong.
+fn collect_mut_methods(pending_methods: &[PendingMethod]) -> (bool, HashSet<String>) {
+    let has_drop = pending_methods
+        .iter()
+        .any(|(_, name, _, _)| name == "Drop::drop");
+    let mut_methods = pending_methods
+        .iter()
+        .filter(|(_, _, _, f)| {
+            f.sig
+                .receiver()
+                .is_some_and(|r| matches!(r.kind, syn::ReceiverKind::Reference(_, _, Some(_))))
+        })
+        .map(|(_, name, _, _)| name.clone())
+        .collect();
+    (has_drop, mut_methods)
+}
+
 fn collect_impl_items(
     resolver: &mut Resolver,
     pending_impls: &[(usize, Rc<syn::ItemImpl>)],

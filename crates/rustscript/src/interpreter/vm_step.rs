@@ -19,9 +19,8 @@ use super::bytecode::{CapSource, Chunk, MacroKind, Member, Op, path_call_chunk};
 use super::iterator::FastNext;
 use super::native::Native;
 use super::numeric::{float_to_int, truncate};
-use super::ops::{
-    self, apply_bin, apply_bin_imm, apply_un, cmp_test, cmp_test_imm, int_of, try_bind,
-};
+use super::ops::{self, apply_bin, apply_bin_imm, apply_un, cmp_test, cmp_test_imm, int_of};
+use super::pattern::{bind_pattern_refs, try_bind};
 use super::typeir::CastIr;
 use super::value::{ClosureData, StructShape, Upvalue, Value};
 use super::vm::{TypeEnv, Vm, empty_type_env};
@@ -1226,7 +1225,7 @@ fn test_bind(ctx: &mut StepCtx, val: u16, pat: u16, dst: u16) -> Flow {
                     writes.push((*reg, v));
                 }
             };
-            ops::bind_pattern_refs(&info.pat, &value, &mut define);
+            bind_pattern_refs(&info.pat, &value, &mut define);
         }
         matched
     } else {

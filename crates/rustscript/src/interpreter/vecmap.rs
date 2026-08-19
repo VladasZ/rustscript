@@ -222,6 +222,7 @@ fn vec_method_by_name(v: &List, method: &MethodName, args: &mut [Value]) -> Resu
         // is gone from this one too. A draining view over the same vector
         // is that borrow.
         "by_ref" => iterator::draining_iter(v.clone()),
+        "peekable" => iterator::peekable_draining(v.clone()),
         "nth" => match v.lock().get(usize::try_from(int_arg(args, 0)?)?) {
             Some(item) => Value::some(item.clone()),
             None => Value::none(),

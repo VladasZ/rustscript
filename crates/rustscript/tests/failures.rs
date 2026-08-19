@@ -276,10 +276,10 @@ fn process_exit_code_passes_through_alike() {
     assert_parity("fn main() {\n    std::process::exit(3);\n}\n", 3, "");
 }
 
-/// An `Err` out of main exits 1 in both worlds. The message rendering differs
-/// by design: a compiled `Result<(), String>` main debug-prints the payload
-/// with quotes, while the interpreter prints the anyhow style `Error: msg`
-/// that the dominant `anyhow::Result` mains produce. Both carry the text.
+/// An `Err` out of main exits 1 in both worlds, and the message renders the
+/// `Debug` form of the payload exactly like a compiled binary, quotes on a
+/// `String` included. The interpreter once printed the bare `Display` text
+/// here, which dropped the quotes.
 #[test]
 fn err_from_main_exits_one_alike() {
     let src = "fn main() -> Result<(), String> {\n    Err(\"boom\".to_string())\n}\n";
@@ -290,9 +290,47 @@ fn err_from_main_exits_one_alike() {
     std::fs::remove_file(&path).unwrap();
     assert_eq!(
         String::from_utf8_lossy(&interpreted.stderr),
-        "Error: boom\n",
-        "interpreter must print the anyhow form exactly"
+        "Error: \"boom\"\n",
+        "interpreter must debug-print the payload exactly"
     );
+}
+
+/// The other common error payloads out of `main` keep their compiled
+/// rendering too: a boxed message stays quoted, an io error prints its
+/// `Os { .. }` debug shape.
+#[test]
+fn err_from_main_matches_compiled_rendering() {
+    assert_parity(
+        "fn main() -> Result<(), Box<dyn std::error::Error>> {\n    Err(\"oops\".into())\n}\n",
+        1,
+        "Error: \"oops\"",
+    );
+    assert_parity(
+        "fn main() -> Result<(), std::io::Error> {\n    let text = std::fs::read_to_string(\"no_such_file_for_this_test\")?;\n    println!(\"{text}\");\n    Ok(())\n}\n",
+        1,
+        "kind: NotFound",
+    );
+}
+
+/// An `anyhow::Result` main is the exception to the debug rendering: real
+/// anyhow's `Debug` prints the bare message, no quotes. Interpreter only,
+/// the plain rustc this suite compiles with has no anyhow.
+#[test]
+fn err_from_anyhow_main_prints_the_bare_message() {
+    for src in [
+        "fn main() -> anyhow::Result<()> {\n    anyhow::bail!(\"boom {}\", 42)\n}\n",
+        "use anyhow::Result;\n\nfn main() -> Result<()> {\n    anyhow::bail!(\"boom {}\", 42)\n}\n",
+    ] {
+        let path = temp_script(src);
+        let interpreted = run_interpreted(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(interpreted.status.code(), Some(1));
+        assert_eq!(
+            String::from_utf8_lossy(&interpreted.stderr),
+            "Error: boom 42\n",
+            "anyhow main must print the bare message"
+        );
+    }
 }
 
 /// A missing feature found at compile time reports with the stable
