@@ -1,0 +1,5 @@
+[default.extend-words]
+ratatui = "ratatui"
+lits = "lits"
+pn = "pn"
+unparseable = "unparseable"
