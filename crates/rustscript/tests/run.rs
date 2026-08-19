@@ -1094,3 +1094,26 @@ async fn main() {
 "#);
     assert_eq!(out, "total 4000\n");
 }
+
+#[test]
+fn mut_scrutinee_slice_rest_bindings_anchor() {
+    // The head and tail bindings around a `..` anchor to the scrutinee's
+    // own elements, so writes through them land, and a named rest binds
+    // the middle. The rest detection once missed `rest @ ..`, which made
+    // this arm bind `rest` to a single element or not match at all.
+    let out = run(r#"
+fn main() {
+    let mut nums = vec![1, 2, 3, 4, 5];
+    match &mut nums {
+        [first, mid @ .., last] => {
+            *first += 100;
+            *last += 200;
+            println!("mid {mid:?}");
+        }
+        _ => {}
+    }
+    println!("{nums:?}");
+}
+"#);
+    assert_eq!(out, "mid [2, 3, 4]\n[101, 2, 3, 4, 205]\n");
+}

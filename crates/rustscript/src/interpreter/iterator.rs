@@ -155,6 +155,19 @@ pub(super) fn draining_iter(items: List) -> Value {
     wrap(IteratorState::DrainingValues { values: items })
 }
 
+/// `peekable` on an eager vector iterator, a `split` result for example. The
+/// peek buffer sits over a draining view of the shared vector, so `peek` and
+/// a later `next` agree with what `by_ref` on the same vector would hand out.
+pub(super) fn peekable_draining(items: List) -> Value {
+    let source = Arc::new(Mutex::new(Native::Iterator(
+        IteratorState::DrainingValues { values: items },
+    )));
+    wrap(IteratorState::Peekable {
+        source,
+        buffered: None,
+    })
+}
+
 pub(super) fn bytes(source: RsStr) -> Value {
     wrap(IteratorState::Bytes { source, index: 0 })
 }
