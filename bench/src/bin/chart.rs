@@ -1,17 +1,20 @@
 //! Render one PNG per benchmark case, dark themed, fixed color per
 //! language, linear scale. Each compute case gets three panels, total time,
 //! self timed compute, and peak memory. The startup cases skip the compute
-//! panel.
+//! panel. The run also writes `bench/RESULTS.md`, the document that collects
+//! every chart.
 //!
 //! Usage: cargo run --release --bin chart
 
 use num_traits::AsPrimitive;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use plotters::coord::Shift;
 use plotters::prelude::*;
+use plotters::style::register_font;
 use plotters::style::text_anchor::{HPos, Pos, VPos};
 use rustscript_bench::{CaseResult, Meta, Report};
 
@@ -29,6 +32,10 @@ const MUTED: RGBColor = RGBColor(148, 150, 158);
 const GRID: RGBColor = RGBColor(62, 64, 70);
 
 const LANG_ORDER: [&str; 4] = ["native", "rustscript", "node", "python"];
+
+/// The only font the charts use. It is embedded because the pure Rust text
+/// renderer has no system font source, so nothing is found by name.
+const FONT: &[u8] = include_bytes!("../../fonts/Roboto-Regular.ttf");
 
 /// Bar geometry in logical units. Bars are packed 5 units apart and the
 /// panel width follows from the packed group, so there is no dead space.
@@ -90,6 +97,9 @@ struct Panel {
 }
 
 fn main() -> Result<()> {
+    register_font("sans-serif", FontStyle::Normal, FONT)
+        .map_err(|_| anyhow!("the embedded Roboto file is not a valid font"))?;
+
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .context("no parent")?;
@@ -108,7 +118,78 @@ fn main() -> Result<()> {
         render_case(&out, c, &report.meta)?;
         println!("wrote {}", out.display());
     }
+
+    let doc = root.join("bench/RESULTS.md");
+    fs::write(&doc, results_markdown(&report)?)?;
+    println!("wrote {}", doc.display());
     Ok(())
+}
+
+/// The document that collects every chart. It is written next to the charts
+/// on every run, so it can never list a case the suite no longer measures.
+fn results_markdown(report: &Report) -> Result<String> {
+    let meta = &report.meta;
+    let mut out = String::new();
+    writeln!(out, "# Benchmark results\n")?;
+    writeln!(
+        out,
+        r"Every case in the suite, one chart each, in run order. Each bar is the
+median of that case's samples. [README.md](README.md) explains the method and
+what every case measures.
+"
+    )?;
+    writeln!(
+        out,
+        r"This file is written by `cargo run --release --bin chart` together with the
+charts themselves. Edit that tool, not this file.
+"
+    )?;
+    writeln!(out, "{}\n", machine_lines(meta))?;
+
+    for c in &report.cases {
+        let title = display_title(&c.name);
+        writeln!(out, "## {title}\n")?;
+        writeln!(out, "{}\n", case_line(c))?;
+        writeln!(out, "![{title}](results/{}.png)\n", c.name)?;
+    }
+    Ok(out)
+}
+
+/// The machine, the runtimes, and the sample counts the recorded run used.
+fn machine_lines(meta: &Meta) -> String {
+    let cores = match meta.cpu_cores {
+        0 => String::new(),
+        n => format!(", {n} cores"),
+    };
+    let rustc = meta
+        .rustc
+        .split_whitespace()
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let commit: String = meta.git_commit.chars().take(7).collect();
+    let dirty = if meta.git_dirty { ", dirty tree" } else { "" };
+    let settings = &meta.settings;
+    format!(
+        r"- machine: {cpu}{cores}, {os} {arch}
+- runtimes: node {node}, {python}, {rustc}
+- run: commit `{commit}`{dirty}, {warmups} warmup, {total} total samples, {compute} compute samples",
+        cpu = meta.cpu,
+        os = meta.os,
+        arch = meta.arch,
+        node = meta.node,
+        python = meta.python,
+        warmups = settings.warmups,
+        total = settings.total_samples,
+        compute = settings.compute_samples,
+    )
+}
+
+/// The case name, its kind, and the arguments or fixture it ran with.
+fn case_line(c: &CaseResult) -> String {
+    let mut parts = vec![format!("`{}`", c.name), c.kind.clone()];
+    parts.extend(c.parameters.iter().map(|p| format!("`{p}`")));
+    parts.join(", ")
 }
 
 /// One PNG for one case.
@@ -203,20 +284,31 @@ fn render_case(out: &Path, c: &CaseResult, meta: &Meta) -> Result<()> {
     let area = BitMapBackend::new(out, dims).into_drawing_area();
     area.fill(&BG)?;
 
-    let (head, body) = area.split_vertically(s(60));
-    head.draw(&Text::new(
-        display_title(&c.name),
-        (s(28), s(18)),
-        ("sans-serif", s(30)).into_font().color(&INK),
-    ))?;
-    head.draw(&Text::new(
-        versions_label(meta),
-        (s(w - 28), s(28)),
-        ("sans-serif", s(15))
-            .into_font()
-            .color(&MUTED)
-            .pos(Pos::new(HPos::Right, VPos::Top)),
-    ))?;
+    let title = display_title(&c.name);
+    let versions = versions_label(meta);
+    let title_style = ("sans-serif", s(30)).into_font().color(&INK);
+    let versions_style = ("sans-serif", s(15)).into_font().color(&MUTED);
+
+    // The narrow two panel cases cannot hold the title and the machine line on
+    // one row without crowding, so the header stacks when the gap gets too
+    // small to read as a separation.
+    let title_w = area.estimate_text_size(title, &title_style)?.0;
+    let versions_w = area.estimate_text_size(&versions, &versions_style)?.0;
+    let header_space = u32::try_from(s(28) * 2 + s(48)).expect("header margins fit u32");
+    let one_row = title_w + versions_w + header_space <= dims.0;
+
+    let (head, body) = area.split_vertically(s(if one_row { 60 } else { 82 }));
+    if one_row {
+        head.draw(&Text::new(title, (s(28), s(18)), title_style))?;
+        head.draw(&Text::new(
+            versions,
+            (s(w - 28), s(28)),
+            versions_style.pos(Pos::new(HPos::Right, VPos::Top)),
+        ))?;
+    } else {
+        head.draw(&Text::new(title, (s(28), s(14)), title_style))?;
+        head.draw(&Text::new(versions, (s(28), s(56)), versions_style))?;
+    }
 
     let cols = body.split_evenly((1, panels.len()));
     for (cell, p) in cols.iter().zip(panels.iter()) {
