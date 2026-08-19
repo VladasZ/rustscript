@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::numeric::NumericCase;
+use crate::slice_case::SliceCase;
 use crate::typed::{GeneratedExpr, GeneratedType};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -597,6 +598,7 @@ pub enum StructuralCase {
     Enum(Box<EnumCase>),
     Function(FunctionCase),
     Numeric(NumericCase),
+    Slice(Box<SliceCase>),
 }
 
 impl StructuralCase {
@@ -604,6 +606,7 @@ impl StructuralCase {
         match self {
             Self::Enum(case) => case.prelude(),
             Self::Function(case) => case.prelude(),
+            Self::Slice(case) => case.prelude(),
             Self::Dataflow(_) | Self::MutableClosure(_) | Self::Numeric(_) => String::new(),
         }
     }
@@ -615,6 +618,7 @@ impl StructuralCase {
             Self::Enum(case) => case.render(),
             Self::Function(case) => case.render(),
             Self::Numeric(case) => case.render(),
+            Self::Slice(case) => case.render(),
         }
     }
 
@@ -633,6 +637,11 @@ impl StructuralCase {
                 .collect(),
             Self::Function(case) => case.shrinks().into_iter().map(Self::Function).collect(),
             Self::Numeric(case) => case.shrinks().into_iter().map(Self::Numeric).collect(),
+            Self::Slice(case) => case
+                .shrinks()
+                .into_iter()
+                .map(|case| Self::Slice(Box::new(case)))
+                .collect(),
         }
     }
 
@@ -643,6 +652,7 @@ impl StructuralCase {
             Self::Enum(case) => case.shape(output),
             Self::Function(case) => case.shape(output),
             Self::Numeric(case) => case.shape(output),
+            Self::Slice(case) => case.shape(output),
         }
     }
 
@@ -653,6 +663,7 @@ impl StructuralCase {
             Self::Enum(case) => case.features(output),
             Self::Function(case) => case.features(output),
             Self::Numeric(case) => case.features(output),
+            Self::Slice(case) => case.features(output),
         }
     }
 }

@@ -22,6 +22,8 @@ fn generation_covers_typed_structural_surfaces() {
         "enum",
         "match-enum",
         "match-guard",
+        "slice-pattern",
+        "slice-rest-pattern",
         "for-loop",
         "type-i64",
         "type-bool",

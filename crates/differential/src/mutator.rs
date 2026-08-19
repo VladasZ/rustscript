@@ -4,6 +4,7 @@ use rand::rngs::StdRng;
 
 use crate::generator::generate_base;
 use crate::model::{MutationOperation, MutationOrigin, Program};
+use crate::slice_case::SliceCase;
 use crate::structural::{EnumCase, FlowStatement, StructuralCase};
 use crate::typed::{GeneratedExpr, GeneratedType};
 use crate::typed_gen::TypedBinding;
@@ -256,6 +257,7 @@ fn case_slots(case: &mut StructuralCase) -> Vec<Slot<'_>> {
             }]
         }
         StructuralCase::Enum(enum_case) => enum_slots(enum_case),
+        StructuralCase::Slice(slice_case) => slice_slots(slice_case),
         // Numeric cases have their own statement language with no
         // GeneratedExpr slots, so the splicer leaves them alone.
         StructuralCase::Numeric(_) => Vec::new(),
@@ -326,6 +328,50 @@ fn enum_slots(enum_case: &mut EnumCase) -> Vec<Slot<'_>> {
     ]
 }
 
+fn slice_slots(slice_case: &mut SliceCase) -> Vec<Slot<'_>> {
+    let id = slice_case.id;
+    let first = binding(format!("slice_first_{id}"), GeneratedType::I64);
+    let last = binding(format!("slice_last_{id}"), GeneratedType::I64);
+    let single = vec![binding(format!("slice_only_{id}"), GeneratedType::I64)];
+    let bookend = vec![
+        first.clone(),
+        binding(format!("slice_penult_{id}"), GeneratedType::I64),
+        last.clone(),
+    ];
+    let pair = vec![first.clone(), last];
+    let tail = vec![binding(format!("slice_tail_{id}"), GeneratedType::I64)];
+    vec![
+        Slot {
+            expr: &mut slice_case.empty_arm,
+            environment: Vec::new(),
+        },
+        Slot {
+            expr: &mut slice_case.single_arm,
+            environment: single,
+        },
+        Slot {
+            expr: &mut slice_case.front_arm,
+            environment: vec![first],
+        },
+        Slot {
+            expr: &mut slice_case.bookend_arm,
+            environment: bookend,
+        },
+        Slot {
+            expr: &mut slice_case.pair_arm,
+            environment: pair,
+        },
+        Slot {
+            expr: &mut slice_case.tail_arm,
+            environment: tail,
+        },
+        Slot {
+            expr: &mut slice_case.ends_empty_arm,
+            environment: Vec::new(),
+        },
+    ]
+}
+
 /// The donor side reads the same slots immutably.
 fn donor_expressions(case: &StructuralCase) -> Vec<&GeneratedExpr> {
     match case {
@@ -357,6 +403,15 @@ fn donor_expressions(case: &StructuralCase) -> Vec<&GeneratedExpr> {
             &enum_case.values_arm,
             &enum_case.some_arm,
             &enum_case.none_arm,
+        ],
+        StructuralCase::Slice(slice_case) => vec![
+            &slice_case.empty_arm,
+            &slice_case.single_arm,
+            &slice_case.front_arm,
+            &slice_case.bookend_arm,
+            &slice_case.pair_arm,
+            &slice_case.tail_arm,
+            &slice_case.ends_empty_arm,
         ],
         StructuralCase::Function(function) => {
             let mut exprs = vec![&function.body];

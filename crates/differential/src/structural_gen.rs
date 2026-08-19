@@ -2,6 +2,7 @@ use rand::RngExt;
 use rand::rngs::StdRng;
 
 use crate::numeric_gen::generate_numeric;
+use crate::slice_case::SliceCase;
 use crate::structural::{
     DataflowCase, EnumCase, FlowStatement, FunctionCase, FunctionParameter, GeneratedBinding,
     GeneratedEnumVariant, MutableClosureCase, MutableClosureKind, StructuralCase,
@@ -13,11 +14,12 @@ pub fn generate_structural_cases(rng: &mut StdRng) -> Vec<StructuralCase> {
     let count = rng.random_range(3..=6);
     let mut cases = vec![StructuralCase::Dataflow(generate_dataflow(0, rng))];
     for id in 1..count {
-        let case = match rng.random_range(0..5) {
+        let case = match rng.random_range(0..6) {
             0 => StructuralCase::Dataflow(generate_dataflow(id, rng)),
             1 => StructuralCase::MutableClosure(generate_mutable_closure(id, rng)),
             2 => StructuralCase::Enum(Box::new(generate_enum(id, rng))),
             3 => StructuralCase::Function(generate_function(id, rng)),
+            4 => StructuralCase::Slice(Box::new(generate_slice(id, rng))),
             _ => StructuralCase::Numeric(generate_numeric(id, rng)),
         };
         cases.push(case);
@@ -215,6 +217,51 @@ fn generate_enum(id: usize, rng: &mut StdRng) -> EnumCase {
         values_arm: expression(GeneratedType::String, depth, &values, rng, &mut next_name),
         some_arm: expression(GeneratedType::String, depth, &some, rng, &mut next_name),
         none_arm: expression(GeneratedType::String, depth, &empty, rng, &mut next_name),
+    }
+}
+
+fn generate_slice(id: usize, rng: &mut StdRng) -> SliceCase {
+    let mut next_name = id * 10_000 + 9_000;
+    let empty = Vec::new();
+    let single = environment(format!("slice_only_{id}"), GeneratedType::I64);
+    let first = environment(format!("slice_first_{id}"), GeneratedType::I64);
+    let bookend = vec![
+        TypedBinding {
+            name: format!("slice_first_{id}"),
+            ty: GeneratedType::I64,
+        },
+        TypedBinding {
+            name: format!("slice_penult_{id}"),
+            ty: GeneratedType::I64,
+        },
+        TypedBinding {
+            name: format!("slice_last_{id}"),
+            ty: GeneratedType::I64,
+        },
+    ];
+    let pair = vec![
+        TypedBinding {
+            name: format!("slice_first_{id}"),
+            ty: GeneratedType::I64,
+        },
+        TypedBinding {
+            name: format!("slice_last_{id}"),
+            ty: GeneratedType::I64,
+        },
+    ];
+    let tail = environment(format!("slice_tail_{id}"), GeneratedType::I64);
+    let depth = rng.random_range(2..=4);
+    SliceCase {
+        id,
+        values: random_i64_values(rng, 6),
+        guard_length: rng.random_range(0..=4),
+        empty_arm: expression(GeneratedType::String, depth, &empty, rng, &mut next_name),
+        single_arm: expression(GeneratedType::String, depth, &single, rng, &mut next_name),
+        front_arm: expression(GeneratedType::I64, depth, &first, rng, &mut next_name),
+        bookend_arm: expression(GeneratedType::String, depth, &bookend, rng, &mut next_name),
+        pair_arm: expression(GeneratedType::String, depth, &pair, rng, &mut next_name),
+        tail_arm: expression(GeneratedType::I64, depth, &tail, rng, &mut next_name),
+        ends_empty_arm: expression(GeneratedType::String, depth, &empty, rng, &mut next_name),
     }
 }
 
