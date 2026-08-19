@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use rustscript_bench::http_server::HttpServer;
-use rustscript_bench::sample::{parse_compute_ns, parse_rss_bytes, rotated_indices};
+use rustscript_bench::sample::{parse_compute_ns, parse_peak_memory_bytes, rotated_indices};
 use rustscript_bench::{CaseResult, Gate, LANGS, MemStat, PYTHON, Report, Settings, TimeStat};
 
 #[derive(Clone, Copy)]
@@ -208,10 +208,10 @@ fn main() -> Result<()> {
     let server = root.join("target/release/bench-server");
     let mut results = Vec::new();
     for case in CASES {
-        if let Some(name) = &case_filter {
-            if case.name != name {
-                continue;
-            }
+        if let Some(name) = &case_filter
+            && case.name != name
+        {
+            continue;
         }
         println!("\n== {} ==", case.name);
         let mut http = if matches!(case.input, Input::Http(_)) {
@@ -588,9 +588,9 @@ fn compute_track(invocations: &[Invocation], count: u32) -> Result<(Vec<TimeStat
             }
             let stderr = String::from_utf8_lossy(&output.stderr);
             let ns = parse_compute_ns(&stderr).context("missing COMPUTE_NS")?;
-            let rss = parse_rss_bytes(&stderr).context("missing maximum RSS")?;
+            let peak = parse_peak_memory_bytes(&stderr).context("missing peak memory")?;
             times[index].push(ns / 1e9);
-            memory[index].push(rss);
+            memory[index].push(peak);
         }
     }
     Ok((
@@ -617,7 +617,7 @@ fn memory_track(invocations: &[Invocation], count: u32) -> Result<Vec<MemStat>> 
                 bail!("memory run failed for {}", invocation.lang);
             }
             let stderr = String::from_utf8_lossy(&output.stderr);
-            memory[index].push(parse_rss_bytes(&stderr).context("missing maximum RSS")?);
+            memory[index].push(parse_peak_memory_bytes(&stderr).context("missing peak memory")?);
         }
     }
     Ok(invocations
@@ -677,7 +677,7 @@ fn print_stats(total: &[TimeStat], compute: &[TimeStat], memory: &[MemStat]) {
     }
     for stat in memory {
         println!(
-            "  rss    {:<11} {:>8.1} MB",
+            "  memory {:<11} {:>8.1} MB",
             stat.lang,
             AsPrimitive::<f64>::as_(stat.median_bytes) / 1e6
         );

@@ -17,8 +17,8 @@ Each timed command runs as a fresh process. The harness records three tracks.
   and work.
 - Compute time comes from a timer inside each workload, after argument handling
   and immediately around the described work.
-- Peak memory is the maximum resident set size reported for each run by
-  `/usr/bin/time`.
+- Peak memory is the most RAM the process held at any moment, reported for
+  each run by `/usr/bin/time`.
 
 The report and charts use the median for every track and retain every raw sample
 in `results.json`. Every chart carries the Node and Python versions the run
@@ -28,7 +28,8 @@ language order to spread temperature and background-system drift.
 
 The default is one warmup, five total time samples, and five compute/memory samples
 for every case. `--quick` uses three samples per track. `--samples N` sets
-both sample counts explicitly.
+both sample counts explicitly. `--case NAME` runs one case only and replaces
+its entry in the existing `results.json`, leaving the other cases untouched.
 
 ## Runtime behavior
 

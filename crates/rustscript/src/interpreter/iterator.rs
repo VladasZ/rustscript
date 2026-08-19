@@ -696,7 +696,7 @@ impl Vm {
                     None => self.iterator_sum(iterator, method.scalar.as_ref())?,
                 }
             }
-            B::Product => self.iterator_product(iterator)?,
+            B::Product => self.iterator_product(iterator, method.scalar.as_ref())?,
             _ => match method.text.as_str() {
                 "next" => self
                     .iterator_next(iterator)?
@@ -936,18 +936,34 @@ impl Vm {
         sum_values(items, target)
     }
 
-    fn iterator_product(self: &Arc<Self>, iterator: &Handle) -> Result<Value> {
-        let mut integers = 1i64;
+    fn iterator_product(
+        self: &Arc<Self>,
+        iterator: &Handle,
+        target: Option<&ScalarTy>,
+    ) -> Result<Value> {
+        // The accumulator is an i128 for the same reason as `sum_values`,
+        // and a `product::<u16>()` overflows at the target width, not at
+        // `i64::MAX`, so the turbofish says where the panic belongs.
+        let mut integers = 1i128;
         let mut floats = 1f64;
         let mut has_float = false;
+        let mut has_int = false;
+        let (low, high) = match target {
+            Some(ScalarTy::Int(width)) => (width.min(), width.max()),
+            _ => (i128::from(i64::MIN), i128::from(i64::MAX)),
+        };
         while let Some(value) = self.iterator_next(iterator)? {
-            let value = value.bridge_image().unwrap_or(value);
-            match value {
-                Value::Int(value) => {
-                    integers = integers
-                        .checked_mul(value)
-                        .ok_or_else(|| anyhow!("attempt to multiply with overflow"))?;
+            if let Some((value, _)) = value.int_parts() {
+                has_int = true;
+                integers = integers
+                    .checked_mul(value)
+                    .ok_or_else(|| anyhow!("attempt to multiply with overflow"))?;
+                if integers < low || integers > high {
+                    bail!("attempt to multiply with overflow");
                 }
+                continue;
+            }
+            match value.bridge_image().unwrap_or(value) {
                 Value::Float(value) => {
                     floats *= value;
                     has_float = true;
@@ -955,10 +971,24 @@ impl Vm {
                 other => bail!("product needs numbers, got {}", other.type_name()),
             }
         }
-        Ok(if has_float {
-            Value::Float(floats * AsPrimitive::<f64>::as_(integers))
+        // An empty sequence carries no element to tell an integer product
+        // from a float one, so a `product::<f64>()` turbofish is the only
+        // thing that can.
+        let float_target = matches!(target, Some(ScalarTy::F32 | ScalarTy::F64));
+        Ok(if has_float || (float_target && !has_int) {
+            let total = floats * AsPrimitive::<f64>::as_(integers);
+            if matches!(target, Some(ScalarTy::F32)) {
+                Value::F32(AsPrimitive::<f32>::as_(total))
+            } else {
+                Value::Float(total)
+            }
+        } else if let Some(ScalarTy::Int(width)) = target {
+            // The product carries the target width, so a later `checked_*`
+            // on it computes at that width. An untagged result made
+            // `product::<u16>().checked_mul(..)` miss its overflow.
+            Value::int_of_width(integers, *width)
         } else {
-            Value::Int(integers)
+            Value::Int(i64::try_from(integers).expect("product is range-checked per step"))
         })
     }
 

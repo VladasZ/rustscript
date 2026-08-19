@@ -16,9 +16,10 @@ pub fn parse_compute_ns(stderr: &str) -> Option<f64> {
     })
 }
 
-pub fn parse_rss_bytes(stderr: &str) -> Option<u64> {
+pub fn parse_peak_memory_bytes(stderr: &str) -> Option<u64> {
     for line in stderr.lines() {
         let lower = line.to_ascii_lowercase();
+        // The exact label /usr/bin/time prints, do not reword.
         if lower.contains("maximum resident set size") {
             let digits: String = line.chars().filter(char::is_ascii_digit).collect();
             let value: u64 = digits.parse().ok()?;

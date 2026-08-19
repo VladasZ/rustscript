@@ -169,7 +169,7 @@ fn case_panels(c: &CaseResult) -> Vec<Panel> {
     if !mem.is_empty() {
         let mmax = mem.iter().map(|b| b.1).fold(0f64, f64::max);
         panels.push(Panel {
-            title: "peak memory   max rss".to_string(),
+            title: "peak memory".to_string(),
             bars: mem,
             axis_hi: if mmax > 0.0 { mmax * 1.18 } else { 1.0 },
             fmt: fmt_bytes,

@@ -249,8 +249,8 @@ Some result types are chosen by the caller, not the receiver, and the
 interpreter honors what the source states. `parse` takes its target from the
 turbofish, so `"300".parse::<u8>()` is an `Err`. `sum` takes its element type
 the same way. `unwrap_or_default` builds its default from whatever annotation
-the call site provides, a `None::<T>`, a binding annotation, or a `collect`
-turbofish earlier in the chain. A `None` carries no runtime type, so where no
+the call site provides, a `None::<T>`, a binding annotation, or a `collect`,
+`sum`, or `product` turbofish earlier in the chain. A `None` carries no runtime type, so where no
 annotation states the payload the shape of the chain does. A method with a
 fixed result type answers for itself, `position` is a `usize` whatever it
 counts, and the stages of an iterator chain carry the element type through to
