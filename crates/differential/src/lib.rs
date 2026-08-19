@@ -12,6 +12,7 @@ pub mod rich;
 pub mod runner;
 pub mod semantic;
 pub mod semantic_gen;
+pub mod slice_case;
 pub mod structural;
 pub mod structural_gen;
 pub mod typed;
