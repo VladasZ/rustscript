@@ -445,6 +445,15 @@ pub(super) fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
         {
             turbofish_scalar(call.turbofish.as_ref())
         }
+        // `it.sum::<T>()` and `it.product::<T>()` state their own type in the
+        // turbofish, the same way `collect` does, so a later `checked_*`
+        // knows its width even when the chain runs through a `map`.
+        Expr::MethodCall(call)
+            if matches!(call.method.to_string().as_str(), "sum" | "product")
+                && turbofish_scalar(call.turbofish.as_ref()).is_some() =>
+        {
+            turbofish_scalar(call.turbofish.as_ref())
+        }
         // A fold answers in its init's type, which the accumulator keeps
         // through every step, so `it.fold(0u8, ..).checked_mul(..)` knows
         // its payload width even when the chain runs through a `map`.
