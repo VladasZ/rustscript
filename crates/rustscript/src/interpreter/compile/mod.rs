@@ -883,12 +883,7 @@ impl<'a> Compiler<'a> {
     /// A path used as a value. Resolves consts, imported variants, and unit
     /// structs at compile time, and leaves the rest for the VM.
     pub(super) fn compile_resolved_value(&mut self, dst: Reg, segs: &[String]) -> Result<()> {
-        let resolved = match self.resolve_path_res(segs) {
-            Ok(r) => r,
-            // A name unknown inside a user module still errors at run time,
-            // matching the old single file behavior for things like `None`.
-            Err(_) => Res::External(segs.to_vec()),
-        };
+        let resolved = self.resolve_path_res(segs)?;
         let path = match resolved {
             Res::Const(idx) => {
                 self.emit(Op::LoadGlobal { dst, idx });

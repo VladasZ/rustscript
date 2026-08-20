@@ -133,6 +133,7 @@ use super::shared::helper;          // parent module
 use stats::words::top_words;        // plain path, from the root file only
 use config::Config as Cfg;          // rename
 use stats::{self, words::top_words};  // groups and nested groups
+use which::which;                   // a crate function named like its crate
 ```
 
 Two things trip people up.

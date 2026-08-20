@@ -4,6 +4,8 @@
 
 use std::fs;
 
+use glob::glob;
+
 fn main() -> anyhow::Result<()> {
     let dir = std::env::temp_dir().join("rustscript_glob");
     fs::create_dir_all(&dir)?;
@@ -13,7 +15,7 @@ fn main() -> anyhow::Result<()> {
 
     let pattern = format!("{}/*.txt", dir.to_string_lossy());
     let mut count = 0;
-    for entry in glob::glob(&pattern)? {
+    for entry in glob(&pattern)? {
         entry?;
         count += 1;
     }

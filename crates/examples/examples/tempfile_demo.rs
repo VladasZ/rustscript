@@ -5,8 +5,10 @@
 
 use std::fs;
 
+use tempfile::tempdir;
+
 fn main() -> anyhow::Result<()> {
-    let dir = tempfile::tempdir()?;
+    let dir = tempdir()?;
     let file = dir.path().join("note.txt");
     fs::write(&file, "scratch data")?;
 

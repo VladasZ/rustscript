@@ -3,6 +3,7 @@
 // base64 and hex encoding, both ways.
 
 use base64::prelude::*;
+use hex::{decode, encode};
 
 fn main() -> anyhow::Result<()> {
     let text = b"rustscript";
@@ -15,9 +16,9 @@ fn main() -> anyhow::Result<()> {
     let url = BASE64_URL_SAFE_NO_PAD.encode(text);
     println!("base64 url safe: {url}");
 
-    let hexed = hex::encode(text);
+    let hexed = encode(text);
     println!("hex: {hexed}");
-    let unhex = hex::decode(&hexed)?;
+    let unhex = decode(&hexed)?;
     println!("hex roundtrip: {}", String::from_utf8_lossy(&unhex));
     Ok(())
 }

@@ -3,10 +3,10 @@
 // Random number generation. Only stable properties are printed so the output
 // does not change from run to run.
 
-use rand::RngExt;
+use rand::{RngExt, rng};
 
 fn main() {
-    let mut rng = rand::rng();
+    let mut rng = rng();
 
     let n = rng.random_range(0..100);
     println!("range 0..100 respected: {}", (0..100).contains(&n));

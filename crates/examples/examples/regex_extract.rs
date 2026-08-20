@@ -1,7 +1,7 @@
 #!/usr/bin/env rust
 
 use anyhow::Result;
-use regex::Regex;
+use regex::{Regex, escape};
 
 fn main() -> Result<()> {
     let text = "2026-07-04 ERROR disk, 2026-07-05 INFO ok, 2026-07-06 ERROR panic";
@@ -40,6 +40,6 @@ fn main() -> Result<()> {
     println!("redacted: {redacted}");
 
     // regex::escape turns metacharacters into literals.
-    println!("escaped: {}", regex::escape("a.b*c?"));
+    println!("escaped: {}", escape("a.b*c?"));
     Ok(())
 }

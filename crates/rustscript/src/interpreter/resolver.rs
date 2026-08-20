@@ -224,6 +224,15 @@ impl Resolver {
             if let Some(target) = syms.uses.get(seg) {
                 let mut spliced = target.clone();
                 spliced.extend_from_slice(&segs[i + 1..]);
+                // `use which::which` names itself. Nothing above matched the
+                // head in this module, so it is the extern crate, and
+                // expanding the import again would only chase its own tail.
+                // Bare `which` is the import, `which::which` written out
+                // after it starts at the crate.
+                if target.first() == Some(seg) {
+                    let external = if last { spliced } else { segs[i..].to_vec() };
+                    return Ok(Res::External(external));
+                }
                 return match self.resolve_use(m, &spliced, depth + 1)? {
                     // An import of something we do not model, `use std::fs`,
                     // stays external with the alias expanded.
