@@ -202,27 +202,26 @@ type UnaryCtor = fn(Box<GeneratedExpr>) -> GeneratedExpr;
 /// The constructor and children of a two-child tuple variant, so every binary
 /// operator shrinks through one code path.
 fn binary_parts(e: &GeneratedExpr) -> Option<(BinaryCtor, &GeneratedExpr, &GeneratedExpr)> {
-    use GeneratedExpr as G;
     let (construct, left, right): (BinaryCtor, _, _) = match e {
-        G::Add(l, r) => (G::Add, &**l, &**r),
-        G::Subtract(l, r) => (G::Subtract, &**l, &**r),
-        G::Multiply(l, r) => (G::Multiply, &**l, &**r),
-        G::Equal(l, r) => (G::Equal, &**l, &**r),
-        G::Less(l, r) => (G::Less, &**l, &**r),
-        G::And(l, r) => (G::And, &**l, &**r),
-        G::Or(l, r) => (G::Or, &**l, &**r),
-        G::Concat(l, r) => (G::Concat, &**l, &**r),
-        G::RawAdd(l, r) => (G::RawAdd, &**l, &**r),
-        G::RawSub(l, r) => (G::RawSub, &**l, &**r),
-        G::RawMul(l, r) => (G::RawMul, &**l, &**r),
-        G::RawDiv(l, r) => (G::RawDiv, &**l, &**r),
-        G::RawRem(l, r) => (G::RawRem, &**l, &**r),
-        G::FAdd(l, r) => (G::FAdd, &**l, &**r),
-        G::FSub(l, r) => (G::FSub, &**l, &**r),
-        G::FMul(l, r) => (G::FMul, &**l, &**r),
-        G::FDiv(l, r) => (G::FDiv, &**l, &**r),
-        G::FLess(l, r) => (G::FLess, &**l, &**r),
-        G::FEq(l, r) => (G::FEq, &**l, &**r),
+        GeneratedExpr::Add(l, r) => (GeneratedExpr::Add, &**l, &**r),
+        GeneratedExpr::Subtract(l, r) => (GeneratedExpr::Subtract, &**l, &**r),
+        GeneratedExpr::Multiply(l, r) => (GeneratedExpr::Multiply, &**l, &**r),
+        GeneratedExpr::Equal(l, r) => (GeneratedExpr::Equal, &**l, &**r),
+        GeneratedExpr::Less(l, r) => (GeneratedExpr::Less, &**l, &**r),
+        GeneratedExpr::And(l, r) => (GeneratedExpr::And, &**l, &**r),
+        GeneratedExpr::Or(l, r) => (GeneratedExpr::Or, &**l, &**r),
+        GeneratedExpr::Concat(l, r) => (GeneratedExpr::Concat, &**l, &**r),
+        GeneratedExpr::RawAdd(l, r) => (GeneratedExpr::RawAdd, &**l, &**r),
+        GeneratedExpr::RawSub(l, r) => (GeneratedExpr::RawSub, &**l, &**r),
+        GeneratedExpr::RawMul(l, r) => (GeneratedExpr::RawMul, &**l, &**r),
+        GeneratedExpr::RawDiv(l, r) => (GeneratedExpr::RawDiv, &**l, &**r),
+        GeneratedExpr::RawRem(l, r) => (GeneratedExpr::RawRem, &**l, &**r),
+        GeneratedExpr::FAdd(l, r) => (GeneratedExpr::FAdd, &**l, &**r),
+        GeneratedExpr::FSub(l, r) => (GeneratedExpr::FSub, &**l, &**r),
+        GeneratedExpr::FMul(l, r) => (GeneratedExpr::FMul, &**l, &**r),
+        GeneratedExpr::FDiv(l, r) => (GeneratedExpr::FDiv, &**l, &**r),
+        GeneratedExpr::FLess(l, r) => (GeneratedExpr::FLess, &**l, &**r),
+        GeneratedExpr::FEq(l, r) => (GeneratedExpr::FEq, &**l, &**r),
         _ => return None,
     };
     Some((construct, left, right))
@@ -230,21 +229,20 @@ fn binary_parts(e: &GeneratedExpr) -> Option<(BinaryCtor, &GeneratedExpr, &Gener
 
 /// The constructor and child of a one-child tuple variant.
 fn unary_parts(e: &GeneratedExpr) -> Option<(UnaryCtor, &GeneratedExpr)> {
-    use GeneratedExpr as G;
     let (construct, value): (UnaryCtor, _) = match e {
-        G::Not(v) => (G::Not, &**v),
-        G::Uppercase(v) => (G::Uppercase, &**v),
-        G::FormatI64(v) => (G::FormatI64, &**v),
-        G::DebugVec(v) => (G::DebugVec, &**v),
-        G::VecReverse(v) => (G::VecReverse, &**v),
-        G::VecLen(v) => (G::VecLen, &**v),
-        G::Some(v) => (G::Some, &**v),
-        G::OptionIsSome(v) => (G::OptionIsSome, &**v),
-        G::I64ToF64(v) => (G::I64ToF64, &**v),
-        G::F64ToI64(v) => (G::F64ToI64, &**v),
-        G::FormatF64(v) => (G::FormatF64, &**v),
-        G::DebugF64(v) => (G::DebugF64, &**v),
-        G::Unwrap(v) => (G::Unwrap, &**v),
+        GeneratedExpr::Not(v) => (GeneratedExpr::Not, &**v),
+        GeneratedExpr::Uppercase(v) => (GeneratedExpr::Uppercase, &**v),
+        GeneratedExpr::FormatI64(v) => (GeneratedExpr::FormatI64, &**v),
+        GeneratedExpr::DebugVec(v) => (GeneratedExpr::DebugVec, &**v),
+        GeneratedExpr::VecReverse(v) => (GeneratedExpr::VecReverse, &**v),
+        GeneratedExpr::VecLen(v) => (GeneratedExpr::VecLen, &**v),
+        GeneratedExpr::Some(v) => (GeneratedExpr::Some, &**v),
+        GeneratedExpr::OptionIsSome(v) => (GeneratedExpr::OptionIsSome, &**v),
+        GeneratedExpr::I64ToF64(v) => (GeneratedExpr::I64ToF64, &**v),
+        GeneratedExpr::F64ToI64(v) => (GeneratedExpr::F64ToI64, &**v),
+        GeneratedExpr::FormatF64(v) => (GeneratedExpr::FormatF64, &**v),
+        GeneratedExpr::DebugF64(v) => (GeneratedExpr::DebugF64, &**v),
+        GeneratedExpr::Unwrap(v) => (GeneratedExpr::Unwrap, &**v),
         _ => return None,
     };
     Some((construct, value))

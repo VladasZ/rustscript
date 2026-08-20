@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 
-use super::bytecode::{BinKind, BuiltinId, BuiltinId as B, ScalarTy};
+use super::bytecode::{BinKind, BuiltinId, ScalarTy};
 use super::numeric::IntWidth;
 
 /// View of a method's arguments. The dispatch layer adapts the value slice,
@@ -89,7 +89,6 @@ pub(super) enum NumOut {
 
 pub(super) fn num_core(recv: Num, name: BuiltinId, args: &impl Args) -> Result<Option<NumOut>> {
     use Num::{Float, Int};
-    use NumOut as O;
     let as_f = || match recv {
         Int(i) => AsPrimitive::<f64>::as_(i),
         Float(f) => f,
@@ -97,64 +96,81 @@ pub(super) fn num_core(recv: Num, name: BuiltinId, args: &impl Args) -> Result<O
     Ok(Some(match (recv, name) {
         // `as_i64`, `as_u64` and `as_f64` on an integer are range checked in
         // `int_methods`, which sees the real width, and never reach here.
-        (Int(i), B::AsI128 | B::AsUsize) => O::SomeInt(i),
+        (Int(i), BuiltinId::AsI128 | BuiltinId::AsUsize) => NumOut::SomeInt(i),
+        (Float(f), BuiltinId::AsF64) => NumOut::SomeFloat(f),
         // serde_json keeps every json float as f64 and its integer accessors
-        // answer None on it, even for a whole value like 5.0.
-        (Float(_), B::AsI64 | B::AsU64 | B::AsI128 | B::AsUsize) => O::Nothing,
-        (Float(f), B::AsF64) => O::SomeFloat(f),
-        // A number is not these serde types, so the accessor is None.
-        (_, B::AsStr | B::AsBool | B::AsArray | B::AsArrayMut | B::AsObject | B::AsObjectMut) => {
-            O::Nothing
-        }
-        (Int(i), B::Abs) => O::Int(i.abs()),
-        (Float(f), B::Abs) => O::Float(f.abs()),
-        (Int(i), B::Pow) => O::Int(i.pow(u32::try_from(int_arg(args, 0)?)?)),
-        (Float(f), B::Powi) => O::Float(f.powi(i32::try_from(int_arg(args, 0)?)?)),
-        (Float(f), B::Powf) => O::Float(f.powf(float_arg(args, 0)?)),
-        (Float(f), B::Sqrt) => O::Float(f.sqrt()),
-        (Float(f), B::Floor) => O::Float(f.floor()),
-        (Float(f), B::Trunc) => O::Float(f.trunc()),
+        // answer None on it, even for a whole value like 5.0. And a number is
+        // not the other serde types, so those accessors are None too.
+        (
+            Float(_),
+            BuiltinId::AsI64 | BuiltinId::AsU64 | BuiltinId::AsI128 | BuiltinId::AsUsize,
+        )
+        | (
+            _,
+            BuiltinId::AsStr
+            | BuiltinId::AsBool
+            | BuiltinId::AsArray
+            | BuiltinId::AsArrayMut
+            | BuiltinId::AsObject
+            | BuiltinId::AsObjectMut,
+        ) => NumOut::Nothing,
+        (Int(i), BuiltinId::Abs) => NumOut::Int(i.abs()),
+        (Float(f), BuiltinId::Abs) => NumOut::Float(f.abs()),
+        (Int(i), BuiltinId::Pow) => NumOut::Int(i.pow(u32::try_from(int_arg(args, 0)?)?)),
+        (Float(f), BuiltinId::Powi) => NumOut::Float(f.powi(i32::try_from(int_arg(args, 0)?)?)),
+        (Float(f), BuiltinId::Powf) => NumOut::Float(f.powf(float_arg(args, 0)?)),
+        (Float(f), BuiltinId::Sqrt) => NumOut::Float(f.sqrt()),
+        (Float(f), BuiltinId::Floor) => NumOut::Float(f.floor()),
+        (Float(f), BuiltinId::Trunc) => NumOut::Float(f.trunc()),
         // Float methods on an int receiver: the untyped `parse` guesses a
         // whole float like "160" into an int, and the annotation that made it
         // f64 in real Rust is erased at runtime. Rounding is identity there,
         // and the rest compute through the float view.
-        (Int(i), B::Trunc | B::Floor | B::Ceil | B::Round) => O::Int(i),
-        (Int(_), B::Sqrt) => O::Float(as_f().sqrt()),
-        (Int(_), B::Powi) => O::Float(as_f().powi(i32::try_from(int_arg(args, 0)?)?)),
-        (Int(_), B::Powf) => O::Float(as_f().powf(float_arg(args, 0)?)),
-        (Int(i), B::IsSignPositive) => O::Bool(i >= 0),
-        (Float(f), B::Ceil) => O::Float(f.ceil()),
-        (Float(f), B::Round) => O::Float(f.round()),
-        (Float(f), B::IsSignPositive) => O::Bool(f.is_sign_positive()),
-        (Float(f), B::Fract) => O::Float(f.fract()),
+        (Int(i), BuiltinId::Trunc | BuiltinId::Floor | BuiltinId::Ceil | BuiltinId::Round) => {
+            NumOut::Int(i)
+        }
+        (Int(_), BuiltinId::Sqrt) => NumOut::Float(as_f().sqrt()),
+        (Int(_), BuiltinId::Powi) => NumOut::Float(as_f().powi(i32::try_from(int_arg(args, 0)?)?)),
+        (Int(_), BuiltinId::Powf) => NumOut::Float(as_f().powf(float_arg(args, 0)?)),
+        (Int(i), BuiltinId::IsSignPositive) => NumOut::Bool(i >= 0),
+        (Float(f), BuiltinId::Ceil) => NumOut::Float(f.ceil()),
+        (Float(f), BuiltinId::Round) => NumOut::Float(f.round()),
+        (Float(f), BuiltinId::IsSignPositive) => NumOut::Bool(f.is_sign_positive()),
+        (Float(f), BuiltinId::Fract) => NumOut::Float(f.fract()),
         // A whole value parse-guessed into an int has no fraction.
-        (Int(_), B::Fract) => O::Int(0),
+        (Int(_), BuiltinId::Fract) => NumOut::Int(0),
         // Int signum answers width-aware in `int_methods`, only the float
         // side lives here.
-        (Float(f), B::Signum) => O::Float(f.signum()),
-        (Float(f), B::Recip) => O::Float(f.recip()),
-        (Int(_), B::Recip) => O::Float(as_f().recip()),
-        (Float(f), B::MulAdd) => O::Float(f.mul_add(float_arg(args, 0)?, float_arg(args, 1)?)),
-        (Int(_), B::MulAdd) => O::Float(as_f().mul_add(float_arg(args, 0)?, float_arg(args, 1)?)),
-        (Float(f), B::IsNan) => O::Bool(f.is_nan()),
-        (Float(f), B::IsFinite) => O::Bool(f.is_finite()),
-        (Int(_), B::IsFinite) => O::Bool(true),
-        (Float(f), B::IsInfinite) => O::Bool(f.is_infinite()),
-        (Int(_), B::IsNan | B::IsInfinite) => O::Bool(false),
-        (Float(f), B::IsSignNegative) => O::Bool(f.is_sign_negative()),
-        (Int(i), B::IsSignNegative) => O::Bool(i < 0),
-        (Int(a), B::Min) => O::Int(a.min(int_arg(args, 0)?)),
-        (Int(a), B::Max) => O::Int(a.max(int_arg(args, 0)?)),
-        (Int(a), B::Clamp) => O::Int(a.clamp(int_arg(args, 0)?, int_arg(args, 1)?)),
-        (Float(a), B::Clamp) => O::Float(a.clamp(float_arg(args, 0)?, float_arg(args, 1)?)),
-        (Float(a), B::Min) => O::Float(a.min(float_arg(args, 0)?)),
-        (Float(a), B::Max) => O::Float(a.max(float_arg(args, 0)?)),
-        (Int(a), B::IsMultipleOf) => O::Bool(a % int_arg(args, 0)? == 0),
-        (Int(a), B::SaturatingSub) => O::Int(a.saturating_sub(int_arg(args, 0)?)),
-        (Int(a), B::SaturatingAdd) => O::Int(a.saturating_add(int_arg(args, 0)?)),
-        (Int(a), B::SaturatingMul) => O::Int(a.saturating_mul(int_arg(args, 0)?)),
-        (Int(a), B::Cmp) => O::Ordering(a.cmp(&int_arg(args, 0)?)),
-        (_, B::PartialCmp) => O::SomeOrdering(
+        (Float(f), BuiltinId::Signum) => NumOut::Float(f.signum()),
+        (Float(f), BuiltinId::Recip) => NumOut::Float(f.recip()),
+        (Int(_), BuiltinId::Recip) => NumOut::Float(as_f().recip()),
+        (Float(f), BuiltinId::MulAdd) => {
+            NumOut::Float(f.mul_add(float_arg(args, 0)?, float_arg(args, 1)?))
+        }
+        (Int(_), BuiltinId::MulAdd) => {
+            NumOut::Float(as_f().mul_add(float_arg(args, 0)?, float_arg(args, 1)?))
+        }
+        (Float(f), BuiltinId::IsNan) => NumOut::Bool(f.is_nan()),
+        (Float(f), BuiltinId::IsFinite) => NumOut::Bool(f.is_finite()),
+        (Int(_), BuiltinId::IsFinite) => NumOut::Bool(true),
+        (Float(f), BuiltinId::IsInfinite) => NumOut::Bool(f.is_infinite()),
+        (Int(_), BuiltinId::IsNan | BuiltinId::IsInfinite) => NumOut::Bool(false),
+        (Float(f), BuiltinId::IsSignNegative) => NumOut::Bool(f.is_sign_negative()),
+        (Int(i), BuiltinId::IsSignNegative) => NumOut::Bool(i < 0),
+        (Int(a), BuiltinId::Min) => NumOut::Int(a.min(int_arg(args, 0)?)),
+        (Int(a), BuiltinId::Max) => NumOut::Int(a.max(int_arg(args, 0)?)),
+        (Int(a), BuiltinId::Clamp) => NumOut::Int(a.clamp(int_arg(args, 0)?, int_arg(args, 1)?)),
+        (Float(a), BuiltinId::Clamp) => {
+            NumOut::Float(a.clamp(float_arg(args, 0)?, float_arg(args, 1)?))
+        }
+        (Float(a), BuiltinId::Min) => NumOut::Float(a.min(float_arg(args, 0)?)),
+        (Float(a), BuiltinId::Max) => NumOut::Float(a.max(float_arg(args, 0)?)),
+        (Int(a), BuiltinId::IsMultipleOf) => NumOut::Bool(a % int_arg(args, 0)? == 0),
+        (Int(a), BuiltinId::SaturatingSub) => NumOut::Int(a.saturating_sub(int_arg(args, 0)?)),
+        (Int(a), BuiltinId::SaturatingAdd) => NumOut::Int(a.saturating_add(int_arg(args, 0)?)),
+        (Int(a), BuiltinId::SaturatingMul) => NumOut::Int(a.saturating_mul(int_arg(args, 0)?)),
+        (Int(a), BuiltinId::Cmp) => NumOut::Ordering(a.cmp(&int_arg(args, 0)?)),
+        (_, BuiltinId::PartialCmp) => NumOut::SomeOrdering(
             as_f()
                 .partial_cmp(&float_arg(args, 0)?)
                 .unwrap_or(Ordering::Equal),
@@ -176,31 +192,32 @@ pub(super) enum F32Out {
 /// the f64 shortest form, `3.4028234663852886e38` instead of `3.4028235e38`
 /// for `f32::MAX`.
 pub(super) fn f32_core(recv: f32, name: BuiltinId, args: &impl Args) -> Result<Option<F32Out>> {
-    use F32Out as O;
     let arg = |i: usize| -> Result<f32> { float_arg(args, i).map(AsPrimitive::<f32>::as_) };
     Ok(Some(match name {
-        B::Abs => O::Val(recv.abs()),
-        B::Powi => O::Val(recv.powi(i32::try_from(int_arg(args, 0)?)?)),
-        B::Powf => O::Val(recv.powf(arg(0)?)),
-        B::Sqrt => O::Val(recv.sqrt()),
-        B::Floor => O::Val(recv.floor()),
-        B::Trunc => O::Val(recv.trunc()),
-        B::Ceil => O::Val(recv.ceil()),
-        B::Round => O::Val(recv.round()),
-        B::Min => O::Val(recv.min(arg(0)?)),
-        B::Max => O::Val(recv.max(arg(0)?)),
-        B::Clamp => O::Val(recv.clamp(arg(0)?, arg(1)?)),
-        B::Fract => O::Val(recv.fract()),
-        B::Signum => O::Val(recv.signum()),
-        B::Recip => O::Val(recv.recip()),
-        B::MulAdd => O::Val(recv.mul_add(arg(0)?, arg(1)?)),
-        B::IsSignPositive => O::Bool(recv.is_sign_positive()),
-        B::IsSignNegative => O::Bool(recv.is_sign_negative()),
-        B::IsNan => O::Bool(recv.is_nan()),
-        B::IsFinite => O::Bool(recv.is_finite()),
-        B::IsInfinite => O::Bool(recv.is_infinite()),
+        BuiltinId::Abs => F32Out::Val(recv.abs()),
+        BuiltinId::Powi => F32Out::Val(recv.powi(i32::try_from(int_arg(args, 0)?)?)),
+        BuiltinId::Powf => F32Out::Val(recv.powf(arg(0)?)),
+        BuiltinId::Sqrt => F32Out::Val(recv.sqrt()),
+        BuiltinId::Floor => F32Out::Val(recv.floor()),
+        BuiltinId::Trunc => F32Out::Val(recv.trunc()),
+        BuiltinId::Ceil => F32Out::Val(recv.ceil()),
+        BuiltinId::Round => F32Out::Val(recv.round()),
+        BuiltinId::Min => F32Out::Val(recv.min(arg(0)?)),
+        BuiltinId::Max => F32Out::Val(recv.max(arg(0)?)),
+        BuiltinId::Clamp => F32Out::Val(recv.clamp(arg(0)?, arg(1)?)),
+        BuiltinId::Fract => F32Out::Val(recv.fract()),
+        BuiltinId::Signum => F32Out::Val(recv.signum()),
+        BuiltinId::Recip => F32Out::Val(recv.recip()),
+        BuiltinId::MulAdd => F32Out::Val(recv.mul_add(arg(0)?, arg(1)?)),
+        BuiltinId::IsSignPositive => F32Out::Bool(recv.is_sign_positive()),
+        BuiltinId::IsSignNegative => F32Out::Bool(recv.is_sign_negative()),
+        BuiltinId::IsNan => F32Out::Bool(recv.is_nan()),
+        BuiltinId::IsFinite => F32Out::Bool(recv.is_finite()),
+        BuiltinId::IsInfinite => F32Out::Bool(recv.is_infinite()),
         // The same answer the f64 core gives, so both precisions stay in step.
-        B::PartialCmp => O::SomeOrdering(recv.partial_cmp(&arg(0)?).unwrap_or(Ordering::Equal)),
+        BuiltinId::PartialCmp => {
+            F32Out::SomeOrdering(recv.partial_cmp(&arg(0)?).unwrap_or(Ordering::Equal))
+        }
         _ => return Ok(None),
     }))
 }
@@ -228,19 +245,18 @@ pub(super) enum JsonKind {
 /// answered before the per type dispatch, which returns early for the hot
 /// receivers and would otherwise never reach them.
 pub(super) fn json_type_test(kind: JsonKind, name: BuiltinId) -> Option<bool> {
-    use JsonKind as K;
     Some(match name {
-        B::IsObject => matches!(kind, K::Object),
-        B::IsArray => matches!(kind, K::Array),
-        B::IsString => matches!(kind, K::Str),
-        B::IsBoolean => matches!(kind, K::Bool),
-        B::IsNumber => matches!(kind, K::Int(_) | K::Float),
+        BuiltinId::IsObject => matches!(kind, JsonKind::Object),
+        BuiltinId::IsArray => matches!(kind, JsonKind::Array),
+        BuiltinId::IsString => matches!(kind, JsonKind::Str),
+        BuiltinId::IsBoolean => matches!(kind, JsonKind::Bool),
+        BuiltinId::IsNumber => matches!(kind, JsonKind::Int(_) | JsonKind::Float),
         // serde answers these by range, not by "it is an integer". A negative
         // number is not a u64, and one past `i64::MAX` is not an i64.
-        B::IsI64 => matches!(kind, K::Int(v) if i64::try_from(v).is_ok()),
-        B::IsU64 => matches!(kind, K::Int(v) if u64::try_from(v).is_ok()),
-        B::IsF64 => matches!(kind, K::Float),
-        B::IsNull => matches!(kind, K::Null),
+        BuiltinId::IsI64 => matches!(kind, JsonKind::Int(v) if i64::try_from(v).is_ok()),
+        BuiltinId::IsU64 => matches!(kind, JsonKind::Int(v) if u64::try_from(v).is_ok()),
+        BuiltinId::IsF64 => matches!(kind, JsonKind::Float),
+        BuiltinId::IsNull => matches!(kind, JsonKind::Null),
         _ => return None,
     })
 }
@@ -251,15 +267,15 @@ pub(super) fn json_type_test(kind: JsonKind, name: BuiltinId) -> Option<bool> {
 pub(super) fn json_accessor(name: BuiltinId) -> bool {
     matches!(
         name,
-        B::AsStr
-            | B::AsI64
-            | B::AsU64
-            | B::AsF64
-            | B::AsBool
-            | B::AsArray
-            | B::AsArrayMut
-            | B::AsObject
-            | B::AsObjectMut
+        BuiltinId::AsStr
+            | BuiltinId::AsI64
+            | BuiltinId::AsU64
+            | BuiltinId::AsF64
+            | BuiltinId::AsBool
+            | BuiltinId::AsArray
+            | BuiltinId::AsArrayMut
+            | BuiltinId::AsObject
+            | BuiltinId::AsObjectMut
     )
 }
 
@@ -307,7 +323,7 @@ pub(super) enum CharOut {
 pub(super) fn char_method(ch: char, name: BuiltinId, args: &impl Args) -> Option<Result<CharOut>> {
     let b = |v: bool| Some(Ok(CharOut::Bool(v)));
     match name {
-        B::ToDigit => {
+        BuiltinId::ToDigit => {
             let radix = match int_arg(args, 0) {
                 Ok(radix) => radix,
                 Err(error) => return Some(Err(error)),
@@ -321,27 +337,27 @@ pub(super) fn char_method(ch: char, name: BuiltinId, args: &impl Args) -> Option
                 u32::try_from(radix).ok().and_then(|r| ch.to_digit(r)),
             )))
         }
-        B::IsAsciiDigit => b(ch.is_ascii_digit()),
-        B::IsAsciiAlphabetic => b(ch.is_ascii_alphabetic()),
-        B::IsAsciiAlphanumeric => b(ch.is_ascii_alphanumeric()),
-        B::IsAsciiUppercase => b(ch.is_ascii_uppercase()),
-        B::IsAsciiLowercase => b(ch.is_ascii_lowercase()),
-        B::IsAsciiWhitespace => b(ch.is_ascii_whitespace()),
-        B::IsAsciiPunctuation => b(ch.is_ascii_punctuation()),
-        B::IsAsciiHexdigit => b(ch.is_ascii_hexdigit()),
-        B::IsAscii => b(ch.is_ascii()),
-        B::IsAlphabetic => b(ch.is_alphabetic()),
-        B::IsAlphanumeric => b(ch.is_alphanumeric()),
-        B::IsNumeric => b(ch.is_numeric()),
-        B::IsWhitespace => b(ch.is_whitespace()),
-        B::IsUppercase => b(ch.is_uppercase()),
-        B::IsLowercase => b(ch.is_lowercase()),
-        B::ToAsciiUppercase => Some(Ok(CharOut::Char(ch.to_ascii_uppercase()))),
-        B::ToAsciiLowercase => Some(Ok(CharOut::Char(ch.to_ascii_lowercase()))),
+        BuiltinId::IsAsciiDigit => b(ch.is_ascii_digit()),
+        BuiltinId::IsAsciiAlphabetic => b(ch.is_ascii_alphabetic()),
+        BuiltinId::IsAsciiAlphanumeric => b(ch.is_ascii_alphanumeric()),
+        BuiltinId::IsAsciiUppercase => b(ch.is_ascii_uppercase()),
+        BuiltinId::IsAsciiLowercase => b(ch.is_ascii_lowercase()),
+        BuiltinId::IsAsciiWhitespace => b(ch.is_ascii_whitespace()),
+        BuiltinId::IsAsciiPunctuation => b(ch.is_ascii_punctuation()),
+        BuiltinId::IsAsciiHexdigit => b(ch.is_ascii_hexdigit()),
+        BuiltinId::IsAscii => b(ch.is_ascii()),
+        BuiltinId::IsAlphabetic => b(ch.is_alphabetic()),
+        BuiltinId::IsAlphanumeric => b(ch.is_alphanumeric()),
+        BuiltinId::IsNumeric => b(ch.is_numeric()),
+        BuiltinId::IsWhitespace => b(ch.is_whitespace()),
+        BuiltinId::IsUppercase => b(ch.is_uppercase()),
+        BuiltinId::IsLowercase => b(ch.is_lowercase()),
+        BuiltinId::ToAsciiUppercase => Some(Ok(CharOut::Char(ch.to_ascii_uppercase()))),
+        BuiltinId::ToAsciiLowercase => Some(Ok(CharOut::Char(ch.to_ascii_lowercase()))),
         // These yield an iterator in real Rust, but a script only ever renders
         // or collects it, so the string it would produce is handed back.
-        B::ToUppercase => Some(Ok(CharOut::Str(ch.to_uppercase().to_string()))),
-        B::ToLowercase => Some(Ok(CharOut::Str(ch.to_lowercase().to_string()))),
+        BuiltinId::ToUppercase => Some(Ok(CharOut::Str(ch.to_uppercase().to_string()))),
+        BuiltinId::ToLowercase => Some(Ok(CharOut::Str(ch.to_lowercase().to_string()))),
         _ => None,
     }
 }
@@ -369,114 +385,117 @@ pub(super) enum StrOut {
 
 /// The untyped `parse` guess: int first, then float, then bool.
 pub(super) fn str_core(s: &str, name: BuiltinId, args: &impl Args) -> Result<Option<StrOut>> {
-    use StrOut as O;
     let a = |i: usize| args.text(i);
     Ok(Some(match name {
-        B::Len => O::USize(s.len()),
-        B::IsEmpty => O::Bool(s.is_empty()),
-        B::Count => O::USize(s.chars().count()),
-        B::Contains => O::Bool(s.contains(&a(0))),
-        B::EqIgnoreAsciiCase => O::Bool(s.eq_ignore_ascii_case(&a(0))),
-        B::StartsWith => O::Bool(s.starts_with(&a(0))),
-        B::EndsWith => O::Bool(s.ends_with(&a(0))),
-        B::Trim => O::Owned(s.trim().to_string()),
-        B::TrimStart => O::Owned(s.trim_start().to_string()),
-        B::TrimEnd => O::Owned(s.trim_end().to_string()),
-        B::ToUppercase => O::Owned(s.to_uppercase()),
-        B::ToLowercase => O::Owned(s.to_lowercase()),
+        BuiltinId::Len => StrOut::USize(s.len()),
+        BuiltinId::IsEmpty => StrOut::Bool(s.is_empty()),
+        BuiltinId::Count => StrOut::USize(s.chars().count()),
+        BuiltinId::Contains => StrOut::Bool(s.contains(&a(0))),
+        BuiltinId::EqIgnoreAsciiCase => StrOut::Bool(s.eq_ignore_ascii_case(&a(0))),
+        BuiltinId::StartsWith => StrOut::Bool(s.starts_with(&a(0))),
+        BuiltinId::EndsWith => StrOut::Bool(s.ends_with(&a(0))),
+        BuiltinId::Trim => StrOut::Owned(s.trim().to_string()),
+        BuiltinId::TrimStart => StrOut::Owned(s.trim_start().to_string()),
+        BuiltinId::TrimEnd => StrOut::Owned(s.trim_end().to_string()),
+        BuiltinId::ToUppercase => StrOut::Owned(s.to_uppercase()),
+        BuiltinId::ToLowercase => StrOut::Owned(s.to_lowercase()),
         // The ascii variants leave non-ascii characters alone, they are not
         // aliases of the unicode ones.
-        B::ToAsciiUppercase => O::Owned(s.to_ascii_uppercase()),
-        B::ToAsciiLowercase => O::Owned(s.to_ascii_lowercase()),
+        BuiltinId::ToAsciiUppercase => StrOut::Owned(s.to_ascii_uppercase()),
+        BuiltinId::ToAsciiLowercase => StrOut::Owned(s.to_ascii_lowercase()),
         // A char-set pattern like `[':', '.']` replaces any of its members, matching real Rust. Without
         // this the array renders as text and matches nothing, silently leaving the string unchanged.
-        B::Replace => match args.pattern_chars(0) {
-            Some(cs) => O::Owned(s.replace(cs.as_slice(), &a(1))),
-            None => O::Owned(s.replace(&a(0), &a(1))),
+        BuiltinId::Replace => match args.pattern_chars(0) {
+            Some(cs) => StrOut::Owned(s.replace(cs.as_slice(), &a(1))),
+            None => StrOut::Owned(s.replace(&a(0), &a(1))),
         },
-        B::Replacen => match args.pattern_chars(0) {
-            Some(cs) => O::Owned(s.replacen(cs.as_slice(), &a(1), usize_arg(args, 2)?)),
-            None => O::Owned(s.replacen(&a(0), &a(1), usize_arg(args, 2)?)),
+        BuiltinId::Replacen => match args.pattern_chars(0) {
+            Some(cs) => StrOut::Owned(s.replacen(cs.as_slice(), &a(1), usize_arg(args, 2)?)),
+            None => StrOut::Owned(s.replacen(&a(0), &a(1), usize_arg(args, 2)?)),
         },
-        B::Repeat => {
+        BuiltinId::Repeat => {
             let n = args
                 .int(0)
                 .and_then(|n| usize::try_from(n).ok())
                 .unwrap_or(0);
-            O::Owned(s.repeat(n))
+            StrOut::Owned(s.repeat(n))
         }
         // String::as_str gives the string back. serde_json::Value::as_str
         // gives an Option, and a json string is a plain Str here, so unwrap
         // and expect on a string are identity to keep serde chains working.
         // A String or a Cow that already owns its data, into_owned is self.
-        B::ToOwned
-        | B::TrimString
-        | B::AsStr
-        | B::AsString
-        | B::Unwrap
-        | B::Expect
-        | B::UnwrapOr
-        | B::UnwrapOrElse
-        | B::UnwrapOrDefault
-        | B::IntoOwned
-        | B::IntoString => O::Keep,
+        BuiltinId::ToOwned
+        | BuiltinId::TrimString
+        | BuiltinId::AsStr
+        | BuiltinId::AsString
+        | BuiltinId::Unwrap
+        | BuiltinId::Expect
+        | BuiltinId::UnwrapOr
+        | BuiltinId::UnwrapOrElse
+        | BuiltinId::UnwrapOrDefault
+        | BuiltinId::IntoOwned
+        | BuiltinId::IntoString => StrOut::Keep,
         // `Option::context` returns a Result, so the pre-unwrapped string has
         // to come back wrapped or a following `?` would have nothing to unwrap.
-        B::Context | B::WithContext => O::OkKeep,
-        B::IsSome => O::Bool(true),
-        B::IsNone => O::Bool(false),
-        B::AsBytes | B::IntoBytes => O::Ints(s.bytes().map(i64::from).collect()),
+        BuiltinId::Context | BuiltinId::WithContext => StrOut::OkKeep,
+        BuiltinId::IsSome => StrOut::Bool(true),
+        BuiltinId::IsNone => StrOut::Bool(false),
+        BuiltinId::AsBytes | BuiltinId::IntoBytes => {
+            StrOut::Ints(s.bytes().map(i64::from).collect())
+        }
         // The utf-16 code units as an eager list of ints, mirroring `bytes`.
-        B::EncodeUtf16 => O::Ints(s.encode_utf16().map(i64::from).collect()),
-        B::StripPrefix => O::OptOwned(s.strip_prefix(&a(0)).map(str::to_string)),
-        B::StripSuffix => O::OptOwned(s.strip_suffix(&a(0)).map(str::to_string)),
+        BuiltinId::EncodeUtf16 => StrOut::Ints(s.encode_utf16().map(i64::from).collect()),
+        BuiltinId::StripPrefix => StrOut::OptOwned(s.strip_prefix(&a(0)).map(str::to_string)),
+        BuiltinId::StripSuffix => StrOut::OptOwned(s.strip_suffix(&a(0)).map(str::to_string)),
         // Byte offsets, same as the real std, and slicing is byte based too,
         // so `&s[..s.find(x).unwrap()]` behaves right.
-        B::Find => O::OptInt(s.find(&a(0)).map(usize_i64)),
-        B::Rfind => O::OptInt(s.rfind(&a(0)).map(usize_i64)),
-        B::SplitOnce => O::OptPair(
+        BuiltinId::Find => StrOut::OptInt(s.find(&a(0)).map(usize_i64)),
+        BuiltinId::Rfind => StrOut::OptInt(s.rfind(&a(0)).map(usize_i64)),
+        BuiltinId::SplitOnce => StrOut::OptPair(
             s.split_once(&a(0))
                 .map(|(x, y)| (x.to_string(), y.to_string())),
         ),
-        B::RsplitOnce => O::OptPair(
+        BuiltinId::RsplitOnce => StrOut::OptPair(
             s.rsplit_once(&a(0))
                 .map(|(x, y)| (x.to_string(), y.to_string())),
         ),
         // A char array like `['-', '_']` splits on any of its members, which
         // a plain string pattern would only match as the literal sequence.
-        B::Split => match args.pattern_chars(0) {
-            Some(chars) => O::Strs(
+        BuiltinId::Split => match args.pattern_chars(0) {
+            Some(chars) => StrOut::Strs(
                 s.split(|c: char| chars.contains(&c))
                     .map(str::to_string)
                     .collect(),
             ),
-            None => O::Strs(s.split(&a(0)).map(str::to_string).collect()),
+            None => StrOut::Strs(s.split(&a(0)).map(str::to_string).collect()),
         },
-        B::Rsplit => O::Strs(s.rsplit(&a(0)).map(str::to_string).collect()),
-        B::Splitn => {
+        BuiltinId::Rsplit => StrOut::Strs(s.rsplit(&a(0)).map(str::to_string).collect()),
+        BuiltinId::Splitn => {
             let n = usize_arg(args, 0)?;
-            O::Strs(s.splitn(n, &a(1)).map(str::to_string).collect())
+            StrOut::Strs(s.splitn(n, &a(1)).map(str::to_string).collect())
         }
-        B::Rsplitn => {
+        BuiltinId::Rsplitn => {
             let n = usize_arg(args, 0)?;
-            O::Strs(s.rsplitn(n, &a(1)).map(str::to_string).collect())
+            StrOut::Strs(s.rsplitn(n, &a(1)).map(str::to_string).collect())
         }
-        B::Matches => O::Strs(s.matches(&a(0)).map(str::to_string).collect()),
-        B::CharIndices => O::CharIdx(s.char_indices().map(|(i, c)| (usize_i64(i), c)).collect()),
-        B::TrimMatches | B::TrimStartMatches | B::TrimEndMatches => {
+        BuiltinId::Matches => StrOut::Strs(s.matches(&a(0)).map(str::to_string).collect()),
+        BuiltinId::CharIndices => {
+            StrOut::CharIdx(s.char_indices().map(|(i, c)| (usize_i64(i), c)).collect())
+        }
+        BuiltinId::TrimMatches | BuiltinId::TrimStartMatches | BuiltinId::TrimEndMatches => {
             let pat = a(0);
             let out = match name {
-                B::TrimStartMatches => s.trim_start_matches(&pat),
-                B::TrimEndMatches => s.trim_end_matches(&pat),
+                BuiltinId::TrimStartMatches => s.trim_start_matches(&pat),
+                BuiltinId::TrimEndMatches => s.trim_end_matches(&pat),
                 // trim_matches only takes chars in real Rust.
                 _ => match args.pattern_chars(0) {
                     Some(chars) => s.trim_matches(|c: char| chars.contains(&c)),
                     None => s.trim_matches(pat.chars().next().unwrap_or(' ')),
                 },
             };
-            O::Owned(out.to_string())
+            StrOut::Owned(out.to_string())
         }
-        B::Cmp => O::Ordering(s.cmp(a(0).as_str())),
+        BuiltinId::Cmp => StrOut::Ordering(s.cmp(a(0).as_str())),
         // `parse` without a turbofish is answered through `parse_core`, which
         // is the only place that sees the target type.
         _ => return Ok(None),
@@ -607,19 +626,22 @@ pub(super) fn regex_core(
     source: &str,
     replacement: &dyn Fn() -> String,
 ) -> Option<RegexOut> {
-    use RegexOut as O;
     Some(match name {
-        B::IsMatch => O::Bool(re.is_match(source)),
-        B::Find => O::OptSpan(re.find(source).map(|m| (m.start(), m.end()))),
-        B::Captures => O::OptGroups(re.captures(source).map(|c| {
+        BuiltinId::IsMatch => RegexOut::Bool(re.is_match(source)),
+        BuiltinId::Find => RegexOut::OptSpan(re.find(source).map(|m| (m.start(), m.end()))),
+        BuiltinId::Captures => RegexOut::OptGroups(re.captures(source).map(|c| {
             (0..c.len())
                 .map(|i| c.get(i).map(|g| (g.start(), g.end())))
                 .collect()
         })),
-        B::Replace => O::Text(re.replacen(source, 1, replacement().as_str()).into_owned()),
-        B::ReplaceAll => O::Text(re.replace_all(source, replacement().as_str()).into_owned()),
-        B::Split => O::Pieces(re.split(source).map(str::to_string).collect()),
-        B::AsStr => O::Pattern,
+        BuiltinId::Replace => {
+            RegexOut::Text(re.replacen(source, 1, replacement().as_str()).into_owned())
+        }
+        BuiltinId::ReplaceAll => {
+            RegexOut::Text(re.replace_all(source, replacement().as_str()).into_owned())
+        }
+        BuiltinId::Split => RegexOut::Pieces(re.split(source).map(str::to_string).collect()),
+        BuiltinId::AsStr => RegexOut::Pattern,
         _ => return None,
     })
 }
@@ -637,9 +659,9 @@ pub(super) fn match_core(
     end: usize,
 ) -> Option<MatchOut> {
     Some(match name {
-        B::AsStr => MatchOut::Text(source[start..end].to_string()),
-        B::Start => MatchOut::Int(usize_i64(start)),
-        B::End => MatchOut::Int(usize_i64(end)),
+        BuiltinId::AsStr => MatchOut::Text(source[start..end].to_string()),
+        BuiltinId::Start => MatchOut::Int(usize_i64(start)),
+        BuiltinId::End => MatchOut::Int(usize_i64(end)),
         _ => return None,
     })
 }
@@ -657,20 +679,19 @@ pub(super) fn captures_core<'n>(
     mut names: impl Iterator<Item = (&'n str, usize)>,
     args: &impl Args,
 ) -> Result<Option<CapturesOut>> {
-    use CapturesOut as O;
     Ok(Some(match name {
-        B::Get => {
+        BuiltinId::Get => {
             let Some(index) = args.int(0).and_then(|i| usize::try_from(i).ok()) else {
                 bail!("captures get needs a non-negative index");
             };
-            O::OptSpan(groups.get(index).copied().flatten())
+            CapturesOut::OptSpan(groups.get(index).copied().flatten())
         }
-        B::Name => {
+        BuiltinId::Name => {
             let wanted = args.text(0);
             let index = names.find_map(|(n, i)| (n == wanted).then_some(i));
-            O::OptSpan(index.and_then(|i| groups.get(i).copied().flatten()))
+            CapturesOut::OptSpan(index.and_then(|i| groups.get(i).copied().flatten()))
         }
-        B::Len => O::Int(usize_i64(groups.len())),
+        BuiltinId::Len => CapturesOut::Int(usize_i64(groups.len())),
         _ => return Ok(None),
     }))
 }
@@ -701,18 +722,19 @@ pub(super) fn duration_arith(op: BinKind, a: Duration, b: Duration) -> Result<Du
 /// `Duration` accessors over the real `secs` plus `nanos` split, exactly the
 /// std methods per name.
 pub(super) fn duration_core(name: BuiltinId, secs: u64, nanos: u32) -> Option<DurOut> {
-    use DurOut as O;
     let total = u128::from(secs) * 1_000_000_000 + u128::from(nanos);
     Some(match name {
-        B::AsSecs => O::Int(i64::try_from(secs).unwrap_or(i64::MAX)),
-        B::AsMillis => O::Int(i64::try_from(total / 1_000_000).unwrap_or(i64::MAX)),
-        B::AsMicros => O::Int(i64::try_from(total / 1_000).unwrap_or(i64::MAX)),
-        B::AsNanos => O::Int(i64::try_from(total).unwrap_or(i64::MAX)),
-        B::SubsecNanos => O::Int(i64::from(nanos)),
-        B::SubsecMillis => O::Int(i64::from(nanos / 1_000_000)),
-        B::SubsecMicros => O::Int(i64::from(nanos / 1_000)),
-        B::AsSecsF64 => O::Float(AsPrimitive::<f64>::as_(secs) + f64::from(nanos) / 1e9),
-        B::IsZero => O::Bool(total == 0),
+        BuiltinId::AsSecs => DurOut::Int(i64::try_from(secs).unwrap_or(i64::MAX)),
+        BuiltinId::AsMillis => DurOut::Int(i64::try_from(total / 1_000_000).unwrap_or(i64::MAX)),
+        BuiltinId::AsMicros => DurOut::Int(i64::try_from(total / 1_000).unwrap_or(i64::MAX)),
+        BuiltinId::AsNanos => DurOut::Int(i64::try_from(total).unwrap_or(i64::MAX)),
+        BuiltinId::SubsecNanos => DurOut::Int(i64::from(nanos)),
+        BuiltinId::SubsecMillis => DurOut::Int(i64::from(nanos / 1_000_000)),
+        BuiltinId::SubsecMicros => DurOut::Int(i64::from(nanos / 1_000)),
+        BuiltinId::AsSecsF64 => {
+            DurOut::Float(AsPrimitive::<f64>::as_(secs) + f64::from(nanos) / 1e9)
+        }
+        BuiltinId::IsZero => DurOut::Bool(total == 0),
         _ => return None,
     })
 }
@@ -755,7 +777,6 @@ pub(super) fn datetime_core(
     offset: i32,
     args: &impl Args,
 ) -> Option<DateOut> {
-    use DateOut as O;
     use chrono::{DateTime, Datelike, FixedOffset, Local, Offset, Timelike, Utc};
     let utc: DateTime<Utc> = DateTime::from_timestamp(secs, nanos).unwrap_or_default();
     let view = if local {
@@ -764,16 +785,16 @@ pub(super) fn datetime_core(
         utc.with_timezone(&FixedOffset::east_opt(offset).unwrap_or(Utc.fix()))
     };
     Some(match name {
-        B::Timestamp => O::Int(secs),
-        B::TimestampMillis => O::Int(secs * 1000 + i64::from(nanos / 1_000_000)),
-        B::ToRfc3339 => O::Text(view.to_rfc3339()),
-        B::Format => O::Text(view.format(&args.text(0)).to_string()),
-        B::Year => O::Int(i64::from(view.year())),
-        B::Month => O::Int(i64::from(view.month())),
-        B::Day => O::Int(i64::from(view.day())),
-        B::Hour => O::Int(i64::from(view.hour())),
-        B::Minute => O::Int(i64::from(view.minute())),
-        B::Second => O::Int(i64::from(view.second())),
+        BuiltinId::Timestamp => DateOut::Int(secs),
+        BuiltinId::TimestampMillis => DateOut::Int(secs * 1000 + i64::from(nanos / 1_000_000)),
+        BuiltinId::ToRfc3339 => DateOut::Text(view.to_rfc3339()),
+        BuiltinId::Format => DateOut::Text(view.format(&args.text(0)).to_string()),
+        BuiltinId::Year => DateOut::Int(i64::from(view.year())),
+        BuiltinId::Month => DateOut::Int(i64::from(view.month())),
+        BuiltinId::Day => DateOut::Int(i64::from(view.day())),
+        BuiltinId::Hour => DateOut::Int(i64::from(view.hour())),
+        BuiltinId::Minute => DateOut::Int(i64::from(view.minute())),
+        BuiltinId::Second => DateOut::Int(i64::from(view.second())),
         _ => return None,
     })
 }
@@ -787,12 +808,11 @@ pub(super) enum StatusOut {
 }
 
 pub(super) fn status_core(name: BuiltinId, code: i64) -> Option<StatusOut> {
-    use StatusOut as O;
     Some(match name {
-        B::AsU16 | B::AsInt => O::Int(code),
-        B::IsSuccess => O::Bool((200..300).contains(&code)),
-        B::IsClientError => O::Bool((400..500).contains(&code)),
-        B::IsServerError => O::Bool((500..600).contains(&code)),
+        BuiltinId::AsU16 | BuiltinId::AsInt => StatusOut::Int(code),
+        BuiltinId::IsSuccess => StatusOut::Bool((200..300).contains(&code)),
+        BuiltinId::IsClientError => StatusOut::Bool((400..500).contains(&code)),
+        BuiltinId::IsServerError => StatusOut::Bool((500..600).contains(&code)),
         _ => return None,
     })
 }
@@ -806,8 +826,8 @@ pub(super) enum HeaderOut {
 
 pub(super) fn header_value_core(name: BuiltinId, text: String) -> Option<HeaderOut> {
     Some(match name {
-        B::ToStr => HeaderOut::Ok(text),
-        B::AsStr | B::AsString | B::ToString => HeaderOut::Text(text),
+        BuiltinId::ToStr => HeaderOut::Ok(text),
+        BuiltinId::AsStr | BuiltinId::AsString | BuiltinId::ToString => HeaderOut::Text(text),
         _ => return None,
     })
 }
@@ -825,8 +845,8 @@ pub(super) fn exit_status_core(
     code: Option<i64>,
 ) -> Option<ExitOut> {
     Some(match name {
-        B::Success => ExitOut::Bool(success),
-        B::Code => ExitOut::OptInt(code),
+        BuiltinId::Success => ExitOut::Bool(success),
+        BuiltinId::Code => ExitOut::OptInt(code),
         _ => return None,
     })
 }
@@ -838,28 +858,28 @@ pub(super) fn exit_status_core(
 pub(super) fn color_core(s: &str, name: BuiltinId) -> Option<String> {
     use colored::Colorize;
     let out = match name {
-        B::Red => s.red(),
-        B::Green => s.green(),
-        B::Yellow => s.yellow(),
-        B::Blue => s.blue(),
-        B::Magenta | B::Purple => s.magenta(),
-        B::Cyan => s.cyan(),
-        B::White => s.white(),
-        B::Black => s.black(),
-        B::BrightRed => s.bright_red(),
-        B::BrightGreen => s.bright_green(),
-        B::BrightYellow => s.bright_yellow(),
-        B::BrightBlue => s.bright_blue(),
-        B::BrightCyan => s.bright_cyan(),
-        B::OnRed => s.on_red(),
-        B::OnGreen => s.on_green(),
-        B::OnBlue => s.on_blue(),
-        B::Bold => s.bold(),
-        B::Dimmed => s.dimmed(),
-        B::Italic => s.italic(),
-        B::Underline => s.underline(),
-        B::Reversed => s.reversed(),
-        B::Clear | B::Normal => s.normal(),
+        BuiltinId::Red => s.red(),
+        BuiltinId::Green => s.green(),
+        BuiltinId::Yellow => s.yellow(),
+        BuiltinId::Blue => s.blue(),
+        BuiltinId::Magenta | BuiltinId::Purple => s.magenta(),
+        BuiltinId::Cyan => s.cyan(),
+        BuiltinId::White => s.white(),
+        BuiltinId::Black => s.black(),
+        BuiltinId::BrightRed => s.bright_red(),
+        BuiltinId::BrightGreen => s.bright_green(),
+        BuiltinId::BrightYellow => s.bright_yellow(),
+        BuiltinId::BrightBlue => s.bright_blue(),
+        BuiltinId::BrightCyan => s.bright_cyan(),
+        BuiltinId::OnRed => s.on_red(),
+        BuiltinId::OnGreen => s.on_green(),
+        BuiltinId::OnBlue => s.on_blue(),
+        BuiltinId::Bold => s.bold(),
+        BuiltinId::Dimmed => s.dimmed(),
+        BuiltinId::Italic => s.italic(),
+        BuiltinId::Underline => s.underline(),
+        BuiltinId::Reversed => s.reversed(),
+        BuiltinId::Clear | BuiltinId::Normal => s.normal(),
         _ => return None,
     };
     Some(out.to_string())

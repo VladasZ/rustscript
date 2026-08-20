@@ -10,7 +10,7 @@ use std::cmp::Ordering;
 use num_traits::AsPrimitive;
 
 use super::bytecode::UnKind;
-use super::bytecode::{BinKind, BuiltinId, BuiltinId as B};
+use super::bytecode::{BinKind, BuiltinId};
 use super::int_methods::{IntOut, int_method, takes_amount_arg};
 use super::numeric::{
     IntWidth, float_arith, float_to_int, i64_arith, int_arith, int_bit, int_neg, int_not,
@@ -481,33 +481,33 @@ pub(super) fn s_try_from(fits: TryFits, v: SVal) -> Option<SVal> {
 pub(super) fn scalar_int_method(name: BuiltinId) -> bool {
     matches!(
         name,
-        B::IsMultipleOf
-            | B::Min
-            | B::Max
-            | B::Clamp
-            | B::Abs
-            | B::Signum
-            | B::Pow
-            | B::Isqrt
-            | B::DivEuclid
-            | B::RemEuclid
-            | B::SaturatingAdd
-            | B::SaturatingSub
-            | B::SaturatingMul
-            | B::WrappingAdd
-            | B::WrappingSub
-            | B::WrappingMul
-            | B::WrappingNeg
-            | B::CountOnes
-            | B::CountZeros
-            | B::LeadingZeros
-            | B::TrailingZeros
-            | B::RotateLeft
-            | B::RotateRight
-            | B::SwapBytes
-            | B::ReverseBits
-            | B::AsI64
-            | B::AsU64
+        BuiltinId::IsMultipleOf
+            | BuiltinId::Min
+            | BuiltinId::Max
+            | BuiltinId::Clamp
+            | BuiltinId::Abs
+            | BuiltinId::Signum
+            | BuiltinId::Pow
+            | BuiltinId::Isqrt
+            | BuiltinId::DivEuclid
+            | BuiltinId::RemEuclid
+            | BuiltinId::SaturatingAdd
+            | BuiltinId::SaturatingSub
+            | BuiltinId::SaturatingMul
+            | BuiltinId::WrappingAdd
+            | BuiltinId::WrappingSub
+            | BuiltinId::WrappingMul
+            | BuiltinId::WrappingNeg
+            | BuiltinId::CountOnes
+            | BuiltinId::CountZeros
+            | BuiltinId::LeadingZeros
+            | BuiltinId::TrailingZeros
+            | BuiltinId::RotateLeft
+            | BuiltinId::RotateRight
+            | BuiltinId::SwapBytes
+            | BuiltinId::ReverseBits
+            | BuiltinId::AsI64
+            | BuiltinId::AsU64
     )
 }
 
@@ -517,21 +517,21 @@ pub(super) fn scalar_int_method(name: BuiltinId) -> bool {
 pub(super) fn scalar_float_method(name: BuiltinId) -> bool {
     matches!(
         name,
-        B::Sqrt
-            | B::Floor
-            | B::Ceil
-            | B::Round
-            | B::Trunc
-            | B::Fract
-            | B::Recip
-            | B::Powi
-            | B::Powf
-            | B::MulAdd
-            | B::IsNan
-            | B::IsFinite
-            | B::IsInfinite
-            | B::IsSignPositive
-            | B::IsSignNegative
+        BuiltinId::Sqrt
+            | BuiltinId::Floor
+            | BuiltinId::Ceil
+            | BuiltinId::Round
+            | BuiltinId::Trunc
+            | BuiltinId::Fract
+            | BuiltinId::Recip
+            | BuiltinId::Powi
+            | BuiltinId::Powf
+            | BuiltinId::MulAdd
+            | BuiltinId::IsNan
+            | BuiltinId::IsFinite
+            | BuiltinId::IsInfinite
+            | BuiltinId::IsSignPositive
+            | BuiltinId::IsSignNegative
     )
 }
 
@@ -602,20 +602,20 @@ pub(super) fn s_float_method(name: BuiltinId, recv: SVal, args: &[SVal]) -> Opti
     let float = |v: f64| Some(SVal::Float(v));
     let flag = |b: bool| Some(SVal::Bool(b));
     match name {
-        B::Sqrt => float(f.sqrt()),
-        B::Abs => float(f.abs()),
-        B::Floor => float(f.floor()),
-        B::Ceil => float(f.ceil()),
-        B::Round => float(f.round()),
-        B::Trunc => float(f.trunc()),
-        B::Fract => float(f.fract()),
-        B::Signum => float(f.signum()),
-        B::Recip => float(f.recip()),
-        B::Min => float(f.min(farg(0)?)),
-        B::Max => float(f.max(farg(0)?)),
-        B::Clamp => float(f.clamp(farg(0)?, farg(1)?)),
-        B::Powf => float(f.powf(farg(0)?)),
-        B::Powi => {
+        BuiltinId::Sqrt => float(f.sqrt()),
+        BuiltinId::Abs => float(f.abs()),
+        BuiltinId::Floor => float(f.floor()),
+        BuiltinId::Ceil => float(f.ceil()),
+        BuiltinId::Round => float(f.round()),
+        BuiltinId::Trunc => float(f.trunc()),
+        BuiltinId::Fract => float(f.fract()),
+        BuiltinId::Signum => float(f.signum()),
+        BuiltinId::Recip => float(f.recip()),
+        BuiltinId::Min => float(f.min(farg(0)?)),
+        BuiltinId::Max => float(f.max(farg(0)?)),
+        BuiltinId::Clamp => float(f.clamp(farg(0)?, farg(1)?)),
+        BuiltinId::Powf => float(f.powf(farg(0)?)),
+        BuiltinId::Powi => {
             let exp = match args.first()? {
                 SVal::Int(i) => *i,
                 SVal::IntW(s, w) => i64::try_from(w.decode(*s)).unwrap_or(i64::MAX),
@@ -623,12 +623,12 @@ pub(super) fn s_float_method(name: BuiltinId, recv: SVal, args: &[SVal]) -> Opti
             };
             float(f.powi(i32::try_from(exp).ok()?))
         }
-        B::MulAdd => float(f.mul_add(farg(0)?, farg(1)?)),
-        B::IsNan => flag(f.is_nan()),
-        B::IsFinite => flag(f.is_finite()),
-        B::IsInfinite => flag(f.is_infinite()),
-        B::IsSignPositive => flag(f.is_sign_positive()),
-        B::IsSignNegative => flag(f.is_sign_negative()),
+        BuiltinId::MulAdd => float(f.mul_add(farg(0)?, farg(1)?)),
+        BuiltinId::IsNan => flag(f.is_nan()),
+        BuiltinId::IsFinite => flag(f.is_finite()),
+        BuiltinId::IsInfinite => flag(f.is_infinite()),
+        BuiltinId::IsSignPositive => flag(f.is_sign_positive()),
+        BuiltinId::IsSignNegative => flag(f.is_sign_negative()),
         _ => None,
     }
 }

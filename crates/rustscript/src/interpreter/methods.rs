@@ -7,11 +7,11 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow, bail};
 
 use super::bridge::VArgs;
-use super::bytecode::{BuiltinId as B, MethodName, ScalarTy};
+use super::bytecode::{BuiltinId, MethodName, ScalarTy};
 use super::enum_def::{EQUAL, EnumKind, GREATER, LESS, OK, ORDERING, SOME};
 use super::iterator;
 use super::ops::compare_values;
-use super::shared::{self, CharOut, Parsed, StrOut, usize_i64};
+use super::shared::{self, CharOut, JsonKind, Parsed, StrOut, usize_i64};
 use super::value::{Map, MapKey, RsStr, Value, ValueRef};
 
 /// `std::cmp::Ordering` as the enum value scripts match on. A comparator
@@ -58,18 +58,18 @@ pub(super) fn entry_method(
     args: &[Value],
 ) -> Result<Value> {
     Ok(match method.id {
-        B::OrInsert => {
+        BuiltinId::OrInsert => {
             let default = args.first().cloned().unwrap_or(Value::Unit);
             m.lock().entry(key.clone()).or_insert(default);
             Value::Ref(Arc::new(ValueRef::map_entry(m.clone(), key.clone())))
         }
-        B::OrDefault => {
+        BuiltinId::OrDefault => {
             m.lock()
                 .entry(key.clone())
                 .or_insert_with(|| Value::vec(Vec::new()));
             Value::Ref(Arc::new(ValueRef::map_entry(m.clone(), key.clone())))
         }
-        B::Key => key.to_value(),
+        BuiltinId::Key => key.to_value(),
         _ => bail!("unknown method `{}` on Entry", method.text),
     })
 }
@@ -87,7 +87,7 @@ pub(super) fn json_value_method(
     method: &MethodName,
     args: &[Value],
 ) -> Option<Value> {
-    if method.id == B::Get {
+    if method.id == BuiltinId::Get {
         return match recv {
             Value::Str(_) if matches!(args.first(), Some(Value::Range { .. })) => None,
             Value::Str(_)
@@ -100,7 +100,7 @@ pub(super) fn json_value_method(
             _ => None,
         };
     }
-    if !matches!(method.id, B::Pointer | B::PointerMut) {
+    if !matches!(method.id, BuiltinId::Pointer | BuiltinId::PointerMut) {
         return None;
     }
     let path = args.first().map(Value::display).unwrap_or_default();
@@ -124,7 +124,7 @@ pub(super) fn json_value_method(
     }
     // `pointer_mut` answers a borrow into the tree, so a mutation through it
     // must reach the tree and the mutation split never applies.
-    if method.id == B::PointerMut {
+    if method.id == BuiltinId::PointerMut {
         return Some(Value::some(Value::Ref(Arc::new(ValueRef::borrowed(here)))));
     }
     Some(Value::some(here))
@@ -132,22 +132,21 @@ pub(super) fn json_value_method(
 
 /// The json shape of a runtime value.
 pub(super) fn json_kind(recv: &Value) -> shared::JsonKind {
-    use shared::JsonKind as K;
     match recv {
-        Value::Map(..) => K::Object,
-        Value::Vec(_) => K::Array,
-        Value::Str(_) => K::Str,
-        Value::Bool(_) => K::Bool,
+        Value::Map(..) => JsonKind::Object,
+        Value::Vec(_) => JsonKind::Array,
+        Value::Str(_) => JsonKind::Str,
+        Value::Bool(_) => JsonKind::Bool,
         Value::Int(_) | Value::IntW(..) => match recv.int_parts() {
-            Some((value, _)) => K::Int(value),
-            None => K::Other,
+            Some((value, _)) => JsonKind::Int(value),
+            None => JsonKind::Other,
         },
-        Value::Float(_) | Value::F32(_) => K::Float,
+        Value::Float(_) | Value::F32(_) => JsonKind::Float,
         // The parser maps a json null to None, so that is what is_null has to
         // answer for. Unit counts too, it is the interpreter's own empty value.
-        Value::Unit => K::Null,
-        _ if recv.is_none_value() => K::Null,
-        _ => K::Other,
+        Value::Unit => JsonKind::Null,
+        _ if recv.is_none_value() => JsonKind::Null,
+        _ => JsonKind::Other,
     }
 }
 
@@ -157,8 +156,8 @@ pub(super) fn generic_method(recv: &Value, method: &MethodName, args: &[Value]) 
         // the static type is a no-op. A receiver with a real conversion, an
         // OsString into a PathBuf for example, handles `into` in its own
         // bridge before this.
-        (_, B::Clone | B::Into) => Ok(recv.clone()),
-        (_, B::ToString) => Ok(Value::str(recv.display())),
+        (_, BuiltinId::Clone | BuiltinId::Into) => Ok(recv.clone()),
+        (_, BuiltinId::ToString) => Ok(Value::str(recv.display())),
         (Value::Char(ch), id) if let Some(out) = shared::char_method(*ch, id, &VArgs(args)) => {
             Ok(match out? {
                 CharOut::Bool(v) => Value::Bool(v),
@@ -171,17 +170,17 @@ pub(super) fn generic_method(recv: &Value, method: &MethodName, args: &[Value]) 
                 CharOut::OptU32(None) => Value::none(),
             })
         }
-        (Value::Bool(b), B::AsBool) => Ok(Value::some(Value::Bool(*b))),
+        (Value::Bool(b), BuiltinId::AsBool) => Ok(Value::some(Value::Bool(*b))),
         // `then_some(v)` yields that value, not a placeholder.
-        (Value::Bool(b), B::ThenSome) => Ok(if *b {
+        (Value::Bool(b), BuiltinId::ThenSome) => Ok(if *b {
             Value::some(args.first().cloned().unwrap_or(Value::Unit))
         } else {
             Value::none()
         }),
-        (Value::Vec(v), B::AsArray) => Ok(Value::some(Value::vec(v.lock().clone()))),
+        (Value::Vec(v), BuiltinId::AsArray) => Ok(Value::some(Value::vec(v.lock().clone()))),
         // `_mut` accessors answer a borrow of the receiver's own storage,
         // so the mutation split never applies to what they hand back.
-        (Value::Vec(v), B::AsArrayMut) => Ok(Value::some(Value::Ref(Arc::new(
+        (Value::Vec(v), BuiltinId::AsArrayMut) => Ok(Value::some(Value::Ref(Arc::new(
             ValueRef::borrowed(Value::Vec(v.clone())),
         )))),
         // Serde accessors on a value that is not the matching type, for example
@@ -191,13 +190,13 @@ pub(super) fn generic_method(recv: &Value, method: &MethodName, args: &[Value]) 
         // work on an Option or a tuple as much as on a number. This is the
         // last resort dispatch, so a receiver with its own `max` or `min`,
         // a Vec or an integer, never reaches here.
-        (_, B::Max | B::Min | B::Cmp) if args.len() == 1 => {
+        (_, BuiltinId::Max | BuiltinId::Min | BuiltinId::Cmp) if args.len() == 1 => {
             let other = &args[0];
             let ordering = compare_values(recv, other)?;
             Ok(match method.id {
-                B::Cmp => make_ordering(ordering),
-                B::Max if ordering.is_ge() => recv.clone(),
-                B::Min if ordering.is_le() => recv.clone(),
+                BuiltinId::Cmp => make_ordering(ordering),
+                BuiltinId::Max if ordering.is_ge() => recv.clone(),
+                BuiltinId::Min if ordering.is_le() => recv.clone(),
                 _ => other.clone(),
             })
         }
@@ -225,20 +224,20 @@ pub(super) fn generic_method(recv: &Value, method: &MethodName, args: &[Value]) 
 fn ordering_method(o: std::cmp::Ordering, method: &MethodName, args: &[Value]) -> Result<Value> {
     let chained = || args.first().cloned().unwrap_or_else(|| make_ordering(o));
     Ok(match method.id {
-        B::Then => {
+        BuiltinId::Then => {
             if o == std::cmp::Ordering::Equal {
                 chained()
             } else {
                 make_ordering(o)
             }
         }
-        B::Reverse => make_ordering(o.reverse()),
-        B::IsLt => Value::Bool(o.is_lt()),
-        B::IsLe => Value::Bool(o.is_le()),
-        B::IsGt => Value::Bool(o.is_gt()),
-        B::IsGe => Value::Bool(o.is_ge()),
-        B::IsEq => Value::Bool(o.is_eq()),
-        B::IsNe => Value::Bool(o.is_ne()),
+        BuiltinId::Reverse => make_ordering(o.reverse()),
+        BuiltinId::IsLt => Value::Bool(o.is_lt()),
+        BuiltinId::IsLe => Value::Bool(o.is_le()),
+        BuiltinId::IsGt => Value::Bool(o.is_gt()),
+        BuiltinId::IsGe => Value::Bool(o.is_ge()),
+        BuiltinId::IsEq => Value::Bool(o.is_eq()),
+        BuiltinId::IsNe => Value::Bool(o.is_ne()),
         _ => bail!("unknown method `{}` on Ordering", method.text),
     })
 }
@@ -254,20 +253,22 @@ fn str_slice(s: &str, start: i64, end: i64) -> Option<&str> {
 pub(super) fn str_method(s: &RsStr, method: &MethodName, args: &[Value]) -> Result<Value> {
     let arg_str = |i: usize| -> String { args.get(i).map(Value::display).unwrap_or_default() };
     Ok(match method.id {
-        B::Len => shared::usize_value(s.len()),
-        B::IsEmpty => Value::Bool(s.is_empty()),
-        B::Clone | B::ToString => Value::Str(s.clone()),
-        B::Trim => Value::str(s.trim().to_string()),
+        BuiltinId::Len => shared::usize_value(s.len()),
+        BuiltinId::IsEmpty => Value::Bool(s.is_empty()),
+        BuiltinId::Clone | BuiltinId::ToString => Value::Str(s.clone()),
+        BuiltinId::Trim => Value::str(s.trim().to_string()),
         // Handled by the vm on the register slot, see Op::Method. Reaching
         // here means the receiver is not addressable, so the edit would be
         // silently lost.
-        B::Push | B::PushStr => bail!("cannot mutate a string through this receiver"),
-        B::Contains => Value::Bool(s.contains(&arg_str(0))),
-        B::StartsWith => Value::Bool(s.starts_with(&arg_str(0))),
-        B::EndsWith => Value::Bool(s.ends_with(&arg_str(0))),
+        BuiltinId::Push | BuiltinId::PushStr => {
+            bail!("cannot mutate a string through this receiver")
+        }
+        BuiltinId::Contains => Value::Bool(s.contains(&arg_str(0))),
+        BuiltinId::StartsWith => Value::Bool(s.starts_with(&arg_str(0))),
+        BuiltinId::EndsWith => Value::Bool(s.ends_with(&arg_str(0))),
         // `str::get(range)`, the real slice method. A json `get` on a string
         // is answered before the per type dispatch and never reaches here.
-        B::Get => match args.first() {
+        BuiltinId::Get => match args.first() {
             Some(Value::Range {
                 start,
                 end,
@@ -289,12 +290,12 @@ pub(super) fn str_method(s: &RsStr, method: &MethodName, args: &[Value]) -> Resu
             }
             _ => Value::none(),
         },
-        B::Chars => iterator::chars(s.clone()),
-        B::Lines => iterator::lines(s.clone()),
-        B::Split => split_value(s, args.first()),
-        B::SplitWhitespace => iterator::split_whitespace(s.clone()),
-        B::Count => Value::Int(usize_i64(s.chars().count())),
-        B::Parse => parse_value(s, method.scalar.as_ref()),
+        BuiltinId::Chars => iterator::chars(s.clone()),
+        BuiltinId::Lines => iterator::lines(s.clone()),
+        BuiltinId::Split => split_value(s, args.first()),
+        BuiltinId::SplitWhitespace => iterator::split_whitespace(s.clone()),
+        BuiltinId::Count => Value::Int(usize_i64(s.chars().count())),
+        BuiltinId::Parse => parse_value(s, method.scalar.as_ref()),
         _ => return str_method_slow(s, method, args),
     })
 }
@@ -344,7 +345,7 @@ pub(super) fn str_method_slow(s: &RsStr, method: &MethodName, args: &[Value]) ->
     }
     match method.id {
         // The lazy iterator form of the byte walk.
-        B::Bytes => Ok(iterator::bytes(s.clone())),
+        BuiltinId::Bytes => Ok(iterator::bytes(s.clone())),
         _ => generic_method(&Value::Str(s.clone()), method, args),
     }
 }
@@ -384,7 +385,7 @@ fn str_out(s: &RsStr, out: StrOut) -> Value {
 pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> Result<Value> {
     // The hot accessors dispatch on the id before the variant is even looked
     // at, and the payload is cloned only on the paths that hand it out.
-    if let B::Clone | B::Copied | B::Cloned = method.id {
+    if let BuiltinId::Clone | BuiltinId::Copied | BuiltinId::Cloned = method.id {
         return Ok(recv.clone());
     }
     let (is_some, inner) = match recv {
@@ -392,30 +393,30 @@ pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
         _ => unreachable!(),
     };
     match method.id {
-        B::Unwrap => {
+        BuiltinId::Unwrap => {
             return inner.ok_or_else(|| anyhow!("called `Option::unwrap()` on a `None` value"));
         }
-        B::UnwrapOr => {
+        BuiltinId::UnwrapOr => {
             return Ok(inner.unwrap_or_else(|| args.first().cloned().unwrap_or(Value::Unit)));
         }
         _ => {}
     }
     Ok(match method.id {
-        B::IsSome => Value::Bool(is_some),
-        B::IsNone => Value::Bool(!is_some),
-        B::Expect => inner
+        BuiltinId::IsSome => Value::Bool(is_some),
+        BuiltinId::IsNone => Value::Bool(!is_some),
+        BuiltinId::Expect => inner
             .ok_or_else(|| anyhow!("{}", args.first().map(Value::display).unwrap_or_default()))?,
         // There is no runtime type here, so the payload type's Default cannot
         // be built beyond what the call site wrote down.
-        B::UnwrapOrDefault => inner.unwrap_or_else(|| default_of(method.scalar.as_ref())),
-        B::AsRef | B::AsDeref | B::Take | B::AsMut => recv.clone(),
+        BuiltinId::UnwrapOrDefault => inner.unwrap_or_else(|| default_of(method.scalar.as_ref())),
+        BuiltinId::AsRef | BuiltinId::AsDeref | BuiltinId::Take | BuiltinId::AsMut => recv.clone(),
         // Iterating an Option yields its payload or nothing, as a vec so the
         // chain's `collect`, `rev`, and friends compose on it.
-        B::IntoIter | B::Iter => Value::vec(inner.into_iter().collect()),
+        BuiltinId::IntoIter | BuiltinId::Iter => Value::vec(inner.into_iter().collect()),
         // A json null parses to None here, so a serde lookup into a value that
         // turned out to be null is None rather than an unknown method error.
-        B::Get => Value::none(),
-        B::OkOr | B::Context => match inner {
+        BuiltinId::Get => Value::none(),
+        BuiltinId::OkOr | BuiltinId::Context => match inner {
             Some(v) => Value::ok(v),
             None => Value::err(args.first().cloned().unwrap_or(Value::Unit)),
         },
@@ -429,11 +430,15 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
         _ => unreachable!(),
     };
     Ok(match method.id {
-        B::IsOk => Value::Bool(is_ok),
-        B::IsErr => Value::Bool(!is_ok),
+        BuiltinId::IsOk => Value::Bool(is_ok),
+        BuiltinId::IsErr => Value::Bool(!is_ok),
         // The interpreter holds no references, so a reference view is the value.
-        B::Clone | B::AsRef | B::AsMut | B::AsDeref | B::AsDerefMut => recv.clone(),
-        B::Unwrap => {
+        BuiltinId::Clone
+        | BuiltinId::AsRef
+        | BuiltinId::AsMut
+        | BuiltinId::AsDeref
+        | BuiltinId::AsDerefMut => recv.clone(),
+        BuiltinId::Unwrap => {
             if is_ok {
                 inner.unwrap_or(Value::Unit)
             } else {
@@ -443,7 +448,7 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
                 );
             }
         }
-        B::UnwrapErr => {
+        BuiltinId::UnwrapErr => {
             if is_ok {
                 bail!(
                     "called `Result::unwrap_err()` on an `Ok` value: {}",
@@ -452,14 +457,14 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
             }
             inner.unwrap_or(Value::Unit)
         }
-        B::Expect => {
+        BuiltinId::Expect => {
             if is_ok {
                 inner.unwrap_or(Value::Unit)
             } else {
                 bail!("{}", args.first().map(Value::display).unwrap_or_default());
             }
         }
-        B::UnwrapOr => {
+        BuiltinId::UnwrapOr => {
             if is_ok {
                 inner.unwrap_or(Value::Unit)
             } else {
@@ -468,21 +473,21 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
         }
         // The Ok payload type, from wherever the call site stated it, exactly
         // as Option::unwrap_or_default above.
-        B::UnwrapOrDefault => {
+        BuiltinId::UnwrapOrDefault => {
             if is_ok {
                 inner.unwrap_or_else(|| default_of(method.scalar.as_ref()))
             } else {
                 default_of(method.scalar.as_ref())
             }
         }
-        B::Ok => {
+        BuiltinId::Ok => {
             if is_ok {
                 Value::some(inner.unwrap_or(Value::Unit))
             } else {
                 Value::none()
             }
         }
-        B::Err => {
+        BuiltinId::Err => {
             if is_ok {
                 Value::none()
             } else {
@@ -490,14 +495,14 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
             }
         }
         // Iterating a Result yields the payload or nothing, like Option.
-        B::IntoIter | B::Iter => {
+        BuiltinId::IntoIter | BuiltinId::Iter => {
             if is_ok {
                 Value::vec(inner.into_iter().collect())
             } else {
                 Value::vec(Vec::new())
             }
         }
-        B::Context | B::WithContext => {
+        BuiltinId::Context | BuiltinId::WithContext => {
             if is_ok {
                 Value::ok(inner.unwrap_or(Value::Unit))
             } else {

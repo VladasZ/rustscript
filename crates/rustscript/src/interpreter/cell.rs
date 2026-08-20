@@ -10,7 +10,7 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow, bail};
 use parking_lot::Mutex;
 
-use super::bytecode::{BuiltinId, BuiltinId as B};
+use super::bytecode::BuiltinId;
 use super::value::{CellKind, Value, ValueRef};
 
 pub(super) fn make_cell(kind: CellKind, inner: Value) -> Value {
@@ -35,43 +35,43 @@ pub(super) fn cell_method(
         return cell_method(inner_kind, &inner_slot, name, args);
     }
     Ok(Some(match name {
-        B::Clone => Value::Cell(kind, slot.clone()),
-        B::Borrow => {
+        BuiltinId::Clone => Value::Cell(kind, slot.clone()),
+        BuiltinId::Borrow => {
             require(kind, CellKind::RefCell, name)?;
             slot.lock().clone()
         }
-        B::BorrowMut => {
+        BuiltinId::BorrowMut => {
             require(kind, CellKind::RefCell, name)?;
             Value::Ref(Arc::new(ValueRef::cell_slot(slot.clone())))
         }
-        B::Lock | B::TryLock | B::BlockingLock => {
+        BuiltinId::Lock | BuiltinId::TryLock | BuiltinId::BlockingLock => {
             // The tokio mutex hands its guard out directly: `lock` is
             // awaited and the await passes the guard through, and only
             // `try_lock` wraps a `Result`. The std mutex wraps its
             // `LockResult` either way and has no `blocking_lock`.
             if kind == CellKind::TokioMutex {
                 let guard = Value::Ref(Arc::new(ValueRef::cell_slot(slot.clone())));
-                if name == B::TryLock {
+                if name == BuiltinId::TryLock {
                     Value::ok(guard)
                 } else {
                     guard
                 }
             } else {
                 require(kind, CellKind::Mutex, name)?;
-                if name == B::BlockingLock {
+                if name == BuiltinId::BlockingLock {
                     bail!("no method `blocking_lock` on std Mutex");
                 }
                 Value::ok(Value::Ref(Arc::new(ValueRef::cell_slot(slot.clone()))))
             }
         }
-        B::Get if kind == CellKind::Cell => slot.lock().clone(),
-        B::Set => {
+        BuiltinId::Get if kind == CellKind::Cell => slot.lock().clone(),
+        BuiltinId::Set => {
             require_interior(kind, name)?;
             let new = args.first().cloned().unwrap_or(Value::Unit);
             *slot.lock() = new;
             Value::Unit
         }
-        B::Replace => {
+        BuiltinId::Replace => {
             require_interior(kind, name)?;
             let new = args.first().cloned().unwrap_or(Value::Unit);
             let mut guard = slot.lock();
@@ -79,18 +79,18 @@ pub(super) fn cell_method(
             *guard = new;
             old
         }
-        B::Take => {
+        BuiltinId::Take => {
             require_interior(kind, name)?;
             let mut guard = slot.lock();
             let old = guard.clone();
             *guard = old.default_like();
             old
         }
-        B::GetMut => {
+        BuiltinId::GetMut => {
             require_interior(kind, name)?;
             Value::Ref(Arc::new(ValueRef::cell_slot(slot.clone())))
         }
-        B::IntoInner => slot.lock().clone(),
+        BuiltinId::IntoInner => slot.lock().clone(),
         _ => return Ok(None),
     }))
 }
@@ -100,16 +100,16 @@ pub(super) fn cell_method(
 fn interior_method(name: BuiltinId) -> bool {
     matches!(
         name,
-        B::Borrow
-            | B::BorrowMut
-            | B::Lock
-            | B::TryLock
-            | B::BlockingLock
-            | B::Get
-            | B::Set
-            | B::Replace
-            | B::Take
-            | B::GetMut
+        BuiltinId::Borrow
+            | BuiltinId::BorrowMut
+            | BuiltinId::Lock
+            | BuiltinId::TryLock
+            | BuiltinId::BlockingLock
+            | BuiltinId::Get
+            | BuiltinId::Set
+            | BuiltinId::Replace
+            | BuiltinId::Take
+            | BuiltinId::GetMut
     )
 }
 

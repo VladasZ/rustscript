@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use super::bytecode::{MethodName, PathId as P};
+use super::bytecode::{MethodName, PathId};
 use super::enum_def::{EnumDef, REG_TYPE};
 use super::std_bridge::as_i64;
 use super::value::{StructData, Value};
@@ -30,37 +30,37 @@ fn unit_enum(def: &Arc<EnumDef>, variant: &str) -> Value {
 
 /// Recognize `HKEY_*` roots, `KEY_*` access flags, and `RegType` variants as
 /// path constants.
-pub(super) fn winreg_const(id: P) -> Option<Value> {
+pub(super) fn winreg_const(id: PathId) -> Option<Value> {
     // The registry value types. `RegType` is a real enum in winreg, so it is
     // mirrored as an enum value and not an int, and `{:?}` prints the bare
     // variant name exactly like the compiled crate does.
     if matches!(
         id,
-        P::RegNone
-            | P::RegSz
-            | P::RegExpandSz
-            | P::RegBinary
-            | P::RegDword
-            | P::RegMultiSz
-            | P::RegQword
+        PathId::RegNone
+            | PathId::RegSz
+            | PathId::RegExpandSz
+            | PathId::RegBinary
+            | PathId::RegDword
+            | PathId::RegMultiSz
+            | PathId::RegQword
     ) {
         return Some(unit_enum(&REG_TYPE, id.name()));
     }
     let n = match id {
-        P::HkeyClassesRoot => 0x8000_0000_u32,
-        P::HkeyCurrentUser => 0x8000_0001,
-        P::HkeyLocalMachine => 0x8000_0002,
-        P::HkeyUsers => 0x8000_0003,
-        P::HkeyCurrentConfig => 0x8000_0005,
-        P::KeyQueryValue => 0x0001,
-        P::KeySetValue => 0x0002,
-        P::KeyCreateSubKey => 0x0004,
-        P::KeyEnumerateSubKeys => 0x0008,
-        P::KeyRead => 0x0002_0019,
-        P::KeyWrite => 0x0002_0006,
-        P::KeyAllAccess => 0x000F_003F,
-        P::KeyWow6464key => 0x0100,
-        P::KeyWow6432key => 0x0200,
+        PathId::HkeyClassesRoot => 0x8000_0000_u32,
+        PathId::HkeyCurrentUser => 0x8000_0001,
+        PathId::HkeyLocalMachine => 0x8000_0002,
+        PathId::HkeyUsers => 0x8000_0003,
+        PathId::HkeyCurrentConfig => 0x8000_0005,
+        PathId::KeyQueryValue => 0x0001,
+        PathId::KeySetValue => 0x0002,
+        PathId::KeyCreateSubKey => 0x0004,
+        PathId::KeyEnumerateSubKeys => 0x0008,
+        PathId::KeyRead => 0x0002_0019,
+        PathId::KeyWrite => 0x0002_0006,
+        PathId::KeyAllAccess => 0x000F_003F,
+        PathId::KeyWow6464key => 0x0100,
+        PathId::KeyWow6432key => 0x0200,
         _ => return None,
     };
     Some(Value::Int(i64::from(n)))
@@ -85,7 +85,7 @@ fn key_value(root: i64, path: &str, flags: i64) -> Value {
 
 #[cfg(windows)]
 mod imp {
-    use super::super::bytecode::{BuiltinId as B, MethodName};
+    use super::super::bytecode::{BuiltinId, MethodName};
     use std::borrow::Cow;
 
     use anyhow::{Result, bail};
@@ -285,7 +285,7 @@ mod imp {
         let path = field_str(s, "path");
 
         Ok(match name.id {
-            B::OpenSubkey | B::OpenSubkeyWithFlags => {
+            BuiltinId::OpenSubkey | BuiltinId::OpenSubkeyWithFlags => {
                 let want = args.get(1).and_then(as_i64).unwrap_or(flags);
                 let full = join(&path, &arg0());
                 match root_key(root).open_subkey_with_flags(&full, want as u32) {
@@ -293,7 +293,7 @@ mod imp {
                     Err(e) => Value::err(Value::str(e.to_string())),
                 }
             }
-            B::CreateSubkey => {
+            BuiltinId::CreateSubkey => {
                 let full = join(&path, &arg0());
                 match root_key(root).create_subkey(&full) {
                     // winreg hands back the key plus whether it was created or
@@ -305,11 +305,11 @@ mod imp {
                     Err(e) => Value::err(Value::str(e.to_string())),
                 }
             }
-            B::GetValue => match open(s).and_then(|k| k.get_raw_value(arg0())) {
+            BuiltinId::GetValue => match open(s).and_then(|k| k.get_raw_value(arg0())) {
                 Ok(v) => Value::ok(read(&v)),
                 Err(e) => Value::err(Value::str(e.to_string())),
             },
-            B::SetValue => {
+            BuiltinId::SetValue => {
                 let Some(v) = args.get(1) else {
                     bail!("set_value takes a name and a value");
                 };
@@ -318,21 +318,25 @@ mod imp {
             }
             // The untyped pair. Binary has no typed form in winreg, so a script
             // that writes REG_BINARY goes through these two.
-            B::GetRawValue => match open(s).and_then(|k| k.get_raw_value(arg0())) {
+            BuiltinId::GetRawValue => match open(s).and_then(|k| k.get_raw_value(arg0())) {
                 Ok(v) => Value::ok(raw_value(&v)),
                 Err(e) => Value::err(Value::str(e.to_string())),
             },
-            B::SetRawValue => {
+            BuiltinId::SetRawValue => {
                 let Some(v) = args.get(1) else {
                     bail!("set_raw_value takes a name and a RegValue");
                 };
                 let raw = raw_from(v)?;
                 io_result(open(s).and_then(|k| k.set_raw_value(arg0(), &raw)))
             }
-            B::DeleteValue => io_result(open(s).and_then(|k| k.delete_value(arg0()))),
-            B::DeleteSubkey => io_result(root_key(root).delete_subkey(join(&path, &arg0()))),
-            B::DeleteSubkeyAll => io_result(root_key(root).delete_subkey_all(join(&path, &arg0()))),
-            B::EnumKeys => match open(s) {
+            BuiltinId::DeleteValue => io_result(open(s).and_then(|k| k.delete_value(arg0()))),
+            BuiltinId::DeleteSubkey => {
+                io_result(root_key(root).delete_subkey(join(&path, &arg0())))
+            }
+            BuiltinId::DeleteSubkeyAll => {
+                io_result(root_key(root).delete_subkey_all(join(&path, &arg0())))
+            }
+            BuiltinId::EnumKeys => match open(s) {
                 Ok(k) => Value::vec(
                     k.enum_keys()
                         .map(|r| match r {
@@ -343,7 +347,7 @@ mod imp {
                 ),
                 Err(e) => Value::vec(vec![Value::err(Value::str(e.to_string()))]),
             },
-            B::EnumValues => match open(s) {
+            BuiltinId::EnumValues => match open(s) {
                 Ok(k) => Value::vec(
                     k.enum_values()
                         .map(|r| match r {

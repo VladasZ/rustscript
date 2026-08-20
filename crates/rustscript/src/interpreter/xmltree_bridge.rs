@@ -11,7 +11,7 @@ use xmltree::{Element, Namespace, XMLNode};
 
 use indexmap::IndexMap;
 
-use super::bytecode::{BuiltinId as B, MethodName};
+use super::bytecode::{BuiltinId, MethodName};
 use super::enum_def::XML_NODE;
 use super::value::{StructData, Value};
 
@@ -38,7 +38,7 @@ pub(super) fn element_method(
     match name.id {
         // The real write takes any writer; scripts hand in a `Vec<u8>`, which
         // is shared, so the serialized bytes land in the caller's vec.
-        B::Write => {
+        BuiltinId::Write => {
             let el = value_to_element(recv)?;
             let mut out: Vec<u8> = Vec::new();
             match el.write(&mut out) {
@@ -53,7 +53,7 @@ pub(super) fn element_method(
             }
         }
         // Option<Cow<str>> of the direct text and cdata children.
-        B::GetText => {
+        BuiltinId::GetText => {
             let el = value_to_element(recv)?;
             Ok(match el.get_text() {
                 Some(text) => Value::some(Value::str(text.to_string())),

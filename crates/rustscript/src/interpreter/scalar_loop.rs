@@ -681,19 +681,19 @@ fn translate_method(
                 slot(regs, *dst)
             }
         };
-        match method.text.as_str() {
+        match method.id {
             // Only a span receiver answers at run time, so a same-named
             // method on any other receiver fails its iteration over to the
             // generic path, whose own dispatch resolves it.
-            "as_str" | "to_string" | "to_owned" => {
+            BuiltinId::AsStr | BuiltinId::ToString | BuiltinId::ToOwned => {
                 let recv = slot(regs, *recv)?;
                 return Some(LOp::AsStr {
                     dst: dst_slot(regs)?,
                     src: recv,
                 });
             }
-            "start" | "end" => {
-                let end = method.text.as_str() == "end";
+            BuiltinId::Start | BuiltinId::End => {
+                let end = method.id == BuiltinId::End;
                 let recv = slot(regs, *recv)?;
                 return Some(LOp::MatchGet {
                     dst: dst_slot(regs)?,
@@ -706,7 +706,7 @@ fn translate_method(
             // probe, so an `unwrap` on anything else keeps rejecting the
             // loop, and only while no user method on `Result` or `Option`
             // shadows the builtin. The live slot decides at run time.
-            "unwrap" => {
+            BuiltinId::Unwrap => {
                 let recv = slot(regs, *recv)?;
                 if try_mask & 1u64.checked_shl(u32::from(recv)).unwrap_or(0) == 0
                     || vm.user_method("Result", "unwrap").is_some()

@@ -14,7 +14,7 @@ use anyhow::{Result, anyhow, bail};
 use base64::Engine;
 use reqwest::{Client, Method};
 
-use super::bytecode::{BuiltinId as B, MethodName, PathId as P};
+use super::bytecode::{BuiltinId, MethodName, PathId};
 use super::json_bridge::{json_to_pvalue, parse_json, pvalue_to_json};
 use super::native::Native;
 use super::std_bridge::duration_from_value;
@@ -80,32 +80,32 @@ fn blocking_client_value(c: reqwest::blocking::Client) -> Value {
 /// The `reqwest` path calls. Both APIs live here: the blocking one for plain
 /// scripts and the async one whose futures drive on the runtime under
 /// `.await`.
-pub(super) fn reqwest_call(id: P, args: &[Value]) -> Result<Value> {
+pub(super) fn reqwest_call(id: PathId, args: &[Value]) -> Result<Value> {
     Ok(match id {
         // A redirect policy marker, built by `reqwest::redirect::Policy::none()`
         // or `::limited(n)`.
-        P::RedirectPolicyNone => {
+        PathId::RedirectPolicyNone => {
             Value::struct_of("RedirectPolicy", [("kind".into(), Value::str("none"))])
         }
-        P::RedirectPolicyLimited => Value::struct_of(
+        PathId::RedirectPolicyLimited => Value::struct_of(
             "RedirectPolicy",
             [
                 ("kind".into(), Value::str("limited")),
                 ("n".into(), args.first().cloned().unwrap_or(Value::Int(10))),
             ],
         ),
-        P::ReqwestBlockingClientNew => {
+        PathId::ReqwestBlockingClientNew => {
             blocking_client_value(build_blocking_client(false, None, None, None)?)
         }
-        P::ReqwestClientNew => client_value(Client::new()),
-        P::ReqwestBlockingClientBuilder => blocking_builder_value(),
-        P::ReqwestClientBuilder => builder_value(),
+        PathId::ReqwestClientNew => client_value(Client::new()),
+        PathId::ReqwestBlockingClientBuilder => blocking_builder_value(),
+        PathId::ReqwestClientBuilder => builder_value(),
         // The only free function either API exposes is `get`.
-        P::ReqwestBlockingGet => {
+        PathId::ReqwestBlockingGet => {
             let url = args.first().map(Value::display).unwrap_or_default();
             run_blocking(&request_struct("GET", &url, Value::Unit))
         }
-        P::ReqwestGet => {
+        PathId::ReqwestGet => {
             let url = args.first().map(Value::display).unwrap_or_default();
             send_future(&request_struct("GET", &url, Value::Unit))
         }
@@ -219,13 +219,13 @@ fn client_method(
     args: &[Value],
 ) -> Result<Value> {
     let verb = match method.id {
-        B::Get => "GET",
-        B::Post => "POST",
-        B::Put => "PUT",
-        B::Delete => "DELETE",
-        B::Patch => "PATCH",
-        B::Head => "HEAD",
-        B::Clone => return Ok(Value::Native(n.clone())),
+        BuiltinId::Get => "GET",
+        BuiltinId::Post => "POST",
+        BuiltinId::Put => "PUT",
+        BuiltinId::Delete => "DELETE",
+        BuiltinId::Patch => "PATCH",
+        BuiltinId::Head => "HEAD",
+        BuiltinId::Clone => return Ok(Value::Native(n.clone())),
         _ => bail!("unknown method `{}` on a client", method.text),
     };
     let url = args.first().map(Value::display).unwrap_or_default();
@@ -239,26 +239,26 @@ fn client_method(
 fn builder_method(s: &Arc<StructData>, method: &MethodName, args: &[Value]) -> Result<Value> {
     let this = || Value::Struct(s.clone());
     match method.id {
-        B::CookieStore => {
+        BuiltinId::CookieStore => {
             s.set(
                 "cookie_store",
                 args.first().cloned().unwrap_or(Value::Bool(false)),
             );
             Ok(this())
         }
-        B::Timeout => {
+        BuiltinId::Timeout => {
             s.set("timeout", args.first().cloned().unwrap_or(Value::Unit));
             Ok(this())
         }
-        B::UserAgent => {
+        BuiltinId::UserAgent => {
             s.set("user_agent", args.first().cloned().unwrap_or(Value::Unit));
             Ok(this())
         }
-        B::Redirect => {
+        BuiltinId::Redirect => {
             s.set("redirect", args.first().cloned().unwrap_or(Value::Unit));
             Ok(this())
         }
-        B::Build => {
+        BuiltinId::Build => {
             let cookies = matches!(s.get("cookie_store"), Some(Value::Bool(true)));
             let timeout = duration_field(s, "timeout");
             let ua = match s.get("user_agent") {
@@ -295,18 +295,18 @@ fn builder_method(s: &Arc<StructData>, method: &MethodName, args: &[Value]) -> R
 fn request_method(s: &Arc<StructData>, method: &MethodName, args: &[Value]) -> Result<Value> {
     let this = || Value::Struct(s.clone());
     match method.id {
-        B::Header => {
+        BuiltinId::Header => {
             let k = args.first().map(Value::display).unwrap_or_default();
             let v = args.get(1).map(Value::display).unwrap_or_default();
             add_header(s, &k, &v);
             Ok(this())
         }
-        B::BearerAuth => {
+        BuiltinId::BearerAuth => {
             let token = args.first().map(Value::display).unwrap_or_default();
             add_header(s, "Authorization", &format!("Bearer {token}"));
             Ok(this())
         }
-        B::BasicAuth => {
+        BuiltinId::BasicAuth => {
             let user = args.first().map(Value::display).unwrap_or_default();
             let pass = match args.get(1) {
                 Some(Value::Enum { data, .. }) => {
@@ -319,7 +319,7 @@ fn request_method(s: &Arc<StructData>, method: &MethodName, args: &[Value]) -> R
             add_header(s, "Authorization", &format!("Basic {token}"));
             Ok(this())
         }
-        B::Query => {
+        BuiltinId::Query => {
             if let Some(Value::Vec(items)) = args.first()
                 && let Some(Value::Vec(q)) = s.get("query")
             {
@@ -329,26 +329,26 @@ fn request_method(s: &Arc<StructData>, method: &MethodName, args: &[Value]) -> R
             }
             Ok(this())
         }
-        B::Json => {
+        BuiltinId::Json => {
             let json = pvalue_to_json(args.first().unwrap_or(&Value::Unit))?;
             add_header(s, "Content-Type", "application/json");
             s.set("body", Value::str(serde_json::to_string(&json)?));
             Ok(this())
         }
-        B::Body => {
+        BuiltinId::Body => {
             s.set(
                 "body",
                 Value::str(args.first().map(Value::display).unwrap_or_default()),
             );
             Ok(this())
         }
-        B::Timeout => {
+        BuiltinId::Timeout => {
             s.set("timeout", args.first().cloned().unwrap_or(Value::Unit));
             Ok(this())
         }
         // A request built from a blocking client runs at once; one built from
         // an async client hands back a future for `.await`.
-        B::Send => {
+        BuiltinId::Send => {
             let blocking = matches!(
                 s.get("client"),
                 Some(Value::Native(n)) if matches!(&*n.lock(), Native::BlockingHttpClient(_))
@@ -574,31 +574,31 @@ fn response_method(s: &Arc<StructData>, method: &MethodName) -> Result<Value> {
     // back futures for `.await`.
     let is_blocking = matches!(s.get("body"), Some(Value::Str(_)));
     Ok(match method.id {
-        B::Status => Value::struct_of(
+        BuiltinId::Status => Value::struct_of(
             "StatusCode",
             [("code".into(), s.get("status").unwrap_or(Value::Int(0)))],
         ),
-        B::Text if is_blocking => {
+        BuiltinId::Text if is_blocking => {
             Value::ok(Value::str(String::from_utf8_lossy(&body()).into_owned()))
         }
-        B::Json if is_blocking => {
+        BuiltinId::Json if is_blocking => {
             let text = String::from_utf8_lossy(&body()).into_owned();
             match parse_json(&text) {
                 Ok(v) => Value::ok(v),
                 Err(e) => Value::err(Value::str(e.to_string())),
             }
         }
-        B::Text => text_future(body()),
-        B::Json => json_future(body()),
-        B::ContentLength => s.get("content_length").unwrap_or_else(Value::none),
-        B::Headers => Value::struct_of(
+        BuiltinId::Text => text_future(body()),
+        BuiltinId::Json => json_future(body()),
+        BuiltinId::ContentLength => s.get("content_length").unwrap_or_else(Value::none),
+        BuiltinId::Headers => Value::struct_of(
             "HeaderMap",
             [(
                 "map".into(),
                 s.get("headers").unwrap_or_else(|| Value::vec(vec![])),
             )],
         ),
-        B::ErrorForStatus => {
+        BuiltinId::ErrorForStatus => {
             let code = match s.get("status") {
                 Some(Value::Int(c)) => c,
                 _ => 0,
@@ -644,7 +644,7 @@ fn json_future(body: Vec<u8>) -> Value {
 
 fn header_map_method(s: &StructData, method: &MethodName, args: &[Value]) -> Value {
     match method.id {
-        B::Get => {
+        BuiltinId::Get => {
             let name = args
                 .first()
                 .map(Value::display)

@@ -12,7 +12,7 @@ use anyhow::{Result, bail};
 use parking_lot::Mutex;
 
 use super::bytecode::Chunk;
-use super::bytecode::{BuiltinId, BuiltinId as B, MethodName, PathId, PathRef};
+use super::bytecode::{BuiltinId, MethodName, PathId, PathRef};
 use super::enum_def::EnumKind;
 use super::methods::{self, make_ordering};
 use super::native::Native;
@@ -507,7 +507,7 @@ impl Vm {
         // `.iter().map(..)` has to be drained here, where the interpreter is
         // in reach. The vec method itself cannot read one.
         if matches!(recv, Value::Vec(_))
-            && matches!(name.text.as_str(), "extend" | "extend_from_slice")
+            && matches!(name.id, BuiltinId::Extend | BuiltinId::ExtendFromSlice)
             && let Some(first) = args.first()
             && !matches!(first, Value::Vec(_))
         {
@@ -790,7 +790,9 @@ fn exitstatus_method(s: &Arc<super::value::StructData>, name: &MethodName) -> Re
 fn output_method(s: &Arc<super::value::StructData>, name: &MethodName) -> Result<Value> {
     let m = name.id;
     Ok(match m {
-        B::Status | B::Stdout | B::Stderr => s.get(m.name()).unwrap_or(Value::Unit),
+        BuiltinId::Status | BuiltinId::Stdout | BuiltinId::Stderr => {
+            s.get(m.name()).unwrap_or(Value::Unit)
+        }
         _ => bail!("unknown method `{}` on Output", name.text),
     })
 }
@@ -876,7 +878,7 @@ fn duration_method(
     let m = name.id;
     let secs = u64::try_from(super::std_bridge::field_int(s, "secs")).unwrap_or_default();
     let nanos = u32::try_from(super::std_bridge::field_int(s, "nanos")).unwrap_or_default();
-    if let B::CheckedAdd | B::CheckedSub = m {
+    if let BuiltinId::CheckedAdd | BuiltinId::CheckedSub = m {
         let own = Duration::new(secs, nanos);
         let Some(other) = args
             .first()
@@ -885,7 +887,7 @@ fn duration_method(
             bail!("`{}` on Duration takes a Duration argument", name.text);
         };
         let out = match m {
-            B::CheckedAdd => own.checked_add(other),
+            BuiltinId::CheckedAdd => own.checked_add(other),
             _ => own.checked_sub(other),
         };
         return Ok(out.map_or_else(Value::none, |d| {
@@ -1015,8 +1017,8 @@ fn scalar_method(recv: &Value, name: &MethodName, args: &[Value]) -> Result<Valu
     // and a number never reaches a generic dispatch, so these are answered
     // here. `2.into()` for a `serde_json::Number` is the same 2.
     match m {
-        B::ToString => return Ok(Value::str(recv.display())),
-        B::Clone | B::Into => return Ok(recv.clone()),
+        BuiltinId::ToString => return Ok(Value::str(recv.display())),
+        BuiltinId::Clone | BuiltinId::Into => return Ok(recv.clone()),
         _ => {}
     }
     // Serde accessors on an already decoded scalar. A json bool arrives as a
@@ -1024,22 +1026,22 @@ fn scalar_method(recv: &Value, name: &MethodName, args: &[Value]) -> Result<Valu
     // the wrong type is None rather than an error, matching serde.
     if matches!(
         m,
-        B::AsStr
-            | B::AsI64
-            | B::AsU64
-            | B::AsF64
-            | B::AsBool
-            | B::AsArray
-            | B::AsArrayMut
-            | B::AsObject
-            | B::AsObjectMut
+        BuiltinId::AsStr
+            | BuiltinId::AsI64
+            | BuiltinId::AsU64
+            | BuiltinId::AsF64
+            | BuiltinId::AsBool
+            | BuiltinId::AsArray
+            | BuiltinId::AsArrayMut
+            | BuiltinId::AsObject
+            | BuiltinId::AsObjectMut
     ) {
         let matched = match (recv, m) {
-            (Value::Bool(_), B::AsBool)
-            | (Value::Str(_), B::AsStr)
-            | (Value::Int(_) | Value::IntW(..), B::AsI64 | B::AsU64)
-            | (Value::Float(_), B::AsF64) => true,
-            (Value::Int(i), B::AsF64) => {
+            (Value::Bool(_), BuiltinId::AsBool)
+            | (Value::Str(_), BuiltinId::AsStr)
+            | (Value::Int(_) | Value::IntW(..), BuiltinId::AsI64 | BuiltinId::AsU64)
+            | (Value::Float(_), BuiltinId::AsF64) => true,
+            (Value::Int(i), BuiltinId::AsF64) => {
                 return Ok(Value::some(Value::Float(AsPrimitive::<f64>::as_(*i))));
             }
             _ => false,
@@ -1187,8 +1189,11 @@ fn deref_receiver(
     // In-place ascii casing through a `&mut` receiver stores back the same
     // way a grow does. The upper flag reuses the harvested arm literal, a
     // partial literal here would leak a bogus name into the bridge tables.
-    if matches!(name.id, B::MakeAsciiUppercase | B::MakeAsciiLowercase) {
-        let upper = name.id == B::MakeAsciiUppercase;
+    if matches!(
+        name.id,
+        BuiltinId::MakeAsciiUppercase | BuiltinId::MakeAsciiLowercase
+    ) {
+        let upper = name.id == BuiltinId::MakeAsciiUppercase;
         let cased = match &value {
             Value::Str(s) => Some(Value::str(if upper {
                 s.to_ascii_uppercase()

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 use parking_lot::Mutex;
 
-use super::bytecode::{BuiltinId as B, MethodName};
+use super::bytecode::{BuiltinId, MethodName};
 use super::enum_def::ERROR_KIND;
 use super::native::Native;
 use super::value::Value;
@@ -142,8 +142,8 @@ pub(super) fn io_error_method(handle: &Handle, method: &MethodName) -> Option<Va
         return None;
     };
     match method.id {
-        B::Kind => Value::enum_named(&ERROR_KIND, kind, Vec::new()),
-        B::RawOsError => Some(match code {
+        BuiltinId::Kind => Value::enum_named(&ERROR_KIND, kind, Vec::new()),
+        BuiltinId::RawOsError => Some(match code {
             Some(n) => Value::some(Value::Int(i64::from(*n))),
             None => Value::none(),
         }),
@@ -160,8 +160,8 @@ pub(super) fn joinerr_method(handle: &Handle, method: &MethodName) -> Option<Val
         return None;
     };
     match method.id {
-        B::IsPanic => Some(Value::Bool(*is_panic)),
-        B::IsCancelled => Some(Value::Bool(false)),
+        BuiltinId::IsPanic => Some(Value::Bool(*is_panic)),
+        BuiltinId::IsCancelled => Some(Value::Bool(false)),
         _ => None,
     }
 }
@@ -173,7 +173,7 @@ fn reader_native_method(
     args: &mut [Value],
 ) -> Result<Option<Value>> {
     match method.id {
-        B::ReadLine => {
+        BuiltinId::ReadLine => {
             let mut h = handle.lock();
             let Some(r) = h.as_buf_read() else {
                 bail!("read_line on non-reader {}", h.type_name());
@@ -188,7 +188,7 @@ fn reader_native_method(
                 Value::Int(int_len(n))
             })));
         }
-        B::ReadToString => {
+        BuiltinId::ReadToString => {
             let mut h = handle.lock();
             let Some(r) = h.as_read() else {
                 bail!("read_to_string on non-reader {}", h.type_name());
@@ -203,7 +203,7 @@ fn reader_native_method(
                 Value::Int(int_len(n))
             })));
         }
-        B::Read => {
+        BuiltinId::Read => {
             let mut h = handle.lock();
             let Some(r) = h.as_read() else {
                 bail!("read on non-reader {}", h.type_name());
@@ -227,7 +227,7 @@ fn reader_native_method(
                 Value::Int(int_len(n))
             })));
         }
-        B::ReadToEnd => {
+        BuiltinId::ReadToEnd => {
             let mut h = handle.lock();
             let Some(r) = h.as_read() else {
                 bail!("read_to_end on non-reader {}", h.type_name());
@@ -246,7 +246,7 @@ fn reader_native_method(
         // guaranteed to be UTF-8. The delimiter is kept in the buffer, as the
         // real method does, so a caller can tell a final unterminated line
         // from a terminated one.
-        B::ReadUntil => {
+        BuiltinId::ReadUntil => {
             let delim = byte_arg(args.first(), "read_until")?;
             let mut h = handle.lock();
             let Some(r) = h.as_buf_read() else {
@@ -262,7 +262,9 @@ fn reader_native_method(
                 Value::Int(int_len(n))
             })));
         }
-        B::Lines | B::Next | B::Collect => return Ok(lines_native_method(handle, method)),
+        BuiltinId::Lines | BuiltinId::Next | BuiltinId::Collect => {
+            return Ok(lines_native_method(handle, method));
+        }
         _ => {}
     }
     Ok(None)
@@ -272,7 +274,7 @@ fn reader_native_method(
 /// `collect` walk the iterator it left behind.
 fn lines_native_method(handle: &Handle, method: &MethodName) -> Option<Value> {
     match method.id {
-        B::Lines => {
+        BuiltinId::Lines => {
             // Move the reader out into a lazy line iterator so a for-loop can
             // stream it. The original handle is left empty.
             let taken = std::mem::replace(&mut *handle.lock(), Native::Taken);
@@ -292,7 +294,7 @@ fn lines_native_method(handle: &Handle, method: &MethodName) -> Option<Value> {
             };
             Some(Native::Lines(iter).wrap())
         }
-        B::Next => {
+        BuiltinId::Next => {
             if matches!(&*handle.lock(), Native::Lines(_)) {
                 return Some(match lines_next(handle) {
                     Some(v) => Value::some(v),
@@ -301,7 +303,7 @@ fn lines_native_method(handle: &Handle, method: &MethodName) -> Option<Value> {
             }
             None
         }
-        B::Collect => {
+        BuiltinId::Collect => {
             if matches!(&*handle.lock(), Native::Lines(_)) {
                 return Some(Value::vec(drain_lines(handle)));
             }
@@ -317,7 +319,7 @@ fn writer_native_method(handle: &Handle, method: &MethodName, args: &mut [Value]
         // The formatter buffer of a user `fmt` impl. `write!` lowers to
         // `write_all`, and `f.write_str(..)` is the same append. The answer
         // is `fmt::Result`, which `?` in the impl body unwraps.
-        B::WriteAll | B::Write | B::WriteStr | B::WriteFmt
+        BuiltinId::WriteAll | BuiltinId::Write | BuiltinId::WriteStr | BuiltinId::WriteFmt
             if matches!(&*handle.lock(), Native::Fmt(_)) =>
         {
             let text = args.first().map(Value::display).unwrap_or_default();
@@ -327,7 +329,7 @@ fn writer_native_method(handle: &Handle, method: &MethodName, args: &mut [Value]
             }
             return Some(Value::ok(Value::Unit));
         }
-        B::WriteAll | B::Write => {
+        BuiltinId::WriteAll | BuiltinId::Write => {
             let bytes = value_to_bytes(args.first());
             let mut h = handle.lock();
             if !matches!(
@@ -338,7 +340,7 @@ fn writer_native_method(handle: &Handle, method: &MethodName, args: &mut [Value]
             }
             let n = bytes.len();
             let r = write_bytes(&mut h, &bytes);
-            let is_write = method.id == B::Write;
+            let is_write = method.id == BuiltinId::Write;
             return Some(io_err(r, |()| {
                 if is_write {
                     Value::Int(int_len(n))
@@ -347,7 +349,7 @@ fn writer_native_method(handle: &Handle, method: &MethodName, args: &mut [Value]
                 }
             }));
         }
-        B::Flush => {
+        BuiltinId::Flush => {
             let mut h = handle.lock();
             let r = flush_writer(&mut h);
             return Some(io_err(r, |()| Value::Unit));
@@ -364,7 +366,7 @@ fn file_native_method(
     args: &mut [Value],
 ) -> Result<Option<Value>> {
     match method.id {
-        B::Seek => {
+        BuiltinId::Seek => {
             let pos = seek_from(args.first());
             let mut h = handle.lock();
             if let Native::File(r) = &mut *h {
@@ -374,14 +376,14 @@ fn file_native_method(
             }
             bail!("seek on non-file {}", h.type_name());
         }
-        B::SyncAll | B::SyncData => {
+        BuiltinId::SyncAll | BuiltinId::SyncData => {
             let mut h = handle.lock();
             if let Native::File(r) = &mut *h {
                 return Ok(Some(io_err(r.get_ref().sync_all(), |()| Value::Unit)));
             }
             bail!("sync on non-file {}", h.type_name());
         }
-        B::SetLen => {
+        BuiltinId::SetLen => {
             let n = as_int(args.first())
                 .and_then(|n| u64::try_from(n).ok())
                 .unwrap_or(0);
@@ -391,7 +393,7 @@ fn file_native_method(
             }
             bail!("set_len on non-file {}", h.type_name());
         }
-        B::SetModified => {
+        BuiltinId::SetModified => {
             let time = match args.first() {
                 Some(Value::Native(other)) => match &*other.lock() {
                     Native::SystemTime(t) => *t,
@@ -407,7 +409,7 @@ fn file_native_method(
             }
             bail!("set_modified on non-file {}", h.type_name());
         }
-        B::Metadata => {
+        BuiltinId::Metadata => {
             let h = handle.lock();
             if let Native::File(r) = &*h {
                 return Ok(Some(io_err(r.get_ref().metadata(), |m| {
@@ -424,7 +426,7 @@ fn file_native_method(
 /// A spawned child process.
 fn child_native_method(handle: &Handle, method: &MethodName) -> Result<Option<Value>> {
     match method.id {
-        B::Wait => {
+        BuiltinId::Wait => {
             let mut h = handle.lock();
             if let Native::Child(c) = &mut *h {
                 return Ok(Some(io_err(c.wait(), |s| {
@@ -433,7 +435,7 @@ fn child_native_method(handle: &Handle, method: &MethodName) -> Result<Option<Va
             }
             bail!("wait on non-child {}", h.type_name());
         }
-        B::TryWait => {
+        BuiltinId::TryWait => {
             let mut h = handle.lock();
             if let Native::Child(c) = &mut *h {
                 return Ok(Some(match c.try_wait() {
@@ -444,20 +446,20 @@ fn child_native_method(handle: &Handle, method: &MethodName) -> Result<Option<Va
             }
             bail!("try_wait on non-child {}", h.type_name());
         }
-        B::Kill => {
+        BuiltinId::Kill => {
             let mut h = handle.lock();
             if let Native::Child(c) = &mut *h {
                 return Ok(Some(io_err(c.kill(), |()| Value::Unit)));
             }
             bail!("kill on non-child {}", h.type_name());
         }
-        B::Id => {
+        BuiltinId::Id => {
             let h = handle.lock();
             if let Native::Child(c) = &*h {
                 return Ok(Some(Value::Int(i64::from(c.id()))));
             }
         }
-        B::WaitWithOutput => {
+        BuiltinId::WaitWithOutput => {
             if !matches!(&*handle.lock(), Native::Child(_)) {
                 return Ok(None);
             }
@@ -478,7 +480,7 @@ fn child_native_method(handle: &Handle, method: &MethodName) -> Result<Option<Va
 /// TCP listeners and streams.
 fn net_native_method(handle: &Handle, method: &MethodName) -> Result<Option<Value>> {
     match method.id {
-        B::Accept => {
+        BuiltinId::Accept => {
             let h = handle.lock();
             if let Native::Listener(l) = &*h {
                 return Ok(Some(match l.accept() {
@@ -491,10 +493,10 @@ fn net_native_method(handle: &Handle, method: &MethodName) -> Result<Option<Valu
             }
             bail!("accept on non-listener {}", h.type_name());
         }
-        B::Incoming => {
+        BuiltinId::Incoming => {
             bail!("incoming() is not supported; loop with listener.accept() instead");
         }
-        B::LocalAddr => {
+        BuiltinId::LocalAddr => {
             let h = handle.lock();
             let addr = match &*h {
                 Native::Listener(l) => l.local_addr(),
@@ -504,14 +506,14 @@ fn net_native_method(handle: &Handle, method: &MethodName) -> Result<Option<Valu
             };
             return Ok(Some(io_err(addr, |a| Value::str(a.to_string()))));
         }
-        B::PeerAddr => {
+        BuiltinId::PeerAddr => {
             let h = handle.lock();
             if let Native::Stream(s) = &*h {
                 return Ok(Some(io_err(s.peer_addr(), |a| Value::str(a.to_string()))));
             }
             bail!("peer_addr on {}", h.type_name());
         }
-        B::Shutdown => {
+        BuiltinId::Shutdown => {
             let h = handle.lock();
             if let Native::Stream(s) = &*h {
                 return Ok(Some(io_err(s.shutdown(std::net::Shutdown::Both), |()| {
@@ -520,7 +522,7 @@ fn net_native_method(handle: &Handle, method: &MethodName) -> Result<Option<Valu
             }
             bail!("shutdown on {}", h.type_name());
         }
-        B::TryClone => {
+        BuiltinId::TryClone => {
             let h = handle.lock();
             match &*h {
                 Native::Stream(s) => {
@@ -544,7 +546,7 @@ fn udp_native_method(
     args: &mut [Value],
 ) -> Result<Option<Value>> {
     match method.id {
-        B::SetBroadcast => {
+        BuiltinId::SetBroadcast => {
             let on = matches!(args.first(), Some(Value::Bool(true)));
             let h = handle.lock();
             if let Native::Udp(s) = &*h {
@@ -552,7 +554,7 @@ fn udp_native_method(
             }
             bail!("set_broadcast on {}", h.type_name());
         }
-        B::SendTo => {
+        BuiltinId::SendTo => {
             let bytes = value_to_bytes(args.first());
             let addr = args.get(1).map(Value::display).unwrap_or_default();
             let h = handle.lock();
@@ -563,7 +565,7 @@ fn udp_native_method(
             }
             bail!("send_to on {}", h.type_name());
         }
-        B::Send => {
+        BuiltinId::Send => {
             let bytes = value_to_bytes(args.first());
             let h = handle.lock();
             if let Native::Udp(s) = &*h {
@@ -571,7 +573,7 @@ fn udp_native_method(
             }
             bail!("send on {}", h.type_name());
         }
-        B::Connect => {
+        BuiltinId::Connect => {
             let addr = args.first().map(Value::display).unwrap_or_default();
             let h = handle.lock();
             if let Native::Udp(s) = &*h {
@@ -591,7 +593,7 @@ fn time_native_method(
     args: &mut [Value],
 ) -> Result<Option<Value>> {
     match method.id {
-        B::Elapsed => {
+        BuiltinId::Elapsed => {
             let h = handle.lock();
             match &*h {
                 Native::Instant(t) => {
@@ -606,7 +608,7 @@ fn time_native_method(
                 _ => bail!("elapsed on {}", h.type_name()),
             }
         }
-        B::DurationSince => {
+        BuiltinId::DurationSince => {
             let h = handle.lock();
             match (&*h, args.first()) {
                 (Native::Instant(t), Some(Value::Native(other))) => {
@@ -634,7 +636,7 @@ fn time_native_method(
 /// Temp dirs and named temp files.
 fn temp_native_method(handle: &Handle, method: &MethodName) -> Result<Option<Value>> {
     match method.id {
-        B::Path => {
+        BuiltinId::Path => {
             let h = handle.lock();
             match &*h {
                 Native::TempDir(d) => {
@@ -650,7 +652,7 @@ fn temp_native_method(handle: &Handle, method: &MethodName) -> Result<Option<Val
                 _ => {}
             }
         }
-        B::Close => {
+        BuiltinId::Close => {
             if !matches!(&*handle.lock(), Native::TempDir(_)) {
                 return Ok(None);
             }

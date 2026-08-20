@@ -20,7 +20,7 @@ use ratatui::widgets::Sparkline;
 use ratatui::widgets::Table;
 use ratatui::widgets::Widget;
 
-use super::bytecode::{BuiltinId as B, MethodName, PathId as P};
+use super::bytecode::{BuiltinId, MethodName, PathId};
 use super::ratatui_bridge::border_type_value;
 use super::ratatui_bridge::color_value;
 use super::ratatui_bridge::constraint_value;
@@ -47,11 +47,11 @@ use super::value::Value;
 
 /// Associated functions, `Table::new`, `Block::bordered`, `Buffer::empty` and
 /// the rest. Returns None when the path is not a ratatui one.
-pub(super) fn ratatui_assoc(id: P, args: &[Value]) -> Option<Value> {
+pub(super) fn ratatui_assoc(id: PathId, args: &[Value]) -> Option<Value> {
     let arg = |i: usize| -> Value { args.get(i).cloned().unwrap_or(Value::Unit) };
     Some(match id {
-        P::StyleNew | P::StyleDefault => style_value(Style::new()),
-        P::RectNew => Value::struct_of(
+        PathId::StyleNew | PathId::StyleDefault => style_value(Style::new()),
+        PathId::RectNew => Value::struct_of(
             "Rect",
             [
                 ("x".into(), arg(0)),
@@ -60,7 +60,7 @@ pub(super) fn ratatui_assoc(id: P, args: &[Value]) -> Option<Value> {
                 ("height".into(), arg(3)),
             ],
         ),
-        P::PaddingNew => Value::struct_of(
+        PathId::PaddingNew => Value::struct_of(
             "Padding",
             [
                 ("left".into(), arg(0)),
@@ -69,27 +69,29 @@ pub(super) fn ratatui_assoc(id: P, args: &[Value]) -> Option<Value> {
                 ("bottom".into(), arg(3)),
             ],
         ),
-        P::PaddingZero | P::PaddingZeroConst => padding_value(ratatui::widgets::Padding::ZERO),
-        P::SpanRaw => Value::struct_of(
+        PathId::PaddingZero | PathId::PaddingZeroConst => {
+            padding_value(ratatui::widgets::Padding::ZERO)
+        }
+        PathId::SpanRaw => Value::struct_of(
             "Span",
             [
                 ("content".into(), arg(0)),
                 ("style".into(), style_value(Style::new())),
             ],
         ),
-        P::SpanStyled => Value::struct_of(
+        PathId::SpanStyled => Value::struct_of(
             "Span",
             [("content".into(), arg(0)), ("style".into(), arg(1))],
         ),
-        P::LineFrom | P::LineRaw | P::LineStyled => line_from(&arg(0)),
-        P::CellFrom | P::CellNew => Value::struct_of(
+        PathId::LineFrom | PathId::LineRaw | PathId::LineStyled => line_from(&arg(0)),
+        PathId::CellFrom | PathId::CellNew => Value::struct_of(
             "Cell",
             [
                 ("content".into(), line_from(&arg(0))),
                 ("style".into(), style_value(Style::new())),
             ],
         ),
-        P::RowNew => Value::struct_of(
+        PathId::RowNew => Value::struct_of(
             "Row",
             [
                 ("cells".into(), Value::vec(items(&arg(0)))),
@@ -97,7 +99,7 @@ pub(super) fn ratatui_assoc(id: P, args: &[Value]) -> Option<Value> {
                 ("height".into(), Value::Int(1)),
             ],
         ),
-        P::TableNew => Value::struct_of(
+        PathId::TableNew => Value::struct_of(
             "Table",
             [
                 ("rows".into(), Value::vec(items(&arg(0)))),
@@ -107,9 +109,9 @@ pub(super) fn ratatui_assoc(id: P, args: &[Value]) -> Option<Value> {
                 ("style".into(), style_value(Style::new())),
             ],
         ),
-        P::BlockNew | P::BlockDefault => block_value(false),
-        P::BlockBordered => block_value(true),
-        P::SparklineDefault | P::SparklineNew => Value::struct_of(
+        PathId::BlockNew | PathId::BlockDefault => block_value(false),
+        PathId::BlockBordered => block_value(true),
+        PathId::SparklineDefault | PathId::SparklineNew => Value::struct_of(
             "Sparkline",
             [
                 ("data".into(), Value::vec(Vec::new())),
@@ -117,14 +119,14 @@ pub(super) fn ratatui_assoc(id: P, args: &[Value]) -> Option<Value> {
                 ("max".into(), Value::none()),
             ],
         ),
-        P::BufferEmpty => Value::struct_of(
+        PathId::BufferEmpty => Value::struct_of(
             "Buffer",
             [
                 ("area".into(), arg(0)),
                 ("content".into(), Value::vec(Vec::new())),
             ],
         ),
-        P::WidgetRender => return render_into(&arg(0), &arg(1), &arg(2)).ok(),
+        PathId::WidgetRender => return render_into(&arg(0), &arg(1), &arg(2)).ok(),
         _ => return None,
     })
 }
@@ -166,15 +168,15 @@ fn with(s: &StructData, field: &str, v: Value) -> Value {
 pub(super) fn style_method(s: &StructData, name: &MethodName, args: &[Value]) -> Result<Value> {
     let arg = |i: usize| -> Value { args.get(i).cloned().unwrap_or(Value::Unit) };
     Ok(match name.id {
-        B::Fg => with(s, "fg", Value::some(arg(0))),
-        B::Bg => with(s, "bg", Value::some(arg(0))),
-        B::AddModifier => with(s, "add_modifier", arg(0)),
-        B::RemoveModifier => with(s, "sub_modifier", arg(0)),
-        B::Bold => add_modifier(s, ratatui::style::Modifier::BOLD),
-        B::Dim => add_modifier(s, ratatui::style::Modifier::DIM),
-        B::Italic => add_modifier(s, ratatui::style::Modifier::ITALIC),
-        B::Underlined => add_modifier(s, ratatui::style::Modifier::UNDERLINED),
-        B::Reversed => add_modifier(s, ratatui::style::Modifier::REVERSED),
+        BuiltinId::Fg => with(s, "fg", Value::some(arg(0))),
+        BuiltinId::Bg => with(s, "bg", Value::some(arg(0))),
+        BuiltinId::AddModifier => with(s, "add_modifier", arg(0)),
+        BuiltinId::RemoveModifier => with(s, "sub_modifier", arg(0)),
+        BuiltinId::Bold => add_modifier(s, ratatui::style::Modifier::BOLD),
+        BuiltinId::Dim => add_modifier(s, ratatui::style::Modifier::DIM),
+        BuiltinId::Italic => add_modifier(s, ratatui::style::Modifier::ITALIC),
+        BuiltinId::Underlined => add_modifier(s, ratatui::style::Modifier::UNDERLINED),
+        BuiltinId::Reversed => add_modifier(s, ratatui::style::Modifier::REVERSED),
         _ => bail!("unknown method `{name}` on Style"),
     })
 }
@@ -196,42 +198,42 @@ pub(super) fn modifier_method(s: &StructData, name: &MethodName, args: &[Value])
         .first()
         .map_or_else(ratatui::style::Modifier::empty, value_modifier);
     Ok(match name.id {
-        B::Contains => Value::Bool(mine.contains(other)),
-        B::Intersects => Value::Bool(mine.intersects(other)),
-        B::IsEmpty => Value::Bool(mine.is_empty()),
-        B::Bits => Value::Int(i64::from(mine.bits())),
-        B::Union => modifier_value(mine | other),
-        B::Difference => modifier_value(mine - other),
+        BuiltinId::Contains => Value::Bool(mine.contains(other)),
+        BuiltinId::Intersects => Value::Bool(mine.intersects(other)),
+        BuiltinId::IsEmpty => Value::Bool(mine.is_empty()),
+        BuiltinId::Bits => Value::Int(i64::from(mine.bits())),
+        BuiltinId::Union => modifier_value(mine | other),
+        BuiltinId::Difference => modifier_value(mine - other),
         _ => bail!("unknown method `{name}` on Modifier"),
     })
 }
 
 pub(super) fn span_method(s: &StructData, name: &MethodName, args: &[Value]) -> Result<Value> {
     Ok(match name.id {
-        B::Width => {
+        BuiltinId::Width => {
             let span = value_span(&rebuild(s));
             Value::Int(i64::try_from(span.width()).unwrap_or(0))
         }
-        B::Style => with(s, "style", args.first().cloned().unwrap_or(Value::Unit)),
-        B::Content => s.get("content").unwrap_or_else(|| Value::str("")),
+        BuiltinId::Style => with(s, "style", args.first().cloned().unwrap_or(Value::Unit)),
+        BuiltinId::Content => s.get("content").unwrap_or_else(|| Value::str("")),
         _ => bail!("unknown method `{name}` on Span"),
     })
 }
 
 pub(super) fn line_method(s: &StructData, name: &MethodName, args: &[Value]) -> Result<Value> {
     Ok(match name.id {
-        B::Width => {
+        BuiltinId::Width => {
             let line = value_line(&rebuild(s));
             Value::Int(i64::try_from(line.width()).unwrap_or(0))
         }
-        B::Style => with(s, "style", args.first().cloned().unwrap_or(Value::Unit)),
+        BuiltinId::Style => with(s, "style", args.first().cloned().unwrap_or(Value::Unit)),
         _ => bail!("unknown method `{name}` on Line"),
     })
 }
 
 pub(super) fn cell_method(s: &StructData, name: &MethodName, args: &[Value]) -> Result<Value> {
     Ok(match name.id {
-        B::Style => with(s, "style", args.first().cloned().unwrap_or(Value::Unit)),
+        BuiltinId::Style => with(s, "style", args.first().cloned().unwrap_or(Value::Unit)),
         _ => bail!("unknown method `{name}` on Cell"),
     })
 }
@@ -239,8 +241,8 @@ pub(super) fn cell_method(s: &StructData, name: &MethodName, args: &[Value]) -> 
 pub(super) fn row_method(s: &StructData, name: &MethodName, args: &[Value]) -> Result<Value> {
     let arg = args.first().cloned().unwrap_or(Value::Unit);
     Ok(match name.id {
-        B::Style => with(s, "style", arg),
-        B::Height => with(s, "height", arg),
+        BuiltinId::Style => with(s, "style", arg),
+        BuiltinId::Height => with(s, "height", arg),
         _ => bail!("unknown method `{name}` on Row"),
     })
 }
@@ -248,10 +250,10 @@ pub(super) fn row_method(s: &StructData, name: &MethodName, args: &[Value]) -> R
 pub(super) fn table_method(s: &StructData, name: &MethodName, args: &[Value]) -> Result<Value> {
     let arg = args.first().cloned().unwrap_or(Value::Unit);
     Ok(match name.id {
-        B::ColumnSpacing => with(s, "column_spacing", arg),
-        B::Block => with(s, "block", Value::some(arg)),
-        B::Style => with(s, "style", arg),
-        B::Widths => with(s, "widths", Value::vec(items(&arg))),
+        BuiltinId::ColumnSpacing => with(s, "column_spacing", arg),
+        BuiltinId::Block => with(s, "block", Value::some(arg)),
+        BuiltinId::Style => with(s, "style", arg),
+        BuiltinId::Widths => with(s, "widths", Value::vec(items(&arg))),
         _ => bail!("unknown method `{name}` on Table"),
     })
 }
@@ -259,12 +261,12 @@ pub(super) fn table_method(s: &StructData, name: &MethodName, args: &[Value]) ->
 pub(super) fn block_method(s: &StructData, name: &MethodName, args: &[Value]) -> Result<Value> {
     let arg = args.first().cloned().unwrap_or(Value::Unit);
     Ok(match name.id {
-        B::Title => with(s, "title", Value::some(line_from(&arg))),
-        B::BorderType => with(s, "border_type", arg),
-        B::BorderStyle => with(s, "border_style", arg),
-        B::Padding => with(s, "padding", arg),
-        B::Style => with(s, "style", arg),
-        B::Borders => with(s, "bordered", Value::Bool(true)),
+        BuiltinId::Title => with(s, "title", Value::some(line_from(&arg))),
+        BuiltinId::BorderType => with(s, "border_type", arg),
+        BuiltinId::BorderStyle => with(s, "border_style", arg),
+        BuiltinId::Padding => with(s, "padding", arg),
+        BuiltinId::Style => with(s, "style", arg),
+        BuiltinId::Borders => with(s, "bordered", Value::Bool(true)),
         _ => bail!("unknown method `{name}` on Block"),
     })
 }
@@ -272,9 +274,9 @@ pub(super) fn block_method(s: &StructData, name: &MethodName, args: &[Value]) ->
 pub(super) fn sparkline_method(s: &StructData, name: &MethodName, args: &[Value]) -> Result<Value> {
     let arg = args.first().cloned().unwrap_or(Value::Unit);
     Ok(match name.id {
-        B::Data => with(s, "data", Value::vec(items(&arg))),
-        B::Style => with(s, "style", arg),
-        B::Max => with(s, "max", Value::some(arg)),
+        BuiltinId::Data => with(s, "data", Value::vec(items(&arg))),
+        BuiltinId::Style => with(s, "style", arg),
+        BuiltinId::Max => with(s, "max", Value::some(arg)),
         _ => bail!("unknown method `{name}` on Sparkline"),
     })
 }
@@ -283,7 +285,7 @@ pub(super) fn buffer_method(s: &StructData, name: &MethodName, args: &[Value]) -
     Ok(match name.id {
         // Indexes the cell list in place. Cloning the whole buffer per lookup
         // makes drawing quadratic, and a full frame reads every cell.
-        B::Cell => {
+        BuiltinId::Cell => {
             let (x, y) = coords(args.first());
             let area = s
                 .get("area")
@@ -300,7 +302,7 @@ pub(super) fn buffer_method(s: &StructData, name: &MethodName, args: &[Value]) -
                 _ => Value::none(),
             }
         }
-        B::Area => s
+        BuiltinId::Area => s
             .get("area")
             .unwrap_or_else(|| rect_value(Rect::new(0, 0, 0, 0))),
         _ => bail!("unknown method `{name}` on Buffer"),
@@ -309,7 +311,7 @@ pub(super) fn buffer_method(s: &StructData, name: &MethodName, args: &[Value]) -
 
 pub(super) fn buffer_cell_method(s: &StructData, name: &MethodName) -> Result<Value> {
     Ok(match name.id {
-        B::Symbol => s.get("symbol").unwrap_or_else(|| Value::str("")),
+        BuiltinId::Symbol => s.get("symbol").unwrap_or_else(|| Value::str("")),
         _ => bail!("unknown method `{name}` on buffer Cell"),
     })
 }
@@ -528,18 +530,20 @@ fn dump(real: &Buffer, area: Rect) -> Vec<Value> {
 }
 
 /// The constraint constructors, `Constraint::Length(10)` and friends.
-pub(super) fn constraint_variant(id: P, args: &[Value]) -> Option<Value> {
+pub(super) fn constraint_variant(id: PathId, args: &[Value]) -> Option<Value> {
     let n = args.first().map_or(0, int_of);
     let second = args.get(1).map_or(0, int_of);
     let c = match id {
-        P::ConstraintLength => ratatui::layout::Constraint::Length(u16::try_from(n).unwrap_or(0)),
-        P::ConstraintMin => ratatui::layout::Constraint::Min(u16::try_from(n).unwrap_or(0)),
-        P::ConstraintMax => ratatui::layout::Constraint::Max(u16::try_from(n).unwrap_or(0)),
-        P::ConstraintPercentage => {
+        PathId::ConstraintLength => {
+            ratatui::layout::Constraint::Length(u16::try_from(n).unwrap_or(0))
+        }
+        PathId::ConstraintMin => ratatui::layout::Constraint::Min(u16::try_from(n).unwrap_or(0)),
+        PathId::ConstraintMax => ratatui::layout::Constraint::Max(u16::try_from(n).unwrap_or(0)),
+        PathId::ConstraintPercentage => {
             ratatui::layout::Constraint::Percentage(u16::try_from(n).unwrap_or(0))
         }
-        P::ConstraintFill => ratatui::layout::Constraint::Fill(u16::try_from(n).unwrap_or(0)),
-        P::ConstraintRatio => ratatui::layout::Constraint::Ratio(
+        PathId::ConstraintFill => ratatui::layout::Constraint::Fill(u16::try_from(n).unwrap_or(0)),
+        PathId::ConstraintRatio => ratatui::layout::Constraint::Ratio(
             u32::try_from(n).unwrap_or(0),
             u32::try_from(second).unwrap_or(1),
         ),
@@ -550,14 +554,14 @@ pub(super) fn constraint_variant(id: P, args: &[Value]) -> Option<Value> {
 
 /// `Color::Rgb(r, g, b)` and `Color::Indexed(i)`, the two colour variants that
 /// carry data.
-pub(super) fn color_variant(id: P, args: &[Value]) -> Option<Value> {
+pub(super) fn color_variant(id: PathId, args: &[Value]) -> Option<Value> {
     let at = |i: usize| -> u8 {
         args.get(i)
             .map_or(0, |v| u8::try_from(int_of(v)).unwrap_or(0))
     };
     match id {
-        P::ColorRgb => Some(color_value(ratatui::style::Color::Rgb(at(0), at(1), at(2)))),
-        P::ColorIndexed => Some(color_value(ratatui::style::Color::Indexed(at(0)))),
+        PathId::ColorRgb => Some(color_value(ratatui::style::Color::Rgb(at(0), at(1), at(2)))),
+        PathId::ColorIndexed => Some(color_value(ratatui::style::Color::Indexed(at(0)))),
         _ => None,
     }
 }

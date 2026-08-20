@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow, bail};
 use parking_lot::Mutex;
 
 use super::bridge::VArgs;
-use super::bytecode::{BuiltinId as B, MethodName};
+use super::bytecode::{BuiltinId, MethodName};
 use super::native::Native;
 use super::shared::{CapturesOut, MatchOut, RegexOut, captures_core, match_core, regex_core};
 use super::value::{RsStr, Value};
@@ -93,8 +93,10 @@ fn regex_method(regex: &RegexValue, method: &MethodName, args: &[Value]) -> Resu
     // The iterator forms are lazy walks over the source, so they stay out of
     // the shared core.
     match method.id {
-        B::FindIter => return Ok(super::iterator::regex_find(regex.clone(), source)),
-        B::CapturesIter => return Ok(super::iterator::regex_captures(regex.clone(), source)),
+        BuiltinId::FindIter => return Ok(super::iterator::regex_find(regex.clone(), source)),
+        BuiltinId::CapturesIter => {
+            return Ok(super::iterator::regex_captures(regex.clone(), source));
+        }
         _ => {}
     }
     let replacement = || args.get(1).map(Value::display).unwrap_or_default();

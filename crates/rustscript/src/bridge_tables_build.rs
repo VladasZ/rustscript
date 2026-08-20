@@ -20,7 +20,7 @@ use syn::visit::Visit;
 
 use crate::builtin_id_build::{MethodRow, camel};
 
-/// Variant name to method name, so a `B::SplitFirst` arm harvests as
+/// Variant name to method name, so a `BuiltinId::SplitFirst` arm harvests as
 /// `split_first`.
 type Variants = BTreeMap<String, String>;
 
@@ -174,7 +174,7 @@ impl<'a> LitCollector<'a> {
         }
     }
 
-    /// A `B::Name` or `BuiltinId::Name` arm names the method by its id.
+    /// A `BuiltinId::Name` arm names the method by its id.
     fn take_variant(&mut self, ident: &str) {
         if let Some(name) = self.variants.get(ident) {
             self.names.insert(name.clone());
@@ -206,7 +206,7 @@ impl<'a> LitCollector<'a> {
                     }
                 }
                 TokenTree::Group(group) => self.take_tokens(group.stream()),
-                // `B::Name` inside a macro body, `matches!(id, B::Len | B::IsEmpty)`.
+                // `BuiltinId::Name` inside a macro body, `matches!(id, BuiltinId::Len | BuiltinId::IsEmpty)`.
                 TokenTree::Ident(ident) if i >= 3 && is_id_prefix(&trees[i - 3]) => {
                     if let (TokenTree::Punct(a), TokenTree::Punct(b)) =
                         (&trees[i - 2], &trees[i - 1])
@@ -223,7 +223,7 @@ impl<'a> LitCollector<'a> {
 }
 
 fn is_id_prefix(tree: &proc_macro2::TokenTree) -> bool {
-    matches!(tree, proc_macro2::TokenTree::Ident(ident) if ident == "B" || ident == "BuiltinId")
+    matches!(tree, proc_macro2::TokenTree::Ident(ident) if ident == "BuiltinId")
 }
 
 impl<'ast> Visit<'ast> for LitCollector<'_> {
@@ -237,9 +237,7 @@ impl<'ast> Visit<'ast> for LitCollector<'_> {
     }
 
     fn visit_path(&mut self, path: &'ast syn::Path) {
-        if path.segments.len() == 2
-            && (path.segments[0].ident == "B" || path.segments[0].ident == "BuiltinId")
-        {
+        if path.segments.len() == 2 && path.segments[0].ident == "BuiltinId" {
             self.take_variant(&path.segments[1].ident.to_string());
         }
         syn::visit::visit_path(self, path);

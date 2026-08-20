@@ -8,7 +8,7 @@ use anyhow::{Result, bail};
 use indexmap::IndexMap;
 use lopdf::{Document, ObjectId};
 
-use super::bytecode::{BuiltinId as B, MethodName};
+use super::bytecode::{BuiltinId, MethodName};
 use super::native::Native;
 use super::value::Value;
 
@@ -27,7 +27,7 @@ pub(super) fn document_method(
 ) -> Result<Option<Value>> {
     Ok(Some(match name.id {
         // BTreeMap of page number to page ObjectId, as a map of int to tuple.
-        B::GetPages => {
+        BuiltinId::GetPages => {
             let mut map = IndexMap::default();
             for (num, id) in doc.get_pages() {
                 let key = Value::Int(i64::from(num))
@@ -37,7 +37,7 @@ pub(super) fn document_method(
             }
             Value::map_of(map)
         }
-        B::GetPageContent => {
+        BuiltinId::GetPageContent => {
             let id = object_id_arg(args, 0)?;
             let bytes = doc.get_page_content(id);
             Value::vec(
@@ -47,7 +47,7 @@ pub(super) fn document_method(
                     .collect(),
             )
         }
-        B::ChangePageContent => {
+        BuiltinId::ChangePageContent => {
             let id = object_id_arg(args, 0)?;
             let bytes = bytes_arg(args, 1);
             match doc.change_page_content(id, bytes) {
@@ -56,7 +56,7 @@ pub(super) fn document_method(
             }
         }
         // The real save returns the created File; scripts drop it, so Unit.
-        B::Save => {
+        BuiltinId::Save => {
             let path = args.first().map(Value::display).unwrap_or_default();
             match doc.save(&path) {
                 Ok(_) => Value::ok(Value::Unit),

@@ -14,7 +14,7 @@
 
 use std::cmp::Ordering;
 
-use super::bytecode::{BinKind, Op};
+use super::bytecode::{BinKind, BuiltinId, Op};
 use super::enum_def::EnumKind;
 use super::numeric::i64_arith;
 use super::value::{ClosureData, Upvalue, Value};
@@ -194,7 +194,7 @@ fn translate_op(clo: &ClosureData, num_regs: usize, op: &Op) -> Option<SOp> {
             name,
             base,
             argc,
-        } if chunk.names[*name as usize].text == "cmp" && *argc == 1 => SOp::Cmp {
+        } if chunk.names[*name as usize].id == BuiltinId::Cmp && *argc == 1 => SOp::Cmp {
             // A discarded destination stays `u16::MAX` and the eval skips
             // the store, matching `set_opt`.
             dst: if *dst == u16::MAX { *dst } else { reg(*dst)? },
