@@ -14,6 +14,7 @@ use anyhow::{Result, anyhow, bail};
 use base64::Engine;
 use reqwest::{Client, Method};
 
+use super::bridge::arg;
 use super::bytecode::{BuiltinId, MethodName, PathId};
 use super::json_bridge::{json_to_pvalue, parse_json, pvalue_to_json};
 use super::native::Native;
@@ -247,15 +248,15 @@ fn builder_method(s: &Arc<StructData>, method: &MethodName, args: &[Value]) -> R
             Ok(this())
         }
         BuiltinId::Timeout => {
-            s.set("timeout", args.first().cloned().unwrap_or(Value::Unit));
+            s.set("timeout", arg(args, 0)?);
             Ok(this())
         }
         BuiltinId::UserAgent => {
-            s.set("user_agent", args.first().cloned().unwrap_or(Value::Unit));
+            s.set("user_agent", arg(args, 0)?);
             Ok(this())
         }
         BuiltinId::Redirect => {
-            s.set("redirect", args.first().cloned().unwrap_or(Value::Unit));
+            s.set("redirect", arg(args, 0)?);
             Ok(this())
         }
         BuiltinId::Build => {
@@ -343,7 +344,7 @@ fn request_method(s: &Arc<StructData>, method: &MethodName, args: &[Value]) -> R
             Ok(this())
         }
         BuiltinId::Timeout => {
-            s.set("timeout", args.first().cloned().unwrap_or(Value::Unit));
+            s.set("timeout", arg(args, 0)?);
             Ok(this())
         }
         // A request built from a blocking client runs at once; one built from

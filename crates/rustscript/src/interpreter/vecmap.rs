@@ -9,6 +9,7 @@ use anyhow::{Result, anyhow, bail};
 use indexmap::IndexMap;
 use parking_lot::Mutex;
 
+use super::bridge::arg;
 use super::bytecode::{BuiltinId, MethodName};
 use super::enum_def::EnumKind;
 use super::iterator;
@@ -35,8 +36,7 @@ pub(super) fn vec_method(v: &List, method: &MethodName, args: &mut [Value]) -> R
         },
         BuiltinId::Insert => {
             let i = usize::try_from(int_arg(args, 0)?)?;
-            v.lock()
-                .insert(i, args.get(1).cloned().unwrap_or(Value::Unit));
+            v.lock().insert(i, arg(args, 1)?);
             Value::Unit
         }
         BuiltinId::Remove => {
@@ -70,7 +70,7 @@ pub(super) fn vec_method(v: &List, method: &MethodName, args: &mut [Value]) -> R
             None => Value::none(),
         },
         BuiltinId::Contains => {
-            let needle = args.first().cloned().unwrap_or(Value::Unit);
+            let needle = arg(args, 0)?;
             Value::Bool(v.lock().iter().any(|x| x.eq_value(&needle)))
         }
         BuiltinId::Sort | BuiltinId::SortUnstable => {
@@ -477,7 +477,7 @@ pub(super) fn map_method(
         BuiltinId::Keys | BuiltinId::IntoKeys => {
             Value::vec(m.lock().keys().map(MapKey::to_value).collect())
         }
-        BuiltinId::Values | BuiltinId::IntoValues => {
+        BuiltinId::Values | BuiltinId::IntoValues | BuiltinId::ValuesMut => {
             Value::vec(m.lock().values().cloned().collect())
         }
         BuiltinId::Entry => {
@@ -490,24 +490,19 @@ pub(super) fn map_method(
             }
             .wrap()
         }
-        BuiltinId::Iter | BuiltinId::IntoIter if kind == MapKind::Set => set_items(m),
-        BuiltinId::Iter | BuiltinId::IntoIter => map_pairs(m),
-        _ => match method.id {
-            BuiltinId::ValuesMut => Value::vec(m.lock().values().cloned().collect()),
-            BuiltinId::Drain if kind == MapKind::Set => set_items(m),
-            BuiltinId::Drain => map_pairs(m),
-            // A JSON object parsed by the interpreter is a Map, and it is Arc
-            // shared, so the mut accessor is the same call: what it hands back
-            // is the same map, and an insert through it reaches the original.
-            BuiltinId::AsObject => Value::some(Value::Map(m.clone(), kind)),
-            BuiltinId::AsObjectMut => Value::some(Value::Ref(Arc::new(
-                super::value::ValueRef::borrowed(Value::Map(m.clone(), kind)),
-            ))),
-            BuiltinId::AsArray | BuiltinId::AsArrayMut => Value::none(),
-            _ => {
-                return super::methods::generic_method(&Value::Map(m.clone(), kind), method, args);
-            }
-        },
+        BuiltinId::Iter | BuiltinId::IntoIter | BuiltinId::Drain if kind == MapKind::Set => {
+            set_items(m)
+        }
+        BuiltinId::Iter | BuiltinId::IntoIter | BuiltinId::Drain => map_pairs(m),
+        // A JSON object parsed by the interpreter is a Map, and it is Arc
+        // shared, so the mut accessor is the same call: what it hands back
+        // is the same map, and an insert through it reaches the original.
+        BuiltinId::AsObject => Value::some(Value::Map(m.clone(), kind)),
+        BuiltinId::AsObjectMut => Value::some(Value::Ref(Arc::new(
+            super::value::ValueRef::borrowed(Value::Map(m.clone(), kind)),
+        ))),
+        BuiltinId::AsArray | BuiltinId::AsArrayMut => Value::none(),
+        _ => return super::methods::generic_method(&Value::Map(m.clone(), kind), method, args),
     })
 }
 

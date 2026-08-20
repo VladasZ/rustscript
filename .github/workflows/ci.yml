@@ -29,9 +29,13 @@ jobs:
       - uses: crate-ci/typos@v1.49.0
 
   clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
+    name: Clippy ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2

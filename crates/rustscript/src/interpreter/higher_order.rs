@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+use super::bridge::arg;
 use super::bytecode::BuiltinId;
 use super::enum_def::{EQUAL, EnumKind, OK, SOME};
 use super::iterator::{as_closure, option_inner};
@@ -109,9 +110,9 @@ impl Vm {
                 )))))
             }
             BuiltinId::AndModify => {
-                if map.lock().contains_key(key) {
+                let current = map.lock().get(key).cloned();
+                if let Some(current) = current {
                     let clo = as_closure(args.first())?;
-                    let current = map.lock().get(key).cloned().unwrap_or(Value::Unit);
                     let updated = self.call_closure_data(&clo, &[current])?;
                     // A closure that returns unit means it mutated in place via
                     // a shared container; otherwise take its return value.
@@ -302,7 +303,7 @@ impl Vm {
                 Value::Bool(all)
             }
             BuiltinId::Fold => {
-                let init = args.first().cloned().unwrap_or(Value::Unit);
+                let init = arg(args, 0)?;
                 let f = clo(1)?;
                 let mut acc = init;
                 for x in list {
@@ -427,72 +428,72 @@ impl Vm {
         args: &[Value],
     ) -> Result<Option<Value>> {
         let is_some = variant == SOME;
-        let inner = || data.lock().first().cloned().unwrap_or(Value::Unit);
+        let inner = || Value::payload(data);
         let clo = |i: usize| as_closure(args.get(i));
         let out = match name {
             BuiltinId::IsSomeAnd => {
-                Value::Bool(is_some && self.call_closure_data(&clo(0)?, &[inner()])?.is_truthy())
+                Value::Bool(is_some && self.call_closure_data(&clo(0)?, &[inner()?])?.is_truthy())
             }
             BuiltinId::Map => {
                 if is_some {
-                    Value::some(self.call_closure_data(&clo(0)?, &[inner()])?)
+                    Value::some(self.call_closure_data(&clo(0)?, &[inner()?])?)
                 } else {
                     Value::none()
                 }
             }
             BuiltinId::AndThen => {
                 if is_some {
-                    self.call_closure_data(&clo(0)?, &[inner()])?
+                    self.call_closure_data(&clo(0)?, &[inner()?])?
                 } else {
                     Value::none()
                 }
             }
             BuiltinId::Filter => {
-                if is_some && self.call_closure_data(&clo(0)?, &[inner()])?.is_truthy() {
-                    Value::some(inner())
+                if is_some && self.call_closure_data(&clo(0)?, &[inner()?])?.is_truthy() {
+                    Value::some(inner()?)
                 } else {
                     Value::none()
                 }
             }
             BuiltinId::MapOr => {
-                let default = args.first().cloned().unwrap_or(Value::Unit);
+                let default = arg(args, 0)?;
                 if is_some {
-                    self.call_closure_data(&clo(1)?, &[inner()])?
+                    self.call_closure_data(&clo(1)?, &[inner()?])?
                 } else {
                     default
                 }
             }
             BuiltinId::MapOrElse => {
                 if is_some {
-                    self.call_closure_data(&clo(1)?, &[inner()])?
+                    self.call_closure_data(&clo(1)?, &[inner()?])?
                 } else {
                     self.call_closure_data(&clo(0)?, &[])?
                 }
             }
             BuiltinId::UnwrapOrElse => {
                 if is_some {
-                    inner()
+                    inner()?
                 } else {
                     self.call_closure_data(&clo(0)?, &[])?
                 }
             }
             BuiltinId::OkOrElse | BuiltinId::WithContext => {
                 if is_some {
-                    Value::ok(inner())
+                    Value::ok(inner()?)
                 } else {
                     Value::err(self.call_closure_data(&clo(0)?, &[])?)
                 }
             }
             BuiltinId::OrElse => {
                 if is_some {
-                    Value::some(inner())
+                    Value::some(inner()?)
                 } else {
                     self.call_closure_data(&clo(0)?, &[])?
                 }
             }
             BuiltinId::Or => {
                 if is_some {
-                    Value::some(inner())
+                    Value::some(inner()?)
                 } else {
                     args.first().cloned().unwrap_or_else(Value::none)
                 }
@@ -510,40 +511,40 @@ impl Vm {
         args: &[Value],
     ) -> Result<Option<Value>> {
         let is_ok = variant == OK;
-        let inner = || data.lock().first().cloned().unwrap_or(Value::Unit);
+        let inner = || Value::payload(data);
         let clo = |i: usize| as_closure(args.get(i));
         let out = match name {
             BuiltinId::IsOkAnd => {
-                Value::Bool(is_ok && self.call_closure_data(&clo(0)?, &[inner()])?.is_truthy())
+                Value::Bool(is_ok && self.call_closure_data(&clo(0)?, &[inner()?])?.is_truthy())
             }
             BuiltinId::IsErrAnd => {
-                Value::Bool(!is_ok && self.call_closure_data(&clo(0)?, &[inner()])?.is_truthy())
+                Value::Bool(!is_ok && self.call_closure_data(&clo(0)?, &[inner()?])?.is_truthy())
             }
             BuiltinId::Map => {
                 if is_ok {
-                    Value::ok(self.call_closure_data(&clo(0)?, &[inner()])?)
+                    Value::ok(self.call_closure_data(&clo(0)?, &[inner()?])?)
                 } else {
-                    Value::err(inner())
+                    Value::err(inner()?)
                 }
             }
             BuiltinId::MapErr => {
                 if is_ok {
-                    Value::ok(inner())
+                    Value::ok(inner()?)
                 } else {
-                    Value::err(self.call_closure_data(&clo(0)?, &[inner()])?)
+                    Value::err(self.call_closure_data(&clo(0)?, &[inner()?])?)
                 }
             }
             BuiltinId::AndThen => {
                 if is_ok {
-                    self.call_closure_data(&clo(0)?, &[inner()])?
+                    self.call_closure_data(&clo(0)?, &[inner()?])?
                 } else {
-                    Value::err(inner())
+                    Value::err(inner()?)
                 }
             }
             BuiltinId::MapOr => {
-                let default = args.first().cloned().unwrap_or(Value::Unit);
+                let default = arg(args, 0)?;
                 if is_ok {
-                    self.call_closure_data(&clo(1)?, &[inner()])?
+                    self.call_closure_data(&clo(1)?, &[inner()?])?
                 } else {
                     default
                 }
@@ -552,26 +553,26 @@ impl Vm {
             // which is what real `Result::map_or_else` does.
             BuiltinId::MapOrElse => {
                 if is_ok {
-                    self.call_closure_data(&clo(1)?, &[inner()])?
+                    self.call_closure_data(&clo(1)?, &[inner()?])?
                 } else {
-                    self.call_closure_data(&clo(0)?, &[inner()])?
+                    self.call_closure_data(&clo(0)?, &[inner()?])?
                 }
             }
             BuiltinId::UnwrapOrElse => {
                 if is_ok {
-                    inner()
+                    inner()?
                 } else {
-                    self.call_closure_data(&clo(0)?, &[inner()])?
+                    self.call_closure_data(&clo(0)?, &[inner()?])?
                 }
             }
             BuiltinId::WithContext => {
                 if is_ok {
-                    Value::ok(inner())
+                    Value::ok(inner()?)
                 } else {
                     let ctx = self.call_closure_data(&clo(0)?, &[])?.display();
                     Value::err(Value::str(format!(
                         "{ctx}\nCaused by: {}",
-                        inner().display()
+                        inner()?.display()
                     )))
                 }
             }

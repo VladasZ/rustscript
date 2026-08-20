@@ -8,7 +8,7 @@ use anyhow::Result;
 
 use super::bytecode::{BuiltinId, MethodName};
 use super::enum_def::{EnumKind, OK, SOME};
-use super::methods::make_ordering;
+use super::methods::{make_ordering, str_grow};
 use super::value::{MapKind, Value};
 use super::vm_step::{Flow, StepCtx};
 
@@ -60,15 +60,17 @@ fn builtin_fast(
 ) -> Option<Value> {
     let base = ctx.base;
     match name.id {
-        BuiltinId::CloneFrom => Some(clone_from(ctx, recv, s, argc)),
+        BuiltinId::CloneFrom if argc == 1 => Some(clone_from(ctx, recv, s)),
         BuiltinId::Take if argc == 0 && is_option(ctx, recv) => Some(option_take(ctx, recv)),
         BuiltinId::Replace if argc == 1 && is_option(ctx, recv) => {
             Some(option_replace(ctx, recv, s))
         }
         BuiltinId::MakeAsciiUppercase => ascii_case(ctx, recv, true),
         BuiltinId::MakeAsciiLowercase => ascii_case(ctx, recv, false),
-        BuiltinId::Push | BuiltinId::PushStr if matches!(ctx.stack[base + recv], Value::Str(_)) => {
-            Some(str_push(ctx, recv, name.id, s, argc))
+        BuiltinId::Push | BuiltinId::PushStr
+            if argc == 1 && matches!(ctx.stack[base + recv], Value::Str(_)) =>
+        {
+            str_push(ctx, recv, name.id, s)
         }
         // Skipped when the script defines methods, which could shadow these.
         BuiltinId::Copied | BuiltinId::Cloned | BuiltinId::Unwrap | BuiltinId::UnwrapOr
@@ -94,16 +96,9 @@ fn is_option(ctx: &StepCtx, recv: usize) -> bool {
     ctx.stack[ctx.base + recv].is_enum_kind(EnumKind::Option)
 }
 
-fn first_arg(ctx: &StepCtx, s: usize, argc: usize) -> Value {
-    ctx.stack[s..s + argc]
-        .first()
-        .cloned()
-        .unwrap_or(Value::Unit)
-}
-
 /// `clone_from` replaces the receiver outright.
-fn clone_from(ctx: &mut StepCtx, recv: usize, s: usize, argc: usize) -> Value {
-    let src = first_arg(ctx, s, argc);
+fn clone_from(ctx: &mut StepCtx, recv: usize, s: usize) -> Value {
+    let src = ctx.stack[s].clone();
     ctx.stack[ctx.base + recv] = src;
     Value::Unit
 }
@@ -118,7 +113,7 @@ fn option_take(ctx: &mut StepCtx, recv: usize) -> Value {
 }
 
 fn option_replace(ctx: &mut StepCtx, recv: usize, s: usize) -> Value {
-    let new = first_arg(ctx, s, 1);
+    let new = ctx.stack[s].clone();
     let old = take(&mut ctx.stack[ctx.base + recv]);
     ctx.stack[ctx.base + recv] = Value::some(new);
     old
@@ -148,18 +143,15 @@ fn ascii_case(ctx: &mut StepCtx, recv: usize, upper: bool) -> Option<Value> {
 /// `push` and `push_str` on a string receiver grow it in place. The argument
 /// is cloned out first so the receiver can be borrowed mutably. A string
 /// clone is a refcount bump, and it also keeps `s.push_str(&s)` sound: the
-/// snapshot survives the in-place append.
-fn str_push(ctx: &mut StepCtx, recv: usize, id: BuiltinId, s: usize, argc: usize) -> Value {
-    let arg = first_arg(ctx, s, argc);
-    if let Value::Str(text) = &mut ctx.stack[ctx.base + recv] {
-        match (id, &arg) {
-            (BuiltinId::Push, Value::Char(c)) => text.push(*c),
-            (BuiltinId::PushStr, Value::Str(other)) => text.push_str(other),
-            (BuiltinId::PushStr, other) => text.push_str(&other.display()),
-            _ => {}
-        }
-    }
-    Value::Unit
+/// snapshot survives the in-place append. A wrong argument answers `None`
+/// and the generic path reports it.
+fn str_push(ctx: &mut StepCtx, recv: usize, id: BuiltinId, s: usize) -> Option<Value> {
+    let arg = ctx.stack[s].clone();
+    let Value::Str(text) = &mut ctx.stack[ctx.base + recv] else {
+        return None;
+    };
+    str_grow(text, id, &arg).ok()?;
+    Some(Value::Unit)
 }
 
 /// A comparator sort calls `cmp` once per comparison, so the plain int
@@ -175,7 +167,7 @@ fn int_cmp(ctx: &StepCtx, recv: usize, s: usize) -> Option<Value> {
 
 /// Option and Result accessors dominate counting loops, so their success
 /// paths run right here, skipping the whole dispatch chain. Failure paths
-/// fall through and get their errors from the slow path.
+/// answer `None` and get their errors from the slow path.
 fn option_fast(
     ctx: &mut StepCtx,
     recv: usize,
@@ -183,39 +175,27 @@ fn option_fast(
     s: usize,
     argc: usize,
 ) -> Option<Value> {
-    // 0 none, 1 clone receiver, 2 clone payload, 3 default
-    let choice = match &ctx.stack[ctx.base + recv] {
-        Value::Enum { def, variant, .. } => {
-            let success = match def.kind {
-                EnumKind::Option => Some(*variant == SOME),
-                EnumKind::Result => Some(*variant == OK),
-                _ => None,
-            };
-            if matches!(id, BuiltinId::Copied | BuiltinId::Cloned) {
-                i32::from(def.kind == EnumKind::Option)
-            } else if success == Some(true) {
-                2
-            } else if success.is_none() {
-                0
-            } else if id == BuiltinId::UnwrapOr {
-                3
-            } else {
-                0
-            }
-        }
-        _ => 0,
-    };
-    match choice {
-        1 => Some(ctx.stack[ctx.base + recv].clone()),
-        2 => match &ctx.stack[ctx.base + recv] {
-            Value::Enum { data, .. } => Some(data.lock().first().cloned().unwrap_or(Value::Unit)),
-            _ => unreachable!(),
+    let (kind, success) = match &ctx.stack[ctx.base + recv] {
+        Value::Enum { def, variant, .. } => match def.kind {
+            EnumKind::Option => (EnumKind::Option, *variant == SOME),
+            EnumKind::Result => (EnumKind::Result, *variant == OK),
+            _ => return None,
         },
-        3 => Some(if argc > 0 {
-            take(&mut ctx.stack[s])
-        } else {
-            Value::Unit
-        }),
+        _ => return None,
+    };
+    match id {
+        // `copied` and `cloned` on an Option answer the Option itself, a
+        // clone here is a refcount bump.
+        BuiltinId::Copied | BuiltinId::Cloned if kind == EnumKind::Option => {
+            Some(ctx.stack[ctx.base + recv].clone())
+        }
+        BuiltinId::Unwrap | BuiltinId::UnwrapOr if success => {
+            let Value::Enum { data, .. } = &ctx.stack[ctx.base + recv] else {
+                return None;
+            };
+            data.lock().first().cloned()
+        }
+        BuiltinId::UnwrapOr if argc == 1 => Some(take(&mut ctx.stack[s])),
         _ => None,
     }
 }

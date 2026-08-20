@@ -8,7 +8,7 @@ use std::mem::take;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use parking_lot::Mutex;
 
 use super::bytecode::Chunk;
@@ -262,7 +262,7 @@ impl Vm {
             // the script's own closure, so it cannot go through the plain
             // native call.
             PathId::CtrlcSetHandler => {
-                let closure = args.first().cloned().unwrap_or(Value::Unit);
+                let closure = arg(&args, 0)?;
                 return Ok(match super::set_ctrlc_handler(closure) {
                     Ok(()) => Value::ok(Value::Unit),
                     Err(e) => Value::err(Value::str(e.to_string())),
@@ -282,7 +282,7 @@ impl Vm {
             // `tokio::sync::Mutex` is its own kind: its `lock` is awaited and
             // answers the guard with no `Result` layer, unlike `std::sync`.
             PathId::TokioSyncMutexNew => {
-                let inner = args.into_iter().next().unwrap_or(Value::Unit);
+                let inner = one(args)?;
                 return Ok(super::cell::make_cell(
                     super::value::CellKind::TokioMutex,
                     inner,
@@ -363,38 +363,11 @@ impl Vm {
 
     // -- methods -----------------------------------------------------------
 
-    /// The dispatch steps that run before any per-receiver bridge: a shared
-    /// cell's own wrapper methods and its auto-deref, `to_string` through a
-    /// user `Display` impl, and the width-tagged number shortcuts.
-    fn pre_dispatch(
-        self: &Arc<Self>,
-        recv: &Value,
-        name: &MethodName,
-        args: &mut [Value],
-    ) -> Result<Option<Value>> {
-        if let Value::Cell(kind, slot) = recv {
-            if let Some(v) = super::cell::cell_method(*kind, slot, name.id, args)? {
-                return Ok(Some(v));
-            }
-            let inner = slot.lock().clone();
-            return self.eval_method(&inner, name, args).map(Some);
-        }
-        if name.id == BuiltinId::ToString
-            && let Some(text) = self.user_fmt_text(recv, false)?
-        {
-            return Ok(Some(Value::str(text)));
-        }
-        if matches!(recv, Value::IntW(..) | Value::F32(_))
-            && matches!(name.id, BuiltinId::ToString | BuiltinId::Clone)
-        {
-            return Ok(Some(match name.id {
-                BuiltinId::ToString => Value::str(recv.display()),
-                _ => recv.clone(),
-            }));
-        }
-        Ok(None)
-    }
-
+    /// Generic method dispatch, in stages. The receiver place is read
+    /// through first. Then the script's own impl method, which wins over
+    /// every builtin the way an inherent method wins in rustc. Then the
+    /// families keyed by method id that answer for any receiver type, the
+    /// numeric methods at their real width, and the per receiver bridges.
     pub(super) fn eval_method(
         self: &Arc<Self>,
         recv: &Value,
@@ -409,18 +382,19 @@ impl Vm {
             _ => None,
         };
         let recv = dereferenced.as_ref().unwrap_or(recv);
-        if let Some(v) = self.pre_dispatch(recv, name, args)? {
+        // A shared cell answers its own wrapper methods, everything else
+        // auto-derefs to the value inside.
+        if let Value::Cell(kind, slot) = recv {
+            if let Some(v) = super::cell::cell_method(*kind, slot, name.id, args)? {
+                return Ok(v);
+            }
+            let inner = slot.lock().clone();
+            return self.eval_method(&inner, name, args);
+        }
+        if let Some(v) = self.user_impl_method(recv, name, args)? {
             return Ok(v);
         }
-        // The serde type tests and the pointer lookup apply to any receiver,
-        // so they are answered before the per type dispatch below, which
-        // returns early and would never reach them. Before `bridge_image` too,
-        // since a u64 past `i64::MAX` saturates there and would then claim to
-        // be an i64.
-        if let Some(v) = methods::json_type_test(recv, name) {
-            return Ok(v);
-        }
-        if let Some(v) = methods::json_value_method(recv, name, &*args) {
+        if let Some(v) = self.any_receiver_method(recv, name, args)? {
             return Ok(v);
         }
         // Integer methods answer from the real width, before `bridge_image`
@@ -444,85 +418,104 @@ impl Vm {
             }
             None => recv,
         };
-        // Option and Result methods hand arguments through to the caller,
-        // `unwrap_or` for one, and `flag.then_some(x)` on a bool does the
-        // same, so their width tags must survive. `fold` hands its initial
-        // value through the closure and the result the same way, and the
-        // containers and a map entry store their arguments, so a pushed or
-        // inserted number keeps its real width too.
-        let hands_args_through = matches!(
-            recv,
-            Value::Enum { .. } | Value::Bool(_) | Value::Vec(_) | Value::Map(..)
-        ) || matches!(recv, Value::Native(n) if matches!(&*n.lock(), Native::Entry { .. }))
-            || name.id == BuiltinId::Fold;
-        if !hands_args_through {
-            for arg in args.iter_mut() {
-                if let Some(image) = arg.bridge_image() {
-                    *arg = image;
-                }
-            }
-        }
-        // The async http client, request, and response types.
-        if let Some(res) = super::http::http_method(recv, name, args) {
-            return res;
-        }
-        if let Some(v) = range_builtin(recv, name, args)? {
-            return Ok(v);
-        }
-        // A method on a range acts on its iterator value, and so does an
-        // adaptor chain on a user type with its own `Iterator` impl, unless
-        // the call is the user type's own method.
+        image_args(recv, name, args);
+        // A range and a user type with its own `Iterator::next` answer the
+        // iterator methods through their iterator value. A range answers its
+        // own handful of methods first.
         let expanded;
-        let recv = if matches!(recv, Value::Range { .. })
-            || (self.has_user_next(recv) && !self.user_method_exists(recv, name))
-        {
-            expanded = self.iterator_value(recv.clone())?;
-            &expanded
-        } else {
-            recv
+        let recv = match recv {
+            Value::Range { .. } => {
+                if let Some(v) = range_builtin(recv, name, args)? {
+                    return Ok(v);
+                }
+                expanded = self.iterator_value(recv.clone())?;
+                &expanded
+            }
+            _ if self.has_user_next(recv) => {
+                expanded = self.iterator_value(recv.clone())?;
+                &expanded
+            }
+            _ => recv,
         };
-        if let Value::Native(iterator) = recv
-            && matches!(&*iterator.lock(), Native::Iterator(_))
-            && let Some(value) = self.iterator_method(iterator, name, args)?
-        {
-            return Ok(value);
-        }
-        // A user defined `impl` method takes priority on a struct or enum, so a
-        // script's own method is not shadowed by a builtin of the same name.
-        if let Some(methods) = self.impls.of_value(recv)
-            && let Some(chunk) = methods.get(name)
-        {
-            let chunk = chunk.clone();
-            let mut full = Vec::with_capacity(args.len() + 1);
-            full.push(recv.clone());
-            full.extend(args.iter().cloned());
-            return self.run_chunk(&chunk, &full, &[]);
-        }
         if name.id.is_higher_order()
             && let Some(v) = self.higher_order(recv, name.id, &*args)?
         {
             return Ok(v);
         }
-        // Vec::extend takes any IntoIterator, so a lazy argument such as
-        // `.iter().map(..)` has to be drained here, where the interpreter is
-        // in reach. The vec method itself cannot read one.
-        if matches!(recv, Value::Vec(_))
-            && matches!(name.id, BuiltinId::Extend | BuiltinId::ExtendFromSlice)
-            && let Some(first) = args.first()
-            && !matches!(first, Value::Vec(_))
-        {
-            let items = self.drain_items(first.clone())?;
-            args[0] = Value::vec(items);
-        }
-        Self::method_by_receiver(recv, name, args)
+        self.method_by_receiver(recv, name, args)
+    }
+
+    /// The script's own `impl` method for the receiver's type, run with the
+    /// receiver as its first argument. `None` when the type declares no such
+    /// method.
+    fn user_impl_method(
+        self: &Arc<Self>,
+        recv: &Value,
+        name: &MethodName,
+        args: &[Value],
+    ) -> Result<Option<Value>> {
+        let Some(chunk) = self
+            .impls
+            .of_value(recv)
+            .and_then(|methods| methods.get(name))
+        else {
+            return Ok(None);
+        };
+        let chunk = chunk.clone();
+        let mut full = Vec::with_capacity(args.len() + 1);
+        full.push(recv.clone());
+        full.extend(args.iter().cloned());
+        self.run_chunk(&chunk, &full, &[]).map(Some)
+    }
+
+    /// The methods that answer for any receiver type, keyed by id:
+    /// `to_string` through a user `Display` impl, the width tagged number
+    /// shortcuts, and the `serde_json` type tests and pointer lookups, which
+    /// apply to a json value whatever shape it turned out to be. They run
+    /// before `bridge_image`, since a u64 past `i64::MAX` saturates there
+    /// and would then claim to be an i64.
+    fn any_receiver_method(
+        self: &Arc<Self>,
+        recv: &Value,
+        name: &MethodName,
+        args: &[Value],
+    ) -> Result<Option<Value>> {
+        let tagged = matches!(recv, Value::IntW(..) | Value::F32(_));
+        Ok(match name.id {
+            BuiltinId::ToString => match self.user_fmt_text(recv, false)? {
+                Some(text) => Some(Value::str(text)),
+                None if tagged => Some(Value::str(recv.display())),
+                None => None,
+            },
+            BuiltinId::Clone if tagged => Some(recv.clone()),
+            _ => methods::json_type_test(recv, name)
+                .or_else(|| methods::json_value_method(recv, name, args)),
+        })
     }
 
     /// The per-receiver dispatch, after the any-receiver families above.
-    fn method_by_receiver(recv: &Value, name: &MethodName, args: &mut [Value]) -> Result<Value> {
-        let m = name.text.as_str();
+    fn method_by_receiver(
+        self: &Arc<Self>,
+        recv: &Value,
+        name: &MethodName,
+        args: &mut [Value],
+    ) -> Result<Value> {
         match recv {
             Value::Str(s) => methods::str_method(s, name, args),
-            Value::Vec(v) => super::vecmap::vec_method(v, name, args),
+            Value::Vec(v) => {
+                // Vec::extend takes any IntoIterator, so a lazy argument such
+                // as `.iter().map(..)` has to be drained here, where the
+                // interpreter is in reach. The vec method itself cannot read
+                // one.
+                if matches!(name.id, BuiltinId::Extend | BuiltinId::ExtendFromSlice)
+                    && let Some(first) = args.first()
+                    && !matches!(first, Value::Vec(_))
+                {
+                    let items = self.drain_items(first.clone())?;
+                    args[0] = Value::vec(items);
+                }
+                super::vecmap::vec_method(v, name, args)
+            }
             Value::Map(map, kind) => super::vecmap::map_method(map, *kind, name, args),
             Value::Enum { def, .. } if def.kind == EnumKind::Option => {
                 methods::opt_method(recv, name, args)
@@ -531,43 +524,68 @@ impl Vm {
                 methods::res_method(recv, name, args)
             }
             Value::Enum { .. } => methods::generic_method(recv, name, args),
-            Value::Struct(st) if super::ratatui::is_ratatui_struct(st.name()) => {
-                super::ratatui::struct_method(st, name, args)
+            Value::Struct(st) => {
+                if let Some(res) = super::http::http_method(recv, name, args) {
+                    return res;
+                }
+                if super::ratatui::is_ratatui_struct(st.name()) {
+                    return super::ratatui::struct_method(st, name, args);
+                }
+                Self::bridge_struct_method(recv, st, name, args)
             }
-            Value::Struct(st) => match &**st.name() {
-                "Command" => super::process::command_method(recv, name, args),
-                "Child" => super::process::child_method(recv, name, args),
-                "ExitStatus" => exitstatus_method(st, name),
-                "Output" => output_method(st, name),
-                "Duration" => duration_method(st, name, args),
-                "DateTime" => datetime_method(st, name, args),
-                "Path" | "PathBuf" => super::std_bridge::path_method(st, name, args),
-                "OsString" => super::std_bridge::os_string_method(st, name),
-                "DirEntry" => super::std_bridge::dir_entry_method(st, name),
-                "FileType" => super::std_bridge::file_type_method(st, name),
-                "Metadata" => super::std_bridge::metadata_method(st, name),
-                "StdStream" => super::std_bridge::std_stream_method(st, name, args),
-                "OpenOptions" => super::std_bridge::openoptions_method(st, name, args),
-                "Permissions" => match m {
-                    "mode" => Ok(st.get("mode").unwrap_or(Value::Int(0))),
-                    "readonly" => Ok(st.get("readonly").unwrap_or(Value::Bool(false))),
-                    "set_readonly" => Ok(Value::Unit),
-                    _ => bail!("unknown method `{m}` on Permissions"),
-                },
-                "Rng" => super::crates_bridge::rng_method(name, args),
-                "Base64Engine" => super::crates_bridge::base64_method(st, name, args),
-                "Element" => super::xmltree_bridge::element_method(st, name, args),
-                "RegKey" => super::winreg_bridge::winreg_method(st, name, args),
-                "ServiceManager" => super::service_bridge::manager_method(st, name, args),
-                "Service" => super::service_bridge::service_method(st, name, args),
-                "WmiConnection" => super::wmi_bridge::wmi_method(st, name, args),
-                _ => methods::generic_method(recv, name, args),
-            },
-            Value::Native(native) => Self::native_method(native, name, args),
+            Value::Native(native) => {
+                if matches!(&*native.lock(), Native::Iterator(_))
+                    && let Some(v) = self.iterator_method(native, name, args)?
+                {
+                    return Ok(v);
+                }
+                if let Some(res) = super::http::http_method(recv, name, args) {
+                    return res;
+                }
+                Self::native_method(native, name, args)
+            }
             Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Char(_) => {
                 scalar_method(recv, name, args)
             }
             other => methods::generic_method(other, name, args),
+        }
+    }
+
+    /// A method on one of the bridge's own struct types, by type name.
+    fn bridge_struct_method(
+        recv: &Value,
+        st: &Arc<super::value::StructData>,
+        name: &MethodName,
+        args: &mut [Value],
+    ) -> Result<Value> {
+        match &**st.name() {
+            "Command" => super::process::command_method(recv, name, args),
+            "Child" => super::process::child_method(recv, name, args),
+            "ExitStatus" => exitstatus_method(st, name),
+            "Output" => output_method(st, name),
+            "Duration" => duration_method(st, name, args),
+            "DateTime" => datetime_method(st, name, args),
+            "Path" | "PathBuf" => super::std_bridge::path_method(st, name, args),
+            "OsString" => super::std_bridge::os_string_method(st, name),
+            "DirEntry" => super::std_bridge::dir_entry_method(st, name),
+            "FileType" => super::std_bridge::file_type_method(st, name),
+            "Metadata" => super::std_bridge::metadata_method(st, name),
+            "StdStream" => super::std_bridge::std_stream_method(st, name, args),
+            "OpenOptions" => super::std_bridge::openoptions_method(st, name, args),
+            "Permissions" => match name.id {
+                BuiltinId::Mode => Ok(st.get("mode").unwrap_or(Value::Int(0))),
+                BuiltinId::Readonly => Ok(st.get("readonly").unwrap_or(Value::Bool(false))),
+                BuiltinId::SetReadonly => Ok(Value::Unit),
+                _ => bail!("unknown method `{name}` on Permissions"),
+            },
+            "Rng" => super::crates_bridge::rng_method(name, args),
+            "Base64Engine" => super::crates_bridge::base64_method(st, name, args),
+            "Element" => super::xmltree_bridge::element_method(st, name, args),
+            "RegKey" => super::winreg_bridge::winreg_method(st, name, args),
+            "ServiceManager" => super::service_bridge::manager_method(st, name, args),
+            "Service" => super::service_bridge::service_method(st, name, args),
+            "WmiConnection" => super::wmi_bridge::wmi_method(st, name, args),
+            _ => methods::generic_method(recv, name, args),
         }
     }
 
@@ -576,7 +594,6 @@ impl Vm {
         name: &MethodName,
         args: &mut [Value],
     ) -> Result<Value> {
-        let m = name.text.as_str();
         let entry = match &*native.lock() {
             Native::Entry { map, key } => Some((map.clone(), key.clone())),
             _ => None,
@@ -585,7 +602,7 @@ impl Vm {
             return methods::entry_method(&map, &key, name, args);
         }
         if let Native::Instant(instant) = &*native.lock()
-            && m == "elapsed"
+            && name.id == BuiltinId::Elapsed
         {
             return Ok(super::std_bridge::make_duration(instant.elapsed()));
         }
@@ -629,14 +646,42 @@ fn path_constant(id: PathId) -> Option<Value> {
     Some(Value::str(text))
 }
 
+/// Flatten width tagged arguments to the i64 and f64 images the bridges
+/// compute in. Option and Result methods hand arguments through to the
+/// caller, `unwrap_or` for one, and `flag.then_some(x)` on a bool does the
+/// same, so their width tags must survive. `fold` hands its initial value
+/// through the closure and the result the same way, and the containers and
+/// a map entry store their arguments, so a pushed or inserted number keeps
+/// its real width too.
+fn image_args(recv: &Value, name: &MethodName, args: &mut [Value]) {
+    let hands_args_through = matches!(
+        recv,
+        Value::Enum { .. } | Value::Bool(_) | Value::Vec(_) | Value::Map(..)
+    ) || matches!(recv, Value::Native(n) if matches!(&*n.lock(), Native::Entry { .. }))
+        || name.id == BuiltinId::Fold;
+    if hands_args_through {
+        return;
+    }
+    for arg in args.iter_mut() {
+        if let Some(image) = arg.bridge_image() {
+            *arg = image;
+        }
+    }
+}
+
 fn one(args: Vec<Value>) -> Result<Value> {
     args.into_iter()
         .next()
         .ok_or_else(|| anyhow::anyhow!("expected one argument"))
 }
 
-fn arg0(args: &[Value]) -> Value {
-    args.first().cloned().unwrap_or(Value::Unit)
+/// The argument at `i`. A script that passes `rust check` always supplies
+/// every argument, so a missing one is an interpreter bug and errors
+/// instead of standing in a Unit.
+pub(super) fn arg(args: &[Value], i: usize) -> Result<Value> {
+    args.get(i)
+        .cloned()
+        .ok_or_else(|| anyhow!("missing argument {}", i + 1))
 }
 
 /// The builtin methods a range answers directly, before it expands to its
@@ -744,7 +789,7 @@ fn bridge_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
             return Ok(Some(now_datetime(id == PathId::LocalNow)));
         }
         PathId::DateTimeParseFromRfc3339 => {
-            return Ok(Some(match parse_rfc3339(&arg0(args).display()) {
+            return Ok(Some(match parse_rfc3339(&arg(args, 0)?.display()) {
                 Ok((unix_secs, nanos, offset)) => {
                     Value::ok(datetime_value(unix_secs, nanos, false, offset))
                 }
@@ -790,9 +835,9 @@ fn exitstatus_method(s: &Arc<super::value::StructData>, name: &MethodName) -> Re
 fn output_method(s: &Arc<super::value::StructData>, name: &MethodName) -> Result<Value> {
     let m = name.id;
     Ok(match m {
-        BuiltinId::Status | BuiltinId::Stdout | BuiltinId::Stderr => {
-            s.get(m.name()).unwrap_or(Value::Unit)
-        }
+        BuiltinId::Status | BuiltinId::Stdout | BuiltinId::Stderr => s
+            .get(m.name())
+            .ok_or_else(|| anyhow!("Output has no `{m}` field"))?,
         _ => bail!("unknown method `{}` on Output", name.text),
     })
 }
@@ -1177,12 +1222,7 @@ fn deref_receiver(
         && matches!(name.id, BuiltinId::Push | BuiltinId::PushStr)
     {
         let mut grown = s.clone();
-        match (&name.id, args.first()) {
-            (BuiltinId::Push, Some(Value::Char(c))) => grown.push(*c),
-            (BuiltinId::PushStr, Some(Value::Str(other))) => grown.push_str(other),
-            (BuiltinId::PushStr, Some(other)) => grown.push_str(&other.display()),
-            _ => {}
-        }
+        methods::str_grow(&mut grown, name.id, &arg(args, 0)?)?;
         reference.set(Value::Str(grown));
         return Ok(RefRead::StrGrown);
     }

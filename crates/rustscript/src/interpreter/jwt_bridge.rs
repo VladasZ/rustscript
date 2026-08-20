@@ -6,6 +6,7 @@ use std::str::FromStr;
 use anyhow::{Result, bail};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 
+use super::bridge::arg;
 use super::bytecode::PathId;
 use super::enum_def::ALGORITHM;
 use super::iterator::option_inner;
@@ -33,10 +34,10 @@ pub(super) fn jwt_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
                 ],
             )
         }
-        PathId::EncodingKeyFromSecret => key_value("secret", args),
+        PathId::EncodingKeyFromSecret => key_value("secret", args)?,
         PathId::EncodingKeyFromEcPem => {
             match EncodingKey::from_ec_pem(&value_to_bytes(args.first())) {
-                Ok(_) => Value::ok(key_value("ec_pem", args)),
+                Ok(_) => Value::ok(key_value("ec_pem", args)?),
                 Err(e) => Value::err(Value::str(e.to_string())),
             }
         }
@@ -46,14 +47,14 @@ pub(super) fn jwt_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
 
 /// The real `EncodingKey` is opaque, so the value keeps the constructor kind
 /// and its raw input, and the key is rebuilt when `encode` runs.
-fn key_value(kind: &str, args: &[Value]) -> Value {
-    Value::struct_of(
+fn key_value(kind: &str, args: &[Value]) -> Result<Value> {
+    Ok(Value::struct_of(
         "EncodingKey",
         [
             ("kind".into(), Value::str(kind)),
-            ("data".into(), args.first().cloned().unwrap_or(Value::Unit)),
+            ("data".into(), arg(args, 0)?),
         ],
-    )
+    ))
 }
 
 pub(super) fn jwt_encode(args: &[Value]) -> Result<Value> {

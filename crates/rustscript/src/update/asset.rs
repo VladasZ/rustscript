@@ -148,7 +148,9 @@ pub fn extract(bytes: &[u8], format: Format, dest: &Path) -> Result<()> {
         Format::TarGz => extract_tar_gz(bytes, dest),
         Format::Zip => extract_zip(bytes, dest),
     }?;
-    make_executable(dest)
+    #[cfg(unix)]
+    make_executable(dest)?;
+    Ok(())
 }
 
 fn extract_tar_gz(bytes: &[u8], dest: &Path) -> Result<()> {
@@ -198,11 +200,6 @@ fn make_executable(path: &Path) -> Result<()> {
 
     set_permissions(path, Permissions::from_mode(0o755))
         .with_context(|| format!("could not make {} executable", path.display()))
-}
-
-#[cfg(not(unix))]
-fn make_executable(_path: &Path) -> Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]

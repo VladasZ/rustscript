@@ -59,7 +59,7 @@ pub(super) fn service_method(s: &StructData, name: &MethodName, args: &[Value]) 
 #[cfg(windows)]
 mod imp {
     use super::super::bytecode::{BuiltinId, MethodName};
-    use anyhow::{Result, bail};
+    use anyhow::{Result, anyhow, bail};
     use windows_service::service::{
         Service, ServiceAccess, ServiceDependency, ServiceErrorControl, ServiceInfo,
         ServiceStartType, ServiceState, ServiceType,
@@ -87,16 +87,22 @@ mod imp {
         s.get(name).as_ref().and_then(as_i64).unwrap_or_default()
     }
 
+    /// An access mask or a type flag set, always a non negative value that
+    /// fits the real u32, since it comes from the bridge constants.
+    fn mask(n: i64) -> Result<u32> {
+        u32::try_from(n).map_err(|_| anyhow!("`{n}` is not a valid flag set"))
+    }
+
     /// Open the manager with the mask the script asked `local_computer` for.
     fn manager(access: i64) -> Result<ServiceManager> {
-        let mask = ServiceManagerAccess::from_bits_truncate(access as u32);
+        let mask = ServiceManagerAccess::from_bits_truncate(mask(access)?);
         Ok(ServiceManager::local_computer(None::<&str>, mask)?)
     }
 
     /// Reopen a service from the name and masks its value carries. The manager
     /// mask travels with the service so a reopen matches the original request.
     fn open(s: &StructData) -> Result<Service> {
-        let access = ServiceAccess::from_bits_truncate(field_i64(s, "access") as u32);
+        let access = ServiceAccess::from_bits_truncate(mask(field_i64(s, "access"))?);
         Ok(manager(field_i64(s, "manager_access"))?.open_service(field_str(s, "name"), access)?)
     }
 
@@ -195,7 +201,7 @@ mod imp {
         Ok(ServiceInfo {
             name: field_str(info, "name").into(),
             display_name: field_str(info, "display_name").into(),
-            service_type: ServiceType::from_bits_truncate(field_i64(info, "service_type") as u32),
+            service_type: ServiceType::from_bits_truncate(mask(field_i64(info, "service_type"))?),
             start_type: start_type_from(&start)?,
             error_control: error_control_from(field_i64(info, "error_control")),
             executable_path: field_str(info, "executable_path").into(),
@@ -262,7 +268,7 @@ mod imp {
                     [(
                         "current_state".into(),
                         service_variant(&SERVICE_STATE, state_name(st.current_state))
-                            .unwrap_or(Value::Unit),
+                            .ok_or_else(|| anyhow!("unknown service state"))?,
                     )],
                 )),
                 Err(e) => Value::err(Value::str(e.to_string())),
@@ -284,7 +290,7 @@ mod imp {
                         (
                             "start_type".into(),
                             service_variant(&SERVICE_START_TYPE, start_type_name(cfg.start_type))
-                                .unwrap_or(Value::Unit),
+                                .ok_or_else(|| anyhow!("unknown service start type"))?,
                         ),
                         (
                             "error_control".into(),

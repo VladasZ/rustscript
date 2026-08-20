@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
 
-use super::bridge::VArgs;
+use super::bridge::{VArgs, arg};
 use super::bytecode::{BuiltinId, MethodName, ScalarTy};
 use super::enum_def::{EQUAL, EnumKind, GREATER, LESS, OK, ORDERING, SOME};
 use super::iterator;
@@ -59,7 +59,7 @@ pub(super) fn entry_method(
 ) -> Result<Value> {
     Ok(match method.id {
         BuiltinId::OrInsert => {
-            let default = args.first().cloned().unwrap_or(Value::Unit);
+            let default = arg(args, 0)?;
             m.lock().entry(key.clone()).or_insert(default);
             Value::Ref(Arc::new(ValueRef::map_entry(m.clone(), key.clone())))
         }
@@ -173,7 +173,7 @@ pub(super) fn generic_method(recv: &Value, method: &MethodName, args: &[Value]) 
         (Value::Bool(b), BuiltinId::AsBool) => Ok(Value::some(Value::Bool(*b))),
         // `then_some(v)` yields that value, not a placeholder.
         (Value::Bool(b), BuiltinId::ThenSome) => Ok(if *b {
-            Value::some(args.first().cloned().unwrap_or(Value::Unit))
+            Value::some(arg(args, 0)?)
         } else {
             Value::none()
         }),
@@ -261,6 +261,10 @@ pub(super) fn str_method(s: &RsStr, method: &MethodName, args: &[Value]) -> Resu
         // here means the receiver is not addressable, so the edit would be
         // silently lost.
         BuiltinId::Push | BuiltinId::PushStr => {
+            // A wrong argument is the error to report. With a right one the
+            // receiver is a value the op has no place to write back to.
+            let mut scratch = s.clone();
+            str_grow(&mut scratch, method.id, &arg(args, 0)?)?;
             bail!("cannot mutate a string through this receiver")
         }
         BuiltinId::Contains => Value::Bool(s.contains(&arg_str(0))),
@@ -397,7 +401,10 @@ pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
             return inner.ok_or_else(|| anyhow!("called `Option::unwrap()` on a `None` value"));
         }
         BuiltinId::UnwrapOr => {
-            return Ok(inner.unwrap_or_else(|| args.first().cloned().unwrap_or(Value::Unit)));
+            return Ok(match inner {
+                Some(v) => v,
+                None => arg(args, 0)?,
+            });
         }
         _ => {}
     }
@@ -418,7 +425,7 @@ pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
         BuiltinId::Get => Value::none(),
         BuiltinId::OkOr | BuiltinId::Context => match inner {
             Some(v) => Value::ok(v),
-            None => Value::err(args.first().cloned().unwrap_or(Value::Unit)),
+            None => Value::err(arg(args, 0)?),
         },
         _ => return generic_method(recv, method, args),
     })
@@ -426,7 +433,7 @@ pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
 
 pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> Result<Value> {
     let (is_ok, inner) = match recv {
-        Value::Enum { variant, data, .. } => (*variant == OK, data.lock().first().cloned()),
+        Value::Enum { variant, data, .. } => (*variant == OK, Value::payload(data)?),
         _ => unreachable!(),
     };
     Ok(match method.id {
@@ -440,11 +447,11 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
         | BuiltinId::AsDerefMut => recv.clone(),
         BuiltinId::Unwrap => {
             if is_ok {
-                inner.unwrap_or(Value::Unit)
+                inner
             } else {
                 bail!(
                     "called `Result::unwrap()` on an `Err` value: {}",
-                    inner.map(|v| v.debug()).unwrap_or_default()
+                    inner.debug()
                 );
             }
         }
@@ -452,37 +459,37 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
             if is_ok {
                 bail!(
                     "called `Result::unwrap_err()` on an `Ok` value: {}",
-                    inner.map(|v| v.debug()).unwrap_or_default()
+                    inner.debug()
                 );
             }
-            inner.unwrap_or(Value::Unit)
+            inner
         }
         BuiltinId::Expect => {
             if is_ok {
-                inner.unwrap_or(Value::Unit)
+                inner
             } else {
                 bail!("{}", args.first().map(Value::display).unwrap_or_default());
             }
         }
         BuiltinId::UnwrapOr => {
             if is_ok {
-                inner.unwrap_or(Value::Unit)
+                inner
             } else {
-                args.first().cloned().unwrap_or(Value::Unit)
+                arg(args, 0)?
             }
         }
         // The Ok payload type, from wherever the call site stated it, exactly
         // as Option::unwrap_or_default above.
         BuiltinId::UnwrapOrDefault => {
             if is_ok {
-                inner.unwrap_or_else(|| default_of(method.scalar.as_ref()))
+                inner
             } else {
                 default_of(method.scalar.as_ref())
             }
         }
         BuiltinId::Ok => {
             if is_ok {
-                Value::some(inner.unwrap_or(Value::Unit))
+                Value::some(inner)
             } else {
                 Value::none()
             }
@@ -491,28 +498,41 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
             if is_ok {
                 Value::none()
             } else {
-                Value::some(inner.unwrap_or(Value::Unit))
+                Value::some(inner)
             }
         }
         // Iterating a Result yields the payload or nothing, like Option.
         BuiltinId::IntoIter | BuiltinId::Iter => {
             if is_ok {
-                Value::vec(inner.into_iter().collect())
+                Value::vec(vec![inner])
             } else {
                 Value::vec(Vec::new())
             }
         }
         BuiltinId::Context | BuiltinId::WithContext => {
             if is_ok {
-                Value::ok(inner.unwrap_or(Value::Unit))
+                Value::ok(inner)
             } else {
                 let ctx = args.first().map(Value::display).unwrap_or_default();
-                let cause = inner.map(|v| v.display()).unwrap_or_default();
+                let cause = inner.display();
                 Value::err(Value::str(format!("{ctx}\nCaused by: {cause}")))
             }
         }
         _ => return generic_method(recv, method, args),
     })
+}
+
+/// Grow a string in place through `push` or `push_str`. A `&String` argument
+/// arrives as a reference or a shared cell and reads through.
+pub(super) fn str_grow(text: &mut RsStr, id: BuiltinId, arg: &Value) -> Result<()> {
+    match (id, arg) {
+        (BuiltinId::Push, Value::Char(c)) => text.push(*c),
+        (BuiltinId::PushStr, Value::Str(other)) => text.push_str(other),
+        (BuiltinId::PushStr, Value::Ref(_) | Value::Cell(..)) => text.push_str(&arg.display()),
+        (BuiltinId::Push, other) => bail!("push takes a char, not {}", other.type_name()),
+        (_, other) => bail!("push_str takes a string, not {}", other.type_name()),
+    }
+    Ok(())
 }
 
 /// `str::split` with either a string pattern or a set of chars. A char array

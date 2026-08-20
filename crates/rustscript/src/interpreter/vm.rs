@@ -10,7 +10,7 @@ use anyhow::{Result, anyhow, bail};
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
 
-use super::bytecode::{Chunk, Member, MethodName, path_call_chunk};
+use super::bytecode::{Chunk, Member, path_call_chunk};
 use super::enum_def::EnumDef;
 use super::impls::ImplTable;
 use super::native::Native;
@@ -369,13 +369,6 @@ impl Vm {
         self.fn_index
             .get(name)
             .map(|&i| self.functions[i as usize].clone())
-    }
-
-    /// Whether the value's user type declares this method itself.
-    pub(super) fn user_method_exists(&self, recv: &Value, name: &MethodName) -> bool {
-        self.impls
-            .of_value(recv)
-            .is_some_and(|methods| methods.get(name).is_some())
     }
 
     /// A user method named at runtime, `Type::method` in a path call.
