@@ -180,10 +180,7 @@ impl Compiler<'_> {
         argc: u16,
     ) -> Result<()> {
         let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
-        let resolved = match self.resolve_path_res(&segs) {
-            Ok(r) => r,
-            Err(_) => Res::External(segs.clone()),
-        };
+        let resolved = self.resolve_path_res(&segs)?;
         let path = match resolved {
             // A known function, called directly by id. Turbofish type args are
             // recorded so the callee can bind them to its generic parameters.
