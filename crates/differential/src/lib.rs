@@ -1,24 +1,11 @@
 pub mod artifact;
-pub mod closure_case;
 pub mod generator;
 pub mod lang;
-pub mod method_case;
 pub mod model;
 pub mod mutator;
-pub mod numeric;
-pub mod numeric_gen;
 pub mod reduce;
-pub mod rich;
 pub mod runner;
-pub mod semantic;
-pub mod semantic_gen;
-pub mod slice_case;
-pub mod structural;
-pub mod structural_gen;
-pub mod typed;
-pub mod typed_gen;
-mod typed_render;
-mod typed_shrink;
+pub mod surface;
 
 use std::path::{Path, PathBuf};
 

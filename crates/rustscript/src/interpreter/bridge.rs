@@ -51,6 +51,16 @@ impl Vm {
         v: &Value,
         debug: bool,
     ) -> Result<Option<String>> {
+        Ok(self.user_fmt(v, debug)?.map(|(text, _)| text))
+    }
+
+    /// `user_fmt_text` plus whether the impl padded through `f.pad`, which
+    /// is when the caller's width applies.
+    pub(super) fn user_fmt(
+        self: &Arc<Self>,
+        v: &Value,
+        debug: bool,
+    ) -> Result<Option<(String, bool)>> {
         let Some(methods) = self.impls.of_value(v) else {
             return Ok(None);
         };
@@ -62,14 +72,17 @@ impl Vm {
         .clone() else {
             return Ok(None);
         };
-        let handle = Arc::new(parking_lot::Mutex::new(Native::Fmt(String::new())));
+        let handle = Arc::new(parking_lot::Mutex::new(Native::Fmt {
+            text: String::new(),
+            padded: false,
+        }));
         let args = vec![v.clone(), Value::Native(handle.clone())];
         self.run_chunk(&chunk, &args, &[])?;
-        let text = match &*handle.lock() {
-            Native::Fmt(s) => s.clone(),
-            _ => String::new(),
+        let out = match &*handle.lock() {
+            Native::Fmt { text, padded } => (text.clone(), *padded),
+            _ => (String::new(), false),
         };
-        Ok(Some(text))
+        Ok(Some(out))
     }
 
     /// Run the value's user `Drop::drop` when this is its last holder, then
@@ -337,6 +350,13 @@ impl Vm {
         if let Some(chunk) = self.user_function(&path.display()) {
             return self.run_chunk(&chunk, &args, &[]);
         }
+        // `Type::from(x)` picks the `From` impl for `x`'s type.
+        if last == "from"
+            && args.len() == 1
+            && let Some(chunk) = self.conversion_impl(namespace, &args[0])
+        {
+            return self.run_chunk(&chunk, &args, &[]);
+        }
         // A method on a user type, `Type::assoc(..)` or UFCS
         // `Type::method(recv, ..)`. The receiver, if any, is simply
         // the first argument, matching param 0.
@@ -456,7 +476,7 @@ impl Vm {
     ) -> Result<Option<Value>> {
         let Some(chunk) = self
             .impls
-            .of_value(recv)
+            .of_receiver(recv, name.scalar.as_ref())
             .and_then(|methods| methods.get(name))
         else {
             return Ok(None);
@@ -1044,7 +1064,7 @@ fn int_out(out: super::int_methods::IntOut, width: super::numeric::IntWidth) -> 
         }
         IntOut::Bool(value) => Value::Bool(value),
         IntOut::Checked(Some(value)) => Value::some(Value::int_of_width(value, width)),
-        IntOut::Checked(None) => Value::none(),
+        IntOut::Checked(None) | IntOut::CheckedCount(None) => Value::none(),
         IntOut::SomeFloat(value) => Value::some(Value::Float(value)),
         IntOut::Ordering(ordering) => make_ordering(ordering),
         IntOut::Bytes(bytes) => Value::vec(
@@ -1053,6 +1073,14 @@ fn int_out(out: super::int_methods::IntOut, width: super::numeric::IntWidth) -> 
                 .map(|byte| Value::Int(i64::from(byte)))
                 .collect(),
         ),
+        IntOut::Overflowing(value, wrapped) => Value::tuple(vec![
+            Value::int_of_width(value, width),
+            Value::Bool(wrapped),
+        ]),
+        IntOut::CheckedCount(Some(count)) => Value::some(Value::int_of_width(
+            i128::from(count),
+            super::numeric::IntWidth::U32,
+        )),
     }
 }
 
@@ -1120,6 +1148,7 @@ fn scalar_method(recv: &Value, name: &MethodName, args: &[Value]) -> Result<Valu
                 super::numeric::IntWidth::U32,
             )),
             CharOut::OptU32(None) => Value::none(),
+            CharOut::USize(n) => super::shared::usize_value(n),
         });
     }
     methods::generic_method(recv, name, args)
@@ -1226,6 +1255,12 @@ fn deref_receiver(
         reference.set(Value::Str(grown));
         return Ok(RefRead::StrGrown);
     }
+    // A reference is always a place, so `clear` through one is
+    // `String::clear`, never the colored crate's.
+    if matches!(value, Value::Str(_)) && name.id == BuiltinId::Clear && args.is_empty() {
+        reference.set(Value::str(String::new()));
+        return Ok(RefRead::StrGrown);
+    }
     // In-place ascii casing through a `&mut` receiver stores back the same
     // way a grow does. The upper flag reuses the harvested arm literal, a
     // partial literal here would leak a bogus name into the bridge tables.
@@ -1284,68 +1319,136 @@ fn render_template(
                     }
                     spec.push(c);
                 }
-                let (name, fmt) = spec.split_once(':').unwrap_or((&spec, ""));
-                let value = resolve_arg(name, &mut next_pos, positional, named)?;
-                // A `{:w$}` width names another argument, so resolve it against
-                // the same tables before the spec is applied.
-                let mut lookup = |token: &str| -> Result<i64> {
-                    let mut pos = 0;
-                    match resolve_arg(token, &mut pos, positional, named)? {
-                        Value::Int(i) => Ok(i),
-                        ref other @ Value::IntW(..) => other
-                            .untag_int()
-                            .ok_or_else(|| anyhow::anyhow!("format width out of range")),
-                        other => {
-                            bail!("format width must be an integer, got {}", other.type_name())
-                        }
-                    }
-                };
-                let fmt = super::format::expand_widths_with(fmt, &mut lookup)?;
-                let number = match &value {
-                    Value::Float(f) => Some(super::format::SpecNumber::Float(*f)),
-                    Value::F32(f) => Some(super::format::SpecNumber::F32(*f)),
-                    Value::Int(i) => Some(super::format::SpecNumber::Int(*i)),
-                    Value::IntW(v, w) => Some(super::format::SpecNumber::Sized {
-                        value: w.decode(*v),
-                        bits: w.bits(),
-                    }),
-                    Value::Big(v, w) => Some(super::format::SpecNumber::Big {
-                        bits: *v,
-                        signed: w.is_signed(),
-                    }),
-                    _ => None,
-                };
-                // A user `Display` or `Debug` impl overrides the built-in
-                // rendering. Only the form the spec asks for runs, an impl
-                // may have side effects.
-                let wants_debug = fmt.contains('?');
-                let display_text = if wants_debug {
-                    String::new()
-                } else {
-                    match vm.user_fmt_text(&value, false)? {
-                        Some(text) => text,
-                        None => value.display(),
-                    }
-                };
-                let debug_text = if wants_debug {
-                    match vm.user_fmt_text(&value, true)? {
-                        Some(text) => text,
-                        None => value.debug(),
-                    }
-                } else {
-                    String::new()
-                };
-                out.push_str(&super::format::apply_spec(
-                    &fmt,
-                    &display_text,
-                    &debug_text,
-                    number,
-                ));
+                out.push_str(&render_placeholder(
+                    vm,
+                    &spec,
+                    &mut next_pos,
+                    positional,
+                    named,
+                )?);
             }
             other => out.push(other),
         }
     }
     Ok(out)
+}
+
+/// One `{..}` placeholder rendered: the argument it names, the width and
+/// precision it takes from other arguments, and the spec applied.
+fn render_placeholder(
+    vm: &Arc<Vm>,
+    spec: &str,
+    next_pos: &mut usize,
+    positional: &[Value],
+    named: &[(&str, Value)],
+) -> Result<String> {
+    let (name, fmt) = spec.split_once(':').unwrap_or((spec, ""));
+    // `{:.*}` takes its precision from the next positional
+    // argument, before the value.
+    let fmt = if fmt.contains(".*") {
+        let precision = match resolve_arg("", next_pos, positional, named)? {
+            Value::Int(i) => i,
+            ref other @ Value::IntW(..) => other
+                .untag_int()
+                .ok_or_else(|| anyhow::anyhow!("format precision out of range"))?,
+            other => {
+                bail!(
+                    "format precision must be an integer, got {}",
+                    other.type_name()
+                )
+            }
+        };
+        fmt.replace(".*", &format!(".{precision}"))
+    } else {
+        fmt.to_string()
+    };
+    let fmt = fmt.as_str();
+    let value = resolve_arg(name, next_pos, positional, named)?;
+    // A `{:w$}` width names another argument, so resolve it against
+    // the same tables before the spec is applied.
+    let mut lookup = |token: &str| -> Result<i64> {
+        let mut pos = 0;
+        match resolve_arg(token, &mut pos, positional, named)? {
+            Value::Int(i) => Ok(i),
+            ref other @ Value::IntW(..) => other
+                .untag_int()
+                .ok_or_else(|| anyhow::anyhow!("format width out of range")),
+            other => {
+                bail!("format width must be an integer, got {}", other.type_name())
+            }
+        }
+    };
+    let fmt = super::format::expand_widths_with(fmt, &mut lookup)?;
+    let number = match &value {
+        Value::Float(f) => Some(super::format::SpecNumber::Float(*f)),
+        Value::F32(f) => Some(super::format::SpecNumber::F32(*f)),
+        Value::Int(i) => Some(super::format::SpecNumber::Int(*i)),
+        Value::IntW(v, w) => Some(super::format::SpecNumber::Sized {
+            value: w.decode(*v),
+            bits: w.bits(),
+        }),
+        Value::Big(v, w) => Some(super::format::SpecNumber::Big {
+            bits: *v,
+            signed: w.is_signed(),
+        }),
+        _ => None,
+    };
+    // A user `Display` or `Debug` impl overrides the built-in
+    // rendering. Only the form the spec asks for runs, an impl
+    // may have side effects.
+    let wants_debug = fmt.contains('?');
+    // A user impl that writes through `write!` ignores the
+    // caller's width, one that goes through `f.pad` honors it.
+    let mut user_padded = None;
+    let display_text = if wants_debug {
+        String::new()
+    } else {
+        match vm.user_fmt(&value, false)? {
+            Some((text, padded)) => {
+                user_padded = Some(padded);
+                text
+            }
+            None => value.display(),
+        }
+    };
+    let mut user_debug = false;
+    let debug_text = if !wants_debug {
+        String::new()
+    } else if let Some((text, padded)) = vm.user_fmt(&value, true)? {
+        user_debug = true;
+        user_padded = Some(padded);
+        text
+    } else {
+        // The flags reach every leaf, the alternate flag picks the pretty
+        // form.
+        let leaf: String = fmt.chars().filter(|c| !matches!(c, '#' | '?')).collect();
+        super::debug_fmt::render(
+            &value,
+            &super::debug_fmt::DebugOpts {
+                pretty: fmt.contains('#'),
+                leaf: &leaf,
+            },
+        )
+    };
+    // The debug renderer applied the spec at every leaf
+    // already, a second pass would sign and pad again.
+    if wants_debug && !user_debug {
+        return Ok(debug_text);
+    }
+    if user_padded == Some(false) {
+        return Ok(if wants_debug {
+            debug_text
+        } else {
+            display_text
+        });
+    }
+    Ok(super::format::apply_spec(
+        &fmt,
+        &display_text,
+        &debug_text,
+        number,
+        user_padded.is_some(),
+    ))
 }
 
 fn resolve_arg(

@@ -272,7 +272,20 @@ fixed result type answers for itself, `position` is a `usize` whatever it
 counts, and the stages of an iterator chain carry the element type through to
 the reduction at the end, closure parameters included: the `i32` in
 `values.iter().map(|v| v + 1).min().unwrap_or_default()` is only ever written
-down on `values`.
+down on `values`. The same reading covers an `Ok::<T, E>` or `Some` that
+built the value, a cast, a tuple, a map `get`, the return type of the
+function handing the value back, a generic helper whose `T` an argument
+states, and a local declared inside the block whose value is read, each
+block by its own `let`.
+
+Bare literals are typed by the context rustc would type them from. A `let`
+annotation reaches through the branches of an `if`, the arms of a `match`,
+a negation, the elements of a `vec!` or an array, the items of a tuple, and
+the payload of a `Some`, so `let v: i32 = -(if c { i32::MIN } else { 0 })`
+overflows at `i32`, and a `sum` or `product` with a known target types the
+`map` closure feeding it. A literal with no other use, a print argument of
+only literals for one, is the `i32` rustc falls back to, so `{:x}` of `-1`
+shows eight digits. A float `sum` of nothing is `-0.0`, as in std.
 
 `u128` and `i128` are real: their values live in dedicated 128-bit storage,
 arithmetic checks overflow natively at 128 bits, and casts, comparisons,
@@ -291,6 +304,12 @@ dispatch picks the override where one exists. User `Display` and `Debug`
 impls drive `{}`, `{:?}`, `to_string`, and `format!`. Operator trait impls
 drive the operators, a user `Iterator` drives for loops and adaptor chains,
 and associated consts resolve as `Type::NAME` globals.
+
+A trait can be implemented for a builtin type too, `impl Describe for
+Vec<u8>`. Such an impl is keyed by the type as written, generics included,
+so `Vec<u8>` and `Vec<String>` keep separate bodies, and a value finds its
+impl from its own runtime shape. An empty vec has no element to name its
+type, so the written type of the receiver picks the impl instead.
 
 `Drop` impls run where real Rust runs them: at scope end in reverse
 declaration order, on explicit `drop`, per loop iteration, on `break`,

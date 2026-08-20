@@ -72,6 +72,14 @@ fn builtin_fast(
         {
             str_push(ctx, recv, name.id, s)
         }
+        // `String::clear` empties the place. Off a place the same name is
+        // the colored crate's `clear`, which answers a value.
+        BuiltinId::Clear
+            if argc == 0 && name.place && matches!(ctx.stack[base + recv], Value::Str(_)) =>
+        {
+            ctx.stack[base + recv] = Value::str(String::new());
+            Some(Value::Unit)
+        }
         // Skipped when the script defines methods, which could shadow these.
         BuiltinId::Copied | BuiltinId::Cloned | BuiltinId::Unwrap | BuiltinId::UnwrapOr
             if ctx.vm.impls.is_empty() =>

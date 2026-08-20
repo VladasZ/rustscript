@@ -26,6 +26,9 @@ pub(super) struct TyEnv<'a> {
     /// The parameter of the closure being walked, with the type the chain
     /// hands it. `Some` only while inside that closure's body.
     param: Option<(&'a str, &'a ScalarTy)>,
+    /// The block being read through, whose own `let`s shadow everything
+    /// outside it, even after the compiler has left the block.
+    block: Option<&'a syn::Block>,
     /// The env this one was bound from, so a closure nested in a closure
     /// still reads the outer parameter.
     outer: Option<&'a TyEnv<'a>>,
@@ -40,7 +43,19 @@ impl<'a> TyEnv<'a> {
             locals,
             fn_returns,
             param: None,
+            block: None,
             outer: None,
+        }
+    }
+
+    /// This env plus one block, for reading that block's value.
+    fn with_block<'b>(&'b self, block: &'b syn::Block) -> TyEnv<'b> {
+        TyEnv {
+            locals: self.locals,
+            fn_returns: self.fn_returns,
+            param: None,
+            block: Some(block),
+            outer: Some(self),
         }
     }
 
@@ -50,23 +65,37 @@ impl<'a> TyEnv<'a> {
             locals: self.locals,
             fn_returns: self.fn_returns,
             param: Some((name, ty)),
+            block: None,
             outer: Some(self),
         }
     }
 
-    /// The type stated for a bare name, a closure parameter in scope first
-    /// and an annotated local otherwise.
-    fn lookup(&self, name: &str) -> Option<&ScalarTy> {
+    /// The type stated for a bare name: a closure parameter or a block's
+    /// own `let` in scope first, innermost first, and an annotated local
+    /// otherwise. A block's unannotated `let` answers through its init,
+    /// read in the env outside that block.
+    fn lookup(&self, name: &str) -> Option<ScalarTy> {
         let mut env = Some(self);
         while let Some(current) = env {
             if let Some((param, ty)) = current.param
                 && param == name
             {
-                return Some(ty);
+                return Some(ty.clone());
+            }
+            if let Some(block) = current.block
+                && let Some(local) = block_let_named(block, name)
+            {
+                return match &local.pat {
+                    syn::Pat::Type(t) => ScalarTy::lower(&t.ty),
+                    _ => {
+                        let init = local.init.as_ref()?;
+                        written_ty(&init.expr, current.outer?)
+                    }
+                };
             }
             env = current.outer;
         }
-        self.locals.get(name)
+        self.locals.get(name).cloned()
     }
 }
 
@@ -108,12 +137,33 @@ fn in_closure<T>(
 ///
 /// This is not type inference. Every arm reads a type the program wrote down,
 /// and anything else answers `None` so the caller keeps its old behavior.
+/// The payload of `<Option<T>>::default()` or `Option::<T>::default()`.
+fn default_call_payload(path: &syn::ExprPath) -> Option<ScalarTy> {
+    let option_ty = match &path.qself {
+        Some(qself) => match &*qself.ty {
+            syn::Type::Path(tp) => tp.path.segments.last().cloned(),
+            _ => None,
+        },
+        None => path.path.segments.iter().rev().nth(1).cloned(),
+    }?;
+    if option_ty.ident != "Option" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &option_ty.arguments else {
+        return None;
+    };
+    args.args.iter().find_map(|arg| match arg {
+        syn::GenericArgument::Type(ty) => ScalarTy::lower(ty),
+        _ => None,
+    })
+}
+
 pub(super) fn option_payload(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
     match expr {
         Expr::Paren(inner) => option_payload(&inner.expr, env),
         Expr::Group(inner) => option_payload(&inner.expr, env),
         // A block answers through its tail expression.
-        Expr::Block(block) => block_tail(&block.block).and_then(|e| option_payload(e, env)),
+        Expr::Block(block) => block_value(&block.block, env, option_payload),
         // An if-else answers through whichever branch states its type,
         // `if c { Some(x as i16) } else { None::<i16> }` from either side.
         Expr::If(sel) => block_tail(&sel.then_branch)
@@ -123,6 +173,8 @@ pub(super) fn option_payload(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                     .as_ref()
                     .and_then(|(_, e)| option_payload(e, env))
             }),
+        // A match answers through whichever arm states its type.
+        Expr::Match(m) => m.arms.iter().find_map(|arm| option_payload(&arm.body, env)),
         Expr::Path(path) => {
             let segment = path.path.segments.last()?;
             // `None::<T>`, the payload is the turbofish.
@@ -131,16 +183,20 @@ pub(super) fn option_payload(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
             }
             // A bare name the program declared as `let opt: Option<T>`.
             match env.lookup(&segment.ident.to_string()) {
-                Some(ScalarTy::Opt(payload)) => Some((**payload).clone()),
+                Some(ScalarTy::Opt(payload)) => Some(*payload),
                 _ => None,
             }
         }
-        // `Some(x)`, the payload is whatever `x` is.
+        // `Some(x)`, the payload is whatever `x` is. `<Option<T>>::default()`
+        // and `Option::<T>::default()` write the payload in the type.
         Expr::Call(call) => {
             let Expr::Path(path) = &*call.func else {
                 return None;
             };
             let last = path.path.segments.last()?;
+            if last.ident == "default" {
+                return default_call_payload(path);
+            }
             (last.ident == "Some")
                 .then(|| call.args.first().and_then(|a| written_ty(a, env)))
                 .flatten()
@@ -214,7 +270,7 @@ pub(super) fn option_payload(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
             // The accessors and the reductions all answer one item of what
             // the receiver holds. A keyed reduction's argument only decides
             // which item, not what type it is.
-            "first" | "last" | "pop" | "next" | "reduce" | "min_by_key" | "max_by_key" => {
+            "first" | "last" | "pop" | "next" | "nth" | "reduce" | "min_by_key" | "max_by_key" => {
                 element_ty(&call.receiver, env)
             }
             "min" | "max" if call.args.is_empty() => element_ty(&call.receiver, env),
@@ -234,6 +290,44 @@ pub(super) fn option_payload(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
     }
 }
 
+/// The type a block's value states, read with `read`. A tail that names a
+/// local the block itself declared answers through that `let`, its
+/// annotation first and its init otherwise, so two blocks that reuse one
+/// name never read each other's type.
+fn block_value(
+    block: &syn::Block,
+    env: &TyEnv,
+    read: fn(&Expr, &TyEnv) -> Option<ScalarTy>,
+) -> Option<ScalarTy> {
+    let tail = block_tail(block)?;
+    let inner = env.with_block(block);
+    read(tail, &inner)
+}
+
+/// The `let` of this block that binds the bare name `tail` is, the last one
+/// when the name is declared twice.
+pub(super) fn block_let<'b>(block: &'b syn::Block, tail: &Expr) -> Option<&'b syn::Local> {
+    let Expr::Path(path) = tail else {
+        return None;
+    };
+    block_let_named(block, &path.path.get_ident()?.to_string())
+}
+
+/// The `let` of this block that binds `name`, the last one when the name
+/// is declared twice.
+fn block_let_named<'b>(block: &'b syn::Block, name: &str) -> Option<&'b syn::Local> {
+    block.stmts.iter().rev().find_map(|stmt| match stmt {
+        syn::Stmt::Local(local) => {
+            let pat = match &local.pat {
+                syn::Pat::Type(t) => &*t.pat,
+                other => other,
+            };
+            matches!(pat, syn::Pat::Ident(id) if id.ident == name).then_some(local)
+        }
+        _ => None,
+    })
+}
+
 /// The tail expression of a block, when the block ends in one.
 fn block_tail(block: &syn::Block) -> Option<&Expr> {
     match block.stmts.last()? {
@@ -250,7 +344,7 @@ fn element_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
     match expr {
         Expr::Paren(inner) => element_ty(&inner.expr, env),
         Expr::Group(inner) => element_ty(&inner.expr, env),
-        Expr::Block(block) => block_tail(&block.block).and_then(|e| element_ty(e, env)),
+        Expr::Block(block) => block_value(&block.block, env, element_ty),
         // `(a..b)` iterates whatever its ends are, so either end that states
         // its own type answers for the range.
         Expr::Range(range) => range
@@ -266,12 +360,13 @@ fn element_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                     .as_ref()
                     .and_then(|(_, e)| element_ty(e, env))
             }),
+        Expr::Match(m) => m.arms.iter().find_map(|arm| element_ty(&arm.body, env)),
         // A bare name the program declared as `let v: Vec<T>` or
         // `let s: HashSet<T>`, both of which iterate their element type.
         Expr::Path(path) => {
             let segment = path.path.segments.last()?;
             match env.lookup(&segment.ident.to_string()) {
-                Some(ScalarTy::List(element) | ScalarTy::Set(element)) => Some((**element).clone()),
+                Some(ScalarTy::List(element) | ScalarTy::Set(element)) => Some(*element),
                 _ => None,
             }
         }
@@ -336,6 +431,12 @@ fn element_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
     }
 }
 
+/// The stated element type of a sequence, for the callers outside this
+/// module that only need that one answer.
+pub(super) fn element_of(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
+    element_ty(expr, env)
+}
+
 /// The stated element type of a `vec![..]` literal, from the first element
 /// that states one. The repeat form `vec![x; n]` answers through `x`.
 fn vec_macro_element(mac: &syn::Macro, env: &TyEnv) -> Option<ScalarTy> {
@@ -386,7 +487,7 @@ pub(super) fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
         Expr::Group(inner) => written_ty(&inner.expr, env),
         // A block answers through its tail expression, which is how a
         // `({ let mut m: HashMap<K, V> = ...; m })` vec element states itself.
-        Expr::Block(block) => block_tail(&block.block).and_then(|e| written_ty(e, env)),
+        Expr::Block(block) => block_value(&block.block, env, written_ty),
         // An if-else answers through whichever branch states its type, so
         // `then_some(if flag { '9' } else { c })` knows it holds a char.
         Expr::If(sel) => block_tail(&sel.then_branch)
@@ -396,26 +497,10 @@ pub(super) fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                     .as_ref()
                     .and_then(|(_, e)| written_ty(e, env))
             }),
+        Expr::Match(m) => m.arms.iter().find_map(|arm| written_ty(&arm.body, env)),
         // `value as u8` names the type at the cast.
         Expr::Cast(cast) => ScalarTy::lower(&cast.ty),
-        // Arithmetic keeps its operands' type, so either side that states it
-        // answers, `(x as i8) / (y as i8)` for one. A comparison is a bool.
-        Expr::Binary(bin) => {
-            use syn::BinOp::{
-                Add, And, BitAnd, BitOr, BitXor, Div, Eq, Ge, Gt, Le, Lt, Mul, Ne, Or, Rem, Shl,
-                Shr, Sub,
-            };
-            match bin.op {
-                Add(_) | Sub(_) | Mul(_) | Div(_) | Rem(_) | BitAnd(_) | BitOr(_) | BitXor(_) => {
-                    written_ty(&bin.left, env).or_else(|| written_ty(&bin.right, env))
-                }
-                Shl(_) | Shr(_) => written_ty(&bin.left, env),
-                Eq(_) | Ne(_) | Lt(_) | Le(_) | Gt(_) | Ge(_) | And(_) | Or(_) => {
-                    Some(ScalarTy::Bool)
-                }
-                _ => None,
-            }
-        }
+        Expr::Binary(bin) => binary_written_ty(bin, env),
         Expr::Unary(un) => match un.op {
             syn::UnOp::Neg(_) | syn::UnOp::Not(_) => written_ty(&un.expr, env),
             _ => None,
@@ -454,6 +539,14 @@ pub(super) fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
         {
             turbofish_scalar(call.turbofish.as_ref())
         }
+        // `concat` of nested vecs answers the inner vec, of strings a string.
+        Expr::MethodCall(call) if call.method == "concat" => {
+            match element_ty(&call.receiver, env) {
+                Some(ScalarTy::List(inner)) => Some(ScalarTy::List(inner)),
+                Some(ScalarTy::Str) => Some(ScalarTy::Str),
+                _ => None,
+            }
+        }
         // A fold answers in its init's type, which the accumulator keeps
         // through every step, so `it.fold(0u8, ..).checked_mul(..)` knows
         // its payload width even when the chain runs through a `map`.
@@ -481,6 +574,8 @@ pub(super) fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                 Some(ScalarTy::List(Box::new(element)))
             } else if let Some(container) = container_new_ty(expr) {
                 Some(container)
+            } else if let Some(qualified) = qualified_ctor_ty(expr) {
+                Some(qualified)
             } else if is_string_call(expr) {
                 Some(ScalarTy::Str)
             } else if let Expr::Path(path) = expr
@@ -489,7 +584,7 @@ pub(super) fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
             {
                 // A bare name the program declared with any scalar
                 // annotation, `let x: u16` included.
-                Some(declared.clone())
+                Some(declared)
             } else {
                 fn_return_ty(expr, env)
             }
@@ -497,6 +592,22 @@ pub(super) fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
         Expr::Macro(mac) if mac.mac.path.is_ident("vec") => Some(ScalarTy::List(Box::new(
             vec_macro_element(&mac.mac, env).unwrap_or(ScalarTy::Other),
         ))),
+        _ => None,
+    }
+}
+
+/// Arithmetic keeps its operands' type, so either side that states it
+/// answers, `(x as i8) / (y as i8)` for one. A comparison is a bool.
+fn binary_written_ty(bin: &syn::ExprBinary, env: &TyEnv) -> Option<ScalarTy> {
+    use syn::BinOp::{
+        Add, And, BitAnd, BitOr, BitXor, Div, Eq, Ge, Gt, Le, Lt, Mul, Ne, Or, Rem, Shl, Shr, Sub,
+    };
+    match bin.op {
+        Add(_) | Sub(_) | Mul(_) | Div(_) | Rem(_) | BitAnd(_) | BitOr(_) | BitXor(_) => {
+            written_ty(&bin.left, env).or_else(|| written_ty(&bin.right, env))
+        }
+        Shl(_) | Shr(_) => written_ty(&bin.left, env),
+        Eq(_) | Ne(_) | Lt(_) | Le(_) | Gt(_) | Ge(_) | And(_) | Or(_) => Some(ScalarTy::Bool),
         _ => None,
     }
 }
@@ -541,7 +652,7 @@ fn vec_new_element(expr: &Expr) -> Option<ScalarTy> {
     };
     let mut segments = path.path.segments.iter().rev();
     let last = segments.next()?;
-    if last.ident != "new" {
+    if !is_ctor(&last.ident) {
         return None;
     }
     let container = segments.next()?;
@@ -565,7 +676,7 @@ fn container_new_ty(expr: &Expr) -> Option<ScalarTy> {
     };
     let mut segments = path.path.segments.iter().rev();
     let last = segments.next()?;
-    if last.ident != "new" {
+    if !is_ctor(&last.ident) {
         return None;
     }
     let container = segments.next()?;
@@ -579,18 +690,46 @@ fn container_new_ty(expr: &Expr) -> Option<ScalarTy> {
     ScalarTy::lower_segment(container)
 }
 
+/// A constructor that builds an empty or sized container of the named type.
+fn is_ctor(name: &syn::Ident) -> bool {
+    name == "new" || name == "default" || name == "with_capacity"
+}
+
+/// `<Vec<Vec<f64>>>::default()`, the type written in the qualified path.
+fn qualified_ctor_ty(expr: &Expr) -> Option<ScalarTy> {
+    let Expr::Call(call) = expr else {
+        return None;
+    };
+    let Expr::Path(path) = &*call.func else {
+        return None;
+    };
+    let qself = path.qself.as_ref()?;
+    if !is_ctor(&path.path.segments.last()?.ident) {
+        return None;
+    }
+    ScalarTy::lower(&qself.ty)
+}
+
 /// The value type of an expression that syntactically builds a map, for the
 /// `map.get(k)` payload, read as literally as `element_ty`.
 fn map_value_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
     match expr {
         Expr::Paren(inner) => map_value_ty(&inner.expr, env),
         Expr::Group(inner) => map_value_ty(&inner.expr, env),
-        Expr::Block(block) => block_tail(&block.block).and_then(|e| map_value_ty(e, env)),
+        Expr::Block(block) => block_value(&block.block, env, map_value_ty),
+        Expr::If(sel) => block_tail(&sel.then_branch)
+            .and_then(|e| map_value_ty(e, env))
+            .or_else(|| {
+                sel.else_branch
+                    .as_ref()
+                    .and_then(|(_, e)| map_value_ty(e, env))
+            }),
+        Expr::Match(m) => m.arms.iter().find_map(|arm| map_value_ty(&arm.body, env)),
         // A bare name the program declared as `let m: HashMap<K, V>`.
         Expr::Path(path) => {
             let segment = path.path.segments.last()?;
             match env.lookup(&segment.ident.to_string()) {
-                Some(ScalarTy::Map(value)) => Some((**value).clone()),
+                Some(ScalarTy::Map(value)) => Some(*value),
                 _ => None,
             }
         }

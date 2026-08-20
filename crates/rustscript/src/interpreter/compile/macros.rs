@@ -8,7 +8,11 @@ use syn::{Expr, Lit};
 
 use crate::interpreter::bytecode::{BinKind, Const, FmtSpec, MacroKind, Op, PathRef, Reg};
 
-use super::{Compiler, inline_holes, parse_exprs, parse_matches, parse_vec_repeat};
+use super::expr::{takes_numeric_hint, unconstrained_int};
+use super::{
+    Compiler, NumericTy, inline_holes, numeric_target, parse_exprs, parse_matches, parse_vec_repeat,
+};
+use crate::interpreter::numeric::IntWidth;
 
 impl Compiler<'_> {
     pub(super) fn compile_macro(&mut self, mac: &syn::Macro, dst: Reg) -> Result<()> {
@@ -241,13 +245,22 @@ impl Compiler<'_> {
     }
 
     pub(super) fn compile_vec_macro(&mut self, dst: Reg, mac: &syn::Macro) -> Result<()> {
+        let elem_ty = self.vec_hints.remove(&std::ptr::from_ref(mac));
         if let Ok(rep) = mac.parse_body_with(parse_vec_repeat) {
+            if let Some(ty) = &elem_ty {
+                self.offer_literal_hints(ty, &rep.0);
+            }
             let val = self.compile_expr(&rep.0)?;
             let count = self.compile_expr(&rep.1)?;
             self.emit(Op::MakeArrayRepeat { dst, val, count });
             return Ok(());
         }
         let exprs = parse_exprs(mac)?;
+        if let Some(ty) = &elem_ty {
+            for expr in &exprs {
+                self.offer_literal_hints(ty, expr);
+            }
+        }
         let base = self.compile_args(exprs.iter())?;
         self.emit(Op::MakeVec {
             dst,
@@ -298,15 +311,34 @@ impl Compiler<'_> {
         let mut positional = Vec::new();
         let mut named: Vec<(String, Reg)> = Vec::new();
         for arg in iter {
+            let value = match arg {
+                Expr::Assign(a) if matches!(&*a.left, Expr::Path(p) if p.path.get_ident().is_some()) => {
+                    &*a.right
+                }
+                other => other,
+            };
+            // A format argument made only of bare literals has no other
+            // use to type it, so it is the `i32` rustc falls back to, and
+            // `{:x}` of a negative one shows eight digits, not sixteen. One
+            // that states its type in a branch types its bare literals too.
+            let target = if unconstrained_int(value) {
+                Some(NumericTy::Int(IntWidth::I32))
+            } else {
+                self.stated_ty(value).as_ref().and_then(numeric_target)
+            };
+            if let Some(target) = target
+                && takes_numeric_hint(value)
+            {
+                self.numeric_hints.insert(std::ptr::from_ref(value), target);
+            }
+            let r = self.compile_expr(value)?;
             if let Expr::Assign(a) = arg
                 && let Expr::Path(p) = &*a.left
                 && let Some(n) = p.path.get_ident()
             {
-                let r = self.compile_expr(&a.right)?;
                 named.push((n.to_string(), r));
                 continue;
             }
-            let r = self.compile_expr(arg)?;
             positional.push(r);
         }
         // Inline identifiers referenced in the template but not given explicitly.

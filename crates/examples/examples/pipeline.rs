@@ -12,4 +12,28 @@ fn main() {
     let any_long = names.iter().any(|n| n.len() > 4);
     let all_short = names.iter().all(|n| n.len() < 10);
     println!("any long: {any_long}, all short: {all_short}");
+
+    // `zip` pairs until the shorter side ends, `chain` runs one after the
+    // other, and both stay lazy under `take`.
+    let ages = [31, 27];
+    let paired: Vec<(String, i32)> = names
+        .iter()
+        .zip(ages.iter())
+        .map(|(name, age)| (name.to_string(), *age))
+        .collect();
+    println!("{paired:?}");
+    let joined: Vec<i64> = nums
+        .iter()
+        .copied()
+        .chain(100..103)
+        .filter(|n| n % 2 == 1)
+        .collect();
+    println!("{joined:?}");
+    let indexed: Vec<(usize, char)> = (0..).zip("rust".chars()).take(3).collect();
+    println!("{indexed:?}");
+    let empty: Vec<(i64, i64)> = Vec::<i64>::new()
+        .into_iter()
+        .zip(Vec::<i64>::new())
+        .collect();
+    println!("{empty:?}");
 }

@@ -319,13 +319,22 @@ fn writer_native_method(handle: &Handle, method: &MethodName, args: &mut [Value]
         // The formatter buffer of a user `fmt` impl. `write!` lowers to
         // `write_all`, and `f.write_str(..)` is the same append. The answer
         // is `fmt::Result`, which `?` in the impl body unwraps.
-        BuiltinId::WriteAll | BuiltinId::Write | BuiltinId::WriteStr | BuiltinId::WriteFmt
-            if matches!(&*handle.lock(), Native::Fmt(_)) =>
+        BuiltinId::WriteAll
+        | BuiltinId::Write
+        | BuiltinId::WriteStr
+        | BuiltinId::WriteFmt
+        | BuiltinId::Pad
+            if matches!(&*handle.lock(), Native::Fmt { .. }) =>
         {
             let text = args.first().map(Value::display).unwrap_or_default();
             let mut h = handle.lock();
-            if let Native::Fmt(buffer) = &mut *h {
+            if let Native::Fmt {
+                text: buffer,
+                padded,
+            } = &mut *h
+            {
                 buffer.push_str(&text);
+                *padded |= method.id == BuiltinId::Pad;
             }
             return Some(Value::ok(Value::Unit));
         }

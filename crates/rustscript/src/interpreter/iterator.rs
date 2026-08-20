@@ -78,6 +78,17 @@ pub enum IteratorState {
         source: RsStr,
         offset: usize,
     },
+    /// `a.zip(b)`, pairs until either side ends.
+    Zip {
+        left: Handle,
+        right: Handle,
+    },
+    /// `a.chain(b)`, the right side once the left is spent.
+    Chain {
+        left: Handle,
+        right: Handle,
+        left_done: bool,
+    },
     Map {
         source: Handle,
         closure: Arc<ClosureData>,
@@ -101,6 +112,12 @@ pub enum IteratorState {
     Skip {
         source: Handle,
         remaining: usize,
+    },
+    /// `step_by`: the first item, then every `step`th one.
+    StepBy {
+        source: Handle,
+        step: usize,
+        first: bool,
     },
     TakeWhile {
         source: Handle,
@@ -128,8 +145,13 @@ enum Step {
     Filter(Handle, Arc<ClosureData>),
     FilterMap(Handle, Arc<ClosureData>),
     Enumerate(Handle, usize),
+    Zip(Handle, Handle),
+    /// The right side is pulled only once the left answered `None`, which
+    /// the state remembers so the left is never asked again.
+    Chain(Handle, Handle, bool),
     Take(Handle),
     Skip(Handle, usize),
+    Stride(Handle, usize),
     TakeWhile(Handle, Arc<ClosureData>),
     SkipWhile(Handle, Arc<ClosureData>, bool),
 }
@@ -278,6 +300,43 @@ impl IteratorState {
         })
     }
 
+    /// The adaptors with their own state: a stride, a predicate that ends
+    /// or starts the stream, and a peek buffer.
+    fn step_adaptor(&mut self) -> Step {
+        match self {
+            IteratorState::StepBy {
+                source,
+                step,
+                first,
+            } => {
+                let skip = if *first { 0 } else { *step - 1 };
+                *first = false;
+                Step::Stride(source.clone(), skip)
+            }
+            IteratorState::TakeWhile {
+                source,
+                closure,
+                done,
+            } => {
+                if *done {
+                    Step::Ready(None)
+                } else {
+                    Step::TakeWhile(source.clone(), closure.clone())
+                }
+            }
+            IteratorState::SkipWhile {
+                source,
+                closure,
+                skipping,
+            } => Step::SkipWhile(source.clone(), closure.clone(), *skipping),
+            IteratorState::Peekable { source, buffered } => match buffered.take() {
+                Some(item) => Step::Ready(Some(item)),
+                None => Step::Take(source.clone()),
+            },
+            _ => unreachable!("step_adaptor handles the stateful adaptors only"),
+        }
+    }
+
     fn step(&mut self) -> Step {
         match self {
             IteratorState::UserNext { value } => Step::User(value.clone()),
@@ -340,6 +399,12 @@ impl IteratorState {
                 *index += 1;
                 Step::Enumerate(source.clone(), current)
             }
+            IteratorState::Zip { left, right } => Step::Zip(left.clone(), right.clone()),
+            IteratorState::Chain {
+                left,
+                right,
+                left_done,
+            } => Step::Chain(left.clone(), right.clone(), *left_done),
             IteratorState::Take { source, remaining } => {
                 if *remaining == 0 {
                     Step::Ready(None)
@@ -353,26 +418,7 @@ impl IteratorState {
                 *remaining = 0;
                 Step::Skip(source.clone(), count)
             }
-            IteratorState::TakeWhile {
-                source,
-                closure,
-                done,
-            } => {
-                if *done {
-                    Step::Ready(None)
-                } else {
-                    Step::TakeWhile(source.clone(), closure.clone())
-                }
-            }
-            IteratorState::SkipWhile {
-                source,
-                closure,
-                skipping,
-            } => Step::SkipWhile(source.clone(), closure.clone(), *skipping),
-            IteratorState::Peekable { source, buffered } => match buffered.take() {
-                Some(item) => Step::Ready(Some(item)),
-                None => Step::Take(source.clone()),
-            },
+            other => other.step_adaptor(),
         }
     }
 }
@@ -537,6 +583,49 @@ impl Vm {
         })
     }
 
+    /// Drop `count` items, then answer the next one, `None` as soon as the
+    /// source runs dry.
+    fn skip_then_next(self: &Arc<Self>, source: &Handle, count: usize) -> Result<Option<Value>> {
+        for _ in 0..count {
+            if self.iterator_next(source)?.is_none() {
+                return Ok(None);
+            }
+        }
+        self.iterator_next(source)
+    }
+
+    /// One pair from a `zip`, `None` once either side is spent.
+    fn zip_next(self: &Arc<Self>, left: &Handle, right: &Handle) -> Result<Option<Value>> {
+        let Some(first) = self.iterator_next(left)? else {
+            return Ok(None);
+        };
+        let Some(second) = self.iterator_next(right)? else {
+            return Ok(None);
+        };
+        Ok(Some(Value::tuple(vec![first, second])))
+    }
+
+    /// The next item of a `chain`: the left side until it answers `None`,
+    /// which the state remembers, then the right.
+    fn chain_next(
+        self: &Arc<Self>,
+        iterator: &Handle,
+        left: &Handle,
+        right: &Handle,
+        left_done: bool,
+    ) -> Result<Option<Value>> {
+        if !left_done {
+            if let Some(value) = self.iterator_next(left)? {
+                return Ok(Some(value));
+            }
+            if let Native::Iterator(IteratorState::Chain { left_done, .. }) = &mut *iterator.lock()
+            {
+                *left_done = true;
+            }
+        }
+        self.iterator_next(right)
+    }
+
     pub(super) fn iterator_next(self: &Arc<Self>, iterator: &Handle) -> Result<Option<Value>> {
         if matches!(&*iterator.lock(), Native::Lines(_)) {
             return Ok(lines_next(iterator));
@@ -580,14 +669,13 @@ impl Vm {
             Step::Enumerate(source, index) => Ok(self
                 .iterator_next(&source)?
                 .map(|value| Value::tuple(vec![Value::Int(usize_i64(index)), value]))),
+            Step::Zip(left, right) => self.zip_next(&left, &right),
+            Step::Chain(left, right, left_done) => {
+                self.chain_next(iterator, &left, &right, left_done)
+            }
             Step::Take(source) => self.iterator_next(&source),
-            Step::Skip(source, count) => {
-                for _ in 0..count {
-                    if self.iterator_next(&source)?.is_none() {
-                        return Ok(None);
-                    }
-                }
-                self.iterator_next(&source)
+            Step::Stride(source, count) | Step::Skip(source, count) => {
+                self.skip_then_next(&source, count)
             }
             Step::TakeWhile(source, closure) => {
                 let Some(value) = self.iterator_next(&source)? else {
@@ -697,6 +785,34 @@ impl Vm {
     /// The builtin methods of a lazy iterator value: the adaptors that wrap
     /// it and the reducers that drain it. `None` for a name that is not one
     /// of them.
+    /// `a.zip(b)` or `a.chain(b)`, `b` any value that iterates.
+    fn zip_or_chain(
+        self: &Arc<Self>,
+        iterator: &Handle,
+        method: &MethodName,
+        args: &[Value],
+    ) -> Result<Value> {
+        let other = args
+            .first()
+            .cloned()
+            .ok_or_else(|| anyhow!("{} takes an iterator", method.text))?;
+        let Value::Native(right) = self.iterator_value(other)? else {
+            bail!("{} takes an iterator", method.text);
+        };
+        Ok(if method.id == BuiltinId::Zip {
+            wrap(IteratorState::Zip {
+                left: iterator.clone(),
+                right,
+            })
+        } else {
+            wrap(IteratorState::Chain {
+                left: iterator.clone(),
+                right,
+                left_done: false,
+            })
+        })
+    }
+
     pub(super) fn iterator_method(
         self: &Arc<Self>,
         iterator: &Handle,
@@ -709,6 +825,7 @@ impl Vm {
                 source: iterator.clone(),
                 index: 0,
             }),
+            BuiltinId::Zip | BuiltinId::Chain => self.zip_or_chain(iterator, method, args)?,
             BuiltinId::Take => wrap(IteratorState::Take {
                 source: iterator.clone(),
                 remaining: usize::try_from(int_arg(args)?)?,
@@ -717,6 +834,17 @@ impl Vm {
                 source: iterator.clone(),
                 remaining: usize::try_from(int_arg(args)?)?,
             }),
+            BuiltinId::StepBy => {
+                let step = usize::try_from(int_arg(args)?)?;
+                if step == 0 {
+                    bail!("assertion failed: step != 0");
+                }
+                wrap(IteratorState::StepBy {
+                    source: iterator.clone(),
+                    step,
+                    first: true,
+                })
+            }
             BuiltinId::Peekable => wrap(IteratorState::Peekable {
                 source: iterator.clone(),
                 buffered: None,
@@ -730,6 +858,17 @@ impl Vm {
             BuiltinId::Next => self
                 .iterator_next(iterator)?
                 .map_or_else(Value::none, Value::some),
+            BuiltinId::Nth => {
+                let index = usize::try_from(int_arg(args)?)?;
+                let mut item = None;
+                for _ in 0..=index {
+                    item = self.iterator_next(iterator)?;
+                    if item.is_none() {
+                        break;
+                    }
+                }
+                item.map_or_else(Value::none, Value::some)
+            }
             BuiltinId::Peek => match self.peek(iterator)? {
                 Some(v) => v,
                 None => return Ok(None),
@@ -878,6 +1017,13 @@ impl Vm {
                 }
                 Value::vec(output)
             }
+            BuiltinId::Flatten => {
+                let mut output = Vec::new();
+                while let Some(value) = self.iterator_next(iterator)? {
+                    output.extend(self.drain_items(value)?);
+                }
+                Value::vec(output)
+            }
             BuiltinId::Partition => {
                 let closure = closure(0)?;
                 let (mut yes, mut no) = (Vec::new(), Vec::new());
@@ -949,12 +1095,21 @@ impl Vm {
         let mut floats = 1f64;
         let mut has_float = false;
         let mut has_int = false;
-        let (low, high) = match target {
+        let (mut low, mut high) = match target {
             Some(ScalarTy::Int(width)) => (width.min(), width.max()),
             _ => (i128::from(i64::MIN), i128::from(i64::MAX)),
         };
+        let mut bounded = matches!(target, Some(ScalarTy::Int(_)));
+        let mut seen_width = None;
         while let Some(value) = self.iterator_next(iterator)? {
-            if let Some((value, _)) = value.int_parts() {
+            if let Some((value, width)) = value.int_parts() {
+                // The elements say the width when the call wrote none, see
+                // `sum_values`.
+                if !bounded {
+                    (low, high) = (width.min(), width.max());
+                    bounded = true;
+                    seen_width = Some(width);
+                }
                 has_int = true;
                 integers = integers
                     .checked_mul(value)
@@ -988,6 +1143,8 @@ impl Vm {
             // on it computes at that width. An untagged result made
             // `product::<u16>().checked_mul(..)` miss its overflow.
             Value::int_of_width(integers, *width)
+        } else if let Some(width) = seen_width {
+            Value::int_of_width(integers, width)
         } else {
             Value::Int(i64::try_from(integers).expect("product is range-checked per step"))
         })
@@ -1069,14 +1226,22 @@ pub(super) fn sum_values(items: Vec<Value>, target: Option<&ScalarTy>) -> Result
     // zeros keeps the sign.
     let mut floats = -0.0f64;
     let mut has_float = false;
-    // Without a target the sum is a plain i64 and overflows at its bounds,
-    // which is what an untyped `sum()` has always done.
-    let (low, high) = match target {
+    // Without a target the elements say the width: real Rust only sums a
+    // `u8` iterator into a `u8`, so the first tagged element's width is the
+    // sum's, and an untagged i64 element keeps the i64 bounds.
+    let (mut low, mut high) = match target {
         Some(ScalarTy::Int(width)) => (width.min(), width.max()),
         _ => (i128::from(i64::MIN), i128::from(i64::MAX)),
     };
+    let mut bounded = matches!(target, Some(ScalarTy::Int(_)));
+    let mut seen_width = None;
     for value in items {
-        if let Some((value, _)) = value.int_parts() {
+        if let Some((value, width)) = value.int_parts() {
+            if !bounded {
+                (low, high) = (width.min(), width.max());
+                bounded = true;
+                seen_width = Some(width);
+            }
             integers = integers
                 .checked_add(value)
                 .ok_or_else(|| anyhow!("attempt to add with overflow"))?;
@@ -1115,6 +1280,8 @@ pub(super) fn sum_values(items: Vec<Value>, target: Option<&ScalarTy>) -> Result
         // The sum carries the element width, so a later `!` or shift on it
         // computes at that width. An untagged zero made `!0u16` answer -1.
         Value::int_of_width(integers, *width)
+    } else if let Some(width) = seen_width {
+        Value::int_of_width(integers, width)
     } else {
         Value::Int(i64::try_from(integers).expect("sum is range-checked per step"))
     })

@@ -13,16 +13,16 @@ use syn::punctuated::Punctuated;
 use syn::{BinOp, Block, Expr, FnArg, Lit, Pat, UnOp};
 
 use super::bytecode::{
-    BinKind, BuiltinId, CapSource, Chunk, Const, EnumVariant, FmtSpec, Member, MethodName, NO_ATOM,
-    Op, PatInfo, PathRef, Reg, ScalarTy, StructLit,
+    BinKind, BuiltinId, CapSource, Chunk, Const, DefaultIr, EnumVariant, FmtSpec, Member,
+    MethodName, NO_ATOM, NO_CONV, Op, PatInfo, PathRef, Reg, ScalarTy, StructLit, StructShape,
 };
 use super::enum_def::EnumDef;
 use super::numeric::IntWidth;
 use super::resolver::{Res, Resolver};
 use super::typeir::{CastIr, TypeIr, lower_cast, lower_type};
 use expr::{
-    annotation_scalar, collect_return_target, returned_collects, returned_from_strs,
-    returned_json_type,
+    annotation_scalar, collect_return_target, returned_collects, returned_exprs,
+    returned_from_strs, returned_json_type,
 };
 
 /// Program level facts the compiler needs, filled before any body is compiled.
@@ -43,6 +43,12 @@ pub struct Ctx<'r> {
     /// says so. A name defined more than once with differing returns is
     /// absent, since the call site cannot tell which one it reaches.
     pub fn_returns: &'r HashMap<String, ScalarTy>,
+    /// The full written return type of each uniquely named function, the
+    /// source `written_type` reads a helper call's type from.
+    pub fn_return_types: &'r HashMap<String, syn::Type>,
+    /// The whole signature of each uniquely named function, for a generic
+    /// helper whose return type is a parameter its arguments state.
+    pub fn_signatures: &'r HashMap<String, syn::Signature>,
     /// Names of user methods any impl declares with a `&mut self` receiver.
     /// A call to one of these compiles its receiver as a place, split from
     /// value sharing first, so the mutation stays private to the receiver.
@@ -70,6 +76,11 @@ struct FnState {
     struct_lits: Vec<StructLit>,
     enum_variants: Vec<EnumVariant>,
     casts: Vec<CastIr>,
+    defaults: Vec<DefaultIr>,
+    try_targets: Vec<Arc<str>>,
+    /// The user error type of this function's `Result` return, the target
+    /// a `?` converts into through `From`.
+    ret_error: Option<Arc<str>>,
     coerces: Vec<TypeIr>,
     paths: Vec<PathRef>,
     names: Vec<MethodName>,
@@ -117,6 +128,9 @@ impl FnState {
             pats: Vec::new(),
             fmts: Vec::new(),
             struct_lits: Vec::new(),
+            defaults: Vec::new(),
+            try_targets: Vec::new(),
+            ret_error: None,
             enum_variants: Vec::new(),
             casts: Vec::new(),
             coerces: Vec::new(),
@@ -222,6 +236,7 @@ impl FnState {
             param_types: self.param_types,
             name: self.name,
             module: 0,
+            moves: false,
             consts: self.consts,
             members: self.members,
             pats: self.pats,
@@ -229,6 +244,8 @@ impl FnState {
             struct_lits: self.struct_lits,
             enum_variants: self.enum_variants,
             casts: self.casts,
+            defaults: self.defaults,
+            try_targets: self.try_targets,
             coerces: self.coerces,
             paths: self.paths,
             names: self.names,
@@ -327,12 +344,42 @@ pub struct Compiler<'a> {
     /// A `let x: T = ...unwrap_or_default()` annotation waiting to attach to
     /// that exact call, naming the payload the default is built from.
     pub(super) default_let: Option<(*const syn::ExprMethodCall, ScalarTy)>,
+    /// A bare `Default::default()` call and the type its context states: a
+    /// `let` annotation, a struct field, or the struct a `..Default::default()`
+    /// completes. Keyed by address like the hints above.
+    pub(super) default_calls: HashMap<*const syn::ExprCall, DefaultIr>,
     /// Declared types of locals annotated `Option<T>`, `Result<T, _>`, or
     /// `Vec<T>`, as `Opt(T)` or `List(T)`, so `opt.unwrap_or_default()` and
     /// `v.get(i).cloned().unwrap_or_default()` can build the right default
     /// from the type the binding was declared with. Only ever read to pick a
     /// `Default`.
     pub(super) typed_locals: HashMap<String, ScalarTy>,
+    /// The full annotation of every annotated local, for `written_type`.
+    pub(super) typed_local_types: HashMap<String, syn::Type>,
+    /// A `let x: T = ...unwrap_or_default()` annotation as written, waiting
+    /// to attach to that exact call.
+    pub(super) default_let_ty: Option<(*const syn::ExprMethodCall, syn::Type)>,
+    /// A `let x: T = ...sum()` or `...product()` annotation waiting to attach
+    /// to that exact call, the width the reduction runs in.
+    pub(super) reduce_let: Option<(*const syn::ExprMethodCall, ScalarTy)>,
+    /// A `let x: T = v.into()` annotation naming the user type whose `From`
+    /// impl the call goes through.
+    pub(super) into_let: Option<(*const syn::ExprMethodCall, Arc<str>)>,
+    /// Every bare `sum`, `product`, or `unwrap_or_default` whose value the
+    /// current function hands back, mapped to the declared return type. The
+    /// signature is the third place that type is knowable, after a turbofish
+    /// and an annotated `let`.
+    pub(super) return_tails: HashMap<*const syn::ExprMethodCall, syn::Type>,
+    /// Expressions an annotation types ahead of their compilation, keyed by
+    /// address: the tails of the branches, blocks, and arms an annotated
+    /// `let` init is made of, and the elements of a `vec![..]` under a
+    /// `Vec<u8>` annotation. A bare literal there adopts the width instead
+    /// of existing as an i64 first.
+    pub(super) numeric_hints: HashMap<*const Expr, NumericTy>,
+    /// A `vec![..]` whose element type an annotation states. Its body is
+    /// parsed only when it compiles, so the hint waits on the macro itself
+    /// and is handed to the elements then.
+    pub(super) vec_hints: HashMap<*const syn::Macro, syn::Type>,
     /// One shape per distinct literal layout in this compiler, so every
     /// instance of the same struct shares one arc and shape identity means
     /// layout identity, which the scalar plan's member slot cache keys on.
@@ -362,7 +409,15 @@ impl<'a> Compiler<'a> {
             json_tails: HashMap::new(),
             option_result: None,
             default_let: None,
+            default_calls: HashMap::new(),
             typed_locals: HashMap::new(),
+            typed_local_types: HashMap::new(),
+            default_let_ty: None,
+            reduce_let: None,
+            into_let: None,
+            return_tails: HashMap::new(),
+            numeric_hints: HashMap::new(),
+            vec_hints: HashMap::new(),
             shapes: Vec::new(),
         }
     }
@@ -469,6 +524,8 @@ impl<'a> Compiler<'a> {
                 .map(|call| (call, target))
                 .collect();
         }
+        let outer_return_tails = take(&mut self.return_tails);
+        self.install_return_hints(&sig.output, block);
         // The same for a `from_str` the body hands back, whose target is the
         // payload of the return type rather than a `let` annotation.
         let outer_json_tails = std::mem::take(&mut self.json_tails);
@@ -483,6 +540,7 @@ impl<'a> Compiler<'a> {
         let res = self.compile_block(block, ret);
         self.collect_tails = outer_collect_tails;
         self.json_tails = outer_json_tails;
+        self.return_tails = outer_return_tails;
         res?;
         if let Some(idx) = self.cur().ret_cast {
             self.emit(Op::Cast {
@@ -641,6 +699,16 @@ impl<'a> Compiler<'a> {
     }
 
     fn add_name_with(&mut self, name: String, scalar: Option<ScalarTy>) -> u16 {
+        self.add_name_full(name, scalar, None, false)
+    }
+
+    fn add_name_full(
+        &mut self,
+        name: String,
+        scalar: Option<ScalarTy>,
+        default: Option<DefaultIr>,
+        place: bool,
+    ) -> u16 {
         let bare = name.strip_prefix("r#").unwrap_or(&name);
         let id = BuiltinId::resolve(bare);
         let atom = self.ctx.method_atoms.get(bare).copied().unwrap_or(NO_ATOM);
@@ -650,6 +718,8 @@ impl<'a> Compiler<'a> {
             atom,
             text: name,
             scalar,
+            default: default.map(Arc::new),
+            place,
         });
         idx16(f.names.len() - 1)
     }
@@ -1019,7 +1089,7 @@ fn bin_kind(op: &BinOp) -> Option<BinKind> {
 
 /// The two float widths, used when a `let` annotation types a bare literal.
 #[derive(Clone, Copy, Eq, PartialEq)]
-enum FloatTy {
+pub(super) enum FloatTy {
     F32,
     F64,
 }
@@ -1028,9 +1098,19 @@ enum FloatTy {
 /// only place a bare literal's width can come from, and a non-literal init
 /// retags through a runtime cast, which is a no-op on an already-typed value.
 #[derive(Clone, Copy)]
-enum NumericTy {
+pub(super) enum NumericTy {
     Int(IntWidth),
     Float(FloatTy),
+}
+
+/// The numeric type behind a stated scalar, for the literal hints.
+pub(super) fn numeric_target(scalar: &ScalarTy) -> Option<NumericTy> {
+    match scalar {
+        ScalarTy::Int(width) => Some(NumericTy::Int(*width)),
+        ScalarTy::F32 => Some(NumericTy::Float(FloatTy::F32)),
+        ScalarTy::F64 => Some(NumericTy::Float(FloatTy::F64)),
+        _ => None,
+    }
 }
 
 fn numeric_annotation(ty: &syn::Type) -> Option<NumericTy> {
@@ -1239,10 +1319,277 @@ mod expr;
 mod macros;
 mod place;
 mod written;
+mod written_type;
 
 /// A table index as the u16 the bytecode stores. Every compiler table is
 /// interned under that limit, so blowing past it is a compiler bug and an
 /// immediate abort beats silently wrapped indices.
 pub(super) fn idx16(i: usize) -> u16 {
     u16::try_from(i).expect("bytecode table exceeds u16 indices")
+}
+
+/// Whether a `#[derive(..)]` list names `Default`.
+pub(super) fn derives_default(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        if !attr.path().is_ident("derive") {
+            return false;
+        }
+        let mut found = false;
+        let parsed = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("Default") {
+                found = true;
+            }
+            Ok(())
+        });
+        parsed.is_ok() && found
+    })
+}
+
+/// How deep a defaulted type may nest before lowering gives up, so a struct
+/// holding a `Vec` of itself still terminates.
+const DEFAULT_DEPTH: usize = 8;
+
+impl Compiler<'_> {
+    /// The default value of a written type, or `None` when the type has no
+    /// `Default` this interpreter can build: a user type without the derive,
+    /// a reference, a type this model does not describe.
+    pub(super) fn default_ir(&mut self, ty: &syn::Type) -> Option<DefaultIr> {
+        self.default_ir_at(ty, 0)
+    }
+
+    fn default_ir_at(&mut self, ty: &syn::Type, depth: usize) -> Option<DefaultIr> {
+        if depth > DEFAULT_DEPTH {
+            return None;
+        }
+        match ty {
+            syn::Type::Tuple(t) if t.elems.is_empty() => Some(DefaultIr::Unit),
+            syn::Type::Tuple(t) => {
+                let items = t
+                    .elems
+                    .iter()
+                    .map(|elem| self.default_ir_at(elem, depth + 1))
+                    .collect::<Option<Vec<_>>>()?;
+                Some(DefaultIr::Tuple(items))
+            }
+            syn::Type::Paren(p) => self.default_ir_at(&p.elem, depth),
+            syn::Type::Group(g) => self.default_ir_at(&g.elem, depth),
+            syn::Type::Path(p) => self.default_ir_path(&p.path, depth),
+            _ => None,
+        }
+    }
+
+    fn default_ir_path(&mut self, path: &syn::Path, depth: usize) -> Option<DefaultIr> {
+        let last = path.segments.last()?.ident.to_string();
+        if let Some(width) = IntWidth::parse(&last) {
+            return Some(DefaultIr::Int(width));
+        }
+        let builtin = match last.as_str() {
+            "f32" => Some(DefaultIr::F32),
+            "f64" => Some(DefaultIr::F64),
+            "bool" => Some(DefaultIr::Bool),
+            "char" => Some(DefaultIr::Char),
+            "String" | "str" => Some(DefaultIr::Str),
+            "Vec" | "VecDeque" => Some(DefaultIr::Vec),
+            "HashMap" | "BTreeMap" => Some(DefaultIr::Map),
+            "HashSet" | "BTreeSet" => Some(DefaultIr::Set),
+            "Option" => Some(DefaultIr::Opt),
+            _ => None,
+        };
+        if builtin.is_some() {
+            return builtin;
+        }
+        let mut segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        // `Self` inside an impl names the impl's own type.
+        if segs.len() == 1
+            && segs[0] == "Self"
+            && let Some(ty) = self.ctx.impl_type
+        {
+            segs[0] = ty.to_string();
+        }
+        match self.resolve_path_res(&segs).ok()? {
+            Res::Struct(canon) => self.default_ir_struct(&canon, depth),
+            Res::Enum(canon) => self.default_ir_enum(&canon),
+            Res::Alias(m, target) => match &*target {
+                syn::Type::Path(p) => {
+                    let canon = self.ctx.resolver.resolve_struct_key(m, &p.path)?;
+                    self.default_ir_struct(&canon, depth)
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// A derived `Default` struct: one default per field, in declaration
+    /// order, under the full shape of the type.
+    fn default_ir_struct(&mut self, canon: &Arc<str>, depth: usize) -> Option<DefaultIr> {
+        let def = self.ctx.resolver.structs.get(canon)?;
+        if !derives_default(&def.ast.attrs) {
+            return None;
+        }
+        let ast = def.ast.clone();
+        let mut names = Vec::new();
+        let mut renames = Vec::new();
+        let mut fields = Vec::new();
+        for field in &ast.fields {
+            let name = field.ident.as_ref()?.to_string();
+            names.push(Arc::<str>::from(name));
+            renames.push(super::serde_attrs::serde_rename(field).map(Arc::<str>::from));
+            fields.push(self.default_ir_at(&field.ty, depth + 1)?);
+        }
+        let shape = self.shape_for(canon, names, renames);
+        Some(DefaultIr::Struct { shape, fields })
+    }
+
+    /// The `#[default]` unit variant of a derived `Default` enum.
+    fn default_ir_enum(&mut self, canon: &Arc<str>) -> Option<DefaultIr> {
+        let ast = self.ctx.resolver.enums.get(canon)?.clone();
+        if !derives_default(&ast.attrs) {
+            return None;
+        }
+        let variant = ast.variants.iter().find(|variant| {
+            variant
+                .attrs
+                .iter()
+                .any(|attr| attr.path().is_ident("default"))
+        })?;
+        let name = variant.ident.to_string();
+        let def = self.ctx.resolver.enum_defs.get(canon)?;
+        Some(DefaultIr::Enum(EnumVariant {
+            def: def.clone(),
+            variant: def.variant_index(&name)?,
+        }))
+    }
+
+    /// The shape of a script struct over the given fields, shared with any
+    /// literal of the same layout so shape identity stays layout identity.
+    pub(super) fn shape_for(
+        &mut self,
+        name: &Arc<str>,
+        fields: Vec<Arc<str>>,
+        renames: Vec<Option<Arc<str>>>,
+    ) -> Arc<StructShape> {
+        if let Some(known) = self
+            .shapes
+            .iter()
+            .find(|s| s.name == *name && s.fields == fields && s.renames == renames)
+        {
+            return known.clone();
+        }
+        let type_id = self.ctx.resolver.type_id_of(name);
+        let built = StructShape::typed(name.clone(), type_id, fields, renames);
+        self.shapes.push(built.clone());
+        built
+    }
+
+    /// The derived default of a struct named by its canonical key.
+    pub(super) fn default_ir_for_struct(&mut self, canon: &Arc<str>) -> Option<DefaultIr> {
+        self.default_ir_struct(canon, 0)
+    }
+
+    /// `default_ir_path` for a call site that already split the path.
+    pub(super) fn default_ir_path_pub(&mut self, path: &syn::Path) -> Option<DefaultIr> {
+        self.default_ir_path(path, 0)
+    }
+
+    /// The two hints a return type gives the body: the user error type a `?`
+    /// converts into, and the type of a bare `Default::default()` the body
+    /// hands back.
+    fn install_return_hints(&mut self, output: &syn::ReturnType, block: &Block) {
+        let syn::ReturnType::Type(_, ty) = output else {
+            return;
+        };
+        if let Some(canon) = self.result_error_type(ty) {
+            self.cur().ret_error = Some(canon);
+        }
+        let calls: Vec<*const syn::ExprCall> = returned_exprs(block)
+            .into_iter()
+            .filter_map(|e| calls::bare_default_call(e).map(std::ptr::from_ref))
+            .collect();
+        if !calls.is_empty()
+            && let Some(ir) = self.default_ir(ty)
+        {
+            for call in calls {
+                self.default_calls.insert(call, ir.clone());
+            }
+        }
+        let reductions = returned_exprs(block).into_iter().filter_map(|e| match e {
+            Expr::MethodCall(m)
+                if m.turbofish.is_none()
+                    && matches!(
+                        m.method.to_string().as_str(),
+                        "sum" | "product" | "unwrap_or_default"
+                    ) =>
+            {
+                Some((std::ptr::from_ref(m), (**ty).clone()))
+            }
+            _ => None,
+        });
+        self.return_tails.extend(reductions);
+    }
+
+    /// The user type `E` of a written `Result<T, E>`, when `E` is a struct
+    /// or enum of the script.
+    fn result_error_type(&self, ty: &syn::Type) -> Option<Arc<str>> {
+        let syn::Type::Path(p) = ty else { return None };
+        let last = p.path.segments.last()?;
+        if last.ident != "Result" {
+            return None;
+        }
+        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+            return None;
+        };
+        let err = args
+            .args
+            .iter()
+            .filter_map(|arg| match arg {
+                syn::GenericArgument::Type(t) => Some(t),
+                _ => None,
+            })
+            .nth(1)?;
+        let syn::Type::Path(err_path) = err else {
+            return None;
+        };
+        let segs: Vec<String> = err_path
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect();
+        match self.resolve_path_res(&segs).ok()? {
+            Res::Struct(canon) | Res::Enum(canon) => Some(canon),
+            _ => None,
+        }
+    }
+
+    /// The canonical key of a user struct or enum named by a type path.
+    pub(super) fn user_type_key(&self, path: &syn::Path) -> Option<Arc<str>> {
+        let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        match self.resolve_path_res(&segs).ok()? {
+            Res::Struct(canon) | Res::Enum(canon) => Some(canon),
+            _ => None,
+        }
+    }
+
+    /// The `conv` operand of a `?`: the frame's error type, interned in
+    /// `try_targets`, or `NO_CONV` when the frame returns no user error.
+    pub(super) fn try_conv(&mut self) -> u16 {
+        let Some(target) = self.cur().ret_error.clone() else {
+            return NO_CONV;
+        };
+        let table = &mut self.cur().try_targets;
+        if let Some(index) = table.iter().position(|known| *known == target) {
+            return idx16(index);
+        }
+        table.push(target);
+        idx16(table.len() - 1)
+    }
+
+    /// Emit a `BuildDefault` for the lowered type.
+    pub(super) fn emit_default(&mut self, dst: Reg, ir: DefaultIr) {
+        let table = &mut self.cur().defaults;
+        table.push(ir);
+        let index = idx16(table.len() - 1);
+        self.emit(Op::BuildDefault { dst, ir: index });
+    }
 }

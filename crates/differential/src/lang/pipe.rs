@@ -1,10 +1,10 @@
 //! Iterator pipelines: a source, a chain of adapters, and a terminal.
 //!
-//! This is the shape the older families could never emit, and the shape where
-//! the collect-target inference in the interpreter lives. The terminal's
-//! `collect` states its target at one of the real annotation sites: a
-//! turbofish on the call, the annotation of the `let` that binds the result,
-//! or the return type of a generated helper function.
+//! This is the shape where the collect-target inference in the interpreter
+//! lives. The terminal's `collect`, `sum`, and `product` state their target
+//! at one of the real annotation sites: a turbofish on the call, the
+//! annotation of the `let` that binds the result, or the return type of a
+//! generated helper function.
 //!
 //! Determinism rule: a map or set source iterates in an order real Rust
 //! randomizes per process. Such a pipeline either passes through a `Sorted`
@@ -50,26 +50,16 @@ impl Item {
 
     pub fn is_ord(&self) -> bool {
         match self {
-            Self::Scalar(ty) => ty_is_ord(ty),
-            Self::Pair(key, value) => ty_is_ord(key) && ty_is_ord(value),
+            Self::Scalar(ty) => ty.is_ord(),
+            Self::Pair(key, value) => key.is_ord() && value.is_ord(),
         }
     }
 
     fn is_float(&self) -> bool {
         match self {
-            Self::Scalar(ty) => matches!(ty, Ty::Float(_)),
-            Self::Pair(..) => false,
+            Self::Scalar(ty) => ty.contains_float(),
+            Self::Pair(key, value) => key.contains_float() || value.contains_float(),
         }
-    }
-}
-
-/// Whether `sort`, `min`, and `max` compile for values of this type. Floats
-/// have no total order, maps and sets implement no order at all.
-pub fn ty_is_ord(ty: &Ty) -> bool {
-    match ty {
-        Ty::Float(_) | Ty::Map(..) | Ty::Set(_) => false,
-        Ty::Vec(inner) | Ty::Opt(inner) => ty_is_ord(inner),
-        _ => true,
     }
 }
 
@@ -171,12 +161,21 @@ impl Bind {
     }
 }
 
+/// Whether a closure parameter carries its type. An untyped parameter is
+/// the site where the interpreter has to learn the item type from the chain.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ParamAnn {
+    Typed,
+    Inferred,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Stage {
     /// `.map(|item| body)`, item to `Scalar(body.ty())`.
     Map {
         bind: Bind,
         body: Expr,
+        ann: ParamAnn,
     },
     /// `.map(|k| (k.clone(), body))`, `Scalar(k)` to `Pair(k, body.ty())`.
     PairWith {
@@ -187,11 +186,14 @@ pub enum Stage {
     Filter {
         bind: Bind,
         pred: Expr,
+        ann: ParamAnn,
     },
     /// Order sensitive, ordered pipelines only.
     Rev,
     Take(u8),
     Skip(u8),
+    /// `.step_by(n)`, order sensitive, panics on zero.
+    StepBy(u8),
     /// `.enumerate()` with the index widened to i64, `Scalar(t)` to
     /// `Pair(i64, t)`. Order sensitive.
     Enumerate,
@@ -214,9 +216,12 @@ impl Stage {
                 Item::Scalar(ty) => Item::Pair(Ty::I64, ty.clone()),
                 Item::Pair(..) => item.clone(),
             },
-            Self::Filter { .. } | Self::Rev | Self::Take(_) | Self::Skip(_) | Self::Sorted => {
-                item.clone()
-            }
+            Self::Filter { .. }
+            | Self::Rev
+            | Self::Take(_)
+            | Self::Skip(_)
+            | Self::StepBy(_)
+            | Self::Sorted => item.clone(),
         }
     }
 
@@ -224,7 +229,7 @@ impl Stage {
     fn order_sensitive(&self) -> bool {
         matches!(
             self,
-            Self::Rev | Self::Take(_) | Self::Skip(_) | Self::Enumerate
+            Self::Rev | Self::Take(_) | Self::Skip(_) | Self::StepBy(_) | Self::Enumerate
         )
     }
 
@@ -235,19 +240,20 @@ impl Stage {
         match self {
             Self::Map { body, .. } | Self::PairWith { body, .. } => body.has_fallible_op(),
             Self::Filter { pred, .. } => pred.has_fallible_op(),
+            // A zero step panics at the call, before any item flows.
+            Self::StepBy(step) => *step == 0,
             Self::Rev | Self::Take(_) | Self::Skip(_) | Self::Enumerate | Self::Sorted => false,
         }
     }
 
     fn render(&self, item: &Item) -> String {
         match self {
-            Self::Map { bind, body } => {
-                format!(
-                    ".map(|{}: {}| {})",
-                    bind.pattern(),
-                    item.rust(),
-                    body.render()
-                )
+            Self::Map { bind, body, ann } => {
+                let param = match ann {
+                    ParamAnn::Typed => format!("{}: {}", bind.pattern(), item.rust()),
+                    ParamAnn::Inferred => bind.pattern(),
+                };
+                format!(".map(|{param}| {})", body.render())
             }
             Self::PairWith { bind, body } => {
                 let name = match bind {
@@ -260,16 +266,21 @@ impl Stage {
                     body.render()
                 )
             }
-            Self::Filter { bind, pred } => {
-                let (pattern, own) = filter_clone(bind, item);
+            Self::Filter { bind, pred, ann } => {
+                let own = match ann {
+                    ParamAnn::Typed => format!(": {}", item.rust()),
+                    ParamAnn::Inferred => String::new(),
+                };
                 format!(
-                    ".filter(|diff_ref| {{ let {pattern}: {own} = diff_ref.clone(); {} }})",
+                    ".filter(|diff_ref| {{ let {}{own} = diff_ref.clone(); {} }})",
+                    bind.pattern(),
                     pred.render()
                 )
             }
             Self::Rev => ".rev()".to_string(),
             Self::Take(count) => format!(".take({count}usize)"),
             Self::Skip(count) => format!(".skip({count}usize)"),
+            Self::StepBy(step) => format!(".step_by({step}usize)"),
             Self::Enumerate => match item {
                 Item::Scalar(ty) => format!(
                     ".enumerate().map(|(diff_i, diff_x): (usize, {})| ((diff_i as i64), diff_x))",
@@ -280,11 +291,6 @@ impl Stage {
             Self::Sorted => String::new(),
         }
     }
-}
-
-/// The pattern and type a filter closure clones its borrowed item into.
-fn filter_clone(bind: &Bind, item: &Item) -> (String, String) {
-    (bind.pattern(), item.rust())
 }
 
 /// Whether a panic is still pending after this stage. A `Sorted` renders as
@@ -304,14 +310,14 @@ pub fn fallible_pending(stages: &[Stage]) -> bool {
     stages.iter().fold(false, carries_panic)
 }
 
-/// Where a `collect` states its target type.
+/// Where a `collect`, `sum`, or `product` states its target type.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Site {
-    /// `collect::<T>()` on the call itself.
+    /// `::<T>()` on the call itself.
     Turbofish,
-    /// Bare `collect()`, the type stated by the context: the annotation of
-    /// the `let` that binds the pipe, or the return type of the helper
-    /// function whose body the pipe is.
+    /// A bare call, the type stated by the context: the annotation of the
+    /// `let` that binds the pipe, or the return type of the helper function
+    /// whose body the pipe is.
     Bare,
 }
 
@@ -321,15 +327,27 @@ pub enum Term {
         target: Ty,
         site: Site,
     },
-    /// `.sum::<T>()` with `T` the item type, so a u8 sum panics at the u8
-    /// bound exactly like debug Rust.
+    /// `.sum()` into the item type, so a u8 sum panics at the u8 bound
+    /// exactly like debug Rust. With a bare site the target comes from the
+    /// binding, which is where a sum was once seen to wrap instead.
     Sum {
         out: Ty,
+        site: Site,
+    },
+    Product {
+        out: Ty,
+        site: Site,
     },
     Count,
     Min,
     Max,
+    Last,
+    Nth(u8),
     Any {
+        bind: Bind,
+        pred: Expr,
+    },
+    All {
         bind: Bind,
         pred: Expr,
     },
@@ -346,6 +364,24 @@ pub enum Term {
 }
 
 impl Term {
+    /// Whether the terminal leaves its type to the context, which only a
+    /// `let` annotation or a helper's return type can supply.
+    pub fn is_bare(&self) -> bool {
+        matches!(
+            self,
+            Self::Collect {
+                site: Site::Bare,
+                ..
+            } | Self::Sum {
+                site: Site::Bare,
+                ..
+            } | Self::Product {
+                site: Site::Bare,
+                ..
+            }
+        )
+    }
+
     fn order_sensitive(&self, item: &Item) -> bool {
         match self {
             // Collecting into a map or set forgets arrival order, a vec keeps it.
@@ -353,12 +389,17 @@ impl Term {
             // A float sum rounds per order. A signed sum panics on an
             // order-dependent prefix when positive and negative values
             // cancel, an unsigned prefix only grows, so its overflow does
-            // not depend on order.
-            Self::Sum { out } => {
+            // not depend on order. A product meets a zero at some position,
+            // and whether an overflow happens before it depends on order.
+            Self::Sum { out, .. } => {
                 item.is_float() || matches!(out, Ty::Int(width) if width.is_signed())
             }
-            Self::Count | Self::Min | Self::Max | Self::Any { .. } => false,
-            Self::Position { .. } | Self::Fold { .. } => true,
+            Self::Count | Self::Min | Self::Max | Self::Any { .. } | Self::All { .. } => false,
+            Self::Product { .. }
+            | Self::Last
+            | Self::Nth(_)
+            | Self::Position { .. }
+            | Self::Fold { .. } => true,
         }
     }
 
@@ -366,9 +407,18 @@ impl Term {
     /// arrival-order leak as `Stage::fallible`.
     fn fallible(&self) -> bool {
         match self {
-            Self::Any { pred, .. } | Self::Position { pred, .. } => pred.has_fallible_op(),
+            Self::Any { pred, .. } | Self::All { pred, .. } | Self::Position { pred, .. } => {
+                pred.has_fallible_op()
+            }
             Self::Fold { init, body, .. } => init.has_fallible_op() || body.has_fallible_op(),
-            Self::Collect { .. } | Self::Sum { .. } | Self::Count | Self::Min | Self::Max => false,
+            Self::Collect { .. }
+            | Self::Sum { .. }
+            | Self::Product { .. }
+            | Self::Count
+            | Self::Min
+            | Self::Max
+            | Self::Last
+            | Self::Nth(_) => false,
         }
     }
 
@@ -381,24 +431,43 @@ impl Term {
             Self::Collect {
                 site: Site::Bare, ..
             } => ".collect()".to_string(),
-            Self::Sum { out } => format!(".sum::<{}>()", out.rust()),
+            Self::Sum {
+                out,
+                site: Site::Turbofish,
+            } => format!(".sum::<{}>()", out.rust()),
+            Self::Sum {
+                site: Site::Bare, ..
+            } => ".sum()".to_string(),
+            Self::Product {
+                out,
+                site: Site::Turbofish,
+            } => format!(".product::<{}>()", out.rust()),
+            Self::Product {
+                site: Site::Bare, ..
+            } => ".product()".to_string(),
             Self::Count => ".count()".to_string(),
             Self::Min => ".min()".to_string(),
             Self::Max => ".max()".to_string(),
-            Self::Any { bind, pred } => {
-                let (pattern, own) = filter_clone(bind, item);
-                format!(
-                    ".any(|diff_ref| {{ let {pattern}: {own} = diff_ref.clone(); {} }})",
-                    pred.render()
-                )
-            }
-            Self::Position { bind, pred } => {
-                let (pattern, own) = filter_clone(bind, item);
-                format!(
-                    ".position(|diff_ref| {{ let {pattern}: {own} = diff_ref.clone(); {} }})",
-                    pred.render()
-                )
-            }
+            Self::Last => ".last()".to_string(),
+            Self::Nth(index) => format!(".nth({index}usize)"),
+            Self::Any { bind, pred } => format!(
+                ".any(|diff_ref| {{ let {}: {} = diff_ref.clone(); {} }})",
+                bind.pattern(),
+                item.rust(),
+                pred.render()
+            ),
+            Self::All { bind, pred } => format!(
+                ".all(|diff_ref| {{ let {}: {} = diff_ref.clone(); {} }})",
+                bind.pattern(),
+                item.rust(),
+                pred.render()
+            ),
+            Self::Position { bind, pred } => format!(
+                ".position(|diff_ref| {{ let {}: {} = diff_ref.clone(); {} }})",
+                bind.pattern(),
+                item.rust(),
+                pred.render()
+            ),
             Self::Fold {
                 acc,
                 bind,
@@ -435,16 +504,34 @@ impl Pipe {
         let item = self.final_item();
         match &self.term {
             Term::Collect { target, .. } => target.clone(),
-            Term::Sum { out } => out.clone(),
+            Term::Sum { out, .. } | Term::Product { out, .. } => out.clone(),
             Term::Count => Ty::USIZE,
-            Term::Min | Term::Max => match item {
+            Term::Min | Term::Max | Term::Last | Term::Nth(_) => match item {
                 Item::Scalar(ty) => Ty::opt_of(ty),
-                Item::Pair(..) => Ty::opt_of(Ty::I64),
+                Item::Pair(key, value) => Ty::opt_of(Ty::Tuple(vec![key, value])),
             },
-            Term::Any { .. } => Ty::Bool,
+            Term::Any { .. } | Term::All { .. } => Ty::Bool,
             Term::Position { .. } => Ty::opt_of(Ty::USIZE),
             Term::Fold { init, .. } => init.ty(),
         }
+    }
+
+    /// Whether the terminal states its own type. A bare `collect`, `sum`,
+    /// or `product` needs the binding or the return type to state it.
+    pub fn states_type(&self) -> bool {
+        !matches!(
+            self.term,
+            Term::Collect {
+                site: Site::Bare,
+                ..
+            } | Term::Sum {
+                site: Site::Bare,
+                ..
+            } | Term::Product {
+                site: Site::Bare,
+                ..
+            }
+        )
     }
 
     /// Both generator rules at once, the gate every built and shrunk pipe
@@ -531,7 +618,9 @@ impl Pipe {
             }
         }
         match &self.term {
-            Term::Any { pred, .. } | Term::Position { pred, .. } => out.push(pred),
+            Term::Any { pred, .. } | Term::All { pred, .. } | Term::Position { pred, .. } => {
+                out.push(pred);
+            }
             Term::Fold { init, body, .. } => {
                 out.push(init);
                 out.push(body);
@@ -554,7 +643,9 @@ impl Pipe {
             }
         }
         match &mut self.term {
-            Term::Any { pred, .. } | Term::Position { pred, .. } => out.push(pred),
+            Term::Any { pred, .. } | Term::All { pred, .. } | Term::Position { pred, .. } => {
+                out.push(pred);
+            }
             Term::Fold { init, body, .. } => {
                 out.push(init);
                 out.push(body);
@@ -590,13 +681,44 @@ impl Pipe {
             Term::Collect {
                 site: Site::Bare, ..
             } => "lang-pipe-collect-bare",
-            Term::Sum { .. } => "lang-pipe-sum",
+            Term::Sum {
+                site: Site::Turbofish,
+                ..
+            } => "lang-pipe-sum",
+            Term::Sum {
+                site: Site::Bare, ..
+            } => "lang-pipe-sum-bare",
+            Term::Product { .. } => "lang-pipe-product",
             Term::Count => "lang-pipe-count",
             Term::Min | Term::Max => "lang-pipe-minmax",
+            Term::Last => "lang-pipe-last",
+            Term::Nth(_) => "lang-pipe-nth",
             Term::Any { .. } => "lang-pipe-any",
+            Term::All { .. } => "lang-pipe-all",
             Term::Position { .. } => "lang-pipe-position",
             Term::Fold { .. } => "lang-pipe-fold",
         });
+        for stage in &self.stages {
+            out.insert(match stage {
+                Stage::Map {
+                    ann: ParamAnn::Inferred,
+                    ..
+                }
+                | Stage::Filter {
+                    ann: ParamAnn::Inferred,
+                    ..
+                } => "lang-pipe-param-inferred",
+                Stage::Map { .. } => "lang-pipe-map",
+                Stage::PairWith { .. } => "lang-pipe-pair",
+                Stage::Filter { .. } => "lang-pipe-filter",
+                Stage::Rev => "lang-pipe-rev",
+                Stage::Take(_) => "lang-pipe-take",
+                Stage::Skip(_) => "lang-pipe-skip",
+                Stage::StepBy(_) => "lang-pipe-step-by",
+                Stage::Enumerate => "lang-pipe-enumerate",
+                Stage::Sorted => "lang-pipe-sorted",
+            });
+        }
         for expr in self.exprs() {
             expr.features(out);
         }
@@ -611,7 +733,11 @@ impl Pipe {
             // break determinism.
             if matches!(
                 self.stages[index],
-                Stage::Filter { .. } | Stage::Rev | Stage::Take(_) | Stage::Skip(_)
+                Stage::Filter { .. }
+                    | Stage::Rev
+                    | Stage::Take(_)
+                    | Stage::Skip(_)
+                    | Stage::StepBy(_)
             ) {
                 let mut candidate = self.clone();
                 candidate.stages.remove(index);

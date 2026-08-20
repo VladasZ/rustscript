@@ -7,7 +7,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::bytecode::{BinKind, BuiltinId, Chunk, MethodName, NO_ATOM, NO_TYPE, UnKind};
+use super::bytecode::{BinKind, BuiltinId, Chunk, MethodName, NO_ATOM, NO_TYPE, ScalarTy, UnKind};
+use super::numeric::IntWidth;
 use super::value::Value;
 
 /// The methods one user type declares.
@@ -203,10 +204,25 @@ impl ImplTable {
 
     /// The methods of the value's type, None for a value of no user type.
     pub fn of_value(&self, value: &Value) -> Option<&TypeMethods> {
+        self.of_receiver(value, None)
+    }
+
+    /// `of_value` for a method call receiver, with the type the call site
+    /// wrote down when it did. An empty vec has no element to name its
+    /// type, so the written `Vec<u8>` is what picks its impl.
+    pub fn of_receiver(&self, value: &Value, written: Option<&ScalarTy>) -> Option<&TypeMethods> {
         let (type_id, name) = match value {
             Value::Struct(s) => (s.shape.type_id, &s.shape.name),
             Value::Enum { def, .. } => (def.type_id, &def.name),
-            _ => return None,
+            // A builtin value answers to an impl on its own type, `impl
+            // Describe for Vec<String>`, which only exists when some impl
+            // targets a type the script did not declare.
+            other => {
+                return self
+                    .foreign
+                    .then(|| self.of_builtin(other, written))
+                    .flatten();
+            }
         };
         if type_id != NO_TYPE {
             return self.types.get(usize::from(type_id));
@@ -215,6 +231,45 @@ impl ImplTable {
             return None;
         }
         self.of_name(name)
+    }
+
+    /// The impl a builtin value's type has, keyed the way `impl_target`
+    /// wrote it down. A vec names its element type from its first element,
+    /// so an empty vec, or one whose impl is generic over the element, falls
+    /// back to the one `Vec<..>` impl when there is exactly one. An untagged
+    /// integer is an i64, or the one integer impl when there is exactly one.
+    fn of_builtin(&self, value: &Value, written: Option<&ScalarTy>) -> Option<&TypeMethods> {
+        match value {
+            Value::Vec(items) => {
+                let exact = items
+                    .lock()
+                    .first()
+                    .and_then(builtin_key)
+                    .and_then(|elem| self.of_name(&format!("Vec<{elem}>")));
+                exact
+                    .or_else(|| {
+                        written
+                            .and_then(written_key)
+                            .and_then(|key| self.of_name(&key))
+                    })
+                    .or_else(|| self.of_unique(|name| name.starts_with("Vec<")))
+            }
+            Value::Int(_) => self
+                .of_name("i64")
+                .or_else(|| self.of_unique(|name| IntWidth::parse(name).is_some())),
+            other => self.of_name(scalar_key(other)?),
+        }
+    }
+
+    /// The methods of the one type matching `pick`, None when none or
+    /// several do.
+    fn of_unique(&self, pick: impl Fn(&str) -> bool) -> Option<&TypeMethods> {
+        let mut found = self.type_ids.iter().filter(|(name, _)| pick(name));
+        let (_, id) = found.next()?;
+        if found.next().is_some() {
+            return None;
+        }
+        self.types.get(usize::from(*id))
     }
 
     /// The methods of a type named at runtime, a path call's namespace.
@@ -242,6 +297,49 @@ impl ImplTable {
             atom: self.atoms.get(method).copied().unwrap_or(NO_ATOM),
             text: method.to_string(),
             scalar: None,
+            default: None,
+            place: false,
         }
     }
+}
+
+/// The type name a scalar value is written as, for the impl key.
+fn scalar_key(value: &Value) -> Option<&'static str> {
+    Some(match value {
+        Value::Bool(_) => "bool",
+        Value::Int(_) => "i64",
+        Value::IntW(_, width) | Value::Big(_, width) => width.name(),
+        Value::Float(_) => "f64",
+        Value::F32(_) => "f32",
+        Value::Char(_) => "char",
+        Value::Str(_) => "String",
+        _ => return None,
+    })
+}
+
+/// The impl key of a value nested inside a container, `u8` or `Vec<u8>`.
+fn builtin_key(value: &Value) -> Option<String> {
+    if let Some(key) = scalar_key(value) {
+        return Some(key.to_string());
+    }
+    let Value::Vec(items) = value else {
+        return None;
+    };
+    let elem = items.lock().first().and_then(builtin_key)?;
+    Some(format!("Vec<{elem}>"))
+}
+
+/// The impl key of a type a call site wrote down, the same form
+/// `builtin_key` rebuilds from a value.
+fn written_key(ty: &ScalarTy) -> Option<String> {
+    Some(match ty {
+        ScalarTy::Int(width) => width.name().to_string(),
+        ScalarTy::F32 => "f32".to_string(),
+        ScalarTy::F64 => "f64".to_string(),
+        ScalarTy::Bool => "bool".to_string(),
+        ScalarTy::Char => "char".to_string(),
+        ScalarTy::Str => "String".to_string(),
+        ScalarTy::List(elem) => format!("Vec<{}>", written_key(elem)?),
+        ScalarTy::Opt(_) | ScalarTy::Map(_) | ScalarTy::Set(_) | ScalarTy::Other => return None,
+    })
 }

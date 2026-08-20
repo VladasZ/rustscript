@@ -57,6 +57,12 @@ jobs:
             --seed "$seed" \
             --cases "${cases:-20000}" \
             --timeout-ms 10000
+      # The std surface against the catalog and the interpreter, so the
+      # methods neither side knows are in the log of every run.
+      - name: Surface report
+        if: always()
+        shell: bash
+        run: cargo run --release -p rustscript-differential -- surface
       # Always, not only on failure. A green run still saves one case per
       # distinct gap reason, and those are the input for closing the gaps.
       - name: Upload failure and gap artifacts

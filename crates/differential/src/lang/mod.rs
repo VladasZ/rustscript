@@ -1,34 +1,35 @@
 //! A type directed Rust program generator.
 //!
-//! The older generators are catalogs: a hand written enum variant per case,
-//! each with its own render arm, printed as a standalone labeled line. Adding
-//! coverage there means adding another variant, so the space explored grows
-//! only as fast as someone writes rows, and whole dimensions stay invisible.
-//! The `saturating_add` bug survived every campaign that way. The expression
-//! grammar could name only `i64`, `bool` and `String`, so it generated the
-//! method the whole time and never on the `u8` where the bug lived.
-//!
-//! Here the type universe is the real one, and generation is driven by types:
-//! ask for a `u8` and the solver offers every literal, operator, cast, branch
-//! and catalog method that can produce one. A method is a single table row and
-//! it composes everywhere immediately, at any depth.
+//! The type universe is the real one, and generation is driven by types: ask
+//! for a `u8` and the solver offers every literal, operator, cast, branch,
+//! match, field, user method, conversion, and catalog method that can produce
+//! one. A method is a single table row and it composes everywhere
+//! immediately, at any depth. User types, consts, closures, and helper
+//! functions are declared per block, so a `?` through a `From` impl can sit
+//! inside a closure inside a fold over a `Vec<u8>` field of a struct.
 
+pub mod block;
 pub mod catalog;
 pub mod expr;
+mod expr_walk;
+pub mod fmt;
+pub mod pat;
 pub mod pipe;
 pub mod stmt;
 pub mod synth;
 pub mod ty;
+pub mod user;
+pub mod width;
 
 use rand::rngs::StdRng;
 
+pub use block::Block;
 pub use expr::Expr;
-pub use stmt::{Block, Stmt};
+pub use stmt::Stmt;
 pub use ty::Ty;
 
-/// `tag` distinguishes the blocks of one program. Bindings may shadow across
-/// blocks, but generated helper functions are top-level items, so their names
-/// carry the tag to stay unique.
+/// `tag` distinguishes the blocks of one program. Every top level item and
+/// binding name carries it, so two blocks never collide.
 pub fn generate_block(rng: &mut StdRng, tag: usize) -> Block {
     synth::Generator::new(rng, tag).block()
 }

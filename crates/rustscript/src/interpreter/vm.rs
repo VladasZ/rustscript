@@ -376,6 +376,17 @@ impl Vm {
         self.impls.by_name(ty, name)
     }
 
+    /// The `impl From<S> for T` whose `S` is the value's type, registered
+    /// under `from<S>`. The plain `from` entry answers when the type has one
+    /// impl only, so a script with a single `From` keeps working whatever
+    /// the value.
+    pub(super) fn conversion_impl(&self, target: &str, value: &Value) -> Option<Arc<Chunk>> {
+        let source = source_type_name(value);
+        self.impls
+            .by_name(target, &format!("from<{source}>"))
+            .or_else(|| self.impls.by_name(target, "from"))
+    }
+
     /// Value of a module const or static, evaluated on first read and cached.
     pub(super) fn global(self: &Arc<Self>, idx: usize) -> Result<Value> {
         {
@@ -444,5 +455,33 @@ impl Vm {
             _ => bail!("cannot set a field of {}", recv.type_name()),
         }
         Ok(())
+    }
+}
+
+/// The type name a `From` impl is keyed by for this value: the bare name of
+/// a user type, the std name of a builtin, the error struct of a parse
+/// error.
+fn source_type_name(value: &Value) -> String {
+    match value {
+        Value::Struct(s) => super::resolver::bare(s.name()).to_string(),
+        Value::Enum { def, .. } => super::resolver::bare(&def.name).to_string(),
+        Value::Str(_) => "String".to_string(),
+        Value::Int(_) => "i64".to_string(),
+        Value::IntW(_, w) | Value::Big(_, w) => format!("{w:?}").to_lowercase(),
+        Value::Float(_) => "f64".to_string(),
+        Value::F32(_) => "f32".to_string(),
+        Value::Bool(_) => "bool".to_string(),
+        Value::Char(_) => "char".to_string(),
+        Value::Vec(_) => "Vec".to_string(),
+        Value::Map(_, super::value::MapKind::Map) => "HashMap".to_string(),
+        Value::Map(_, super::value::MapKind::Set) => "HashSet".to_string(),
+        Value::Native(n) => match &*n.lock() {
+            super::native::Native::ParseErr { debug, .. } => {
+                debug.split(' ').next().unwrap_or("").to_string()
+            }
+            super::native::Native::IoErr { .. } => "Error".to_string(),
+            other => other.type_name().to_string(),
+        },
+        other => other.type_name().to_string(),
     }
 }

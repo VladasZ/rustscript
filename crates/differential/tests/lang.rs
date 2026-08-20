@@ -3,56 +3,22 @@
 //! The one that matters most is `generated_programs_compile`. A generator that
 //! emits Rust the compiler rejects reports `RustcRejected` as a hard failure,
 //! so a whole campaign turns into noise about the harness instead of findings
-//! about the interpreter. Two real regressions were caught this way already,
-//! both from a constant the compiler could fold into a lint error: an
-//! unlaundered integer literal, then an unlaundered float literal cast to an
-//! integer.
+//! about the interpreter.
 
 use std::collections::BTreeSet;
 
-use rand::SeedableRng;
-use rand::rngs::StdRng;
+use rustscript_differential::generator::generate;
 use rustscript_differential::lang::catalog::{METHODS, solve};
-use rustscript_differential::lang::ty::{INT_WIDTHS, SCALAR_TYPES, Ty};
-use rustscript_differential::lang::{Block, generate_block};
+use rustscript_differential::lang::ty::{INT_WIDTHS, SCALAR_TYPES, StdErr, Ty};
+use rustscript_differential::model::Program;
 use rustscript_differential::runner::{Classification, Runner};
 use rustscript_differential::workspace_root;
-
-fn block_for(seed: u64) -> Block {
-    let mut rng = StdRng::seed_from_u64(seed);
-    generate_block(&mut rng, 0)
-}
-
-/// A program made only of one generated block, so a compile failure points at
-/// this generator and not at one of the older case lists.
-fn program_for(seed: u64) -> String {
-    let block = block_for(seed);
-    let mut source = String::new();
-    let mut features = BTreeSet::new();
-    block.features(&mut features);
-    let uses_map = features.contains("lang-ty-map");
-    let uses_set = features.contains("lang-ty-set");
-    match (uses_map, uses_set) {
-        (true, true) => source.push_str("use std::collections::{HashMap, HashSet};\n\n"),
-        (true, false) => source.push_str("use std::collections::HashMap;\n\n"),
-        (false, true) => source.push_str("use std::collections::HashSet;\n\n"),
-        (false, false) => {}
-    }
-    for helper in block.helpers() {
-        source.push_str(helper.definition());
-    }
-    source.push_str(&block.render_fns());
-    source.push_str("fn main() {\n");
-    source.push_str(&block.render());
-    source.push_str("}\n");
-    source
-}
 
 #[test]
 fn generation_is_deterministic() {
     for seed in [1, 7, 99, 4242] {
-        assert_eq!(block_for(seed), block_for(seed));
-        assert_eq!(program_for(seed), program_for(seed));
+        assert_eq!(generate(seed), generate(seed));
+        assert_eq!(generate(seed).render(), generate(seed).render());
     }
 }
 
@@ -64,7 +30,7 @@ fn generated_programs_compile() {
     let runner = Runner::build(&root, 20_000).expect("build interpreter");
     let mut rejected = Vec::new();
     for seed in 0..60u64 {
-        let source = program_for(seed);
+        let source = generate(seed).render();
         let result = runner.run_source(&source).expect("run generated program");
         if result.classification == Classification::RustcRejected {
             rejected.push((seed, result.compiler.stderr.clone(), source));
@@ -80,48 +46,148 @@ fn generated_programs_compile() {
     );
 }
 
-/// The whole point of this generator is the type universe the old one could
-/// not name. If a width stops appearing, the dimension is invisible again and
-/// bugs living there become unfindable.
+/// Every shape that once hid a real divergence, or is the kind of shape that
+/// does. See `generation_covers_the_language`.
+const EXPECTED_FEATURES: &[&str] = &[
+    // types
+    "lang-ty-u8",
+    "lang-ty-u16",
+    "lang-ty-u32",
+    "lang-ty-u64",
+    "lang-ty-usize",
+    "lang-ty-i8",
+    "lang-ty-i16",
+    "lang-ty-i32",
+    "lang-ty-i64",
+    "lang-ty-f32",
+    "lang-ty-f64",
+    "lang-ty-bool",
+    "lang-ty-char",
+    "lang-ty-string",
+    "lang-ty-vec",
+    "lang-ty-option",
+    "lang-ty-map",
+    "lang-ty-set",
+    "lang-ty-tuple",
+    "lang-ty-result",
+    "lang-ty-stderr",
+    "lang-ty-struct",
+    "lang-ty-enum",
+    // bindings and inference sites
+    "lang-let",
+    "lang-let-inferred",
+    "lang-let-tuple",
+    "lang-bare-int",
+    "lang-bare-float",
+    "lang-const",
+    "lang-const-def",
+    "lang-pipe-collect-fish",
+    "lang-pipe-collect-bare",
+    "lang-pipe-sum",
+    "lang-pipe-sum-bare",
+    "lang-pipe-product",
+    "lang-pipe-param-inferred",
+    "lang-pipe-fold",
+    "lang-pipe-step-by",
+    "lang-pipe-last",
+    "lang-pipe-all",
+    // functions and closures
+    "lang-fn-def",
+    "lang-fn-call",
+    "lang-fn-writer",
+    "lang-borrow-mut",
+    "lang-fn-generic",
+    "lang-fn-apply",
+    "lang-apply-call",
+    "lang-fn-factory",
+    "lang-closure",
+    "lang-closure-call",
+    "lang-closure-move",
+    "lang-closure-mut",
+    "lang-closure-factory",
+    "lang-early-return",
+    "lang-try",
+    // control flow
+    "lang-if",
+    "lang-if-stmt",
+    "lang-for",
+    "lang-while",
+    "lang-loop",
+    "lang-break",
+    "lang-continue",
+    "lang-for-accum",
+    "lang-iter-mut",
+    "lang-compound",
+    "lang-match",
+    "lang-pat-range",
+    "lang-pat-guard",
+    "lang-pat-slice",
+    "lang-pat-slice-rest",
+    "lang-pat-tuple",
+    "lang-pat-enum",
+    "lang-pat-option",
+    "lang-pat-result",
+    "lang-pat-struct",
+    // user types
+    "lang-struct-def",
+    "lang-enum-def",
+    "lang-struct-lit",
+    "lang-struct-update",
+    "lang-enum-lit",
+    "lang-default",
+    "lang-field",
+    "lang-tuple-field",
+    "lang-index",
+    "lang-method",
+    "lang-method-def",
+    "lang-assoc-fn",
+    "lang-display-impl",
+    "lang-from-impl",
+    "lang-from",
+    "lang-into",
+    "lang-trait-impl",
+    "lang-trait-impl-builtin",
+    "lang-trait-call",
+    // operators and calls
+    "lang-call",
+    "lang-cast",
+    "lang-op-add",
+    "lang-op-shl",
+    "lang-op-compare",
+    "lang-mut-map-insert",
+    "lang-mut-retain",
+    "lang-mut-swap",
+    "lang-mut-opt-take",
+    "lang-mut-str-push-str",
+    // formatting
+    "lang-fmt-display",
+    "lang-fmt-debug",
+    "lang-fmt-hex",
+    "lang-fmt-binary",
+    "lang-fmt-exp",
+    "lang-fmt-width",
+    "lang-fmt-align",
+    "lang-fmt-plus",
+    "lang-fmt-zero",
+    "lang-fmt-precision",
+    "lang-fmt-alternate",
+    "lang-print-indexed",
+    "lang-print-twice",
+    "lang-print-width-arg",
+    "lang-print-named-width",
+];
+
+/// The whole point of this generator is the language surface the old ones
+/// could not name. If a feature stops appearing, the dimension is invisible
+/// again and bugs living there become unfindable. Every name here is a shape
+/// that once hid a real divergence or is the kind of shape that does.
 #[test]
-fn generation_covers_the_type_universe() {
+fn generation_covers_the_language() {
     let mut features = BTreeSet::new();
     for seed in 0..400u64 {
-        block_for(seed).features(&mut features);
+        features.extend(generate(seed).structural_features());
     }
-    let expected = [
-        "lang-ty-u8",
-        "lang-ty-u16",
-        "lang-ty-u32",
-        "lang-ty-u64",
-        "lang-ty-usize",
-        "lang-ty-i8",
-        "lang-ty-i16",
-        "lang-ty-i32",
-        "lang-ty-i64",
-        "lang-ty-f32",
-        "lang-ty-f64",
-        "lang-ty-bool",
-        "lang-ty-char",
-        "lang-ty-string",
-        "lang-ty-vec",
-        "lang-ty-option",
-        "lang-ty-map",
-        "lang-ty-set",
-        "lang-pipe",
-        "lang-pipe-collect-fish",
-        "lang-pipe-collect-bare",
-        "lang-fn-def",
-        "lang-for-accum",
-        "lang-mut-map-insert",
-        "lang-call",
-        "lang-cast",
-        "lang-if",
-        "lang-for",
-        "lang-op-add",
-        "lang-op-shl",
-        "lang-op-compare",
-    ];
+    let expected = EXPECTED_FEATURES;
     let missing: Vec<&str> = expected
         .iter()
         .copied()
@@ -138,10 +204,26 @@ fn every_catalog_method_is_reachable() {
     for width in INT_WIDTHS {
         wanted.push(Ty::vec_of(Ty::Int(*width)));
         wanted.push(Ty::opt_of(Ty::Int(*width)));
+        wanted.push(Ty::Tuple(vec![Ty::Int(*width), Ty::Bool]));
     }
     for scalar in SCALAR_TYPES {
         wanted.push(Ty::vec_of(scalar.clone()));
         wanted.push(Ty::opt_of(scalar.clone()));
+        wanted.push(Ty::vec_of(Ty::vec_of(scalar.clone())));
+        wanted.push(Ty::res_of(scalar.clone(), Ty::Str));
+        wanted.push(Ty::res_of(scalar.clone(), Ty::StdErr(StdErr::ParseInt)));
+        wanted.push(Ty::opt_of(Ty::Tuple(vec![scalar.clone(), scalar.clone()])));
+        wanted.push(Ty::vec_of(Ty::Tuple(vec![scalar.clone(), scalar.clone()])));
+        wanted.push(Ty::vec_of(Ty::Tuple(vec![Ty::USIZE, scalar.clone()])));
+        wanted.push(Ty::Tuple(vec![
+            Ty::vec_of(scalar.clone()),
+            Ty::vec_of(scalar.clone()),
+        ]));
+        wanted.push(Ty::opt_of(Ty::Tuple(vec![
+            scalar.clone(),
+            Ty::vec_of(scalar.clone()),
+        ])));
+        wanted.push(Ty::res_of(Ty::USIZE, Ty::USIZE));
     }
     let unreachable: Vec<&str> = METHODS
         .iter()
@@ -176,8 +258,10 @@ fn catalog_names_are_unique() {
 #[test]
 fn fallible_closure_needs_defined_order() {
     use rustscript_differential::lang::expr::{BinOp, Expr};
-    use rustscript_differential::lang::pipe::{Access, Bind, Pipe, Site, Source, Stage, Term};
-    use rustscript_differential::numeric::IntWidth;
+    use rustscript_differential::lang::pipe::{
+        Access, Bind, ParamAnn, Pipe, Site, Source, Stage, Term,
+    };
+    use rustscript_differential::lang::ty::IntWidth;
 
     let int = |value: i128| Expr::IntLit {
         width: IntWidth::I64,
@@ -192,6 +276,7 @@ fn fallible_closure_needs_defined_order() {
             right: Box::new(int(2)),
             ty: Ty::I64,
         },
+        ann: ParamAnn::Typed,
     };
     let pipe_with = |stages: Vec<Stage>| Pipe {
         source: Source::Coll {
@@ -224,8 +309,10 @@ fn fallible_closure_needs_defined_order() {
 #[test]
 fn fallible_closure_must_not_hide_behind_skip() {
     use rustscript_differential::lang::expr::{BinOp, Expr};
-    use rustscript_differential::lang::pipe::{Access, Bind, Pipe, Site, Source, Stage, Term};
-    use rustscript_differential::numeric::IntWidth;
+    use rustscript_differential::lang::pipe::{
+        Access, Bind, ParamAnn, Pipe, Site, Source, Stage, Term,
+    };
+    use rustscript_differential::lang::ty::IntWidth;
 
     let int = |value: i128| Expr::IntLit {
         width: IntWidth::I64,
@@ -240,6 +327,7 @@ fn fallible_closure_must_not_hide_behind_skip() {
             right: Box::new(int(2)),
             ty: Ty::I64,
         },
+        ann: ParamAnn::Typed,
     };
     let pipe_with = |stages: Vec<Stage>| Pipe {
         source: Source::Coll {
@@ -264,4 +352,86 @@ fn fallible_closure_must_not_hide_behind_skip() {
     assert!(pipe_with(vec![fallible_map.clone(), Stage::Sorted, Stage::Skip(2)]).is_valid());
     // Other length-changing stages keep the body observable.
     assert!(pipe_with(vec![fallible_map, Stage::Take(2)]).is_valid());
+}
+
+/// A shrunk program is still a program: every candidate parses, so the
+/// reducer never trades a real finding for a harness error.
+#[test]
+fn shrink_candidates_parse() {
+    for seed in 0..8u64 {
+        let program: Program = generate(seed);
+        let candidates = program.shrink_candidates();
+        let last_start = candidates.len().saturating_sub(24);
+        let sample = candidates
+            .iter()
+            .take(24)
+            .chain(candidates.iter().skip(last_start));
+        for candidate in sample {
+            let source = candidate.render();
+            syn::parse_file(&source).unwrap_or_else(|error| {
+                panic!("seed {seed} shrink did not parse: {error}\n{source}");
+            });
+        }
+    }
+}
+
+/// The reducer must end even when every candidate reproduces the failure.
+/// Some shrinks rewrite a node into a same-size form whose own shrinks lead
+/// back, and a reducer that took every reproducing candidate cycled between
+/// them for millions of cached steps on a real campaign artifact.
+#[test]
+fn reduction_terminates_when_everything_reproduces() {
+    use rustscript_differential::reduce::reduce_by;
+    use rustscript_differential::runner::{ProcessOutput, RunResult};
+    let output = ProcessOutput {
+        status: Some(0),
+        stdout: String::new(),
+        stderr: String::new(),
+        timed_out: false,
+    };
+    let target = RunResult {
+        classification: Classification::SemanticMismatch,
+        compiler: output.clone(),
+        native: output.clone(),
+        interpreted: output,
+    };
+    for seed in 0..4u64 {
+        let program: Program = generate(seed);
+        let original_len = program.render().len();
+        let (reduced, _) = reduce_by(
+            |_| Ok(target.clone()),
+            &program,
+            &target,
+            |progress| {
+                assert!(
+                    progress.candidates_checked < 200_000,
+                    "seed {seed}: the reducer does not converge"
+                );
+            },
+        )
+        .expect("reduction runs");
+        assert!(reduced.render().len() < original_len);
+    }
+}
+
+/// Every method a catalog template calls is a real std method on some
+/// receiver, read from the harvested `std_surface.txt`. A row that names a
+/// method only the interpreter invented would test the interpreter against
+/// itself.
+#[test]
+fn catalog_calls_are_std() {
+    use rustscript_differential::surface::{TRAIT_METHODS, load, template_methods};
+    let surface = load(&workspace_root()).expect("std_surface.txt, run `surface --refresh`");
+    let std_names: BTreeSet<&String> = surface.values().flatten().collect();
+    let mut unknown: Vec<String> = METHODS
+        .iter()
+        .flat_map(|method| template_methods(method.template))
+        .filter(|name| !std_names.contains(name) && !TRAIT_METHODS.contains(&name.as_str()))
+        .collect();
+    unknown.sort();
+    unknown.dedup();
+    assert!(
+        unknown.is_empty(),
+        "catalog calls that are not std: {unknown:?}"
+    );
 }

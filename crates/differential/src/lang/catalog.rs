@@ -7,12 +7,13 @@
 //! immediately composes with everything else, at any depth, inside any
 //! expression.
 //!
-//! That is the difference from the old `method_case.rs`, where each method was
-//! a hand written enum variant with its own render arm and its own shrink arm,
-//! printed as a standalone labeled line that never met the rest of the program.
+//! The rows name real std methods. `crates/differential/std_surface.txt`
+//! lists the std surface the generator could cover, and the `surface`
+//! command reports which of those names neither the catalog nor the
+//! interpreter knows, so a missing row is a measured gap and not a blind
+//! spot.
 
-use crate::lang::ty::Ty;
-use crate::numeric::{FloatWidth, IntWidth};
+use crate::lang::ty::{FloatWidth, IntWidth, Ty};
 
 /// Which receiver types a method applies to.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -25,7 +26,10 @@ pub enum RecvClass {
     Char,
     Str,
     Vec,
+    /// `Vec<Vec<E>>`, for `concat` and friends.
+    VecOfVec,
     Opt,
+    Res,
     Map,
     Set,
 }
@@ -41,22 +45,25 @@ impl RecvClass {
             Self::Char => matches!(ty, Ty::Char),
             Self::Str => matches!(ty, Ty::Str),
             Self::Vec => matches!(ty, Ty::Vec(_)),
+            Self::VecOfVec => matches!(ty, Ty::Vec(inner) if matches!(**inner, Ty::Vec(_))),
             Self::Opt => matches!(ty, Ty::Opt(_)),
+            Self::Res => matches!(ty, Ty::Res(..)),
             Self::Map => matches!(ty, Ty::Map(..)),
             Self::Set => matches!(ty, Ty::Set(_)),
         }
     }
 
     /// Whether this class wraps an element type, so an `Elem` result can name
-    /// the receiver as a container over the wanted type. `Map` is excluded,
-    /// its receiver needs a key type too and is completed in `solve`.
+    /// the receiver as a container over the wanted type. `Map` and `Res` are
+    /// excluded, their receivers need two types and are completed in `solve`.
     pub fn is_container(self) -> bool {
-        matches!(self, Self::Vec | Self::Opt | Self::Set)
+        matches!(self, Self::Vec | Self::VecOfVec | Self::Opt | Self::Set)
     }
 
     pub fn wrap(self, elem: Ty) -> Option<Ty> {
         match self {
             Self::Vec => Some(Ty::vec_of(elem)),
+            Self::VecOfVec => Some(Ty::vec_of(Ty::vec_of(elem))),
             Self::Opt => Some(Ty::opt_of(elem)),
             Self::Set => Some(Ty::set_of(elem)),
             _ => None,
@@ -69,16 +76,23 @@ impl RecvClass {
 pub enum TyPat {
     /// The receiver's own type.
     Same,
-    /// The element type of a `Vec<E>`, `Option<E>`, or `HashSet<E>` receiver.
+    /// The element type of a `Vec<E>`, `Option<E>`, or `HashSet<E>`
+    /// receiver, or the inner element of a `Vec<Vec<E>>`.
     Elem,
     /// The key type of a `HashMap<K, V>` receiver.
     Key,
     /// The value type of a `HashMap<K, V>` receiver.
     Val,
+    /// The ok type of a `Result<T, E>` receiver.
+    OkT,
+    /// The error type of a `Result<T, E>` receiver.
+    ErrT,
     /// A fixed scalar type that carries no type variable.
     Exact(Fixed),
     Vec(&'static TyPat),
     Opt(&'static TyPat),
+    Tuple2(&'static TyPat, &'static TyPat),
+    Res(&'static TyPat, &'static TyPat),
     /// A turbofish type the generator picks, as in `parse::<u8>()`.
     Fish,
     /// A small literal count, so `repeat` and `pow` cannot blow up runtime.
@@ -94,6 +108,7 @@ pub enum Fixed {
     Char,
     Str,
     U32,
+    U64,
     USize,
     F64,
 }
@@ -105,6 +120,7 @@ impl Fixed {
             Self::Char => Ty::Char,
             Self::Str => Ty::Str,
             Self::U32 => Ty::Int(IntWidth::U32),
+            Self::U64 => Ty::Int(IntWidth::U64),
             Self::USize => Ty::Int(IntWidth::USize),
             Self::F64 => Ty::Float(FloatWidth::F64),
         }
@@ -120,23 +136,27 @@ pub enum ElemReq {
     Ord,
     /// An integer or a float, for `sum` and `product`.
     Num,
+    /// Hashable, `Eq`, and ordered, for a set or a map key.
+    Key,
+    /// `Default`, for `unwrap_or_default`.
+    Default,
+    /// Exactly `String`, for `join` and `concat`.
+    Str,
+    /// `Copy`, for slice `repeat`.
+    Copy,
 }
 
 impl ElemReq {
     fn allows(self, ty: &Ty) -> bool {
         match self {
             Self::Any => true,
-            Self::Ord => is_ord(ty),
+            Self::Ord => ty.is_ord(),
             Self::Num => ty.is_numeric(),
+            Self::Key => ty.is_key(),
+            Self::Default => ty.has_default(),
+            Self::Str => matches!(ty, Ty::Str),
+            Self::Copy => ty.is_copy(),
         }
-    }
-}
-
-fn is_ord(ty: &Ty) -> bool {
-    match ty {
-        Ty::Float(_) | Ty::Map(..) | Ty::Set(_) => false,
-        Ty::Vec(inner) | Ty::Opt(inner) => is_ord(inner),
-        _ => true,
     }
 }
 
@@ -157,7 +177,8 @@ pub struct Method {
     pub ret: TyPat,
     pub elem: ElemReq,
     pub fish: FishReq,
-    /// `{r}` receiver, `{0}`.. arguments, `{E}` element type, `{T}` turbofish.
+    /// `{r}` receiver, `{0}`.. arguments, `{E}` element type, `{T}` turbofish,
+    /// `{K}` and `{V}` the key and value or the ok and error types.
     pub template: &'static str,
 }
 
@@ -187,14 +208,27 @@ const fn with_fish(method: Method, fish: FishReq) -> Method {
     Method { fish, ..method }
 }
 
-use ElemReq::{Num, Ord as OrdElem};
-use Fixed::{Bool as FBool, F64 as FF64, Str as FStr, U32 as FU32, USize as FUSize};
-use RecvClass::{Char, Float, Int, Opt, SignedInt, Str, UnsignedInt, Vec as VecRecv};
-use TyPat::{Elem, Exact, Fish, Same, SmallI32, SmallU32, SmallUsize};
+use ElemReq::{Default as DefaultElem, Key as KeyElem, Num, Ord as OrdElem, Str as StrElem};
+use Fixed::{
+    Bool as FBool, Char as FChar, F64 as FF64, Str as FStr, U32 as FU32, U64 as FU64,
+    USize as FUSize,
+};
+use RecvClass::{
+    Char, Float, Int, Opt, Res, SignedInt, Str, UnsignedInt, Vec as VecRecv, VecOfVec,
+};
+use TyPat::{Elem, ErrT, Exact, Fish, OkT, Same, SmallI32, SmallU32, SmallUsize};
 
 const SAME: &TyPat = &Same;
 const ELEM: &TyPat = &Elem;
+const OK_PAT: &TyPat = &OkT;
+const ERR_PAT: &TyPat = &ErrT;
+const KEY_PAT: &TyPat = &TyPat::Key;
+const VAL_PAT: &TyPat = &TyPat::Val;
 const USIZE_PAT: &TyPat = &Exact(FUSize);
+const U32_PAT: &TyPat = &Exact(FU32);
+const STR_PAT: &TyPat = &Exact(FStr);
+const BOOL_PAT: &TyPat = &Exact(FBool);
+const CHAR_PAT: &TyPat = &Exact(FChar);
 
 pub const METHODS: &[Method] = &[
     // -- integers, every width ---------------------------------------------
@@ -219,9 +253,37 @@ pub const METHODS: &[Method] = &[
         Same,
         "{r}.saturating_mul({0})",
     ),
+    m(
+        "saturating_pow",
+        Int,
+        &[SmallU32],
+        Same,
+        "{r}.saturating_pow({0})",
+    ),
     m("wrapping_add", Int, &[Same], Same, "{r}.wrapping_add({0})"),
     m("wrapping_sub", Int, &[Same], Same, "{r}.wrapping_sub({0})"),
     m("wrapping_mul", Int, &[Same], Same, "{r}.wrapping_mul({0})"),
+    m(
+        "wrapping_pow",
+        Int,
+        &[SmallU32],
+        Same,
+        "{r}.wrapping_pow({0})",
+    ),
+    m(
+        "wrapping_shl",
+        Int,
+        &[SmallU32],
+        Same,
+        "{r}.wrapping_shl({0})",
+    ),
+    m(
+        "wrapping_shr",
+        Int,
+        &[SmallU32],
+        Same,
+        "{r}.wrapping_shr({0})",
+    ),
     m(
         "checked_add",
         Int,
@@ -257,9 +319,68 @@ pub const METHODS: &[Method] = &[
         TyPat::Opt(SAME),
         "{r}.checked_rem({0})",
     ),
+    m(
+        "checked_pow",
+        Int,
+        &[SmallU32],
+        TyPat::Opt(SAME),
+        "{r}.checked_pow({0})",
+    ),
+    m(
+        "checked_shl",
+        Int,
+        &[SmallU32],
+        TyPat::Opt(SAME),
+        "{r}.checked_shl({0})",
+    ),
+    m(
+        "checked_shr",
+        Int,
+        &[SmallU32],
+        TyPat::Opt(SAME),
+        "{r}.checked_shr({0})",
+    ),
+    m(
+        "checked_rem_euclid",
+        Int,
+        &[Same],
+        TyPat::Opt(SAME),
+        "{r}.checked_rem_euclid({0})",
+    ),
+    m(
+        "checked_ilog2",
+        Int,
+        &[],
+        TyPat::Opt(U32_PAT),
+        "{r}.checked_ilog2()",
+    ),
+    m(
+        "overflowing_add",
+        Int,
+        &[Same],
+        TyPat::Tuple2(SAME, BOOL_PAT),
+        "{r}.overflowing_add({0})",
+    ),
+    m(
+        "overflowing_sub",
+        Int,
+        &[Same],
+        TyPat::Tuple2(SAME, BOOL_PAT),
+        "{r}.overflowing_sub({0})",
+    ),
+    m(
+        "overflowing_mul",
+        Int,
+        &[Same],
+        TyPat::Tuple2(SAME, BOOL_PAT),
+        "{r}.overflowing_mul({0})",
+    ),
     m("pow", Int, &[SmallU32], Same, "{r}.pow({0})"),
     m("min", Int, &[Same], Same, "{r}.min({0})"),
     m("max", Int, &[Same], Same, "{r}.max({0})"),
+    // Panics when min > max, exactly like debug Rust.
+    m("clamp", Int, &[Same, Same], Same, "{r}.clamp({0}, {1})"),
+    m("midpoint", Int, &[Same], Same, "{r}.midpoint({0})"),
     m("div_euclid", Int, &[Same], Same, "{r}.div_euclid({0})"),
     m("rem_euclid", Int, &[Same], Same, "{r}.rem_euclid({0})"),
     m("count_ones", Int, &[], Exact(FU32), "{r}.count_ones()"),
@@ -278,6 +399,17 @@ pub const METHODS: &[Method] = &[
         Exact(FU32),
         "{r}.trailing_zeros()",
     ),
+    m("leading_ones", Int, &[], Exact(FU32), "{r}.leading_ones()"),
+    m(
+        "trailing_ones",
+        Int,
+        &[],
+        Exact(FU32),
+        "{r}.trailing_ones()",
+    ),
+    // Panics on zero and on a negative value.
+    m("ilog2", Int, &[], Exact(FU32), "{r}.ilog2()"),
+    m("ilog10", Int, &[], Exact(FU32), "{r}.ilog10()"),
     m(
         "rotate_left",
         Int,
@@ -299,6 +431,20 @@ pub const METHODS: &[Method] = &[
     m("abs", SignedInt, &[], Same, "{r}.abs()"),
     m("signum", SignedInt, &[], Same, "{r}.signum()"),
     m(
+        "is_negative",
+        SignedInt,
+        &[],
+        Exact(FBool),
+        "{r}.is_negative()",
+    ),
+    m(
+        "is_positive",
+        SignedInt,
+        &[],
+        Exact(FBool),
+        "{r}.is_positive()",
+    ),
+    m(
         "checked_neg",
         SignedInt,
         &[],
@@ -306,26 +452,92 @@ pub const METHODS: &[Method] = &[
         "{r}.checked_neg()",
     ),
     m(
+        "checked_abs",
+        SignedInt,
+        &[],
+        TyPat::Opt(SAME),
+        "{r}.checked_abs()",
+    ),
+    m("wrapping_neg", SignedInt, &[], Same, "{r}.wrapping_neg()"),
+    m("wrapping_abs", SignedInt, &[], Same, "{r}.wrapping_abs()"),
+    m(
         "is_multiple_of",
         UnsignedInt,
         &[Same],
         Exact(FBool),
         "{r}.is_multiple_of({0})",
     ),
+    m(
+        "is_power_of_two",
+        UnsignedInt,
+        &[],
+        Exact(FBool),
+        "{r}.is_power_of_two()",
+    ),
+    // Panics past the top power in debug Rust.
+    m(
+        "next_power_of_two",
+        UnsignedInt,
+        &[],
+        Same,
+        "{r}.next_power_of_two()",
+    ),
+    m("div_ceil", UnsignedInt, &[Same], Same, "{r}.div_ceil({0})"),
+    m(
+        "next_multiple_of",
+        UnsignedInt,
+        &[Same],
+        Same,
+        "{r}.next_multiple_of({0})",
+    ),
     // -- floats -------------------------------------------------------------
     m("float_abs", Float, &[], Same, "{r}.abs()"),
     m("sqrt", Float, &[], Same, "{r}.sqrt()"),
+    m("cbrt", Float, &[], Same, "{r}.cbrt()"),
     m("floor", Float, &[], Same, "{r}.floor()"),
     m("ceil", Float, &[], Same, "{r}.ceil()"),
     m("round", Float, &[], Same, "{r}.round()"),
+    m("round_ties_even", Float, &[], Same, "{r}.round_ties_even()"),
     m("trunc", Float, &[], Same, "{r}.trunc()"),
     m("fract", Float, &[], Same, "{r}.fract()"),
     m("float_signum", Float, &[], Same, "{r}.signum()"),
     m("recip", Float, &[], Same, "{r}.recip()"),
+    m("exp", Float, &[], Same, "{r}.exp()"),
+    m("exp2", Float, &[], Same, "{r}.exp2()"),
+    m("ln", Float, &[], Same, "{r}.ln()"),
+    m("log2", Float, &[], Same, "{r}.log2()"),
+    m("log10", Float, &[], Same, "{r}.log10()"),
+    m("to_degrees", Float, &[], Same, "{r}.to_degrees()"),
+    m("to_radians", Float, &[], Same, "{r}.to_radians()"),
     m("powi", Float, &[SmallI32], Same, "{r}.powi({0})"),
     m("powf", Float, &[Same], Same, "{r}.powf({0})"),
+    m("hypot", Float, &[Same], Same, "{r}.hypot({0})"),
+    m("copysign", Float, &[Same], Same, "{r}.copysign({0})"),
     m("float_min", Float, &[Same], Same, "{r}.min({0})"),
     m("float_max", Float, &[Same], Same, "{r}.max({0})"),
+    // Panics when min > max or either is NaN.
+    m(
+        "float_clamp",
+        Float,
+        &[Same, Same],
+        Same,
+        "{r}.clamp({0}, {1})",
+    ),
+    m("float_midpoint", Float, &[Same], Same, "{r}.midpoint({0})"),
+    m(
+        "float_rem_euclid",
+        Float,
+        &[Same],
+        Same,
+        "{r}.rem_euclid({0})",
+    ),
+    m(
+        "float_div_euclid",
+        Float,
+        &[Same],
+        Same,
+        "{r}.div_euclid({0})",
+    ),
     m(
         "mul_add",
         Float,
@@ -336,6 +548,14 @@ pub const METHODS: &[Method] = &[
     m("is_nan", Float, &[], Exact(FBool), "{r}.is_nan()"),
     m("is_finite", Float, &[], Exact(FBool), "{r}.is_finite()"),
     m("is_infinite", Float, &[], Exact(FBool), "{r}.is_infinite()"),
+    m("is_normal", Float, &[], Exact(FBool), "{r}.is_normal()"),
+    m(
+        "is_subnormal",
+        Float,
+        &[],
+        Exact(FBool),
+        "{r}.is_subnormal()",
+    ),
     m(
         "is_sign_positive",
         Float,
@@ -362,6 +582,13 @@ pub const METHODS: &[Method] = &[
     m("is_empty", Str, &[], Exact(FBool), "{r}.is_empty()"),
     m("to_uppercase", Str, &[], Exact(FStr), "{r}.to_uppercase()"),
     m("to_lowercase", Str, &[], Exact(FStr), "{r}.to_lowercase()"),
+    m(
+        "str_to_ascii_uppercase",
+        Str,
+        &[],
+        Exact(FStr),
+        "{r}.to_ascii_uppercase()",
+    ),
     m("trim", Str, &[], Exact(FStr), "{r}.trim().to_string()"),
     m(
         "trim_start",
@@ -378,11 +605,25 @@ pub const METHODS: &[Method] = &[
         "{r}.trim_end().to_string()",
     ),
     m(
+        "trim_matches",
+        Str,
+        &[Exact(FChar)],
+        Exact(FStr),
+        "{r}.trim_matches({0}).to_string()",
+    ),
+    m(
         "contains",
         Str,
         &[Exact(FStr)],
         Exact(FBool),
         "{r}.contains({0}.as_str())",
+    ),
+    m(
+        "contains_char",
+        Str,
+        &[Exact(FChar)],
+        Exact(FBool),
+        "{r}.contains({0})",
     ),
     m(
         "starts_with",
@@ -406,11 +647,25 @@ pub const METHODS: &[Method] = &[
         "{r}.find({0}.as_str())",
     ),
     m(
+        "rfind",
+        Str,
+        &[Exact(FStr)],
+        TyPat::Opt(USIZE_PAT),
+        "{r}.rfind({0}.as_str())",
+    ),
+    m(
         "replace",
         Str,
         &[Exact(FStr), Exact(FStr)],
         Exact(FStr),
         "{r}.replace({0}.as_str(), {1}.as_str())",
+    ),
+    m(
+        "replacen",
+        Str,
+        &[Exact(FStr), Exact(FStr), SmallUsize],
+        Exact(FStr),
+        "{r}.replacen({0}.as_str(), {1}.as_str(), {2})",
     ),
     m("repeat", Str, &[SmallUsize], Exact(FStr), "{r}.repeat({0})"),
     m(
@@ -421,11 +676,102 @@ pub const METHODS: &[Method] = &[
         "{r}.chars().count()",
     ),
     m(
+        "chars_rev",
+        Str,
+        &[],
+        Exact(FStr),
+        "{r}.chars().rev().collect::<String>()",
+    ),
+    m(
+        "chars_nth",
+        Str,
+        &[SmallUsize],
+        TyPat::Opt(CHAR_PAT),
+        "{r}.chars().nth({0})",
+    ),
+    m(
+        "chars_collect",
+        Str,
+        &[],
+        TyPat::Vec(CHAR_PAT),
+        "{r}.chars().collect::<Vec<char>>()",
+    ),
+    m(
+        "bytes_sum",
+        Str,
+        &[],
+        Exact(FU64),
+        "{r}.bytes().map(u64::from).sum::<u64>()",
+    ),
+    m(
         "split_count",
         Str,
         &[Exact(FStr)],
         Exact(FUSize),
         "{r}.split({0}.as_str()).count()",
+    ),
+    m(
+        "split_collect",
+        Str,
+        &[Exact(FStr)],
+        TyPat::Vec(STR_PAT),
+        "{r}.split({0}.as_str()).map(String::from).collect::<Vec<String>>()",
+    ),
+    m(
+        "split_whitespace_collect",
+        Str,
+        &[],
+        TyPat::Vec(STR_PAT),
+        "{r}.split_whitespace().map(String::from).collect::<Vec<String>>()",
+    ),
+    m(
+        "lines_collect",
+        Str,
+        &[],
+        TyPat::Vec(STR_PAT),
+        "{r}.lines().map(String::from).collect::<Vec<String>>()",
+    ),
+    m(
+        "split_once",
+        Str,
+        &[Exact(FStr)],
+        TyPat::Opt(&TyPat::Tuple2(STR_PAT, STR_PAT)),
+        "{r}.split_once({0}.as_str()).map(|(a, b)| (a.to_string(), b.to_string()))",
+    ),
+    m(
+        "strip_prefix",
+        Str,
+        &[Exact(FStr)],
+        TyPat::Opt(STR_PAT),
+        "{r}.strip_prefix({0}.as_str()).map(String::from)",
+    ),
+    m(
+        "strip_suffix",
+        Str,
+        &[Exact(FStr)],
+        TyPat::Opt(STR_PAT),
+        "{r}.strip_suffix({0}.as_str()).map(String::from)",
+    ),
+    m(
+        "str_get",
+        Str,
+        &[SmallUsize],
+        TyPat::Opt(STR_PAT),
+        "{r}.get(0..{0}).map(String::from)",
+    ),
+    m(
+        "is_char_boundary",
+        Str,
+        &[SmallUsize],
+        Exact(FBool),
+        "{r}.is_char_boundary({0})",
+    ),
+    m(
+        "matches_count",
+        Str,
+        &[Exact(FStr)],
+        Exact(FUSize),
+        "{r}.matches({0}.as_str()).count()",
     ),
     m(
         "eq_ignore_ascii_case",
@@ -434,6 +780,7 @@ pub const METHODS: &[Method] = &[
         Exact(FBool),
         "{r}.eq_ignore_ascii_case({0}.as_str())",
     ),
+    m("is_ascii_str", Str, &[], Exact(FBool), "{r}.is_ascii()"),
     // The parse family is why the turbofish exists. It is the one method whose
     // result type is chosen by the caller, and the interpreter has to honor it.
     with_fish(
@@ -453,6 +800,16 @@ pub const METHODS: &[Method] = &[
             &[],
             Exact(FBool),
             "{r}.parse::<{T}>().is_err()",
+        ),
+        FishReq::ParseTarget,
+    ),
+    with_fish(
+        m(
+            "parse_result",
+            Str,
+            &[],
+            TyPat::Res(&Fish, STR_PAT),
+            "{r}.parse::<{T}>().map_err(|e| e.to_string())",
         ),
         FishReq::ParseTarget,
     ),
@@ -499,6 +856,28 @@ pub const METHODS: &[Method] = &[
     ),
     m("is_ascii", Char, &[], Exact(FBool), "{r}.is_ascii()"),
     m(
+        "is_ascii_digit",
+        Char,
+        &[],
+        Exact(FBool),
+        "{r}.is_ascii_digit()",
+    ),
+    m(
+        "is_ascii_alphabetic",
+        Char,
+        &[],
+        Exact(FBool),
+        "{r}.is_ascii_alphabetic()",
+    ),
+    m(
+        "is_ascii_punctuation",
+        Char,
+        &[],
+        Exact(FBool),
+        "{r}.is_ascii_punctuation()",
+    ),
+    m("is_control", Char, &[], Exact(FBool), "{r}.is_control()"),
+    m(
         "is_uppercase",
         Char,
         &[],
@@ -527,12 +906,27 @@ pub const METHODS: &[Method] = &[
         "{r}.to_ascii_lowercase()",
     ),
     m("char_to_string", Char, &[], Exact(FStr), "{r}.to_string()"),
+    m("len_utf8", Char, &[], Exact(FUSize), "{r}.len_utf8()"),
     m(
         "char_to_digit",
         Char,
         &[],
-        TyPat::Opt(&Exact(FU32)),
+        TyPat::Opt(U32_PAT),
         "{r}.to_digit(10)",
+    ),
+    m(
+        "char_to_digit_16",
+        Char,
+        &[],
+        TyPat::Opt(U32_PAT),
+        "{r}.to_digit(16)",
+    ),
+    m(
+        "char_eq_ignore_ascii_case",
+        Char,
+        &[Same],
+        Exact(FBool),
+        "{r}.eq_ignore_ascii_case(&{0})",
     ),
     // -- Vec ----------------------------------------------------------------
     m("vec_len", VecRecv, &[], Exact(FUSize), "{r}.len()"),
@@ -557,6 +951,14 @@ pub const METHODS: &[Method] = &[
         &[SmallUsize],
         TyPat::Opt(ELEM),
         "{r}.get({0}).cloned()",
+    ),
+    // Panics out of bounds.
+    m(
+        "vec_index",
+        VecRecv,
+        &[SmallUsize],
+        Elem,
+        "{r}[{0}].clone()",
     ),
     m(
         "vec_contains",
@@ -597,11 +999,41 @@ pub const METHODS: &[Method] = &[
     ),
     with_elem(
         m(
+            "vec_product",
+            VecRecv,
+            &[],
+            Elem,
+            "{r}.iter().copied().product::<{E}>()",
+        ),
+        Num,
+    ),
+    with_elem(
+        m(
             "vec_sorted",
             VecRecv,
             &[],
             Same,
             "({{ let mut sorted = {r}; sorted.sort(); sorted }})",
+        ),
+        OrdElem,
+    ),
+    with_elem(
+        m(
+            "vec_sorted_dedup",
+            VecRecv,
+            &[],
+            Same,
+            "({{ let mut sorted = {r}; sorted.sort(); sorted.dedup(); sorted }})",
+        ),
+        OrdElem,
+    ),
+    with_elem(
+        m(
+            "vec_binary_search",
+            VecRecv,
+            &[Elem],
+            TyPat::Res(USIZE_PAT, USIZE_PAT),
+            "({{ let mut sorted = {r}; sorted.sort(); sorted.binary_search(&{0}) }})",
         ),
         OrdElem,
     ),
@@ -612,18 +1044,175 @@ pub const METHODS: &[Method] = &[
         Same,
         "{r}.into_iter().rev().collect::<Vec<{E}>>()",
     ),
+    m(
+        "vec_take",
+        VecRecv,
+        &[SmallUsize],
+        Same,
+        "{r}.into_iter().take({0}).collect::<Vec<{E}>>()",
+    ),
+    m(
+        "vec_skip",
+        VecRecv,
+        &[SmallUsize],
+        Same,
+        "{r}.into_iter().skip({0}).collect::<Vec<{E}>>()",
+    ),
+    // Panics on a zero step.
+    m(
+        "vec_step_by",
+        VecRecv,
+        &[SmallUsize],
+        Same,
+        "{r}.into_iter().step_by({0}).collect::<Vec<{E}>>()",
+    ),
+    with_elem(
+        m(
+            "vec_repeat",
+            VecRecv,
+            &[SmallUsize],
+            Same,
+            "{r}.repeat({0})",
+        ),
+        ElemReq::Copy,
+    ),
+    m(
+        "vec_concat_with",
+        VecRecv,
+        &[Same],
+        Same,
+        "[{r}, {0}].concat()",
+    ),
+    // Panics when the split point passes the end.
+    m(
+        "vec_split_at",
+        VecRecv,
+        &[SmallUsize],
+        TyPat::Tuple2(SAME, SAME),
+        "({{ let (a, b) = {r}.split_at({0}); (a.to_vec(), b.to_vec()) }})",
+    ),
+    m(
+        "vec_split_first",
+        VecRecv,
+        &[],
+        TyPat::Opt(&TyPat::Tuple2(ELEM, SAME)),
+        "{r}.split_first().map(|(a, b)| (a.clone(), b.to_vec()))",
+    ),
+    m(
+        "vec_split_last",
+        VecRecv,
+        &[],
+        TyPat::Opt(&TyPat::Tuple2(ELEM, SAME)),
+        "{r}.split_last().map(|(a, b)| (a.clone(), b.to_vec()))",
+    ),
+    // Panics on a zero chunk size.
+    m(
+        "vec_chunk_lens",
+        VecRecv,
+        &[SmallUsize],
+        TyPat::Vec(USIZE_PAT),
+        "{r}.chunks({0}).map(<[{E}]>::len).collect::<Vec<usize>>()",
+    ),
+    m(
+        "vec_window_count",
+        VecRecv,
+        &[SmallUsize],
+        Exact(FUSize),
+        "{r}.windows({0}).count()",
+    ),
+    with_elem(
+        m(
+            "vec_window_sums",
+            VecRecv,
+            &[],
+            Same,
+            "{r}.windows(2).map(|w| w[0] + w[1]).collect::<Vec<{E}>>()",
+        ),
+        Num,
+    ),
+    m(
+        "vec_zip",
+        VecRecv,
+        &[Same],
+        TyPat::Vec(&TyPat::Tuple2(ELEM, ELEM)),
+        "{r}.into_iter().zip({0}).collect::<Vec<({E}, {E})>>()",
+    ),
+    m(
+        "vec_enumerate",
+        VecRecv,
+        &[],
+        TyPat::Vec(&TyPat::Tuple2(USIZE_PAT, ELEM)),
+        "{r}.into_iter().enumerate().collect::<Vec<(usize, {E})>>()",
+    ),
+    with_elem(
+        m(
+            "vec_to_set_max",
+            VecRecv,
+            &[],
+            TyPat::Opt(ELEM),
+            "{r}.into_iter().collect::<HashSet<{E}>>().into_iter().max()",
+        ),
+        KeyElem,
+    ),
+    with_elem(
+        m(
+            "vec_join",
+            VecRecv,
+            &[Exact(FStr)],
+            Exact(FStr),
+            "{r}.join({0}.as_str())",
+        ),
+        StrElem,
+    ),
+    with_elem(
+        m("vec_str_concat", VecRecv, &[], Exact(FStr), "{r}.concat()"),
+        StrElem,
+    ),
+    m(
+        "vec_concat",
+        VecOfVec,
+        &[],
+        TyPat::Vec(ELEM),
+        "{r}.concat()",
+    ),
+    m(
+        "vec_flatten_len",
+        VecOfVec,
+        &[],
+        Exact(FUSize),
+        "{r}.into_iter().flatten().count()",
+    ),
     // -- Option -------------------------------------------------------------
     m("is_some", Opt, &[], Exact(FBool), "{r}.is_some()"),
     m("is_none", Opt, &[], Exact(FBool), "{r}.is_none()"),
     m("unwrap_or", Opt, &[Elem], Elem, "{r}.unwrap_or({0})"),
-    m(
-        "unwrap_or_default",
-        Opt,
-        &[],
-        Elem,
-        "{r}.unwrap_or_default()",
+    with_elem(
+        m(
+            "unwrap_or_default",
+            Opt,
+            &[],
+            Elem,
+            "{r}.unwrap_or_default()",
+        ),
+        DefaultElem,
     ),
     m("opt_or", Opt, &[Same], Same, "{r}.or({0})"),
+    m("opt_xor", Opt, &[Same], Same, "{r}.xor({0})"),
+    m("opt_and", Opt, &[Same], Same, "{r}.and({0})"),
+    m(
+        "opt_zip",
+        Opt,
+        &[Same],
+        TyPat::Opt(&TyPat::Tuple2(ELEM, ELEM)),
+        "{r}.zip({0})",
+    ),
+    m(
+        "opt_ok_or",
+        Opt,
+        &[Exact(FStr)],
+        TyPat::Res(ELEM, STR_PAT),
+        "{r}.ok_or({0})",
+    ),
     m(
         "opt_to_vec",
         Opt,
@@ -632,12 +1221,27 @@ pub const METHODS: &[Method] = &[
         "{r}.into_iter().collect::<Vec<{E}>>()",
     ),
     m(
+        "opt_iter_count",
+        Opt,
+        &[],
+        Exact(FUSize),
+        "{r}.iter().count()",
+    ),
+    m(
         "opt_as_f64",
         Opt,
         &[],
         Exact(FF64),
         "(({r}.is_some() as u8) as f64)",
     ),
+    // -- Result -------------------------------------------------------------
+    m("res_is_ok", Res, &[], Exact(FBool), "{r}.is_ok()"),
+    m("res_is_err", Res, &[], Exact(FBool), "{r}.is_err()"),
+    m("res_ok", Res, &[], TyPat::Opt(OK_PAT), "{r}.ok()"),
+    m("res_err", Res, &[], TyPat::Opt(ERR_PAT), "{r}.err()"),
+    m("res_unwrap_or", Res, &[OkT], OkT, "{r}.unwrap_or({0})"),
+    m("res_and", Res, &[Same], Same, "{r}.and({0})"),
+    m("res_or", Res, &[Same], Same, "{r}.or({0})"),
     // -- HashMap ------------------------------------------------------------
     // Only order-neutral observations. Anything that iterates goes through a
     // sort inside the template, per the determinism rule in `pipe`.
@@ -664,32 +1268,60 @@ pub const METHODS: &[Method] = &[
         "{r}.get(&{0}).cloned().unwrap_or({1})",
     ),
     m(
+        "map_get_or_default",
+        RecvClass::Map,
+        &[TyPat::Key],
+        TyPat::Val,
+        "{r}.get(&{0}).cloned().unwrap_or_default()",
+    ),
+    m(
         "map_get",
         RecvClass::Map,
         &[TyPat::Key],
-        TyPat::Opt(&TyPat::Val),
+        TyPat::Opt(VAL_PAT),
         "{r}.get(&{0}).cloned()",
     ),
     m(
         "map_remove",
         RecvClass::Map,
         &[TyPat::Key],
-        TyPat::Opt(&TyPat::Val),
+        TyPat::Opt(VAL_PAT),
         "({{ let mut diff_owned = {r}; diff_owned.remove(&{0}) }})",
+    ),
+    m(
+        "map_keys_max",
+        RecvClass::Map,
+        &[],
+        TyPat::Opt(KEY_PAT),
+        "{r}.into_keys().max()",
+    ),
+    m(
+        "map_values_max",
+        RecvClass::Map,
+        &[],
+        TyPat::Opt(VAL_PAT),
+        "{r}.into_values().max()",
     ),
     m(
         "map_sorted_keys",
         RecvClass::Map,
         &[],
-        TyPat::Vec(&TyPat::Key),
+        TyPat::Vec(KEY_PAT),
         "({{ let mut diff_keys: Vec<{K}> = {r}.into_keys().collect(); diff_keys.sort(); diff_keys }})",
     ),
     m(
         "map_sorted_values",
         RecvClass::Map,
         &[],
-        TyPat::Vec(&TyPat::Val),
+        TyPat::Vec(VAL_PAT),
         "({{ let mut diff_values: Vec<{V}> = {r}.into_values().collect(); diff_values.sort(); diff_values }})",
+    ),
+    m(
+        "map_sorted_pairs",
+        RecvClass::Map,
+        &[],
+        TyPat::Vec(&TyPat::Tuple2(KEY_PAT, VAL_PAT)),
+        "({{ let mut diff_pairs: Vec<({K}, {V})> = {r}.into_iter().collect(); diff_pairs.sort(); diff_pairs }})",
     ),
     // -- HashSet ------------------------------------------------------------
     m("set_len", RecvClass::Set, &[], Exact(FUSize), "{r}.len()"),
@@ -708,11 +1340,32 @@ pub const METHODS: &[Method] = &[
         "{r}.contains(&{0})",
     ),
     m(
+        "set_is_subset",
+        RecvClass::Set,
+        &[Same],
+        Exact(FBool),
+        "{r}.is_subset(&{0})",
+    ),
+    m(
+        "set_is_disjoint",
+        RecvClass::Set,
+        &[Same],
+        Exact(FBool),
+        "{r}.is_disjoint(&{0})",
+    ),
+    m(
         "set_insert_observed",
         RecvClass::Set,
         &[Elem],
         Exact(FBool),
         "({{ let mut diff_owned = {r}; diff_owned.insert({0}) }})",
+    ),
+    m(
+        "set_max",
+        RecvClass::Set,
+        &[],
+        TyPat::Opt(ELEM),
+        "{r}.into_iter().max()",
     ),
     m(
         "set_sorted",
@@ -721,6 +1374,27 @@ pub const METHODS: &[Method] = &[
         TyPat::Vec(ELEM),
         "({{ let mut diff_elems: Vec<{E}> = {r}.into_iter().collect(); diff_elems.sort(); diff_elems }})",
     ),
+    m(
+        "set_union_sorted",
+        RecvClass::Set,
+        &[Same],
+        TyPat::Vec(ELEM),
+        "({{ let mut diff_elems: Vec<{E}> = {r}.union(&{0}).cloned().collect(); diff_elems.sort(); diff_elems }})",
+    ),
+    m(
+        "set_intersection_sorted",
+        RecvClass::Set,
+        &[Same],
+        TyPat::Vec(ELEM),
+        "({{ let mut diff_elems: Vec<{E}> = {r}.intersection(&{0}).cloned().collect(); diff_elems.sort(); diff_elems }})",
+    ),
+    m(
+        "set_difference_sorted",
+        RecvClass::Set,
+        &[Same],
+        TyPat::Vec(ELEM),
+        "({{ let mut diff_elems: Vec<{E}> = {r}.difference(&{0}).cloned().collect(); diff_elems.sort(); diff_elems }})",
+    ),
 ];
 
 /// What solving a result pattern against a wanted type told us about the call.
@@ -728,7 +1402,8 @@ pub const METHODS: &[Method] = &[
 pub struct Solved {
     /// The receiver type, when the wanted type pinned it. `None` means any
     /// type in the method's receiver class works and the generator picks,
-    /// guided by `key` or `val` when the result pinned half of a map.
+    /// guided by `key` or `val` when the result pinned half of a map or a
+    /// result.
     pub recv: Option<Ty>,
     pub fish: Option<Ty>,
     pub key: Option<Ty>,
@@ -741,8 +1416,8 @@ pub struct Solved {
 pub fn solve(method: &Method, want: &Ty) -> Option<Solved> {
     let mut found = Found::default();
     unify(&method.ret, want, &mut found)?;
-    if method.recv == RecvClass::Map {
-        return solve_map(method, found);
+    if found.same.is_none() && matches!(method.recv, RecvClass::Map | RecvClass::Res) {
+        return solve_pair(method, found);
     }
     if found.key.is_some() || found.val.is_some() {
         return None;
@@ -758,7 +1433,7 @@ pub fn solve(method: &Method, want: &Ty) -> Option<Solved> {
             if !method.recv.is_container() || !method.elem.allows(&elem) {
                 return None;
             }
-            if method.recv == RecvClass::Set && !legal_set_elem(&elem) {
+            if method.recv == RecvClass::Set && !elem.is_key() {
                 return None;
             }
             Some(method.recv.wrap(elem)?)
@@ -766,7 +1441,7 @@ pub fn solve(method: &Method, want: &Ty) -> Option<Solved> {
         (None, None) => None,
     };
     if let Some(ty) = &recv
-        && let Some(elem) = ty.elem()
+        && let Some(elem) = inner_elem(method.recv, ty)
         && !method.elem.allows(elem)
     {
         return None;
@@ -787,29 +1462,38 @@ pub fn solve(method: &Method, want: &Ty) -> Option<Solved> {
     })
 }
 
-/// Complete a map method against what the result pinned. A pinned half must
-/// belong to a legal map shape, and a fully pinned pair must be one of the
-/// generated combos, otherwise the call could not compile or would leave the
-/// planned universe.
-fn solve_map(method: &Method, found: Found) -> Option<Solved> {
+/// The element `ElemReq` constrains: the inner element for `Vec<Vec<E>>`.
+fn inner_elem(recv: RecvClass, ty: &Ty) -> Option<&Ty> {
+    match recv {
+        RecvClass::VecOfVec => ty.elem()?.elem(),
+        _ => ty.elem(),
+    }
+}
+
+/// Complete a map or result method against what the result pinned. A fully
+/// pinned pair becomes the receiver, half pinned pairs guide the generator's
+/// sample. A map key must hash and a map value must sort, per the
+/// observation rule.
+fn solve_pair(method: &Method, found: Found) -> Option<Solved> {
     if found.same.is_some() || found.elem.is_some() || found.fish.is_some() {
         return None;
     }
     if method.fish != FishReq::None {
         return None;
     }
-    let combos = crate::lang::ty::map_combos();
-    let fits = |key: &Option<Ty>, val: &Option<Ty>| {
-        combos.iter().any(|(k, v)| {
-            key.as_ref().is_none_or(|found_key| found_key == k)
-                && val.as_ref().is_none_or(|found_val| found_val == v)
-        })
-    };
-    if !fits(&found.key, &found.val) {
-        return None;
+    if method.recv == RecvClass::Map {
+        if found.key.as_ref().is_some_and(|key| !key.is_key()) {
+            return None;
+        }
+        if found.val.as_ref().is_some_and(|val| !is_map_val(val)) {
+            return None;
+        }
     }
     let recv = match (&found.key, &found.val) {
-        (Some(key), Some(val)) => Some(Ty::map_of(key.clone(), val.clone())),
+        (Some(key), Some(val)) if method.recv == RecvClass::Map => {
+            Some(Ty::map_of(key.clone(), val.clone()))
+        }
+        (Some(ok), Some(err)) => Some(Ty::res_of(ok.clone(), err.clone())),
         _ => None,
     };
     Some(Solved {
@@ -820,8 +1504,9 @@ fn solve_map(method: &Method, found: Found) -> Option<Solved> {
     })
 }
 
-fn legal_set_elem(elem: &Ty) -> bool {
-    crate::lang::ty::set_elems().contains(elem)
+/// A map value sorts in the observation and defaults in `get_or_default`.
+pub fn is_map_val(ty: &Ty) -> bool {
+    ty.is_ord() && ty.has_default()
 }
 
 pub fn fish_allows(req: FishReq, ty: &Ty) -> bool {
@@ -837,25 +1522,33 @@ struct Found {
     same: Option<Ty>,
     elem: Option<Ty>,
     fish: Option<Ty>,
+    /// The key of a map or the ok type of a result.
     key: Option<Ty>,
+    /// The value of a map or the error type of a result.
     val: Option<Ty>,
 }
 
 fn unify(pat: &TyPat, want: &Ty, found: &mut Found) -> Option<()> {
     match pat {
         Same => {
+            if found.same.as_ref().is_some_and(|seen| seen != want) {
+                return None;
+            }
             found.same = Some(want.clone());
             Some(())
         }
         Elem => {
+            if found.elem.as_ref().is_some_and(|seen| seen != want) {
+                return None;
+            }
             found.elem = Some(want.clone());
             Some(())
         }
-        TyPat::Key => {
+        TyPat::Key | OkT => {
             found.key = Some(want.clone());
             Some(())
         }
-        TyPat::Val => {
+        TyPat::Val | ErrT => {
             found.val = Some(want.clone());
             Some(())
         }
@@ -872,22 +1565,49 @@ fn unify(pat: &TyPat, want: &Ty, found: &mut Found) -> Option<()> {
             Ty::Opt(elem) => unify(inner, elem, found),
             _ => None,
         },
+        TyPat::Tuple2(first, second) => match want {
+            Ty::Tuple(items) if items.len() == 2 => {
+                unify(first, &items[0], found)?;
+                unify(second, &items[1], found)
+            }
+            _ => None,
+        },
+        TyPat::Res(ok, err) => match want {
+            Ty::Res(want_ok, want_err) => {
+                unify(ok, want_ok, found)?;
+                unify(err, want_err, found)
+            }
+            _ => None,
+        },
         // Count patterns describe an argument, never a result.
         SmallU32 | SmallI32 | SmallUsize => None,
     }
 }
 
-/// The concrete type an argument pattern takes for a solved call.
-pub fn arg_ty(pat: &TyPat, recv: &Ty, fish: Option<&Ty>) -> Option<Ty> {
+/// The concrete type an argument pattern takes for a solved call. `Elem` is
+/// the element the method's receiver class names, the inner one only for a
+/// `VecOfVec` method, so `vec_contains` on a `Vec<Vec<u64>>` still takes a
+/// `Vec<u64>`.
+pub fn arg_ty(pat: &TyPat, class: RecvClass, recv: &Ty, fish: Option<&Ty>) -> Option<Ty> {
     Some(match pat {
         Same => recv.clone(),
-        Elem => recv.elem()?.clone(),
+        Elem => inner_elem(class, recv)?.clone(),
         TyPat::Key => recv.key_val()?.0.clone(),
         TyPat::Val => recv.key_val()?.1.clone(),
+        OkT => recv.ok_err()?.0.clone(),
+        ErrT => recv.ok_err()?.1.clone(),
         Exact(fixed) => fixed.ty(),
         Fish => fish?.clone(),
-        TyPat::Vec(inner) => Ty::vec_of(arg_ty(inner, recv, fish)?),
-        TyPat::Opt(inner) => Ty::opt_of(arg_ty(inner, recv, fish)?),
+        TyPat::Vec(inner) => Ty::vec_of(arg_ty(inner, class, recv, fish)?),
+        TyPat::Opt(inner) => Ty::opt_of(arg_ty(inner, class, recv, fish)?),
+        TyPat::Tuple2(first, second) => Ty::Tuple(vec![
+            arg_ty(first, class, recv, fish)?,
+            arg_ty(second, class, recv, fish)?,
+        ]),
+        TyPat::Res(ok, err) => Ty::res_of(
+            arg_ty(ok, class, recv, fish)?,
+            arg_ty(err, class, recv, fish)?,
+        ),
         SmallU32 => Ty::Int(IntWidth::U32),
         SmallI32 => Ty::Int(IntWidth::I32),
         SmallUsize => Ty::Int(IntWidth::USize),

@@ -6,6 +6,7 @@ account_name
 add_modifier
 all
 ancestors
+and
 and_modify
 and_then
 any
@@ -34,6 +35,7 @@ as_path
 as_ref
 as_secs
 as_secs_f64
+as_slice
 as_str
 as_string
 as_u16
@@ -66,22 +68,28 @@ by_ref
 bytes
 captures
 captures_iter
+cbrt
 ceil
 cell
+chain
 chain_update
 change_config
 change_page_content
 char_indices
 chars
+checked_abs
 checked_add
 checked_div
+checked_ilog2
 checked_mul
 checked_neg
 checked_pow
 checked_rem
+checked_rem_euclid
 checked_shl
 checked_shr
 checked_sub
+chunks
 clamp
 clear mut
 client
@@ -106,6 +114,7 @@ context
 cookie_store
 copied
 copy_from_slice mut
+copysign
 count
 count_ones
 count_zeros
@@ -134,6 +143,7 @@ dim
 dimmed
 display
 display_name
+div_ceil
 div_euclid
 drain mut
 duration_since
@@ -154,6 +164,8 @@ error_control
 error_for_status
 executable_path
 exists
+exp
+exp2
 expect
 extend mut
 extend_from_slice mut
@@ -200,12 +212,16 @@ header
 headers
 height
 hour
+hypot
 id
+ilog10
+ilog2
 incoming
 inner
 ino
 insert mut
 insert_str mut
+intersection
 intersects
 into
 into_bytes
@@ -231,8 +247,11 @@ is_ascii_uppercase
 is_ascii_whitespace
 is_boolean
 is_cancelled
+is_char_boundary
 is_client_error
+is_control
 is_dir
+is_disjoint
 is_empty
 is_eq
 is_err
@@ -251,7 +270,9 @@ is_match
 is_multiple_of
 is_nan
 is_ne
+is_negative
 is_none
+is_normal
 is_null
 is_number
 is_numeric
@@ -259,13 +280,18 @@ is_object
 is_ok
 is_ok_and
 is_panic
+is_positive
+is_power_of_two
 is_server_error
 is_sign_negative
 is_sign_positive
 is_some
 is_some_and
 is_string
+is_subnormal
+is_subset
 is_success
+is_superset
 is_symlink
 is_terminal
 is_u64
@@ -284,12 +310,17 @@ kill
 kind
 last
 last_mut mut
+leading_ones
 leading_zeros
 len
+len_utf8
 lines
+ln
 local
 local_addr
 lock
+log10
+log2
 magenta
 make_ascii_lowercase mut
 make_ascii_uppercase mut
@@ -302,6 +333,7 @@ matches
 max
 max_by_key
 metadata
+midpoint
 min
 min_by_key
 minute
@@ -314,6 +346,8 @@ name
 namespace
 nanos
 next
+next_multiple_of
+next_power_of_two
 normal
 nth
 offset
@@ -334,6 +368,10 @@ or_insert
 or_insert_with
 or_insert_with_key
 output
+overflowing_add
+overflowing_mul
+overflowing_sub
+pad
 padding
 parent
 parse
@@ -396,12 +434,14 @@ root
 rotate_left mut
 rotate_right mut
 round
+round_ties_even
 rposition
 rsplit
 rsplit_once
 rsplitn
 saturating_add
 saturating_mul
+saturating_pow
 saturating_sub
 save
 second
@@ -445,6 +485,7 @@ status
 stderr
 stdin
 stdout
+step_by
 stop
 strip_prefix
 strip_suffix
@@ -460,6 +501,7 @@ swap mut
 swap_bytes
 swap_remove mut
 symbol
+symmetric_difference
 sync_all
 sync_data
 take mut
@@ -475,18 +517,21 @@ title
 to_ascii_lowercase
 to_ascii_uppercase
 to_be_bytes
+to_degrees
 to_digit
 to_le_bytes
 to_lowercase
 to_ne_bytes
 to_owned
 to_path_buf
+to_radians
 to_rfc3339
 to_str
 to_string
 to_string_lossy
 to_uppercase
 to_vec
+trailing_ones
 trailing_zeros
 trim
 trim_end
@@ -520,15 +565,22 @@ wait_with_output
 white
 width
 widths
+windows
 with_context
 with_extension
+wrapping_abs
 wrapping_add
 wrapping_mul
 wrapping_neg
+wrapping_pow
+wrapping_shl
+wrapping_shr
 wrapping_sub
 write
 write_all
 write_fmt
 write_str
+xor
 year
 yellow
+zip

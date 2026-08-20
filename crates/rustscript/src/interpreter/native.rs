@@ -89,6 +89,10 @@ pub enum Native {
         kind: String,
         code: Option<i32>,
     },
+    /// A `ParseIntError`, `ParseFloatError`, `ParseBoolError`, or
+    /// `ParseCharError` as scripts observe it: the real `Display` and
+    /// `Debug` texts.
+    ParseErr { display: String, debug: String },
     /// A tokio `JoinError` as scripts observe it: real `Display` and
     /// `Debug` text captured at conversion, plus what its accessors answer.
     JoinErr {
@@ -99,7 +103,12 @@ pub enum Native {
     /// The buffer behind a `fmt::Formatter` handed to a user `fmt` impl.
     /// `write!` into it appends here, and the formatter reads it back as the
     /// rendered text.
-    Fmt(String),
+    Fmt {
+        text: String,
+        /// The impl went through `f.pad`, which honors the caller's width,
+        /// where `write!` ignores it.
+        padded: bool,
+    },
     /// A consumed handle, left behind after a task or future is taken to await,
     /// or after a stdin pipe is closed so the child sees EOF.
     Taken,
@@ -112,6 +121,7 @@ impl Native {
             Native::Task(_) => "JoinHandle",
             Native::Future(_) => "Future",
             Native::HttpClient(_) | Native::BlockingHttpClient(_) => "Client",
+            Native::ParseErr { .. } => "ParseError",
             Native::Instant(_) => "Instant",
             Native::SystemTime(_) => "SystemTime",
             Native::Child(_) => "Child",
@@ -134,7 +144,7 @@ impl Native {
             Native::Iterator(_) => "Iterator",
             Native::IoErr { .. } => "IoError",
             Native::JoinErr { .. } => "JoinError",
-            Native::Fmt(_) => "Formatter",
+            Native::Fmt { .. } => "Formatter",
             Native::Taken => "Taken",
         }
     }

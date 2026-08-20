@@ -120,6 +120,22 @@ pub(super) fn num_core(recv: Num, name: BuiltinId, args: &impl Args) -> Result<O
         (Float(f), BuiltinId::Powi) => NumOut::Float(f.powi(i32::try_from(int_arg(args, 0)?)?)),
         (Float(f), BuiltinId::Powf) => NumOut::Float(f.powf(float_arg(args, 0)?)),
         (Float(f), BuiltinId::Sqrt) => NumOut::Float(f.sqrt()),
+        (Float(f), BuiltinId::Cbrt) => NumOut::Float(f.cbrt()),
+        (Float(f), BuiltinId::Exp) => NumOut::Float(f.exp()),
+        (Float(f), BuiltinId::Exp2) => NumOut::Float(f.exp2()),
+        (Float(f), BuiltinId::Ln) => NumOut::Float(f.ln()),
+        (Float(f), BuiltinId::Log2) => NumOut::Float(f.log2()),
+        (Float(f), BuiltinId::Log10) => NumOut::Float(f.log10()),
+        (Float(f), BuiltinId::ToDegrees) => NumOut::Float(f.to_degrees()),
+        (Float(f), BuiltinId::ToRadians) => NumOut::Float(f.to_radians()),
+        (Float(f), BuiltinId::RoundTiesEven) => NumOut::Float(f.round_ties_even()),
+        (Float(f), BuiltinId::Hypot) => NumOut::Float(f.hypot(float_arg(args, 0)?)),
+        (Float(f), BuiltinId::Copysign) => NumOut::Float(f.copysign(float_arg(args, 0)?)),
+        (Float(f), BuiltinId::Midpoint) => NumOut::Float(f.midpoint(float_arg(args, 0)?)),
+        (Float(f), BuiltinId::RemEuclid) => NumOut::Float(f.rem_euclid(float_arg(args, 0)?)),
+        (Float(f), BuiltinId::DivEuclid) => NumOut::Float(f.div_euclid(float_arg(args, 0)?)),
+        (Float(f), BuiltinId::IsNormal) => NumOut::Bool(f.is_normal()),
+        (Float(f), BuiltinId::IsSubnormal) => NumOut::Bool(f.is_subnormal()),
         (Float(f), BuiltinId::Floor) => NumOut::Float(f.floor()),
         (Float(f), BuiltinId::Trunc) => NumOut::Float(f.trunc()),
         // Float methods on an int receiver: the untyped `parse` guesses a
@@ -161,7 +177,14 @@ pub(super) fn num_core(recv: Num, name: BuiltinId, args: &impl Args) -> Result<O
         (Int(a), BuiltinId::Max) => NumOut::Int(a.max(int_arg(args, 0)?)),
         (Int(a), BuiltinId::Clamp) => NumOut::Int(a.clamp(int_arg(args, 0)?, int_arg(args, 1)?)),
         (Float(a), BuiltinId::Clamp) => {
-            NumOut::Float(a.clamp(float_arg(args, 0)?, float_arg(args, 1)?))
+            let (low, high) = (float_arg(args, 0)?, float_arg(args, 1)?);
+            if !matches!(
+                low.partial_cmp(&high),
+                Some(Ordering::Less | Ordering::Equal)
+            ) {
+                bail!("min > max, or either was NaN. min = {low:?}, max = {high:?}");
+            }
+            NumOut::Float(a.clamp(low, high))
         }
         (Float(a), BuiltinId::Min) => NumOut::Float(a.min(float_arg(args, 0)?)),
         (Float(a), BuiltinId::Max) => NumOut::Float(a.max(float_arg(args, 0)?)),
@@ -198,13 +221,38 @@ pub(super) fn f32_core(recv: f32, name: BuiltinId, args: &impl Args) -> Result<O
         BuiltinId::Powi => F32Out::Val(recv.powi(i32::try_from(int_arg(args, 0)?)?)),
         BuiltinId::Powf => F32Out::Val(recv.powf(arg(0)?)),
         BuiltinId::Sqrt => F32Out::Val(recv.sqrt()),
+        BuiltinId::Cbrt => F32Out::Val(recv.cbrt()),
+        BuiltinId::Exp => F32Out::Val(recv.exp()),
+        BuiltinId::Exp2 => F32Out::Val(recv.exp2()),
+        BuiltinId::Ln => F32Out::Val(recv.ln()),
+        BuiltinId::Log2 => F32Out::Val(recv.log2()),
+        BuiltinId::Log10 => F32Out::Val(recv.log10()),
+        BuiltinId::ToDegrees => F32Out::Val(recv.to_degrees()),
+        BuiltinId::ToRadians => F32Out::Val(recv.to_radians()),
+        BuiltinId::RoundTiesEven => F32Out::Val(recv.round_ties_even()),
+        BuiltinId::Hypot => F32Out::Val(recv.hypot(arg(0)?)),
+        BuiltinId::Copysign => F32Out::Val(recv.copysign(arg(0)?)),
+        BuiltinId::Midpoint => F32Out::Val(recv.midpoint(arg(0)?)),
+        BuiltinId::RemEuclid => F32Out::Val(recv.rem_euclid(arg(0)?)),
+        BuiltinId::DivEuclid => F32Out::Val(recv.div_euclid(arg(0)?)),
+        BuiltinId::IsNormal => F32Out::Bool(recv.is_normal()),
+        BuiltinId::IsSubnormal => F32Out::Bool(recv.is_subnormal()),
         BuiltinId::Floor => F32Out::Val(recv.floor()),
         BuiltinId::Trunc => F32Out::Val(recv.trunc()),
         BuiltinId::Ceil => F32Out::Val(recv.ceil()),
         BuiltinId::Round => F32Out::Val(recv.round()),
         BuiltinId::Min => F32Out::Val(recv.min(arg(0)?)),
         BuiltinId::Max => F32Out::Val(recv.max(arg(0)?)),
-        BuiltinId::Clamp => F32Out::Val(recv.clamp(arg(0)?, arg(1)?)),
+        BuiltinId::Clamp => {
+            let (low, high) = (arg(0)?, arg(1)?);
+            if !matches!(
+                low.partial_cmp(&high),
+                Some(Ordering::Less | Ordering::Equal)
+            ) {
+                bail!("min > max, or either was NaN. min = {low:?}, max = {high:?}");
+            }
+            F32Out::Val(recv.clamp(low, high))
+        }
         BuiltinId::Fract => F32Out::Val(recv.fract()),
         BuiltinId::Signum => F32Out::Val(recv.signum()),
         BuiltinId::Recip => F32Out::Val(recv.recip()),
@@ -317,6 +365,8 @@ pub(super) enum CharOut {
     Str(String),
     /// `to_digit`, whose payload is a u32 in real Rust.
     OptU32(Option<u32>),
+    /// `len_utf8`.
+    USize(usize),
 }
 
 /// The `char` classification and conversion methods.
@@ -346,6 +396,13 @@ pub(super) fn char_method(ch: char, name: BuiltinId, args: &impl Args) -> Option
         BuiltinId::IsAsciiPunctuation => b(ch.is_ascii_punctuation()),
         BuiltinId::IsAsciiHexdigit => b(ch.is_ascii_hexdigit()),
         BuiltinId::IsAscii => b(ch.is_ascii()),
+        BuiltinId::IsControl => b(ch.is_control()),
+        BuiltinId::EqIgnoreAsciiCase => b(args
+            .text(0)
+            .chars()
+            .next()
+            .is_some_and(|other| ch.eq_ignore_ascii_case(&other))),
+        BuiltinId::LenUtf8 => Some(Ok(CharOut::USize(ch.len_utf8()))),
         BuiltinId::IsAlphabetic => b(ch.is_alphabetic()),
         BuiltinId::IsAlphanumeric => b(ch.is_alphanumeric()),
         BuiltinId::IsNumeric => b(ch.is_numeric()),
@@ -389,6 +446,8 @@ pub(super) fn str_core(s: &str, name: BuiltinId, args: &impl Args) -> Result<Opt
     Ok(Some(match name {
         BuiltinId::Len => StrOut::USize(s.len()),
         BuiltinId::IsEmpty => StrOut::Bool(s.is_empty()),
+        BuiltinId::IsCharBoundary => StrOut::Bool(s.is_char_boundary(usize_arg(args, 0)?)),
+        BuiltinId::IsAscii => StrOut::Bool(s.is_ascii()),
         BuiltinId::Count => StrOut::USize(s.chars().count()),
         BuiltinId::Contains => StrOut::Bool(s.contains(&a(0))),
         BuiltinId::EqIgnoreAsciiCase => StrOut::Bool(s.eq_ignore_ascii_case(&a(0))),

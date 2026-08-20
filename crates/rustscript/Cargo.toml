@@ -51,6 +51,7 @@ ratatui = { workspace = true }
 crossterm = { workspace = true }
 terminal-light = { workspace = true }
 num-traits = { workspace = true }
+quote = { workspace = true }
 
 # Not a default feature on purpose. parking_lot's detector tracks the owner
 # of every lock, which costs on each acquisition, so only test builds carry

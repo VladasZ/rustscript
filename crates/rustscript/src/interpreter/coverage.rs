@@ -127,7 +127,10 @@ impl UserMethods {
         let mut types = BTreeSet::new();
         let mut names = BTreeSet::new();
         for (ty, method) in methods {
-            let bare = super::resolver::bare(&ty).to_string();
+            // `impl T for Vec<u8>` is keyed with its generics, which the
+            // checker's receiver shapes do not carry.
+            let bare = super::resolver::bare(&ty);
+            let bare = bare.split('<').next().unwrap_or(bare).to_string();
             types.insert(bare.clone());
             names.insert(method.clone());
             pairs.insert((bare, method));
@@ -142,6 +145,19 @@ impl UserMethods {
     fn has(&self, ty: &str, method: &str) -> bool {
         self.pairs
             .contains(&(super::resolver::bare(ty).to_string(), method.to_string()))
+    }
+
+    /// Whether the script implements `method` on the builtin type behind a
+    /// checker receiver shape, `Str` standing for `String`, `Map` for either
+    /// map, `Vec` for either sequence.
+    fn has_on_builtin(&self, recv: &str, method: &str) -> bool {
+        let names: &[&str] = match recv {
+            "Str" => &["String", "str"],
+            "Map" => &["HashMap", "BTreeMap"],
+            "Vec" => &["Vec", "VecDeque"],
+            other => return self.has(other, method),
+        };
+        names.iter().any(|name| self.has(name, method))
     }
 }
 
@@ -254,7 +270,9 @@ fn walk(chunk: &Chunk, user: &UserMethods, out: &mut Vec<Finding>) {
                         || (user.has(ty_name, "next") && any_name(method))
                 }
                 _ => match ty.name() {
-                    Some(recv_name) => on_recv(recv_name, method),
+                    Some(recv_name) => {
+                        on_recv(recv_name, method) || user.has_on_builtin(recv_name, method)
+                    }
                     None => user.names.contains(method) || any_name(method),
                 },
             };

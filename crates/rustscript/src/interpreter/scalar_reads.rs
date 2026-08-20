@@ -32,6 +32,7 @@ fn mark_reads(chunk: &Chunk, op: &Op, mark: &mut impl FnMut(u16)) {
         | Op::LoadGlobal { .. }
         | Op::LoadEnum { .. }
         | Op::MakeMap { .. }
+        | Op::BuildDefault { .. }
         | Op::PathValue { .. }
         | Op::UniqueUpvalue { .. }
         | Op::Jump { .. }

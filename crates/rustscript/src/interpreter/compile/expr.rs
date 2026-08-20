@@ -12,6 +12,7 @@ use crate::interpreter::numeric::{IntWidth, truncate};
 use super::{
     CollectTarget, Compiler, FloatTy, LoopCtx, NameLoc, NumericTy, ScalarTy, bin_kind, expr_kind,
     first_generic_type, int_literal, is_assign_op, macro_yields_value, numeric_annotation,
+    numeric_target,
 };
 
 /// Operators whose operands share the annotated integer type in real Rust.
@@ -134,7 +135,7 @@ fn result_ok_type(ty: &syn::Type) -> Option<&syn::Type> {
 /// value of one of them. Walks only the shapes whose own value is a
 /// sub-expression's value: parens, a block's trailing expression, both branches
 /// of an `if`, and every arm of a `match`.
-fn tail_exprs<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+pub(super) fn tail_exprs<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
     match e {
         Expr::Paren(p) => tail_exprs(&p.expr, out),
         Expr::Group(g) => tail_exprs(&g.expr, out),
@@ -154,6 +155,63 @@ fn tail_exprs<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
     }
 }
 
+/// Whether an expression is built only from unsuffixed integer literals,
+/// through negation, arithmetic, branches, blocks, and arms. Nothing else
+/// in the program can type such a value, so rustc falls back to `i32`.
+pub(super) fn unconstrained_int(expr: &Expr) -> bool {
+    match expr {
+        Expr::Lit(l) => matches!(&l.lit, Lit::Int(int) if int.suffix().is_empty()),
+        Expr::Paren(p) => unconstrained_int(&p.expr),
+        Expr::Group(g) => unconstrained_int(&g.expr),
+        Expr::Unary(u) => matches!(u.op, UnOp::Neg(_)) && unconstrained_int(&u.expr),
+        Expr::Binary(b) => match bin_kind(&b.op) {
+            Some(BinKind::Shl | BinKind::Shr) => unconstrained_int(&b.left),
+            Some(op) if propagates_annotation(op) && !is_assign_op(&b.op) => {
+                unconstrained_int(&b.left) && unconstrained_int(&b.right)
+            }
+            _ => false,
+        },
+        Expr::If(_) | Expr::Block(_) | Expr::Match(_) => {
+            let mut tails = Vec::new();
+            tail_exprs(expr, &mut tails);
+            let complete = match expr {
+                Expr::If(sel) => sel.else_branch.is_some(),
+                _ => true,
+            };
+            complete && !tails.is_empty() && tails.into_iter().all(unconstrained_int)
+        }
+        _ => false,
+    }
+}
+
+/// Whether a numeric hint on this node can ever be consumed: the shapes
+/// `compile_numeric_annotated` handles, which always compile through
+/// `compile_into`. A hint on anything else would stay behind, keyed by an
+/// address a later parse of a macro body can reuse for an unrelated node.
+pub(super) fn takes_numeric_hint(expr: &Expr) -> bool {
+    match expr {
+        Expr::Lit(l) => matches!(&l.lit, Lit::Int(_) | Lit::Float(_)),
+        Expr::Paren(p) => takes_numeric_hint(&p.expr),
+        Expr::Group(g) => takes_numeric_hint(&g.expr),
+        Expr::Unary(u) => matches!(u.op, UnOp::Neg(_)),
+        Expr::Binary(b) => {
+            !is_assign_op(&b.op) && bin_kind(&b.op).is_some_and(propagates_annotation)
+        }
+        Expr::If(sel) => sel.else_branch.is_some(),
+        Expr::Block(_) | Expr::Match(_) => true,
+        _ => false,
+    }
+}
+
+/// An expression without the parens and groups around it.
+pub(super) fn unparen(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Paren(p) => unparen(&p.expr),
+        Expr::Group(g) => unparen(&g.expr),
+        other => other,
+    }
+}
+
 /// The trailing expression of a block, which is the block's own value.
 fn tail_block_exprs<'a>(block: &'a Block, out: &mut Vec<&'a Expr>) {
     if let Some(Stmt::Expr(e, None)) = block.stmts.last() {
@@ -165,7 +223,7 @@ fn tail_block_exprs<'a>(block: &'a Block, out: &mut Vec<&'a Expr>) {
 /// trailing expression and from a `return`. A closure body is skipped, because
 /// its `return` leaves the closure rather than this function, so the function's
 /// return type says nothing about it.
-fn returned_exprs(block: &Block) -> Vec<&Expr> {
+pub(super) fn returned_exprs(block: &Block) -> Vec<&Expr> {
     let mut found = Vec::new();
     tail_block_exprs(block, &mut found);
     walk_returns(block, &mut found);
@@ -194,6 +252,21 @@ pub(super) fn returned_from_strs(block: &Block) -> Vec<*const syn::ExprCall> {
         .into_iter()
         .filter_map(|e| from_str_chain(e, true).map(std::ptr::from_ref))
         .collect()
+}
+
+/// `<[T]>::len` as the two segment path `Vec::len`, the owner read off the
+/// qualified self type.
+fn qualified_method_ref(p: &syn::ExprPath) -> Vec<String> {
+    let owner = match p.qself.as_ref().map(|q| &*q.ty) {
+        Some(syn::Type::Path(tp)) => tp
+            .path
+            .segments
+            .last()
+            .map_or_else(|| "Vec".to_string(), |s| s.ident.to_string()),
+        Some(syn::Type::Slice(_)) => "Vec".to_string(),
+        _ => "str".to_string(),
+    };
+    vec![owner, p.path.segments[0].ident.to_string()]
 }
 
 /// Statement level `return`s, following the constructs that carry a block.
@@ -245,7 +318,13 @@ fn walk_returns_expr<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
 impl Compiler<'_> {
     pub(super) fn compile_block(&mut self, block: &Block, dst: Reg) -> Result<()> {
         self.push_scope();
+        // The written types of the block's own locals end with it, so a
+        // later block reusing a name cannot be read under the wrong type.
+        let typed_locals = self.typed_locals.clone();
+        let typed_local_types = self.typed_local_types.clone();
         let res = self.compile_block_inner(block, dst);
+        self.typed_locals = typed_locals;
+        self.typed_local_types = typed_local_types;
         // The block value already moved into `dst` before the scope ends, so
         // a returned binding reads as still-shared and is not dropped here.
         if res.is_ok() {
@@ -395,6 +474,11 @@ impl Compiler<'_> {
             if let Some(call) = from_str_root(&init.expr) {
                 self.json_let = Some((std::ptr::from_ref(call), self.lower_ir(&t.ty)));
                 offered = true;
+            } else if let Some(call) = super::calls::bare_default_call(&init.expr) {
+                // `let x: T = Default::default()` names the type only here.
+                if let Some(ir) = self.default_ir(&t.ty) {
+                    self.default_calls.insert(std::ptr::from_ref(call), ir);
+                }
             } else if let Some(target) = CollectTarget::of_type(&t.ty)
                 && let Some(mc) = collect_root(&init.expr)
             {
@@ -403,11 +487,31 @@ impl Compiler<'_> {
             // `let x: T = ...unwrap_or_default()` is the only place
             // that names the payload the default is built from,
             // since the method takes no turbofish of its own.
-            if let Expr::MethodCall(mc) = &*init.expr
+            if let Expr::MethodCall(mc) = unparen(&init.expr)
                 && mc.method == "unwrap_or_default"
+            {
+                if let Some(ty) = ScalarTy::lower(&t.ty) {
+                    self.default_let = Some((std::ptr::from_ref(mc), ty));
+                }
+                self.default_let_ty = Some((std::ptr::from_ref(mc), (*t.ty).clone()));
+            }
+            // `let x: T = ...sum()` names the width a bare `sum` or
+            // `product` adds up in, the same way a turbofish would.
+            if let Expr::MethodCall(mc) = unparen(&init.expr)
+                && (mc.method == "sum" || mc.method == "product")
+                && mc.turbofish.is_none()
                 && let Some(ty) = ScalarTy::lower(&t.ty)
             {
-                self.default_let = Some((std::ptr::from_ref(mc), ty));
+                self.reduce_let = Some((std::ptr::from_ref(mc), ty));
+            }
+            // `let x: T = v.into()` names the `From` impl `into` goes through.
+            if let Expr::MethodCall(mc) = unparen(&init.expr)
+                && mc.method == "into"
+                && mc.args.is_empty()
+                && let syn::Type::Path(p) = &*t.ty
+                && let Some(canon) = self.user_type_key(&p.path)
+            {
+                self.into_let = Some((std::ptr::from_ref(mc), canon));
             }
         }
         // `let opt: Option<T> = ..` and `let v: Vec<T> = ..`
@@ -416,9 +520,12 @@ impl Compiler<'_> {
         // .unwrap_or_default()` builds the right default from it.
         if let Pat::Type(t) = &local.pat
             && let Pat::Ident(ident) = &*t.pat
-            && let Some(declared) = annotation_scalar(&t.ty)
         {
-            self.typed_locals.insert(ident.ident.to_string(), declared);
+            self.typed_local_types
+                .insert(ident.ident.to_string(), (*t.ty).clone());
+            if let Some(declared) = annotation_scalar(&t.ty) {
+                self.typed_locals.insert(ident.ident.to_string(), declared);
+            }
         }
         // A numeric annotation types a bare literal init at
         // compile time, so the value never exists at the wrong
@@ -426,10 +533,14 @@ impl Compiler<'_> {
         let mut typed_literal = false;
         if let Pat::Type(t) = &local.pat
             && let Some(init) = &local.init
-            && let Some(target) = numeric_annotation(&t.ty)
         {
-            typed_literal = self.compile_numeric_annotated(val, &init.expr, target)?;
+            if let Some(target) = numeric_annotation(&t.ty) {
+                typed_literal = self.compile_numeric_annotated(val, &init.expr, target)?;
+            } else {
+                self.offer_literal_hints(&t.ty, &init.expr);
+            }
         }
+        self.seed_unannotated_hint(local);
         if !typed_literal {
             match &local.init {
                 Some(init) => self.compile_into(val, &init.expr)?,
@@ -444,9 +555,13 @@ impl Compiler<'_> {
         if !matches!(&local.pat, Pat::Type(_))
             && let Pat::Ident(ident) = &local.pat
             && let Some(init) = &local.init
-            && let Some(stated) = self.stated_ty(&init.expr)
         {
-            self.typed_locals.insert(ident.ident.to_string(), stated);
+            if let Some(stated) = self.stated_ty(&init.expr) {
+                self.typed_locals.insert(ident.ident.to_string(), stated);
+            }
+            if let Some(ty) = self.written_type(&init.expr) {
+                self.typed_local_types.insert(ident.ident.to_string(), ty);
+            }
         }
         let consumed = offered && self.json_let.is_none();
         self.json_let = None;
@@ -464,6 +579,19 @@ impl Compiler<'_> {
             self.emit(Op::LoadUnit { dst });
         }
         Ok(())
+    }
+
+    /// Without an annotation, a suffixed literal or a typed local in one
+    /// branch of the init types the bare literals in the others.
+    fn seed_unannotated_hint(&mut self, local: &syn::Local) {
+        if !matches!(&local.pat, Pat::Type(_))
+            && let Some(init) = &local.init
+            && takes_numeric_hint(&init.expr)
+            && let Some(target) = self.stated_ty(&init.expr).as_ref().and_then(numeric_target)
+        {
+            self.numeric_hints
+                .insert(std::ptr::from_ref(&*init.expr), target);
+        }
     }
 
     /// Apply a `let` annotation to an already-computed init value. A numeric
@@ -511,6 +639,7 @@ impl Compiler<'_> {
         {
             let name = p.path.segments[0].ident.to_string();
             if let NameLoc::Local(reg) = self.resolve(&name) {
+                self.numeric_hints.remove(&std::ptr::from_ref(expr));
                 return Ok(reg);
             }
         }
@@ -521,6 +650,11 @@ impl Compiler<'_> {
 
     pub(super) fn compile_into(&mut self, dst: Reg, expr: &Expr) -> Result<()> {
         self.set_line(expr.span());
+        if let Some(target) = self.numeric_hints.remove(&std::ptr::from_ref(expr))
+            && self.compile_numeric_annotated(dst, expr, target)?
+        {
+            return Ok(());
+        }
         match expr {
             Expr::Lit(lit) => self.compile_lit(dst, &lit.lit)?,
             Expr::Paren(p) => self.compile_into(dst, &p.expr)?,
@@ -528,6 +662,12 @@ impl Compiler<'_> {
             Expr::Reference(r) => self.compile_into(dst, &r.expr)?,
             Expr::Unsafe(u) => self.compile_block(&u.block, dst)?,
             Expr::Block(b) => self.compile_block(&b.block, dst)?,
+            // `<[T]>::len` or `<str>::trim` used as a value is a method
+            // reference, the type is only there to pick the method.
+            Expr::Path(p) if p.qself.is_some() && p.path.segments.len() == 1 => {
+                let segs = qualified_method_ref(p);
+                self.compile_resolved_value(dst, &segs)?;
+            }
             Expr::Path(p) => self.compile_path(dst, &p.path)?,
             Expr::Unary(u) => self.compile_unary(dst, u)?,
             Expr::Binary(b) => self.compile_binary(dst, b)?,
@@ -579,22 +719,7 @@ impl Compiler<'_> {
             }
             Expr::Struct(s) => self.compile_struct_literal(dst, s)?,
             Expr::Range(r) => self.compile_range(dst, r)?,
-            Expr::Try(t) => {
-                let src = self.compile_expr(&t.expr)?;
-                if self.ctx.has_drop {
-                    // The early return runs the scope drops it would
-                    // otherwise skip by leaving the frame from inside the VM.
-                    let site = self.here();
-                    self.emit(Op::TryJump { dst, src, to: 0 });
-                    let depth = self.cur().scope_order.len();
-                    self.emit_scope_drops(depth);
-                    self.emit(Op::Ret { src: dst });
-                    let ok = self.mark()?;
-                    self.patch_jump(site, ok);
-                } else {
-                    self.emit(Op::Try { dst, src });
-                }
-            }
+            Expr::Try(t) => self.compile_try(dst, t)?,
             Expr::Cast(c) => {
                 let src = self.compile_expr(&c.expr)?;
                 let ty = self.add_cast(&c.ty);
@@ -766,8 +891,32 @@ impl Compiler<'_> {
         match expr {
             Expr::Paren(p) => self.compile_numeric_annotated(dst, &p.expr, target),
             Expr::Group(g) => self.compile_numeric_annotated(dst, &g.expr, target),
+            // A negated literal types as one token. Any other negated
+            // operand adopts the width first, so `-(if c { i32::MIN } ..)`
+            // overflows at i32 the way the annotation says.
             Expr::Unary(u) if matches!(u.op, UnOp::Neg(_)) => {
-                self.compile_numeric_lit(dst, &u.expr, true, target)
+                if self.compile_numeric_lit(dst, &u.expr, true, target)? {
+                    return Ok(true);
+                }
+                let a = self.alloc();
+                self.compile_numeric_operand(a, &u.expr, target)?;
+                self.emit(Op::Un {
+                    dst,
+                    a,
+                    op: UnKind::Neg,
+                });
+                Ok(true)
+            }
+            // A branch, block, or arm hands its value up from its tail, so
+            // every tail adopts the annotation when its own turn comes.
+            Expr::If(_) | Expr::Block(_) | Expr::Match(_) => {
+                let mut tails = Vec::new();
+                tail_exprs(expr, &mut tails);
+                for tail in tails.into_iter().filter(|tail| takes_numeric_hint(tail)) {
+                    self.numeric_hints.insert(std::ptr::from_ref(tail), target);
+                }
+                self.compile_into(dst, expr)?;
+                Ok(true)
             }
             // An integer annotation reaches into the init's arithmetic, so
             // `let b: u128 = 1 << 100` computes at 128 bits instead of
@@ -792,6 +941,64 @@ impl Compiler<'_> {
                 Ok(true)
             }
             other => self.compile_numeric_lit(dst, other, false, target),
+        }
+    }
+
+    /// Seed the literal hints an annotation states for the parts of an init
+    /// that are not numeric themselves: the elements of a `vec![..]` or an
+    /// array under a `Vec<T>` or `[T; N]` annotation, the items of a tuple,
+    /// and the payload of a `Some(..)`, each down to the numeric leaves.
+    pub(super) fn offer_literal_hints(&mut self, ty: &syn::Type, expr: &Expr) {
+        let expr = unparen(expr);
+        if let Some(target) = numeric_annotation(ty) {
+            if takes_numeric_hint(expr) {
+                self.numeric_hints.insert(std::ptr::from_ref(expr), target);
+            }
+            return;
+        }
+        match (ty, expr) {
+            (syn::Type::Paren(p), _) => self.offer_literal_hints(&p.elem, expr),
+            (syn::Type::Group(g), _) => self.offer_literal_hints(&g.elem, expr),
+            (syn::Type::Reference(r), Expr::Reference(e)) => {
+                self.offer_literal_hints(&r.elem, &e.expr);
+            }
+            (syn::Type::Tuple(t), Expr::Tuple(e)) => {
+                for (item_ty, item) in t.elems.iter().zip(e.elems.iter()) {
+                    self.offer_literal_hints(item_ty, item);
+                }
+            }
+            (
+                syn::Type::Array(syn::TypeArray { elem, .. })
+                | syn::Type::Slice(syn::TypeSlice { elem, .. }),
+                Expr::Array(e),
+            ) => {
+                for item in &e.elems {
+                    self.offer_literal_hints(elem, item);
+                }
+            }
+            (
+                syn::Type::Array(syn::TypeArray { elem, .. })
+                | syn::Type::Slice(syn::TypeSlice { elem, .. }),
+                Expr::Repeat(e),
+            ) => {
+                self.offer_literal_hints(elem, &e.expr);
+            }
+            (syn::Type::Path(p), Expr::Macro(mac)) if mac.mac.path.is_ident("vec") => {
+                if let Some(elem) = sequence_element(p) {
+                    self.vec_hints
+                        .insert(std::ptr::from_ref(&mac.mac), elem.clone());
+                }
+            }
+            (syn::Type::Path(p), Expr::Call(call)) => {
+                if let Expr::Path(func) = &*call.func
+                    && func.path.is_ident("Some")
+                    && let Some(payload) = generic_named(p, "Option")
+                    && let Some(arg) = call.args.first()
+                {
+                    self.offer_literal_hints(payload, arg);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -828,13 +1035,46 @@ impl Compiler<'_> {
         }
     }
 
+    /// `expr?`: unwrap into `dst` or return early, the error converted
+    /// through the frame's `From` impl. With `Drop` impls in the program the
+    /// early return runs the scope drops it would otherwise skip.
+    fn compile_try(&mut self, dst: Reg, t: &syn::ExprTry) -> Result<()> {
+        let src = self.compile_expr(&t.expr)?;
+        let conv = self.try_conv();
+        if self.ctx.has_drop {
+            // The early return runs the scope drops it would
+            // otherwise skip by leaving the frame from inside the VM.
+            let site = self.here();
+            self.emit(Op::TryJump {
+                dst,
+                src,
+                to: 0,
+                conv,
+            });
+            let depth = self.cur().scope_order.len();
+            self.emit_scope_drops(depth);
+            self.emit(Op::Ret { src: dst });
+            let ok = self.mark()?;
+            self.patch_jump(site, ok);
+        } else {
+            self.emit(Op::Try { dst, src, conv });
+        }
+        Ok(())
+    }
+
     pub(super) fn compile_path(&mut self, dst: Reg, path: &syn::Path) -> Result<()> {
         if path.segments.len() == 1 {
             let name = path.segments[0].ident.to_string();
             return self.load_name(&name, dst);
         }
         // A multi segment path used as a value, resolved against the module.
-        let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        // `Self::Unit` inside an impl names the impl's own type.
+        let mut segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        if segs[0] == "Self"
+            && let Some(ty) = self.ctx.impl_type
+        {
+            segs[0] = ty.to_string();
+        }
         self.compile_resolved_value(dst, &segs)
     }
 
@@ -1350,4 +1590,24 @@ pub(super) fn annotation_scalar(ty: &syn::Type) -> Option<ScalarTy> {
         return Some(ScalarTy::Opt(Box::new(inner)));
     }
     ScalarTy::lower(ty)
+}
+
+/// The element type of a `Vec<T>` or `VecDeque<T>` annotation.
+fn sequence_element(p: &syn::TypePath) -> Option<&syn::Type> {
+    generic_named(p, "Vec").or_else(|| generic_named(p, "VecDeque"))
+}
+
+/// The single type argument of an annotation whose last segment is `name`.
+fn generic_named<'t>(p: &'t syn::TypePath, name: &str) -> Option<&'t syn::Type> {
+    let seg = p.path.segments.last()?;
+    if seg.ident != name {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return None;
+    };
+    args.args.iter().find_map(|arg| match arg {
+        syn::GenericArgument::Type(ty) => Some(ty),
+        _ => None,
+    })
 }
