@@ -6,6 +6,7 @@ use std::slice::from_ref;
 use std::sync::Arc;
 
 use super::bytecode::{PLit, PPat};
+use super::enum_def::{EnumKind, NONE};
 use super::resolver::bare;
 use super::value::{List, StructData, Value, ValueRef};
 
@@ -40,10 +41,13 @@ pub(super) fn try_bind(pat: &PPat, val: &Value, define: &mut dyn FnMut(&str, Val
             Value::Unit if elems.is_empty() => true,
             _ => false,
         },
-        PPat::TupleStruct { name, elems } => match val {
-            Value::Enum { variant, data, .. } => {
+        PPat::TupleStruct { tag, elems } => match val {
+            Value::Enum { def, variant, data } => {
+                if !tag.matches(def, *variant) {
+                    return false;
+                }
                 let payload = data.lock().clone();
-                name.as_deref() == Some(&**variant) && bind_seq(elems, &payload, define)
+                bind_seq(elems, &payload, define)
             }
             Value::Struct(st) => {
                 let vals: Vec<Value> = st.values.lock().clone();
@@ -54,22 +58,18 @@ pub(super) fn try_bind(pat: &PPat, val: &Value, define: &mut dyn FnMut(&str, Val
             // does, that shape is a real unit value, not an Option.
             Value::Unit => false,
             other => {
-                if json_variant_kind_matches(name.as_deref(), other) {
+                if json_variant_kind_matches(tag.name.as_deref(), other) {
                     bind_seq(elems, from_ref(other), define)
                 } else {
-                    name.as_deref() == Some("Some") && bind_seq(elems, from_ref(other), define)
+                    tag.is_named("Some") && bind_seq(elems, from_ref(other), define)
                 }
             }
         },
-        PPat::Path { name } => match val {
-            Value::Enum {
-                enum_name, variant, ..
-            } => {
-                name.as_deref() == Some(&**variant)
+        PPat::Path { tag } => match val {
+            Value::Enum { def, variant, .. } => {
+                tag.matches(def, *variant)
                     // A json null is Option::None here, so `Value::Null` matches it.
-                    || (name.as_deref() == Some("Null")
-                        && &**enum_name == "Option"
-                        && &**variant == "None")
+                    || (tag.is_named("Null") && def.kind == EnumKind::Option && *variant == NONE)
             }
             _ => false,
         },

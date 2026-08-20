@@ -15,7 +15,7 @@ use anyhow::{Result, anyhow, bail};
 use num_traits::AsPrimitive;
 use parking_lot::Mutex;
 
-use super::bytecode::{CapSource, Chunk, MacroKind, Member, Op, path_call_chunk};
+use super::bytecode::{CapSource, Chunk, MacroKind, Member, Op, PathId, path_call_chunk};
 use super::iterator::FastNext;
 use super::native::Native;
 use super::numeric::{float_to_int, truncate};
@@ -155,6 +155,7 @@ pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
         } => get_or_default(ctx, *dst, *recv, *key, *default)?,
         Op::Ret { src } => Flow::Ret(ctx.take(*src)),
         Op::MakeVec { dst, base, count } => make_vec(ctx, *dst, *base, *count),
+        Op::MakeMap { dst, set } => ctx.set(*dst, if *set { Value::set() } else { Value::map() }),
         Op::MakeTuple { dst, base, count } => make_tuple(ctx, *dst, *base, *count),
         Op::MakeArrayRepeat { dst, val, count } => array_repeat(ctx, *dst, *val, *count)?,
         Op::MakeRange {
@@ -210,12 +211,12 @@ pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
 /// impl, so the copy in the argument window is the last holder and the
 /// guard drops at the destination, not at this scope's end.
 fn move_out(ctx: &mut StepCtx, src: u16) -> Flow {
-    let ty = match ctx.get(src) {
-        Value::Struct(s) => s.name().to_string(),
-        Value::Enum { enum_name, .. } => enum_name.to_string(),
-        _ => return Flow::Next,
-    };
-    if ctx.vm.methods.contains_key(&(ty, "Drop::drop".to_string())) {
+    let has_drop = ctx
+        .vm
+        .impls
+        .of_value(ctx.get(src))
+        .is_some_and(|methods| methods.drop.is_some());
+    if has_drop {
         ctx.put(src, Value::Unit);
     }
     Flow::Next
@@ -233,15 +234,6 @@ fn drop_scope(ctx: &mut StepCtx, list: u16) -> Result<()> {
     Ok(())
 }
 
-/// The user type name an operator could dispatch on, for `impl Add for X`.
-fn user_op_type(v: &Value) -> Option<&str> {
-    match v {
-        Value::Struct(s) => Some(s.name()),
-        Value::Enum { enum_name, .. } => Some(enum_name),
-        _ => None,
-    }
-}
-
 /// A binary operator on a value whose type has the matching operator trait
 /// impl. `a + b` dispatches to the user `add`, and `a += b`, which the
 /// compiler lowers to `a = a + b`, falls back to a user `add_assign` that
@@ -252,30 +244,21 @@ fn user_bin(
     a: &Value,
     b: &Value,
 ) -> Result<Option<Value>> {
-    use super::bytecode::BinKind as K;
-    if ctx.vm.methods.is_empty() {
+    if ctx.vm.impls.is_empty() {
         return Ok(None);
     }
-    let Some(ty) = user_op_type(a).or_else(|| user_op_type(b)) else {
+    let Some(methods) = ctx
+        .vm
+        .impls
+        .of_value(a)
+        .or_else(|| ctx.vm.impls.of_value(b))
+    else {
         return Ok(None);
     };
-    let name = match op {
-        K::Add => "add",
-        K::Sub => "sub",
-        K::Mul => "mul",
-        K::Div => "div",
-        K::Rem => "rem",
-        K::BitAnd => "bitand",
-        K::BitOr => "bitor",
-        K::BitXor => "bitxor",
-        K::Shl => "shl",
-        K::Shr => "shr",
-        // Equality and ordering answer through `eq_value` and
-        // `partial_compare`, whose derived semantics `apply_bin` runs.
-        K::Eq | K::Ne | K::Lt | K::Le | K::Gt | K::Ge => return Ok(None),
-    };
-    let ty = ty.to_string();
-    if let Some(chunk) = ctx.vm.methods.get(&(ty.clone(), name.to_string())) {
+    // Equality and ordering answer through `eq_value` and `partial_compare`,
+    // whose derived semantics `apply_bin` runs, so `bin` has no slot for
+    // them.
+    if let Some(chunk) = methods.bin(op) {
         let chunk = chunk.clone();
         return Ok(Some(ctx.vm.run_chunk(
             &chunk,
@@ -283,8 +266,7 @@ fn user_bin(
             &[],
         )?));
     }
-    let assign = format!("{name}_assign");
-    if let Some(chunk) = ctx.vm.methods.get(&(ty, assign)) {
+    if let Some(chunk) = methods.bin_assign(op) {
         let chunk = chunk.clone();
         // The receiver mutates in place through its `&mut self`, and the
         // mutated value is the store-back result of the lowered `a = a + b`.
@@ -296,18 +278,10 @@ fn user_bin(
 
 /// A unary operator with a user trait impl, `impl Neg for X`.
 fn user_un(ctx: &StepCtx, op: super::bytecode::UnKind, a: &Value) -> Result<Option<Value>> {
-    use super::bytecode::UnKind as U;
-    if ctx.vm.methods.is_empty() {
+    if ctx.vm.impls.is_empty() {
         return Ok(None);
     }
-    let Some(ty) = user_op_type(a) else {
-        return Ok(None);
-    };
-    let name = match op {
-        U::Neg => "neg",
-        U::Not => "not",
-    };
-    let Some(chunk) = ctx.vm.methods.get(&(ty.to_string(), name.to_string())) else {
+    let Some(chunk) = ctx.vm.impls.of_value(a).and_then(|methods| methods.un(op)) else {
         return Ok(None);
     };
     let chunk = chunk.clone();
@@ -576,7 +550,7 @@ fn request_call(
     // actually passed. `u8::saturating_add` handed to `fold` takes two
     // arguments where the guess was one.
     let chunk = if chunk.path_forwarder && argc as usize != chunk.num_params {
-        path_call_chunk(chunk.paths[0].0.clone(), argc as usize)
+        path_call_chunk(chunk.paths[0].clone(), argc as usize)
     } else {
         chunk
     };
@@ -601,55 +575,39 @@ fn request_call(
 fn call_path(ctx: &mut StepCtx, dst: u16, path: u16, abase: u16, argc: u16) -> Result<Flow> {
     let (vm, cur) = (ctx.vm, ctx.cur);
     let (abase, argc) = (abase as usize, argc as usize);
-    let (segs, coerce) = &cur.paths[path as usize];
-    if let Some(v) = internal_path(segs, &ctx.stack[ctx.base..], abase, argc)? {
-        return Ok(ctx.set(dst, v));
+    let path = &cur.paths[path as usize];
+    // The compiler-internal paths, `::unreachable_match` and friends.
+    match path.id {
+        PathId::UnreachableMatch => bail!("no match arm matched the value"),
+        PathId::AssertFailed => bail!("assertion failed"),
+        PathId::EnsureFail => {
+            let message = if argc > 0 {
+                ctx.stack[ctx.base + abase].display()
+            } else {
+                "condition failed".to_string()
+            };
+            return Ok(ctx.set(dst, Value::err(Value::str(message))));
+        }
+        _ => {}
     }
     let call_args = ctx.take_range(abase, argc);
     // Typed json parses straight into the target structs, no generic tree and
     // no coercion pass afterwards.
-    if let Some(ty) = coerce {
-        let canon = vm.canonical(segs);
-        if canon.len() >= 2
-            && canon[canon.len() - 2] == "serde_json"
-            && canon[canon.len() - 1] == "from_str"
-        {
-            return Ok(ctx.set(dst, vm.typed_from_str(&call_args, ty, ctx.cur_tenv)?));
-        }
+    if let Some(ty) = &path.coerce
+        && path.id == PathId::SerdeJsonFromStr
+    {
+        return Ok(ctx.set(dst, vm.typed_from_str(&call_args, ty, ctx.cur_tenv)?));
     }
-    let mut v = vm.dispatch_call(segs, call_args)?;
-    if let Some(ty) = coerce {
+    let mut v = vm.dispatch_call(path, call_args)?;
+    if let Some(ty) = &path.coerce {
         v = vm.coerce_result(v, ty);
     }
     Ok(ctx.set(dst, v))
 }
 
-/// The compiler-internal paths, `::unreachable_match` and friends.
-fn internal_path(
-    segments: &[String],
-    registers: &[Value],
-    base: usize,
-    count: usize,
-) -> Result<Option<Value>> {
-    let head = segments.first().map_or("", String::as_str);
-    match head {
-        "::unreachable_match" => bail!("no match arm matched the value"),
-        "::assert_failed" => bail!("assertion failed"),
-        "::ensure_fail" => {
-            let message = if count > 0 {
-                registers[base].display()
-            } else {
-                "condition failed".to_string()
-            };
-            Ok(Some(Value::err(Value::str(message))))
-        }
-        _ => Ok(None),
-    }
-}
-
 fn path_value(ctx: &mut StepCtx, dst: u16, path: u16) -> Result<Flow> {
-    let (segs, _) = &ctx.cur.paths[path as usize];
-    Ok(ctx.set(dst, ctx.vm.eval_path_value(segs)?))
+    let path = &ctx.cur.paths[path as usize];
+    Ok(ctx.set(dst, ctx.vm.eval_path_value(path)?))
 }
 
 fn make_vec(ctx: &mut StepCtx, dst: u16, first: u16, count: u16) -> Flow {
@@ -747,11 +705,7 @@ fn make_struct(ctx: &mut StepCtx, dst: u16, info: u16, first: u16) -> Flow {
                 }
             }
         }
-        let shape = Arc::new(StructShape {
-            name: lit.shape.name.clone(),
-            fields,
-            renames,
-        });
+        let shape = StructShape::typed(lit.shape.name.clone(), lit.shape.type_id, fields, renames);
         Value::structure(shape, values)
     } else {
         Value::structure(lit.shape.clone(), values)
@@ -765,8 +719,8 @@ fn make_enum(ctx: &mut StepCtx, dst: u16, info: u16, first: u16, count: u16) -> 
     ctx.set(
         dst,
         Value::Enum {
-            enum_name: variant.enum_name.clone(),
-            variant: variant.variant.clone(),
+            def: variant.def.clone(),
+            variant: variant.variant,
             data,
         },
     )
@@ -777,8 +731,8 @@ fn load_enum(ctx: &mut StepCtx, dst: u16, info: u16) -> Flow {
     ctx.set(
         dst,
         Value::Enum {
-            enum_name: variant.enum_name.clone(),
-            variant: variant.variant.clone(),
+            def: variant.def.clone(),
+            variant: variant.variant,
             data: Arc::new(Mutex::new(Vec::new())),
         },
     )
@@ -1027,7 +981,7 @@ fn unique_field(ctx: &mut StepCtx, dst: u16, base: u16, member: u16) -> Result<F
     let target = place_base(ctx.get(base))?;
     let v = match (&target, member) {
         (Value::Struct(s), Member::Named(n)) => {
-            let Some(i) = s.shape.slot(n) else {
+            let Some(i) = n.slot_in(&s.shape) else {
                 bail!("no field `{n}`");
             };
             let mut values = s.values.lock();
@@ -1149,7 +1103,7 @@ fn ref_field(ctx: &mut StepCtx, dst: u16, base: u16, member: u16) -> Result<Flow
     let target = place_base(ctx.get(base))?;
     let v = match (&target, member) {
         (Value::Struct(s), Member::Named(n)) => {
-            let Some(slot) = s.shape.slot(n) else {
+            let Some(slot) = n.slot_in(&s.shape) else {
                 bail!("no field `{n}`");
             };
             Value::Ref(Arc::new(super::value::ValueRef::struct_field(

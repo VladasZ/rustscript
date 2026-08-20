@@ -12,6 +12,7 @@
 
 use anyhow::Result;
 
+use super::bytecode::MethodName;
 use super::value::{StructData, Value};
 
 /// `WMIConnection::new()` defaults to root\cimv2, the namespace almost every
@@ -32,12 +33,13 @@ pub(super) fn connection(args: &[Value], default_namespace: bool) -> Value {
     }
 }
 
-pub(super) fn wmi_method(s: &StructData, name: &str, args: &[Value]) -> Result<Value> {
+pub(super) fn wmi_method(s: &StructData, name: &MethodName, args: &[Value]) -> Result<Value> {
     imp::wmi_method(s, name, args)
 }
 
 #[cfg(windows)]
 mod imp {
+    use super::super::bytecode::{BuiltinId as B, MethodName};
 
     use std::collections::HashMap;
 
@@ -95,13 +97,13 @@ mod imp {
         Value::map_of(map)
     }
 
-    pub(super) fn wmi_method(s: &StructData, name: &str, args: &[Value]) -> Result<Value> {
+    pub(super) fn wmi_method(s: &StructData, name: &MethodName, args: &[Value]) -> Result<Value> {
         let namespace = s
             .get("namespace")
             .map(|v| v.display())
             .unwrap_or_else(|| r"root\cimv2".to_string());
-        Ok(match name {
-            "raw_query" | "query" => {
+        Ok(match name.id {
+            B::RawQuery | B::Query => {
                 let q = args.first().map(Value::display).unwrap_or_default();
                 match connect(&namespace)
                     .and_then(|c| Ok(c.raw_query::<HashMap<String, Variant>>(&q)?))
@@ -117,6 +119,7 @@ mod imp {
 
 #[cfg(not(windows))]
 mod imp {
+    use super::super::bytecode::MethodName;
     use anyhow::{Result, bail};
 
     use super::super::value::{StructData, Value};
@@ -125,7 +128,7 @@ mod imp {
         bail!("WMI does not exist on this platform")
     }
 
-    pub(super) fn wmi_method(_s: &StructData, name: &str, _args: &[Value]) -> Result<Value> {
+    pub(super) fn wmi_method(_s: &StructData, name: &MethodName, _args: &[Value]) -> Result<Value> {
         bail!("WmiConnection::{name} is WMI, it does not exist on this platform")
     }
 }

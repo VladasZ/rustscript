@@ -8,6 +8,7 @@ use anyhow::{Result, anyhow, bail};
 use parking_lot::Mutex;
 
 use super::bridge::VArgs;
+use super::bytecode::{BuiltinId as B, MethodName};
 use super::native::Native;
 use super::shared::{CapturesOut, MatchOut, RegexOut, captures_core, match_core, regex_core};
 use super::value::{RsStr, Value};
@@ -65,7 +66,7 @@ pub(super) fn match_value(source: RsStr, start: usize, end: usize) -> Value {
 /// not one of these, so the caller can keep looking.
 pub(super) fn regex_native_method(
     handle: &Arc<Mutex<Native>>,
-    method: &str,
+    method: &MethodName,
     args: &[Value],
 ) -> Result<Option<Value>> {
     let kind = match &*handle.lock() {
@@ -87,18 +88,18 @@ enum Kind {
     Captures(CapturesValue),
 }
 
-fn regex_method(regex: &RegexValue, method: &str, args: &[Value]) -> Result<Value> {
+fn regex_method(regex: &RegexValue, method: &MethodName, args: &[Value]) -> Result<Value> {
     let source = text_arg(args, 0);
     // The iterator forms are lazy walks over the source, so they stay out of
     // the shared core.
-    match method {
-        "find_iter" => return Ok(super::iterator::regex_find(regex.clone(), source)),
-        "captures_iter" => return Ok(super::iterator::regex_captures(regex.clone(), source)),
+    match method.id {
+        B::FindIter => return Ok(super::iterator::regex_find(regex.clone(), source)),
+        B::CapturesIter => return Ok(super::iterator::regex_captures(regex.clone(), source)),
         _ => {}
     }
     let replacement = || args.get(1).map(Value::display).unwrap_or_default();
-    let Some(out) = regex_core(&regex.compiled, method, &source, &replacement) else {
-        bail!("unknown method `{method}` on Regex");
+    let Some(out) = regex_core(&regex.compiled, method.id, &source, &replacement) else {
+        bail!("unknown method `{}` on Regex", method.text);
     };
     Ok(match out {
         RegexOut::Bool(b) => Value::Bool(b),
@@ -121,22 +122,22 @@ fn regex_method(regex: &RegexValue, method: &str, args: &[Value]) -> Result<Valu
     })
 }
 
-fn match_method(found: &MatchValue, method: &str) -> Result<Value> {
-    match match_core(method, &found.source, found.start, found.end) {
+fn match_method(found: &MatchValue, method: &MethodName) -> Result<Value> {
+    match match_core(method.id, &found.source, found.start, found.end) {
         Some(MatchOut::Text(s)) => Ok(Value::str(s)),
         Some(MatchOut::Int(i)) => Ok(Value::Int(i)),
-        None => bail!("unknown method `{method}` on Match"),
+        None => bail!("unknown method `{}` on Match", method.text),
     }
 }
 
-fn captures_method(captures: &CapturesValue, method: &str, args: &[Value]) -> Result<Value> {
+fn captures_method(captures: &CapturesValue, method: &MethodName, args: &[Value]) -> Result<Value> {
     let names = captures.names.iter().map(|(n, i)| (n.as_ref(), *i));
-    match captures_core(method, &captures.groups, names, &VArgs(args))? {
+    match captures_core(method.id, &captures.groups, names, &VArgs(args))? {
         Some(CapturesOut::Int(i)) => Ok(Value::Int(i)),
         Some(CapturesOut::OptSpan(span)) => Ok(span.map_or_else(Value::none, |(start, end)| {
             Value::some(match_value(captures.source.clone(), start, end))
         })),
-        None => bail!("unknown method `{method}` on Captures"),
+        None => bail!("unknown method `{}` on Captures", method.text),
     }
 }
 

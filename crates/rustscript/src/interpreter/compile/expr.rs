@@ -6,7 +6,7 @@ use syn::{BinOp, Block, Expr, Lit, Pat, Stmt, UnOp};
 
 use std::sync::Arc;
 
-use crate::interpreter::bytecode::{BinKind, Const, DISCARD, Op, Reg, UnKind};
+use crate::interpreter::bytecode::{BinKind, Const, DISCARD, Op, PathRef, Reg, UnKind};
 use crate::interpreter::numeric::{IntWidth, truncate};
 
 use super::{
@@ -1315,7 +1315,7 @@ impl Compiler<'_> {
             }
         }
         // No arm matched, a runtime error mirroring the old behavior.
-        let p = self.add_path(vec!["::unreachable_match".to_string()], None);
+        let p = self.add_path(PathRef::new(vec!["::unreachable_match".to_string()], None));
         self.emit(Op::CallPath {
             dst,
             path: p,

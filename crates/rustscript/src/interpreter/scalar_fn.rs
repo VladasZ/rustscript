@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use anyhow::Result;
 use parking_lot::Mutex;
 
-use super::bytecode::{Chunk, Op, PPat};
+use super::bytecode::{Chunk, Op, PPat, PathId};
 use super::scalar_fold::fold_moves;
 use super::scalar_loop::{
     LOp, LTo, MAX_CALL_ARGS, MAX_ENUM_ARGS, NO_SLOT, OpOut, Region, eval_op, slot, translate,
@@ -81,8 +81,8 @@ fn new_enum(
         return Some(LOp::UnitEnum {
             dst: slot(regs, dst)?,
             value: Value::Enum {
-                enum_name: variant.enum_name.clone(),
-                variant: variant.variant.clone(),
+                def: variant.def.clone(),
+                variant: variant.variant,
                 data: Arc::new(Mutex::new(Vec::new())),
             },
         });
@@ -93,18 +93,16 @@ fn new_enum(
     }
     Some(LOp::NewEnum {
         dst: slot(regs, dst)?,
-        enum_name: variant.enum_name.clone(),
-        variant: variant.variant.clone(),
+        def: variant.def.clone(),
+        variant: variant.variant,
         args,
         argc: u8::try_from(count).ok()?,
     })
 }
 
 /// The `Op::CallPath` arm of `build` for `Box::new(x)`, whose bridge is the
-/// identity, so the plan op is a move. Only while nothing shadows that
-/// bridge, mirroring the checks of the shared `translate_call`.
+/// identity, so the plan op is a move.
 fn box_new(
-    vm: &Vm,
     chunk: &Chunk,
     regs: &mut Vec<u16>,
     dst: u16,
@@ -115,19 +113,8 @@ fn box_new(
     if argc != 1 || dst == u16::MAX {
         return None;
     }
-    let (segs, coerce) = &chunk.paths[path as usize];
-    if coerce.is_some() {
-        return None;
-    }
-    let canon = vm.canonical(segs);
-    let [ty, func] = canon.as_slice() else {
-        return None;
-    };
-    if ty != "Box"
-        || func != "new"
-        || vm.user_function("Box::new").is_some()
-        || vm.user_method("Box", "new").is_some()
-    {
+    let path = &chunk.paths[path as usize];
+    if path.id != PathId::BoxNew || path.coerce.is_some() {
         return None;
     }
     Some(LOp::Move {
@@ -144,14 +131,11 @@ fn box_new(
 /// arms of the generic `try_bind`.
 fn test_variant(chunk: &Chunk, regs: &mut Vec<u16>, val: u16, pat: u16, dst: u16) -> Option<LOp> {
     let info = &chunk.pats[pat as usize];
-    let (name, binds) = match &info.pat {
+    let (tag, binds) = match &info.pat {
         // The `Null` name also matches an `Option::None` value on the
         // generic path, a json rule the plan does not mirror.
-        PPat::Path { name: Some(name) } if name != "Null" => (name, Vec::new()),
-        PPat::TupleStruct {
-            name: Some(name),
-            elems,
-        } if !elems.is_empty() => {
+        PPat::Path { tag } if tag.name.is_some() && !tag.is_named("Null") => (tag, Vec::new()),
+        PPat::TupleStruct { tag, elems } if tag.name.is_some() && !elems.is_empty() => {
             let mut binds = Vec::with_capacity(elems.len());
             for elem in elems {
                 let PPat::Ident {
@@ -164,14 +148,14 @@ fn test_variant(chunk: &Chunk, regs: &mut Vec<u16>, val: u16, pat: u16, dst: u16
                 let (_, reg) = info.binds.iter().find(|(n, _)| n == elem_name)?;
                 binds.push(slot(regs, *reg)?);
             }
-            (name, binds)
+            (tag, binds)
         }
         _ => return None,
     };
     Some(LOp::TestVariant {
         dst: slot(regs, dst)?,
         val: slot(regs, val)?,
-        name: Arc::from(name.as_str()),
+        tag: tag.clone(),
         binds: binds.into_boxed_slice(),
     })
 }
@@ -242,7 +226,7 @@ fn build(vm: &Vm, chunk: &Arc<Chunk>) -> Option<FnPlan> {
                 path,
                 base,
                 argc,
-            } => match box_new(vm, chunk, &mut regs, *dst, *path, *base, *argc) {
+            } => match box_new(chunk, &mut regs, *dst, *path, *base, *argc) {
                 Some(lop) => lop,
                 None => translate(vm, chunk, &region, &mut regs, None, &mut try_mask, op)?,
             },
@@ -308,7 +292,7 @@ fn enum_op(op: &LOp, regs: &mut [SVal], boxed: &mut Vec<Value>) -> Option<()> {
         }
         LOp::NewEnum {
             dst,
-            enum_name,
+            def,
             variant,
             args,
             argc,
@@ -319,8 +303,8 @@ fn enum_op(op: &LOp, regs: &mut [SVal], boxed: &mut Vec<Value>) -> Option<()> {
             }
             let idx = u32::try_from(boxed.len()).ok()?;
             boxed.push(Value::Enum {
-                enum_name: enum_name.clone(),
-                variant: variant.clone(),
+                def: def.clone(),
+                variant: *variant,
                 data: Arc::new(Mutex::new(data)),
             });
             regs[usize::from(*dst)] = SVal::Boxed(idx);
@@ -328,7 +312,7 @@ fn enum_op(op: &LOp, regs: &mut [SVal], boxed: &mut Vec<Value>) -> Option<()> {
         LOp::TestVariant {
             dst,
             val,
-            name,
+            tag,
             binds,
         } => {
             let SVal::Boxed(i) = regs[usize::from(*val)] else {
@@ -338,10 +322,10 @@ fn enum_op(op: &LOp, regs: &mut [SVal], boxed: &mut Vec<Value>) -> Option<()> {
             // pre-unwrapped Some and the json shape matches, so it fails
             // the run over.
             let (mut matched, payload) = {
-                let Value::Enum { variant, data, .. } = &boxed[i as usize] else {
+                let Value::Enum { def, variant, data } = &boxed[i as usize] else {
                     return None;
                 };
-                let matched = **variant == **name;
+                let matched = tag.matches(def, *variant);
                 // The list handle alone, so the elements bind straight out
                 // of the locked storage with no payload copy, the clone
                 // the generic bind pays.
@@ -380,6 +364,11 @@ fn enum_op(op: &LOp, regs: &mut [SVal], boxed: &mut Vec<Value>) -> Option<()> {
 /// generic path would report call depth exceeded. `boxed` arrives holding
 /// the call's enum arguments and grows with every value the run builds or
 /// binds.
+///
+/// Kept out of line on purpose. Inlined through `try_call` into `step` it
+/// drags the plan loop into the dispatch frame of every op, which cost
+/// `binary_trees` 14 percent.
+#[inline(never)]
 fn run(
     vm: &Arc<Vm>,
     plan: &FnPlan,

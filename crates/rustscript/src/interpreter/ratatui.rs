@@ -4,6 +4,7 @@
 
 use anyhow::Result;
 
+use super::bytecode::{MethodName, PathId};
 use super::value::{StructData, Value};
 
 /// Names the bridge owns. Checked before dispatch so an unrelated struct
@@ -27,17 +28,17 @@ pub(super) fn is_ratatui_struct(name: &str) -> bool {
     )
 }
 
-pub(super) fn ratatui_const(ty: &str, name: &str) -> Option<Value> {
-    super::ratatui_bridge::ratatui_const(ty, name)
+pub(super) fn ratatui_const(id: PathId) -> Option<Value> {
+    super::ratatui_bridge::ratatui_const(id)
 }
 
-pub(super) fn ratatui_assoc(ty: &str, func: &str, args: &[Value]) -> Option<Value> {
-    super::ratatui_render::ratatui_assoc(ty, func, args)
-        .or_else(|| super::ratatui_render::constraint_variant(ty, func, args))
-        .or_else(|| super::ratatui_render::color_variant(ty, func, args))
+pub(super) fn ratatui_assoc(id: PathId, args: &[Value]) -> Option<Value> {
+    super::ratatui_render::ratatui_assoc(id, args)
+        .or_else(|| super::ratatui_render::constraint_variant(id, args))
+        .or_else(|| super::ratatui_render::color_variant(id, args))
 }
 
-pub(super) fn struct_method(st: &StructData, m: &str, args: &[Value]) -> Result<Value> {
+pub(super) fn struct_method(st: &StructData, m: &MethodName, args: &[Value]) -> Result<Value> {
     match &**st.name() {
         "Style" => super::ratatui_render::style_method(st, m, args),
         "Modifier" => super::ratatui_render::modifier_method(st, m, args),

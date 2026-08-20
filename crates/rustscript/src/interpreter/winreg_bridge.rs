@@ -15,49 +15,52 @@
 //! On a non-Windows host every entry point returns a plain error instead of
 //! being absent, so a script that reaches registry code by mistake says why.
 
+use std::sync::Arc;
+
 use anyhow::Result;
 
+use super::bytecode::{MethodName, PathId as P};
+use super::enum_def::{EnumDef, REG_TYPE};
 use super::std_bridge::as_i64;
 use super::value::{StructData, Value};
 
-/// The registry value types. `RegType` is a real enum in winreg, so it is
-/// mirrored as an enum value and not an int, and `{:?}` prints the bare variant
-/// name exactly like the compiled crate does.
-const REG_TYPES: [&str; 7] = [
-    "REG_NONE",
-    "REG_SZ",
-    "REG_EXPAND_SZ",
-    "REG_BINARY",
-    "REG_DWORD",
-    "REG_MULTI_SZ",
-    "REG_QWORD",
-];
-
-fn unit_enum(enum_name: &str, variant: &str) -> Value {
-    Value::enum_of(enum_name, variant, Vec::new())
+fn unit_enum(def: &Arc<EnumDef>, variant: &str) -> Value {
+    Value::enum_named(def, variant, Vec::new()).expect("every winreg enum variant is listed")
 }
 
 /// Recognize `HKEY_*` roots, `KEY_*` access flags, and `RegType` variants as
 /// path constants.
-pub(super) fn winreg_const(name: &str) -> Option<Value> {
-    if REG_TYPES.contains(&name) {
-        return Some(unit_enum("RegType", name));
+pub(super) fn winreg_const(id: P) -> Option<Value> {
+    // The registry value types. `RegType` is a real enum in winreg, so it is
+    // mirrored as an enum value and not an int, and `{:?}` prints the bare
+    // variant name exactly like the compiled crate does.
+    if matches!(
+        id,
+        P::RegNone
+            | P::RegSz
+            | P::RegExpandSz
+            | P::RegBinary
+            | P::RegDword
+            | P::RegMultiSz
+            | P::RegQword
+    ) {
+        return Some(unit_enum(&REG_TYPE, id.name()));
     }
-    let n = match name {
-        "HKEY_CLASSES_ROOT" => 0x8000_0000_u32,
-        "HKEY_CURRENT_USER" => 0x8000_0001,
-        "HKEY_LOCAL_MACHINE" => 0x8000_0002,
-        "HKEY_USERS" => 0x8000_0003,
-        "HKEY_CURRENT_CONFIG" => 0x8000_0005,
-        "KEY_QUERY_VALUE" => 0x0001,
-        "KEY_SET_VALUE" => 0x0002,
-        "KEY_CREATE_SUB_KEY" => 0x0004,
-        "KEY_ENUMERATE_SUB_KEYS" => 0x0008,
-        "KEY_READ" => 0x0002_0019,
-        "KEY_WRITE" => 0x0002_0006,
-        "KEY_ALL_ACCESS" => 0x000F_003F,
-        "KEY_WOW64_64KEY" => 0x0100,
-        "KEY_WOW64_32KEY" => 0x0200,
+    let n = match id {
+        P::HkeyClassesRoot => 0x8000_0000_u32,
+        P::HkeyCurrentUser => 0x8000_0001,
+        P::HkeyLocalMachine => 0x8000_0002,
+        P::HkeyUsers => 0x8000_0003,
+        P::HkeyCurrentConfig => 0x8000_0005,
+        P::KeyQueryValue => 0x0001,
+        P::KeySetValue => 0x0002,
+        P::KeyCreateSubKey => 0x0004,
+        P::KeyEnumerateSubKeys => 0x0008,
+        P::KeyRead => 0x0002_0019,
+        P::KeyWrite => 0x0002_0006,
+        P::KeyAllAccess => 0x000F_003F,
+        P::KeyWow6464key => 0x0100,
+        P::KeyWow6432key => 0x0200,
         _ => return None,
     };
     Some(Value::Int(i64::from(n)))
@@ -82,6 +85,7 @@ fn key_value(root: i64, path: &str, flags: i64) -> Value {
 
 #[cfg(windows)]
 mod imp {
+    use super::super::bytecode::{BuiltinId as B, MethodName};
     use std::borrow::Cow;
 
     use anyhow::{Result, bail};
@@ -89,8 +93,9 @@ mod imp {
     use winreg::enums::RegType;
     use winreg::types::{FromRegValue, ToRegValue};
 
+    use super::super::enum_def::{REG_DISPOSITION, REG_TYPE};
     use super::super::value::Value;
-    use super::{as_i64, key_value};
+    use super::{as_i64, key_value, unit_enum};
     use crate::interpreter::value::StructData;
 
     fn field_str(s: &StructData, name: &str) -> String {
@@ -210,7 +215,7 @@ mod imp {
     }
 
     fn type_from_name(name: &str) -> RegType {
-        match name {
+        match name.id {
             "REG_NONE" => RegType::REG_NONE,
             "REG_SZ" => RegType::REG_SZ,
             "REG_EXPAND_SZ" => RegType::REG_EXPAND_SZ,
@@ -231,10 +236,7 @@ mod imp {
                     "bytes".into(),
                     Value::vec(v.bytes.iter().map(|b| Value::Int(i64::from(*b))).collect()),
                 ),
-                (
-                    "vtype".into(),
-                    super::unit_enum("RegType", type_name(&v.vtype)),
-                ),
+                ("vtype".into(), unit_enum(&REG_TYPE, type_name(&v.vtype))),
             ],
         )
     }
@@ -256,7 +258,7 @@ mod imp {
             bytes.push(u8::try_from(n.rem_euclid(256)).unwrap_or_default());
         }
         let vtype = match s.get("vtype") {
-            Some(Value::Enum { variant, .. }) => type_from_name(&variant),
+            Some(Value::Enum { def, variant, .. }) => type_from_name(def.variant_name(variant)),
             _ => RegType::REG_BINARY,
         };
         Ok(winreg::RegValue {
@@ -272,14 +274,18 @@ mod imp {
         }
     }
 
-    pub(super) fn regkey_method(s: &StructData, name: &str, args: &[Value]) -> Result<Value> {
+    pub(super) fn regkey_method(
+        s: &StructData,
+        name: &MethodName,
+        args: &[Value],
+    ) -> Result<Value> {
         let arg0 = || args.first().map(Value::display).unwrap_or_default();
         let root = field_i64(s, "root");
         let flags = field_i64(s, "flags");
         let path = field_str(s, "path");
 
-        Ok(match name {
-            "open_subkey" | "open_subkey_with_flags" => {
+        Ok(match name.id {
+            B::OpenSubkey | B::OpenSubkeyWithFlags => {
                 let want = args.get(1).and_then(as_i64).unwrap_or(flags);
                 let full = join(&path, &arg0());
                 match root_key(root).open_subkey_with_flags(&full, want as u32) {
@@ -287,23 +293,23 @@ mod imp {
                     Err(e) => Value::err(Value::str(e.to_string())),
                 }
             }
-            "create_subkey" => {
+            B::CreateSubkey => {
                 let full = join(&path, &arg0());
                 match root_key(root).create_subkey(&full) {
                     // winreg hands back the key plus whether it was created or
                     // opened. Scripts destructure the pair like the real crate.
                     Ok((_, disp)) => Value::ok(Value::tuple(vec![
                         key_value(root, &full, flags),
-                        super::unit_enum("RegDisposition", &format!("{disp:?}")),
+                        unit_enum(&REG_DISPOSITION, &format!("{disp:?}")),
                     ])),
                     Err(e) => Value::err(Value::str(e.to_string())),
                 }
             }
-            "get_value" => match open(s).and_then(|k| k.get_raw_value(arg0())) {
+            B::GetValue => match open(s).and_then(|k| k.get_raw_value(arg0())) {
                 Ok(v) => Value::ok(read(&v)),
                 Err(e) => Value::err(Value::str(e.to_string())),
             },
-            "set_value" => {
+            B::SetValue => {
                 let Some(v) = args.get(1) else {
                     bail!("set_value takes a name and a value");
                 };
@@ -312,23 +318,21 @@ mod imp {
             }
             // The untyped pair. Binary has no typed form in winreg, so a script
             // that writes REG_BINARY goes through these two.
-            "get_raw_value" => match open(s).and_then(|k| k.get_raw_value(arg0())) {
+            B::GetRawValue => match open(s).and_then(|k| k.get_raw_value(arg0())) {
                 Ok(v) => Value::ok(raw_value(&v)),
                 Err(e) => Value::err(Value::str(e.to_string())),
             },
-            "set_raw_value" => {
+            B::SetRawValue => {
                 let Some(v) = args.get(1) else {
                     bail!("set_raw_value takes a name and a RegValue");
                 };
                 let raw = raw_from(v)?;
                 io_result(open(s).and_then(|k| k.set_raw_value(arg0(), &raw)))
             }
-            "delete_value" => io_result(open(s).and_then(|k| k.delete_value(arg0()))),
-            "delete_subkey" => io_result(root_key(root).delete_subkey(join(&path, &arg0()))),
-            "delete_subkey_all" => {
-                io_result(root_key(root).delete_subkey_all(join(&path, &arg0())))
-            }
-            "enum_keys" => match open(s) {
+            B::DeleteValue => io_result(open(s).and_then(|k| k.delete_value(arg0()))),
+            B::DeleteSubkey => io_result(root_key(root).delete_subkey(join(&path, &arg0()))),
+            B::DeleteSubkeyAll => io_result(root_key(root).delete_subkey_all(join(&path, &arg0()))),
+            B::EnumKeys => match open(s) {
                 Ok(k) => Value::vec(
                     k.enum_keys()
                         .map(|r| match r {
@@ -339,7 +343,7 @@ mod imp {
                 ),
                 Err(e) => Value::vec(vec![Value::err(Value::str(e.to_string()))]),
             },
-            "enum_values" => match open(s) {
+            B::EnumValues => match open(s) {
                 Ok(k) => Value::vec(
                     k.enum_values()
                         .map(|r| match r {
@@ -357,15 +361,20 @@ mod imp {
 
 #[cfg(not(windows))]
 mod imp {
+    use super::super::bytecode::MethodName;
     use anyhow::{Result, bail};
 
     use super::super::value::{StructData, Value};
 
-    pub(super) fn regkey_method(_s: &StructData, name: &str, _args: &[Value]) -> Result<Value> {
+    pub(super) fn regkey_method(
+        _s: &StructData,
+        name: &MethodName,
+        _args: &[Value],
+    ) -> Result<Value> {
         bail!("RegKey::{name} is the windows registry, it does not exist on this platform")
     }
 }
 
-pub(super) fn winreg_method(s: &StructData, name: &str, args: &[Value]) -> Result<Value> {
+pub(super) fn winreg_method(s: &StructData, name: &MethodName, args: &[Value]) -> Result<Value> {
     imp::regkey_method(s, name, args)
 }

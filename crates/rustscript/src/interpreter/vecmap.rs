@@ -9,20 +9,21 @@ use anyhow::{Result, anyhow, bail};
 use indexmap::IndexMap;
 use parking_lot::Mutex;
 
-use super::bytecode::{BuiltinId, MethodName};
+use super::bytecode::{BuiltinId as B, MethodName};
+use super::enum_def::EnumKind;
 use super::iterator;
+use super::native::Native;
 use super::ops::compare_values;
 use super::value::{List, MapKey, MapKind, Value};
 
 pub(super) type MapStore = IndexMap<MapKey, Value>;
 
 pub(super) fn vec_method(v: &List, method: &MethodName, args: &mut [Value]) -> Result<Value> {
-    use BuiltinId as B;
     Ok(match method.id {
         B::Len | B::Count => super::shared::usize_value(v.lock().len()),
         B::IsEmpty => Value::Bool(v.lock().is_empty()),
         B::Clone => Value::vec(v.lock().clone()),
-        B::Iter => iterator::value_iter(v.clone()),
+        B::Iter | B::IntoIter => iterator::value_iter(v.clone()),
         B::IterMut => iterator::value_iter_mut(v.clone()),
         B::Push => {
             v.lock().push(args.first_mut().map_or(Value::Unit, take));
@@ -49,9 +50,9 @@ pub(super) fn vec_method(v: &List, method: &MethodName, args: &mut [Value]) -> R
             }
             items.remove(i)
         }
-        B::Get => vec_get(v, method, args),
-        B::First if method.text == "first_mut" => edge_element_ref(v, true),
-        B::Last if method.text == "last_mut" => edge_element_ref(v, false),
+        B::Get | B::GetMut => vec_get(v, method, args),
+        B::FirstMut => edge_element_ref(v, true),
+        B::LastMut => edge_element_ref(v, false),
         B::First => v
             .lock()
             .first()
@@ -72,7 +73,7 @@ pub(super) fn vec_method(v: &List, method: &MethodName, args: &mut [Value]) -> R
             let needle = args.first().cloned().unwrap_or(Value::Unit);
             Value::Bool(v.lock().iter().any(|x| x.eq_value(&needle)))
         }
-        B::Sort => {
+        B::Sort | B::SortUnstable => {
             let mut items = v.lock();
             items.sort_by_key(sort_key);
             Value::Unit
@@ -119,7 +120,7 @@ fn vec_get(v: &List, method: &MethodName, args: &[Value]) -> Value {
     let Some(i) = index else {
         return Value::none();
     };
-    if method.text == "get_mut" {
+    if method.id == B::GetMut {
         return if i < v.lock().len() {
             Value::some(Value::Ref(Arc::new(super::value::ValueRef::vec_element(
                 v.clone(),
@@ -216,35 +217,35 @@ fn vec_join(v: &List, args: &[Value]) -> Value {
 
 /// The by-name tail of `vec_method`, everything without a builtin id.
 fn vec_method_by_name(v: &List, method: &MethodName, args: &mut [Value]) -> Result<Value> {
-    Ok(match method.text.as_str() {
-        "to_vec" | "collect" | "cloned" | "copied" => Value::vec(v.lock().clone()),
+    Ok(match method.id {
+        B::ToVec | B::Collect | B::Cloned | B::Copied => Value::vec(v.lock().clone()),
         // `by_ref` lends the iterator out, so whatever the borrow hands on
         // is gone from this one too. A draining view over the same vector
         // is that borrow.
-        "by_ref" => iterator::draining_iter(v.clone()),
-        "peekable" => iterator::peekable_draining(v.clone()),
-        "nth" => match v.lock().get(usize::try_from(int_arg(args, 0)?)?) {
+        B::ByRef => iterator::draining_iter(v.clone()),
+        B::Peekable => iterator::peekable_draining(v.clone()),
+        B::Nth => match v.lock().get(usize::try_from(int_arg(args, 0)?)?) {
             Some(item) => Value::some(item.clone()),
             None => Value::none(),
         },
-        "collect_string" => Value::str(v.lock().iter().map(Value::display).collect::<String>()),
-        "collect_map" => return collect_map(v.lock().clone()),
-        "collect_set" => return collect_set(v.lock().clone()),
-        "reverse" => {
+        B::CollectString => Value::str(v.lock().iter().map(Value::display).collect::<String>()),
+        B::CollectMap => return collect_map(v.lock().clone()),
+        B::CollectSet => return collect_set(v.lock().clone()),
+        B::Reverse => {
             v.lock().reverse();
             Value::Unit
         }
-        "dedup" => {
+        B::Dedup => {
             let mut items = v.lock();
             items.dedup_by(|a, b| a.eq_value(b));
             Value::Unit
         }
-        "clear" => {
+        B::Clear => {
             v.lock().clear();
             Value::Unit
         }
-        "copy_from_slice" => return vec_copy_from_slice(v, args),
-        "swap_remove" => {
+        B::CopyFromSlice => return vec_copy_from_slice(v, args),
+        B::SwapRemove => {
             let i = usize::try_from(int_arg(args, 0)?)?;
             let mut items = v.lock();
             if i >= items.len() {
@@ -255,7 +256,7 @@ fn vec_method_by_name(v: &List, method: &MethodName, args: &mut [Value]) -> Resu
             }
             items.swap_remove(i)
         }
-        "truncate" => {
+        B::Truncate => {
             let n = usize::try_from(int_arg(args, 0)?)?;
             v.lock().truncate(n);
             Value::Unit
@@ -264,7 +265,7 @@ fn vec_method_by_name(v: &List, method: &MethodName, args: &mut [Value]) -> Resu
         // here, see `eval_method`'s extend pre-pass. Anything else that is
         // not a vec is an error rather than a silent no-op: extending by
         // nothing and reporting success hides the bug in the caller's data.
-        "extend" | "append" | "extend_from_slice" => {
+        B::Extend | B::Append | B::ExtendFromSlice => {
             let Some(Value::Vec(other)) = args.first() else {
                 bail!("`{}` needs something iterable", method.text);
             };
@@ -276,19 +277,19 @@ fn vec_method_by_name(v: &List, method: &MethodName, args: &mut [Value]) -> Resu
         }
         // Flattens one level: nested vectors spill their items, and Ok/Some
         // yield their inner value while Err/None drop out.
-        "flatten" => {
+        B::Flatten => {
             let items = v.lock().clone();
             let mut out: Vec<Value> = Vec::new();
             for item in &items {
                 match item {
                     Value::Vec(inner) => out.extend(inner.lock().iter().cloned()),
-                    Value::Enum { variant, data, .. } if matches!(&**variant, "Some" | "Ok") => {
-                        let first = data.lock().first().cloned();
-                        if let Some(inner) = first {
+                    Value::Enum { def, .. }
+                        if matches!(def.kind, EnumKind::Option | EnumKind::Result) =>
+                    {
+                        if let Some(inner) = item.success_payload() {
                             out.push(inner);
                         }
                     }
-                    Value::Enum { variant, .. } if matches!(&**variant, "None" | "Err") => {}
                     other => out.push(other.clone()),
                 }
             }
@@ -298,7 +299,7 @@ fn vec_method_by_name(v: &List, method: &MethodName, args: &mut [Value]) -> Resu
         // and leaves the rest behind. Handing back the first item without
         // removing it left the iterator unconsumed, so a following `collect`
         // saw the item again.
-        "next" => {
+        B::Next => {
             let mut items = v.lock();
             if items.is_empty() {
                 Value::none()
@@ -306,20 +307,20 @@ fn vec_method_by_name(v: &List, method: &MethodName, args: &mut [Value]) -> Resu
                 Value::some(items.remove(0))
             }
         }
-        "max" | "min" => return vec_min_max(v, method, args),
+        B::Max | B::Min => return vec_min_max(v, method, args),
         // A JSON array parsed by the interpreter is a plain Vec, so the
         // serde_json accessors resolve against it here.
-        "as_array" => Value::some(Value::vec(v.lock().clone())),
+        B::AsArray => Value::some(Value::vec(v.lock().clone())),
         // The mut accessor has to hand back the same list, not a copy,
         // so a push through it reaches the value it was taken from.
-        "as_array_mut" => Value::some(Value::Ref(Arc::new(super::value::ValueRef::borrowed(
+        B::AsArrayMut => Value::some(Value::Ref(Arc::new(super::value::ValueRef::borrowed(
             Value::Vec(v.clone()),
         )))),
-        "as_object" | "as_object_mut" => Value::none(),
+        B::AsObject | B::AsObjectMut => Value::none(),
         // Names that apply to any receiver, `clone` and `into` and the
         // rest, live in one place instead of being repeated per type.
-        other => {
-            return super::methods::generic_method(&Value::Vec(v.clone()), other, args);
+        _ => {
+            return super::methods::generic_method(&Value::Vec(v.clone()), method, args);
         }
     })
 }
@@ -366,7 +367,7 @@ fn vec_min_max(v: &List, method: &MethodName, args: &[Value]) -> Result<Value> {
     if let Some(other) = args.first() {
         let recv = Value::Vec(v.clone());
         let ord = compare_values(&recv, other)?;
-        let take_recv = if method.text == "max" {
+        let take_recv = if method.id == B::Max {
             ord.is_ge()
         } else {
             ord.is_le()
@@ -379,7 +380,7 @@ fn vec_min_max(v: &List, method: &MethodName, args: &[Value]) -> Result<Value> {
         let better = match best {
             Some(b) => {
                 let ord = compare_values(item, b)?;
-                if method.text == "max" {
+                if method.id == B::Max {
                     ord.is_gt()
                 } else {
                     ord.is_lt()
@@ -400,7 +401,6 @@ pub(super) fn map_method(
     method: &MethodName,
     args: &mut [Value],
 ) -> Result<Value> {
-    use BuiltinId as B;
     let lookup = |i: usize, f: &dyn Fn(Option<&Value>) -> Value| -> Result<Value> {
         let arg = args.get(i).ok_or_else(|| anyhow!("invalid map key"))?;
         let k = arg.as_key().ok_or_else(|| anyhow!("invalid map key"))?;
@@ -439,7 +439,7 @@ pub(super) fn map_method(
         }
         // `get_mut` answers `&mut V` in real Rust, so writes through the
         // answer must land in the entry. A clone would drop them.
-        B::Get if method.text == "get_mut" => {
+        B::GetMut => {
             let arg = args.first().ok_or_else(|| anyhow!("invalid map key"))?;
             let k = arg.as_key().ok_or_else(|| anyhow!("invalid map key"))?;
             if m.lock().contains_key(&k) {
@@ -470,31 +470,34 @@ pub(super) fn map_method(
                 None => Value::none(),
             }
         }
-        B::Keys => Value::vec(m.lock().keys().map(MapKey::to_value).collect()),
-        B::Values => Value::vec(m.lock().values().cloned().collect()),
-        B::Entry => Value::struct_of(
-            "Entry",
-            [
-                ("map".into(), Value::Map(m.clone(), kind)),
-                ("key".into(), args.first().cloned().unwrap_or(Value::Unit)),
-            ],
-        ),
-        B::Iter if kind == MapKind::Set => set_items(m),
-        B::Iter => map_pairs(m),
-        _ => match method.text.as_str() {
-            "values_mut" => Value::vec(m.lock().values().cloned().collect()),
-            "drain" if kind == MapKind::Set => set_items(m),
-            "drain" => map_pairs(m),
+        B::Keys | B::IntoKeys => Value::vec(m.lock().keys().map(MapKey::to_value).collect()),
+        B::Values | B::IntoValues => Value::vec(m.lock().values().cloned().collect()),
+        B::Entry => {
+            let Some(key) = args.first().and_then(Value::as_key) else {
+                bail!("invalid entry key");
+            };
+            Native::Entry {
+                map: m.clone(),
+                key,
+            }
+            .wrap()
+        }
+        B::Iter | B::IntoIter if kind == MapKind::Set => set_items(m),
+        B::Iter | B::IntoIter => map_pairs(m),
+        _ => match method.id {
+            B::ValuesMut => Value::vec(m.lock().values().cloned().collect()),
+            B::Drain if kind == MapKind::Set => set_items(m),
+            B::Drain => map_pairs(m),
             // A JSON object parsed by the interpreter is a Map, and it is Arc
             // shared, so the mut accessor is the same call: what it hands back
             // is the same map, and an insert through it reaches the original.
-            "as_object" => Value::some(Value::Map(m.clone(), kind)),
-            "as_object_mut" => Value::some(Value::Ref(Arc::new(super::value::ValueRef::borrowed(
+            B::AsObject => Value::some(Value::Map(m.clone(), kind)),
+            B::AsObjectMut => Value::some(Value::Ref(Arc::new(super::value::ValueRef::borrowed(
                 Value::Map(m.clone(), kind),
             )))),
-            "as_array" | "as_array_mut" => Value::none(),
-            name => {
-                return super::methods::generic_method(&Value::Map(m.clone(), kind), name, args);
+            B::AsArray | B::AsArrayMut => Value::none(),
+            _ => {
+                return super::methods::generic_method(&Value::Map(m.clone(), kind), method, args);
             }
         },
     })

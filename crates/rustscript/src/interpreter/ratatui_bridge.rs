@@ -16,30 +16,27 @@ use ratatui::text::Span;
 use ratatui::widgets::BorderType;
 use ratatui::widgets::Padding;
 
+use super::bytecode::PathId as P;
+use super::enum_def::{BORDER_TYPE, COLOR, CONSTRAINT, EnumKind};
 use super::value::Value;
 
-/// `Modifier::BOLD` and friends, plus the colour and border constants a script
-/// names by path rather than by call.
-pub(super) fn ratatui_const(ty: &str, name: &str) -> Option<Value> {
-    match ty {
-        "Modifier" => modifier_const(name).map(modifier_value),
-        "Color" => color_const(name).map(color_value),
-        "BorderType" => border_type_const(name).map(border_type_value),
-        _ => None,
-    }
+/// `Modifier::BOLD` and friends. The colour and border constants are enum
+/// variants, loaded in place by the compiler.
+pub(super) fn ratatui_const(id: P) -> Option<Value> {
+    modifier_const(id).map(modifier_value)
 }
 
-fn modifier_const(name: &str) -> Option<Modifier> {
-    Some(match name {
-        "BOLD" => Modifier::BOLD,
-        "DIM" => Modifier::DIM,
-        "ITALIC" => Modifier::ITALIC,
-        "UNDERLINED" => Modifier::UNDERLINED,
-        "SLOW_BLINK" => Modifier::SLOW_BLINK,
-        "RAPID_BLINK" => Modifier::RAPID_BLINK,
-        "REVERSED" => Modifier::REVERSED,
-        "HIDDEN" => Modifier::HIDDEN,
-        "CROSSED_OUT" => Modifier::CROSSED_OUT,
+fn modifier_const(id: P) -> Option<Modifier> {
+    Some(match id {
+        P::ModifierBold => Modifier::BOLD,
+        P::ModifierDim => Modifier::DIM,
+        P::ModifierItalic => Modifier::ITALIC,
+        P::ModifierUnderlined => Modifier::UNDERLINED,
+        P::ModifierSlowBlink => Modifier::SLOW_BLINK,
+        P::ModifierRapidBlink => Modifier::RAPID_BLINK,
+        P::ModifierReversed => Modifier::REVERSED,
+        P::ModifierHidden => Modifier::HIDDEN,
+        P::ModifierCrossedOut => Modifier::CROSSED_OUT,
         _ => return None,
     })
 }
@@ -149,13 +146,14 @@ pub(super) fn color_value(c: Color) -> Value {
         ),
         Color::Indexed(i) => ("Indexed", vec![Value::Int(i64::from(i))]),
     };
-    Value::enum_of("Color", variant, data)
+    Value::enum_named(&COLOR, variant, data).expect("every ratatui color variant is listed")
 }
 
 pub(super) fn value_color(v: &Value) -> Color {
-    let Value::Enum { variant, data, .. } = v else {
+    let Value::Enum { def, variant, data } = v else {
         return Color::Reset;
     };
+    let variant = def.variant_name(*variant);
     let data = data.lock().clone();
     let at = |i: usize| -> u8 {
         data.get(i)
@@ -295,13 +293,15 @@ pub(super) fn constraint_value(c: Constraint) -> Value {
             vec![Value::Int(i64::from(a)), Value::Int(i64::from(b))],
         ),
     };
-    Value::enum_of("Constraint", variant, data)
+    Value::enum_named(&CONSTRAINT, variant, data)
+        .expect("every ratatui constraint variant is listed")
 }
 
 pub(super) fn value_constraint(v: &Value) -> Constraint {
-    let Value::Enum { variant, data, .. } = v else {
+    let Value::Enum { def, variant, data } = v else {
         return Constraint::Min(0);
     };
+    let variant = def.variant_name(*variant);
     let data = data.lock().clone();
     let at = |i: usize| -> u16 {
         data.get(i)
@@ -318,12 +318,15 @@ pub(super) fn value_constraint(v: &Value) -> Constraint {
 }
 
 pub(super) fn border_type_value(b: BorderType) -> Value {
-    Value::enum_of("BorderType", border_type_name(b), Vec::new())
+    Value::enum_named(&BORDER_TYPE, border_type_name(b), Vec::new())
+        .expect("every ratatui border type is listed")
 }
 
 pub(super) fn value_border_type(v: &Value) -> BorderType {
     match v {
-        Value::Enum { variant, .. } => border_type_const(variant).unwrap_or(BorderType::Plain),
+        Value::Enum { def, variant, .. } => {
+            border_type_const(def.variant_name(*variant)).unwrap_or(BorderType::Plain)
+        }
         _ => BorderType::Plain,
     }
 }
@@ -383,9 +386,10 @@ pub(super) fn items(v: &Value) -> Vec<Value> {
 /// The payload of a `Some`, or None for a `None` and for anything that is not
 /// an Option at all.
 pub(super) fn option_inner(v: Option<&Value>) -> Option<Value> {
-    match v? {
-        Value::Enum { variant, data, .. } if &**variant == "Some" => data.lock().first().cloned(),
-        Value::Enum { variant, .. } if &**variant == "None" => None,
-        other => Some(other.clone()),
+    let v = v?;
+    if v.is_enum_kind(EnumKind::Option) {
+        v.some_payload()
+    } else {
+        Some(v.clone())
     }
 }

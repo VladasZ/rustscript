@@ -4,11 +4,13 @@
 //! frame, so variable access is an array read, not a name lookup.
 
 use std::collections::HashMap;
+use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
-use std::sync::atomic::AtomicU8;
+use std::sync::atomic::{AtomicU8, AtomicU16, Ordering};
 
 use parking_lot::Mutex;
 
+use super::enum_def::EnumDef;
 use super::typeir::{CastIr, TypeIr};
 
 pub type Reg = u16;
@@ -76,72 +78,59 @@ pub enum UnKind {
     Not,
 }
 
-/// Method names whose builtin receivers mutate in place. The compiler
-/// splits such a receiver from value sharing before the call, and the VM
-/// applies the same split when the receiver arrives through a reference.
-/// Read-only names must stay off this list, splitting is correct but wastes
-/// a copy when the receiver is shared.
-pub fn builtin_mutating(name: &str) -> bool {
-    matches!(
-        name,
-        "push"
-            | "pop"
-            | "insert"
-            | "insert_str"
-            | "remove"
-            | "swap_remove"
-            | "remove_entry"
-            | "push_str"
-            | "clear"
-            | "extend"
-            | "extend_from_slice"
-            | "append"
-            | "truncate"
-            | "retain"
-            | "retain_mut"
-            | "dedup"
-            | "dedup_by"
-            | "dedup_by_key"
-            | "sort"
-            | "sort_by"
-            | "sort_by_key"
-            | "sort_unstable"
-            | "sort_unstable_by"
-            | "sort_unstable_by_key"
-            | "reverse"
-            | "rotate_left"
-            | "rotate_right"
-            | "fill"
-            | "resize"
-            | "swap"
-            | "split_off"
-            | "drain"
-            | "iter_mut"
-            | "values_mut"
-            | "get_mut"
-            | "first_mut"
-            | "last_mut"
-            | "entry"
-            | "take"
-            | "replace"
-            | "get_or_insert"
-            | "get_or_insert_with"
-            | "make_ascii_uppercase"
-            | "make_ascii_lowercase"
-            | "clone_from"
-            | "copy_from_slice"
-            | "shuffle"
-            | "read_line"
-            | "read_to_string"
-            | "read_to_end"
-    )
-}
-
 /// A field being read or written, named for structs, positional for tuples.
 #[derive(Clone)]
 pub enum Member {
-    Named(Arc<str>),
+    Named(FieldName),
     Indexed(usize),
+}
+
+/// A struct field named at a single access site, with the slot the last
+/// access found. The next access checks that the remembered slot still
+/// holds the name and only scans the shape again when the receiver turned
+/// out to be a different struct, so a site that always sees the same type
+/// pays one compare per access.
+pub struct FieldName {
+    pub name: Arc<str>,
+    slot: AtomicU16,
+}
+
+impl FieldName {
+    pub fn new(name: Arc<str>) -> FieldName {
+        FieldName {
+            name,
+            slot: AtomicU16::new(u16::MAX),
+        }
+    }
+
+    pub fn slot_in(&self, shape: &StructShape) -> Option<usize> {
+        let hint = self.slot.load(Ordering::Relaxed);
+        if let Some(field) = shape.fields.get(usize::from(hint))
+            && (Arc::ptr_eq(field, &self.name) || **field == *self.name)
+        {
+            return Some(usize::from(hint));
+        }
+        let found = shape.slot(&self.name)?;
+        if let Ok(small) = u16::try_from(found) {
+            self.slot.store(small, Ordering::Relaxed);
+        }
+        Some(found)
+    }
+}
+
+impl Clone for FieldName {
+    fn clone(&self) -> FieldName {
+        FieldName {
+            name: self.name.clone(),
+            slot: AtomicU16::new(self.slot.load(Ordering::Relaxed)),
+        }
+    }
+}
+
+impl Display for FieldName {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.name)
+    }
 }
 
 /// Where a closure upvalue is copied from when the closure is built.
@@ -175,21 +164,49 @@ pub struct StructLit {
 
 #[derive(Clone)]
 pub struct EnumVariant {
-    pub enum_name: Arc<str>,
-    pub variant: Arc<str>,
+    pub def: Arc<EnumDef>,
+    pub variant: u16,
 }
 
 /// A method name with its builtin id resolved once at compile time, so hot
 /// dispatch matches an enum instead of comparing strings.
+/// The `type_id` of a value no script type declares, a bridge struct or a
+/// builtin enum.
+pub const NO_TYPE: u16 = u16::MAX;
+/// The atom of a method name no script impl declares.
+pub const NO_ATOM: u32 = u32::MAX;
+
 #[derive(Clone)]
 pub struct MethodName {
     pub text: String,
     pub id: BuiltinId,
+    /// The interned name when a script impl declares a method of this name
+    /// that no bridge knows, see `impls::method_atoms`. `NO_ATOM` otherwise.
+    pub atom: u32,
     /// The scalar type of an explicit turbofish, `s.parse::<u8>()` for one.
     /// Names are allocated per call site, so this rides along without an
     /// extra operand. Without it `parse` had to guess its target from the
     /// text, which made `"300".parse::<u8>()` an `Ok(300)`.
     pub scalar: Option<ScalarTy>,
+}
+
+impl MethodName {
+    /// A name the interpreter calls itself, for an internal call that reuses
+    /// a bridge method.
+    pub fn builtin(id: BuiltinId) -> MethodName {
+        MethodName {
+            text: id.name().to_string(),
+            id,
+            atom: NO_ATOM,
+            scalar: None,
+        }
+    }
+}
+
+impl Display for MethodName {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.text)
+    }
 }
 
 /// A concrete type a turbofish can name, for the methods whose result type is
@@ -286,184 +303,44 @@ impl ScalarTy {
     }
 }
 
-/// Ids for the builtin and higher-order methods the dispatcher special-cases.
-/// `Other` falls back to name-string dispatch, so an unlisted method still
-/// works, it just pays the string compares.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum BuiltinId {
-    Len,
-    IsEmpty,
-    Clone,
-    ToString,
-    Get,
-    Insert,
-    ContainsKey,
-    Remove,
-    Entry,
-    Keys,
-    Values,
-    Iter,
-    IterMut,
-    Push,
-    Pop,
-    First,
-    Last,
-    SplitFirst,
-    Contains,
-    Sort,
-    Join,
-    Concat,
-    Sum,
-    Product,
-    Enumerate,
-    Rev,
-    Count,
-    Take,
-    Skip,
-    PushStr,
-    /// `bool::then`, which takes a closure.
-    Then,
-    /// `clone_from`, which replaces the receiver and so is handled by the VM.
-    CloneFrom,
-    SplitWhitespace,
-    Split,
-    Chars,
-    Lines,
-    Trim,
-    StartsWith,
-    EndsWith,
-    Parse,
-    Unwrap,
-    UnwrapOr,
-    Copied,
-    // Higher-order methods, dispatched before the plain builtins.
-    Map,
-    Filter,
-    FilterMap,
-    FlatMap,
-    ForEach,
-    Find,
-    FindMap,
-    Position,
-    Any,
-    All,
-    Fold,
-    Reduce,
-    Retain,
-    SortByKey,
-    SortByCachedKey,
-    SortBy,
-    MaxByKey,
-    MinByKey,
-    TakeWhile,
-    SkipWhile,
-    Partition,
-    AndThen,
-    MapErr,
-    MapOr,
-    UnwrapOrElse,
-    OkOrElse,
-    WithContext,
-    OrInsertWith,
-    OrInsertWithKey,
-    AndModify,
-    Other,
+include!(concat!(env!("OUT_DIR"), "/builtin_id.rs"));
+include!(concat!(env!("OUT_DIR"), "/path_id.rs"));
+
+/// A path call or path value site. `id` is resolved once at compile time,
+/// `Other` for a user item the VM looks up by `segs`, which also name the
+/// path in errors and rebuild a forwarder closure.
+#[derive(Clone)]
+pub struct PathRef {
+    pub id: PathId,
+    pub segs: Vec<String>,
+    /// The turbofish or `let` annotation a call's result coerces to.
+    pub coerce: Option<TypeIr>,
 }
 
-impl BuiltinId {
-    pub fn resolve(name: &str) -> BuiltinId {
-        use BuiltinId::{
-            All, AndModify, AndThen, Any, Chars, Clone, CloneFrom, Concat, Contains, ContainsKey,
-            Copied, Count, EndsWith, Entry, Enumerate, Filter, FilterMap, Find, FindMap, First,
-            FlatMap, Fold, ForEach, Get, Insert, IsEmpty, Iter, IterMut, Join, Keys, Last, Len,
-            Lines, Map, MapErr, MapOr, MaxByKey, MinByKey, OkOrElse, OrInsertWith, OrInsertWithKey,
-            Other, Parse, Partition, Pop, Position, Product, Push, PushStr, Reduce, Remove, Retain,
-            Rev, Skip, SkipWhile, Sort, SortBy, SortByCachedKey, SortByKey, Split, SplitFirst,
-            SplitWhitespace, StartsWith, Sum, Take, TakeWhile, Then, ToString, Trim, Unwrap,
-            UnwrapOr, UnwrapOrElse, Values, WithContext,
-        };
-        match name {
-            "len" => Len,
-            "is_empty" => IsEmpty,
-            "clone" => Clone,
-            "to_string" => ToString,
-            // A returned container is Rc shared, so mutating it reaches the
-            // original. That is what `get_mut` is for, so it resolves to the
-            // same op rather than needing a mutable borrow the VM has no
-            // concept of.
-            "get" | "get_mut" => Get,
-            "then" => Then,
-            "clone_from" => CloneFrom,
-            "insert" => Insert,
-            "contains_key" => ContainsKey,
-            "remove" => Remove,
-            "entry" => Entry,
-            "keys" | "into_keys" => Keys,
-            "values" | "into_values" => Values,
-            "iter" | "into_iter" => Iter,
-            "iter_mut" => IterMut,
-            "push" => Push,
-            "pop" => Pop,
-            "first" | "first_mut" => First,
-            "last" | "last_mut" => Last,
-            "split_first" => SplitFirst,
-            "contains" => Contains,
-            "sort" | "sort_unstable" => Sort,
-            "join" => Join,
-            "concat" => Concat,
-            "sum" => Sum,
-            "product" => Product,
-            "enumerate" => Enumerate,
-            "rev" => Rev,
-            "count" => Count,
-            "take" => Take,
-            "skip" => Skip,
-            "push_str" => PushStr,
-            "split_whitespace" => SplitWhitespace,
-            "split" => Split,
-            "chars" => Chars,
-            "lines" => Lines,
-            "trim" => Trim,
-            "starts_with" => StartsWith,
-            "ends_with" => EndsWith,
-            "parse" => Parse,
-            "unwrap" => Unwrap,
-            "unwrap_or" => UnwrapOr,
-            "copied" | "cloned" => Copied,
-            "map" => Map,
-            "filter" => Filter,
-            "filter_map" => FilterMap,
-            "flat_map" => FlatMap,
-            "for_each" => ForEach,
-            "find" => Find,
-            "find_map" => FindMap,
-            "position" => Position,
-            "any" => Any,
-            "all" => All,
-            "fold" => Fold,
-            "reduce" => Reduce,
-            "retain" => Retain,
-            "sort_by_key" => SortByKey,
-            "sort_by_cached_key" => SortByCachedKey,
-            "sort_by" => SortBy,
-            "max_by_key" => MaxByKey,
-            "min_by_key" => MinByKey,
-            "take_while" => TakeWhile,
-            "skip_while" => SkipWhile,
-            "partition" => Partition,
-            "and_then" => AndThen,
-            "map_err" => MapErr,
-            "map_or" => MapOr,
-            "unwrap_or_else" => UnwrapOrElse,
-            "ok_or_else" => OkOrElse,
-            "with_context" => WithContext,
-            "or_insert_with" => OrInsertWith,
-            "or_insert_with_key" => OrInsertWithKey,
-            "and_modify" => AndModify,
-            _ => Other,
+impl PathRef {
+    pub fn new(segs: Vec<String>, coerce: Option<TypeIr>) -> Self {
+        PathRef {
+            id: PathId::resolve(&segs),
+            segs,
+            coerce,
         }
     }
 
+    /// A user item path: a type member or a tuple struct, never the table.
+    pub fn user(segs: Vec<String>, coerce: Option<TypeIr>) -> Self {
+        PathRef {
+            id: PathId::Other,
+            segs,
+            coerce,
+        }
+    }
+
+    pub fn display(&self) -> String {
+        self.segs.join("::")
+    }
+}
+
+impl BuiltinId {
     /// The checker-visible receivers this id-dispatched method works on:
     /// the types the coverage walk can infer, `Str`, `Vec`, `Map`, and
     /// `Option`, or `*` for every receiver. Names the interpreter answers
@@ -495,48 +372,68 @@ impl BuiltinId {
         }
     }
 
-    /// Whether this method takes a closure and must run through the
-    /// interpreter's higher-order dispatch.
+    /// Whether the call runs through the higher order dispatch first. The
+    /// plain builtins listed here never take a closure, so they skip it,
+    /// and everything else tries it, including a name no table lists.
     pub fn is_higher_order(self) -> bool {
         use BuiltinId::{
-            All, AndModify, AndThen, Any, Filter, FilterMap, Find, FindMap, FlatMap, Fold, ForEach,
-            Map, MapErr, MapOr, MaxByKey, MinByKey, OkOrElse, OrInsertWith, OrInsertWithKey, Other,
-            Partition, Position, Reduce, Retain, SkipWhile, SortBy, SortByCachedKey, SortByKey,
-            TakeWhile, Then, UnwrapOrElse, WithContext,
+            Chars, Clone, CloneFrom, Cloned, Concat, Contains, ContainsKey, Copied, Count,
+            EndsWith, Entry, Enumerate, First, FirstMut, Get, GetMut, Insert, IntoIter, IntoKeys,
+            IntoValues, IsEmpty, Iter, IterMut, Join, Keys, Last, LastMut, Len, Lines, Parse, Pop,
+            Product, Push, PushStr, Remove, Rev, Skip, Sort, SortUnstable, Split, SplitFirst,
+            SplitWhitespace, StartsWith, Sum, Take, ToString, Trim, Unwrap, UnwrapOr, Values,
         };
-        matches!(
+        !matches!(
             self,
-            Then | Map
-                | Filter
-                | FilterMap
-                | FlatMap
-                | ForEach
-                | Find
-                | FindMap
-                | Position
-                | Any
-                | All
-                | Fold
-                | Reduce
-                | Retain
-                | SortByKey
-                | SortByCachedKey
-                | SortBy
-                | MaxByKey
-                | MinByKey
-                | TakeWhile
-                | SkipWhile
-                | Partition
-                | AndThen
-                | MapErr
-                | MapOr
-                | UnwrapOrElse
-                | OkOrElse
-                | WithContext
-                | OrInsertWith
-                | OrInsertWithKey
-                | AndModify
-                | Other
+            Len | IsEmpty
+                | Clone
+                | ToString
+                | Get
+                | GetMut
+                | Insert
+                | ContainsKey
+                | Remove
+                | Entry
+                | Keys
+                | IntoKeys
+                | Values
+                | IntoValues
+                | Iter
+                | IntoIter
+                | IterMut
+                | Push
+                | Pop
+                | First
+                | FirstMut
+                | Last
+                | LastMut
+                | SplitFirst
+                | Contains
+                | Sort
+                | SortUnstable
+                | Join
+                | Concat
+                | Sum
+                | Product
+                | Enumerate
+                | Rev
+                | Count
+                | Take
+                | Skip
+                | PushStr
+                | CloneFrom
+                | SplitWhitespace
+                | Split
+                | Chars
+                | Lines
+                | Trim
+                | StartsWith
+                | EndsWith
+                | Parse
+                | Unwrap
+                | UnwrapOr
+                | Copied
+                | Cloned
         )
     }
 }
@@ -555,6 +452,32 @@ pub struct FmtSpec {
 pub struct PatInfo {
     pub pat: PPat,
     pub binds: Vec<(String, Reg)>,
+}
+
+/// The variant a tuple struct or path pattern names. `variant` is set when
+/// the compiler resolved the path to a definition, and the test is then a
+/// definition and index compare. `name` is the last path segment, kept for
+/// the shapes that match by name alone: a tuple struct pattern on a struct,
+/// the `serde_json::Value` variants held as plain values, and an unresolved
+/// path.
+#[derive(Clone)]
+pub struct PTag {
+    pub name: Option<Arc<str>>,
+    pub variant: Option<(Arc<EnumDef>, u16)>,
+}
+
+impl PTag {
+    /// Whether an enum value's variant is the one this pattern names.
+    pub fn matches(&self, def: &Arc<EnumDef>, variant: u16) -> bool {
+        match &self.variant {
+            Some((want, index)) => EnumDef::same(want, def) && *index == variant,
+            None => self.name.as_deref() == Some(&**def.variant_name(variant)),
+        }
+    }
+
+    pub fn is_named(&self, name: &str) -> bool {
+        self.name.as_deref() == Some(name)
+    }
 }
 
 #[derive(Clone)]
@@ -577,11 +500,11 @@ pub enum PPat {
     Lit(PLit),
     Tuple(Vec<PPat>),
     TupleStruct {
-        name: Option<String>,
+        tag: PTag,
         elems: Vec<PPat>,
     },
     Path {
-        name: Option<String>,
+        tag: PTag,
     },
     Struct {
         name: Option<String>,
@@ -774,6 +697,12 @@ pub enum Op {
         dst: Reg,
         base: Reg,
         count: u16,
+    },
+    /// An empty `HashMap` or `HashSet`, the `new` and `with_capacity`
+    /// constructors lowered in place.
+    MakeMap {
+        dst: Reg,
+        set: bool,
     },
     MakeTuple {
         dst: Reg,
@@ -1039,8 +968,8 @@ pub struct Chunk {
     pub casts: Vec<CastIr>,
     /// Annotated `let` coercion targets, referenced by `Coerce`.
     pub coerces: Vec<TypeIr>,
-    /// Path calls, the segments plus an optional turbofish coercion type.
-    pub paths: Vec<(Vec<String>, Option<TypeIr>)>,
+    /// Path calls and path values.
+    pub paths: Vec<PathRef>,
     pub names: Vec<MethodName>,
     /// Nested closure bodies, referenced by `MakeClosure`.
     pub children: Vec<Arc<Chunk>>,
@@ -1123,6 +1052,9 @@ impl Chunk {
 /// instance allocates no map.
 pub struct StructShape {
     pub name: Arc<str>,
+    /// The script type this is an instance of, the index into the impl
+    /// table. `NO_TYPE` for a struct a bridge builds.
+    pub type_id: u16,
     pub fields: Vec<Arc<str>>,
     /// One entry per field, its `#[serde(rename = "..")]` name if any. Empty
     /// when the struct has no renamed fields. Read when serializing to json so
@@ -1134,18 +1066,22 @@ impl StructShape {
     pub fn new(name: impl Into<Arc<str>>, fields: Vec<Arc<str>>) -> Arc<StructShape> {
         Arc::new(StructShape {
             name: name.into(),
+            type_id: NO_TYPE,
             fields,
             renames: Vec::new(),
         })
     }
 
-    pub fn with_renames(
+    /// The shape of a script struct, tagged with its type id.
+    pub fn typed(
         name: impl Into<Arc<str>>,
+        type_id: u16,
         fields: Vec<Arc<str>>,
         renames: Vec<Option<Arc<str>>>,
     ) -> Arc<StructShape> {
         Arc::new(StructShape {
             name: name.into(),
+            type_id,
             fields,
             renames,
         })
@@ -1164,14 +1100,14 @@ impl StructShape {
 /// constructor. A builtin method reference has no known parameter count, so
 /// `num_params` is only a default, a call with a different count rebuilds the
 /// forwarder for the count actually passed.
-pub fn path_call_chunk(segs: Vec<String>, num_params: usize) -> Arc<Chunk> {
+pub fn path_call_chunk(path: PathRef, num_params: usize) -> Arc<Chunk> {
     let count = u16::try_from(num_params).expect("parameter count fits u16");
     let dst = count * 2;
     let mut chunk = Chunk::empty("<pathfn>");
     chunk.path_forwarder = true;
     chunk.num_params = num_params;
     chunk.num_regs = num_params * 2 + 1;
-    chunk.paths.push((segs, None));
+    chunk.paths.push(path);
     // Arguments land in registers 0..count. The path call consumes its
     // window, and the frame loop hands the parameter registers back to the
     // caller on return, so the call runs on copies in count..2*count and

@@ -15,6 +15,7 @@
 use std::cmp::Ordering;
 
 use super::bytecode::{BinKind, Op};
+use super::enum_def::EnumKind;
 use super::numeric::i64_arith;
 use super::value::{ClosureData, Upvalue, Value};
 use super::vm::Vm;
@@ -123,19 +124,6 @@ fn is_compare(op: BinKind) -> bool {
     )
 }
 
-/// The `Ordering` variant a path or enum literal names, as -1, 0, or 1.
-fn ordering_const(enum_name: &str, variant: &str) -> Option<i64> {
-    if enum_name != "Ordering" {
-        return None;
-    }
-    match variant {
-        "Less" => Some(-1),
-        "Equal" => Some(0),
-        "Greater" => Some(1),
-        _ => None,
-    }
-}
-
 pub(super) struct ScalarPlan {
     ops: Vec<SOp>,
     num_regs: usize,
@@ -215,17 +203,12 @@ fn translate_op(clo: &ClosureData, num_regs: usize, op: &Op) -> Option<SOp> {
         },
         Op::LoadEnum { dst, info } => {
             let variant = &chunk.enum_variants[*info as usize];
-            let v = ordering_const(&variant.enum_name, &variant.variant)?;
-            SOp::LoadOrd { dst: reg(*dst)?, v }
-        }
-        Op::PathValue { dst, path } => {
-            let (segs, _) = &chunk.paths[*path as usize];
-            let [.., enum_name, variant] = segs.as_slice() else {
+            if variant.def.kind != EnumKind::Ordering {
                 return None;
-            };
+            }
             SOp::LoadOrd {
                 dst: reg(*dst)?,
-                v: ordering_const(enum_name, variant)?,
+                v: i64::from(variant.variant) - 1,
             }
         }
         Op::Ret { src } => SOp::Ret { src: reg(*src)? },

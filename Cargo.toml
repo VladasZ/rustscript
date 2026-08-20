@@ -74,6 +74,7 @@ pedantic = { level = "warn", priority = -1 }
 
 explicit_deref_methods = "allow"
 format_push_string = "allow"
+inline_always = "allow"
 manual_assert = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"

@@ -10,6 +10,7 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow, bail};
 use parking_lot::Mutex;
 
+use super::bytecode::{BuiltinId, BuiltinId as B};
 use super::value::{CellKind, Value, ValueRef};
 
 pub(super) fn make_cell(kind: CellKind, inner: Value) -> Value {
@@ -21,7 +22,7 @@ pub(super) fn make_cell(kind: CellKind, inner: Value) -> Value {
 pub(super) fn cell_method(
     kind: CellKind,
     slot: &Arc<Mutex<Value>>,
-    name: &str,
+    name: BuiltinId,
     args: &mut [Value],
 ) -> Result<Option<Value>> {
     // An interior method on an `Rc<RefCell<..>>` derefs the shared pointer
@@ -29,48 +30,48 @@ pub(super) fn cell_method(
     if kind.is_shared_pointer() && interior_method(name) {
         let inner = slot.lock().clone();
         let Value::Cell(inner_kind, inner_slot) = inner else {
-            bail!("no method `{name}` on {}", kind_name(kind));
+            bail!("no method `{}` on {}", name.name(), kind_name(kind));
         };
         return cell_method(inner_kind, &inner_slot, name, args);
     }
     Ok(Some(match name {
-        "clone" => Value::Cell(kind, slot.clone()),
-        "borrow" => {
+        B::Clone => Value::Cell(kind, slot.clone()),
+        B::Borrow => {
             require(kind, CellKind::RefCell, name)?;
             slot.lock().clone()
         }
-        "borrow_mut" => {
+        B::BorrowMut => {
             require(kind, CellKind::RefCell, name)?;
             Value::Ref(Arc::new(ValueRef::cell_slot(slot.clone())))
         }
-        "lock" | "try_lock" | "blocking_lock" => {
+        B::Lock | B::TryLock | B::BlockingLock => {
             // The tokio mutex hands its guard out directly: `lock` is
             // awaited and the await passes the guard through, and only
             // `try_lock` wraps a `Result`. The std mutex wraps its
             // `LockResult` either way and has no `blocking_lock`.
             if kind == CellKind::TokioMutex {
                 let guard = Value::Ref(Arc::new(ValueRef::cell_slot(slot.clone())));
-                if name == "try_lock" {
+                if name == B::TryLock {
                     Value::ok(guard)
                 } else {
                     guard
                 }
             } else {
                 require(kind, CellKind::Mutex, name)?;
-                if name == "blocking_lock" {
+                if name == B::BlockingLock {
                     bail!("no method `blocking_lock` on std Mutex");
                 }
                 Value::ok(Value::Ref(Arc::new(ValueRef::cell_slot(slot.clone()))))
             }
         }
-        "get" if kind == CellKind::Cell => slot.lock().clone(),
-        "set" => {
+        B::Get if kind == CellKind::Cell => slot.lock().clone(),
+        B::Set => {
             require_interior(kind, name)?;
             let new = args.first().cloned().unwrap_or(Value::Unit);
             *slot.lock() = new;
             Value::Unit
         }
-        "replace" => {
+        B::Replace => {
             require_interior(kind, name)?;
             let new = args.first().cloned().unwrap_or(Value::Unit);
             let mut guard = slot.lock();
@@ -78,37 +79,37 @@ pub(super) fn cell_method(
             *guard = new;
             old
         }
-        "take" => {
+        B::Take => {
             require_interior(kind, name)?;
             let mut guard = slot.lock();
             let old = guard.clone();
             *guard = old.default_like();
             old
         }
-        "get_mut" => {
+        B::GetMut => {
             require_interior(kind, name)?;
             Value::Ref(Arc::new(ValueRef::cell_slot(slot.clone())))
         }
-        "into_inner" => slot.lock().clone(),
+        B::IntoInner => slot.lock().clone(),
         _ => return Ok(None),
     }))
 }
 
 /// Whether the name is an interior-mutability method that auto-derefs
 /// through Rc and Arc to the cell inside.
-fn interior_method(name: &str) -> bool {
+fn interior_method(name: BuiltinId) -> bool {
     matches!(
         name,
-        "borrow"
-            | "borrow_mut"
-            | "lock"
-            | "try_lock"
-            | "blocking_lock"
-            | "get"
-            | "set"
-            | "replace"
-            | "take"
-            | "get_mut"
+        B::Borrow
+            | B::BorrowMut
+            | B::Lock
+            | B::TryLock
+            | B::BlockingLock
+            | B::Get
+            | B::Set
+            | B::Replace
+            | B::Take
+            | B::GetMut
     )
 }
 
@@ -122,17 +123,25 @@ fn kind_name(kind: CellKind) -> &'static str {
     }
 }
 
-fn require(kind: CellKind, wanted: CellKind, name: &str) -> Result<()> {
+fn require(kind: CellKind, wanted: CellKind, name: BuiltinId) -> Result<()> {
     if kind == wanted {
         Ok(())
     } else {
-        Err(anyhow!("no method `{name}` on {}", kind_name(kind)))
+        Err(anyhow!(
+            "no method `{}` on {}",
+            name.name(),
+            kind_name(kind)
+        ))
     }
 }
 
-fn require_interior(kind: CellKind, name: &str) -> Result<()> {
+fn require_interior(kind: CellKind, name: BuiltinId) -> Result<()> {
     if kind.is_shared_pointer() {
-        Err(anyhow!("no method `{name}` on {}", kind_name(kind)))
+        Err(anyhow!(
+            "no method `{}` on {}",
+            name.name(),
+            kind_name(kind)
+        ))
     } else {
         Ok(())
     }

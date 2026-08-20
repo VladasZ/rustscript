@@ -596,7 +596,7 @@ fn run_vec_span(
 /// out-of-range indexed member is caught by the values access itself.
 fn member_slot(data: &StructData, member: &Member) -> Option<usize> {
     match member {
-        Member::Named(name) => data.shape.slot(name),
+        Member::Named(name) => name.slot_in(&data.shape),
         Member::Indexed(i) => Some(*i),
     }
 }

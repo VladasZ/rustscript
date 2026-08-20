@@ -6,7 +6,7 @@ use anyhow::{Result, anyhow, bail};
 use syn::punctuated::Punctuated;
 use syn::{Expr, Lit};
 
-use crate::interpreter::bytecode::{BinKind, Const, FmtSpec, MacroKind, Op, Reg};
+use crate::interpreter::bytecode::{BinKind, Const, FmtSpec, MacroKind, Op, PathRef, Reg};
 
 use super::{Compiler, inline_holes, parse_exprs, parse_matches, parse_vec_repeat};
 
@@ -110,7 +110,7 @@ impl Compiler<'_> {
         let c = self.compile_expr(cond)?;
         let ok = self.here();
         self.emit(Op::JumpIfTrue { cond: c, to: 0 });
-        let p = self.add_path(vec!["::assert_failed".to_string()], None);
+        let p = self.add_path(PathRef::new(vec!["::assert_failed".to_string()], None));
         self.emit(Op::CallPath {
             dst,
             path: p,
@@ -146,7 +146,7 @@ impl Compiler<'_> {
         } else {
             self.emit(Op::JumpIfFalse { cond: eqr, to: 0 });
         }
-        let p = self.add_path(vec!["::assert_failed".to_string()], None);
+        let p = self.add_path(PathRef::new(vec!["::assert_failed".to_string()], None));
         self.emit(Op::CallPath {
             dst,
             path: p,
@@ -196,7 +196,7 @@ impl Compiler<'_> {
             let k = self.add_const(Const::Str(Arc::from("condition failed")));
             self.emit(Op::LoadConst { dst: msg, k });
         }
-        let p = self.add_path(vec!["::ensure_fail".to_string()], None);
+        let p = self.add_path(PathRef::new(vec!["::ensure_fail".to_string()], None));
         self.emit(Op::CallPath {
             dst,
             path: p,

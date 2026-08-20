@@ -6,9 +6,11 @@ mod compile;
 mod console;
 pub mod coverage;
 mod crates_bridge;
+mod enum_def;
 mod format;
 mod higher_order;
 mod http;
+mod impls;
 mod int_methods;
 mod iterator;
 mod json_bridge;
@@ -133,14 +135,13 @@ pub struct Interp {
     functions: Vec<Arc<Chunk>>,
     /// Canonical name to function id, for calls resolved at runtime.
     fn_index: HashMap<String, u32>,
-    /// Inherent and trait methods, keyed by (canonical type name, method name).
-    methods: HashMap<(String, String), Arc<Chunk>>,
+    /// Inherent and trait methods, by type id and method id.
+    impls: Arc<impls::ImplTable>,
     /// Module tree and item tables, shared by compile and runtime lookups.
     resolver: Resolver,
     /// Consts and statics, evaluated lazily so declaration order is free.
     globals: RefCell<Vec<GlobalSlot>>,
     /// Root module imports, used by the bridge dispatch to expand aliases.
-    uses: HashMap<String, Vec<String>>,
     main_index: Option<u32>,
     /// Whether an `Err` out of `main` prints its `Display` text rather than
     /// its `Debug` form, decided by `main`'s written error type.
@@ -257,17 +258,7 @@ impl Interp {
         let mut pending_impls: Vec<(usize, Rc<syn::ItemImpl>)> = Vec::new();
         let mut pending_consts: Vec<(usize, Rc<syn::Expr>)> = Vec::new();
 
-        // Trait definitions by bare name, so an impl can pull in the default
-        // method bodies its block does not override.
-        let mut traits: HashMap<String, (usize, Rc<syn::ItemTrait>)> = HashMap::default();
-        for (m, src) in modules.iter().enumerate() {
-            for item in &src.items {
-                if let Item::Trait(t) = item {
-                    traits.insert(t.ident.to_string(), (m, Rc::new(t.clone())));
-                }
-            }
-        }
-
+        let traits = collect_traits(modules);
         for (m, src) in modules.iter().enumerate() {
             for item in &src.items {
                 register_item(
@@ -288,6 +279,7 @@ impl Interp {
         let fn_returns = collect_fn_returns(&pending_fns);
 
         let (has_drop, mut_methods) = collect_mut_methods(&pending_methods);
+        let (impl_methods, method_atoms) = impl_name_tables(&pending_methods);
 
         let mut functions = Vec::with_capacity(pending_fns.len());
         for (m, f) in &pending_fns {
@@ -299,12 +291,14 @@ impl Interp {
                 impl_type: None,
                 fn_returns: &fn_returns,
                 mut_methods: &mut_methods,
+                impl_methods: &impl_methods,
+                method_atoms: &method_atoms,
                 has_drop,
             };
             let mut c = Compiler::new(&ctx);
             functions.push(Arc::new(c.compile_fn(&f.sig, &f.block)?));
         }
-        let mut methods = HashMap::default();
+        let mut methods = Vec::with_capacity(pending_methods.len());
         for (ty, name, m, f) in &pending_methods {
             let ctx = Ctx {
                 resolver: &resolver,
@@ -314,14 +308,18 @@ impl Interp {
                 impl_type: Some(ty),
                 fn_returns: &fn_returns,
                 mut_methods: &mut_methods,
+                impl_methods: &impl_methods,
+                method_atoms: &method_atoms,
                 has_drop,
             };
             let mut c = Compiler::new(&ctx);
-            methods.insert(
-                (ty.clone(), name.clone()),
+            methods.push((
+                ty.clone(),
+                name.clone(),
                 Arc::new(c.compile_fn(&f.sig, &f.block)?),
-            );
+            ));
         }
+        let impls = build_impl_table(&resolver, methods, &method_atoms);
         let mut globals = Vec::with_capacity(pending_consts.len());
         for (m, expr) in &pending_consts {
             let ctx = Ctx {
@@ -332,6 +330,8 @@ impl Interp {
                 impl_type: None,
                 fn_returns: &fn_returns,
                 mut_methods: &mut_methods,
+                impl_methods: &impl_methods,
+                method_atoms: &method_atoms,
                 has_drop,
             };
             let mut c = Compiler::new(&ctx);
@@ -347,10 +347,9 @@ impl Interp {
         Ok(Interp {
             functions,
             fn_index,
-            methods,
+            impls,
             resolver,
             globals: RefCell::new(globals),
-            uses,
             main_index,
             main_err_display,
         })
@@ -360,8 +359,7 @@ impl Interp {
     /// Report methods the interpreter does not implement, without running
     /// anything. Used by `rust check`.
     pub fn coverage(&self) -> Vec<coverage::Finding> {
-        let user = self.methods.keys().cloned();
-        coverage::report(&self.functions, user)
+        coverage::report(&self.functions, self.impls.names())
     }
 
     /// The coverage walk as a gate: an error listing every method the
@@ -397,7 +395,6 @@ impl Interp {
             .build()
             .map_err(|e| anyhow!("cannot start tokio runtime: {e}"))?;
         let functions = self.functions.clone();
-        let methods = self.methods.clone();
         let globals: Vec<parking_lot::Mutex<vm::GlobalSlot>> = self
             .globals
             .borrow()
@@ -409,24 +406,8 @@ impl Interp {
             .collect();
         // The runtime tables for dynamic dispatch, precomputed here so nothing
         // at runtime touches the syn AST, which is not `Send`.
-        let enums: Vec<vm::EnumDef> = self
-            .resolver
-            .enums
-            .iter()
-            .map(|(name, def)| vm::EnumDef {
-                name: Arc::from(&**name),
-                variants: def
-                    .variants
-                    .iter()
-                    .map(|v| {
-                        (
-                            Arc::from(v.ident.to_string().as_str()),
-                            matches!(v.fields, syn::Fields::Unit),
-                        )
-                    })
-                    .collect(),
-            })
-            .collect();
+        let enums: Vec<Arc<enum_def::EnumDef>> =
+            self.resolver.enum_defs.values().cloned().collect();
         let unit_structs: Vec<Arc<str>> = self
             .resolver
             .structs
@@ -443,10 +424,9 @@ impl Interp {
         let pinterp = Arc::new(vm::Vm {
             functions,
             fn_index: self.fn_index.clone(),
-            methods,
+            impls: self.impls.clone(),
             globals,
             structs: self.build_structs(),
-            uses: self.uses.clone(),
             enums,
             unit_structs,
             struct_names,
@@ -475,13 +455,9 @@ impl Interp {
                 .unwrap_or_else(|| "unknown panic".to_string());
             anyhow!("main task panicked: {msg}")
         })??;
-        if let value::Value::Enum {
-            enum_name,
-            variant,
-            data,
-        } = &ret
-            && &**enum_name == "Result"
-            && &**variant == "Err"
+        if let value::Value::Enum { def, variant, data } = &ret
+            && def.kind == enum_def::EnumKind::Result
+            && *variant == enum_def::ERR
         {
             // A compiled binary prints the `Debug` form of the error here.
             // An `anyhow::Error` is the exception, its own `Debug` prints
@@ -532,6 +508,8 @@ fn build_module_tree(modules: &[ModuleSrc]) -> Resolver {
         modules: syms,
         structs: HashMap::default(),
         enums: HashMap::default(),
+        enum_defs: HashMap::default(),
+        type_ids: HashMap::default(),
     }
 }
 
@@ -555,6 +533,7 @@ fn register_item(
         Item::Struct(s) => {
             let name = s.ident.to_string();
             let canon: Arc<str> = resolver.canon(m, &name).into();
+            resolver.type_id(&canon);
             resolver.modules[m].structs.insert(name, canon.clone());
             resolver.structs.insert(
                 canon,
@@ -568,6 +547,19 @@ fn register_item(
             let name = e.ident.to_string();
             let canon: Arc<str> = resolver.canon(m, &name).into();
             resolver.modules[m].enums.insert(name, canon.clone());
+            let type_id = resolver.type_id(&canon);
+            let def = enum_def::EnumDef::new(
+                enum_def::EnumKind::Other,
+                canon.clone(),
+                type_id,
+                e.variants.iter().map(|v| {
+                    (
+                        Arc::from(v.ident.to_string()),
+                        matches!(v.fields, syn::Fields::Unit),
+                    )
+                }),
+            );
+            resolver.enum_defs.insert(canon.clone(), def);
             resolver.enums.insert(canon, Rc::new(e.clone()));
         }
         Item::Impl(imp) => pending_impls.push((m, Rc::new(imp.clone()))),
@@ -609,6 +601,48 @@ fn register_item(
 /// and body.
 type PendingMethod = (String, String, usize, Rc<syn::ImplItemFn>);
 
+/// Trait definitions by bare name, so an impl can pull in the default method
+/// bodies its block does not override.
+fn collect_traits(modules: &[ModuleSrc]) -> HashMap<String, (usize, Rc<syn::ItemTrait>)> {
+    let mut traits: HashMap<String, (usize, Rc<syn::ItemTrait>)> = HashMap::default();
+    for (m, src) in modules.iter().enumerate() {
+        for item in &src.items {
+            if let Item::Trait(t) = item {
+                traits.insert(t.ident.to_string(), (m, Rc::new(t.clone())));
+            }
+        }
+    }
+    traits
+}
+
+/// The `(type, method)` pairs every impl declares, and the atoms of the
+/// method names no bridge knows.
+fn impl_name_tables(
+    pending_methods: &[PendingMethod],
+) -> (HashSet<(String, String)>, HashMap<String, u32>) {
+    let impl_methods = pending_methods
+        .iter()
+        .map(|(ty, name, _, _)| (ty.clone(), name.clone()))
+        .collect();
+    let atoms = impls::method_atoms(pending_methods.iter().map(|(_, name, _, _)| name.as_str()));
+    (impl_methods, atoms)
+}
+
+fn build_impl_table(
+    resolver: &Resolver,
+    methods: Vec<(String, String, Arc<Chunk>)>,
+    method_atoms: &HashMap<String, u32>,
+) -> Arc<impls::ImplTable> {
+    let declared =
+        |ty: &str| resolver.structs.contains_key(ty) || resolver.enum_defs.contains_key(ty);
+    Arc::new(impls::ImplTable::build(
+        methods,
+        resolver.type_ids.clone(),
+        method_atoms.clone(),
+        &declared,
+    ))
+}
+
 /// Register every impl block's methods and consts, resolving impl targets
 /// after all modules registered their types. A trait impl also brings in the
 /// trait's default bodies for methods it does not override, compiled against
@@ -645,6 +679,7 @@ fn collect_impl_items(
     for (m, imp) in pending_impls {
         let type_name = impl_target(resolver, *m, &imp.self_ty)
             .ok_or_else(|| anyhow!("unsupported impl target"))?;
+        resolver.type_id(&type_name);
         let trait_name = imp
             .trait_
             .as_ref()

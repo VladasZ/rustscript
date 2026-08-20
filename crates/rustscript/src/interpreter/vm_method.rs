@@ -6,6 +6,7 @@ use std::mem::take;
 use anyhow::{Result, bail};
 
 use super::bytecode::{BuiltinId, MethodName};
+use super::enum_def::{EnumKind, OK, SOME};
 use super::methods::make_ordering;
 use super::value::{MapKind, Value};
 use super::vm_step::{Flow, StepCtx};
@@ -41,15 +42,13 @@ pub(super) fn method_op(
     // bridge's and an iterator `take(n)` is an adaptor.
     if matches!(name.id, BuiltinId::Take)
         && argc == 0
-        && matches!(&ctx.stack[base + recv], Value::Enum { enum_name, .. } if &**enum_name == "Option")
+        && ctx.stack[base + recv].is_enum_kind(EnumKind::Option)
     {
         let old = take(&mut ctx.stack[base + recv]);
         ctx.stack[base + recv] = Value::none();
         return Ok(ctx.set_opt(dst, old));
     }
-    if name.text == "replace"
-        && argc == 1
-        && matches!(&ctx.stack[base + recv], Value::Enum { enum_name, .. } if &**enum_name == "Option")
+    if name.text == "replace" && argc == 1 && ctx.stack[base + recv].is_enum_kind(EnumKind::Option)
     {
         let new = ctx.stack[s..s + argc]
             .first()
@@ -87,10 +86,10 @@ pub(super) fn method_op(
         }
         return Ok(ctx.set_opt(dst, Value::Unit));
     }
-    if vm.methods.is_empty()
+    if vm.impls.is_empty()
         && matches!(
             name.id,
-            BuiltinId::Copied | BuiltinId::Unwrap | BuiltinId::UnwrapOr
+            BuiltinId::Copied | BuiltinId::Cloned | BuiltinId::Unwrap | BuiltinId::UnwrapOr
         )
         && let Some(v) = option_fast(ctx, recv, name, s, argc)
     {
@@ -179,15 +178,18 @@ fn option_fast(
 ) -> Option<Value> {
     // 0 none, 1 clone receiver, 2 clone payload, 3 default
     let choice = match &ctx.stack[ctx.base + recv] {
-        Value::Enum {
-            enum_name, variant, ..
-        } => {
-            if matches!(name.id, BuiltinId::Copied) {
-                i32::from(&**enum_name == "Option")
-            } else if !matches!(&**enum_name, "Option" | "Result") {
-                0
-            } else if matches!(&**variant, "Some" | "Ok") {
+        Value::Enum { def, variant, .. } => {
+            let success = match def.kind {
+                EnumKind::Option => Some(*variant == SOME),
+                EnumKind::Result => Some(*variant == OK),
+                _ => None,
+            };
+            if matches!(name.id, BuiltinId::Copied | BuiltinId::Cloned) {
+                i32::from(def.kind == EnumKind::Option)
+            } else if success == Some(true) {
                 2
+            } else if success.is_none() {
+                0
             } else if matches!(name.id, BuiltinId::UnwrapOr) {
                 3
             } else {
@@ -282,17 +284,10 @@ pub(super) fn get_or_default(
 ) -> Result<Flow> {
     let recv_v = ctx.get(recv).clone();
     let key_v = ctx.get(key).clone();
-    let get = MethodName {
-        text: "get".into(),
-        id: BuiltinId::Get,
-        scalar: None,
-    };
+    let get = MethodName::builtin(BuiltinId::Get);
     let opt = ctx.vm.eval_method(&recv_v, &get, &mut [key_v])?;
-    let v = match opt {
-        Value::Enum { variant, data, .. } if &*variant == "Some" => {
-            data.lock().first().cloned().unwrap_or(Value::Unit)
-        }
-        _ => ctx.get(default).clone(),
-    };
+    let v = opt
+        .some_payload()
+        .unwrap_or_else(|| ctx.get(default).clone());
     Ok(ctx.set(dst, v))
 }

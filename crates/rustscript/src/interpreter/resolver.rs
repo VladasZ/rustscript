@@ -11,6 +11,9 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 
+use super::bytecode::NO_TYPE;
+use super::enum_def::EnumDef;
+
 /// Symbols of one module.
 #[derive(Default)]
 pub(super) struct ModuleSyms {
@@ -61,12 +64,33 @@ pub(super) struct Resolver {
     pub modules: Vec<ModuleSyms>,
     pub structs: HashMap<Arc<str>, StructDef>,
     pub enums: HashMap<Arc<str>, Rc<syn::ItemEnum>>,
+    /// One runtime definition per user enum, shared by every value of it.
+    pub enum_defs: HashMap<Arc<str>, Arc<EnumDef>>,
+    /// Type name to impl table id, handed out to every declared struct and
+    /// enum and to every other impl target, `impl MyTrait for PathBuf`.
+    pub type_ids: HashMap<Arc<str>, u16>,
 }
 
 /// Bound on import chains, so `pub use` cycles error instead of hanging.
 const MAX_DEPTH: usize = 64;
 
 impl Resolver {
+    /// The impl table id of a type, handing out the next one on first sight.
+    pub fn type_id(&mut self, name: &str) -> u16 {
+        if let Some(id) = self.type_ids.get(name) {
+            return *id;
+        }
+        let id = u16::try_from(self.type_ids.len()).expect("type count fits u16");
+        self.type_ids.insert(Arc::from(name), id);
+        id
+    }
+
+    /// The impl table id of a type, `NO_TYPE` when the program never
+    /// mentions it as a struct, enum, or impl target.
+    pub fn type_id_of(&self, name: &str) -> u16 {
+        self.type_ids.get(name).copied().unwrap_or(NO_TYPE)
+    }
+
     /// Canonical key for an item named `name` in module `m`.
     pub fn canon(&self, m: usize, name: &str) -> String {
         let path = &self.modules[m].path;

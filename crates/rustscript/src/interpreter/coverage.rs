@@ -291,18 +291,24 @@ fn infer<'a>(chunk: &'a Chunk, before: usize, reg: u16, user: &UserMethods) -> T
             Op::LoadInt { dst, .. } if *dst == reg => return Ty::Int,
             Op::LoadBool { dst, .. } if *dst == reg => return Ty::Bool,
             Op::MakeVec { dst, .. } if *dst == reg => return Ty::Vec,
+            Op::MakeMap { dst, .. } if *dst == reg => return Ty::Map,
             Op::Fmt { dst, .. } if *dst == reg => return Ty::Str,
             // A freshly built user struct or enum names its type exactly.
             Op::MakeStruct { dst, info, .. } if *dst == reg => {
                 return Ty::User(&chunk.struct_lits[*info as usize].shape.name);
             }
             Op::MakeEnum { dst, info, .. } | Op::LoadEnum { dst, info } if *dst == reg => {
-                return Ty::User(&chunk.enum_variants[*info as usize].enum_name);
+                let def = &chunk.enum_variants[*info as usize].def;
+                return if def.user {
+                    Ty::User(&def.name)
+                } else {
+                    Ty::Unknown
+                };
             }
             // A one-segment path value naming a script type is a unit
             // struct, `let d = Dog;`, so the report can name the type.
             Op::PathValue { dst, path } if *dst == reg => {
-                let segs = &chunk.paths[*path as usize].0;
+                let segs = &chunk.paths[*path as usize].segs;
                 if let [name] = segs.as_slice()
                     && user.types.contains(name)
                 {
@@ -338,6 +344,7 @@ fn writes(op: &Op) -> Option<u16> {
         | Op::CallValue { dst, .. }
         | Op::MakeStruct { dst, .. }
         | Op::MakeEnum { dst, .. }
+        | Op::MakeMap { dst, .. }
         | Op::LoadGlobal { dst, .. }
         | Op::LoadUpvalue { dst, .. }
         | Op::LoadCell { dst, .. }

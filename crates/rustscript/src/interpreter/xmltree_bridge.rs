@@ -11,6 +11,8 @@ use xmltree::{Element, Namespace, XMLNode};
 
 use indexmap::IndexMap;
 
+use super::bytecode::{BuiltinId as B, MethodName};
+use super::enum_def::XML_NODE;
 use super::value::{StructData, Value};
 
 /// `Element::parse(bytes_or_str)` as the real associated function.
@@ -28,11 +30,15 @@ pub(super) fn new_element(name: &str) -> Value {
 }
 
 /// Methods on an `Element` struct value, mirroring the real crate.
-pub(super) fn element_method(recv: &StructData, name: &str, args: &[Value]) -> Result<Value> {
-    match name {
+pub(super) fn element_method(
+    recv: &StructData,
+    name: &MethodName,
+    args: &[Value],
+) -> Result<Value> {
+    match name.id {
         // The real write takes any writer; scripts hand in a `Vec<u8>`, which
         // is shared, so the serialized bytes land in the caller's vec.
-        "write" => {
+        B::Write => {
             let el = value_to_element(recv)?;
             let mut out: Vec<u8> = Vec::new();
             match el.write(&mut out) {
@@ -47,7 +53,7 @@ pub(super) fn element_method(recv: &StructData, name: &str, args: &[Value]) -> R
             }
         }
         // Option<Cow<str>> of the direct text and cdata children.
-        "get_text" => {
+        B::GetText => {
             let el = value_to_element(recv)?;
             Ok(match el.get_text() {
                 Some(text) => Value::some(Value::str(text.to_string())),
@@ -98,7 +104,7 @@ fn node_to_value(node: &XMLNode) -> Value {
             vec![Value::str(target.clone()), opt_str(content.as_deref())],
         ),
     };
-    Value::enum_of("XMLNode", variant, data)
+    Value::enum_named(&XML_NODE, variant, data).expect("every xmltree node variant is listed")
 }
 
 fn value_to_element(s: &StructData) -> Result<Element> {
@@ -139,9 +145,10 @@ fn value_to_element(s: &StructData) -> Result<Element> {
 }
 
 fn value_to_node(v: &Value) -> Result<XMLNode> {
-    let Value::Enum { variant, data, .. } = v else {
+    let Value::Enum { def, variant, data } = v else {
         bail!("an Element child must be an XMLNode");
     };
+    let variant = def.variant_name(*variant);
     let data = data.lock().clone();
     let text = |i: usize| data.get(i).map(Value::display).unwrap_or_default();
     Ok(match &**variant {
@@ -176,14 +183,7 @@ fn field_opt_str(s: &StructData, field: &str) -> Option<String> {
 
 /// The payload of a `Some`, or None for `None` and anything else.
 fn option_value(v: &Value) -> Option<Value> {
-    match v {
-        Value::Enum {
-            enum_name,
-            variant,
-            data,
-        } if &**enum_name == "Option" && &**variant == "Some" => data.lock().first().cloned(),
-        _ => None,
-    }
+    v.some_payload()
 }
 
 fn map_value(pairs: impl IntoIterator<Item = (Value, Value)>) -> Value {

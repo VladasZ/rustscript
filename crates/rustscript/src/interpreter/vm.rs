@@ -10,7 +10,9 @@ use anyhow::{Result, anyhow, bail};
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
 
-use super::bytecode::{Chunk, Member, path_call_chunk};
+use super::bytecode::{Chunk, Member, MethodName, path_call_chunk};
+use super::enum_def::EnumDef;
+use super::impls::ImplTable;
 use super::native::Native;
 use super::typeir::TypeIr;
 use super::value::{ClosureData, StructShape, Upvalue, Value};
@@ -52,26 +54,17 @@ pub enum GlobalSlot {
     Ready(Value),
 }
 
-/// A user enum's variants, precomputed at load so runtime dispatch never
-/// touches the syn AST, which is not `Send`.
-pub struct EnumDef {
-    pub name: Arc<str>,
-    /// Variant name and whether it is a unit variant.
-    pub variants: Vec<(Arc<str>, bool)>,
-}
-
 /// The compiled program plus the runtime handle, shared across worker threads.
 pub struct Vm {
     pub functions: Vec<Arc<Chunk>>,
     pub fn_index: HashMap<String, u32>,
-    pub methods: HashMap<(String, String), Arc<Chunk>>,
+    /// The script's impl methods, by type id and method id.
+    pub impls: Arc<ImplTable>,
     pub globals: Vec<Mutex<GlobalSlot>>,
     /// User struct layouts precomputed at load, for coercion and typed json.
     pub structs: super::json_bridge::Structs,
-    /// Root module imports, used by the bridge dispatch to expand aliases.
-    pub uses: HashMap<String, Vec<String>>,
     /// User enums with their variants, for dynamic variant construction.
-    pub enums: Vec<EnumDef>,
+    pub enums: Vec<Arc<EnumDef>>,
     /// Canonical names of unit structs, for `struct Marker;` used as a value.
     pub unit_structs: Vec<Arc<str>>,
     /// Canonical names of every user struct, for tuple struct calls.
@@ -80,17 +73,6 @@ pub struct Vm {
 }
 
 impl Vm {
-    /// Expand the first path segment through the `use` table.
-    pub(super) fn canonical(&self, segs: &[String]) -> Vec<String> {
-        if let Some(full) = self.uses.get(&segs[0]) {
-            let mut out = full.clone();
-            out.extend_from_slice(&segs[1..]);
-            out
-        } else {
-            segs.to_vec()
-        }
-    }
-
     /// A unit variant of a user enum, matched by canonical or bare enum name.
     pub(super) fn unit_variant(&self, enum_name: Option<&str>, variant: &str) -> Option<Value> {
         for def in &self.enums {
@@ -100,12 +82,10 @@ impl Vm {
             {
                 continue;
             }
-            if def
-                .variants
-                .iter()
-                .any(|(name, unit)| &**name == variant && *unit)
+            if let Some(index) = def.variant_index(variant)
+                && def.is_unit(index)
             {
-                return Some(Value::enum_of(def.name.clone(), variant, Vec::new()));
+                return Some(Value::enum_of(def, index, Vec::new()));
             }
         }
         None
@@ -125,16 +105,17 @@ impl Vm {
             {
                 continue;
             }
-            if def.variants.iter().any(|(name, _)| &**name == variant) {
-                return Some(Value::enum_of(def.name.clone(), variant, args.to_vec()));
+            if let Some(index) = def.variant_index(variant) {
+                return Some(Value::enum_of(def, index, args.to_vec()));
             }
         }
         None
     }
 
-    pub(super) fn make_tuple_struct(name: &str, args: Vec<Value>) -> Value {
+    pub(super) fn make_tuple_struct(&self, name: &str, args: Vec<Value>) -> Value {
         let fields = (0..args.len()).map(|i| i.to_string().into()).collect();
-        Value::structure(StructShape::new(name, fields), args)
+        let type_id = self.impls.type_id(name);
+        Value::structure(StructShape::typed(name, type_id, fields, Vec::new()), args)
     }
 
     /// If a Ctrl-C arrived, run the script's registered handler closure.
@@ -181,7 +162,7 @@ impl Vm {
         // two arguments where the guess was one.
         let rebuilt;
         let chunk = if chunk.path_forwarder && args.len() != chunk.num_params {
-            rebuilt = path_call_chunk(chunk.paths[0].0.clone(), args.len());
+            rebuilt = path_call_chunk(chunk.paths[0].clone(), args.len());
             &rebuilt
         } else {
             chunk
@@ -391,20 +372,15 @@ impl Vm {
     }
 
     /// Whether the value's user type declares this method itself.
-    pub(super) fn user_method_exists(&self, recv: &Value, name: &str) -> bool {
-        let ty = match recv {
-            Value::Struct(s) => &**s.name(),
-            Value::Enum { enum_name, .. } => &**enum_name,
-            _ => return false,
-        };
-        self.methods
-            .contains_key(&(ty.to_string(), name.to_string()))
+    pub(super) fn user_method_exists(&self, recv: &Value, name: &MethodName) -> bool {
+        self.impls
+            .of_value(recv)
+            .is_some_and(|methods| methods.get(name).is_some())
     }
 
+    /// A user method named at runtime, `Type::method` in a path call.
     pub(super) fn user_method(&self, ty: &str, name: &str) -> Option<Arc<Chunk>> {
-        self.methods
-            .get(&(ty.to_string(), name.to_string()))
-            .cloned()
+        self.impls.by_name(ty, name)
     }
 
     /// Value of a module const or static, evaluated on first read and cached.
@@ -438,9 +414,10 @@ impl Vm {
 impl Vm {
     pub(super) fn get_field(recv: &Value, member: &Member) -> Result<Value> {
         match (recv, member) {
-            (Value::Struct(s), Member::Named(n)) => {
-                s.get(n).ok_or_else(|| anyhow!("no field `{n}`"))
-            }
+            (Value::Struct(s), Member::Named(n)) => n
+                .slot_in(&s.shape)
+                .and_then(|i| s.values.lock().get(i).cloned())
+                .ok_or_else(|| anyhow!("no field `{n}`")),
             (Value::Tuple(t), Member::Indexed(i)) => t
                 .lock()
                 .get(*i)
@@ -459,9 +436,10 @@ impl Vm {
     pub(super) fn set_field(recv: &Value, member: &Member, v: Value) -> Result<()> {
         match (recv, member) {
             (Value::Struct(s), Member::Named(n)) => {
-                if !s.set(n, v) {
+                let Some(i) = n.slot_in(&s.shape) else {
                     bail!("no field `{n}`");
-                }
+                };
+                s.values.lock()[i] = v;
             }
             (Value::Tuple(t), Member::Indexed(i)) => {
                 let mut t = t.lock();

@@ -13,9 +13,10 @@ use syn::punctuated::Punctuated;
 use syn::{BinOp, Block, Expr, FnArg, Lit, Pat, UnOp};
 
 use super::bytecode::{
-    BinKind, BuiltinId, CapSource, Chunk, Const, EnumVariant, FmtSpec, Member, MethodName, Op,
-    PatInfo, Reg, ScalarTy, StructLit,
+    BinKind, BuiltinId, CapSource, Chunk, Const, EnumVariant, FmtSpec, Member, MethodName, NO_ATOM,
+    Op, PatInfo, PathRef, Reg, ScalarTy, StructLit,
 };
+use super::enum_def::EnumDef;
 use super::numeric::IntWidth;
 use super::resolver::{Res, Resolver};
 use super::typeir::{CastIr, TypeIr, lower_cast, lower_type};
@@ -46,6 +47,13 @@ pub struct Ctx<'r> {
     /// A call to one of these compiles its receiver as a place, split from
     /// value sharing first, so the mutation stays private to the receiver.
     pub mut_methods: &'r HashSet<String>,
+    /// Every `(type, method)` an impl block declares, including impls on
+    /// bridge type names like `impl From<Point> for String`. A path call on
+    /// one of these is a user call even when the bridge knows the name.
+    pub impl_methods: &'r HashSet<(String, String)>,
+    /// The atoms of the impl method names no bridge knows, so a call site
+    /// carries the id its receiver's type is looked up by.
+    pub method_atoms: &'r HashMap<String, u32>,
     /// Whether any type in the program has a `Drop` impl. False skips all
     /// scope-drop bookkeeping, the common case pays nothing.
     pub has_drop: bool,
@@ -63,7 +71,7 @@ struct FnState {
     enum_variants: Vec<EnumVariant>,
     casts: Vec<CastIr>,
     coerces: Vec<TypeIr>,
-    paths: Vec<(Vec<String>, Option<TypeIr>)>,
+    paths: Vec<PathRef>,
     names: Vec<MethodName>,
     children: Vec<Arc<Chunk>>,
     child_caps: Vec<Vec<CapSource>>,
@@ -633,25 +641,41 @@ impl<'a> Compiler<'a> {
     }
 
     fn add_name_with(&mut self, name: String, scalar: Option<ScalarTy>) -> u16 {
+        let bare = name.strip_prefix("r#").unwrap_or(&name);
+        let id = BuiltinId::resolve(bare);
+        let atom = self.ctx.method_atoms.get(bare).copied().unwrap_or(NO_ATOM);
         let f = self.cur();
         f.names.push(MethodName {
-            id: BuiltinId::resolve(&name),
+            id,
+            atom,
             text: name,
             scalar,
         });
         idx16(f.names.len() - 1)
     }
 
-    fn add_path(&mut self, segs: Vec<String>, coerce: Option<TypeIr>) -> u16 {
+    /// A path outside the script's own items. The bridge table names it,
+    /// unless a user impl on that type name declares the method, `String::from`
+    /// after `impl From<Point> for String`, which stays a user call.
+    pub(super) fn external_path(&self, segs: Vec<String>, coerce: Option<TypeIr>) -> PathRef {
+        if let [.., ty, name] = segs.as_slice()
+            && self.ctx.impl_methods.contains(&(ty.clone(), name.clone()))
+        {
+            return PathRef::user(segs, coerce);
+        }
+        PathRef::new(segs, coerce)
+    }
+
+    fn add_path(&mut self, path: PathRef) -> u16 {
         let f = self.cur();
-        f.paths.push((segs, coerce));
+        f.paths.push(path);
         idx16(f.paths.len() - 1)
     }
 
     fn add_enum_variant(&mut self, variant: EnumVariant) -> u16 {
         let variants = &mut self.cur().enum_variants;
         if let Some(index) = variants.iter().position(|known| {
-            known.enum_name == variant.enum_name && known.variant == variant.variant
+            EnumDef::same(&known.def, &variant.def) && known.variant == variant.variant
         }) {
             return idx16(index);
         }
@@ -667,13 +691,14 @@ impl<'a> Compiler<'a> {
     ) -> Option<EnumVariant> {
         let variant_name = rest.first().filter(|_| rest.len() == 1)?;
         let definition = self.ctx.resolver.enums.get(enum_name)?;
-        let variant = definition
+        definition
             .variants
             .iter()
             .find(|variant| variant.ident == variant_name && fields(&variant.fields))?;
+        let def = self.ctx.resolver.enum_defs.get(enum_name)?;
         Some(EnumVariant {
-            enum_name: enum_name.clone(),
-            variant: Arc::from(variant.ident.to_string()),
+            def: def.clone(),
+            variant: def.variant_index(variant_name)?,
         })
     }
 
@@ -864,12 +889,12 @@ impl<'a> Compiler<'a> {
             // matching the old single file behavior for things like `None`.
             Err(_) => Res::External(segs.to_vec()),
         };
-        let path_segs = match resolved {
+        let path = match resolved {
             Res::Const(idx) => {
                 self.emit(Op::LoadGlobal { dst, idx });
                 return Ok(());
             }
-            Res::Struct(c) | Res::Enum(c) => vec![c.to_string()],
+            Res::Struct(c) | Res::Enum(c) => PathRef::user(vec![c.to_string()], None),
             Res::TypeMember(c, rest) => {
                 if let Some(variant) =
                     self.enum_variant(&c, &rest, |fields| matches!(fields, syn::Fields::Unit))
@@ -896,7 +921,7 @@ impl<'a> Compiler<'a> {
                 }
                 let mut segs = vec![c.to_string()];
                 segs.extend(rest);
-                segs
+                PathRef::user(segs, None)
             }
             Res::Alias(m, target) => {
                 let path = match &*target {
@@ -904,14 +929,29 @@ impl<'a> Compiler<'a> {
                     _ => bail!("`{}` does not name a value", segs.join("::")),
                 };
                 match self.ctx.resolver.resolve_struct_key(m, &path) {
-                    Some(c) => vec![c.to_string()],
+                    Some(c) => PathRef::user(vec![c.to_string()], None),
                     None => bail!("`{}` does not name a value", segs.join("::")),
                 }
             }
             Res::Module => bail!("`{}` is a module, not a value", segs.join("::")),
-            Res::Fn(_) | Res::External(_) => segs.to_vec(),
+            Res::External(canon) => {
+                // `None`, `Ordering::Less`, and the other builtin unit
+                // variants load their value in place, like a user variant.
+                if let Some((def, index)) = self.resolve_variant(segs)
+                    && def.is_unit(index)
+                {
+                    let info = self.add_enum_variant(EnumVariant {
+                        def,
+                        variant: index,
+                    });
+                    self.emit(Op::LoadEnum { dst, info });
+                    return Ok(());
+                }
+                self.external_path(canon, None)
+            }
+            Res::Fn(_) => PathRef::user(segs.to_vec(), None),
         };
-        let path = self.add_path(path_segs, None);
+        let path = self.add_path(path);
         self.emit(Op::PathValue { dst, path });
         Ok(())
     }
