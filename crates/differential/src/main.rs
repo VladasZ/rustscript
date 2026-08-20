@@ -153,7 +153,6 @@ fn record_case(
         }
     }
     ctx.report.checked += 1;
-    ctx.report.checked += 1;
     Ok(())
 }
 

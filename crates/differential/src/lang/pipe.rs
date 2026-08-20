@@ -13,8 +13,18 @@
 //! float addition is not associative, so float-typed items are only allowed
 //! on ordered pipelines. A closure that can panic is order-sensitive too,
 //! the first item to panic decides the message, so a fallible closure body
-//! only runs after order is defined. `assert_deterministic` re-checks the
-//! invariant on every generated and every shrunk pipe.
+//! only runs after order is defined.
+//!
+//! Panic reach rule: a `Skip` that empties the pipeline can drop every
+//! closure call before it. Collecting a `Vec` source into a `Vec` takes the
+//! in-place path in std, which reads the length first and touches no item
+//! when that length is zero, so a panicking body earlier in the chain never
+//! runs. That is a std specialization, not something a lazy iterator engine
+//! reproduces, so a fallible body never sits before a `Skip`. A `Sorted`
+//! stage collects the chain so far, which runs every body before it, so it
+//! clears the flag.
+//!
+//! `is_valid` re-checks both rules on every generated and every shrunk pipe.
 
 use std::collections::BTreeSet;
 
@@ -277,6 +287,23 @@ fn filter_clone(bind: &Bind, item: &Item) -> (String, String) {
     (bind.pattern(), item.rust())
 }
 
+/// Whether a panic is still pending after this stage. A `Sorted` renders as
+/// a collect of the chain so far, which runs every body before it, so it
+/// clears the flag.
+fn carries_panic(pending: bool, stage: &Stage) -> bool {
+    match stage {
+        Stage::Sorted => false,
+        _ => pending || stage.fallible(),
+    }
+}
+
+/// Whether a closure body among these stages can still panic without a later
+/// `Sorted` having forced it to run. A `Skip` appended here would hide that
+/// panic, see the panic reach rule in the module docs.
+pub fn fallible_pending(stages: &[Stage]) -> bool {
+    stages.iter().fold(false, carries_panic)
+}
+
 /// Where a `collect` states its target type.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Site {
@@ -420,9 +447,28 @@ impl Pipe {
         }
     }
 
+    /// Both generator rules at once, the gate every built and shrunk pipe
+    /// passes. Generation upholds them by construction, shrinking re-checks
+    /// them, and a pipe that fails one is a harness bug, never a case worth
+    /// keeping. See the module docs.
+    pub fn is_valid(&self) -> bool {
+        self.is_deterministic() && self.panics_reach_output()
+    }
+
+    /// Whether every panic a closure body can raise actually reaches the
+    /// output, see the panic reach rule in the module docs.
+    pub fn panics_reach_output(&self) -> bool {
+        let mut pending = false;
+        for stage in &self.stages {
+            if matches!(stage, Stage::Skip(_)) && pending {
+                return false;
+            }
+            pending = carries_panic(pending, stage);
+        }
+        true
+    }
+
     /// True when every order-sensitive point is preceded by defined order.
-    /// Generation upholds this by construction, shrinking re-checks it, and a
-    /// pipe that fails it is a harness bug, never a case worth keeping.
     pub fn is_deterministic(&self) -> bool {
         let mut ordered = self.source.ordered();
         let mut item = self.source.item();
@@ -569,7 +615,7 @@ impl Pipe {
             ) {
                 let mut candidate = self.clone();
                 candidate.stages.remove(index);
-                if candidate.is_deterministic() {
+                if candidate.is_valid() {
                     out.push(candidate);
                 }
             }
@@ -580,7 +626,7 @@ impl Pipe {
                 if let Some(slot) = candidate.exprs_mut().into_iter().nth(index) {
                     *slot = shrunk;
                 }
-                if candidate.is_deterministic() {
+                if candidate.is_valid() {
                     out.push(candidate);
                 }
             }

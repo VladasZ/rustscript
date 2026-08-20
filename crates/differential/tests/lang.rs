@@ -213,3 +213,55 @@ fn fallible_closure_needs_defined_order() {
     // Sorting first defines the order the body runs in.
     assert!(pipe_with(vec![Stage::Sorted, fallible_map]).is_deterministic());
 }
+
+/// A `Skip` that empties the pipeline can drop every closure call before it.
+/// Collecting a `Vec` source into a `Vec` takes the in-place path in std,
+/// which reads the length first and touches no item when that length is
+/// zero, so a panicking body earlier in the chain never runs while the
+/// interpreter's lazy chain still runs it. A nightly campaign hit exactly
+/// this: a one item vec mapped through an overflowing `sum`, then skipped
+/// past its end.
+#[test]
+fn fallible_closure_must_not_hide_behind_skip() {
+    use rustscript_differential::lang::expr::{BinOp, Expr};
+    use rustscript_differential::lang::pipe::{Access, Bind, Pipe, Site, Source, Stage, Term};
+    use rustscript_differential::numeric::IntWidth;
+
+    let int = |value: i128| Expr::IntLit {
+        width: IntWidth::I64,
+        value,
+        opaque: true,
+    };
+    let fallible_map = Stage::Map {
+        bind: Bind::One("diff_x_0".to_string()),
+        body: Expr::Bin {
+            op: BinOp::Add,
+            left: Box::new(int(1)),
+            right: Box::new(int(2)),
+            ty: Ty::I64,
+        },
+    };
+    let pipe_with = |stages: Vec<Stage>| Pipe {
+        source: Source::Coll {
+            expr: Expr::VecLit {
+                elem: Ty::I64,
+                items: vec![int(1)],
+            },
+            access: Access::VecInto,
+        },
+        stages,
+        term: Term::Collect {
+            target: Ty::vec_of(Ty::I64),
+            site: Site::Turbofish,
+        },
+    };
+
+    // The nightly's failing shape.
+    assert!(!pipe_with(vec![fallible_map.clone(), Stage::Skip(2)]).is_valid());
+    // Skipping first, the body only runs on items the pipe yields.
+    assert!(pipe_with(vec![Stage::Skip(2), fallible_map.clone()]).is_valid());
+    // A `Sorted` collects the chain so far, so the body has already run.
+    assert!(pipe_with(vec![fallible_map.clone(), Stage::Sorted, Stage::Skip(2)]).is_valid());
+    // Other length-changing stages keep the body observable.
+    assert!(pipe_with(vec![fallible_map, Stage::Take(2)]).is_valid());
+}

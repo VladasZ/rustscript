@@ -16,7 +16,9 @@ use crate::lang::catalog::{
     ElemReq, FishReq, METHODS, Method, RecvClass, Solved, TyPat, arg_ty, fish_allows, solve,
 };
 use crate::lang::expr::{BinOp, Expr, UnOp};
-use crate::lang::pipe::{Access, Bind, Item, Pipe, Site, Source, Stage, Term, ty_is_ord};
+use crate::lang::pipe::{
+    Access, Bind, Item, Pipe, Site, Source, Stage, Term, fallible_pending, ty_is_ord,
+};
 use crate::lang::stmt::{Block, FnDef, MutOp, Stmt};
 use crate::lang::ty::{FLOAT_WIDTHS, INT_WIDTHS, SCALAR_TYPES, Ty, map_combos, set_elems};
 use crate::numeric::{FloatWidth, IntWidth};
@@ -930,8 +932,8 @@ impl<'a> Generator<'a> {
             _ => return None,
         };
         assert!(
-            pipe.is_deterministic(),
-            "generated a nondeterministic pipe: {}",
+            pipe.is_valid(),
+            "generated a pipe that breaks a generator rule: {}",
             pipe.render()
         );
         Some(Expr::Pipe(Box::new(pipe)))
@@ -1049,7 +1051,10 @@ impl<'a> Generator<'a> {
                 stages.push(Stage::Sorted);
             }
             if self.rng.random_bool(0.3) {
-                stages.push(match self.rng.random_range(0..3) {
+                // A `Skip` behind a body that can panic would hide the
+                // panic, see the panic reach rule in `pipe`.
+                let choices = if fallible_pending(&stages) { 2 } else { 3 };
+                stages.push(match self.rng.random_range(0..choices) {
                     0 => Stage::Rev,
                     1 => Stage::Take(self.rng.random_range(0..=5)),
                     _ => Stage::Skip(self.rng.random_range(0..=3)),
