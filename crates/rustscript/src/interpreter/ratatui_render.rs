@@ -20,6 +20,7 @@ use ratatui::widgets::Sparkline;
 use ratatui::widgets::Table;
 use ratatui::widgets::Widget;
 
+use super::bridge::arg;
 use super::bytecode::{BuiltinId, MethodName, PathId};
 use super::ratatui_bridge::border_type_value;
 use super::ratatui_bridge::color_value;
@@ -48,25 +49,25 @@ use super::value::Value;
 /// Associated functions, `Table::new`, `Block::bordered`, `Buffer::empty` and
 /// the rest. Returns None when the path is not a ratatui one.
 pub(super) fn ratatui_assoc(id: PathId, args: &[Value]) -> Option<Value> {
-    let arg = |i: usize| -> Value { args.get(i).cloned().unwrap_or(Value::Unit) };
+    let argument = |i: usize| args.get(i).cloned();
     Some(match id {
         PathId::StyleNew | PathId::StyleDefault => style_value(Style::new()),
         PathId::RectNew => Value::struct_of(
             "Rect",
             [
-                ("x".into(), arg(0)),
-                ("y".into(), arg(1)),
-                ("width".into(), arg(2)),
-                ("height".into(), arg(3)),
+                ("x".into(), argument(0)?),
+                ("y".into(), argument(1)?),
+                ("width".into(), argument(2)?),
+                ("height".into(), argument(3)?),
             ],
         ),
         PathId::PaddingNew => Value::struct_of(
             "Padding",
             [
-                ("left".into(), arg(0)),
-                ("right".into(), arg(1)),
-                ("top".into(), arg(2)),
-                ("bottom".into(), arg(3)),
+                ("left".into(), argument(0)?),
+                ("right".into(), argument(1)?),
+                ("top".into(), argument(2)?),
+                ("bottom".into(), argument(3)?),
             ],
         ),
         PathId::PaddingZero | PathId::PaddingZeroConst => {
@@ -75,26 +76,29 @@ pub(super) fn ratatui_assoc(id: PathId, args: &[Value]) -> Option<Value> {
         PathId::SpanRaw => Value::struct_of(
             "Span",
             [
-                ("content".into(), arg(0)),
+                ("content".into(), argument(0)?),
                 ("style".into(), style_value(Style::new())),
             ],
         ),
         PathId::SpanStyled => Value::struct_of(
             "Span",
-            [("content".into(), arg(0)), ("style".into(), arg(1))],
+            [
+                ("content".into(), argument(0)?),
+                ("style".into(), argument(1)?),
+            ],
         ),
-        PathId::LineFrom | PathId::LineRaw | PathId::LineStyled => line_from(&arg(0)),
+        PathId::LineFrom | PathId::LineRaw | PathId::LineStyled => line_from(&argument(0)?),
         PathId::CellFrom | PathId::CellNew => Value::struct_of(
             "Cell",
             [
-                ("content".into(), line_from(&arg(0))),
+                ("content".into(), line_from(&argument(0)?)),
                 ("style".into(), style_value(Style::new())),
             ],
         ),
         PathId::RowNew => Value::struct_of(
             "Row",
             [
-                ("cells".into(), Value::vec(items(&arg(0)))),
+                ("cells".into(), Value::vec(items(&argument(0)?))),
                 ("style".into(), style_value(Style::new())),
                 ("height".into(), Value::Int(1)),
             ],
@@ -102,8 +106,8 @@ pub(super) fn ratatui_assoc(id: PathId, args: &[Value]) -> Option<Value> {
         PathId::TableNew => Value::struct_of(
             "Table",
             [
-                ("rows".into(), Value::vec(items(&arg(0)))),
-                ("widths".into(), Value::vec(items(&arg(1)))),
+                ("rows".into(), Value::vec(items(&argument(0)?))),
+                ("widths".into(), Value::vec(items(&argument(1)?))),
                 ("column_spacing".into(), Value::Int(1)),
                 ("block".into(), Value::none()),
                 ("style".into(), style_value(Style::new())),
@@ -122,11 +126,13 @@ pub(super) fn ratatui_assoc(id: PathId, args: &[Value]) -> Option<Value> {
         PathId::BufferEmpty => Value::struct_of(
             "Buffer",
             [
-                ("area".into(), arg(0)),
+                ("area".into(), argument(0)?),
                 ("content".into(), Value::vec(Vec::new())),
             ],
         ),
-        PathId::WidgetRender => return render_into(&arg(0), &arg(1), &arg(2)).ok(),
+        PathId::WidgetRender => {
+            return render_into(&argument(0)?, &argument(1)?, &argument(2)?).ok();
+        }
         _ => return None,
     })
 }
@@ -166,12 +172,11 @@ fn with(s: &StructData, field: &str, v: Value) -> Value {
 }
 
 pub(super) fn style_method(s: &StructData, name: &MethodName, args: &[Value]) -> Result<Value> {
-    let arg = |i: usize| -> Value { args.get(i).cloned().unwrap_or(Value::Unit) };
     Ok(match name.id {
-        BuiltinId::Fg => with(s, "fg", Value::some(arg(0))),
-        BuiltinId::Bg => with(s, "bg", Value::some(arg(0))),
-        BuiltinId::AddModifier => with(s, "add_modifier", arg(0)),
-        BuiltinId::RemoveModifier => with(s, "sub_modifier", arg(0)),
+        BuiltinId::Fg => with(s, "fg", Value::some(arg(args, 0)?)),
+        BuiltinId::Bg => with(s, "bg", Value::some(arg(args, 0)?)),
+        BuiltinId::AddModifier => with(s, "add_modifier", arg(args, 0)?),
+        BuiltinId::RemoveModifier => with(s, "sub_modifier", arg(args, 0)?),
         BuiltinId::Bold => add_modifier(s, ratatui::style::Modifier::BOLD),
         BuiltinId::Dim => add_modifier(s, ratatui::style::Modifier::DIM),
         BuiltinId::Italic => add_modifier(s, ratatui::style::Modifier::ITALIC),
@@ -214,7 +219,7 @@ pub(super) fn span_method(s: &StructData, name: &MethodName, args: &[Value]) -> 
             let span = value_span(&rebuild(s));
             Value::Int(i64::try_from(span.width()).unwrap_or(0))
         }
-        BuiltinId::Style => with(s, "style", args.first().cloned().unwrap_or(Value::Unit)),
+        BuiltinId::Style => with(s, "style", arg(args, 0)?),
         BuiltinId::Content => s.get("content").unwrap_or_else(|| Value::str("")),
         _ => bail!("unknown method `{name}` on Span"),
     })
@@ -226,57 +231,57 @@ pub(super) fn line_method(s: &StructData, name: &MethodName, args: &[Value]) -> 
             let line = value_line(&rebuild(s));
             Value::Int(i64::try_from(line.width()).unwrap_or(0))
         }
-        BuiltinId::Style => with(s, "style", args.first().cloned().unwrap_or(Value::Unit)),
+        BuiltinId::Style => with(s, "style", arg(args, 0)?),
         _ => bail!("unknown method `{name}` on Line"),
     })
 }
 
 pub(super) fn cell_method(s: &StructData, name: &MethodName, args: &[Value]) -> Result<Value> {
     Ok(match name.id {
-        BuiltinId::Style => with(s, "style", args.first().cloned().unwrap_or(Value::Unit)),
+        BuiltinId::Style => with(s, "style", arg(args, 0)?),
         _ => bail!("unknown method `{name}` on Cell"),
     })
 }
 
 pub(super) fn row_method(s: &StructData, name: &MethodName, args: &[Value]) -> Result<Value> {
-    let arg = args.first().cloned().unwrap_or(Value::Unit);
+    let value = arg(args, 0)?;
     Ok(match name.id {
-        BuiltinId::Style => with(s, "style", arg),
-        BuiltinId::Height => with(s, "height", arg),
+        BuiltinId::Style => with(s, "style", value),
+        BuiltinId::Height => with(s, "height", value),
         _ => bail!("unknown method `{name}` on Row"),
     })
 }
 
 pub(super) fn table_method(s: &StructData, name: &MethodName, args: &[Value]) -> Result<Value> {
-    let arg = args.first().cloned().unwrap_or(Value::Unit);
+    let value = arg(args, 0)?;
     Ok(match name.id {
-        BuiltinId::ColumnSpacing => with(s, "column_spacing", arg),
-        BuiltinId::Block => with(s, "block", Value::some(arg)),
-        BuiltinId::Style => with(s, "style", arg),
-        BuiltinId::Widths => with(s, "widths", Value::vec(items(&arg))),
+        BuiltinId::ColumnSpacing => with(s, "column_spacing", value),
+        BuiltinId::Block => with(s, "block", Value::some(value)),
+        BuiltinId::Style => with(s, "style", value),
+        BuiltinId::Widths => with(s, "widths", Value::vec(items(&value))),
         _ => bail!("unknown method `{name}` on Table"),
     })
 }
 
 pub(super) fn block_method(s: &StructData, name: &MethodName, args: &[Value]) -> Result<Value> {
-    let arg = args.first().cloned().unwrap_or(Value::Unit);
+    let value = arg(args, 0)?;
     Ok(match name.id {
-        BuiltinId::Title => with(s, "title", Value::some(line_from(&arg))),
-        BuiltinId::BorderType => with(s, "border_type", arg),
-        BuiltinId::BorderStyle => with(s, "border_style", arg),
-        BuiltinId::Padding => with(s, "padding", arg),
-        BuiltinId::Style => with(s, "style", arg),
+        BuiltinId::Title => with(s, "title", Value::some(line_from(&value))),
+        BuiltinId::BorderType => with(s, "border_type", value),
+        BuiltinId::BorderStyle => with(s, "border_style", value),
+        BuiltinId::Padding => with(s, "padding", value),
+        BuiltinId::Style => with(s, "style", value),
         BuiltinId::Borders => with(s, "bordered", Value::Bool(true)),
         _ => bail!("unknown method `{name}` on Block"),
     })
 }
 
 pub(super) fn sparkline_method(s: &StructData, name: &MethodName, args: &[Value]) -> Result<Value> {
-    let arg = args.first().cloned().unwrap_or(Value::Unit);
+    let value = arg(args, 0)?;
     Ok(match name.id {
-        BuiltinId::Data => with(s, "data", Value::vec(items(&arg))),
-        BuiltinId::Style => with(s, "style", arg),
-        BuiltinId::Max => with(s, "max", Value::some(arg)),
+        BuiltinId::Data => with(s, "data", Value::vec(items(&value))),
+        BuiltinId::Style => with(s, "style", value),
+        BuiltinId::Max => with(s, "max", Value::some(value)),
         _ => bail!("unknown method `{name}` on Sparkline"),
     })
 }

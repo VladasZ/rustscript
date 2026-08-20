@@ -88,12 +88,14 @@ mod imp {
     use super::super::bytecode::{BuiltinId, MethodName};
     use std::borrow::Cow;
 
-    use anyhow::{Result, bail};
+    use anyhow::{Result, anyhow, bail};
+    use std::ptr::with_exposed_provenance_mut;
     use winreg::RegKey;
     use winreg::enums::RegType;
     use winreg::types::{FromRegValue, ToRegValue};
 
     use super::super::enum_def::{REG_DISPOSITION, REG_TYPE};
+    use super::super::numeric::IntWidth;
     use super::super::value::Value;
     use super::{as_i64, key_value, unit_enum};
     use crate::interpreter::value::StructData;
@@ -115,14 +117,23 @@ mod imp {
         }
     }
 
-    fn root_key(root: i64) -> RegKey {
-        RegKey::predef(root as isize as winreg::HKEY)
+    /// A flag set or a root handle number, always non negative and within
+    /// u32, since it comes from the bridge constants.
+    fn mask(n: i64) -> Result<u32> {
+        u32::try_from(n).map_err(|_| anyhow!("`{n}` is not a valid registry flag set"))
+    }
+
+    /// The predefined roots are handle numbers, `HKEY_LOCAL_MACHINE` is
+    /// `0x8000_0002`, and a root value carries that number as an int.
+    fn root_key(root: i64) -> Result<RegKey> {
+        let raw = usize::try_from(root).map_err(|_| anyhow!("`{root}` is not a registry root"))?;
+        Ok(RegKey::predef(with_exposed_provenance_mut(raw)))
     }
 
     fn open(s: &StructData) -> std::io::Result<RegKey> {
         let path = field_str(s, "path");
-        let flags = field_i64(s, "flags") as u32;
-        let root = root_key(field_i64(s, "root"));
+        let flags = mask(field_i64(s, "flags")).map_err(std::io::Error::other)?;
+        let root = root_key(field_i64(s, "root")).map_err(std::io::Error::other)?;
         if path.is_empty() {
             // The predefined root itself, there is nothing to open below it.
             return Ok(root);
@@ -138,9 +149,9 @@ mod imp {
             RegType::REG_DWORD => {
                 Value::Int(u32::from_reg_value(v).map(i64::from).unwrap_or_default())
             }
-            RegType::REG_QWORD => {
-                Value::Int(u64::from_reg_value(v).map(|n| n as i64).unwrap_or_default())
-            }
+            RegType::REG_QWORD => u64::from_reg_value(v).map_or(Value::Int(0), |n| {
+                Value::int_of_width(i128::from(n), IntWidth::U64)
+            }),
             RegType::REG_SZ | RegType::REG_EXPAND_SZ => {
                 Value::str(String::from_reg_value(v).unwrap_or_default())
             }
@@ -166,7 +177,7 @@ mod imp {
                 if let Ok(small) = u32::try_from(*n) {
                     Ok(own(small.to_reg_value()))
                 } else {
-                    let wide = *n as u64;
+                    let wide = n.cast_unsigned();
                     Ok(own(wide.to_reg_value()))
                 }
             }
@@ -279,7 +290,7 @@ mod imp {
         name: &MethodName,
         args: &[Value],
     ) -> Result<Value> {
-        let arg0 = || args.first().map(Value::display).unwrap_or_default();
+        let first_text = || args.first().map(Value::display).unwrap_or_default();
         let root = field_i64(s, "root");
         let flags = field_i64(s, "flags");
         let path = field_str(s, "path");
@@ -287,15 +298,15 @@ mod imp {
         Ok(match name.id {
             BuiltinId::OpenSubkey | BuiltinId::OpenSubkeyWithFlags => {
                 let want = args.get(1).and_then(as_i64).unwrap_or(flags);
-                let full = join(&path, &arg0());
-                match root_key(root).open_subkey_with_flags(&full, want as u32) {
+                let full = join(&path, &first_text());
+                match root_key(root)?.open_subkey_with_flags(&full, mask(want)?) {
                     Ok(_) => Value::ok(key_value(root, &full, want)),
                     Err(e) => Value::err(Value::str(e.to_string())),
                 }
             }
             BuiltinId::CreateSubkey => {
-                let full = join(&path, &arg0());
-                match root_key(root).create_subkey(&full) {
+                let full = join(&path, &first_text());
+                match root_key(root)?.create_subkey(&full) {
                     // winreg hands back the key plus whether it was created or
                     // opened. Scripts destructure the pair like the real crate.
                     Ok((_, disp)) => Value::ok(Value::tuple(vec![
@@ -305,7 +316,7 @@ mod imp {
                     Err(e) => Value::err(Value::str(e.to_string())),
                 }
             }
-            BuiltinId::GetValue => match open(s).and_then(|k| k.get_raw_value(arg0())) {
+            BuiltinId::GetValue => match open(s).and_then(|k| k.get_raw_value(first_text())) {
                 Ok(v) => Value::ok(read(&v)),
                 Err(e) => Value::err(Value::str(e.to_string())),
             },
@@ -314,11 +325,11 @@ mod imp {
                     bail!("set_value takes a name and a value");
                 };
                 let raw = write(v)?;
-                io_result(open(s).and_then(|k| k.set_raw_value(arg0(), &raw)))
+                io_result(open(s).and_then(|k| k.set_raw_value(first_text(), &raw)))
             }
             // The untyped pair. Binary has no typed form in winreg, so a script
             // that writes REG_BINARY goes through these two.
-            BuiltinId::GetRawValue => match open(s).and_then(|k| k.get_raw_value(arg0())) {
+            BuiltinId::GetRawValue => match open(s).and_then(|k| k.get_raw_value(first_text())) {
                 Ok(v) => Value::ok(raw_value(&v)),
                 Err(e) => Value::err(Value::str(e.to_string())),
             },
@@ -327,14 +338,14 @@ mod imp {
                     bail!("set_raw_value takes a name and a RegValue");
                 };
                 let raw = raw_from(v)?;
-                io_result(open(s).and_then(|k| k.set_raw_value(arg0(), &raw)))
+                io_result(open(s).and_then(|k| k.set_raw_value(first_text(), &raw)))
             }
-            BuiltinId::DeleteValue => io_result(open(s).and_then(|k| k.delete_value(arg0()))),
+            BuiltinId::DeleteValue => io_result(open(s).and_then(|k| k.delete_value(first_text()))),
             BuiltinId::DeleteSubkey => {
-                io_result(root_key(root).delete_subkey(join(&path, &arg0())))
+                io_result(root_key(root)?.delete_subkey(join(&path, &first_text())))
             }
             BuiltinId::DeleteSubkeyAll => {
-                io_result(root_key(root).delete_subkey_all(join(&path, &arg0())))
+                io_result(root_key(root)?.delete_subkey_all(join(&path, &first_text())))
             }
             BuiltinId::EnumKeys => match open(s) {
                 Ok(k) => Value::vec(

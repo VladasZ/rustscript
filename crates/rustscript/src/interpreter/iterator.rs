@@ -10,6 +10,7 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow, bail};
 use parking_lot::Mutex;
 
+use super::bridge::arg;
 use super::bytecode::{BuiltinId, MethodName, ScalarTy};
 use super::native::Native;
 use super::ops::compare_values;
@@ -674,12 +675,35 @@ impl Vm {
         }))
     }
 
+    fn iterator_count(self: &Arc<Self>, iterator: &Handle) -> Result<Value> {
+        if let Some(v) = try_reduce(self, iterator, &ChainReduce::Count)? {
+            return Ok(v);
+        }
+        let mut count: usize = 0;
+        while self.iterator_next(iterator)?.is_some() {
+            count += 1;
+        }
+        Ok(super::shared::usize_value(count))
+    }
+
+    fn iterator_last(self: &Arc<Self>, iterator: &Handle) -> Result<Value> {
+        let mut last = None;
+        while let Some(item) = self.iterator_next(iterator)? {
+            last = Some(item);
+        }
+        Ok(last.map_or_else(Value::none, Value::some))
+    }
+
+    /// The builtin methods of a lazy iterator value: the adaptors that wrap
+    /// it and the reducers that drain it. `None` for a name that is not one
+    /// of them.
     pub(super) fn iterator_method(
         self: &Arc<Self>,
         iterator: &Handle,
         method: &MethodName,
         args: &[Value],
     ) -> Result<Option<Value>> {
+        let scalar = method.scalar.as_ref();
         let value = match method.id {
             BuiltinId::Enumerate => wrap(IteratorState::Enumerate {
                 source: iterator.clone(),
@@ -693,79 +717,55 @@ impl Vm {
                 source: iterator.clone(),
                 remaining: usize::try_from(int_arg(args)?)?,
             }),
-            BuiltinId::Count => {
-                if let Some(v) = try_reduce(self, iterator, &ChainReduce::Count)? {
-                    v
-                } else {
-                    let mut count: usize = 0;
-                    while self.iterator_next(iterator)?.is_some() {
-                        count += 1;
-                    }
-                    super::shared::usize_value(count)
-                }
+            BuiltinId::Peekable => wrap(IteratorState::Peekable {
+                source: iterator.clone(),
+                buffered: None,
+            }),
+            // `by_ref` borrows the iterator so the caller keeps it after
+            // the adaptor is done with it. Iterators are shared handles
+            // here, so handing the same one back is that borrow.
+            BuiltinId::Cloned | BuiltinId::Copied | BuiltinId::ByRef => {
+                Value::Native(iterator.clone())
             }
-            BuiltinId::Sum => {
-                match try_reduce(self, iterator, &ChainReduce::Sum(method.scalar.as_ref()))? {
-                    Some(v) => v,
-                    None => self.iterator_sum(iterator, method.scalar.as_ref())?,
-                }
+            BuiltinId::Next => self
+                .iterator_next(iterator)?
+                .map_or_else(Value::none, Value::some),
+            BuiltinId::Peek => match self.peek(iterator)? {
+                Some(v) => v,
+                None => return Ok(None),
+            },
+            BuiltinId::Count => self.iterator_count(iterator)?,
+            BuiltinId::Last => self.iterator_last(iterator)?,
+            BuiltinId::Sum => match try_reduce(self, iterator, &ChainReduce::Sum(scalar))? {
+                Some(v) => v,
+                None => self.iterator_sum(iterator, scalar)?,
+            },
+            BuiltinId::Product => self.iterator_product(iterator, scalar)?,
+            BuiltinId::Max | BuiltinId::Min => self.iterator_extreme(iterator, method.id)?,
+            BuiltinId::Collect | BuiltinId::ToVec => Value::vec(self.drain_iterator(iterator)?),
+            BuiltinId::CollectString => Value::str(
+                self.drain_iterator(iterator)?
+                    .iter()
+                    .map(Value::display)
+                    .collect::<String>(),
+            ),
+            BuiltinId::CollectMap => super::vecmap::collect_map(self.drain_iterator(iterator)?)?,
+            BuiltinId::CollectSet => super::vecmap::collect_set(self.drain_iterator(iterator)?)?,
+            BuiltinId::Rev => {
+                let mut items = self.drain_iterator(iterator)?;
+                items.reverse();
+                Value::vec(items)
             }
-            BuiltinId::Product => self.iterator_product(iterator, method.scalar.as_ref())?,
-            _ => match method.id {
-                BuiltinId::Next => self
-                    .iterator_next(iterator)?
-                    .map_or_else(Value::none, Value::some),
-                BuiltinId::Last => {
-                    let mut last = None;
-                    while let Some(item) = self.iterator_next(iterator)? {
-                        last = Some(item);
-                    }
-                    last.map_or_else(Value::none, Value::some)
+            // `Chars::as_str` gives the not yet consumed tail, which is what
+            // makes the `chars.next()` then `chars.as_str()` capitalize idiom
+            // work. Only a char iterator still knows its source text.
+            BuiltinId::AsStr => match &*iterator.lock() {
+                Native::Iterator(IteratorState::Chars { source, offset }) => {
+                    Value::str(source[*offset..].to_string())
                 }
-                BuiltinId::Collect | BuiltinId::ToVec => Value::vec(self.drain_iterator(iterator)?),
-                BuiltinId::CollectString => Value::str(
-                    self.drain_iterator(iterator)?
-                        .iter()
-                        .map(Value::display)
-                        .collect::<String>(),
-                ),
-                BuiltinId::CollectMap => {
-                    super::vecmap::collect_map(self.drain_iterator(iterator)?)?
-                }
-                BuiltinId::CollectSet => {
-                    super::vecmap::collect_set(self.drain_iterator(iterator)?)?
-                }
-                // `by_ref` borrows the iterator so the caller keeps it after
-                // the adaptor is done with it. Iterators are shared handles
-                // here, so handing the same one back is that borrow.
-                BuiltinId::Cloned | BuiltinId::Copied | BuiltinId::ByRef => {
-                    Value::Native(iterator.clone())
-                }
-                BuiltinId::Peekable => wrap(IteratorState::Peekable {
-                    source: iterator.clone(),
-                    buffered: None,
-                }),
-                BuiltinId::Peek => match self.peek(iterator)? {
-                    Some(v) => v,
-                    None => return Ok(None),
-                },
-                BuiltinId::Rev => {
-                    let mut items = self.drain_iterator(iterator)?;
-                    items.reverse();
-                    Value::vec(items)
-                }
-                BuiltinId::Max | BuiltinId::Min => self.iterator_extreme(iterator, method.id)?,
-                // `Chars::as_str` gives the not yet consumed tail, which is what
-                // makes the `chars.next()` then `chars.as_str()` capitalize idiom
-                // work. Only a char iterator still knows its source text.
-                BuiltinId::AsStr => match &*iterator.lock() {
-                    Native::Iterator(IteratorState::Chars { source, offset }) => {
-                        Value::str(source[*offset..].to_string())
-                    }
-                    _ => return Ok(None),
-                },
                 _ => return Ok(None),
             },
+            _ => return Ok(None),
         };
         Ok(Some(value))
     }
@@ -853,7 +853,7 @@ impl Vm {
         let value = match name {
             BuiltinId::Fold => {
                 let closure = closure(1)?;
-                let mut accumulator = args.first().cloned().unwrap_or(Value::Unit);
+                let mut accumulator = arg(args, 0)?;
                 while let Some(value) = self.iterator_next(iterator)? {
                     accumulator = self.call_closure_data(&closure, &[accumulator, value])?;
                 }

@@ -514,21 +514,18 @@ pub(super) fn set_index(recv: &Value, key: &Value, v: Value) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn eval_try(v: Value) -> Result<Value, Value> {
+/// What a `?` does with the value: `Ok` continues with the payload, `Err` is
+/// the early return.
+pub(super) fn eval_try(v: Value) -> Result<Result<Value, Value>> {
     match v {
         Value::Enum { def, variant, data } => match (def.kind, variant) {
-            (EnumKind::Result, OK) | (EnumKind::Option, SOME) => {
-                Ok(data.lock().first().cloned().unwrap_or(Value::Unit))
-            }
-            (EnumKind::Result, ERR) => {
-                let inner = data.lock().first().cloned().unwrap_or(Value::Unit);
-                Err(Value::err(inner))
-            }
-            (EnumKind::Option, NONE) => Err(Value::none()),
+            (EnumKind::Result, OK) | (EnumKind::Option, SOME) => Ok(Ok(Value::payload(&data)?)),
+            (EnumKind::Result, ERR) => Ok(Err(Value::err(Value::payload(&data)?))),
+            (EnumKind::Option, NONE) => Ok(Err(Value::none())),
             // Any other value acts as its own Some, matching eval_try in
             // eval.rs, see the comment there.
-            _ => Ok(Value::Enum { def, variant, data }),
+            _ => Ok(Ok(Value::Enum { def, variant, data })),
         },
-        other => Ok(other),
+        other => Ok(Ok(other)),
     }
 }

@@ -10,6 +10,7 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow, bail};
 use parking_lot::Mutex;
 
+use super::bridge::arg;
 use super::bytecode::BuiltinId;
 use super::value::{CellKind, Value, ValueRef};
 
@@ -67,13 +68,13 @@ pub(super) fn cell_method(
         BuiltinId::Get if kind == CellKind::Cell => slot.lock().clone(),
         BuiltinId::Set => {
             require_interior(kind, name)?;
-            let new = args.first().cloned().unwrap_or(Value::Unit);
+            let new = arg(args, 0)?;
             *slot.lock() = new;
             Value::Unit
         }
         BuiltinId::Replace => {
             require_interior(kind, name)?;
-            let new = args.first().cloned().unwrap_or(Value::Unit);
+            let new = arg(args, 0)?;
             let mut guard = slot.lock();
             let old = guard.clone();
             *guard = new;

@@ -7,6 +7,7 @@ use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use anyhow::{Result, anyhow};
 use indexmap::IndexMap;
 use parking_lot::Mutex;
 
@@ -422,7 +423,7 @@ impl Value {
             Value::Enum { def, variant, data }
                 if def.kind == EnumKind::Option && *variant == SOME =>
             {
-                Some(data.lock().first().cloned().unwrap_or(Value::Unit))
+                data.lock().first().cloned()
             }
             _ => None,
         }
@@ -435,10 +436,20 @@ impl Value {
                 if (def.kind == EnumKind::Option && *variant == SOME)
                     || (def.kind == EnumKind::Result && *variant == OK) =>
             {
-                Some(data.lock().first().cloned().unwrap_or(Value::Unit))
+                data.lock().first().cloned()
             }
             _ => None,
         }
+    }
+
+    /// The single payload of a `Some`, an `Ok`, or an `Err`. Those variants
+    /// always carry exactly one value, so an empty payload is an interpreter
+    /// bug and errors instead of standing in a Unit.
+    pub fn payload(data: &List) -> Result<Value> {
+        data.lock()
+            .first()
+            .cloned()
+            .ok_or_else(|| anyhow!("enum payload is missing"))
     }
 
     pub fn ok(v: Value) -> Value {

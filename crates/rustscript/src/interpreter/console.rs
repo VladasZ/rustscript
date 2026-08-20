@@ -43,7 +43,7 @@ fn decode_native(bytes: &[u8]) -> String {
 }
 
 /// Map the code pages a Windows console actually gets set to onto the labels
-/// encoding_rs knows. Anything else falls back to lossy UTF-8, which is no
+/// `encoding_rs` knows. Anything else falls back to lossy UTF-8, which is no
 /// worse than the behavior this replaced.
 #[cfg(windows)]
 fn codepage_encoding(cp: u32) -> Option<&'static encoding_rs::Encoding> {

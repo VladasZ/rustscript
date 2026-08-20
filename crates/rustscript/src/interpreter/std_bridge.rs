@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 
 use super::bytecode::{BuiltinId, MethodName, PathId};
 use super::crates_bridge::crate_bridge;
@@ -449,12 +449,15 @@ pub(super) fn file_type_method(s: &Arc<StructData>, method: &MethodName) -> Resu
 }
 
 pub(super) fn metadata_method(s: &Arc<StructData>, name: &MethodName) -> Result<Value> {
-    let get = |k: &str| s.get(k).unwrap_or(Value::Unit);
+    let get = |k: &str| {
+        s.get(k)
+            .ok_or_else(|| anyhow!("Metadata has no `{k}` field"))
+    };
     Ok(match name.id {
-        BuiltinId::Len => get("len"),
-        BuiltinId::IsDir => get("is_dir"),
-        BuiltinId::IsFile => get("is_file"),
-        BuiltinId::IsSymlink => get("is_symlink"),
+        BuiltinId::Len => get("len")?,
+        BuiltinId::IsDir => get("is_dir")?,
+        BuiltinId::IsFile => get("is_file")?,
+        BuiltinId::IsSymlink => get("is_symlink")?,
         BuiltinId::Modified | BuiltinId::Created | BuiltinId::Accessed => match s.get("modified") {
             Some(v) => Value::ok(v),
             None => Value::err(Value::str("timestamp not available".to_string())),
@@ -464,12 +467,12 @@ pub(super) fn metadata_method(s: &Arc<StructData>, name: &MethodName) -> Result<
         | BuiltinId::Ino
         | BuiltinId::Uid
         | BuiltinId::Gid
-        | BuiltinId::Mtime => get(&name.text),
+        | BuiltinId::Mtime => get(&name.text)?,
         BuiltinId::Permissions => Value::struct_of(
             "Permissions",
             [
-                ("mode".into(), get("mode")),
-                ("readonly".into(), get("readonly")),
+                ("mode".into(), get("mode")?),
+                ("readonly".into(), get("readonly")?),
             ],
         ),
         _ => bail!("unknown method `{name}` on Metadata"),

@@ -24,13 +24,7 @@ pub(super) fn connection(args: &[Value], default_namespace: bool) -> Value {
     } else {
         args.first().map(Value::display).unwrap_or_default()
     };
-    match imp::check_available() {
-        Ok(()) => Value::ok(Value::struct_of(
-            "WmiConnection",
-            [("namespace".into(), Value::str(ns))],
-        )),
-        Err(e) => Value::err(Value::str(e.to_string())),
-    }
+    imp::connection(ns)
 }
 
 pub(super) fn wmi_method(s: &StructData, name: &MethodName, args: &[Value]) -> Result<Value> {
@@ -47,12 +41,16 @@ mod imp {
     use indexmap::IndexMap;
     use wmi::{Variant, WMIConnection};
 
+    use super::super::numeric::IntWidth;
     use super::super::value::{MapKey, StructData, Value};
 
     /// Nothing to check up front. A namespace that does not exist, or a COM
     /// that will not start, reports itself when the connection is opened.
-    pub(super) fn check_available() -> Result<()> {
-        Ok(())
+    pub(super) fn connection(namespace: String) -> Value {
+        Value::ok(Value::struct_of(
+            "WmiConnection",
+            [("namespace".into(), Value::str(namespace))],
+        ))
     }
 
     fn connect(namespace: &str) -> Result<WMIConnection> {
@@ -77,7 +75,7 @@ mod imp {
             Variant::UI1(n) => Value::Int(i64::from(*n)),
             Variant::UI2(n) => Value::Int(i64::from(*n)),
             Variant::UI4(n) => Value::Int(i64::from(*n)),
-            Variant::UI8(n) => Value::Int(*n as i64),
+            Variant::UI8(n) => Value::int_of_width(i128::from(*n), IntWidth::U64),
             Variant::R4(n) => Value::Float(f64::from(*n)),
             Variant::R8(n) => Value::Float(*n),
             Variant::Array(items) => Value::vec(items.iter().map(from_variant).collect()),
@@ -100,8 +98,7 @@ mod imp {
     pub(super) fn wmi_method(s: &StructData, name: &MethodName, args: &[Value]) -> Result<Value> {
         let namespace = s
             .get("namespace")
-            .map(|v| v.display())
-            .unwrap_or_else(|| r"root\cimv2".to_string());
+            .map_or_else(|| r"root\cimv2".to_string(), |v| v.display());
         Ok(match name.id {
             BuiltinId::RawQuery | BuiltinId::Query => {
                 let q = args.first().map(Value::display).unwrap_or_default();
@@ -124,8 +121,8 @@ mod imp {
 
     use super::super::value::{StructData, Value};
 
-    pub(super) fn check_available() -> Result<()> {
-        bail!("WMI does not exist on this platform")
+    pub(super) fn connection(_namespace: String) -> Value {
+        Value::err(Value::str("WMI does not exist on this platform"))
     }
 
     pub(super) fn wmi_method(_s: &StructData, name: &MethodName, _args: &[Value]) -> Result<Value> {

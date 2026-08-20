@@ -85,9 +85,11 @@ pub const BRIDGES: &[Bridge] = &[
     b("iterator.rs", "iterator_predicate", "Iterator"),
     // -- dispatch front door ------------------------------------------------
     b("bridge.rs", "eval_method", "*"),
-    b("bridge.rs", "pre_dispatch", "*"),
+    b("bridge.rs", "any_receiver_method", "*"),
+    b("bridge.rs", "image_args", "*"),
     b("bridge.rs", "deref_receiver", "*"),
     b("bridge.rs", "method_by_receiver", "*"),
+    b("bridge.rs", "bridge_struct_method", "*"),
     b("bridge.rs", "scalar_method", "*"),
     b("bridge.rs", "range_builtin", "*"),
     b("bridge.rs", "native_method", "Native"),

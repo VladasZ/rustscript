@@ -194,8 +194,8 @@ pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
         | Op::MoveOut { .. }
         | Op::DefaultOf { .. }
         | Op::MakeBorrow { .. } => place_step(ctx, op)?,
-        Op::Try { dst, src } => try_op(ctx, *dst, *src),
-        Op::TryJump { dst, src, to } => try_jump(ctx, *dst, *src, *to),
+        Op::Try { dst, src } => try_op(ctx, *dst, *src)?,
+        Op::TryJump { dst, src, to } => try_jump(ctx, *dst, *src, *to)?,
         Op::Cast { dst, src, ty } => cast_op(ctx, *dst, *src, *ty)?,
         Op::Coerce { dst, src, ty } => coerce_op(ctx, *dst, *src, *ty),
         Op::TestBind { val, pat, dst } => test_bind(ctx, *val, *pat, *dst),
@@ -1122,15 +1122,15 @@ fn ref_field(ctx: &mut StepCtx, dst: u16, base: u16, member: u16) -> Result<Flow
     Ok(ctx.set(dst, v))
 }
 
-fn try_op(ctx: &mut StepCtx, dst: u16, src: u16) -> Flow {
-    match ops::eval_try(ctx.get(src).clone()) {
+fn try_op(ctx: &mut StepCtx, dst: u16, src: u16) -> Result<Flow> {
+    Ok(match ops::eval_try(ctx.get(src).clone())? {
         Ok(v) => ctx.set(dst, v),
         Err(early) => Flow::Ret(early),
-    }
+    })
 }
 
-fn try_jump(ctx: &mut StepCtx, dst: u16, src: u16, to: u32) -> Flow {
-    match ops::eval_try(ctx.get(src).clone()) {
+fn try_jump(ctx: &mut StepCtx, dst: u16, src: u16, to: u32) -> Result<Flow> {
+    Ok(match ops::eval_try(ctx.get(src).clone())? {
         Ok(v) => {
             ctx.put(dst, v);
             Flow::Jump(to as usize)
@@ -1138,7 +1138,7 @@ fn try_jump(ctx: &mut StepCtx, dst: u16, src: u16, to: u32) -> Flow {
         // Falls through into the scope drops and the `Ret` emitted after
         // this op, with the early-return value ready in `dst`.
         Err(early) => ctx.set(dst, early),
-    }
+    })
 }
 
 fn cast_op(ctx: &mut StepCtx, dst: u16, src: u16, ty: u16) -> Result<Flow> {

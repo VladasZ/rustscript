@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
 
+use super::bridge::arg;
 use super::bytecode::PathId;
 use super::cell;
 use super::enum_def::{SEEK_FROM, XML_NODE};
@@ -185,29 +186,15 @@ fn container_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
         // `Rc::clone(&x)` is `x.clone()` spelled as the docs recommend,
         // and a cell's clone shares its slot, so handing the value through
         // is exactly right for both.
-        PathId::BoxNew | PathId::RcClone | PathId::ArcClone => {
-            args.first().cloned().unwrap_or(Value::Unit)
-        }
+        PathId::BoxNew | PathId::RcClone | PathId::ArcClone => arg(args, 0)?,
         // Real shared cells: cloning shares the slot and writes through one
         // handle show through every handle. `Box` above stays transparent,
         // ownership is what the value model already gives every value.
-        PathId::RcNew => {
-            cell::make_cell(CellKind::Rc, args.first().cloned().unwrap_or(Value::Unit))
-        }
-        PathId::ArcNew => {
-            cell::make_cell(CellKind::Arc, args.first().cloned().unwrap_or(Value::Unit))
-        }
-        PathId::RefCellNew => cell::make_cell(
-            CellKind::RefCell,
-            args.first().cloned().unwrap_or(Value::Unit),
-        ),
-        PathId::CellNew => {
-            cell::make_cell(CellKind::Cell, args.first().cloned().unwrap_or(Value::Unit))
-        }
-        PathId::MutexNew => cell::make_cell(
-            CellKind::Mutex,
-            args.first().cloned().unwrap_or(Value::Unit),
-        ),
+        PathId::RcNew => cell::make_cell(CellKind::Rc, arg(args, 0)?),
+        PathId::ArcNew => cell::make_cell(CellKind::Arc, arg(args, 0)?),
+        PathId::RefCellNew => cell::make_cell(CellKind::RefCell, arg(args, 0)?),
+        PathId::CellNew => cell::make_cell(CellKind::Cell, arg(args, 0)?),
+        PathId::MutexNew => cell::make_cell(CellKind::Mutex, arg(args, 0)?),
         PathId::RcStrongCount | PathId::ArcStrongCount => {
             let Some(Value::Cell(_, slot)) = args.first() else {
                 bail!("strong_count needs an Rc or Arc argument");
@@ -241,7 +228,8 @@ fn container_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
                     Err(e) => return Err(anyhow!("cannot buffer socket: {e}")),
                 }
             }
-            other => other.cloned().unwrap_or(Value::Unit),
+            Some(other) => other.clone(),
+            None => bail!("missing argument 1"),
         },
         PathId::PathBufNew => make_path(""),
         PathId::PathBufFrom | PathId::PathFrom | PathId::PathNew => {

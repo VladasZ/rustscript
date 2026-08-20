@@ -14,6 +14,7 @@ use anyhow::{Result, bail};
 use rustc_hash::FxHashMap;
 
 use super::Interp;
+use super::bridge::arg;
 use super::bytecode::PathId;
 use super::enum_def::{EnumKind, OK, SOME};
 use super::numeric::IntWidth;
@@ -179,8 +180,10 @@ impl Vm {
             && def.kind == EnumKind::Result
             && *variant == OK
         {
-            let inner = data.lock().first().cloned().unwrap_or(Value::Unit);
-            return Value::ok(self.coerce_value(inner, ty));
+            let inner = data.lock().first().cloned();
+            if let Some(inner) = inner {
+                return Value::ok(self.coerce_value(inner, ty));
+            }
         }
         self.coerce_value(value, ty)
     }
@@ -683,7 +686,7 @@ pub(super) fn bridge_serde_json(id: PathId, args: &[Value]) -> Result<Value> {
             }
         }
         PathId::SerdeJsonToString | PathId::SerdeJsonToStringPretty => {
-            let v = args.first().cloned().unwrap_or(Value::Unit);
+            let v = arg(args, 0)?;
             let j = pvalue_to_json(&v)?;
             let s = if id == PathId::SerdeJsonToStringPretty {
                 serde_json::to_string_pretty(&j)?
@@ -693,7 +696,7 @@ pub(super) fn bridge_serde_json(id: PathId, args: &[Value]) -> Result<Value> {
             Ok(Value::ok(Value::str(s)))
         }
         PathId::SerdeJsonToValue => {
-            let v = args.first().cloned().unwrap_or(Value::Unit);
+            let v = arg(args, 0)?;
             Ok(Value::ok(json_to_pvalue(pvalue_to_json(&v)?)))
         }
         _ => bail!("unsupported serde_json function `{id}`"),

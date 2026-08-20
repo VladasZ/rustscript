@@ -7,6 +7,7 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 use parking_lot::Mutex;
 
+use super::bridge::arg;
 use super::bytecode::{BuiltinId, MethodName};
 use super::enum_def::{EnumKind, SOME};
 use super::native::Native;
@@ -202,8 +203,7 @@ pub(super) fn command_method(recv: &Value, name: &MethodName, args: &[Value]) ->
     Ok(match name.id {
         BuiltinId::Arg => {
             if let Some(Value::Vec(list)) = s.get("args") {
-                list.lock()
-                    .push(args.first().cloned().unwrap_or(Value::Unit));
+                list.lock().push(arg(args, 0)?);
             }
             cmd_value()
         }
@@ -216,12 +216,12 @@ pub(super) fn command_method(recv: &Value, name: &MethodName, args: &[Value]) ->
             cmd_value()
         }
         BuiltinId::CurrentDir => {
-            s.set("cwd", args.first().cloned().unwrap_or(Value::Unit));
+            s.set("cwd", arg(args, 0)?);
             cmd_value()
         }
         BuiltinId::Env => {
             let key = args.first().map(Value::display).unwrap_or_default();
-            let val = args.get(1).cloned().unwrap_or(Value::Unit);
+            let val = arg(args, 1)?;
             let envs = command_envs(s);
             if let Some(k) = Value::str(key).as_key() {
                 envs.lock().insert(k, val);
@@ -240,15 +240,15 @@ pub(super) fn command_method(recv: &Value, name: &MethodName, args: &[Value]) ->
         // this does not understand used to be kept and then quietly ignored
         // when the command was built.
         BuiltinId::Stdin | BuiltinId::Stdout | BuiltinId::Stderr => {
-            let arg = args.first().cloned().unwrap_or(Value::Unit);
-            match &arg {
+            let target = arg(args, 0)?;
+            match &target {
                 Value::Struct(m) if &**m.name() == "Stdio" => {}
                 other => bail!(
                     "Command::{name} takes an Stdio, got {}. Use Stdio::piped(), Stdio::null(), Stdio::inherit(), or Stdio::from(file).",
                     other.type_name()
                 ),
             }
-            s.set(&name.text, arg);
+            s.set(&name.text, target);
             cmd_value()
         }
         BuiltinId::Spawn => spawn_command(s),
