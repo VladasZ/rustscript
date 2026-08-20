@@ -260,7 +260,7 @@ mod imp {
                 Ok(st) => Value::ok(Value::struct_of(
                     "ServiceStatus",
                     [(
-                        B::CurrentState.into(),
+                        "current_state".into(),
                         service_variant(&SERVICE_STATE, state_name(st.current_state))
                             .unwrap_or(Value::Unit),
                     )],
@@ -278,28 +278,28 @@ mod imp {
                     "ServiceConfig",
                     [
                         (
-                            B::ServiceType.into(),
+                            "service_type".into(),
                             Value::Int(i64::from(cfg.service_type.bits())),
                         ),
                         (
-                            B::StartType.into(),
+                            "start_type".into(),
                             service_variant(&SERVICE_START_TYPE, start_type_name(cfg.start_type))
                                 .unwrap_or(Value::Unit),
                         ),
                         (
-                            B::ErrorControl.into(),
+                            "error_control".into(),
                             Value::Int(error_control_raw(cfg.error_control)),
                         ),
                         (
-                            B::ExecutablePath.into(),
+                            "executable_path".into(),
                             Value::str(cfg.executable_path.display().to_string()),
                         ),
                         (
-                            B::DisplayName.into(),
+                            "display_name".into(),
                             Value::str(cfg.display_name.to_string_lossy().into_owned()),
                         ),
                         (
-                            B::AccountName.into(),
+                            "account_name".into(),
                             match cfg.account_name {
                                 Some(a) => {
                                     Value::some(Value::str(a.to_string_lossy().into_owned()))
@@ -308,7 +308,7 @@ mod imp {
                             },
                         ),
                         (
-                            B::Dependencies.into(),
+                            "dependencies".into(),
                             Value::vec(
                                 cfg.dependencies
                                     .iter()

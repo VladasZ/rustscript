@@ -215,7 +215,7 @@ mod imp {
     }
 
     fn type_from_name(name: &str) -> RegType {
-        match name.id {
+        match name {
             "REG_NONE" => RegType::REG_NONE,
             "REG_SZ" => RegType::REG_SZ,
             "REG_EXPAND_SZ" => RegType::REG_EXPAND_SZ,
