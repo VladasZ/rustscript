@@ -420,6 +420,14 @@ fn write_back(
             }
         }
     }
+    // A string constant slot has no boxed form either, so its register gets
+    // the string the generic `LoadConst` would have put there.
+    for (slot, sval) in regs.iter().enumerate() {
+        if let SVal::StrConst(id) = *sval {
+            let text: &str = &plan.strs[usize::from(id)];
+            ctx.put(plan.regs[slot], Value::str(text));
+        }
+    }
     write_regs(ctx, &plan.regs, regs);
     ctx.put(idx, Value::Int(consumed));
 }

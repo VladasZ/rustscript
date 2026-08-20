@@ -514,8 +514,8 @@ fn translate_op(
         },
         // `*r` on a plain value copies it, the way the generic `deref`
         // answers a non-reference, so a deref is a move. A real reference
-        // or cell loads as `Opaque`, so any use of the copy fails the
-        // iteration over to the generic path, which derefs for real.
+        // or cell loads as `Opaque`, and moving one fails the iteration
+        // over to the generic path, which derefs for real.
         Op::Move { dst, src } | Op::Deref { dst, src } => LOp::Move {
             dst: slot(regs, *dst)?,
             src: slot(regs, *src)?,
@@ -1183,6 +1183,20 @@ fn land(regs: &mut [SVal], dst: u16, v: Option<SVal>) -> OpOut {
     }
 }
 
+/// The `Move` arm of `eval_op`. Copying an `Opaque` would poison the
+/// destination, and a poisoned slot skips writeback, so its frame register
+/// would keep the value it held before the loop instead of the copy. Fail
+/// over the way any other read of an `Opaque` does.
+#[inline]
+fn eval_move(regs: &mut [SVal], dst: u16, src: u16) -> OpOut {
+    let v = regs[usize::from(src)];
+    if matches!(v, SVal::Opaque) {
+        return OpOut::Fail;
+    }
+    regs[usize::from(dst)] = v;
+    OpOut::Fall
+}
+
 /// The conditional-jump arms of `eval_op`: jump when the condition's truth
 /// matches `want`, and fail over on an `Opaque` condition the way any other
 /// read of one does.
@@ -1206,7 +1220,7 @@ pub(super) fn eval_op(op: &LOp, regs: &mut [SVal]) -> OpOut {
         LOp::LoadIntW { dst, v, w } => regs[usize::from(*dst)] = SVal::IntW(*v, *w),
         LOp::LoadFloat { dst, v } => regs[usize::from(*dst)] = SVal::Float(*v),
         LOp::LoadBool { dst, v } => regs[usize::from(*dst)] = SVal::Bool(*v),
-        LOp::Move { dst, src } => regs[usize::from(*dst)] = regs[usize::from(*src)],
+        LOp::Move { dst, src } => return eval_move(regs, *dst, *src),
         LOp::Bin { dst, a, b, op } => {
             let (x, y) = (regs[usize::from(*a)], regs[usize::from(*b)]);
             match s_bin(*op, x, y) {
