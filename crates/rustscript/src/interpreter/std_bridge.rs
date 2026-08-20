@@ -5,35 +5,37 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 
+use super::bytecode::{BuiltinId as B, MethodName, PathId as P};
 use super::crates_bridge::crate_bridge;
+use super::enum_def::{NOT_PRESENT, NOT_UNICODE, VAR_ERROR};
 use super::json_bridge::bridge_serde_json;
 use super::native::Native;
 use super::native_methods;
 use super::value::{StructData, Value};
 
 /// The `std::fs` free functions.
-fn fs_native_call(func: &str, args: &[Value]) -> Result<Option<Value>> {
+fn fs_native_call(id: P, args: &[Value]) -> Result<Option<Value>> {
     let s = |i: usize| -> Result<String> {
         match args.get(i) {
             Some(v) => Ok(path_like(v)),
-            None => bail!("missing argument {i} for fs::{func}"),
+            None => bail!("missing argument {i} for {id}"),
         }
     };
-    Ok(Some(match func {
-        "read_to_string" => wrap_io(std::fs::read_to_string(s(0)?)),
-        "read" => wrap_bytes(std::fs::read(s(0)?)),
-        "write" => wrap_unit(std::fs::write(s(0)?, s(1)?)),
-        "create_dir_all" => wrap_unit(std::fs::create_dir_all(s(0)?)),
-        "create_dir" => wrap_unit(std::fs::create_dir(s(0)?)),
-        "remove_file" => wrap_unit(std::fs::remove_file(s(0)?)),
-        "remove_dir_all" => wrap_unit(std::fs::remove_dir_all(s(0)?)),
-        "remove_dir" => wrap_unit(std::fs::remove_dir(s(0)?)),
-        "copy" => match std::fs::copy(s(0)?, s(1)?) {
+    Ok(Some(match id {
+        P::FsReadToString => wrap_io(std::fs::read_to_string(s(0)?)),
+        P::FsRead => wrap_bytes(std::fs::read(s(0)?)),
+        P::FsWrite => wrap_unit(std::fs::write(s(0)?, s(1)?)),
+        P::FsCreateDirAll => wrap_unit(std::fs::create_dir_all(s(0)?)),
+        P::FsCreateDir => wrap_unit(std::fs::create_dir(s(0)?)),
+        P::FsRemoveFile => wrap_unit(std::fs::remove_file(s(0)?)),
+        P::FsRemoveDirAll => wrap_unit(std::fs::remove_dir_all(s(0)?)),
+        P::FsRemoveDir => wrap_unit(std::fs::remove_dir(s(0)?)),
+        P::FsCopy => match std::fs::copy(s(0)?, s(1)?) {
             Ok(n) => Value::ok(Value::Int(i64::try_from(n).unwrap_or(i64::MAX))),
             Err(e) => Value::err(super::native::io_error_value(&e)),
         },
-        "rename" => wrap_unit(std::fs::rename(s(0)?, s(1)?)),
-        "read_dir" => match std::fs::read_dir(s(0)?) {
+        P::FsRename => wrap_unit(std::fs::rename(s(0)?, s(1)?)),
+        P::FsReadDir => match std::fs::read_dir(s(0)?) {
             Ok(rd) => {
                 let mut items = Vec::new();
                 for e in rd {
@@ -46,89 +48,92 @@ fn fs_native_call(func: &str, args: &[Value]) -> Result<Option<Value>> {
             }
             Err(e) => Value::err(super::native::io_error_value(&e)),
         },
-        "canonicalize" => match std::fs::canonicalize(s(0)?) {
+        P::FsCanonicalize => match std::fs::canonicalize(s(0)?) {
             Ok(p) => Value::ok(make_path(p.display().to_string())),
             Err(e) => Value::err(super::native::io_error_value(&e)),
         },
-        "metadata" => match std::fs::metadata(s(0)?) {
+        P::FsMetadata => match std::fs::metadata(s(0)?) {
             Ok(m) => Value::ok(make_metadata(&m)),
             Err(e) => Value::err(super::native::io_error_value(&e)),
         },
-        "symlink_metadata" => match std::fs::symlink_metadata(s(0)?) {
+        P::FsSymlinkMetadata => match std::fs::symlink_metadata(s(0)?) {
             Ok(m) => Value::ok(make_metadata(&m)),
             Err(e) => Value::err(super::native::io_error_value(&e)),
         },
-        "read_link" => match std::fs::read_link(s(0)?) {
+        P::FsReadLink => match std::fs::read_link(s(0)?) {
             Ok(p) => Value::ok(make_path(p.display().to_string())),
             Err(e) => Value::err(super::native::io_error_value(&e)),
         },
-        "hard_link" => wrap_unit(std::fs::hard_link(s(0)?, s(1)?)),
+        P::FsHardLink => wrap_unit(std::fs::hard_link(s(0)?, s(1)?)),
         // The platform specific names are aliased to one cross-platform
         // helper, so the cfg gated `use` a script needs to type-check on
         // each os all dispatch here at runtime.
-        "symlink" | "symlink_file" | "symlink_dir" => wrap_unit(make_symlink(&s(0)?, &s(1)?)),
-        "set_permissions" => wrap_unit(set_permissions_impl(
+        P::FsSymlink | P::FsSymlinkFile | P::FsSymlinkDir => {
+            wrap_unit(make_symlink(&s(0)?, &s(1)?))
+        }
+        P::FsSetPermissions => wrap_unit(set_permissions_impl(
             &s(0)?,
             args.get(1).and_then(perm_mode),
         )),
-        _ => return crate_bridge("fs", func, args),
+        _ => return Ok(None),
     }))
 }
 
-pub(super) fn native_call(module: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
-    if module == "serde_json" {
-        return bridge_serde_json(func, args).map(Some);
-    }
-    if module == "fs" {
-        return fs_native_call(func, args);
+pub(super) fn native_call(id: P, args: &[Value]) -> Result<Option<Value>> {
+    if let Some(v) = fs_native_call(id, args)? {
+        return Ok(Some(v));
     }
     let s = |i: usize| -> Result<String> {
         match args.get(i) {
             Some(v) => Ok(path_like(v)),
-            None => bail!("missing argument {i} for {module}::{func}"),
+            None => bail!("missing argument {i} for {id}"),
         }
     };
-    Ok(Some(match (module, func) {
-        ("env", "args") => Value::vec(super::script_args().into_iter().map(Value::str).collect()),
-        ("env", "var") => match std::env::var(s(0)?) {
+    Ok(Some(match id {
+        P::SerdeJsonFromStr
+        | P::SerdeJsonToString
+        | P::SerdeJsonToStringPretty
+        | P::SerdeJsonToValue => return bridge_serde_json(id, args).map(Some),
+        P::EnvArgs => Value::vec(super::script_args().into_iter().map(Value::str).collect()),
+        P::EnvVar => match std::env::var(s(0)?) {
             Ok(v) => Value::ok(Value::str(v)),
             // The structured `VarError`, so `Err(VarError::NotPresent)`
             // matches and `{e:?}` prints `NotPresent` like real Rust.
             Err(std::env::VarError::NotPresent) => {
-                Value::err(Value::enum_of("VarError", "NotPresent", Vec::new()))
+                Value::err(Value::enum_of(&VAR_ERROR, NOT_PRESENT, Vec::new()))
             }
             Err(std::env::VarError::NotUnicode(os)) => Value::err(Value::enum_of(
-                "VarError",
-                "NotUnicode",
+                &VAR_ERROR,
+                NOT_UNICODE,
                 vec![Value::str(os.to_string_lossy().into_owned())],
             )),
         },
-        ("env", "current_dir") => match std::env::current_dir() {
+        P::EnvCurrentDir => match std::env::current_dir() {
             Ok(p) => Value::ok(make_path(p.display().to_string())),
             Err(e) => Value::err(super::native::io_error_value(&e)),
         },
-        ("env", "set_var") => {
+        P::EnvSetVar => {
             // Safety: scripts treat the environment as script-wide state, the
             // same trade a single threaded interpreter always made.
             unsafe { std::env::set_var(s(0)?, s(1)?) };
             Value::Unit
         }
-        ("env", "remove_var") => {
+        P::EnvRemoveVar => {
             unsafe { std::env::remove_var(s(0)?) };
             Value::Unit
         }
-        ("env", "var_os") => match std::env::var_os(s(0)?) {
+        P::EnvVarOs => match std::env::var_os(s(0)?) {
             Some(v) => Value::some(make_os_string(v.to_string_lossy().into_owned())),
             None => Value::none(),
         },
-        ("env", "vars" | "vars_os") => Value::vec(
+        P::EnvVars | P::EnvVarsOs => Value::vec(
             std::env::vars()
                 .map(|(k, v)| Value::tuple(vec![Value::str(k), Value::str(v)]))
                 .collect(),
         ),
-        ("env", "set_current_dir") => wrap_unit(std::env::set_current_dir(s(0)?)),
-        ("env", "temp_dir") => make_path(std::env::temp_dir().display().to_string()),
-        ("process", "exit") => {
+        P::EnvSetCurrentDir => wrap_unit(std::env::set_current_dir(s(0)?)),
+        P::EnvTempDir => make_path(std::env::temp_dir().display().to_string()),
+        P::ProcessExit => {
             let code = args
                 .first()
                 .and_then(as_i64)
@@ -136,16 +141,16 @@ pub(super) fn native_call(module: &str, func: &str, args: &[Value]) -> Result<Op
                 .unwrap_or(0);
             std::process::exit(code);
         }
-        ("process", "abort") => std::process::abort(),
-        ("process", "id") => Value::Int(i64::from(std::process::id())),
+        P::ProcessAbort => std::process::abort(),
+        P::ProcessId => Value::Int(i64::from(std::process::id())),
         // -- io -------------------------------------------------------
-        ("io", "stdin") => make_std_stream(
+        P::IoStdin => make_std_stream(
             "stdin",
             Native::Reader(std::io::BufReader::new(Box::new(std::io::stdin()))),
         ),
-        ("io", "stdout") => make_std_stream("stdout", Native::Writer(Box::new(std::io::stdout()))),
-        ("io", "stderr") => make_std_stream("stderr", Native::Writer(Box::new(std::io::stderr()))),
-        _ => return crate_bridge(module, func, args),
+        P::IoStdout => make_std_stream("stdout", Native::Writer(Box::new(std::io::stdout()))),
+        P::IoStderr => make_std_stream("stderr", Native::Writer(Box::new(std::io::stderr()))),
+        _ => return crate_bridge(id, args),
     }))
 }
 
@@ -227,11 +232,11 @@ pub(super) fn make_std_stream(kind: &str, inner: Native) -> Value {
 
 pub(super) fn std_stream_method(
     s: &Arc<StructData>,
-    name: &str,
+    name: &MethodName,
     args: &mut [Value],
 ) -> Result<Value> {
     use std::io::IsTerminal;
-    if name == "is_terminal" {
+    if name.id == B::IsTerminal {
         let kind = s.get("kind").map(|v| v.display()).unwrap_or_default();
         let tty = match kind.as_str() {
             "stdin" => std::io::stdin().is_terminal(),
@@ -240,7 +245,7 @@ pub(super) fn std_stream_method(
         };
         return Ok(Value::Bool(tty));
     }
-    if matches!(name, "lock" | "by_ref") {
+    if matches!(name.id, B::Lock | B::ByRef) {
         return Ok(Value::Struct(s.clone()));
     }
     let inner = match s.get("inner") {
@@ -320,12 +325,12 @@ pub(super) fn make_os_string(s: impl Into<String>) -> Value {
     Value::struct_of("OsString", [("s".into(), Value::str(s.into()))])
 }
 
-pub(super) fn os_string_method(s: &Arc<StructData>, method: &str) -> Result<Value> {
+pub(super) fn os_string_method(s: &Arc<StructData>, method: &MethodName) -> Result<Value> {
     let value = s.get("s").map(|value| value.display()).unwrap_or_default();
-    Ok(match method {
-        "into" => make_path(value),
-        "to_string_lossy" | "to_str" => Value::str(value),
-        "is_empty" => Value::Bool(value.is_empty()),
+    Ok(match method.id {
+        B::Into => make_path(value),
+        B::ToStringLossy | B::ToStr => Value::str(value),
+        B::IsEmpty => Value::Bool(value.is_empty()),
         _ => bail!("unknown method `{method}` on OsString"),
     })
 }
@@ -365,87 +370,91 @@ pub(super) fn path_string(s: &StructData, key: &str) -> String {
     s.get(key).map(|v| v.display()).unwrap_or_default()
 }
 
-pub(super) fn path_method(st: &Arc<StructData>, method: &str, args: &[Value]) -> Result<Value> {
+pub(super) fn path_method(
+    st: &Arc<StructData>,
+    method: &MethodName,
+    args: &[Value],
+) -> Result<Value> {
     let s = path_string(st, "s");
     let p = std::path::Path::new(&s);
     let opt_str = |o: Option<&std::ffi::OsStr>| match o {
         Some(v) => Value::some(Value::str(v.to_string_lossy().into_owned())),
         None => Value::none(),
     };
-    Ok(match method {
-        "display" | "to_string_lossy" => Value::str(s.clone()),
-        "to_str" => Value::some(Value::str(s.clone())),
-        "into_string" | "into_os_string" => Value::ok(Value::str(s.clone())),
-        "to_owned" | "to_path_buf" | "clone" | "as_path" | "as_os_str" => make_path(s.clone()),
-        "is_dir" => Value::Bool(p.is_dir()),
-        "is_file" => Value::Bool(p.is_file()),
-        "is_absolute" => Value::Bool(p.is_absolute()),
-        "exists" => Value::Bool(p.exists()),
-        "file_name" => match p.file_name() {
+    Ok(match method.id {
+        B::Display | B::ToStringLossy => Value::str(s.clone()),
+        B::ToStr => Value::some(Value::str(s.clone())),
+        B::IntoString | B::IntoOsString => Value::ok(Value::str(s.clone())),
+        B::ToOwned | B::ToPathBuf | B::Clone | B::AsPath | B::AsOsStr => make_path(s.clone()),
+        B::IsDir => Value::Bool(p.is_dir()),
+        B::IsFile => Value::Bool(p.is_file()),
+        B::IsAbsolute => Value::Bool(p.is_absolute()),
+        B::Exists => Value::Bool(p.exists()),
+        B::FileName => match p.file_name() {
             Some(n) => Value::some(make_path(n.to_string_lossy().into_owned())),
             None => Value::none(),
         },
-        "file_stem" => opt_str(p.file_stem()),
-        "extension" => opt_str(p.extension()),
-        "with_extension" => make_path(p.with_extension(arg_str(args, 0)).display().to_string()),
-        "parent" => match p.parent() {
+        B::FileStem => opt_str(p.file_stem()),
+        B::Extension => opt_str(p.extension()),
+        B::WithExtension => make_path(p.with_extension(arg_str(args, 0)).display().to_string()),
+        B::Parent => match p.parent() {
             Some(par) => Value::some(make_path(par.display().to_string())),
             None => Value::none(),
         },
-        "ancestors" => Value::vec(
+        B::Ancestors => Value::vec(
             p.ancestors()
                 .map(|ancestor| make_path(ancestor.display().to_string()))
                 .collect(),
         ),
-        "join" | "push" => {
+        B::Join | B::Push => {
             let joined = p.join(args.first().map(Value::display).unwrap_or_default());
             make_path(joined.display().to_string())
         }
         // Path compares whole components, so "/a/bc" does not start with "/a/b"
         // the way the str method would say it does.
-        "starts_with" => {
+        B::StartsWith => {
             Value::Bool(p.starts_with(args.first().map(Value::display).unwrap_or_default()))
         }
-        "ends_with" => {
+        B::EndsWith => {
             Value::Bool(p.ends_with(args.first().map(Value::display).unwrap_or_default()))
         }
         _ => bail!("unknown method `{method}` on Path"),
     })
 }
 
-pub(super) fn dir_entry_method(s: &Arc<StructData>, method: &str) -> Result<Value> {
+pub(super) fn dir_entry_method(s: &Arc<StructData>, method: &MethodName) -> Result<Value> {
     let path = path_string(s, "path");
-    Ok(match method {
-        "path" => make_path(path),
-        "file_name" => make_path(path_string(s, "name")),
-        "file_type" => Value::ok(make_file_type(std::path::Path::new(&path))),
+    Ok(match method.id {
+        B::Path => make_path(path),
+        B::FileName => make_path(path_string(s, "name")),
+        B::FileType => Value::ok(make_file_type(std::path::Path::new(&path))),
         _ => bail!("unknown method `{method}` on DirEntry"),
     })
 }
 
-pub(super) fn file_type_method(s: &Arc<StructData>, method: &str) -> Result<Value> {
+pub(super) fn file_type_method(s: &Arc<StructData>, method: &MethodName) -> Result<Value> {
     let get = |k: &str| s.get(k).unwrap_or(Value::Bool(false));
-    Ok(match method {
-        "is_dir" => get("is_dir"),
-        "is_file" => get("is_file"),
-        "is_symlink" => get("is_symlink"),
+    Ok(match method.id {
+        B::IsDir => get("is_dir"),
+        B::IsFile => get("is_file"),
+        B::IsSymlink => get("is_symlink"),
         _ => bail!("unknown method `{method}` on FileType"),
     })
 }
 
-pub(super) fn metadata_method(s: &Arc<StructData>, name: &str) -> Result<Value> {
+pub(super) fn metadata_method(s: &Arc<StructData>, name: &MethodName) -> Result<Value> {
     let get = |k: &str| s.get(k).unwrap_or(Value::Unit);
-    Ok(match name {
-        "len" => get("len"),
-        "is_dir" => get("is_dir"),
-        "is_file" => get("is_file"),
-        "is_symlink" => get("is_symlink"),
-        "modified" | "created" | "accessed" => match s.get("modified") {
+    Ok(match name.id {
+        B::Len => get("len"),
+        B::IsDir => get("is_dir"),
+        B::IsFile => get("is_file"),
+        B::IsSymlink => get("is_symlink"),
+        B::Modified | B::Created | B::Accessed => match s.get("modified") {
             Some(v) => Value::ok(v),
             None => Value::err(Value::str("timestamp not available".to_string())),
         },
-        "mode" | "dev" | "ino" | "uid" | "gid" | "mtime" => get(name),
-        "permissions" => Value::struct_of(
+        B::Mode | B::Dev | B::Ino | B::Uid | B::Gid | B::Mtime => get(&name.text),
+        B::Permissions => Value::struct_of(
             "Permissions",
             [
                 ("mode".into(), get("mode")),
@@ -511,7 +520,11 @@ pub(super) fn open_file(path: &str, opts: &std::fs::OpenOptions) -> Value {
 // setters return a fresh struct with one flag flipped, matching the real
 // `&mut self -> &mut Self` chain, and `open` assembles a real std OpenOptions
 // from the flags and opens the file.
-pub(super) fn openoptions_method(s: &StructData, name: &str, args: &[Value]) -> Result<Value> {
+pub(super) fn openoptions_method(
+    s: &StructData,
+    name: &MethodName,
+    args: &[Value],
+) -> Result<Value> {
     const FLAGS: [&str; 6] = [
         "read",
         "write",
@@ -521,17 +534,17 @@ pub(super) fn openoptions_method(s: &StructData, name: &str, args: &[Value]) -> 
         "truncate",
     ];
     let field_bool = |k: &str| matches!(s.get(k), Some(Value::Bool(true)));
-    if FLAGS.contains(&name) {
+    if FLAGS.contains(&name.text.as_str()) {
         let on = matches!(args.first(), Some(Value::Bool(true)));
         let pairs = FLAGS.iter().map(|&k| {
             (
                 Arc::from(k),
-                Value::Bool(if k == name { on } else { field_bool(k) }),
+                Value::Bool(if k == name.text { on } else { field_bool(k) }),
             )
         });
         return Ok(Value::struct_of("OpenOptions", pairs));
     }
-    if name == "open" {
+    if name.id == B::Open {
         let path = args.first().map(path_like).unwrap_or_default();
         let mut opts = std::fs::OpenOptions::new();
         opts.read(field_bool("read"))

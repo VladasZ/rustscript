@@ -12,7 +12,8 @@ use anyhow::{Result, bail};
 use parking_lot::Mutex;
 
 use super::bytecode::Chunk;
-use super::bytecode::{BuiltinId, MethodName};
+use super::bytecode::{BuiltinId, BuiltinId as B, MethodName, PathId, PathRef};
+use super::enum_def::EnumKind;
 use super::methods::{self, make_ordering};
 use super::native::Native;
 use super::shared::{self, Args, CharOut, F32Out, Num, NumOut, parse_rfc3339};
@@ -45,16 +46,22 @@ impl Vm {
     /// The text a user `Display` or `Debug` impl renders for this value, or
     /// None when the value's type has no such impl. The impl runs with the
     /// value and a formatter buffer, and the buffer is the answer.
-    pub(super) fn user_fmt_text(self: &Arc<Self>, v: &Value, key: &str) -> Result<Option<String>> {
-        let ty: &str = match v {
-            Value::Struct(s) => s.name(),
-            Value::Enum { enum_name, .. } => enum_name,
-            _ => return Ok(None),
-        };
-        let Some(chunk) = self.methods.get(&(ty.to_string(), key.to_string())) else {
+    pub(super) fn user_fmt_text(
+        self: &Arc<Self>,
+        v: &Value,
+        debug: bool,
+    ) -> Result<Option<String>> {
+        let Some(methods) = self.impls.of_value(v) else {
             return Ok(None);
         };
-        let chunk = chunk.clone();
+        let Some(chunk) = (if debug {
+            &methods.debug
+        } else {
+            &methods.display
+        })
+        .clone() else {
+            return Ok(None);
+        };
         let handle = Arc::new(parking_lot::Mutex::new(Native::Fmt(String::new())));
         let args = vec![v.clone(), Value::Native(handle.clone())];
         self.run_chunk(&chunk, &args, &[])?;
@@ -77,7 +84,7 @@ impl Vm {
                 if Arc::strong_count(&s) != 1 {
                     return Ok(());
                 }
-                self.run_drop_impl(s.name().to_string(), Value::Struct(s.clone()))?;
+                self.run_drop_impl(Value::Struct(s.clone()))?;
                 // The impl could have stored a clone of self somewhere, in
                 // which case the fields live on with it.
                 if Arc::strong_count(&s) != 1 {
@@ -91,22 +98,15 @@ impl Vm {
                 }
                 Ok(())
             }
-            Value::Enum {
-                enum_name,
-                variant,
-                data,
-            } => {
+            Value::Enum { def, variant, data } => {
                 if Arc::strong_count(&data) != 1 {
                     return Ok(());
                 }
-                self.run_drop_impl(
-                    enum_name.to_string(),
-                    Value::Enum {
-                        enum_name,
-                        variant,
-                        data: data.clone(),
-                    },
-                )?;
+                self.run_drop_impl(Value::Enum {
+                    def,
+                    variant,
+                    data: data.clone(),
+                })?;
                 if Arc::strong_count(&data) != 1 {
                     return Ok(());
                 }
@@ -147,154 +147,129 @@ impl Vm {
         }
     }
 
-    /// Run `ty`'s own `Drop::drop` on `value`, when the script defines one.
-    fn run_drop_impl(self: &Arc<Self>, ty: String, value: Value) -> Result<()> {
-        let Some(chunk) = self.methods.get(&(ty, "Drop::drop".to_string())) else {
+    /// Run the value type's own `Drop::drop`, when the script defines one.
+    fn run_drop_impl(self: &Arc<Self>, value: Value) -> Result<()> {
+        let Some(chunk) = self
+            .impls
+            .of_value(&value)
+            .and_then(|methods| methods.drop.clone())
+        else {
             return Ok(());
         };
-        let chunk = chunk.clone();
         self.run_chunk(&chunk, &[value], &[])?;
         Ok(())
     }
 
     // -- path values -------------------------------------------------------
 
-    pub(super) fn eval_path_value(&self, raw: &[String]) -> Result<Value> {
-        let segs = self.canonical(raw);
-        match segs.last().map(String::as_str) {
-            Some("None") => Ok(Value::none()),
-            Some("UNIX_EPOCH") => Ok(Native::SystemTime(std::time::UNIX_EPOCH).wrap()),
-            Some(other) => {
-                if let Some(v) = super::crates_bridge::base64_engine(other) {
-                    return Ok(v);
-                }
-                if let Some(v) = super::winreg_bridge::winreg_const(other) {
-                    return Ok(v);
-                }
-                if let Some(v) = super::service_bridge::service_const(other) {
-                    return Ok(v);
-                }
-                if segs.len() >= 2 {
-                    let ty = segs[segs.len() - 2].as_str();
-                    if let Some(v) = typed_path_constant(ty, other) {
-                        return Ok(v);
-                    }
-                    if let Some(v) = self.unit_variant(Some(ty), other) {
-                        return Ok(v);
-                    }
-                } else {
-                    if let Some(v) = self.unit_variant(None, other) {
-                        return Ok(v);
-                    }
-                    // A unit struct used as a value, `struct Marker;` then
-                    // `Marker`.
-                    if let Some(name) = self
-                        .unit_structs
-                        .iter()
-                        .find(|name| &***name == other || super::resolver::bare(name) == other)
-                    {
-                        return Ok(Value::structure(
-                            super::value::StructShape::new(&**name, Vec::new()),
-                            Vec::new(),
-                        ));
-                    }
-                }
-                // A bare function name used as a value, `.map(strip_html)`. The
-                // closure forwards its arguments to the call, which
-                // `dispatch_call` resolves back to the user function.
-                if segs.len() == 1
-                    && let Some(chunk) = self.user_function(other)
-                {
-                    return Ok(path_closure(segs.clone(), chunk.num_params));
-                }
-                // A path used as a function value. A zero-arg constructor like
-                // `Vec::new` handed to `or_insert_with` becomes a nullary
-                // closure. Anything else, a method reference like
-                // `Value::as_str` handed to `and_then`, becomes a one-arg
-                // closure, and `dispatch_call` resolves it as a UFCS method
-                // call on that argument.
-                if matches!(other, "new" | "default") {
-                    return Ok(path_closure(segs.clone(), 0));
-                }
-                let function = segs.join("::");
-                if segs.len() >= 2
-                    && let Some(chunk) = self
-                        .user_method(&segs[segs.len() - 2], other)
-                        .or_else(|| self.user_function(&function))
-                        .or_else(|| self.user_function(other))
-                {
-                    return Ok(path_closure(segs.clone(), chunk.num_params));
-                }
-                // A SCREAMING_CASE tail is a constant, never a function, so
-                // wrapping it in the closure fallback would smuggle a closure
-                // value into arithmetic.
-                if other.chars().any(|c| c.is_ascii_uppercase())
-                    && !other.chars().any(|c| c.is_ascii_lowercase())
-                {
-                    bail!("unsupported constant `{function}`");
-                }
-                Ok(path_closure(segs.clone(), 1))
-            }
-            None => bail!("empty path"),
+    pub(super) fn eval_path_value(&self, path: &PathRef) -> Result<Value> {
+        if path.id == PathId::Other {
+            return self.user_path_value(path);
         }
+        if let Some(v) = path_constant(path.id) {
+            return Ok(v);
+        }
+        // A path used as a function value. A zero-arg constructor like
+        // `Vec::new` handed to `or_insert_with` becomes a nullary closure.
+        // Anything else, `Some` handed to `map`, becomes a one-arg closure,
+        // and `dispatch_call` runs the call.
+        let arity = usize::from(!matches!(path.id.name(), "new" | "default"));
+        Ok(path_closure(path.clone(), arity))
+    }
+
+    /// A user item used as a value: a unit variant, a unit struct, a
+    /// function by bare name, or a method reference.
+    fn user_path_value(&self, path: &PathRef) -> Result<Value> {
+        let segs = &path.segs;
+        let Some(last) = segs.last().map(String::as_str) else {
+            bail!("empty path");
+        };
+        if segs.len() >= 2 {
+            let ty = segs[segs.len() - 2].as_str();
+            if let Some(v) = self.unit_variant(Some(ty), last) {
+                return Ok(v);
+            }
+        } else {
+            if let Some(v) = self.unit_variant(None, last) {
+                return Ok(v);
+            }
+            // A unit struct used as a value, `struct Marker;` then
+            // `Marker`.
+            if let Some(name) = self
+                .unit_structs
+                .iter()
+                .find(|name| &***name == last || super::resolver::bare(name) == last)
+            {
+                let type_id = self.impls.type_id(name);
+                return Ok(Value::structure(
+                    super::value::StructShape::typed(&**name, type_id, Vec::new(), Vec::new()),
+                    Vec::new(),
+                ));
+            }
+            // A bare function name used as a value, `.map(strip_html)`. The
+            // closure forwards its arguments to the call, which
+            // `dispatch_call` resolves back to the user function.
+            if let Some(chunk) = self.user_function(last) {
+                return Ok(path_closure(path.clone(), chunk.num_params));
+            }
+        }
+        // A path used as a function value. A zero-arg constructor handed to
+        // `or_insert_with` becomes a nullary closure. A method reference like
+        // `Value::as_str` handed to `and_then` becomes a one-arg closure, and
+        // `dispatch_call` resolves it as a UFCS method call on that argument.
+        if matches!(last, "new" | "default") {
+            return Ok(path_closure(path.clone(), 0));
+        }
+        if segs.len() >= 2
+            && let Some(chunk) = self
+                .user_method(&segs[segs.len() - 2], last)
+                .or_else(|| self.user_function(&path.display()))
+                .or_else(|| self.user_function(last))
+        {
+            return Ok(path_closure(path.clone(), chunk.num_params));
+        }
+        // A SCREAMING_CASE tail is a constant, never a function, so
+        // wrapping it in the closure fallback would smuggle a closure
+        // value into arithmetic.
+        if last.chars().any(|c| c.is_ascii_uppercase())
+            && !last.chars().any(|c| c.is_ascii_lowercase())
+        {
+            bail!("unsupported constant `{}`", path.display());
+        }
+        Ok(path_closure(path.clone(), 1))
     }
 
     // -- path calls --------------------------------------------------------
 
-    /// A one-segment call: the option and result constructors, `drop`, a
-    /// script function by bare name, or a tuple struct or variant.
-    fn dispatch_bare_call(self: &Arc<Self>, name: &str, args: Vec<Value>) -> Result<Value> {
-        match name {
-            "Some" => return Ok(Value::some(one(args)?)),
-            "Ok" => return Ok(Value::ok(one(args)?)),
-            "Err" => return Ok(Value::err(one(args)?)),
+    pub(super) fn dispatch_call(
+        self: &Arc<Self>,
+        path: &PathRef,
+        args: Vec<Value>,
+    ) -> Result<Value> {
+        match path.id {
+            PathId::Other => return self.dispatch_user_call(path, args),
+            PathId::Some => return Ok(Value::some(one(args)?)),
+            PathId::Ok => return Ok(Value::ok(one(args)?)),
+            PathId::Err => return Ok(Value::err(one(args)?)),
             // A user type with a `Drop` impl runs it now, its register was
             // cleared at the call site so this is the last holder. Anything
             // else dies with its register, file writes are unbuffered.
-            "drop" => {
+            PathId::Drop => {
                 self.run_user_drop(one(args)?)?;
                 return Ok(Value::Unit);
             }
-            _ => {}
-        }
-        if let Some(chunk) = self.user_function(name) {
-            return self.run_chunk(&chunk, &args, &[]);
-        }
-        if self.struct_names.contains(name) {
-            return Ok(Self::make_tuple_struct(name, args));
-        }
-        if let Some(v) = self.make_tuple_variant(None, name, &args) {
-            return Ok(v);
-        }
-        bail!("unknown function `{name}`");
-    }
-
-    pub(super) fn dispatch_call(
-        self: &Arc<Self>,
-        segs: &[String],
-        args: Vec<Value>,
-    ) -> Result<Value> {
-        let canon = self.canonical(segs);
-        if canon.len() == 1 {
-            return self.dispatch_bare_call(&canon[0], args);
-        }
-
-        // A namespaced call, `module::func` or `Type::func`. Match on the last
-        // two segments so `use` shortenings and full paths behave the same.
-        let last = canon[canon.len() - 1].as_str();
-        let namespace = canon[canon.len() - 2].as_str();
-        // The Ctrl-C handler must reach back into the interpreter to run the
-        // script's own closure, so it cannot go through the plain native call.
-        if namespace == "ctrlc" && last == "set_handler" {
-            let closure = args.first().cloned().unwrap_or(Value::Unit);
-            return Ok(match super::set_ctrlc_handler(closure) {
-                Ok(()) => Value::ok(Value::Unit),
-                Err(e) => Value::err(Value::str(e.to_string())),
-            });
-        }
-        if namespace == "thread" {
+            // The Ctrl-C handler must reach back into the interpreter to run
+            // the script's own closure, so it cannot go through the plain
+            // native call.
+            PathId::CtrlcSetHandler => {
+                let closure = args.first().cloned().unwrap_or(Value::Unit);
+                return Ok(match super::set_ctrlc_handler(closure) {
+                    Ok(()) => Value::ok(Value::Unit),
+                    Err(e) => Value::err(Value::str(e.to_string())),
+                });
+            }
             // sleep is the one thread function that needs no threading.
-            if last == "sleep" {
+            PathId::ThreadSleep => {
                 let Some(d) = args
                     .first()
                     .and_then(super::std_bridge::duration_from_value)
@@ -304,21 +279,28 @@ impl Vm {
                 std::thread::sleep(d);
                 return Ok(Value::Unit);
             }
-            bail!("std::thread is not supported beyond sleep, use tokio::spawn");
-        }
-        // `tokio::sync::Mutex` is its own kind: its `lock` is awaited and
-        // answers the guard with no `Result` layer, unlike `std::sync`.
-        if namespace == "Mutex" && last == "new" && canon.iter().any(|s| s == "tokio") {
-            let inner = args.into_iter().next().unwrap_or(Value::Unit);
-            return Ok(super::cell::make_cell(
-                super::value::CellKind::TokioMutex,
-                inner,
-            ));
+            // `tokio::sync::Mutex` is its own kind: its `lock` is awaited and
+            // answers the guard with no `Result` layer, unlike `std::sync`.
+            PathId::TokioSyncMutexNew => {
+                let inner = args.into_iter().next().unwrap_or(Value::Unit);
+                return Ok(super::cell::make_cell(
+                    super::value::CellKind::TokioMutex,
+                    inner,
+                ));
+            }
+            // A json value written out in a script, `Value::String(s)`. A
+            // parsed json is held as native values here, so each variant is
+            // exactly its own payload.
+            PathId::ValueString
+            | PathId::ValueBool
+            | PathId::ValueNumber
+            | PathId::ValueArray
+            | PathId::ValueObject => return one(args),
+            _ => {}
         }
         // Namespaced calls reaching native bridges compute in i64 and f64, so
         // width-tagged numbers pass those their plain image. The script-level
-        // targets below, a user chunk, a variant constructor, a payload
-        // passthrough, or the UFCS method fallback, hand values through, so
+        // targets above and in `dispatch_user_call` hand values through, so
         // they keep the real args and their width tags.
         let images: Vec<Value> = args
             .iter()
@@ -327,73 +309,56 @@ impl Vm {
                 None => arg.clone(),
             })
             .collect();
-        if canon.first().map(String::as_str) == Some("reqwest") {
-            return super::http::reqwest_call(&canon, &images);
+        match bridge_call(path.id, &images)? {
+            Some(v) => Ok(v),
+            None => bail!("unsupported call `{}`", path.display()),
         }
-        // Ahead of the match because `Widget::render` mutates the buffer it is
-        // given, so it must run exactly once.
-        if let Some(v) = super::ratatui::ratatui_assoc(namespace, last, &images) {
+    }
+
+    /// A call the path table does not name: a script function, a method on
+    /// a user type, a tuple struct or variant, or a UFCS method reference.
+    fn dispatch_user_call(self: &Arc<Self>, path: &PathRef, args: Vec<Value>) -> Result<Value> {
+        let [.., namespace, last] = path.segs.as_slice() else {
+            let name = path.segs.first().map_or("", String::as_str);
+            if let Some(chunk) = self.user_function(name) {
+                return self.run_chunk(&chunk, &args, &[]);
+            }
+            if self.struct_names.contains(name) {
+                return Ok(self.make_tuple_struct(name, args));
+            }
+            if let Some(v) = self.make_tuple_variant(None, name, &args) {
+                return Ok(v);
+            }
+            bail!("unknown function `{name}`");
+        };
+        if namespace == "thread" {
+            bail!("std::thread is not supported beyond sleep, use tokio::spawn");
+        }
+        if let Some(chunk) = self.user_function(&path.display()) {
+            return self.run_chunk(&chunk, &args, &[]);
+        }
+        // A method on a user type, `Type::assoc(..)` or UFCS
+        // `Type::method(recv, ..)`. The receiver, if any, is simply
+        // the first argument, matching param 0.
+        if let Some(chunk) = self.user_method(namespace, last) {
+            return self.run_chunk(&chunk, &args, &[]);
+        }
+        if let Some(v) = self.make_tuple_variant(Some(namespace), last, &args) {
             return Ok(v);
         }
-        match (namespace, last) {
-            ("serde_json", _) => super::json_bridge::bridge_serde_json(last, &images),
-            ("Utc" | "Local", "now") => Ok(now_datetime(namespace == "Local")),
-            ("DateTime", "parse_from_rfc3339") => {
-                Ok(match parse_rfc3339(&arg0(&images).display()) {
-                    Ok((unix_secs, nanos, offset)) => {
-                        Value::ok(datetime_value(unix_secs, nanos, false, offset))
-                    }
-                    Err(e) => Value::err(Value::str(e)),
-                })
-            }
-            ("time", "sleep") => Ok(sleep_future(&images)),
-            ("task", "yield_now") => Ok(yield_future()),
-            _ => {
-                if let Some(chunk) = self.user_function(&canon.join("::")) {
-                    return self.run_chunk(&chunk, &args, &[]);
-                }
-                if let Some(v) = super::std_bridge::native_call(namespace, last, &images)? {
-                    return Ok(v);
-                }
-                // A method on a user type, `Type::assoc(..)` or UFCS
-                // `Type::method(recv, ..)`. The receiver, if any, is simply
-                // the first argument, matching param 0.
-                if let Some(chunk) = self.user_method(namespace, last) {
-                    return self.run_chunk(&chunk, &args, &[]);
-                }
-                if let Some(v) = super::assoc::assoc_fn(namespace, last, &images)? {
-                    return Ok(v);
-                }
-                if let Some(v) = self.make_tuple_variant(Some(namespace), last, &args) {
-                    return Ok(v);
-                }
-                // A json value written out in a script, `Value::String(s)`. A
-                // parsed json is held as native values here, so each variant is
-                // exactly its own payload.
-                if namespace == "Value"
-                    && matches!(last, "String" | "Bool" | "Number" | "Array" | "Object")
-                {
-                    return one(args);
-                }
-                // UFCS fallback: `Type::method(recv, ..)` dispatches `method`
-                // on the receiver. This is what makes a method reference used
-                // as a value, like `str::trim` handed to `map`, callable.
-                // `eval_method` takes the real args, it images them itself
-                // where a method needs that, so a width-aware method like
-                // `u8::saturating_add` still sees its real width.
-                if let Some((recv, rest)) = args.split_first() {
-                    let recv = recv.clone();
-                    let mut rest = rest.to_vec();
-                    let name = MethodName {
-                        id: BuiltinId::resolve(last),
-                        text: last.to_string(),
-                        scalar: None,
-                    };
-                    return self.eval_method(&recv, &name, &mut rest);
-                }
-                bail!("unsupported call `{}`", canon.join("::"))
-            }
+        // UFCS fallback: `Type::method(recv, ..)` dispatches `method`
+        // on the receiver. This is what makes a method reference used
+        // as a value, like `str::trim` handed to `map`, callable.
+        // `eval_method` takes the real args, it images them itself
+        // where a method needs that, so a width-aware method like
+        // `u8::saturating_add` still sees its real width.
+        if let Some((recv, rest)) = args.split_first() {
+            let recv = recv.clone();
+            let mut rest = rest.to_vec();
+            let name = self.impls.method_name(last);
+            return self.eval_method(&recv, &name, &mut rest);
         }
+        bail!("unsupported call `{}`", path.display())
     }
 
     // -- methods -----------------------------------------------------------
@@ -408,14 +373,14 @@ impl Vm {
         args: &mut [Value],
     ) -> Result<Option<Value>> {
         if let Value::Cell(kind, slot) = recv {
-            if let Some(v) = super::cell::cell_method(*kind, slot, &name.text, args)? {
+            if let Some(v) = super::cell::cell_method(*kind, slot, name.id, args)? {
                 return Ok(Some(v));
             }
             let inner = slot.lock().clone();
             return self.eval_method(&inner, name, args).map(Some);
         }
         if name.id == BuiltinId::ToString
-            && let Some(text) = self.user_fmt_text(recv, "Display::fmt")?
+            && let Some(text) = self.user_fmt_text(recv, false)?
         {
             return Ok(Some(Value::str(text)));
         }
@@ -452,22 +417,22 @@ impl Vm {
         // returns early and would never reach them. Before `bridge_image` too,
         // since a u64 past `i64::MAX` saturates there and would then claim to
         // be an i64.
-        if let Some(v) = methods::json_type_test(recv, &name.text) {
+        if let Some(v) = methods::json_type_test(recv, name) {
             return Ok(v);
         }
-        if let Some(v) = methods::json_value_method(recv, &name.text, &*args) {
+        if let Some(v) = methods::json_value_method(recv, name, &*args) {
             return Ok(v);
         }
         // Integer methods answer from the real width, before `bridge_image`
         // below flattens the receiver to an i64 that saturates at `i64::MAX`
         // and forgets whether it was a u8 or a u64.
-        if let Some(result) = int_method(recv, &name.text, args) {
+        if let Some(result) = int_method(recv, name, args) {
             return result;
         }
         // f32 methods likewise: computed in real f32 before the image below
         // widens the receiver to an f64 that prints the wrong shortest form.
         if let Value::F32(f) = recv
-            && let Some(value) = f32_method(*f, &name.text, args)?
+            && let Some(value) = f32_method(*f, name.id, args)?
         {
             return Ok(value);
         }
@@ -488,7 +453,7 @@ impl Vm {
         let hands_args_through = matches!(
             recv,
             Value::Enum { .. } | Value::Bool(_) | Value::Vec(_) | Value::Map(..)
-        ) || matches!(recv, Value::Struct(st) if &**st.name() == "Entry")
+        ) || matches!(recv, Value::Native(n) if matches!(&*n.lock(), Native::Entry { .. }))
             || name.id == BuiltinId::Fold;
         if !hands_args_through {
             for arg in args.iter_mut() {
@@ -498,7 +463,7 @@ impl Vm {
             }
         }
         // The async http client, request, and response types.
-        if let Some(res) = super::http::http_method(recv, &name.text, args) {
+        if let Some(res) = super::http::http_method(recv, name, args) {
             return res;
         }
         if let Some(v) = range_builtin(recv, name, args)? {
@@ -509,7 +474,7 @@ impl Vm {
         // the call is the user type's own method.
         let expanded;
         let recv = if matches!(recv, Value::Range { .. })
-            || (self.has_user_next(recv) && !self.user_method_exists(recv, &name.text))
+            || (self.has_user_next(recv) && !self.user_method_exists(recv, name))
         {
             expanded = self.iterator_value(recv.clone())?;
             &expanded
@@ -524,21 +489,17 @@ impl Vm {
         }
         // A user defined `impl` method takes priority on a struct or enum, so a
         // script's own method is not shadowed by a builtin of the same name.
-        let type_key = match recv {
-            Value::Struct(st) => Some(st.name().to_string()),
-            Value::Enum { enum_name, .. } => Some(enum_name.to_string()),
-            _ => None,
-        };
-        if let Some(tk) = &type_key
-            && let Some(chunk) = self.user_method(tk, &name.text)
+        if let Some(methods) = self.impls.of_value(recv)
+            && let Some(chunk) = methods.get(name)
         {
+            let chunk = chunk.clone();
             let mut full = Vec::with_capacity(args.len() + 1);
             full.push(recv.clone());
             full.extend(args.iter().cloned());
             return self.run_chunk(&chunk, &full, &[]);
         }
         if name.id.is_higher_order()
-            && let Some(v) = self.higher_order(recv, &name.text, &*args)?
+            && let Some(v) = self.higher_order(recv, name.id, &*args)?
         {
             return Ok(v);
         }
@@ -563,51 +524,50 @@ impl Vm {
             Value::Str(s) => methods::str_method(s, name, args),
             Value::Vec(v) => super::vecmap::vec_method(v, name, args),
             Value::Map(map, kind) => super::vecmap::map_method(map, *kind, name, args),
-            Value::Enum { enum_name, .. } if &**enum_name == "Option" => {
+            Value::Enum { def, .. } if def.kind == EnumKind::Option => {
                 methods::opt_method(recv, name, args)
             }
-            Value::Enum { enum_name, .. } if &**enum_name == "Result" => {
+            Value::Enum { def, .. } if def.kind == EnumKind::Result => {
                 methods::res_method(recv, name, args)
             }
-            Value::Enum { .. } => methods::generic_method(recv, m, args),
+            Value::Enum { .. } => methods::generic_method(recv, name, args),
             Value::Struct(st) if super::ratatui::is_ratatui_struct(st.name()) => {
-                super::ratatui::struct_method(st, m, args)
+                super::ratatui::struct_method(st, name, args)
             }
             Value::Struct(st) => match &**st.name() {
-                "Command" => super::process::command_method(recv, m, args),
-                "Child" => super::process::child_method(recv, m, args),
-                "ExitStatus" => exitstatus_method(st, m),
-                "Output" => output_method(st, m),
-                "Duration" => duration_method(st, m, args),
-                "DateTime" => datetime_method(st, m, args),
-                "Entry" => methods::entry_method(st, m, args),
-                "Path" | "PathBuf" => super::std_bridge::path_method(st, m, args),
-                "OsString" => super::std_bridge::os_string_method(st, m),
-                "DirEntry" => super::std_bridge::dir_entry_method(st, m),
-                "FileType" => super::std_bridge::file_type_method(st, m),
-                "Metadata" => super::std_bridge::metadata_method(st, m),
-                "StdStream" => super::std_bridge::std_stream_method(st, m, args),
-                "OpenOptions" => super::std_bridge::openoptions_method(st, m, args),
+                "Command" => super::process::command_method(recv, name, args),
+                "Child" => super::process::child_method(recv, name, args),
+                "ExitStatus" => exitstatus_method(st, name),
+                "Output" => output_method(st, name),
+                "Duration" => duration_method(st, name, args),
+                "DateTime" => datetime_method(st, name, args),
+                "Path" | "PathBuf" => super::std_bridge::path_method(st, name, args),
+                "OsString" => super::std_bridge::os_string_method(st, name),
+                "DirEntry" => super::std_bridge::dir_entry_method(st, name),
+                "FileType" => super::std_bridge::file_type_method(st, name),
+                "Metadata" => super::std_bridge::metadata_method(st, name),
+                "StdStream" => super::std_bridge::std_stream_method(st, name, args),
+                "OpenOptions" => super::std_bridge::openoptions_method(st, name, args),
                 "Permissions" => match m {
                     "mode" => Ok(st.get("mode").unwrap_or(Value::Int(0))),
                     "readonly" => Ok(st.get("readonly").unwrap_or(Value::Bool(false))),
                     "set_readonly" => Ok(Value::Unit),
                     _ => bail!("unknown method `{m}` on Permissions"),
                 },
-                "Rng" => super::crates_bridge::rng_method(m, args),
-                "Base64Engine" => super::crates_bridge::base64_method(st, m, args),
-                "Element" => super::xmltree_bridge::element_method(st, m, args),
-                "RegKey" => super::winreg_bridge::winreg_method(st, m, args),
-                "ServiceManager" => super::service_bridge::manager_method(st, m, args),
-                "Service" => super::service_bridge::service_method(st, m, args),
-                "WmiConnection" => super::wmi_bridge::wmi_method(st, m, args),
-                _ => methods::generic_method(recv, m, args),
+                "Rng" => super::crates_bridge::rng_method(name, args),
+                "Base64Engine" => super::crates_bridge::base64_method(st, name, args),
+                "Element" => super::xmltree_bridge::element_method(st, name, args),
+                "RegKey" => super::winreg_bridge::winreg_method(st, name, args),
+                "ServiceManager" => super::service_bridge::manager_method(st, name, args),
+                "Service" => super::service_bridge::service_method(st, name, args),
+                "WmiConnection" => super::wmi_bridge::wmi_method(st, name, args),
+                _ => methods::generic_method(recv, name, args),
             },
             Value::Native(native) => Self::native_method(native, name, args),
             Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Char(_) => {
-                scalar_method(recv, m, args)
+                scalar_method(recv, name, args)
             }
-            other => methods::generic_method(other, m, args),
+            other => methods::generic_method(other, name, args),
         }
     }
 
@@ -617,72 +577,56 @@ impl Vm {
         args: &mut [Value],
     ) -> Result<Value> {
         let m = name.text.as_str();
+        let entry = match &*native.lock() {
+            Native::Entry { map, key } => Some((map.clone(), key.clone())),
+            _ => None,
+        };
+        if let Some((map, key)) = entry {
+            return methods::entry_method(&map, &key, name, args);
+        }
         if let Native::Instant(instant) = &*native.lock()
             && m == "elapsed"
         {
             return Ok(super::std_bridge::make_duration(instant.elapsed()));
         }
         // Files, readers, writers, sockets, children, clocks, temp files.
-        if let Some(v) = super::native_methods::native_method(native, m, args)? {
+        if let Some(v) = super::native_methods::native_method(native, name, args)? {
             return Ok(v);
         }
-        if let Some(v) = super::regex_bridge::regex_native_method(native, m, args)? {
+        if let Some(v) = super::regex_bridge::regex_native_method(native, name, args)? {
             return Ok(v);
         }
-        methods::generic_method(&Value::Native(native.clone()), m, args)
+        methods::generic_method(&Value::Native(native.clone()), name, args)
     }
 }
 
 // -- free helpers ----------------------------------------------------------
 
-/// A `Type::CONST` path value: env consts, numeric limits, and the bridge
-/// constants that hang off a type name. The widths that tag their values,
-/// `u16::MAX`, carry the tag so the constant keeps its real width.
-fn typed_path_constant(ty: &str, name: &str) -> Option<Value> {
-    // `ErrorKind::NotFound` and friends compare against `e.kind()` answers.
-    if ty == "ErrorKind" {
-        return Some(Value::enum_of("ErrorKind", name, Vec::new()));
-    }
-    if ty == "consts" {
-        let text = match name {
-            "OS" => std::env::consts::OS,
-            "ARCH" => std::env::consts::ARCH,
-            "FAMILY" => std::env::consts::FAMILY,
-            "EXE_EXTENSION" => std::env::consts::EXE_EXTENSION,
-            "EXE_SUFFIX" => std::env::consts::EXE_SUFFIX,
-            "PI" => return Some(Value::Float(PI)),
-            _ => return None,
-        };
-        return Some(Value::str(text));
-    }
-    if let Some(v) = int_limit(ty, name) {
-        return Some(v);
-    }
-    if let Some(v) = super::ratatui::ratatui_const(ty, name) {
-        return Some(v);
-    }
-    if let Some(v) = super::service_bridge::service_variant(ty, name) {
-        return Some(v);
-    }
-    if let Some(v) = super::jwt_bridge::jwt_algorithm(ty, name) {
-        return Some(v);
-    }
-    if ty == "Ordering" {
-        use std::cmp::Ordering::{Equal, Greater, Less};
-        let o = match name {
-            "Less" => Less,
-            "Greater" => Greater,
-            "Equal" => Equal,
-            _ => return None,
-        };
-        return Some(make_ordering(o));
-    }
-    // A json null is None here, the same mapping the parser uses, so
-    // `serde_json::Value::Null` written in a script lands on the same value.
-    if ty == "Value" && name == "Null" {
-        return Some(Value::none());
-    }
-    None
+/// A path value the table names: env consts, numeric limits, and the bridge
+/// constants that hang off a type name. None for a path that names a
+/// function, which becomes a closure instead.
+fn path_constant(id: PathId) -> Option<Value> {
+    let text = match id {
+        PathId::UnixEpoch => return Some(Native::SystemTime(std::time::UNIX_EPOCH).wrap()),
+        // A json null is None here, the same mapping the parser uses, so
+        // `serde_json::Value::Null` written in a script lands on the same
+        // value.
+        PathId::ValueNull => return Some(Value::none()),
+        PathId::ConstsPi => return Some(Value::Float(PI)),
+        PathId::ConstsOs => std::env::consts::OS,
+        PathId::ConstsArch => std::env::consts::ARCH,
+        PathId::ConstsFamily => std::env::consts::FAMILY,
+        PathId::ConstsExeExtension => std::env::consts::EXE_EXTENSION,
+        PathId::ConstsExeSuffix => std::env::consts::EXE_SUFFIX,
+        _ => {
+            return numeric_limit(id)
+                .or_else(|| super::crates_bridge::base64_engine(id))
+                .or_else(|| super::winreg_bridge::winreg_const(id))
+                .or_else(|| super::service_bridge::service_const(id))
+                .or_else(|| super::ratatui::ratatui_const(id));
+        }
+    };
+    Some(Value::str(text))
 }
 
 fn one(args: Vec<Value>) -> Result<Value> {
@@ -734,64 +678,102 @@ fn range_builtin(recv: &Value, name: &MethodName, args: &[Value]) -> Result<Opti
     Ok(None)
 }
 
-// `usize::MAX`, `i32::MIN`, `f32::NAN` and friends, at their real width.
-// Returns None for anything that is not a numeric limit path.
-fn int_limit(ty: &str, name: &str) -> Option<Value> {
-    // The float limits first, `f64::EPSILON` guards float comparisons.
-    if ty == "f64" {
-        let v = match name {
-            "EPSILON" => f64::EPSILON,
-            "MAX" => f64::MAX,
-            "MIN" => f64::MIN,
-            "MIN_POSITIVE" => f64::MIN_POSITIVE,
-            "INFINITY" => f64::INFINITY,
-            "NEG_INFINITY" => f64::NEG_INFINITY,
-            "NAN" => f64::NAN,
-            _ => return None,
-        };
-        return Some(Value::Float(v));
-    }
-    if ty == "f32" {
-        let v = match name {
-            "EPSILON" => f32::EPSILON,
-            "MAX" => f32::MAX,
-            "MIN" => f32::MIN,
-            "MIN_POSITIVE" => f32::MIN_POSITIVE,
-            "INFINITY" => f32::INFINITY,
-            "NEG_INFINITY" => f32::NEG_INFINITY,
-            "NAN" => f32::NAN,
-            _ => return None,
-        };
-        return Some(Value::F32(v));
-    }
-    // The 128-bit bounds live in `Value::Big`, u128's as reinterpreted bits.
-    if ty == "i128" {
-        return match name {
-            "MAX" => Some(Value::Big(i128::MAX, super::numeric::IntWidth::I128)),
-            "MIN" => Some(Value::Big(i128::MIN, super::numeric::IntWidth::I128)),
-            _ => None,
-        };
-    }
-    if ty == "u128" {
-        return match name {
-            "MAX" => Some(Value::Big(
-                u128::MAX.cast_signed(),
-                super::numeric::IntWidth::U128,
-            )),
-            "MIN" => Some(Value::Big(0, super::numeric::IntWidth::U128)),
-            _ => None,
-        };
-    }
-    let w = super::numeric::IntWidth::parse(ty)?;
-    let value = match name {
-        "MAX" => w.max(),
-        "MIN" => w.min(),
+/// `usize::MAX`, `i32::MIN`, `f32::NAN` and friends, at their real width.
+/// The widths that tag their values, `u16::MAX`, carry the tag so the
+/// constant keeps its real width.
+fn numeric_limit(id: PathId) -> Option<Value> {
+    use super::numeric::IntWidth;
+    Some(match id {
+        // The float limits first, `f64::EPSILON` guards float comparisons.
+        PathId::F64Epsilon => Value::Float(f64::EPSILON),
+        PathId::F64Max => Value::Float(f64::MAX),
+        PathId::F64Min => Value::Float(f64::MIN),
+        PathId::F64MinPositive => Value::Float(f64::MIN_POSITIVE),
+        PathId::F64Infinity => Value::Float(f64::INFINITY),
+        PathId::F64NegInfinity => Value::Float(f64::NEG_INFINITY),
+        PathId::F64Nan => Value::Float(f64::NAN),
+        PathId::F32Epsilon => Value::F32(f32::EPSILON),
+        PathId::F32Max => Value::F32(f32::MAX),
+        PathId::F32Min => Value::F32(f32::MIN),
+        PathId::F32MinPositive => Value::F32(f32::MIN_POSITIVE),
+        PathId::F32Infinity => Value::F32(f32::INFINITY),
+        PathId::F32NegInfinity => Value::F32(f32::NEG_INFINITY),
+        PathId::F32Nan => Value::F32(f32::NAN),
+        // The 128-bit bounds live in `Value::Big`, u128's as reinterpreted
+        // bits.
+        PathId::I128Max => Value::Big(i128::MAX, IntWidth::I128),
+        PathId::I128Min => Value::Big(i128::MIN, IntWidth::I128),
+        PathId::U128Max => Value::Big(u128::MAX.cast_signed(), IntWidth::U128),
+        PathId::U128Min => Value::Big(0, IntWidth::U128),
+        PathId::I8Max
+        | PathId::I16Max
+        | PathId::I32Max
+        | PathId::I64Max
+        | PathId::IsizeMax
+        | PathId::U8Max
+        | PathId::U16Max
+        | PathId::U32Max
+        | PathId::U64Max
+        | PathId::UsizeMax => {
+            let w = IntWidth::parse(id.namespace())?;
+            Value::int_of_width(w.max(), w)
+        }
+        PathId::I8Min
+        | PathId::I16Min
+        | PathId::I32Min
+        | PathId::I64Min
+        | PathId::IsizeMin
+        | PathId::U8Min
+        | PathId::U16Min
+        | PathId::U32Min
+        | PathId::U64Min
+        | PathId::UsizeMin => {
+            let w = IntWidth::parse(id.namespace())?;
+            Value::int_of_width(w.min(), w)
+        }
         _ => return None,
-    };
-    Some(Value::int_of_width(value, w))
+    })
 }
 
-fn exitstatus_method(s: &Arc<super::value::StructData>, m: &str) -> Result<Value> {
+/// The bridge call behind a table path: chrono, the async sleeps, reqwest,
+/// ratatui, std, and the associated functions. None when no bridge answers
+/// the id, which is a table entry with no implementation behind it.
+fn bridge_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
+    match id {
+        PathId::UtcNow | PathId::LocalNow => {
+            return Ok(Some(now_datetime(id == PathId::LocalNow)));
+        }
+        PathId::DateTimeParseFromRfc3339 => {
+            return Ok(Some(match parse_rfc3339(&arg0(args).display()) {
+                Ok((unix_secs, nanos, offset)) => {
+                    Value::ok(datetime_value(unix_secs, nanos, false, offset))
+                }
+                Err(e) => Value::err(Value::str(e)),
+            }));
+        }
+        PathId::TimeSleep => return Ok(Some(sleep_future(args))),
+        PathId::TaskYieldNow => return Ok(Some(yield_future())),
+        PathId::ReqwestGet
+        | PathId::ReqwestBlockingGet
+        | PathId::ReqwestClientNew
+        | PathId::ReqwestClientBuilder
+        | PathId::ReqwestBlockingClientNew
+        | PathId::ReqwestBlockingClientBuilder
+        | PathId::RedirectPolicyNone
+        | PathId::RedirectPolicyLimited => return super::http::reqwest_call(id, args).map(Some),
+        _ => {}
+    }
+    if let Some(v) = super::ratatui::ratatui_assoc(id, args) {
+        return Ok(Some(v));
+    }
+    if let Some(v) = super::std_bridge::native_call(id, args)? {
+        return Ok(Some(v));
+    }
+    super::assoc::assoc_fn(id, args)
+}
+
+fn exitstatus_method(s: &Arc<super::value::StructData>, name: &MethodName) -> Result<Value> {
+    let m = name.id;
     let success = matches!(s.get("success"), Some(Value::Bool(true)));
     let code = match s.get("code") {
         Some(Value::Int(c)) => Some(c),
@@ -801,14 +783,15 @@ fn exitstatus_method(s: &Arc<super::value::StructData>, m: &str) -> Result<Value
         Some(shared::ExitOut::Bool(b)) => Ok(Value::Bool(b)),
         Some(shared::ExitOut::OptInt(Some(c))) => Ok(Value::some(Value::Int(c))),
         Some(shared::ExitOut::OptInt(None)) => Ok(Value::none()),
-        None => bail!("unknown method `{m}` on ExitStatus"),
+        None => bail!("unknown method `{}` on ExitStatus", name.text),
     }
 }
 
-fn output_method(s: &Arc<super::value::StructData>, m: &str) -> Result<Value> {
+fn output_method(s: &Arc<super::value::StructData>, name: &MethodName) -> Result<Value> {
+    let m = name.id;
     Ok(match m {
-        "status" | "stdout" | "stderr" => s.get(m).unwrap_or(Value::Unit),
-        _ => bail!("unknown method `{m}` on Output"),
+        B::Status | B::Stdout | B::Stderr => s.get(m.name()).unwrap_or(Value::Unit),
+        _ => bail!("unknown method `{}` on Output", name.text),
     })
 }
 
@@ -859,7 +842,12 @@ fn now_datetime(local: bool) -> Value {
     )
 }
 
-fn datetime_method(s: &Arc<super::value::StructData>, m: &str, args: &[Value]) -> Result<Value> {
+fn datetime_method(
+    s: &Arc<super::value::StructData>,
+    name: &MethodName,
+    args: &[Value],
+) -> Result<Value> {
+    let m = name.id;
     let secs = match s.get("secs") {
         Some(Value::Int(v)) => v,
         _ => 0,
@@ -876,23 +864,28 @@ fn datetime_method(s: &Arc<super::value::StructData>, m: &str, args: &[Value]) -
     match shared::datetime_core(m, secs, nanos, local, offset, &VArgs(args)) {
         Some(shared::DateOut::Int(i)) => Ok(Value::Int(i)),
         Some(shared::DateOut::Text(t)) => Ok(Value::str(t)),
-        None => bail!("unknown method `{m}` on DateTime"),
+        None => bail!("unknown method `{}` on DateTime", name.text),
     }
 }
 
-fn duration_method(s: &Arc<super::value::StructData>, m: &str, args: &[Value]) -> Result<Value> {
+fn duration_method(
+    s: &Arc<super::value::StructData>,
+    name: &MethodName,
+    args: &[Value],
+) -> Result<Value> {
+    let m = name.id;
     let secs = u64::try_from(super::std_bridge::field_int(s, "secs")).unwrap_or_default();
     let nanos = u32::try_from(super::std_bridge::field_int(s, "nanos")).unwrap_or_default();
-    if let "checked_add" | "checked_sub" = m {
+    if let B::CheckedAdd | B::CheckedSub = m {
         let own = Duration::new(secs, nanos);
         let Some(other) = args
             .first()
             .and_then(super::std_bridge::duration_from_value)
         else {
-            bail!("`{m}` on Duration takes a Duration argument");
+            bail!("`{}` on Duration takes a Duration argument", name.text);
         };
         let out = match m {
-            "checked_add" => own.checked_add(other),
+            B::CheckedAdd => own.checked_add(other),
             _ => own.checked_sub(other),
         };
         return Ok(out.map_or_else(Value::none, |d| {
@@ -903,22 +896,23 @@ fn duration_method(s: &Arc<super::value::StructData>, m: &str, args: &[Value]) -
         Some(shared::DurOut::Int(i)) => Ok(Value::Int(i)),
         Some(shared::DurOut::Float(f)) => Ok(Value::Float(f)),
         Some(shared::DurOut::Bool(b)) => Ok(Value::Bool(b)),
-        None => bail!("unknown method `{m}` on Duration"),
+        None => bail!("unknown method `{}` on Duration", name.text),
     }
 }
 
 /// Width-aware integer methods.
-fn int_method(recv: &Value, m: &str, args: &[Value]) -> Option<Result<Value>> {
+fn int_method(recv: &Value, name: &MethodName, args: &[Value]) -> Option<Result<Value>> {
+    let m = name.id;
     // An operand with no i128 image is a u128 past `i128::MAX`; it answers
     // on the native 128-bit cores over raw bits. Checking through the
     // `int_parts` failure keeps this off the hot 64-bit dispatch path.
     let Some((value, mut width)) = recv.int_parts() else {
-        return big_int_route(recv, m, args);
+        return big_int_route(recv, name, args);
     };
     let mut decoded = Vec::with_capacity(args.len());
     for arg in args {
         let Some((arg_value, arg_width)) = arg.int_parts() else {
-            return big_int_route(recv, m, args);
+            return big_int_route(recv, name, args);
         };
         decoded.push(arg_value);
         // Receiver and argument share one type in real Rust, so a width
@@ -948,7 +942,8 @@ fn int_method(recv: &Value, m: &str, args: &[Value]) -> Option<Result<Value>> {
 /// which is any non-integer receiver. Cold: the hot integer dispatch calls
 /// it only through the `int_parts` failure path.
 #[cold]
-fn big_int_route(recv: &Value, m: &str, args: &[Value]) -> Option<Result<Value>> {
+fn big_int_route(recv: &Value, name: &MethodName, args: &[Value]) -> Option<Result<Value>> {
+    let m = name.id;
     let mut width = match recv {
         Value::Big(_, w) => Some(*w),
         _ => None,
@@ -980,7 +975,7 @@ fn big_bits(v: &Value) -> Option<i128> {
 
 /// Materialize an f32 core answer as a runtime value. Called before
 /// `bridge_image` widens the receiver, so the result keeps the f32 tag.
-fn f32_method(recv: f32, name: &str, args: &[Value]) -> Result<Option<Value>> {
+fn f32_method(recv: f32, name: BuiltinId, args: &[Value]) -> Result<Option<Value>> {
     Ok(
         shared::f32_core(recv, name, &VArgs(args))?.map(|out| match out {
             F32Out::Val(value) => Value::F32(value),
@@ -1014,13 +1009,14 @@ fn int_out(out: super::int_methods::IntOut, width: super::numeric::IntWidth) -> 
     }
 }
 
-fn scalar_method(recv: &Value, m: &str, args: &[Value]) -> Result<Value> {
+fn scalar_method(recv: &Value, name: &MethodName, args: &[Value]) -> Result<Value> {
+    let m = name.id;
     // A conversion that only changes the static type is a no-op on a scalar,
     // and a number never reaches a generic dispatch, so these are answered
     // here. `2.into()` for a `serde_json::Number` is the same 2.
     match m {
-        "to_string" => return Ok(Value::str(recv.display())),
-        "clone" | "into" => return Ok(recv.clone()),
+        B::ToString => return Ok(Value::str(recv.display())),
+        B::Clone | B::Into => return Ok(recv.clone()),
         _ => {}
     }
     // Serde accessors on an already decoded scalar. A json bool arrives as a
@@ -1028,22 +1024,22 @@ fn scalar_method(recv: &Value, m: &str, args: &[Value]) -> Result<Value> {
     // the wrong type is None rather than an error, matching serde.
     if matches!(
         m,
-        "as_str"
-            | "as_i64"
-            | "as_u64"
-            | "as_f64"
-            | "as_bool"
-            | "as_array"
-            | "as_array_mut"
-            | "as_object"
-            | "as_object_mut"
+        B::AsStr
+            | B::AsI64
+            | B::AsU64
+            | B::AsF64
+            | B::AsBool
+            | B::AsArray
+            | B::AsArrayMut
+            | B::AsObject
+            | B::AsObjectMut
     ) {
         let matched = match (recv, m) {
-            (Value::Bool(_), "as_bool")
-            | (Value::Str(_), "as_str")
-            | (Value::Int(_) | Value::IntW(..), "as_i64" | "as_u64")
-            | (Value::Float(_), "as_f64") => true,
-            (Value::Int(i), "as_f64") => {
+            (Value::Bool(_), B::AsBool)
+            | (Value::Str(_), B::AsStr)
+            | (Value::Int(_) | Value::IntW(..), B::AsI64 | B::AsU64)
+            | (Value::Float(_), B::AsF64) => true,
+            (Value::Int(i), B::AsF64) => {
                 return Ok(Value::some(Value::Float(AsPrimitive::<f64>::as_(*i))));
             }
             _ => false,
@@ -1063,7 +1059,7 @@ fn scalar_method(recv: &Value, m: &str, args: &[Value]) -> Result<Value> {
         if let Some(out) = shared::num_core(n, m, &VArgs(args))? {
             return Ok(num_out(out));
         }
-        bail!("unknown method `{m}` on a number");
+        bail!("unknown method `{}` on a number", name.text);
     }
     if let Value::Char(ch) = recv
         && let Some(out) = shared::char_method(*ch, m, &VArgs(args))
@@ -1079,7 +1075,7 @@ fn scalar_method(recv: &Value, m: &str, args: &[Value]) -> Result<Value> {
             CharOut::OptU32(None) => Value::none(),
         });
     }
-    methods::generic_method(recv, m, args)
+    methods::generic_method(recv, name, args)
 }
 
 /// Turn a neutral numeric core answer into a runtime value.
@@ -1098,9 +1094,9 @@ fn num_out(out: NumOut) -> Value {
 
 /// A closure that forwards its arguments to a path call, so a path written as
 /// a value can be handed to `map` or `and_then`.
-fn path_closure(segs: Vec<String>, num_params: usize) -> Value {
+fn path_closure(path: PathRef, num_params: usize) -> Value {
     Value::Closure(Arc::new(ClosureData {
-        chunk: super::bytecode::path_call_chunk(segs, num_params),
+        chunk: super::bytecode::path_call_chunk(path, num_params),
         captured: Vec::new(),
     }))
 }
@@ -1167,7 +1163,7 @@ fn deref_receiver(
     name: &MethodName,
     args: &[Value],
 ) -> Result<RefRead> {
-    let read = if super::bytecode::builtin_mutating(&name.text) {
+    let read = if name.id.mutates() {
         reference.get_unique()
     } else {
         reference.get()
@@ -1191,8 +1187,8 @@ fn deref_receiver(
     // In-place ascii casing through a `&mut` receiver stores back the same
     // way a grow does. The upper flag reuses the harvested arm literal, a
     // partial literal here would leak a bogus name into the bridge tables.
-    if matches!(&*name.text, "make_ascii_uppercase" | "make_ascii_lowercase") {
-        let upper = &*name.text == "make_ascii_uppercase";
+    if matches!(name.id, B::MakeAsciiUppercase | B::MakeAsciiLowercase) {
+        let upper = name.id == B::MakeAsciiUppercase;
         let cased = match &value {
             Value::Str(s) => Some(Value::str(if upper {
                 s.to_ascii_uppercase()
@@ -1281,13 +1277,13 @@ fn render_template(
                 let display_text = if wants_debug {
                     String::new()
                 } else {
-                    match vm.user_fmt_text(&value, "Display::fmt")? {
+                    match vm.user_fmt_text(&value, false)? {
                         Some(text) => text,
                         None => value.display(),
                     }
                 };
                 let debug_text = if wants_debug {
-                    match vm.user_fmt_text(&value, "Debug::fmt")? {
+                    match vm.user_fmt_text(&value, true)? {
                         Some(text) => text,
                         None => value.debug(),
                     }

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 use parking_lot::Mutex;
 
+use super::bytecode::{BuiltinId as B, MethodName, PathId as P};
 use super::json_bridge::{json_to_pvalue, pvalue_to_json};
 use super::native::Native;
 use super::native_methods::value_to_bytes;
@@ -25,28 +26,28 @@ pub(super) fn bytes_to_vec(b: &[u8]) -> Value {
 }
 
 /// `module::func` call that is not a plain std bridge.
-pub(super) fn crate_bridge(module: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
+pub(super) fn crate_bridge(id: P, args: &[Value]) -> Result<Option<Value>> {
     let s0 = || args.first().map(Value::display).unwrap_or_default();
-    Ok(Some(match (module, func) {
+    Ok(Some(match id {
         // dirs -------------------------------------------------------------
-        ("dirs", "home_dir") => opt_path(dirs::home_dir()),
-        ("dirs", "cache_dir") => opt_path(dirs::cache_dir()),
-        ("dirs", "config_dir") => opt_path(dirs::config_dir()),
-        ("dirs", "config_local_dir") => opt_path(dirs::config_local_dir()),
-        ("dirs", "data_dir") => opt_path(dirs::data_dir()),
-        ("dirs", "data_local_dir") => opt_path(dirs::data_local_dir()),
-        ("dirs", "executable_dir") => opt_path(dirs::executable_dir()),
-        ("dirs", "runtime_dir") => opt_path(dirs::runtime_dir()),
-        ("dirs", "desktop_dir") => opt_path(dirs::desktop_dir()),
-        ("dirs", "download_dir") => opt_path(dirs::download_dir()),
-        ("dirs", "document_dir") => opt_path(dirs::document_dir()),
+        P::DirsHomeDir => opt_path(dirs::home_dir()),
+        P::DirsCacheDir => opt_path(dirs::cache_dir()),
+        P::DirsConfigDir => opt_path(dirs::config_dir()),
+        P::DirsConfigLocalDir => opt_path(dirs::config_local_dir()),
+        P::DirsDataDir => opt_path(dirs::data_dir()),
+        P::DirsDataLocalDir => opt_path(dirs::data_local_dir()),
+        P::DirsExecutableDir => opt_path(dirs::executable_dir()),
+        P::DirsRuntimeDir => opt_path(dirs::runtime_dir()),
+        P::DirsDesktopDir => opt_path(dirs::desktop_dir()),
+        P::DirsDownloadDir => opt_path(dirs::download_dir()),
+        P::DirsDocumentDir => opt_path(dirs::document_dir()),
         // which ------------------------------------------------------------
-        ("which", "which") => match which::which(s0()) {
+        P::WhichWhich => match which::which(s0()) {
             Ok(p) => Value::ok(make_path(p.display().to_string())),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
         // glob -------------------------------------------------------------
-        ("glob", "glob") => match glob::glob(&s0()) {
+        P::GlobGlob => match glob::glob(&s0()) {
             Ok(paths) => Value::ok(Value::vec(
                 paths
                     .map(|r| match r {
@@ -58,74 +59,74 @@ pub(super) fn crate_bridge(module: &str, func: &str, args: &[Value]) -> Result<O
             Err(e) => Value::err(Value::str(e.to_string())),
         },
         // sha2 -------------------------------------------------------------
-        ("Sha256", "new" | "default") => {
+        P::Sha256New | P::Sha256Default => {
             use sha2::Digest;
             Native::Sha256(sha2::Sha256::new()).wrap()
         }
-        ("Sha256", "digest") => {
+        P::Sha256Digest => {
             use sha2::Digest;
             bytes_to_vec(&sha2::Sha256::digest(value_to_bytes(args.first())))
         }
         // regex free functions ---------------------------------------------
-        ("regex", "escape") => Value::str(regex::escape(&s0())),
+        P::RegexEscape => Value::str(regex::escape(&s0())),
         // hex --------------------------------------------------------------
-        ("hex", "encode") => Value::str(hex::encode(value_to_bytes(args.first()))),
-        ("hex", "decode") => match hex::decode(s0()) {
+        P::HexEncode => Value::str(hex::encode(value_to_bytes(args.first()))),
+        P::HexDecode => match hex::decode(s0()) {
             Ok(b) => Value::ok(bytes_to_vec(&b)),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
         // toml -------------------------------------------------------------
-        ("toml", "from_str") => match toml::from_str::<serde_json::Value>(&s0()) {
+        P::TomlFromStr => match toml::from_str::<serde_json::Value>(&s0()) {
             Ok(j) => Value::ok(json_to_pvalue(j)),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
-        ("toml", "to_string" | "to_string_pretty") => {
+        P::TomlToString | P::TomlToStringPretty => {
             match toml::to_string(&pvalue_to_json(args.first().unwrap_or(&Value::Unit))?) {
                 Ok(s) => Value::ok(Value::str(s)),
                 Err(e) => Value::err(Value::str(e.to_string())),
             }
         }
         // serde_yaml -------------------------------------------------------
-        ("serde_yaml", "from_str") => match serde_yaml::from_str::<serde_json::Value>(&s0()) {
+        P::SerdeYamlFromStr => match serde_yaml::from_str::<serde_json::Value>(&s0()) {
             Ok(j) => Value::ok(json_to_pvalue(j)),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
-        ("serde_yaml", "to_string") => {
+        P::SerdeYamlToString => {
             match serde_yaml::to_string(&pvalue_to_json(args.first().unwrap_or(&Value::Unit))?) {
                 Ok(s) => Value::ok(Value::str(s)),
                 Err(e) => Value::err(Value::str(e.to_string())),
             }
         }
         // rand -------------------------------------------------------------
-        ("rand", "rng" | "thread_rng") => Value::struct_of("Rng", []),
-        ("rand", "random") => Value::Float(rand::random::<f64>()),
+        P::RandRng | P::RandThreadRng => Value::struct_of("Rng", []),
+        P::RandRandom => Value::Float(rand::random::<f64>()),
         // chrono is answered in `dispatch_call`, Utc/Local/DateTime.
         // jsonwebtoken -----------------------------------------------------
-        ("jsonwebtoken", "encode") => super::jwt_bridge::jwt_encode(args)?,
+        P::JsonwebtokenEncode => super::jwt_bridge::jwt_encode(args)?,
         // tempfile ---------------------------------------------------------
-        ("tempfile", "tempdir") => match tempfile::tempdir() {
+        P::TempfileTempdir => match tempfile::tempdir() {
             Ok(d) => Value::ok(Native::TempDir(d).wrap()),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
-        ("tempfile", "tempfile") => match tempfile::tempfile() {
+        P::TempfileTempfile => match tempfile::tempfile() {
             Ok(f) => Value::ok(Native::File(std::io::BufReader::new(f)).wrap()),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
-        ("NamedTempFile", "new") => match tempfile::NamedTempFile::new() {
+        P::NamedTempFileNew => match tempfile::NamedTempFile::new() {
             Ok(f) => Value::ok(Native::NamedTempFile(f).wrap()),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
         // winreg -----------------------------------------------------------
-        ("RegKey", "predef") => super::winreg_bridge::predef(args),
+        P::RegKeyPredef => super::winreg_bridge::predef(args),
         // windows-service --------------------------------------------------
-        ("ServiceManager", "local_computer") => super::service_bridge::local_computer(args),
+        P::ServiceManagerLocalComputer => super::service_bridge::local_computer(args),
         // wmi --------------------------------------------------------------
-        ("WMIConnection", "new") => super::wmi_bridge::connection(args, true),
-        ("WMIConnection", "with_namespace_path") => super::wmi_bridge::connection(args, false),
+        P::WMIConnectionNew => super::wmi_bridge::connection(args, true),
+        P::WMIConnectionWithNamespacePath => super::wmi_bridge::connection(args, false),
         // crossterm --------------------------------------------------------
-        ("terminal", "size") => terminal_size(),
+        P::TerminalSize => terminal_size(),
         // terminal-light ---------------------------------------------------
-        ("terminal_light", "luma") => terminal_luma(),
+        P::TerminalLightLuma => terminal_luma(),
         _ => return Ok(None),
     }))
 }
@@ -154,12 +155,12 @@ fn terminal_luma() -> Value {
 
 /// Recognize a base64 engine constant name and build a marker value carrying
 /// which alphabet it uses, so `.encode`/`.decode` can pick the right engine.
-pub(super) fn base64_engine(name: &str) -> Option<Value> {
-    let kind = match name {
-        "STANDARD" | "BASE64_STANDARD" => "standard",
-        "STANDARD_NO_PAD" | "BASE64_STANDARD_NO_PAD" => "standard_no_pad",
-        "URL_SAFE" | "BASE64_URL_SAFE" => "url_safe",
-        "URL_SAFE_NO_PAD" | "BASE64_URL_SAFE_NO_PAD" => "url_safe_no_pad",
+pub(super) fn base64_engine(id: P) -> Option<Value> {
+    let kind = match id {
+        P::Standard | P::Base64Standard => "standard",
+        P::StandardNoPad | P::Base64StandardNoPad => "standard_no_pad",
+        P::UrlSafe | P::Base64UrlSafe => "url_safe",
+        P::UrlSafeNoPad | P::Base64UrlSafeNoPad => "url_safe_no_pad",
         _ => return None,
     };
     Some(Value::struct_of(
@@ -168,7 +169,7 @@ pub(super) fn base64_engine(name: &str) -> Option<Value> {
     ))
 }
 
-pub(super) fn base64_method(s: &StructData, method: &str, args: &[Value]) -> Result<Value> {
+pub(super) fn base64_method(s: &StructData, method: &MethodName, args: &[Value]) -> Result<Value> {
     use base64::Engine;
     use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
     let kind = s.get("kind").map(|v| v.display()).unwrap_or_default();
@@ -182,9 +183,9 @@ pub(super) fn base64_method(s: &StructData, method: &str, args: &[Value]) -> Res
             }
         };
     }
-    Ok(match method {
-        "encode" => Value::str(pick!(encode, value_to_bytes(args.first()))),
-        "decode" => {
+    Ok(match method.id {
+        B::Encode => Value::str(pick!(encode, value_to_bytes(args.first()))),
+        B::Decode => {
             let input = args.first().map(Value::display).unwrap_or_default();
             match pick!(decode, &input) {
                 Ok(b) => Value::ok(bytes_to_vec(&b)),
@@ -195,11 +196,11 @@ pub(super) fn base64_method(s: &StructData, method: &str, args: &[Value]) -> Res
     })
 }
 
-pub(super) fn rng_method(name: &str, args: &[Value]) -> Result<Value> {
+pub(super) fn rng_method(name: &MethodName, args: &[Value]) -> Result<Value> {
     use rand::RngExt;
     let mut rng = rand::rng();
-    Ok(match name {
-        "random_range" | "gen_range" => match args.first() {
+    Ok(match name.id {
+        B::RandomRange | B::GenRange => match args.first() {
             Some(Value::Range {
                 start,
                 end,
@@ -214,7 +215,7 @@ pub(super) fn rng_method(name: &str, args: &[Value]) -> Result<Value> {
             }
             _ => bail!("random_range needs a range"),
         },
-        "random_bool" | "gen_bool" => {
+        B::RandomBool | B::GenBool => {
             let p = match args.first() {
                 Some(Value::Float(f)) => *f,
                 Some(Value::Int(i)) => AsPrimitive::<f64>::as_(*i),
@@ -222,8 +223,8 @@ pub(super) fn rng_method(name: &str, args: &[Value]) -> Result<Value> {
             };
             Value::Bool(rng.random_bool(p.clamp(0.0, 1.0)))
         }
-        "random" | "r#gen" | "gen" => Value::Float(rng.random::<f64>()),
-        "fill_bytes" | "fill" => {
+        B::Random | B::Gen => Value::Float(rng.random::<f64>()),
+        B::FillBytes | B::Fill => {
             if let Some(Value::Vec(v)) = args.first() {
                 let mut buf = v.lock();
                 for slot in buf.iter_mut() {
@@ -243,7 +244,7 @@ pub(super) fn rng_method(name: &str, args: &[Value]) -> Result<Value> {
 /// pairs with `hex::encode` exactly as the compiled crate does.
 pub(super) fn sha256_method(
     handle: &Arc<Mutex<Native>>,
-    method: &str,
+    method: &MethodName,
     args: &[Value],
 ) -> Result<Option<Value>> {
     use sha2::Digest;
@@ -251,16 +252,16 @@ pub(super) fn sha256_method(
     let Native::Sha256(hasher) = &mut *h else {
         return Ok(None);
     };
-    Ok(Some(match method {
-        "update" => {
+    Ok(Some(match method.id {
+        B::Update => {
             hasher.update(value_to_bytes(args.first()));
             Value::Unit
         }
-        "chain_update" => {
+        B::ChainUpdate => {
             hasher.update(value_to_bytes(args.first()));
             Value::Native(handle.clone())
         }
-        "finalize" => bytes_to_vec(&hasher.clone().finalize()),
+        B::Finalize => bytes_to_vec(&hasher.clone().finalize()),
         _ => return Ok(None),
     }))
 }

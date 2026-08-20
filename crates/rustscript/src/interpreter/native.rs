@@ -14,7 +14,7 @@ use std::time::{Instant, SystemTime};
 
 use parking_lot::Mutex;
 
-use super::value::Value;
+use super::value::{Map, MapKey, Value};
 
 /// A boxed future that yields a script value. `Send` so it can be driven on any
 /// worker thread.
@@ -25,6 +25,8 @@ pub type BoxFut = Pin<Box<dyn Future<Output = Value> + Send>>;
 pub type LineIter = Box<dyn Iterator<Item = std::io::Result<String>> + Send>;
 
 pub enum Native {
+    /// A `HashMap::entry` handle, the map plus the key it points at.
+    Entry { map: Map, key: MapKey },
     /// A spawned task, joined when awaited.
     Task(tokio::task::JoinHandle<Value>),
     /// A pending future, for example `tokio::time::sleep` or an async request.
@@ -106,6 +108,7 @@ pub enum Native {
 impl Native {
     pub fn type_name(&self) -> &'static str {
         match self {
+            Native::Entry { .. } => "Entry",
             Native::Task(_) => "JoinHandle",
             Native::Future(_) => "Future",
             Native::HttpClient(_) | Native::BlockingHttpClient(_) => "Client",

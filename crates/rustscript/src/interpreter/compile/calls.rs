@@ -7,8 +7,10 @@ use syn::{Expr, Lit, Pat, UnOp};
 
 use crate::interpreter::bytecode::StructShape;
 use crate::interpreter::bytecode::{
-    BinKind, CapSource, DISCARD, Member, Op, PLit, PPat, PatInfo, Reg, ScalarTy, StructLit,
+    BinKind, BuiltinId, CapSource, Const, DISCARD, EnumVariant, FieldName, Member, Op, PLit, PPat,
+    PTag, PatInfo, PathId, PathRef, Reg, ScalarTy, StructLit,
 };
+use crate::interpreter::enum_def::{EnumDef, builtin_enum, prelude_variant};
 use crate::interpreter::numeric::IntWidth;
 use crate::interpreter::serde_attrs::serde_rename;
 use crate::interpreter::typeir::CastIr;
@@ -120,6 +122,53 @@ impl Compiler<'_> {
         self.compile_resolved_call(dst, c, path, coerce, argc)
     }
 
+    /// `Some(x)`, `Ok(x)`, the other builtin tuple variants, and the empty
+    /// container constructors build their value in place, the way a user
+    /// variant does, so a `Vec::new()` in a loop skips the path dispatch.
+    /// A `with_capacity` argument still runs, its value is only a hint.
+    fn compile_builtin_ctor(
+        &mut self,
+        dst: Reg,
+        c: &syn::ExprCall,
+        path: &PathRef,
+        argc: u16,
+    ) -> Result<bool> {
+        if let Some((def, index)) = self.resolve_variant(&path.segs)
+            && !def.is_unit(index)
+        {
+            let base = self.compile_args(c.args.iter())?;
+            let info = self.add_enum_variant(EnumVariant {
+                def,
+                variant: index,
+            });
+            self.emit(Op::MakeEnum {
+                dst,
+                info,
+                base,
+                count: argc,
+            });
+            return Ok(true);
+        }
+        let Some(kind) = empty_container(path.id) else {
+            return Ok(false);
+        };
+        let base = self.compile_args(c.args.iter())?;
+        match kind {
+            EmptyKind::Vec => self.emit(Op::MakeVec {
+                dst,
+                base,
+                count: 0,
+            }),
+            EmptyKind::Str => {
+                let k = self.add_const(Const::Str(Arc::from("")));
+                self.emit(Op::LoadConst { dst, k });
+            }
+            EmptyKind::Map => self.emit(Op::MakeMap { dst, set: false }),
+            EmptyKind::Set => self.emit(Op::MakeMap { dst, set: true }),
+        }
+        Ok(true)
+    }
+
     /// The path-resolved half of `compile_call`: a known function by id, a
     /// constructor, an associated function, or an external bridge path.
     fn compile_resolved_call(
@@ -135,7 +184,7 @@ impl Compiler<'_> {
             Ok(r) => r,
             Err(_) => Res::External(segs.clone()),
         };
-        let path_segs = match resolved {
+        let path = match resolved {
             // A known function, called directly by id. Turbofish type args are
             // recorded so the callee can bind them to its generic parameters.
             Res::Fn(idx) => {
@@ -153,7 +202,7 @@ impl Compiler<'_> {
                 return Ok(());
             }
             // A tuple struct constructor.
-            Res::Struct(canon) => vec![canon.to_string()],
+            Res::Struct(canon) => PathRef::user(vec![canon.to_string()], coerce),
             // An associated function, UFCS method, or tuple enum variant.
             Res::TypeMember(canon, rest) => {
                 if let Some(variant) = self.enum_variant(&canon, &rest, |fields| {
@@ -171,7 +220,7 @@ impl Compiler<'_> {
                 }
                 let mut segs = vec![canon.to_string()];
                 segs.extend(rest);
-                segs
+                PathRef::user(segs, coerce)
             }
             // A tuple struct built through a type alias, `type P = Point; P(..)`.
             Res::Alias(m, target) => {
@@ -180,7 +229,7 @@ impl Compiler<'_> {
                     _ => None,
                 };
                 match aliased {
-                    Some(canon) => vec![canon.to_string()],
+                    Some(canon) => PathRef::user(vec![canon.to_string()], coerce),
                     None => bail!("cannot call `{}`", segs.join("::")),
                 }
             }
@@ -189,35 +238,17 @@ impl Compiler<'_> {
             }
             // Everything else, resolved by the VM through the bridge dispatch.
             Res::External(segs) => {
-                if is_transparent_new(&segs) && c.args.len() == 1 {
-                    return self.compile_into(dst, &c.args[0]);
+                let path = self.external_path(segs, coerce);
+                match self.compile_external_call(dst, c, path, argc)? {
+                    Some(path) => path,
+                    None => return Ok(()),
                 }
-                // The mem place functions move whole values between places,
-                // which only the compiler can express.
-                if let Some(kind) = self.mem_intrinsic(&segs)
-                    && self.compile_mem_intrinsic(dst, kind, c)?
-                {
-                    return Ok(());
-                }
-                // Numeric `T::from(x)` lowers to the same cast op as `x as T`.
-                // rustc has already proven the conversion lossless, so the
-                // widening cast computes the same value without the dynamic
-                // path dispatch.
-                if let Some(ir) = numeric_from_cast(&segs, c.args.len()) {
-                    let src = self.compile_expr(&c.args[0])?;
-                    let f = self.cur();
-                    f.casts.push(ir);
-                    let ty = idx16(f.casts.len() - 1);
-                    self.emit(Op::Cast { dst, src, ty });
-                    return Ok(());
-                }
-                segs
             }
         };
         // Explicit `drop(x)` moves `x` out, so its register clears before
         // the call and the callee sees the last holder, which is what lets
         // a user `Drop` impl run at the call.
-        let cleared = if path_segs.len() == 1 && path_segs[0] == "drop" && c.args.len() == 1 {
+        let cleared = if path.id == PathId::Drop && c.args.len() == 1 {
             place::single_path_name(&c.args[0]).and_then(|n| {
                 let n = self.unalias(&n);
                 match self.resolve(&n) {
@@ -228,7 +259,7 @@ impl Compiler<'_> {
         } else {
             None
         };
-        let p = self.add_path(path_segs, coerce);
+        let p = self.add_path(path);
         let base = self.compile_args(c.args.iter())?;
         if let Some(reg) = cleared {
             self.emit(Op::LoadUnit { dst: reg });
@@ -240,6 +271,49 @@ impl Compiler<'_> {
             argc,
         });
         Ok(())
+    }
+
+    /// The bridge paths the compiler lowers in place instead of emitting a
+    /// path call. Answers the path back when the call still needs the VM.
+    fn compile_external_call(
+        &mut self,
+        dst: Reg,
+        c: &syn::ExprCall,
+        path: PathRef,
+        argc: u16,
+    ) -> Result<Option<PathRef>> {
+        // Only `Box::new` is a compile time pass-through: a box is pure
+        // ownership, which the value model already gives every value. Rc,
+        // Arc, RefCell, Cell, and Mutex build real shared cells at runtime,
+        // their sharing is the point of the type.
+        if path.id == PathId::BoxNew && c.args.len() == 1 {
+            self.compile_into(dst, &c.args[0])?;
+            return Ok(None);
+        }
+        // The mem place functions move whole values between places, which
+        // only the compiler can express.
+        if matches!(
+            path.id,
+            PathId::MemSwap | PathId::MemTake | PathId::MemReplace
+        ) && self.compile_mem_intrinsic(dst, path.id, c)?
+        {
+            return Ok(None);
+        }
+        // Numeric `T::from(x)` lowers to the same cast op as `x as T`. rustc
+        // has already proven the conversion lossless, so the widening cast
+        // computes the same value without the dynamic path dispatch.
+        if let Some(ir) = numeric_from_cast(path.id, c.args.len()) {
+            let src = self.compile_expr(&c.args[0])?;
+            let f = self.cur();
+            f.casts.push(ir);
+            let ty = idx16(f.casts.len() - 1);
+            self.emit(Op::Cast { dst, src, ty });
+            return Ok(None);
+        }
+        if self.compile_builtin_ctor(dst, c, &path, argc)? {
+            return Ok(None);
+        }
+        Ok(Some(path))
     }
 
     /// The coercion target of a call: its own turbofish, a pending `let`
@@ -359,8 +433,8 @@ impl Compiler<'_> {
         // any value sharing first, and the receiver value stores back after,
         // which lands the split buffer of a string mutation in its place.
         let method_text = m.method.to_string();
-        let mutating =
-            place::builtin_mutating(&method_text) || self.ctx.mut_methods.contains(&method_text);
+        let mutating = BuiltinId::resolve(&method_text).mutates()
+            || self.ctx.mut_methods.contains(&method_text);
         let (recv, receiver_place) = if mutating {
             let p = self.compile_mut_receiver(&m.receiver)?;
             (p.reg, Some(p))
@@ -930,7 +1004,9 @@ impl Compiler<'_> {
 
     pub(super) fn member_of(&mut self, member: &syn::Member) -> u16 {
         match member {
-            syn::Member::Named(n) => self.add_member(Member::Named(n.to_string().into())),
+            syn::Member::Named(n) => {
+                self.add_member(Member::Named(FieldName::new(n.to_string().into())))
+            }
             syn::Member::Unnamed(i) => self.add_member(Member::Indexed(i.index as usize)),
         }
     }
@@ -1027,7 +1103,8 @@ impl Compiler<'_> {
             let shape = if let Some(shared) = known {
                 shared.clone()
             } else {
-                let built = StructShape::with_renames(name, fields, renames);
+                let type_id = self.ctx.resolver.type_id_of(&name);
+                let built = StructShape::typed(name, type_id, fields, renames);
                 self.shapes.push(built.clone());
                 built
             };
@@ -1051,12 +1128,101 @@ impl Compiler<'_> {
             self.define(&n, reg);
             binds.push((n, reg));
         }
+        let lowered = self.lower_pattern(pat);
         let f = self.cur();
         f.pats.push(PatInfo {
-            pat: lower_pattern(pat),
+            pat: lowered,
             binds,
         });
         Ok(u16::try_from(f.pats.len() - 1)?)
+    }
+
+    /// The variant a pattern path names, through the user enums first and
+    /// the builtin tables second. A path nothing resolves keeps only its
+    /// last segment, and the runtime test falls back to the name.
+    fn variant_tag(&self, path: &syn::Path) -> PTag {
+        let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        self.variant_tag_of(&segs)
+    }
+
+    fn variant_tag_of(&self, segs: &[String]) -> PTag {
+        PTag {
+            name: segs.last().map(|s| Arc::from(s.as_str())),
+            variant: self.resolve_variant(segs),
+        }
+    }
+
+    pub(super) fn resolve_variant(&self, segs: &[String]) -> Option<(Arc<EnumDef>, u16)> {
+        if let Ok(Res::TypeMember(canon, rest)) = self.resolve_path_res(segs)
+            && let [variant] = rest.as_slice()
+            && let Some(def) = self.ctx.resolver.enum_defs.get(&canon)
+            && let Some(index) = def.variant_index(variant)
+        {
+            return Some((def.clone(), index));
+        }
+        match segs {
+            [single] => prelude_variant(single).map(|(def, index)| (def.clone(), index)),
+            [.., enum_name, variant] => {
+                let def = builtin_enum(enum_name)?;
+                Some((def.clone(), def.variant_index(variant)?))
+            }
+            [] => None,
+        }
+    }
+
+    fn lower_pattern(&self, pattern: &Pat) -> PPat {
+        match pattern {
+            Pat::Wild(_) => PPat::Wild,
+            Pat::Rest(_) => PPat::Rest,
+            Pat::Ident(ident) if is_unit_variant_ident(ident) => PPat::Path {
+                tag: self.variant_tag_of(&[ident.ident.to_string()]),
+            },
+            Pat::Ident(ident) => PPat::Ident {
+                name: ident.ident.to_string(),
+                sub: ident
+                    .subpat
+                    .as_ref()
+                    .map(|subpattern| Box::new(self.lower_pattern(&subpattern.1))),
+            },
+            Pat::Lit(literal) => lower_literal(&literal.lit),
+            Pat::Paren(paren) => self.lower_pattern(&paren.pat),
+            Pat::Reference(reference) => self.lower_pattern(&reference.pat),
+            Pat::Type(typed) => self.lower_pattern(&typed.pat),
+            Pat::Tuple(tuple) => {
+                PPat::Tuple(tuple.elems.iter().map(|p| self.lower_pattern(p)).collect())
+            }
+            Pat::TupleStruct(tuple) => PPat::TupleStruct {
+                tag: self.variant_tag(&tuple.path),
+                elems: tuple.elems.iter().map(|p| self.lower_pattern(p)).collect(),
+            },
+            Pat::Path(path) => PPat::Path {
+                tag: self.variant_tag(&path.path),
+            },
+            Pat::Struct(structure) => PPat::Struct {
+                name: structure
+                    .path
+                    .segments
+                    .last()
+                    .map(|segment| segment.ident.to_string()),
+                fields: structure
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        let name = match &field.member {
+                            syn::Member::Named(name) => name.to_string(),
+                            syn::Member::Unnamed(index) => index.index.to_string(),
+                        };
+                        (name, self.lower_pattern(&field.pat))
+                    })
+                    .collect(),
+            },
+            Pat::Or(or) => PPat::Or(or.cases.iter().map(|p| self.lower_pattern(p)).collect()),
+            Pat::Slice(slice) => {
+                PPat::Slice(slice.elems.iter().map(|p| self.lower_pattern(p)).collect())
+            }
+            Pat::Range(range) => lower_range(range),
+            _ => PPat::Unsupported,
+        }
     }
 
     /// Bind an irrefutable pattern whose value already sits in `reg`.
@@ -1088,36 +1254,28 @@ impl Compiler<'_> {
     // -- macros ------------------------------------------------------------
 }
 
-// Only `Box::new` stays a compile-time pass-through: a box is pure
-// ownership, which the value model already gives every value. Rc, Arc,
-// RefCell, Cell, and Mutex build real shared cells at runtime, their
-// sharing is the point of the type.
-fn is_transparent_new(segments: &[String]) -> bool {
-    let Some((prefix, [receiver, method])) = segments.split_last_chunk::<2>() else {
-        return false;
-    };
-    (prefix.is_empty() || matches!(prefix.first().map(String::as_str), Some("std" | "alloc")))
-        && method == "new"
-        && receiver == "Box"
-}
-
 /// The cast target of a numeric `T::from(x)` call, when the whole call is
-/// exactly that shape. A `std` or `core` prefix still names the primitive.
-fn numeric_from_cast(segments: &[String], argc: usize) -> Option<CastIr> {
+/// exactly that shape.
+fn numeric_from_cast(id: PathId, argc: usize) -> Option<CastIr> {
     if argc != 1 {
         return None;
     }
-    let (prefix, [receiver, method]) = segments.split_last_chunk::<2>()?;
-    if method != "from"
-        || !(prefix.is_empty()
-            || matches!(prefix.first().map(String::as_str), Some("std" | "core")))
-    {
-        return None;
-    }
-    match receiver.as_str() {
-        "f64" => Some(CastIr::F64),
-        "f32" => Some(CastIr::F32),
-        name => IntWidth::parse(name).map(CastIr::Int),
+    match id {
+        PathId::F64From => Some(CastIr::F64),
+        PathId::F32From => Some(CastIr::F32),
+        PathId::I8From
+        | PathId::I16From
+        | PathId::I32From
+        | PathId::I64From
+        | PathId::I128From
+        | PathId::IsizeFrom
+        | PathId::U8From
+        | PathId::U16From
+        | PathId::U32From
+        | PathId::U64From
+        | PathId::U128From
+        | PathId::UsizeFrom => IntWidth::parse(id.namespace()).map(CastIr::Int),
+        _ => None,
     }
 }
 
@@ -1136,65 +1294,6 @@ pub(super) fn is_unit_variant_ident(id: &syn::PatIdent) -> bool {
             .chars()
             .next()
             .is_some_and(|c| c.is_ascii_uppercase())
-}
-
-fn lower_pattern(pattern: &Pat) -> PPat {
-    match pattern {
-        Pat::Wild(_) => PPat::Wild,
-        Pat::Rest(_) => PPat::Rest,
-        Pat::Ident(ident) if is_unit_variant_ident(ident) => PPat::Path {
-            name: Some(ident.ident.to_string()),
-        },
-        Pat::Ident(ident) => PPat::Ident {
-            name: ident.ident.to_string(),
-            sub: ident
-                .subpat
-                .as_ref()
-                .map(|subpattern| Box::new(lower_pattern(&subpattern.1))),
-        },
-        Pat::Lit(literal) => lower_literal(&literal.lit),
-        Pat::Paren(paren) => lower_pattern(&paren.pat),
-        Pat::Reference(reference) => lower_pattern(&reference.pat),
-        Pat::Type(typed) => lower_pattern(&typed.pat),
-        Pat::Tuple(tuple) => PPat::Tuple(tuple.elems.iter().map(lower_pattern).collect()),
-        Pat::TupleStruct(tuple) => PPat::TupleStruct {
-            name: tuple
-                .path
-                .segments
-                .last()
-                .map(|segment| segment.ident.to_string()),
-            elems: tuple.elems.iter().map(lower_pattern).collect(),
-        },
-        Pat::Path(path) => PPat::Path {
-            name: path
-                .path
-                .segments
-                .last()
-                .map(|segment| segment.ident.to_string()),
-        },
-        Pat::Struct(structure) => PPat::Struct {
-            name: structure
-                .path
-                .segments
-                .last()
-                .map(|segment| segment.ident.to_string()),
-            fields: structure
-                .fields
-                .iter()
-                .map(|field| {
-                    let name = match &field.member {
-                        syn::Member::Named(name) => name.to_string(),
-                        syn::Member::Unnamed(index) => index.index.to_string(),
-                    };
-                    (name, lower_pattern(&field.pat))
-                })
-                .collect(),
-        },
-        Pat::Or(or) => PPat::Or(or.cases.iter().map(lower_pattern).collect()),
-        Pat::Slice(slice) => PPat::Slice(slice.elems.iter().map(lower_pattern).collect()),
-        Pat::Range(range) => lower_range(range),
-        _ => PPat::Unsupported,
-    }
 }
 
 fn lower_range(range: &syn::PatRange) -> PPat {
@@ -1291,5 +1390,24 @@ fn turbofish_collect_target(tf: &syn::AngleBracketedGenericArguments) -> Option<
     tf.args.iter().find_map(|arg| match arg {
         syn::GenericArgument::Type(ty) => CollectTarget::of_type(ty),
         _ => None,
+    })
+}
+
+/// The empty container a constructor path builds, lowered to one op so a
+/// `Vec::new()` in a loop does not go through the path dispatch.
+enum EmptyKind {
+    Vec,
+    Str,
+    Map,
+    Set,
+}
+
+fn empty_container(id: PathId) -> Option<EmptyKind> {
+    Some(match id {
+        PathId::VecNew | PathId::VecWithCapacity => EmptyKind::Vec,
+        PathId::StringNew | PathId::StringWithCapacity => EmptyKind::Str,
+        PathId::HashMapNew | PathId::HashMapWithCapacity | PathId::BTreeMapNew => EmptyKind::Map,
+        PathId::HashSetNew | PathId::HashSetWithCapacity | PathId::BTreeSetNew => EmptyKind::Set,
+        _ => return None,
     })
 }

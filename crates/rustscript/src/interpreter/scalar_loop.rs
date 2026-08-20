@@ -29,7 +29,8 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 
-use super::bytecode::{BinKind, BuiltinId, Chunk, Const, Member, Op, PPat, UnKind};
+use super::bytecode::{BinKind, BuiltinId, Chunk, Const, Member, Op, PPat, PTag, PathId, UnKind};
+use super::enum_def::{EnumDef, EnumKind, SOME};
 use super::numeric::IntWidth;
 use super::scalar_fold::{fold_moves, op_write};
 use super::scalar_reads::chunk_reads;
@@ -187,7 +188,7 @@ pub(super) enum LOp {
         recv: u16,
         args: [u16; 2],
         argc: u8,
-        name: Box<str>,
+        id: BuiltinId,
     },
     /// `dst = vec[idx]` on one of the plan's locked vecs. `vec` indexes the
     /// plan's vec table, not a slot. A non-scalar element or a bad index
@@ -308,8 +309,8 @@ pub(super) enum LOp {
     /// holds the table, see `scalar_fn`.
     NewEnum {
         dst: u16,
-        enum_name: Arc<str>,
-        variant: Arc<str>,
+        def: Arc<EnumDef>,
+        variant: u16,
         args: [u16; MAX_ENUM_ARGS],
         argc: u8,
     },
@@ -330,7 +331,7 @@ pub(super) enum LOp {
     TestVariant {
         dst: u16,
         val: u16,
-        name: Arc<str>,
+        tag: PTag,
         binds: Box<[u16]>,
     },
     /// A recursive call back into the same function plan, run by the
@@ -573,7 +574,7 @@ fn translate_op(
             _ => return None,
         },
         Op::Method { .. } => return translate_method(vm, chunk, regs, try_mask, op),
-        Op::CallPath { .. } => return translate_call(vm, chunk, regs, op),
+        Op::CallPath { .. } => return translate_call(chunk, regs, op),
         Op::TestBind { val, pat, dst } => return translate_test(chunk, regs, *val, *pat, *dst),
         // A nested loop's entry hook has nothing to do inside a plan, which
         // already runs the nested loop unboxed, but keeps its position.
@@ -589,11 +590,7 @@ fn translate_op(
 /// flag alone otherwise.
 fn translate_test(chunk: &Chunk, regs: &mut Vec<u16>, val: u16, pat: u16, dst: u16) -> Option<LOp> {
     let info = &chunk.pats[pat as usize];
-    let PPat::TupleStruct {
-        name: Some(name),
-        elems,
-    } = &info.pat
-    else {
+    let PPat::TupleStruct { tag, elems } = &info.pat else {
         return None;
     };
     let [
@@ -608,7 +605,8 @@ fn translate_test(chunk: &Chunk, regs: &mut Vec<u16>, val: u16, pat: u16, dst: u
     let [(bind, reg)] = info.binds.as_slice() else {
         return None;
     };
-    if name != "Some" || bind != elem {
+    let is_some = matches!(&tag.variant, Some((def, SOME)) if def.kind == EnumKind::Option);
+    if !is_some || bind != elem {
         return None;
     }
     Some(LOp::TestSome {
@@ -619,11 +617,9 @@ fn translate_test(chunk: &Chunk, regs: &mut Vec<u16>, val: u16, pat: u16, dst: u
 }
 
 /// The `Op::CallPath` arm of `translate`: only a plain `f64::from(x)` or an
-/// integer `T::try_from(x)` call maps, and only while nothing shadows the
-/// bridge arm it mirrors. A user function or user method of the same name
-/// resolves first on the generic path, and a coercion on the call site has
-/// no plan equivalent, so either rejects the loop.
-fn translate_call(vm: &Vm, chunk: &Chunk, regs: &mut Vec<u16>, op: &Op) -> Option<LOp> {
+/// integer `T::try_from(x)` call maps. A coercion on the call site has no
+/// plan equivalent, so it rejects the loop.
+fn translate_call(chunk: &Chunk, regs: &mut Vec<u16>, op: &Op) -> Option<LOp> {
     let Op::CallPath {
         dst,
         path,
@@ -633,18 +629,11 @@ fn translate_call(vm: &Vm, chunk: &Chunk, regs: &mut Vec<u16>, op: &Op) -> Optio
     else {
         return None;
     };
-    let (segs, coerce) = &chunk.paths[*path as usize];
-    if segs.len() == 1 && segs[0] == "::unreachable_match" {
+    let path = &chunk.paths[*path as usize];
+    if path.id == PathId::UnreachableMatch {
         return Some(LOp::FailOver);
     }
-    if coerce.is_some() || *argc != 1 {
-        return None;
-    }
-    let canon = vm.canonical(segs);
-    let [ty, func] = canon.as_slice() else {
-        return None;
-    };
-    if vm.user_function(&format!("{ty}::{func}")).is_some() || vm.user_method(ty, func).is_some() {
+    if path.coerce.is_some() || *argc != 1 {
         return None;
     }
     let dst = if *dst == u16::MAX {
@@ -653,11 +642,11 @@ fn translate_call(vm: &Vm, chunk: &Chunk, regs: &mut Vec<u16>, op: &Op) -> Optio
         slot(regs, *dst)?
     };
     let src = slot(regs, *base)?;
-    if ty == "f64" && func == "from" {
+    if path.id == PathId::F64From {
         return Some(LOp::F64From { dst, src });
     }
-    if func == "try_from" {
-        let fits = try_fits_of(ty)?;
+    if path.id.name() == "try_from" {
+        let fits = try_fits_of(path.id.namespace())?;
         return Some(LOp::IntTryFrom { dst, src, fits });
     }
     None
@@ -733,7 +722,7 @@ fn translate_method(
             _ => {}
         }
     }
-    let known = scalar_int_method(&method.text) || scalar_float_method(&method.text);
+    let known = scalar_int_method(method.id) || scalar_float_method(method.id);
     if !known || method.scalar.is_some() || *argc > 2 {
         return None;
     }
@@ -750,7 +739,7 @@ fn translate_method(
         recv: slot(regs, *recv)?,
         args,
         argc: u8::try_from(*argc).ok()?,
-        name: method.text.clone().into_boxed_str(),
+        id: method.id,
     })
 }
 
@@ -903,10 +892,9 @@ fn map_bases(chunk: &Chunk, body: usize, exit: usize) -> Option<(Vec<u16>, Vec<b
                 }
                 match name.id {
                     BuiltinId::Insert if *argc == 2 => (*recv, true),
-                    BuiltinId::Get if *argc == 1 && *dst != u16::MAX && name.text == "get" => {
+                    BuiltinId::Get | BuiltinId::ContainsKey if *argc == 1 && *dst != u16::MAX => {
                         (*recv, false)
                     }
-                    BuiltinId::ContainsKey if *argc == 1 && *dst != u16::MAX => (*recv, false),
                     _ => continue,
                 }
             }
@@ -968,13 +956,11 @@ fn translate_map(chunk: &Chunk, regs: &mut Vec<u16>, maps: &[u16], op: &Op) -> O
                     key: slot(regs, *base)?,
                     val: slot(regs, base.checked_add(1)?)?,
                 }),
-                BuiltinId::Get if *argc == 1 && *dst != u16::MAX && name.text == "get" => {
-                    Some(LOp::MapGetOpt {
-                        dst: slot(regs, *dst)?,
-                        map,
-                        key: slot(regs, *base)?,
-                    })
-                }
+                BuiltinId::Get if *argc == 1 && *dst != u16::MAX => Some(LOp::MapGetOpt {
+                    dst: slot(regs, *dst)?,
+                    map,
+                    key: slot(regs, *base)?,
+                }),
                 BuiltinId::ContainsKey if *argc == 1 && *dst != u16::MAX => Some(LOp::MapHas {
                     dst: slot(regs, *dst)?,
                     map,
@@ -1157,13 +1143,13 @@ fn eval_num_method(
     recv: u16,
     args: [u16; 2],
     count: u8,
-    name: &str,
+    id: BuiltinId,
 ) -> Option<SVal> {
     let vals = [regs[usize::from(args[0])], regs[usize::from(args[1])]];
     let receiver = regs[usize::from(recv)];
     match receiver {
-        SVal::Float(_) => s_float_method(name, receiver, &vals[..usize::from(count)]),
-        _ => s_int_method(name, receiver, &vals[..usize::from(count)]),
+        SVal::Float(_) => s_float_method(id, receiver, &vals[..usize::from(count)]),
+        _ => s_int_method(id, receiver, &vals[..usize::from(count)]),
     }
 }
 
@@ -1212,7 +1198,10 @@ fn eval_cond_jump(regs: &[SVal], cond: u16, to: LTo, want: bool) -> OpOut {
     }
 }
 
-#[inline]
+// Forced, not hinted. Left to the inliner it gets split out of
+// `scalar_fn::try_call` whenever the surrounding code changes size, which
+// costs `binary_trees` about 7 percent and `collatz` about 12.
+#[inline(always)]
 pub(super) fn eval_op(op: &LOp, regs: &mut [SVal]) -> OpOut {
     match op {
         LOp::LoadUnit { dst } => regs[usize::from(*dst)] = SVal::Unit,
@@ -1282,9 +1271,9 @@ pub(super) fn eval_op(op: &LOp, regs: &mut [SVal]) -> OpOut {
             recv,
             args,
             argc,
-            name,
+            id,
         } => {
-            let v = eval_num_method(regs, *recv, *args, *argc, name);
+            let v = eval_num_method(regs, *recv, *args, *argc, *id);
             return land(regs, *dst, v);
         }
         LOp::Nop => {}

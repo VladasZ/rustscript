@@ -14,6 +14,8 @@ use anyhow::{Result, bail};
 use rustc_hash::FxHashMap;
 
 use super::Interp;
+use super::bytecode::PathId as P;
+use super::enum_def::{EnumKind, OK, SOME};
 use super::numeric::IntWidth;
 use super::typeir::{TypeIr, lower_type};
 use super::value::{MapKey, RsStr, StructShape, Value};
@@ -73,11 +75,12 @@ impl Interp {
                     slot += 1;
                 }
             }
-            let shape = Arc::new(StructShape {
-                name: Arc::from(&**canon),
+            let shape = StructShape::typed(
+                Arc::from(&**canon),
+                self.resolver().type_id_of(canon),
                 fields,
                 renames,
-            });
+            );
             out.insert(
                 Arc::from(&**canon),
                 Arc::new(StructInfo {
@@ -154,17 +157,8 @@ impl Vm {
                 Value::set_of(set)
             }
             TypeIr::Option(inner) => {
-                if let Value::Enum {
-                    enum_name,
-                    variant,
-                    data,
-                } = &value
-                    && &**enum_name == "Option"
-                    && &**variant == "Some"
-                {
-                    let coerced = self
-                        .coerce_value(data.lock().first().cloned().unwrap_or(Value::Unit), inner);
-                    return Value::some(coerced);
+                if let Some(payload) = value.some_payload() {
+                    return Value::some(self.coerce_value(payload, inner));
                 }
                 value
             }
@@ -181,13 +175,9 @@ impl Vm {
 
     /// If `value` is `Ok(x)` coerce `x`, otherwise coerce `value` directly.
     pub(super) fn coerce_result(&self, value: Value, ty: &TypeIr) -> Value {
-        if let Value::Enum {
-            enum_name,
-            variant,
-            data,
-        } = &value
-            && &**enum_name == "Result"
-            && &**variant == "Ok"
+        if let Value::Enum { def, variant, data } = &value
+            && def.kind == EnumKind::Result
+            && *variant == OK
         {
             let inner = data.lock().first().cloned().unwrap_or(Value::Unit);
             return Value::ok(self.coerce_value(inner, ty));
@@ -633,23 +623,20 @@ pub(super) fn pvalue_to_json(v: &Value) -> Result<serde_json::Value> {
             }
             J::Object(obj)
         }
-        Value::Enum {
-            enum_name,
-            variant,
-            data,
-        } => {
+        Value::Enum { def, variant, data } => {
             let payload = data.lock().clone();
-            if &**enum_name == "Option" {
-                match &**variant {
-                    "Some" => pvalue_to_json(&payload[0])?,
-                    _ => J::Null,
+            if def.kind == EnumKind::Option {
+                if *variant == SOME {
+                    pvalue_to_json(&payload[0])?
+                } else {
+                    J::Null
                 }
             } else if payload.is_empty() {
-                J::String(variant.to_string())
+                J::String(def.variant_name(*variant).to_string())
             } else {
                 let mut obj = serde_json::Map::default();
                 obj.insert(
-                    variant.to_string(),
+                    def.variant_name(*variant).to_string(),
                     J::Array(payload.iter().map(pvalue_to_json).collect::<Result<_>>()?),
                 );
                 J::Object(obj)
@@ -674,9 +661,9 @@ pub(super) fn pvalue_to_json(v: &Value) -> Result<serde_json::Value> {
 
 /// The `serde_json` free functions on the dynamic path, `from_str` with no
 /// type information plus `to_string` and `to_string_pretty`.
-pub(super) fn bridge_serde_json(func: &str, args: &[Value]) -> Result<Value> {
-    match func {
-        "from_str" => {
+pub(super) fn bridge_serde_json(id: P, args: &[Value]) -> Result<Value> {
+    match id {
+        P::SerdeJsonFromStr => {
             let owned;
             let s: &str = match args.first() {
                 Some(Value::Str(s)) => s,
@@ -691,21 +678,21 @@ pub(super) fn bridge_serde_json(func: &str, args: &[Value]) -> Result<Value> {
                 Err(e) => Ok(Value::err(Value::str(e.to_string()))),
             }
         }
-        "to_string" | "to_string_pretty" => {
+        P::SerdeJsonToString | P::SerdeJsonToStringPretty => {
             let v = args.first().cloned().unwrap_or(Value::Unit);
             let j = pvalue_to_json(&v)?;
-            let s = if func == "to_string_pretty" {
+            let s = if id == P::SerdeJsonToStringPretty {
                 serde_json::to_string_pretty(&j)?
             } else {
                 serde_json::to_string(&j)?
             };
             Ok(Value::ok(Value::str(s)))
         }
-        "to_value" => {
+        P::SerdeJsonToValue => {
             let v = args.first().cloned().unwrap_or(Value::Unit);
             Ok(Value::ok(json_to_pvalue(pvalue_to_json(&v)?)))
         }
-        other => bail!("unsupported serde_json function `{other}`"),
+        _ => bail!("unsupported serde_json function `{id}`"),
     }
 }
 

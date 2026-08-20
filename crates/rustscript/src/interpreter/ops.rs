@@ -6,6 +6,7 @@ use std::cmp::Ordering;
 use anyhow::{Result, anyhow, bail};
 
 use super::bytecode::{BinKind, UnKind};
+use super::enum_def::{ERR, EnumDef, EnumKind, NONE, OK, SOME};
 use super::numeric::{
     IntWidth, float_arith, i64_arith, int_arith, int_bit, int_neg, int_not, int_shift, u64_arith,
     unify,
@@ -247,21 +248,17 @@ fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
         // any `Err`, and two of the same variant compare by payload.
         (
             Value::Enum {
-                enum_name: left_enum,
+                def: left_def,
                 variant: left_variant,
                 data: left_data,
             },
             Value::Enum {
-                enum_name: right_enum,
+                def: right_def,
                 variant: right_variant,
                 data: right_data,
             },
-        ) if left_enum == right_enum => {
-            let rank = |variant: &str| match variant {
-                "None" | "Ok" => 0,
-                _ => 1,
-            };
-            match rank(left_variant).cmp(&rank(right_variant)) {
+        ) if EnumDef::same(left_def, right_def) => {
+            match left_variant.cmp(right_variant) {
                 Ordering::Equal => {
                     // Snapshots, not held guards: comparing a value with its
                     // own clone sees the same storage on both sides.
@@ -519,26 +516,18 @@ pub(super) fn set_index(recv: &Value, key: &Value, v: Value) -> Result<()> {
 
 pub(super) fn eval_try(v: Value) -> Result<Value, Value> {
     match v {
-        Value::Enum {
-            enum_name,
-            variant,
-            data,
-        } => match (&*enum_name, &*variant) {
-            ("Result", "Ok") | ("Option", "Some") => {
+        Value::Enum { def, variant, data } => match (def.kind, variant) {
+            (EnumKind::Result, OK) | (EnumKind::Option, SOME) => {
                 Ok(data.lock().first().cloned().unwrap_or(Value::Unit))
             }
-            ("Result", "Err") => {
+            (EnumKind::Result, ERR) => {
                 let inner = data.lock().first().cloned().unwrap_or(Value::Unit);
                 Err(Value::err(inner))
             }
-            ("Option", "None") => Err(Value::none()),
+            (EnumKind::Option, NONE) => Err(Value::none()),
             // Any other value acts as its own Some, matching eval_try in
             // eval.rs, see the comment there.
-            _ => Ok(Value::Enum {
-                enum_name,
-                variant,
-                data,
-            }),
+            _ => Ok(Value::Enum { def, variant, data }),
         },
         other => Ok(other),
     }

@@ -7,6 +7,8 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 use parking_lot::Mutex;
 
+use super::bytecode::{BuiltinId as B, MethodName};
+use super::enum_def::{EnumKind, SOME};
 use super::native::Native;
 use super::native_methods;
 use super::std_bridge::path_like;
@@ -192,20 +194,20 @@ pub(super) fn make_output(out: std::process::Output) -> Value {
     )
 }
 
-pub(super) fn command_method(recv: &Value, name: &str, args: &[Value]) -> Result<Value> {
+pub(super) fn command_method(recv: &Value, name: &MethodName, args: &[Value]) -> Result<Value> {
     let Value::Struct(s) = recv else {
         unreachable!()
     };
     let cmd_value = || recv.clone();
-    Ok(match name {
-        "arg" => {
+    Ok(match name.id {
+        B::Arg => {
             if let Some(Value::Vec(list)) = s.get("args") {
                 list.lock()
                     .push(args.first().cloned().unwrap_or(Value::Unit));
             }
             cmd_value()
         }
-        "args" => {
+        B::Args => {
             if let (Some(Value::Vec(list)), Some(Value::Vec(extra))) = (s.get("args"), args.first())
             {
                 let extra = extra.lock().clone();
@@ -213,11 +215,11 @@ pub(super) fn command_method(recv: &Value, name: &str, args: &[Value]) -> Result
             }
             cmd_value()
         }
-        "current_dir" => {
+        B::CurrentDir => {
             s.set("cwd", args.first().cloned().unwrap_or(Value::Unit));
             cmd_value()
         }
-        "env" => {
+        B::Env => {
             let key = args.first().map(Value::display).unwrap_or_default();
             let val = args.get(1).cloned().unwrap_or(Value::Unit);
             let envs = command_envs(s);
@@ -226,7 +228,7 @@ pub(super) fn command_method(recv: &Value, name: &str, args: &[Value]) -> Result
             }
             cmd_value()
         }
-        "env_remove" => {
+        B::EnvRemove => {
             let key = args.first().map(Value::display).unwrap_or_default();
             let envs = command_envs(s);
             if let Some(k) = Value::str(key).as_key() {
@@ -237,7 +239,7 @@ pub(super) fn command_method(recv: &Value, name: &str, args: &[Value]) -> Result
         // Rejected rather than stored when it is not an Stdio, because a value
         // this does not understand used to be kept and then quietly ignored
         // when the command was built.
-        "stdin" | "stdout" | "stderr" => {
+        B::Stdin | B::Stdout | B::Stderr => {
             let arg = args.first().cloned().unwrap_or(Value::Unit);
             match &arg {
                 Value::Struct(m) if &**m.name() == "Stdio" => {}
@@ -246,12 +248,12 @@ pub(super) fn command_method(recv: &Value, name: &str, args: &[Value]) -> Result
                     other.type_name()
                 ),
             }
-            s.set(name, arg);
+            s.set(&name.text, arg);
             cmd_value()
         }
-        "spawn" => spawn_command(s),
-        "output" => run_command(s),
-        "status" => status_command(s),
+        B::Spawn => spawn_command(s),
+        B::Output => run_command(s),
+        B::Status => status_command(s),
         _ => bail!("unknown method `{name}` on Command"),
     })
 }
@@ -276,11 +278,7 @@ const STDIN_PIPE: &str = "stdin_pipe";
 fn close_child_stdin(v: &Value) {
     match v {
         Value::Native(h) => *h.lock() = Native::Taken,
-        Value::Enum {
-            enum_name,
-            variant,
-            data,
-        } if &**enum_name == "Option" && &**variant == "Some" => {
+        Value::Enum { def, variant, data } if def.kind == EnumKind::Option && *variant == SOME => {
             let first = data.lock().first().cloned();
             if let Some(inner) = first {
                 close_child_stdin(&inner);
@@ -292,7 +290,7 @@ fn close_child_stdin(v: &Value) {
 
 /// Methods on a spawned `Child`. Lifecycle calls delegate to the real child
 /// handle; `wait_with_output` reads any piped stdout/stderr to the end first.
-pub(super) fn child_method(recv: &Value, name: &str, args: &mut [Value]) -> Result<Value> {
+pub(super) fn child_method(recv: &Value, name: &MethodName, args: &mut [Value]) -> Result<Value> {
     let Value::Struct(s) = recv else {
         unreachable!()
     };
@@ -302,14 +300,14 @@ pub(super) fn child_method(recv: &Value, name: &str, args: &mut [Value]) -> Resu
     // whole call, so close it through the shared handle instead. The hidden
     // `stdin_pipe` alias reaches the pipe even after `stdin.take()` emptied
     // the visible field.
-    if matches!(name, "wait" | "wait_with_output") {
+    if matches!(name.id, B::Wait | B::WaitWithOutput) {
         if let Some(v) = s.get(STDIN_PIPE) {
             close_child_stdin(&v);
         }
         s.set("stdin", Value::none());
         s.set(STDIN_PIPE, Value::none());
     }
-    if name == "wait_with_output" {
+    if name.id == B::WaitWithOutput {
         let out = drain_child_pipe(s, "stdout");
         let err = drain_child_pipe(s, "stderr");
         let status = {
@@ -357,7 +355,8 @@ fn drain_child_pipe(s: &StructData, key: &str) -> String {
         _ => return String::new(),
     };
     let mut target = [Value::str("")];
-    match native_methods::native_method(&handle, "read_to_string", &mut target) {
+    match native_methods::native_method(&handle, &MethodName::builtin(B::ReadToString), &mut target)
+    {
         Ok(_) => {}
         Err(_) => return String::new(),
     }

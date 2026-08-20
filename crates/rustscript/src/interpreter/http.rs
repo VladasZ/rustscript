@@ -14,6 +14,7 @@ use anyhow::{Result, anyhow, bail};
 use base64::Engine;
 use reqwest::{Client, Method};
 
+use super::bytecode::{BuiltinId as B, MethodName, PathId as P};
 use super::json_bridge::{json_to_pvalue, parse_json, pvalue_to_json};
 use super::native::Native;
 use super::std_bridge::duration_from_value;
@@ -76,47 +77,40 @@ fn blocking_client_value(c: reqwest::blocking::Client) -> Value {
 
 // -- dispatch of `reqwest::..` path calls ----------------------------------
 
-/// Handle a call whose canonical path starts with `reqwest`. Both APIs live
-/// here: the blocking one for plain scripts and the async one whose futures
-/// drive on the runtime under `.await`.
-pub(super) fn reqwest_call(segs: &[String], args: &[Value]) -> Result<Value> {
-    let last = segs.last().map_or("", String::as_str);
-    // A redirect policy marker, built by `reqwest::redirect::Policy::none()`
-    // or `::limited(n)`. It carries no `blocking` segment, so match it first.
-    if segs.iter().any(|s| s == "redirect") {
-        return Ok(match last {
-            "none" => Value::struct_of("RedirectPolicy", [("kind".into(), Value::str("none"))]),
-            "limited" => Value::struct_of(
-                "RedirectPolicy",
-                [
-                    ("kind".into(), Value::str("limited")),
-                    ("n".into(), args.first().cloned().unwrap_or(Value::Int(10))),
-                ],
-            ),
-            _ => bail!("unsupported redirect policy `{last}`"),
-        });
-    }
-    let blocking = segs.iter().any(|s| s == "blocking");
-    if segs.iter().any(|s| s == "Client") {
-        return match (blocking, last) {
-            (true, "new") => Ok(blocking_client_value(build_blocking_client(
-                false, None, None, None,
-            )?)),
-            (false, "new") => Ok(client_value(Client::new())),
-            (true, "builder") => Ok(blocking_builder_value()),
-            (false, "builder") => Ok(builder_value()),
-            _ => bail!("unknown reqwest Client function `{last}`"),
-        };
-    }
-    // The only free function either API exposes is `get`.
-    if last == "get" {
-        let url = args.first().map(Value::display).unwrap_or_default();
-        if blocking {
-            return Ok(run_blocking(&request_struct("GET", &url, Value::Unit)));
+/// The `reqwest` path calls. Both APIs live here: the blocking one for plain
+/// scripts and the async one whose futures drive on the runtime under
+/// `.await`.
+pub(super) fn reqwest_call(id: P, args: &[Value]) -> Result<Value> {
+    Ok(match id {
+        // A redirect policy marker, built by `reqwest::redirect::Policy::none()`
+        // or `::limited(n)`.
+        P::RedirectPolicyNone => {
+            Value::struct_of("RedirectPolicy", [("kind".into(), Value::str("none"))])
         }
-        return Ok(send_future(&request_struct("GET", &url, Value::Unit)));
-    }
-    bail!("unsupported reqwest function `{last}`, build a Client for other verbs")
+        P::RedirectPolicyLimited => Value::struct_of(
+            "RedirectPolicy",
+            [
+                ("kind".into(), Value::str("limited")),
+                ("n".into(), args.first().cloned().unwrap_or(Value::Int(10))),
+            ],
+        ),
+        P::ReqwestBlockingClientNew => {
+            blocking_client_value(build_blocking_client(false, None, None, None)?)
+        }
+        P::ReqwestClientNew => client_value(Client::new()),
+        P::ReqwestBlockingClientBuilder => blocking_builder_value(),
+        P::ReqwestClientBuilder => builder_value(),
+        // The only free function either API exposes is `get`.
+        P::ReqwestBlockingGet => {
+            let url = args.first().map(Value::display).unwrap_or_default();
+            run_blocking(&request_struct("GET", &url, Value::Unit))
+        }
+        P::ReqwestGet => {
+            let url = args.first().map(Value::display).unwrap_or_default();
+            send_future(&request_struct("GET", &url, Value::Unit))
+        }
+        _ => bail!("unsupported reqwest function `{id}`, build a Client for other verbs"),
+    })
 }
 
 // -- request and builder values --------------------------------------------
@@ -192,7 +186,11 @@ fn redirect_policy(s: &StructData) -> Option<reqwest::redirect::Policy> {
 
 /// Route a method on one of the http struct types. Returns `None` when the
 /// receiver is not an http type, so the caller can try other dispatch.
-pub(super) fn http_method(recv: &Value, method: &str, args: &[Value]) -> Option<Result<Value>> {
+pub(super) fn http_method(
+    recv: &Value,
+    method: &MethodName,
+    args: &[Value],
+) -> Option<Result<Value>> {
     match recv {
         Value::Native(n)
             if matches!(
@@ -217,18 +215,18 @@ pub(super) fn http_method(recv: &Value, method: &str, args: &[Value]) -> Option<
 
 fn client_method(
     n: &Arc<parking_lot::Mutex<Native>>,
-    method: &str,
+    method: &MethodName,
     args: &[Value],
 ) -> Result<Value> {
-    let verb = match method {
-        "get" => "GET",
-        "post" => "POST",
-        "put" => "PUT",
-        "delete" => "DELETE",
-        "patch" => "PATCH",
-        "head" => "HEAD",
-        "clone" => return Ok(Value::Native(n.clone())),
-        _ => bail!("unknown method `{method}` on a client"),
+    let verb = match method.id {
+        B::Get => "GET",
+        B::Post => "POST",
+        B::Put => "PUT",
+        B::Delete => "DELETE",
+        B::Patch => "PATCH",
+        B::Head => "HEAD",
+        B::Clone => return Ok(Value::Native(n.clone())),
+        _ => bail!("unknown method `{}` on a client", method.text),
     };
     let url = args.first().map(Value::display).unwrap_or_default();
     Ok(Value::Struct(request_struct(
@@ -238,29 +236,29 @@ fn client_method(
     )))
 }
 
-fn builder_method(s: &Arc<StructData>, method: &str, args: &[Value]) -> Result<Value> {
+fn builder_method(s: &Arc<StructData>, method: &MethodName, args: &[Value]) -> Result<Value> {
     let this = || Value::Struct(s.clone());
-    match method {
-        "cookie_store" => {
+    match method.id {
+        B::CookieStore => {
             s.set(
                 "cookie_store",
                 args.first().cloned().unwrap_or(Value::Bool(false)),
             );
             Ok(this())
         }
-        "timeout" => {
+        B::Timeout => {
             s.set("timeout", args.first().cloned().unwrap_or(Value::Unit));
             Ok(this())
         }
-        "user_agent" => {
+        B::UserAgent => {
             s.set("user_agent", args.first().cloned().unwrap_or(Value::Unit));
             Ok(this())
         }
-        "redirect" => {
+        B::Redirect => {
             s.set("redirect", args.first().cloned().unwrap_or(Value::Unit));
             Ok(this())
         }
-        "build" => {
+        B::Build => {
             let cookies = matches!(s.get("cookie_store"), Some(Value::Bool(true)));
             let timeout = duration_field(s, "timeout");
             let ua = match s.get("user_agent") {
@@ -290,25 +288,25 @@ fn builder_method(s: &Arc<StructData>, method: &str, args: &[Value]) -> Result<V
                 Err(e) => Value::err(Value::str(e.to_string())),
             })
         }
-        _ => bail!("unknown method `{method}` on a client builder"),
+        _ => bail!("unknown method `{}` on a client builder", method.text),
     }
 }
 
-fn request_method(s: &Arc<StructData>, method: &str, args: &[Value]) -> Result<Value> {
+fn request_method(s: &Arc<StructData>, method: &MethodName, args: &[Value]) -> Result<Value> {
     let this = || Value::Struct(s.clone());
-    match method {
-        "header" => {
+    match method.id {
+        B::Header => {
             let k = args.first().map(Value::display).unwrap_or_default();
             let v = args.get(1).map(Value::display).unwrap_or_default();
             add_header(s, &k, &v);
             Ok(this())
         }
-        "bearer_auth" => {
+        B::BearerAuth => {
             let token = args.first().map(Value::display).unwrap_or_default();
             add_header(s, "Authorization", &format!("Bearer {token}"));
             Ok(this())
         }
-        "basic_auth" => {
+        B::BasicAuth => {
             let user = args.first().map(Value::display).unwrap_or_default();
             let pass = match args.get(1) {
                 Some(Value::Enum { data, .. }) => {
@@ -321,7 +319,7 @@ fn request_method(s: &Arc<StructData>, method: &str, args: &[Value]) -> Result<V
             add_header(s, "Authorization", &format!("Basic {token}"));
             Ok(this())
         }
-        "query" => {
+        B::Query => {
             if let Some(Value::Vec(items)) = args.first()
                 && let Some(Value::Vec(q)) = s.get("query")
             {
@@ -331,26 +329,26 @@ fn request_method(s: &Arc<StructData>, method: &str, args: &[Value]) -> Result<V
             }
             Ok(this())
         }
-        "json" => {
+        B::Json => {
             let json = pvalue_to_json(args.first().unwrap_or(&Value::Unit))?;
             add_header(s, "Content-Type", "application/json");
             s.set("body", Value::str(serde_json::to_string(&json)?));
             Ok(this())
         }
-        "body" => {
+        B::Body => {
             s.set(
                 "body",
                 Value::str(args.first().map(Value::display).unwrap_or_default()),
             );
             Ok(this())
         }
-        "timeout" => {
+        B::Timeout => {
             s.set("timeout", args.first().cloned().unwrap_or(Value::Unit));
             Ok(this())
         }
         // A request built from a blocking client runs at once; one built from
         // an async client hands back a future for `.await`.
-        "send" => {
+        B::Send => {
             let blocking = matches!(
                 s.get("client"),
                 Some(Value::Native(n)) if matches!(&*n.lock(), Native::BlockingHttpClient(_))
@@ -361,7 +359,7 @@ fn request_method(s: &Arc<StructData>, method: &str, args: &[Value]) -> Result<V
                 Ok(send_future(s))
             }
         }
-        _ => bail!("unknown method `{method}` on a request"),
+        _ => bail!("unknown method `{}` on a request", method.text),
     }
 }
 
@@ -568,39 +566,39 @@ fn duration_field(s: &StructData, field: &str) -> Option<Duration> {
 
 // -- response methods ------------------------------------------------------
 
-fn response_method(s: &Arc<StructData>, method: &str) -> Result<Value> {
+fn response_method(s: &Arc<StructData>, method: &MethodName) -> Result<Value> {
     let this = || Value::Struct(s.clone());
     let body = || body_bytes(s);
     // A blocking response holds its body as decoded text, so `text` and
     // `json` answer directly. An async response holds wire bytes and hands
     // back futures for `.await`.
     let is_blocking = matches!(s.get("body"), Some(Value::Str(_)));
-    Ok(match method {
-        "status" => Value::struct_of(
+    Ok(match method.id {
+        B::Status => Value::struct_of(
             "StatusCode",
             [("code".into(), s.get("status").unwrap_or(Value::Int(0)))],
         ),
-        "text" if is_blocking => {
+        B::Text if is_blocking => {
             Value::ok(Value::str(String::from_utf8_lossy(&body()).into_owned()))
         }
-        "json" if is_blocking => {
+        B::Json if is_blocking => {
             let text = String::from_utf8_lossy(&body()).into_owned();
             match parse_json(&text) {
                 Ok(v) => Value::ok(v),
                 Err(e) => Value::err(Value::str(e.to_string())),
             }
         }
-        "text" => text_future(body()),
-        "json" => json_future(body()),
-        "content_length" => s.get("content_length").unwrap_or_else(Value::none),
-        "headers" => Value::struct_of(
+        B::Text => text_future(body()),
+        B::Json => json_future(body()),
+        B::ContentLength => s.get("content_length").unwrap_or_else(Value::none),
+        B::Headers => Value::struct_of(
             "HeaderMap",
             [(
                 "map".into(),
                 s.get("headers").unwrap_or_else(|| Value::vec(vec![])),
             )],
         ),
-        "error_for_status" => {
+        B::ErrorForStatus => {
             let code = match s.get("status") {
                 Some(Value::Int(c)) => c,
                 _ => 0,
@@ -611,7 +609,7 @@ fn response_method(s: &Arc<StructData>, method: &str) -> Result<Value> {
                 Value::err(Value::str(format!("HTTP status {code}")))
             }
         }
-        _ => bail!("unknown method `{method}` on a response"),
+        _ => bail!("unknown method `{}` on a response", method.text),
     })
 }
 
@@ -644,9 +642,9 @@ fn json_future(body: Vec<u8>) -> Value {
     .wrap()
 }
 
-fn header_map_method(s: &StructData, method: &str, args: &[Value]) -> Value {
-    match method {
-        "get" => {
+fn header_map_method(s: &StructData, method: &MethodName, args: &[Value]) -> Value {
+    match method.id {
+        B::Get => {
             let name = args
                 .first()
                 .map(Value::display)
@@ -671,21 +669,21 @@ fn header_map_method(s: &StructData, method: &str, args: &[Value]) -> Value {
     }
 }
 
-fn header_value_method(s: &StructData, method: &str) -> Value {
+fn header_value_method(s: &StructData, method: &MethodName) -> Value {
     let text = s.get("text").map(|v| v.display()).unwrap_or_default();
-    match super::shared::header_value_core(method, text) {
+    match super::shared::header_value_core(method.id, text) {
         Some(super::shared::HeaderOut::Ok(t)) => Value::ok(Value::str(t)),
         Some(super::shared::HeaderOut::Text(t)) => Value::str(t),
         None => Value::Unit,
     }
 }
 
-fn status_method(s: &StructData, method: &str) -> Value {
+fn status_method(s: &StructData, method: &MethodName) -> Value {
     let code = match s.get("code") {
         Some(Value::Int(c)) => c,
         _ => 0,
     };
-    match super::shared::status_core(method, code) {
+    match super::shared::status_core(method.id, code) {
         Some(super::shared::StatusOut::Int(i)) => Value::Int(i),
         Some(super::shared::StatusOut::Bool(b)) => Value::Bool(b),
         None => Value::Unit,

@@ -6,7 +6,7 @@ the `supported_page_is_current` test enforces it.
 
 ## any value
 
-`abs`, `as_array`, `as_array_mut`, `as_bool`, `as_f64`, `as_i128`, `as_i64`, `as_object`, `as_object_mut`, `as_str`, `as_u64`, `as_usize`, `ceil`, `checked_add`, `checked_div`, `checked_mul`, `checked_neg`, `checked_pow`, `checked_rem`, `checked_shl`, `checked_shr`, `checked_sub`, `clamp`, `clone`, `cmp`, `count_ones`, `count_zeros`, `div_euclid`, `extend`, `extend_from_slice`, `floor`, `fract`, `get`, `into`, `is_array`, `is_boolean`, `is_f64`, `is_finite`, `is_i64`, `is_infinite`, `is_multiple_of`, `is_nan`, `is_null`, `is_number`, `is_object`, `is_sign_negative`, `is_sign_positive`, `is_string`, `is_u64`, `isqrt`, `leading_zeros`, `make_ascii_lowercase`, `make_ascii_uppercase`, `max`, `min`, `mode`, `mul_add`, `partial_cmp`, `pointer`, `pointer_mut`, `pow`, `powf`, `powi`, `readonly`, `recip`, `rem_euclid`, `reverse_bits`, `rotate_left`, `rotate_right`, `round`, `saturating_add`, `saturating_mul`, `saturating_sub`, `set_readonly`, `signum`, `sqrt`, `swap_bytes`, `then`, `then_some`, `then_with`, `to_be_bytes`, `to_le_bytes`, `to_ne_bytes`, `to_string`, `trailing_zeros`, `trunc`, `wrapping_add`, `wrapping_mul`, `wrapping_neg`, `wrapping_sub`
+`abs`, `as_array`, `as_array_mut`, `as_bool`, `as_f64`, `as_i128`, `as_i64`, `as_object`, `as_object_mut`, `as_str`, `as_u64`, `as_usize`, `ceil`, `checked_add`, `checked_div`, `checked_mul`, `checked_neg`, `checked_pow`, `checked_rem`, `checked_shl`, `checked_shr`, `checked_sub`, `clamp`, `clone`, `cmp`, `contains`, `count`, `count_ones`, `count_zeros`, `div_euclid`, `extend`, `extend_from_slice`, `floor`, `fold`, `fract`, `get`, `into`, `is_array`, `is_boolean`, `is_empty`, `is_f64`, `is_finite`, `is_i64`, `is_infinite`, `is_multiple_of`, `is_nan`, `is_null`, `is_number`, `is_object`, `is_sign_negative`, `is_sign_positive`, `is_string`, `is_u64`, `isqrt`, `leading_zeros`, `len`, `make_ascii_lowercase`, `make_ascii_uppercase`, `max`, `min`, `mode`, `mul_add`, `partial_cmp`, `pointer`, `pointer_mut`, `pow`, `powf`, `powi`, `push`, `push_str`, `readonly`, `recip`, `rem_euclid`, `reverse_bits`, `rotate_left`, `rotate_right`, `round`, `saturating_add`, `saturating_mul`, `saturating_sub`, `set_readonly`, `signum`, `sqrt`, `swap_bytes`, `then`, `then_some`, `then_with`, `to_be_bytes`, `to_le_bytes`, `to_ne_bytes`, `to_string`, `trailing_zeros`, `trunc`, `wrapping_add`, `wrapping_mul`, `wrapping_neg`, `wrapping_sub`
 
 ## Base64
 
@@ -74,7 +74,7 @@ the `supported_page_is_current` test enforces it.
 
 ## Entry
 
-`and_modify`, `key`, `map`, `or_default`, `or_insert`, `or_insert_with`, `or_insert_with_key`
+`and_modify`, `key`, `or_default`, `or_insert`, `or_insert_with`, `or_insert_with_key`
 
 ## ExitStatus
 
@@ -94,7 +94,7 @@ the `supported_page_is_current` test enforces it.
 
 ## Iterator
 
-`all`, `any`, `as_str`, `by_ref`, `cloned`, `collect`, `collect_map`, `collect_set`, `collect_string`, `copied`, `filter`, `filter_map`, `find`, `find_map`, `for_each`, `last`, `map`, `max`, `min`, `next`, `peek`, `peekable`, `position`, `rev`, `rposition`, `skip_while`, `take_while`, `to_vec`
+`all`, `any`, `as_str`, `by_ref`, `cloned`, `collect`, `collect_map`, `collect_set`, `collect_string`, `copied`, `count`, `enumerate`, `filter`, `filter_map`, `find`, `find_map`, `for_each`, `last`, `map`, `max`, `min`, `next`, `peek`, `peekable`, `position`, `product`, `rev`, `rposition`, `skip`, `skip_while`, `sum`, `take`, `take_while`, `to_vec`
 
 ## Line
 
@@ -102,7 +102,7 @@ the `supported_page_is_current` test enforces it.
 
 ## Map
 
-`as_array`, `as_array_mut`, `as_object`, `as_object_mut`, `drain`, `get_mut`, `key`, `map`, `values_mut`
+`as_array`, `as_array_mut`, `as_object`, `as_object_mut`, `clone`, `contains`, `contains_key`, `count`, `drain`, `entry`, `get`, `get_mut`, `insert`, `into_iter`, `into_keys`, `into_values`, `is_empty`, `iter`, `keys`, `len`, `remove`, `values`, `values_mut`
 
 ## Match
 
@@ -126,7 +126,7 @@ the `supported_page_is_current` test enforces it.
 
 ## Option
 
-`and_then`, `as_deref`, `as_mut`, `as_ref`, `context`, `expect`, `filter`, `get`, `into_iter`, `is_none`, `is_some`, `is_some_and`, `iter`, `map`, `map_or`, `map_or_else`, `ok_or`, `ok_or_else`, `or`, `or_else`, `take`, `unwrap_or_default`, `unwrap_or_else`, `with_context`
+`and_then`, `as_deref`, `as_mut`, `as_ref`, `clone`, `cloned`, `context`, `copied`, `expect`, `filter`, `get`, `into_iter`, `is_none`, `is_some`, `is_some_and`, `iter`, `map`, `map_or`, `map_or_else`, `ok_or`, `ok_or_else`, `or`, `or_else`, `take`, `unwrap`, `unwrap_or`, `unwrap_or_default`, `unwrap_or_else`, `with_context`
 
 ## Ordering
 
@@ -198,7 +198,7 @@ the `supported_page_is_current` test enforces it.
 
 ## String and str
 
-`as_bytes`, `as_str`, `as_string`, `black`, `blue`, `bold`, `bright_blue`, `bright_cyan`, `bright_green`, `bright_red`, `bright_yellow`, `bytes`, `char_indices`, `clear`, `cmp`, `contains`, `context`, `count`, `cyan`, `dimmed`, `encode_utf16`, `ends_with`, `eq_ignore_ascii_case`, `expect`, `find`, `green`, `into_bytes`, `into_owned`, `into_string`, `is_empty`, `is_none`, `is_some`, `italic`, `len`, `magenta`, `matches`, `normal`, `on_blue`, `on_green`, `on_red`, `purple`, `red`, `repeat`, `replace`, `replacen`, `reversed`, `rfind`, `rsplit`, `rsplit_once`, `rsplitn`, `split`, `split_once`, `splitn`, `starts_with`, `strip_prefix`, `strip_suffix`, `to_ascii_lowercase`, `to_ascii_uppercase`, `to_lowercase`, `to_owned`, `to_uppercase`, `trim`, `trim_end`, `trim_end_matches`, `trim_matches`, `trim_start`, `trim_start_matches`, `trim_string`, `underline`, `unwrap`, `unwrap_or`, `unwrap_or_default`, `unwrap_or_else`, `white`, `with_context`, `yellow`
+`as_bytes`, `as_str`, `as_string`, `black`, `blue`, `bold`, `bright_blue`, `bright_cyan`, `bright_green`, `bright_red`, `bright_yellow`, `bytes`, `char_indices`, `chars`, `clear`, `clone`, `cmp`, `contains`, `context`, `count`, `cyan`, `dimmed`, `encode_utf16`, `ends_with`, `eq_ignore_ascii_case`, `expect`, `find`, `get`, `green`, `into_bytes`, `into_owned`, `into_string`, `is_empty`, `is_none`, `is_some`, `italic`, `len`, `lines`, `magenta`, `matches`, `normal`, `on_blue`, `on_green`, `on_red`, `parse`, `purple`, `push`, `push_str`, `red`, `repeat`, `replace`, `replacen`, `reversed`, `rfind`, `rsplit`, `rsplit_once`, `rsplitn`, `split`, `split_once`, `split_whitespace`, `splitn`, `starts_with`, `strip_prefix`, `strip_suffix`, `to_ascii_lowercase`, `to_ascii_uppercase`, `to_lowercase`, `to_owned`, `to_string`, `to_uppercase`, `trim`, `trim_end`, `trim_end_matches`, `trim_matches`, `trim_start`, `trim_start_matches`, `trim_string`, `underline`, `unwrap`, `unwrap_or`, `unwrap_or_default`, `unwrap_or_else`, `white`, `with_context`, `yellow`
 
 ## Style
 
@@ -210,7 +210,7 @@ the `supported_page_is_current` test enforces it.
 
 ## Vec
 
-`all`, `any`, `append`, `as_array`, `as_array_mut`, `as_object`, `as_object_mut`, `by_ref`, `clear`, `cloned`, `collect`, `collect_map`, `collect_set`, `collect_string`, `copied`, `copy_from_slice`, `dedup`, `extend`, `extend_from_slice`, `filter`, `filter_map`, `find`, `find_map`, `first_mut`, `flat_map`, `flatten`, `fold`, `for_each`, `get_mut`, `last_mut`, `map`, `max`, `max_by_key`, `min`, `min_by_key`, `next`, `nth`, `partition`, `peekable`, `position`, `reduce`, `retain`, `reverse`, `skip_while`, `sort_by`, `sort_by_cached_key`, `sort_by_key`, `swap_remove`, `take_while`, `to_vec`, `truncate`
+`all`, `any`, `append`, `as_array`, `as_array_mut`, `as_object`, `as_object_mut`, `by_ref`, `clear`, `clone`, `cloned`, `collect`, `collect_map`, `collect_set`, `collect_string`, `concat`, `contains`, `copied`, `copy_from_slice`, `count`, `dedup`, `enumerate`, `extend`, `extend_from_slice`, `filter`, `filter_map`, `find`, `find_map`, `first`, `first_mut`, `flat_map`, `flatten`, `fold`, `for_each`, `get`, `get_mut`, `insert`, `into_iter`, `is_empty`, `iter`, `iter_mut`, `join`, `last`, `last_mut`, `len`, `map`, `max`, `max_by_key`, `min`, `min_by_key`, `next`, `nth`, `partition`, `peekable`, `pop`, `position`, `product`, `push`, `reduce`, `remove`, `retain`, `rev`, `reverse`, `skip`, `skip_while`, `sort`, `sort_by`, `sort_by_cached_key`, `sort_by_key`, `sort_unstable`, `split_first`, `sum`, `swap_remove`, `take`, `take_while`, `to_vec`, `truncate`
 
 ## WmiConnection
 
@@ -218,4 +218,4 @@ the `supported_page_is_current` test enforces it.
 
 ## builtin (dispatched by id on matching receivers)
 
-`all`, `and_modify`, `and_then`, `any`, `chars`, `clone`, `clone_from`, `cloned`, `concat`, `contains`, `contains_key`, `copied`, `count`, `ends_with`, `entry`, `enumerate`, `filter`, `filter_map`, `find`, `find_map`, `first`, `first_mut`, `flat_map`, `fold`, `for_each`, `get`, `get_mut`, `insert`, `into_iter`, `into_keys`, `into_values`, `is_empty`, `iter`, `iter_mut`, `join`, `keys`, `last`, `last_mut`, `len`, `lines`, `map`, `map_err`, `map_or`, `max_by_key`, `min_by_key`, `ok_or_else`, `or_insert_with`, `or_insert_with_key`, `parse`, `partition`, `pop`, `position`, `product`, `push`, `push_str`, `reduce`, `remove`, `retain`, `rev`, `skip`, `skip_while`, `sort`, `sort_by`, `sort_by_cached_key`, `sort_by_key`, `sort_unstable`, `split`, `split_first`, `split_whitespace`, `starts_with`, `sum`, `take`, `take_while`, `then`, `to_string`, `trim`, `unwrap`, `unwrap_or`, `unwrap_or_else`, `values`, `with_context`
+`clone`, `clone_from`, `cloned`, `cmp`, `contains_key`, `copied`, `get`, `get_mut`, `insert`, `make_ascii_lowercase`, `make_ascii_uppercase`, `push`, `push_str`, `replace`, `take`, `to_string`, `unwrap`, `unwrap_or`

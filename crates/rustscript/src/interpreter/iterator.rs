@@ -10,7 +10,7 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow, bail};
 use parking_lot::Mutex;
 
-use super::bytecode::{BuiltinId, MethodName, ScalarTy};
+use super::bytecode::{BuiltinId, BuiltinId as B, MethodName, ScalarTy};
 use super::native::Native;
 use super::ops::compare_values;
 use super::regex_bridge::{CapturesValue, MatchValue, RegexValue};
@@ -208,16 +208,7 @@ pub(super) fn as_closure(v: Option<&Value>) -> Result<Arc<ClosureData>> {
 }
 
 pub(super) fn option_inner(v: &Value) -> Option<Value> {
-    match v {
-        Value::Enum {
-            enum_name,
-            variant,
-            data,
-        } if &**enum_name == "Option" && &**variant == "Some" => {
-            Some(data.lock().first().cloned().unwrap_or(Value::Unit))
-        }
-        _ => None,
-    }
+    v.some_payload()
 }
 
 fn next_line(source: &str, offset: &mut usize) -> Option<Value> {
@@ -487,28 +478,22 @@ impl Vm {
     /// Call the user `next` impl of an iterator value held by `UserNext`.
     /// The receiver mutates in place through its `&mut self`.
     fn call_user_next(self: &Arc<Self>, value: &Value) -> Result<Value> {
-        let ty = match value {
-            Value::Struct(s) => s.name().to_string(),
-            Value::Enum { enum_name, .. } => enum_name.to_string(),
-            other => bail!("{} is not an iterator", other.type_name()),
+        let Some(chunk) = self
+            .impls
+            .of_value(value)
+            .and_then(|methods| methods.next.clone())
+        else {
+            bail!("{} is not an iterator", value.type_name());
         };
-        let Some(chunk) = self.methods.get(&(ty.clone(), "next".to_string())) else {
-            bail!("no `next` method on `{ty}`");
-        };
-        let chunk = chunk.clone();
         self.run_chunk(&chunk, from_ref(value), &[])
     }
 
     /// Whether the value's user type has its own `Iterator::next`, so a for
     /// loop or an adaptor chain can drive it.
     pub(super) fn has_user_next(&self, value: &Value) -> bool {
-        let ty = match value {
-            Value::Struct(s) => &**s.name(),
-            Value::Enum { enum_name, .. } => &**enum_name,
-            _ => return false,
-        };
-        self.methods
-            .contains_key(&(ty.to_string(), "next".to_string()))
+        self.impls
+            .of_value(value)
+            .is_some_and(|methods| methods.next.is_some())
     }
 
     pub(super) fn iterator_value(self: &Arc<Self>, value: Value) -> Result<Value> {
@@ -566,12 +551,7 @@ impl Vm {
             Step::Ready(value) => Ok(value),
             Step::User(value) => {
                 let out = self.call_user_next(&value)?;
-                Ok(match out {
-                    Value::Enum { variant, data, .. } if &*variant == "Some" => {
-                        Some(data.lock().first().cloned().unwrap_or(Value::Unit))
-                    }
-                    _ => None,
-                })
+                Ok(out.some_payload())
             }
             Step::Map(source, closure) => match self.iterator_next(&source)? {
                 Some(value) => Ok(Some(self.call_closure_data(&closure, &[value])?)),
@@ -678,7 +658,6 @@ impl Vm {
         method: &MethodName,
         args: &[Value],
     ) -> Result<Option<Value>> {
-        use BuiltinId as B;
         let value = match method.id {
             B::Enumerate => wrap(IteratorState::Enumerate {
                 source: iterator.clone(),
@@ -710,37 +689,37 @@ impl Vm {
                 }
             }
             B::Product => self.iterator_product(iterator, method.scalar.as_ref())?,
-            _ => match method.text.as_str() {
-                "next" => self
+            _ => match method.id {
+                B::Next => self
                     .iterator_next(iterator)?
                     .map_or_else(Value::none, Value::some),
-                "last" => {
+                B::Last => {
                     let mut last = None;
                     while let Some(item) = self.iterator_next(iterator)? {
                         last = Some(item);
                     }
                     last.map_or_else(Value::none, Value::some)
                 }
-                "collect" | "to_vec" => Value::vec(self.drain_iterator(iterator)?),
-                "collect_string" => Value::str(
+                B::Collect | B::ToVec => Value::vec(self.drain_iterator(iterator)?),
+                B::CollectString => Value::str(
                     self.drain_iterator(iterator)?
                         .iter()
                         .map(Value::display)
                         .collect::<String>(),
                 ),
-                "collect_map" => super::vecmap::collect_map(self.drain_iterator(iterator)?)?,
-                "collect_set" => super::vecmap::collect_set(self.drain_iterator(iterator)?)?,
+                B::CollectMap => super::vecmap::collect_map(self.drain_iterator(iterator)?)?,
+                B::CollectSet => super::vecmap::collect_set(self.drain_iterator(iterator)?)?,
                 // `by_ref` borrows the iterator so the caller keeps it after
                 // the adaptor is done with it. Iterators are shared handles
                 // here, so handing the same one back is that borrow.
-                "cloned" | "copied" | "by_ref" => Value::Native(iterator.clone()),
-                "peekable" => wrap(IteratorState::Peekable {
+                B::Cloned | B::Copied | B::ByRef => Value::Native(iterator.clone()),
+                B::Peekable => wrap(IteratorState::Peekable {
                     source: iterator.clone(),
                     buffered: None,
                 }),
                 // `peek` pulls one item early and keeps it, so the value is
                 // still there for the next `next`.
-                "peek" => {
+                B::Peek => {
                     let buffered = match &*iterator.lock() {
                         Native::Iterator(IteratorState::Peekable { buffered, .. }) => {
                             buffered.clone()
@@ -765,16 +744,16 @@ impl Vm {
                         None => Value::none(),
                     }
                 }
-                "rev" => {
+                B::Rev => {
                     let mut items = self.drain_iterator(iterator)?;
                     items.reverse();
                     Value::vec(items)
                 }
-                "max" | "min" => self.iterator_extreme(iterator, method.text.as_str())?,
+                B::Max | B::Min => self.iterator_extreme(iterator, method.id)?,
                 // `Chars::as_str` gives the not yet consumed tail, which is what
                 // makes the `chars.next()` then `chars.as_str()` capitalize idiom
                 // work. Only a char iterator still knows its source text.
-                "as_str" => match &*iterator.lock() {
+                B::AsStr => match &*iterator.lock() {
                     Native::Iterator(IteratorState::Chars { source, offset }) => {
                         Value::str(source[*offset..].to_string())
                     }
@@ -789,41 +768,41 @@ impl Vm {
     pub(super) fn iterator_higher_order(
         self: &Arc<Self>,
         iterator: &Handle,
-        name: &str,
+        name: BuiltinId,
         args: &[Value],
     ) -> Result<Option<Value>> {
         let closure = |index| as_closure(args.get(index));
         let value = match name {
-            "map" => wrap(IteratorState::Map {
+            B::Map => wrap(IteratorState::Map {
                 source: iterator.clone(),
                 closure: closure(0)?,
             }),
-            "filter" => wrap(IteratorState::Filter {
+            B::Filter => wrap(IteratorState::Filter {
                 source: iterator.clone(),
                 closure: closure(0)?,
             }),
-            "filter_map" => wrap(IteratorState::FilterMap {
+            B::FilterMap => wrap(IteratorState::FilterMap {
                 source: iterator.clone(),
                 closure: closure(0)?,
             }),
-            "take_while" => wrap(IteratorState::TakeWhile {
+            B::TakeWhile => wrap(IteratorState::TakeWhile {
                 source: iterator.clone(),
                 closure: closure(0)?,
                 done: false,
             }),
-            "skip_while" => wrap(IteratorState::SkipWhile {
+            B::SkipWhile => wrap(IteratorState::SkipWhile {
                 source: iterator.clone(),
                 closure: closure(0)?,
                 skipping: true,
             }),
-            "for_each" => {
+            B::ForEach => {
                 let closure = closure(0)?;
                 while let Some(value) = self.iterator_next(iterator)? {
                     self.call_closure_data(&closure, &[value])?;
                 }
                 Value::Unit
             }
-            "find_map" => {
+            B::FindMap => {
                 let closure = closure(0)?;
                 let mut found = Value::none();
                 while let Some(value) = self.iterator_next(iterator)? {
@@ -835,11 +814,11 @@ impl Vm {
                 }
                 found
             }
-            "find" | "position" | "rposition" | "any" | "all" => {
+            B::Find | B::Position | B::Rposition | B::Any | B::All => {
                 let closure = closure(0)?;
                 let reduce = match name {
-                    "any" => Some(ChainReduce::Any(&closure)),
-                    "all" => Some(ChainReduce::All(&closure)),
+                    B::Any => Some(ChainReduce::Any(&closure)),
+                    B::All => Some(ChainReduce::All(&closure)),
                     _ => None,
                 };
                 if let Some(reduce) = reduce
@@ -858,12 +837,12 @@ impl Vm {
     fn iterator_reduce_ho(
         self: &Arc<Self>,
         iterator: &Handle,
-        name: &str,
+        name: BuiltinId,
         args: &[Value],
     ) -> Result<Option<Value>> {
         let closure = |index| as_closure(args.get(index));
         let value = match name {
-            "fold" => {
+            B::Fold => {
                 let closure = closure(1)?;
                 let mut accumulator = args.first().cloned().unwrap_or(Value::Unit);
                 while let Some(value) = self.iterator_next(iterator)? {
@@ -871,7 +850,7 @@ impl Vm {
                 }
                 accumulator
             }
-            "reduce" => {
+            B::Reduce => {
                 let closure = closure(0)?;
                 let Some(mut accumulator) = self.iterator_next(iterator)? else {
                     return Ok(Some(Value::none()));
@@ -881,7 +860,7 @@ impl Vm {
                 }
                 Value::some(accumulator)
             }
-            "flat_map" => {
+            B::FlatMap => {
                 let closure = closure(0)?;
                 let mut output = Vec::new();
                 while let Some(value) = self.iterator_next(iterator)? {
@@ -890,7 +869,7 @@ impl Vm {
                 }
                 Value::vec(output)
             }
-            "partition" => {
+            B::Partition => {
                 let closure = closure(0)?;
                 let (mut yes, mut no) = (Vec::new(), Vec::new());
                 while let Some(value) = self.iterator_next(iterator)? {
@@ -905,7 +884,7 @@ impl Vm {
                 }
                 Value::tuple(vec![Value::vec(yes), Value::vec(no)])
             }
-            "max_by_key" | "min_by_key" => {
+            B::MaxByKey | B::MinByKey => {
                 let closure = closure(0)?;
                 let mut best: Option<(Value, Value)> = None;
                 while let Some(value) = self.iterator_next(iterator)? {
@@ -914,7 +893,7 @@ impl Vm {
                         None => true,
                         Some((best_key, _)) => {
                             let order = compare_values(&key, best_key)?;
-                            if name == "max_by_key" {
+                            if name == B::MaxByKey {
                                 order.is_ge()
                             } else {
                                 order.is_lt()
@@ -1005,14 +984,14 @@ impl Vm {
         })
     }
 
-    fn iterator_extreme(self: &Arc<Self>, iterator: &Handle, name: &str) -> Result<Value> {
+    fn iterator_extreme(self: &Arc<Self>, iterator: &Handle, name: BuiltinId) -> Result<Value> {
         let mut best: Option<Value> = None;
         while let Some(value) = self.iterator_next(iterator)? {
             let take = match &best {
                 None => true,
                 Some(current) => {
                     let order = compare_values(&value, current)?;
-                    if name == "max" {
+                    if name == B::Max {
                         order.is_gt()
                     } else {
                         order.is_lt()
@@ -1029,7 +1008,7 @@ impl Vm {
     fn iterator_predicate(
         self: &Arc<Self>,
         iterator: &Handle,
-        name: &str,
+        name: BuiltinId,
         closure: &Arc<ClosureData>,
     ) -> Result<Value> {
         let mut index = 0;
@@ -1042,20 +1021,20 @@ impl Vm {
                 .call_closure_data(closure, from_ref(&value))?
                 .is_truthy();
             match name {
-                "find" if matches => return Ok(Value::some(value)),
-                "position" if matches => return Ok(Value::some(Value::Int(index))),
-                "rposition" if matches => last_match = Some(index),
-                "any" if matches => return Ok(Value::Bool(true)),
-                "all" if !matches => return Ok(Value::Bool(false)),
+                B::Find if matches => return Ok(Value::some(value)),
+                B::Position if matches => return Ok(Value::some(Value::Int(index))),
+                B::Rposition if matches => last_match = Some(index),
+                B::Any if matches => return Ok(Value::Bool(true)),
+                B::All if !matches => return Ok(Value::Bool(false)),
                 _ => {}
             }
             index += 1;
         }
         Ok(match name {
-            "find" | "position" => Value::none(),
-            "rposition" => last_match.map_or_else(Value::none, |i| Value::some(Value::Int(i))),
-            "any" => Value::Bool(false),
-            "all" => Value::Bool(true),
+            B::Find | B::Position => Value::none(),
+            B::Rposition => last_match.map_or_else(Value::none, |i| Value::some(Value::Int(i))),
+            B::Any => Value::Bool(false),
+            B::All => Value::Bool(true),
             _ => unreachable!(),
         })
     }

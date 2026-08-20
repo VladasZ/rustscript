@@ -6,25 +6,20 @@ use std::str::FromStr;
 use anyhow::{Result, bail};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 
+use super::bytecode::PathId as P;
+use super::enum_def::ALGORITHM;
 use super::iterator::option_inner;
 use super::json_bridge::pvalue_to_json;
 use super::native_methods::value_to_bytes;
 use super::value::{StructData, Value};
 
-/// Recognize `Algorithm::ES256` and friends used as a path value.
-pub(super) fn jwt_algorithm(ty: &str, variant: &str) -> Option<Value> {
-    if ty != "Algorithm" || Algorithm::from_str(variant).is_err() {
-        return None;
-    }
-    Some(Value::enum_of("Algorithm", variant, Vec::new()))
-}
-
-pub(super) fn jwt_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
-    Ok(Some(match (ty, func) {
-        ("Header", "new" | "default") => {
+pub(super) fn jwt_assoc(id: P, args: &[Value]) -> Result<Option<Value>> {
+    Ok(Some(match id {
+        P::HeaderNew | P::HeaderDefault => {
             let alg = match args.first() {
                 Some(v) => v.clone(),
-                None => jwt_algorithm("Algorithm", "HS256").expect("HS256 is a known algorithm"),
+                None => Value::enum_named(&ALGORITHM, "HS256", Vec::new())
+                    .expect("HS256 is a known algorithm"),
             };
             // The shape carries every header field a script can set later,
             // since a shape cannot grow after the instance exists.
@@ -38,13 +33,11 @@ pub(super) fn jwt_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<V
                 ],
             )
         }
-        ("EncodingKey", "from_secret") => key_value("secret", args),
-        ("EncodingKey", "from_ec_pem") => {
-            match EncodingKey::from_ec_pem(&value_to_bytes(args.first())) {
-                Ok(_) => Value::ok(key_value("ec_pem", args)),
-                Err(e) => Value::err(Value::str(e.to_string())),
-            }
-        }
+        P::EncodingKeyFromSecret => key_value("secret", args),
+        P::EncodingKeyFromEcPem => match EncodingKey::from_ec_pem(&value_to_bytes(args.first())) {
+            Ok(_) => Value::ok(key_value("ec_pem", args)),
+            Err(e) => Value::err(Value::str(e.to_string())),
+        },
         _ => return Ok(None),
     }))
 }
@@ -92,10 +85,10 @@ pub(super) fn jwt_encode(args: &[Value]) -> Result<Value> {
 }
 
 fn header_algorithm(s: &StructData) -> Result<Algorithm> {
-    let Some(Value::Enum { variant, .. }) = s.get("alg") else {
+    let Some(Value::Enum { def, variant, .. }) = s.get("alg") else {
         bail!("the header has no algorithm");
     };
-    match Algorithm::from_str(&variant) {
+    match Algorithm::from_str(def.variant_name(variant)) {
         Ok(a) => Ok(a),
         Err(_) => bail!("unknown JWT algorithm `{variant}`"),
     }

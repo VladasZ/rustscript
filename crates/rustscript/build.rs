@@ -1,5 +1,9 @@
 #[path = "src/bridge_tables_build.rs"]
 mod bridge_tables_build;
+#[path = "src/builtin_id_build.rs"]
+mod builtin_id_build;
+#[path = "src/path_id_build.rs"]
+mod path_id_build;
 
 use std::env;
 use std::path::PathBuf;
@@ -36,9 +40,18 @@ fn main() {
     // Harvest the interpreter's supported method names from the bridge sources
     // so `rust check` can tell a script when it uses one that does not exist.
     let interpreter = std::path::Path::new("src/interpreter");
-    let tables = bridge_tables_build::generate(interpreter);
-    let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")).join("bridge_tables.rs");
-    std::fs::write(&out, tables).expect("write bridge tables");
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
+    let rows = builtin_id_build::read_table(&interpreter.join("method_names.txt"));
+    std::fs::write(
+        out_dir.join("builtin_id.rs"),
+        builtin_id_build::generate(&rows),
+    )
+    .expect("write builtin ids");
+    let paths = path_id_build::read_paths(&interpreter.join("path_names.txt"));
+    std::fs::write(out_dir.join("path_id.rs"), path_id_build::generate(&paths))
+        .expect("write path ids");
+    let tables = bridge_tables_build::generate(interpreter, &rows);
+    std::fs::write(out_dir.join("bridge_tables.rs"), tables).expect("write bridge tables");
     println!("cargo:rerun-if-changed=src/interpreter");
     println!("cargo:rerun-if-changed=src/bridge_tables_build.rs");
     println!("cargo:rerun-if-changed=build.rs");

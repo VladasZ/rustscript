@@ -5,14 +5,16 @@
 use std::slice::from_ref;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::Result;
 
+use super::bytecode::{BuiltinId, BuiltinId as B};
+use super::enum_def::{EQUAL, EnumKind, OK, SOME};
 use super::iterator::{as_closure, option_inner};
 use super::methods::ordering_from_value;
 use super::native::Native;
 use super::scalar::scalar_sort_by;
 use super::shared::usize_i64;
-use super::value::{List, StructData, Value, ValueRef};
+use super::value::{List, Map, MapKey, Value, ValueRef};
 use super::vecmap::{SortKey, sort_key};
 use super::vm::Vm;
 
@@ -22,13 +24,13 @@ impl Vm {
     pub(super) fn higher_order(
         self: &Arc<Self>,
         recv: &Value,
-        name: &str,
+        name: BuiltinId,
         args: &[Value],
     ) -> Result<Option<Value>> {
         match recv {
             // `then` takes a closure, unlike `then_some` which takes a value,
             // so it is only reachable from the higher order path.
-            Value::Bool(b) if name == "then" => {
+            Value::Bool(b) if name == B::Then => {
                 if !*b {
                     return Ok(Some(Value::none()));
                 }
@@ -36,10 +38,10 @@ impl Vm {
                 Ok(Some(Value::some(self.call_closure_data(&f, &[])?)))
             }
             // `Ordering::then_with` calls its closure only on Equal.
-            Value::Enum {
-                enum_name, variant, ..
-            } if &**enum_name == "Ordering" && name == "then_with" => {
-                if &**variant == "Equal" {
+            Value::Enum { def, variant, .. }
+                if def.kind == EnumKind::Ordering && name == B::ThenWith =>
+            {
+                if *variant == EQUAL {
                     let f = as_closure(args.first())?;
                     Ok(Some(self.call_closure_data(&f, &[])?))
                 } else {
@@ -50,24 +52,26 @@ impl Vm {
             Value::Native(iterator) if matches!(&*iterator.lock(), Native::Iterator(_)) => {
                 self.iterator_higher_order(iterator, name, args)
             }
-            Value::Enum {
-                enum_name,
-                variant,
-                data,
-            } if &**enum_name == "Option" => self.option_higher_order(variant, data, name, args),
-            Value::Enum {
-                enum_name,
-                variant,
-                data,
-            } if &**enum_name == "Result" => self.result_higher_order(variant, data, name, args),
-            Value::Struct(s) if &**s.name() == "Entry" => self.entry_higher_order(s, name, args),
+            Value::Enum { def, variant, data } if def.kind == EnumKind::Option => {
+                self.option_higher_order(*variant, data, name, args)
+            }
+            Value::Enum { def, variant, data } if def.kind == EnumKind::Result => {
+                self.result_higher_order(*variant, data, name, args)
+            }
+            Value::Native(n) if matches!(&*n.lock(), Native::Entry { .. }) => {
+                let (map, key) = match &*n.lock() {
+                    Native::Entry { map, key } => (map.clone(), key.clone()),
+                    _ => unreachable!("checked by the guard"),
+                };
+                self.entry_higher_order(recv, &map, &key, name, args)
+            }
             // A JSON string is a plain String, but Value::as_str hands it back
             // as an already unwrapped Some, so its Option closure methods route
             // here as Some. Unknown names fall through to plain dispatch.
             Value::Str(s) => {
                 let data: super::value::List =
                     Arc::new(parking_lot::Mutex::new(vec![Value::Str(s.clone())]));
-                self.option_higher_order("Some", &data, name, args)
+                self.option_higher_order(SOME, &data, name, args)
             }
             _ => Ok(None),
         }
@@ -78,23 +82,18 @@ impl Vm {
     /// to `entry_method`.
     pub(super) fn entry_higher_order(
         self: &Arc<Self>,
-        entry: &Arc<StructData>,
-        name: &str,
+        entry: &Value,
+        map: &Map,
+        key: &MapKey,
+        name: BuiltinId,
         args: &[Value],
     ) -> Result<Option<Value>> {
-        let key = entry
-            .get("key")
-            .and_then(|k| k.as_key())
-            .ok_or_else(|| anyhow!("invalid entry key"))?;
-        let Some(Value::Map(map, _)) = entry.get("map") else {
-            bail!("entry lost its map");
-        };
         match name {
-            "or_insert_with" | "or_insert_with_key" => {
-                let present = map.lock().contains_key(&key);
+            B::OrInsertWith | B::OrInsertWithKey => {
+                let present = map.lock().contains_key(key);
                 if !present {
                     let clo = as_closure(args.first())?;
-                    let call_args = if name == "or_insert_with_key" {
+                    let call_args = if name == B::OrInsertWithKey {
                         vec![key.to_value()]
                     } else {
                         vec![]
@@ -106,13 +105,13 @@ impl Vm {
                 // must reach the map.
                 Ok(Some(Value::Ref(Arc::new(ValueRef::map_entry(
                     map.clone(),
-                    key,
+                    key.clone(),
                 )))))
             }
-            "and_modify" => {
-                if map.lock().contains_key(&key) {
+            B::AndModify => {
+                if map.lock().contains_key(key) {
                     let clo = as_closure(args.first())?;
-                    let current = map.lock().get(&key).cloned().unwrap_or(Value::Unit);
+                    let current = map.lock().get(key).cloned().unwrap_or(Value::Unit);
                     let updated = self.call_closure_data(&clo, &[current])?;
                     // A closure that returns unit means it mutated in place via
                     // a shared container; otherwise take its return value.
@@ -121,7 +120,7 @@ impl Vm {
                     }
                 }
                 // Return the Entry so further chaining (or_insert) still works.
-                Ok(Some(Value::Struct(entry.clone())))
+                Ok(Some(entry.clone()))
             }
             _ => Ok(None),
         }
@@ -130,7 +129,7 @@ impl Vm {
     pub(super) fn vec_higher_order(
         self: &Arc<Self>,
         items: &List,
-        name: &str,
+        name: BuiltinId,
         args: &[Value],
     ) -> Result<Option<Value>> {
         if let Some(v) = self.vec_transform_ho(items, name, args)? {
@@ -146,13 +145,13 @@ impl Vm {
     fn vec_transform_ho(
         self: &Arc<Self>,
         items: &List,
-        name: &str,
+        name: BuiltinId,
         args: &[Value],
     ) -> Result<Option<Value>> {
         let clo = |i: usize| as_closure(args.get(i));
         let list = items.lock().clone();
         let out = match name {
-            "map" => {
+            B::Map => {
                 let f = clo(0)?;
                 let mut r = Vec::with_capacity(list.len());
                 for x in list {
@@ -160,7 +159,7 @@ impl Vm {
                 }
                 Value::vec(r)
             }
-            "filter" => {
+            B::Filter => {
                 let f = clo(0)?;
                 let mut r = Vec::new();
                 for x in list {
@@ -170,7 +169,7 @@ impl Vm {
                 }
                 Value::vec(r)
             }
-            "filter_map" => {
+            B::FilterMap => {
                 let f = clo(0)?;
                 let mut r = Vec::new();
                 for x in list {
@@ -180,7 +179,7 @@ impl Vm {
                 }
                 Value::vec(r)
             }
-            "flat_map" => {
+            B::FlatMap => {
                 let f = clo(0)?;
                 let mut r = Vec::new();
                 for x in list {
@@ -188,14 +187,14 @@ impl Vm {
                 }
                 Value::vec(r)
             }
-            "for_each" => {
+            B::ForEach => {
                 let f = clo(0)?;
                 for x in list {
                     self.call_closure_data(&f, &[x])?;
                 }
                 Value::Unit
             }
-            "take_while" => {
+            B::TakeWhile => {
                 let f = clo(0)?;
                 let mut r = Vec::new();
                 for x in list {
@@ -207,7 +206,7 @@ impl Vm {
                 }
                 Value::vec(r)
             }
-            "skip_while" => {
+            B::SkipWhile => {
                 let f = clo(0)?;
                 let mut r = Vec::new();
                 let mut skipping = true;
@@ -220,7 +219,7 @@ impl Vm {
                 }
                 Value::vec(r)
             }
-            "partition" => {
+            B::Partition => {
                 let f = clo(0)?;
                 let (mut yes, mut no) = (Vec::new(), Vec::new());
                 for x in list {
@@ -241,13 +240,13 @@ impl Vm {
     fn vec_reduce_ho(
         self: &Arc<Self>,
         items: &List,
-        name: &str,
+        name: BuiltinId,
         args: &[Value],
     ) -> Result<Option<Value>> {
         let clo = |i: usize| as_closure(args.get(i));
         let list = items.lock().clone();
         let out = match name {
-            "find" => {
+            B::Find => {
                 let f = clo(0)?;
                 let mut found = Value::none();
                 for x in list {
@@ -258,7 +257,7 @@ impl Vm {
                 }
                 found
             }
-            "find_map" => {
+            B::FindMap => {
                 let f = clo(0)?;
                 let mut found = Value::none();
                 for x in list {
@@ -269,7 +268,7 @@ impl Vm {
                 }
                 found
             }
-            "position" => {
+            B::Position => {
                 let f = clo(0)?;
                 let mut found = Value::none();
                 for (i, x) in list.into_iter().enumerate() {
@@ -280,7 +279,7 @@ impl Vm {
                 }
                 found
             }
-            "any" => {
+            B::Any => {
                 let f = clo(0)?;
                 let mut any = false;
                 for x in list {
@@ -291,7 +290,7 @@ impl Vm {
                 }
                 Value::Bool(any)
             }
-            "all" => {
+            B::All => {
                 let f = clo(0)?;
                 let mut all = true;
                 for x in list {
@@ -302,7 +301,7 @@ impl Vm {
                 }
                 Value::Bool(all)
             }
-            "fold" => {
+            B::Fold => {
                 let init = args.first().cloned().unwrap_or(Value::Unit);
                 let f = clo(1)?;
                 let mut acc = init;
@@ -311,7 +310,7 @@ impl Vm {
                 }
                 acc
             }
-            "reduce" => {
+            B::Reduce => {
                 let f = clo(0)?;
                 let mut it = list.into_iter();
                 match it.next() {
@@ -334,13 +333,13 @@ impl Vm {
     fn vec_order_ho(
         self: &Arc<Self>,
         items: &List,
-        name: &str,
+        name: BuiltinId,
         args: &[Value],
     ) -> Result<Option<Value>> {
         let clo = |i: usize| as_closure(args.get(i));
         let list = items.lock().clone();
         let out = match name {
-            "retain" => {
+            B::Retain => {
                 let f = clo(0)?;
                 let mut kept = Vec::new();
                 for x in list {
@@ -351,7 +350,7 @@ impl Vm {
                 *items.lock() = kept;
                 Value::Unit
             }
-            "sort_by_key" | "sort_by_cached_key" => {
+            B::SortByKey | B::SortByCachedKey => {
                 let f = clo(0)?;
                 let mut keyed = Vec::new();
                 for x in list {
@@ -362,7 +361,7 @@ impl Vm {
                 *items.lock() = keyed.into_iter().map(|(_, x)| x).collect();
                 Value::Unit
             }
-            "sort_by" => {
+            B::SortBy => {
                 let f = clo(0)?;
                 // An all-int list with an int-only comparator sorts unboxed,
                 // skipping the closure call machinery per comparison.
@@ -390,9 +389,9 @@ impl Vm {
                 *items.lock() = sorted;
                 Value::Unit
             }
-            "max_by_key" | "min_by_key" => {
+            B::MaxByKey | B::MinByKey => {
                 let f = clo(0)?;
-                let want_max = name == "max_by_key";
+                let want_max = name == B::MaxByKey;
                 let mut best: Option<(SortKey, Value)> = None;
                 for x in list {
                     let k = sort_key(&self.call_closure_data(&f, from_ref(&x))?);
@@ -422,40 +421,40 @@ impl Vm {
 
     pub(super) fn option_higher_order(
         self: &Arc<Self>,
-        variant: &str,
+        variant: u16,
         data: &super::value::List,
-        name: &str,
+        name: BuiltinId,
         args: &[Value],
     ) -> Result<Option<Value>> {
-        let is_some = variant == "Some";
+        let is_some = variant == SOME;
         let inner = || data.lock().first().cloned().unwrap_or(Value::Unit);
         let clo = |i: usize| as_closure(args.get(i));
         let out = match name {
-            "is_some_and" => {
+            B::IsSomeAnd => {
                 Value::Bool(is_some && self.call_closure_data(&clo(0)?, &[inner()])?.is_truthy())
             }
-            "map" => {
+            B::Map => {
                 if is_some {
                     Value::some(self.call_closure_data(&clo(0)?, &[inner()])?)
                 } else {
                     Value::none()
                 }
             }
-            "and_then" => {
+            B::AndThen => {
                 if is_some {
                     self.call_closure_data(&clo(0)?, &[inner()])?
                 } else {
                     Value::none()
                 }
             }
-            "filter" => {
+            B::Filter => {
                 if is_some && self.call_closure_data(&clo(0)?, &[inner()])?.is_truthy() {
                     Value::some(inner())
                 } else {
                     Value::none()
                 }
             }
-            "map_or" => {
+            B::MapOr => {
                 let default = args.first().cloned().unwrap_or(Value::Unit);
                 if is_some {
                     self.call_closure_data(&clo(1)?, &[inner()])?
@@ -463,35 +462,35 @@ impl Vm {
                     default
                 }
             }
-            "map_or_else" => {
+            B::MapOrElse => {
                 if is_some {
                     self.call_closure_data(&clo(1)?, &[inner()])?
                 } else {
                     self.call_closure_data(&clo(0)?, &[])?
                 }
             }
-            "unwrap_or_else" => {
+            B::UnwrapOrElse => {
                 if is_some {
                     inner()
                 } else {
                     self.call_closure_data(&clo(0)?, &[])?
                 }
             }
-            "ok_or_else" | "with_context" => {
+            B::OkOrElse | B::WithContext => {
                 if is_some {
                     Value::ok(inner())
                 } else {
                     Value::err(self.call_closure_data(&clo(0)?, &[])?)
                 }
             }
-            "or_else" => {
+            B::OrElse => {
                 if is_some {
                     Value::some(inner())
                 } else {
                     self.call_closure_data(&clo(0)?, &[])?
                 }
             }
-            "or" => {
+            B::Or => {
                 if is_some {
                     Value::some(inner())
                 } else {
@@ -505,43 +504,43 @@ impl Vm {
 
     pub(super) fn result_higher_order(
         self: &Arc<Self>,
-        variant: &str,
+        variant: u16,
         data: &super::value::List,
-        name: &str,
+        name: BuiltinId,
         args: &[Value],
     ) -> Result<Option<Value>> {
-        let is_ok = variant == "Ok";
+        let is_ok = variant == OK;
         let inner = || data.lock().first().cloned().unwrap_or(Value::Unit);
         let clo = |i: usize| as_closure(args.get(i));
         let out = match name {
-            "is_ok_and" => {
+            B::IsOkAnd => {
                 Value::Bool(is_ok && self.call_closure_data(&clo(0)?, &[inner()])?.is_truthy())
             }
-            "is_err_and" => {
+            B::IsErrAnd => {
                 Value::Bool(!is_ok && self.call_closure_data(&clo(0)?, &[inner()])?.is_truthy())
             }
-            "map" => {
+            B::Map => {
                 if is_ok {
                     Value::ok(self.call_closure_data(&clo(0)?, &[inner()])?)
                 } else {
                     Value::err(inner())
                 }
             }
-            "map_err" => {
+            B::MapErr => {
                 if is_ok {
                     Value::ok(inner())
                 } else {
                     Value::err(self.call_closure_data(&clo(0)?, &[inner()])?)
                 }
             }
-            "and_then" => {
+            B::AndThen => {
                 if is_ok {
                     self.call_closure_data(&clo(0)?, &[inner()])?
                 } else {
                     Value::err(inner())
                 }
             }
-            "map_or" => {
+            B::MapOr => {
                 let default = args.first().cloned().unwrap_or(Value::Unit);
                 if is_ok {
                     self.call_closure_data(&clo(1)?, &[inner()])?
@@ -551,21 +550,21 @@ impl Vm {
             }
             // Unlike the Option form, the fallback here is handed the error,
             // which is what real `Result::map_or_else` does.
-            "map_or_else" => {
+            B::MapOrElse => {
                 if is_ok {
                     self.call_closure_data(&clo(1)?, &[inner()])?
                 } else {
                     self.call_closure_data(&clo(0)?, &[inner()])?
                 }
             }
-            "unwrap_or_else" => {
+            B::UnwrapOrElse => {
                 if is_ok {
                     inner()
                 } else {
                     self.call_closure_data(&clo(0)?, &[inner()])?
                 }
             }
-            "with_context" => {
+            B::WithContext => {
                 if is_ok {
                     Value::ok(inner())
                 } else {

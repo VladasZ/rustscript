@@ -12,11 +12,17 @@
 //! to the table on the next build, and renaming a harvested function is a hard
 //! build failure rather than a silently emptied table.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
 use syn::visit::Visit;
+
+use crate::builtin_id_build::{MethodRow, camel};
+
+/// Variant name to method name, so a `B::SplitFirst` arm harvests as
+/// `split_first`.
+type Variants = BTreeMap<String, String>;
 
 /// A function whose dispatch arms are harvested, and the receiver those methods
 /// belong to. `recv` is the type name the checker infers for a value, or "*"
@@ -155,12 +161,26 @@ const fn b(file: &'static str, func: &'static str, recv: &'static str) -> Bridge
 /// recognise each dispatch style. The trade is deliberate and one directional:
 /// a stray literal only makes the check accept a name it should not, while
 /// missing one makes it reject working code, which is far worse.
-#[derive(Default)]
-struct LitCollector {
+struct LitCollector<'a> {
     names: BTreeSet<String>,
+    variants: &'a Variants,
 }
 
-impl LitCollector {
+impl<'a> LitCollector<'a> {
+    fn new(variants: &'a Variants) -> Self {
+        LitCollector {
+            names: BTreeSet::new(),
+            variants,
+        }
+    }
+
+    /// A `B::Name` or `BuiltinId::Name` arm names the method by its id.
+    fn take_variant(&mut self, ident: &str) {
+        if let Some(name) = self.variants.get(ident) {
+            self.names.insert(name.clone());
+        }
+    }
+
     fn take(&mut self, value: String) {
         // Method names only: no paths, spaces, or format templates.
         if !value.is_empty()
@@ -175,22 +195,38 @@ impl LitCollector {
     /// A macro body is an unparsed token stream, so `matches!(name, "lock")`
     /// is invisible to the ast visitor. Walk the raw tokens for literals too.
     fn take_tokens(&mut self, tokens: proc_macro2::TokenStream) {
-        for tree in tokens {
+        use proc_macro2::TokenTree;
+        let trees: Vec<TokenTree> = tokens.into_iter().collect();
+        for (i, tree) in trees.iter().enumerate() {
             match tree {
-                proc_macro2::TokenTree::Literal(lit) => {
+                TokenTree::Literal(lit) => {
                     let text = lit.to_string();
                     if let Some(inner) = text.strip_prefix('"').and_then(|t| t.strip_suffix('"')) {
                         self.take(inner.to_string());
                     }
                 }
-                proc_macro2::TokenTree::Group(group) => self.take_tokens(group.stream()),
+                TokenTree::Group(group) => self.take_tokens(group.stream()),
+                // `B::Name` inside a macro body, `matches!(id, B::Len | B::IsEmpty)`.
+                TokenTree::Ident(ident) if i >= 3 && is_id_prefix(&trees[i - 3]) => {
+                    if let (TokenTree::Punct(a), TokenTree::Punct(b)) =
+                        (&trees[i - 2], &trees[i - 1])
+                        && a.as_char() == ':'
+                        && b.as_char() == ':'
+                    {
+                        self.take_variant(&ident.to_string());
+                    }
+                }
                 _ => {}
             }
         }
     }
 }
 
-impl<'ast> Visit<'ast> for LitCollector {
+fn is_id_prefix(tree: &proc_macro2::TokenTree) -> bool {
+    matches!(tree, proc_macro2::TokenTree::Ident(ident) if ident == "B" || ident == "BuiltinId")
+}
+
+impl<'ast> Visit<'ast> for LitCollector<'_> {
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         self.take_tokens(mac.tokens.clone());
         syn::visit::visit_macro(self, mac);
@@ -198,6 +234,15 @@ impl<'ast> Visit<'ast> for LitCollector {
 
     fn visit_lit_str(&mut self, lit: &'ast syn::LitStr) {
         self.take(lit.value());
+    }
+
+    fn visit_path(&mut self, path: &'ast syn::Path) {
+        if path.segments.len() == 2
+            && (path.segments[0].ident == "B" || path.segments[0].ident == "BuiltinId")
+        {
+            self.take_variant(&path.segments[1].ident.to_string());
+        }
+        syn::visit::visit_path(self, path);
     }
 }
 
@@ -211,13 +256,14 @@ impl<'ast> Visit<'ast> for LitCollector {
 /// method the real one implements.
 struct FnFinder<'a> {
     want: &'a str,
+    variants: &'a Variants,
     found: Option<BTreeSet<String>>,
 }
 
 impl<'ast> Visit<'ast> for FnFinder<'_> {
     fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
         if item.sig.ident == self.want {
-            let mut c = LitCollector::default();
+            let mut c = LitCollector::new(self.variants);
             c.visit_block(&item.block);
             self.found.get_or_insert_with(BTreeSet::new).extend(c.names);
         }
@@ -226,7 +272,7 @@ impl<'ast> Visit<'ast> for FnFinder<'_> {
 
     fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
         if item.sig.ident == self.want {
-            let mut c = LitCollector::default();
+            let mut c = LitCollector::new(self.variants);
             c.visit_block(&item.block);
             self.found.get_or_insert_with(BTreeSet::new).extend(c.names);
         }
@@ -235,23 +281,34 @@ impl<'ast> Visit<'ast> for FnFinder<'_> {
 }
 
 /// Harvest one function's dispatch names, or `None` when it is missing.
-fn harvest(dir: &Path, file: &str, func: &str) -> Option<BTreeSet<String>> {
+fn harvest(dir: &Path, file: &str, func: &str, variants: &Variants) -> Option<BTreeSet<String>> {
     let text = std::fs::read_to_string(dir.join(file)).ok()?;
     let ast = syn::parse_file(&text).ok()?;
     let mut finder = FnFinder {
         want: func,
+        variants,
         found: None,
     };
     finder.visit_file(&ast);
     finder.found
 }
 
-/// Harvest a table that may legitimately be absent, unlike a bridge function.
-fn harvest_names(dir: &Path, file: &str, func: &str) -> BTreeSet<String> {
-    harvest(dir, file, func).unwrap_or_default()
+/// Harvest every dispatch name in a whole file, for the VM's own id
+/// dispatch, which is spread over its functions rather than held in one.
+fn harvest_file(dir: &Path, file: &str, variants: &Variants) -> BTreeSet<String> {
+    let text = std::fs::read_to_string(dir.join(file))
+        .unwrap_or_else(|e| panic!("cannot read {file}: {e}"));
+    let ast = syn::parse_file(&text).unwrap_or_else(|e| panic!("cannot parse {file}: {e}"));
+    let mut c = LitCollector::new(variants);
+    c.visit_file(&ast);
+    c.names
 }
 
-pub fn generate(interpreter_dir: &Path) -> String {
+pub fn generate(interpreter_dir: &Path, rows: &[MethodRow]) -> String {
+    let variants: Variants = rows
+        .iter()
+        .map(|row| (camel(&row.name), row.name.clone()))
+        .collect();
     let mut out = String::new();
     out.push_str(
         "// Generated by build.rs from the bridge sources. Do not edit.\n\
@@ -260,13 +317,14 @@ pub fn generate(interpreter_dir: &Path) -> String {
 
     let mut rows: Vec<String> = Vec::new();
     for bridge in BRIDGES {
-        let names = harvest(interpreter_dir, bridge.file, bridge.func).unwrap_or_else(|| {
-            panic!(
-                "bridge function `{}` not found in {}. It was renamed or moved, \
+        let names =
+            harvest(interpreter_dir, bridge.file, bridge.func, &variants).unwrap_or_else(|| {
+                panic!(
+                    "bridge function `{}` not found in {}. It was renamed or moved, \
                  which would silently empty its coverage table.",
-                bridge.func, bridge.file
-            )
-        });
+                    bridge.func, bridge.file
+                )
+            });
         let list: Vec<String> = names.iter().map(|n| format!("{n:?}")).collect();
         rows.push(format!(
             "    BridgeTable {{ recv: {:?}, names: &[{}] }},",
@@ -281,9 +339,9 @@ pub fn generate(interpreter_dir: &Path) -> String {
         rows.join("\n")
     );
 
-    // The hot path methods resolve through `BuiltinId`, not a string match, so
-    // their names live in the resolver instead of a bridge.
-    let builtin = harvest_names(interpreter_dir, "bytecode.rs", "resolve");
+    // The VM answers some methods itself by id before any bridge is reached,
+    // and that dispatch is spread over `vm_method.rs`.
+    let builtin = harvest_file(interpreter_dir, "vm_method.rs", &variants);
     let list: Vec<String> = builtin.iter().map(|n| format!("{n:?}")).collect();
     let _ = writeln!(
         out,

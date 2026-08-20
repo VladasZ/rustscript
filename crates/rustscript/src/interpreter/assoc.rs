@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
 
+use super::bytecode::PathId as P;
 use super::cell;
+use super::enum_def::{SEEK_FROM, XML_NODE};
 use super::int_methods::{from_bytes, from_bytes_order};
 use super::jwt_bridge::jwt_assoc;
 use super::native::Native;
@@ -16,37 +18,37 @@ use super::std_bridge::{
 };
 use super::value::{CellKind, Value};
 
-/// Associated functions like `String::new`, `Vec::new`, `HashMap::new`.
-pub(super) fn assoc_fn(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
-    if matches!(ty, "Header" | "EncodingKey") {
-        return jwt_assoc(ty, func, args);
-    }
-    if let Some(v) = super::ratatui::ratatui_assoc(ty, func, args) {
+/// Associated functions like `String::from`, `File::open`, `Regex::new`.
+pub(super) fn assoc_fn(id: P, args: &[Value]) -> Result<Option<Value>> {
+    if let Some(v) = jwt_assoc(id, args)? {
         return Ok(Some(v));
     }
-    // The groups use disjoint type and name pairs, so the first helper that
-    // recognizes the pair answers.
-    if let Some(v) = conversion_assoc(ty, func, args)? {
+    // The groups answer disjoint ids, so the first helper that recognizes
+    // the id answers.
+    if let Some(v) = conversion_assoc(id, args)? {
         return Ok(Some(v));
     }
-    if let Some(v) = container_assoc(ty, func, args)? {
+    if let Some(v) = int_assoc(id, args)? {
         return Ok(Some(v));
     }
-    if let Some(v) = fs_process_assoc(ty, func, args)? {
+    if let Some(v) = container_assoc(id, args)? {
         return Ok(Some(v));
     }
-    misc_assoc(ty, func, args)
+    if let Some(v) = fs_process_assoc(id, args)? {
+        return Ok(Some(v));
+    }
+    misc_assoc(id, args)
 }
 
 /// String, char, and numeric constructors and conversions.
-fn conversion_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
-    Ok(Some(match (ty, func) {
-        ("String", "new" | "with_capacity") => Value::str(""),
-        ("String", "from") => Value::str(args.first().map(Value::display).unwrap_or_default()),
-        ("String", "from_utf8_lossy") => Value::str(bytes_to_string(args.first())),
+fn conversion_assoc(id: P, args: &[Value]) -> Result<Option<Value>> {
+    Ok(Some(match id {
+        P::StringNew | P::StringWithCapacity => Value::str(""),
+        P::StringFrom => Value::str(args.first().map(Value::display).unwrap_or_default()),
+        P::StringFromUtf8Lossy => Value::str(bytes_to_string(args.first())),
         // `char::from` only converts a u8 in real Rust, so the byte range is
         // enforced even though every integer is an i64 here.
-        ("char", "from") => match args.first() {
+        P::CharFrom => match args.first() {
             Some(Value::Char(c)) => Value::Char(*c),
             Some(Value::Int(n)) => match u8::try_from(*n) {
                 Ok(b) => Value::Char(char::from(b)),
@@ -54,14 +56,14 @@ fn conversion_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value
             },
             _ => bail!("`char::from` needs a u8"),
         },
-        ("char", "from_u32") => match args.first().and_then(as_i64) {
+        P::CharFromU32 => match args.first().and_then(as_i64) {
             Some(n) => match u32::try_from(n).ok().and_then(char::from_u32) {
                 Some(c) => Value::some(Value::Char(c)),
                 None => Value::none(),
             },
             _ => Value::none(),
         },
-        ("char", "from_digit") => {
+        P::CharFromDigit => {
             let n = args.first().and_then(as_i64).unwrap_or(-1);
             let radix = args.get(1).and_then(as_i64).unwrap_or(10);
             match (u32::try_from(n), u32::try_from(radix)) {
@@ -72,12 +74,28 @@ fn conversion_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value
                 _ => Value::none(),
             }
         }
+        P::StringFromUtf8 => Value::ok(Value::str(bytes_to_string(args.first()))),
+        _ => return int_assoc(id, args),
+    }))
+}
+
+/// The integer constructors and conversions, `from_str_radix`, `from`,
+/// `try_from`, and the byte order readers, plus the float `from`.
+fn int_assoc(id: P, args: &[Value]) -> Result<Option<Value>> {
+    let ty = id.namespace();
+    Ok(Some(match id {
         // Every 64-bit-and-under type parses the same way here, values are
         // untyped ints. The 128-bit types parse in their real width below.
-        (
-            "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize",
-            "from_str_radix",
-        ) => {
+        P::I8FromStrRadix
+        | P::I16FromStrRadix
+        | P::I32FromStrRadix
+        | P::I64FromStrRadix
+        | P::IsizeFromStrRadix
+        | P::U8FromStrRadix
+        | P::U16FromStrRadix
+        | P::U32FromStrRadix
+        | P::U64FromStrRadix
+        | P::UsizeFromStrRadix => {
             let text = args.first().map(Value::display).unwrap_or_default();
             let radix = radix_arg(args);
             match i64::from_str_radix(text.trim(), radix) {
@@ -85,14 +103,14 @@ fn conversion_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value
                 Err(e) => Value::err(Value::str(e.to_string())),
             }
         }
-        ("i128", "from_str_radix") => {
+        P::I128FromStrRadix => {
             let text = args.first().map(Value::display).unwrap_or_default();
             match i128::from_str_radix(text.trim(), radix_arg(args)) {
                 Ok(n) => Value::ok(Value::Big(n, IntWidth::I128)),
                 Err(e) => Value::err(Value::str(e.to_string())),
             }
         }
-        ("u128", "from_str_radix") => {
+        P::U128FromStrRadix => {
             let text = args.first().map(Value::display).unwrap_or_default();
             match u128::from_str_radix(text.trim(), radix_arg(args)) {
                 Ok(n) => Value::ok(Value::Big(n.cast_signed(), IntWidth::U128)),
@@ -102,15 +120,21 @@ fn conversion_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value
         // Numeric `T::from(x)`. Every integer is an i64 here, so a widening
         // conversion just carries the value. `from` on a bool gives 0 or 1,
         // the same as `usize::from(cond)` and the like.
-        ("u128" | "i128", "from") => {
+        P::U128From | P::I128From => {
             let width = IntWidth::parse(ty).expect("128-bit width parses");
             Value::int_of_width(i128::from(int_from_arg(ty, args.first())?), width)
         }
-        (
-            "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize",
-            "from",
-        ) => Value::Int(int_from_arg(ty, args.first())?),
-        ("f32" | "f64", "from") => match args.first() {
+        P::I8From
+        | P::I16From
+        | P::I32From
+        | P::I64From
+        | P::IsizeFrom
+        | P::U8From
+        | P::U16From
+        | P::U32From
+        | P::U64From
+        | P::UsizeFrom => Value::Int(int_from_arg(ty, args.first())?),
+        P::F32From | P::F64From => match args.first() {
             Some(Value::Float(f)) => Value::Float(*f),
             Some(Value::Int(n)) => Value::Float(AsPrimitive::<f64>::as_(*n)),
             Some(Value::Bool(b)) => Value::Float(if *b { 1.0 } else { 0.0 }),
@@ -119,11 +143,18 @@ fn conversion_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value
         // Fallible `T::try_from(x)`. The value fits when it lands inside the
         // target range, so a narrowing conversion reports overflow with the
         // same message as the real `TryFromIntError`.
-        (
-            "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128"
-            | "usize",
-            "try_from",
-        ) => {
+        P::I8TryFrom
+        | P::I16TryFrom
+        | P::I32TryFrom
+        | P::I64TryFrom
+        | P::I128TryFrom
+        | P::IsizeTryFrom
+        | P::U8TryFrom
+        | P::U16TryFrom
+        | P::U32TryFrom
+        | P::U64TryFrom
+        | P::U128TryFrom
+        | P::UsizeTryFrom => {
             let n = int_from_arg(ty, args.first())?;
             if int_fits(ty, n) {
                 Value::ok(Value::Int(n))
@@ -133,58 +164,43 @@ fn conversion_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value
                 ))
             }
         }
-        // `T::from_le_bytes` and its be and ne siblings. The result carries
-        // the named width, so a `u32` read stays a u32 and an `i32` read of
-        // the same four bytes is negative where the top bit is set.
-        (
-            "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128"
-            | "usize",
-            "from_le_bytes" | "from_be_bytes" | "from_ne_bytes",
-        ) => int_from_bytes(ty, func, args)?,
-        ("String", "from_utf8") => Value::ok(Value::str(bytes_to_string(args.first()))),
-        _ => return Ok(None),
+        _ => return int_bytes_assoc(id, args),
     }))
 }
 
-/// Containers, wrappers, paths, regex, and the option and result names.
-fn container_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
-    Ok(Some(match (ty, func) {
+/// Containers, wrappers, paths, and regex.
+fn container_assoc(id: P, args: &[Value]) -> Result<Option<Value>> {
+    Ok(Some(match id {
         // The shape carries every field a later builder call can set, since a
         // shape cannot grow after the instance exists.
-        ("Command", "new") => command_new(args.first().cloned().unwrap_or_else(|| Value::str(""))),
-        ("Vec", "new" | "with_capacity") => Value::vec(vec![]),
-        ("Vec", "from") => match args.first() {
+        P::CommandNew => command_new(args.first().cloned().unwrap_or_else(|| Value::str(""))),
+        P::VecNew | P::VecWithCapacity => Value::vec(vec![]),
+        P::VecFrom => match args.first() {
             Some(Value::Vec(v)) => Value::vec(v.lock().clone()),
             Some(other) => Value::vec(vec![other.clone()]),
             None => Value::vec(vec![]),
         },
-        ("HashMap" | "BTreeMap", "new") | ("HashMap", "with_capacity") => Value::map(),
-        ("HashSet" | "BTreeSet", "new") | ("HashSet", "with_capacity") => Value::set(),
+        P::HashMapNew | P::BTreeMapNew | P::HashMapWithCapacity => Value::map(),
+        P::HashSetNew | P::BTreeSetNew | P::HashSetWithCapacity => Value::set(),
         // `Rc::clone(&x)` is `x.clone()` spelled as the docs recommend,
         // and a cell's clone shares its slot, so handing the value through
         // is exactly right for both.
-        ("Box", "new") | ("Rc" | "Arc", "clone") => args.first().cloned().unwrap_or(Value::Unit),
+        P::BoxNew | P::RcClone | P::ArcClone => args.first().cloned().unwrap_or(Value::Unit),
         // Real shared cells: cloning shares the slot and writes through one
         // handle show through every handle. `Box` above stays transparent,
         // ownership is what the value model already gives every value.
-        ("Rc", "new") => {
-            cell::make_cell(CellKind::Rc, args.first().cloned().unwrap_or(Value::Unit))
-        }
-        ("Arc", "new") => {
-            cell::make_cell(CellKind::Arc, args.first().cloned().unwrap_or(Value::Unit))
-        }
-        ("RefCell", "new") => cell::make_cell(
+        P::RcNew => cell::make_cell(CellKind::Rc, args.first().cloned().unwrap_or(Value::Unit)),
+        P::ArcNew => cell::make_cell(CellKind::Arc, args.first().cloned().unwrap_or(Value::Unit)),
+        P::RefCellNew => cell::make_cell(
             CellKind::RefCell,
             args.first().cloned().unwrap_or(Value::Unit),
         ),
-        ("Cell", "new") => {
-            cell::make_cell(CellKind::Cell, args.first().cloned().unwrap_or(Value::Unit))
-        }
-        ("Mutex", "new") => cell::make_cell(
+        P::CellNew => cell::make_cell(CellKind::Cell, args.first().cloned().unwrap_or(Value::Unit)),
+        P::MutexNew => cell::make_cell(
             CellKind::Mutex,
             args.first().cloned().unwrap_or(Value::Unit),
         ),
-        ("Rc" | "Arc", "strong_count") => {
+        P::RcStrongCount | P::ArcStrongCount => {
             let Some(Value::Cell(_, slot)) = args.first() else {
                 bail!("strong_count needs an Rc or Arc argument");
             };
@@ -197,41 +213,84 @@ fn container_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value>
         }
         // Our file and pipe readers are already buffered, so wrapping is a
         // pass-through; a raw socket is turned into a buffered reader.
-        ("BufReader" | "BufWriter", "new" | "with_capacity") => match args.last() {
-            Some(Value::Native(h)) if matches!(&*h.lock(), Native::Stream(_)) => {
-                let cloned = {
-                    let locked = h.lock();
-                    let Native::Stream(s) = &*locked else {
-                        unreachable!()
+        P::BufReaderNew | P::BufReaderWithCapacity | P::BufWriterNew | P::BufWriterWithCapacity => {
+            match args.last() {
+                Some(Value::Native(h)) if matches!(&*h.lock(), Native::Stream(_)) => {
+                    let cloned = {
+                        let locked = h.lock();
+                        let Native::Stream(s) = &*locked else {
+                            unreachable!()
+                        };
+                        s.try_clone()
                     };
-                    s.try_clone()
-                };
-                match cloned {
-                    Ok(clone) => Native::Reader(std::io::BufReader::new(
-                        Box::new(clone) as Box<dyn std::io::Read + Send>
-                    ))
-                    .wrap(),
-                    Err(e) => return Err(anyhow!("cannot buffer socket: {e}")),
+                    match cloned {
+                        Ok(clone) => Native::Reader(std::io::BufReader::new(
+                            Box::new(clone) as Box<dyn std::io::Read + Send>
+                        ))
+                        .wrap(),
+                        Err(e) => return Err(anyhow!("cannot buffer socket: {e}")),
+                    }
                 }
+                other => other.cloned().unwrap_or(Value::Unit),
             }
-            other => other.cloned().unwrap_or(Value::Unit),
-        },
-        ("PathBuf", "new") => make_path(""),
-        ("PathBuf" | "Path", "from") | ("Path", "new") => {
+        }
+        P::PathBufNew => make_path(""),
+        P::PathBufFrom | P::PathFrom | P::PathNew => {
             make_path(args.first().map(path_like).unwrap_or_default())
         }
-        ("Regex", "new") => {
+        P::RegexNew => {
             let pat = args.first().map(Value::display).unwrap_or_default();
             match regex::Regex::new(&pat) {
                 Ok(compiled) => Value::ok(super::regex_bridge::make_regex(compiled, &pat)),
                 Err(e) => Value::err(Value::str(e.to_string())),
             }
         }
-        ("Some", _) | ("Option", "Some") => {
-            Value::some(args.first().cloned().unwrap_or(Value::Unit))
-        }
-        ("Result", "Ok") => Value::ok(args.first().cloned().unwrap_or(Value::Unit)),
-        ("Result", "Err") => Value::err(args.first().cloned().unwrap_or(Value::Unit)),
+        _ => return Ok(None),
+    }))
+}
+
+/// `T::from_le_bytes` and its be and ne siblings for every integer width.
+fn int_bytes_assoc(id: P, args: &[Value]) -> Result<Option<Value>> {
+    Ok(Some(match id {
+        // `T::from_le_bytes` and its be and ne siblings. The result carries
+        // the named width, so a `u32` read stays a u32 and an `i32` read of
+        // the same four bytes is negative where the top bit is set.
+        P::I8FromLeBytes
+        | P::I8FromBeBytes
+        | P::I8FromNeBytes
+        | P::I16FromLeBytes
+        | P::I16FromBeBytes
+        | P::I16FromNeBytes
+        | P::I32FromLeBytes
+        | P::I32FromBeBytes
+        | P::I32FromNeBytes
+        | P::I64FromLeBytes
+        | P::I64FromBeBytes
+        | P::I64FromNeBytes
+        | P::I128FromLeBytes
+        | P::I128FromBeBytes
+        | P::I128FromNeBytes
+        | P::IsizeFromLeBytes
+        | P::IsizeFromBeBytes
+        | P::IsizeFromNeBytes
+        | P::U8FromLeBytes
+        | P::U8FromBeBytes
+        | P::U8FromNeBytes
+        | P::U16FromLeBytes
+        | P::U16FromBeBytes
+        | P::U16FromNeBytes
+        | P::U32FromLeBytes
+        | P::U32FromBeBytes
+        | P::U32FromNeBytes
+        | P::U64FromLeBytes
+        | P::U64FromBeBytes
+        | P::U64FromNeBytes
+        | P::U128FromLeBytes
+        | P::U128FromBeBytes
+        | P::U128FromNeBytes
+        | P::UsizeFromLeBytes
+        | P::UsizeFromBeBytes
+        | P::UsizeFromNeBytes => int_from_bytes(id, args)?,
         _ => return Ok(None),
     }))
 }
@@ -253,26 +312,26 @@ pub(super) fn command_new(program: Value) -> Value {
 }
 
 /// Files, permissions, and process stream markers.
-fn fs_process_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
-    Ok(Some(match (ty, func) {
-        ("Permissions", "from_mode") => {
+fn fs_process_assoc(id: P, args: &[Value]) -> Result<Option<Value>> {
+    Ok(Some(match id {
+        P::PermissionsFromMode => {
             let mode = args.first().and_then(as_i64).unwrap_or(0o644);
             Value::struct_of("Permissions", vec![("mode".into(), Value::Int(mode))])
         }
         // -- files -----------------------------------------------------
-        ("File", "open") => open_file(&arg_str(args, 0), std::fs::OpenOptions::new().read(true)),
-        ("File", "create") => open_file(
+        P::FileOpen => open_file(&arg_str(args, 0), std::fs::OpenOptions::new().read(true)),
+        P::FileCreate => open_file(
             &arg_str(args, 0),
             std::fs::OpenOptions::new()
                 .write(true)
                 .create(true)
                 .truncate(true),
         ),
-        ("File", "create_new") => open_file(
+        P::FileCreateNew => open_file(
             &arg_str(args, 0),
             std::fs::OpenOptions::new().write(true).create_new(true),
         ),
-        ("OpenOptions", "new") => Value::struct_of(
+        P::OpenOptionsNew => Value::struct_of(
             "OpenOptions",
             [
                 "read",
@@ -285,13 +344,13 @@ fn fs_process_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value
             .into_iter()
             .map(|k| (Arc::from(k), Value::Bool(false))),
         ),
-        ("Stdio", "piped" | "inherit" | "null") => {
-            Value::struct_of("Stdio", [("kind".into(), Value::str(func))])
+        P::StdioPiped | P::StdioInherit | P::StdioNull => {
+            Value::struct_of("Stdio", [("kind".into(), Value::str(id.name()))])
         }
         // `Stdio::from(file)` sends a child's stream straight to an open file.
         // The marker carries the file, and the handle is cloned when the
         // command is built so the script keeps its own copy.
-        ("Stdio", "from") => {
+        P::StdioFrom => {
             let Some(file @ Value::Native(_)) = args.first() else {
                 bail!(
                     "Stdio::from takes an open File, got {}",
@@ -311,53 +370,57 @@ fn fs_process_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value
 }
 
 /// Time, net, pdf, xml, and the seek positions.
-fn misc_assoc(ty: &str, func: &str, args: &[Value]) -> Result<Option<Value>> {
-    Ok(Some(match (ty, func) {
+fn misc_assoc(id: P, args: &[Value]) -> Result<Option<Value>> {
+    Ok(Some(match id {
         // -- time ------------------------------------------------------
-        ("Instant", "now") => Native::Instant(std::time::Instant::now()).wrap(),
-        ("SystemTime", "now") => Native::SystemTime(std::time::SystemTime::now()).wrap(),
-        ("Duration", "from_secs") => make_duration(std::time::Duration::from_secs(
+        P::InstantNow => Native::Instant(std::time::Instant::now()).wrap(),
+        P::SystemTimeNow => Native::SystemTime(std::time::SystemTime::now()).wrap(),
+        P::DurationFromSecs => make_duration(std::time::Duration::from_secs(
             u64::try_from(arg_int(args, 0)).unwrap_or_default(),
         )),
-        ("Duration", "from_millis") => make_duration(std::time::Duration::from_millis(
+        P::DurationFromMillis => make_duration(std::time::Duration::from_millis(
             u64::try_from(arg_int(args, 0)).unwrap_or_default(),
         )),
-        ("Duration", "from_micros") => make_duration(std::time::Duration::from_micros(
+        P::DurationFromMicros => make_duration(std::time::Duration::from_micros(
             u64::try_from(arg_int(args, 0)).unwrap_or_default(),
         )),
-        ("Duration", "from_nanos") => make_duration(std::time::Duration::from_nanos(
+        P::DurationFromNanos => make_duration(std::time::Duration::from_nanos(
             u64::try_from(arg_int(args, 0)).unwrap_or_default(),
         )),
-        ("Duration", "new") => make_duration(std::time::Duration::new(
+        P::DurationNew => make_duration(std::time::Duration::new(
             u64::try_from(arg_int(args, 0)).unwrap_or_default(),
             u32::try_from(arg_int(args, 1)).unwrap_or_default(),
         )),
         // -- net -------------------------------------------------------
-        ("TcpListener", "bind") => match std::net::TcpListener::bind(arg_str(args, 0)) {
+        P::TcpListenerBind => match std::net::TcpListener::bind(arg_str(args, 0)) {
             Ok(l) => Value::ok(Native::Listener(l).wrap()),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
-        ("TcpStream", "connect") => match std::net::TcpStream::connect(arg_str(args, 0)) {
+        P::TcpStreamConnect => match std::net::TcpStream::connect(arg_str(args, 0)) {
             Ok(s) => Value::ok(Native::Stream(s).wrap()),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
-        ("UdpSocket", "bind") => match std::net::UdpSocket::bind(arg_str(args, 0)) {
+        P::UdpSocketBind => match std::net::UdpSocket::bind(arg_str(args, 0)) {
             Ok(s) => Value::ok(Native::Udp(s).wrap()),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
-        ("Document", "load") => super::pdf_bridge::load(&arg_str(args, 0)),
-        ("Element", "parse") => super::xmltree_bridge::parse(args),
-        ("Element", "new") => super::xmltree_bridge::new_element(&arg_str(args, 0)),
+        P::DocumentLoad => super::pdf_bridge::load(&arg_str(args, 0)),
+        P::ElementParse => super::xmltree_bridge::parse(args),
+        P::ElementNew => super::xmltree_bridge::new_element(&arg_str(args, 0)),
         // The real xmltree node enum, constructed like `SeekFrom` below since
         // no user declaration exists for it.
-        ("XMLNode", "Element" | "Text" | "Comment" | "CData" | "ProcessingInstruction") => {
-            Value::enum_of("XMLNode", func, args.to_vec())
-        }
-        ("SeekFrom", "Start" | "End" | "Current") => Value::enum_of(
-            "SeekFrom",
-            func,
+        P::XMLNodeElement
+        | P::XMLNodeText
+        | P::XMLNodeComment
+        | P::XMLNodeCData
+        | P::XMLNodeProcessingInstruction => Value::enum_named(&XML_NODE, id.name(), args.to_vec())
+            .expect("the matched xmltree node variants are all listed"),
+        P::SeekFromStart | P::SeekFromEnd | P::SeekFromCurrent => Value::enum_named(
+            &SEEK_FROM,
+            id.name(),
             vec![args.first().cloned().unwrap_or(Value::Int(0))],
-        ),
+        )
+        .expect("the matched SeekFrom variants are all listed"),
         _ => return Ok(None),
     }))
 }
@@ -389,11 +452,12 @@ fn int_from_arg(ty: &str, v: Option<&Value>) -> Result<i64> {
 
 /// `T::from_le_bytes([..])` and its be and ne siblings, over the same shared
 /// core the `to_*_bytes` methods use.
-fn int_from_bytes(ty: &str, func: &str, args: &[Value]) -> Result<Value> {
-    let (Some(width), Some(order)) = (IntWidth::parse(ty), from_bytes_order(func)) else {
-        bail!("`{ty}::{func}` is not a byte conversion");
+fn int_from_bytes(id: P, args: &[Value]) -> Result<Value> {
+    let (Some(width), Some(order)) = (IntWidth::parse(id.namespace()), from_bytes_order(id.name()))
+    else {
+        bail!("`{id}` is not a byte conversion");
     };
-    let bytes = byte_array(ty, func, args.first())?;
+    let bytes = byte_array(id, args.first())?;
     Ok(Value::int_of_width(
         from_bytes(width, order, &bytes)?,
         width,
@@ -402,15 +466,15 @@ fn int_from_bytes(ty: &str, func: &str, args: &[Value]) -> Result<Value> {
 
 /// The `[u8; N]` argument of a byte conversion. An array literal is a vec at
 /// runtime, so the shape real Rust guarantees in its type is read back here.
-fn byte_array(ty: &str, func: &str, arg: Option<&Value>) -> Result<Vec<i128>> {
+fn byte_array(id: P, arg: Option<&Value>) -> Result<Vec<i128>> {
     let Some(Value::Vec(items)) = arg else {
-        bail!("`{ty}::{func}` needs a byte array");
+        bail!("`{id}` needs a byte array");
     };
     let items = items.lock();
     let mut out = Vec::with_capacity(items.len());
     for item in items.iter() {
         let Some((value, _)) = item.int_parts() else {
-            bail!("`{ty}::{func}` needs a byte array");
+            bail!("`{id}` needs a byte array");
         };
         out.push(value);
     }

@@ -11,6 +11,7 @@ use indexmap::IndexMap;
 use parking_lot::Mutex;
 
 use super::bytecode::Const;
+use super::enum_def::{ERR, EnumDef, EnumKind, NONE, NOT_UNICODE, OK, OPTION, RESULT, SOME};
 use super::native::Native;
 use super::numeric::IntWidth;
 pub use super::rs_str::RsStr;
@@ -261,8 +262,8 @@ pub enum Value {
     /// The payload shares the list storage shape, so a `&mut` binding into
     /// a payload slot is an addressable element reference.
     Enum {
-        enum_name: Arc<str>,
-        variant: Arc<str>,
+        def: Arc<EnumDef>,
+        variant: u16,
         data: List,
     },
     Range {
@@ -375,39 +376,77 @@ impl Value {
     }
 
     pub fn some(v: Value) -> Value {
-        Value::enum_of("Option", "Some", vec![v])
+        Value::enum_of(&OPTION, SOME, vec![v])
     }
 
     /// An enum value with its payload in fresh list storage.
-    pub fn enum_of(
-        enum_name: impl Into<Arc<str>>,
-        variant: impl Into<Arc<str>>,
-        data: Vec<Value>,
-    ) -> Value {
+    pub fn enum_of(def: &Arc<EnumDef>, variant: u16, data: Vec<Value>) -> Value {
         Value::Enum {
-            enum_name: enum_name.into(),
-            variant: variant.into(),
+            def: def.clone(),
+            variant,
             data: Arc::new(Mutex::new(data)),
         }
     }
 
+    /// An enum value by variant name, for the bridges that receive the
+    /// name from a script or from a crate's `Debug` output. None when the
+    /// definition has no such variant.
+    pub fn enum_named(def: &Arc<EnumDef>, variant: &str, data: Vec<Value>) -> Option<Value> {
+        Some(Value::enum_of(def, def.variant_index(variant)?, data))
+    }
+
     pub fn none() -> Value {
-        Value::enum_of("Option", "None", Vec::new())
+        Value::enum_of(&OPTION, NONE, Vec::new())
+    }
+
+    /// Whether this is a variant of a builtin enum, `is_variant(EnumKind::Option, SOME)`.
+    pub fn is_variant(&self, kind: EnumKind, index: u16) -> bool {
+        matches!(self, Value::Enum { def, variant, .. } if def.kind == kind && *variant == index)
+    }
+
+    /// Whether this is an enum of the given builtin kind, any variant.
+    pub fn is_enum_kind(&self, kind: EnumKind) -> bool {
+        matches!(self, Value::Enum { def, .. } if def.kind == kind)
     }
 
     /// True for `Option::None`, used to keep a null json value as None rather
     /// than wrapping it in Some when filling an Option struct field.
     pub fn is_none_value(&self) -> bool {
-        matches!(self, Value::Enum { enum_name, variant, .. }
-            if &**enum_name == "Option" && &**variant == "None")
+        self.is_variant(EnumKind::Option, NONE)
+    }
+
+    /// The payload of an `Option::Some`, or None for `Option::None` and
+    /// for anything that is not an Option.
+    pub fn some_payload(&self) -> Option<Value> {
+        match self {
+            Value::Enum { def, variant, data }
+                if def.kind == EnumKind::Option && *variant == SOME =>
+            {
+                Some(data.lock().first().cloned().unwrap_or(Value::Unit))
+            }
+            _ => None,
+        }
+    }
+
+    /// The payload of a `Some` or an `Ok`, the value a flatten keeps.
+    pub fn success_payload(&self) -> Option<Value> {
+        match self {
+            Value::Enum { def, variant, data }
+                if (def.kind == EnumKind::Option && *variant == SOME)
+                    || (def.kind == EnumKind::Result && *variant == OK) =>
+            {
+                Some(data.lock().first().cloned().unwrap_or(Value::Unit))
+            }
+            _ => None,
+        }
     }
 
     pub fn ok(v: Value) -> Value {
-        Value::enum_of("Result", "Ok", vec![v])
+        Value::enum_of(&RESULT, OK, vec![v])
     }
 
     pub fn err(v: Value) -> Value {
-        Value::enum_of("Result", "Err", vec![v])
+        Value::enum_of(&RESULT, ERR, vec![v])
     }
 
     pub fn is_truthy(&self) -> bool {
@@ -430,7 +469,7 @@ impl Value {
             Value::Vec(_) => Value::vec(Vec::new()),
             Value::Map(_, MapKind::Map) => Value::map(),
             Value::Map(_, MapKind::Set) => Value::set(),
-            Value::Enum { enum_name, .. } if &**enum_name == "Option" => Value::none(),
+            Value::Enum { def, .. } if def.kind == EnumKind::Option => Value::none(),
             _ => Value::Unit,
         }
     }
@@ -647,12 +686,12 @@ impl Value {
             }
             (
                 Value::Enum {
-                    enum_name: ea,
+                    def: ea,
                     variant: va,
                     data: da,
                 },
                 Value::Enum {
-                    enum_name: eb,
+                    def: eb,
                     variant: vb,
                     data: db,
                 },
@@ -660,7 +699,7 @@ impl Value {
                 // Snapshots, not held guards, see the container arms above.
                 let da = da.lock().clone();
                 let db = db.lock().clone();
-                ea == eb
+                EnumDef::same(ea, eb)
                     && va == vb
                     && da.len() == db.len()
                     && da.iter().zip(db.iter()).all(|(x, y)| x.eq_value(y))
@@ -715,12 +754,8 @@ impl Value {
             },
             // `std::env::VarError` implements `Display` in real Rust, and
             // its text is what scripts print with `{e}`.
-            Value::Enum {
-                enum_name,
-                variant,
-                data,
-            } if &**enum_name == "VarError" => {
-                if &**variant == "NotUnicode" {
+            Value::Enum { def, variant, data } if def.kind == EnumKind::VarError => {
+                if *variant == NOT_UNICODE {
                     let payload = data.lock().first().map(Value::display).unwrap_or_default();
                     format!("environment variable was not valid unicode: {payload:?}")
                 } else {
@@ -809,8 +844,8 @@ impl Value {
                     write!(out, "<{}>", n.lock().type_name()).unwrap();
                 }
             }
-            Value::Enum { variant, data, .. } => {
-                write!(out, "{variant}").unwrap();
+            Value::Enum { def, variant, data } => {
+                out.push_str(def.variant_name(*variant));
                 let data = data.lock().clone();
                 if !data.is_empty() {
                     out.push('(');

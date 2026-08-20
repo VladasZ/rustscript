@@ -10,7 +10,7 @@
 use anyhow::Result;
 use syn::Expr;
 
-use super::super::bytecode::{Op, Reg};
+use super::super::bytecode::{Op, PathId, Reg};
 use super::{Compiler, NameLoc};
 
 /// How to land a mutated place value back where it lives. Composite storage
@@ -312,29 +312,6 @@ impl Compiler<'_> {
 }
 
 impl Compiler<'_> {
-    /// Whether a call path is `std::mem::{swap, take, replace}` after
-    /// expanding the module's imports.
-    pub(super) fn mem_intrinsic(&self, segs: &[String]) -> Option<&'static str> {
-        let uses = &self.ctx.resolver.modules[self.ctx.module].uses;
-        let expanded: Vec<&str> = match segs.first().and_then(|head| uses.get(head)) {
-            Some(full) => full
-                .iter()
-                .chain(segs[1..].iter())
-                .map(String::as_str)
-                .collect(),
-            None => segs.iter().map(String::as_str).collect(),
-        };
-        match expanded.as_slice() {
-            ["mem", f] | ["std" | "core", "mem", f] => match *f {
-                "swap" => Some("swap"),
-                "take" => Some("take"),
-                "replace" => Some("replace"),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
     /// Lower `mem::swap`, `mem::take`, and `mem::replace` as place moves.
     /// These replace whole values, so no storage is mutated in place and no
     /// uniqueness split is needed beyond what `compile_place` does. True
@@ -342,7 +319,7 @@ impl Compiler<'_> {
     pub(super) fn compile_mem_intrinsic(
         &mut self,
         dst: Reg,
-        kind: &str,
+        kind: PathId,
         c: &syn::ExprCall,
     ) -> Result<bool> {
         let strip = |e: &Expr| match e {
@@ -350,7 +327,7 @@ impl Compiler<'_> {
             _ => None,
         };
         match kind {
-            "swap" if c.args.len() == 2 => {
+            PathId::MemSwap if c.args.len() == 2 => {
                 let (Some(a), Some(b)) = (strip(&c.args[0]), strip(&c.args[1])) else {
                     return Ok(false);
                 };
@@ -376,7 +353,7 @@ impl Compiler<'_> {
                 self.emit(Op::LoadUnit { dst });
                 Ok(true)
             }
-            "take" if c.args.len() == 1 => {
+            PathId::MemTake if c.args.len() == 1 => {
                 let Some(a) = strip(&c.args[0]) else {
                     return Ok(false);
                 };
@@ -396,7 +373,7 @@ impl Compiler<'_> {
                 self.emit(Op::Move { dst, src: old });
                 Ok(true)
             }
-            "replace" if c.args.len() == 2 => {
+            PathId::MemReplace if c.args.len() == 2 => {
                 let Some(a) = strip(&c.args[0]) else {
                     return Ok(false);
                 };
@@ -432,5 +409,3 @@ pub(super) fn single_path_name(expr: &Expr) -> Option<String> {
     }
     None
 }
-
-pub(super) use super::super::bytecode::builtin_mutating;

@@ -9,8 +9,8 @@ use std::cmp::Ordering;
 
 use num_traits::AsPrimitive;
 
-use super::bytecode::BinKind;
 use super::bytecode::UnKind;
+use super::bytecode::{BinKind, BuiltinId, BuiltinId as B};
 use super::int_methods::{IntOut, int_method, takes_amount_arg};
 use super::numeric::{
     IntWidth, float_arith, float_to_int, i64_arith, int_arith, int_bit, int_neg, int_not,
@@ -478,60 +478,60 @@ pub(super) fn s_try_from(fits: TryFits, v: SVal) -> Option<SVal> {
 /// `int_method` for every integer receiver, so the plan call and the generic
 /// call hit the same table. Names the table rejects at runtime, `abs` on an
 /// unsigned width for one, fail the iteration over to the generic path.
-pub(super) fn scalar_int_method(name: &str) -> bool {
+pub(super) fn scalar_int_method(name: BuiltinId) -> bool {
     matches!(
         name,
-        "is_multiple_of"
-            | "min"
-            | "max"
-            | "clamp"
-            | "abs"
-            | "signum"
-            | "pow"
-            | "isqrt"
-            | "div_euclid"
-            | "rem_euclid"
-            | "saturating_add"
-            | "saturating_sub"
-            | "saturating_mul"
-            | "wrapping_add"
-            | "wrapping_sub"
-            | "wrapping_mul"
-            | "wrapping_neg"
-            | "count_ones"
-            | "count_zeros"
-            | "leading_zeros"
-            | "trailing_zeros"
-            | "rotate_left"
-            | "rotate_right"
-            | "swap_bytes"
-            | "reverse_bits"
-            | "as_i64"
-            | "as_u64"
+        B::IsMultipleOf
+            | B::Min
+            | B::Max
+            | B::Clamp
+            | B::Abs
+            | B::Signum
+            | B::Pow
+            | B::Isqrt
+            | B::DivEuclid
+            | B::RemEuclid
+            | B::SaturatingAdd
+            | B::SaturatingSub
+            | B::SaturatingMul
+            | B::WrappingAdd
+            | B::WrappingSub
+            | B::WrappingMul
+            | B::WrappingNeg
+            | B::CountOnes
+            | B::CountZeros
+            | B::LeadingZeros
+            | B::TrailingZeros
+            | B::RotateLeft
+            | B::RotateRight
+            | B::SwapBytes
+            | B::ReverseBits
+            | B::AsI64
+            | B::AsU64
     )
 }
 
 /// Float methods a plan may run on an f64 receiver: pure, scalar in and
 /// out, and answered by `s_float_method`, which mirrors the float arms of
 /// `shared::num_core`.
-pub(super) fn scalar_float_method(name: &str) -> bool {
+pub(super) fn scalar_float_method(name: BuiltinId) -> bool {
     matches!(
         name,
-        "sqrt"
-            | "floor"
-            | "ceil"
-            | "round"
-            | "trunc"
-            | "fract"
-            | "recip"
-            | "powi"
-            | "powf"
-            | "mul_add"
-            | "is_nan"
-            | "is_finite"
-            | "is_infinite"
-            | "is_sign_positive"
-            | "is_sign_negative"
+        B::Sqrt
+            | B::Floor
+            | B::Ceil
+            | B::Round
+            | B::Trunc
+            | B::Fract
+            | B::Recip
+            | B::Powi
+            | B::Powf
+            | B::MulAdd
+            | B::IsNan
+            | B::IsFinite
+            | B::IsInfinite
+            | B::IsSignPositive
+            | B::IsSignNegative
     )
 }
 
@@ -540,7 +540,7 @@ pub(super) fn scalar_float_method(name: &str) -> bool {
 /// the same `int_methods::int_method` table. A `None` answer, an unknown
 /// name, a non-integer operand, or an error, sends the call to the generic
 /// path, which reproduces its exact result or panic.
-pub(super) fn s_int_method(name: &str, recv: SVal, args: &[SVal]) -> Option<SVal> {
+pub(super) fn s_int_method(name: BuiltinId, recv: SVal, args: &[SVal]) -> Option<SVal> {
     let (value, mut width) = parts(recv)?;
     let mut decoded = [0i128; 2];
     for (slot, arg) in decoded.iter_mut().zip(args) {
@@ -594,7 +594,7 @@ fn s_float_arg(v: SVal) -> Option<f64> {
 /// impl cannot target a primitive. A `None` answer, a non-float receiver, or
 /// a bad argument sends the call to the generic path, which reproduces its
 /// exact result or panic.
-pub(super) fn s_float_method(name: &str, recv: SVal, args: &[SVal]) -> Option<SVal> {
+pub(super) fn s_float_method(name: BuiltinId, recv: SVal, args: &[SVal]) -> Option<SVal> {
     let SVal::Float(f) = recv else {
         return None;
     };
@@ -602,20 +602,20 @@ pub(super) fn s_float_method(name: &str, recv: SVal, args: &[SVal]) -> Option<SV
     let float = |v: f64| Some(SVal::Float(v));
     let flag = |b: bool| Some(SVal::Bool(b));
     match name {
-        "sqrt" => float(f.sqrt()),
-        "abs" => float(f.abs()),
-        "floor" => float(f.floor()),
-        "ceil" => float(f.ceil()),
-        "round" => float(f.round()),
-        "trunc" => float(f.trunc()),
-        "fract" => float(f.fract()),
-        "signum" => float(f.signum()),
-        "recip" => float(f.recip()),
-        "min" => float(f.min(farg(0)?)),
-        "max" => float(f.max(farg(0)?)),
-        "clamp" => float(f.clamp(farg(0)?, farg(1)?)),
-        "powf" => float(f.powf(farg(0)?)),
-        "powi" => {
+        B::Sqrt => float(f.sqrt()),
+        B::Abs => float(f.abs()),
+        B::Floor => float(f.floor()),
+        B::Ceil => float(f.ceil()),
+        B::Round => float(f.round()),
+        B::Trunc => float(f.trunc()),
+        B::Fract => float(f.fract()),
+        B::Signum => float(f.signum()),
+        B::Recip => float(f.recip()),
+        B::Min => float(f.min(farg(0)?)),
+        B::Max => float(f.max(farg(0)?)),
+        B::Clamp => float(f.clamp(farg(0)?, farg(1)?)),
+        B::Powf => float(f.powf(farg(0)?)),
+        B::Powi => {
             let exp = match args.first()? {
                 SVal::Int(i) => *i,
                 SVal::IntW(s, w) => i64::try_from(w.decode(*s)).unwrap_or(i64::MAX),
@@ -623,12 +623,12 @@ pub(super) fn s_float_method(name: &str, recv: SVal, args: &[SVal]) -> Option<SV
             };
             float(f.powi(i32::try_from(exp).ok()?))
         }
-        "mul_add" => float(f.mul_add(farg(0)?, farg(1)?)),
-        "is_nan" => flag(f.is_nan()),
-        "is_finite" => flag(f.is_finite()),
-        "is_infinite" => flag(f.is_infinite()),
-        "is_sign_positive" => flag(f.is_sign_positive()),
-        "is_sign_negative" => flag(f.is_sign_negative()),
+        B::MulAdd => float(f.mul_add(farg(0)?, farg(1)?)),
+        B::IsNan => flag(f.is_nan()),
+        B::IsFinite => flag(f.is_finite()),
+        B::IsInfinite => flag(f.is_infinite()),
+        B::IsSignPositive => flag(f.is_sign_positive()),
+        B::IsSignNegative => flag(f.is_sign_negative()),
         _ => None,
     }
 }
