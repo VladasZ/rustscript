@@ -282,6 +282,26 @@ fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
                 decided => Some(decided),
             }
         }
+        // A derived `Ord` compares the fields in declaration order, which is
+        // the order a literal's values keep, see `compile_struct_literal`.
+        (Value::Struct(a), Value::Struct(b)) if a.name() == b.name() => {
+            let a = a.values.lock().clone();
+            let b = b.values.lock().clone();
+            let mut order = None;
+            for (left, right) in a.iter().zip(b.iter()) {
+                match partial_compare(left, right)? {
+                    Some(Ordering::Equal) => {}
+                    other => {
+                        order = Some(other);
+                        break;
+                    }
+                }
+            }
+            match order {
+                Some(decided) => decided,
+                None => Some(a.len().cmp(&b.len())),
+            }
+        }
         (a, b) => bail!("cannot compare {} and {}", a.type_name(), b.type_name()),
     })
 }
@@ -327,6 +347,19 @@ pub(super) fn int_of(v: &Value) -> Result<i64> {
     }
 }
 
+/// A sequence index as the unsigned value the source typed it as. A `u64`
+/// past `i64::MAX` is a valid index in real Rust and reports out of bounds
+/// with its full value, not a conversion failure.
+fn index_of(key: &Value) -> Result<u128> {
+    if let Value::Big(bits, super::numeric::IntWidth::U128) = key {
+        return Ok(bits.cast_unsigned());
+    }
+    let (n, _) = key
+        .int_parts()
+        .ok_or_else(|| anyhow!("sequence index must be an integer"))?;
+    u128::try_from(n).map_err(|_| anyhow!("negative index"))
+}
+
 /// The shared 128-bit width of two operands when either is a `Value::Big`.
 /// The untagged side is a bare literal adopting the big side's width.
 fn big_operands(l: &Value, r: &Value) -> Option<super::numeric::IntWidth> {
@@ -361,14 +394,17 @@ pub(super) fn index(recv: &Value, key: &Value) -> Result<Value> {
     }
     match recv {
         Value::Vec(items) => {
-            let i = usize::try_from(int_of(key)?)?;
+            let i = index_of(key)?;
             let items = items.lock();
-            items.get(i).cloned().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "index out of bounds: the len is {} but the index is {i}",
-                    items.len()
-                )
-            })
+            usize::try_from(i)
+                .ok()
+                .and_then(|i| items.get(i).cloned())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "index out of bounds: the len is {} but the index is {i}",
+                        items.len()
+                    )
+                })
         }
         Value::Map(m, _) => {
             let k = key
@@ -380,13 +416,17 @@ pub(super) fn index(recv: &Value, key: &Value) -> Result<Value> {
                 .ok_or_else(|| anyhow::anyhow!("no entry found for key"))
         }
         Value::Str(s) => {
-            let i = usize::try_from(int_of(key)?)?;
-            s.chars().nth(i).map(Value::Char).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "index out of bounds: the len is {} but the index is {i}",
-                    s.chars().count()
-                )
-            })
+            let i = index_of(key)?;
+            usize::try_from(i)
+                .ok()
+                .and_then(|i| s.chars().nth(i))
+                .map(Value::Char)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "index out of bounds: the len is {} but the index is {i}",
+                        s.chars().count()
+                    )
+                })
         }
         // `caps[1]` and `caps["name"]` on a capture set.
         Value::Native(h) => super::regex_bridge::capture_index(h, key),

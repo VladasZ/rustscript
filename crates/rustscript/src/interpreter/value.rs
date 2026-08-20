@@ -3,7 +3,6 @@
 //! concurrent tasks.
 
 use num_traits::AsPrimitive;
-use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -281,16 +280,49 @@ pub enum Value {
     Native(Arc<Mutex<Native>>),
 }
 
-/// Hashable map key, the subset of values that may be keys. The manual
+/// Hashable map key, every value real Rust can hash: the scalars, and the
+/// tuples, options, vecs, structs, and enums built from them. The manual
 /// `Hash` pins the exact bytes each variant feeds the hasher, so the
 /// borrowed `StrKey` below can probe a map without building an owned key.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub enum MapKey {
     Bool(bool),
     Int(i64),
+    /// An integer key with its width, so the key rebuilds as the same
+    /// value. Hashes and compares like `Int`, one real map never mixes
+    /// widths.
+    Wide(i64, IntWidth),
     Char(char),
     Str(RsStr),
+    Unit,
+    Tuple(Vec<MapKey>),
+    Opt(Option<Box<MapKey>>),
+    Vec(Vec<MapKey>),
+    /// A struct with a derived `Hash`, its shape kept to rebuild the value.
+    Struct(Arc<StructShape>, Vec<MapKey>),
+    Enum(Arc<EnumDef>, u16, Vec<MapKey>),
 }
+
+impl PartialEq for MapKey {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (MapKey::Bool(a), MapKey::Bool(b)) => a == b,
+            (MapKey::Int(a) | MapKey::Wide(a, _), MapKey::Int(b) | MapKey::Wide(b, _)) => a == b,
+            (MapKey::Char(a), MapKey::Char(b)) => a == b,
+            (MapKey::Str(a), MapKey::Str(b)) => a == b,
+            (MapKey::Unit, MapKey::Unit) => true,
+            (MapKey::Tuple(a), MapKey::Tuple(b)) | (MapKey::Vec(a), MapKey::Vec(b)) => a == b,
+            (MapKey::Opt(a), MapKey::Opt(b)) => a == b,
+            (MapKey::Struct(sa, a), MapKey::Struct(sb, b)) => sa.name == sb.name && a == b,
+            (MapKey::Enum(da, va, a), MapKey::Enum(db, vb, b)) => {
+                da.name == db.name && va == vb && a == b
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for MapKey {}
 
 impl Hash for MapKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -299,7 +331,7 @@ impl Hash for MapKey {
                 state.write_u8(0);
                 b.hash(state);
             }
-            MapKey::Int(i) => {
+            MapKey::Int(i) | MapKey::Wide(i, _) => {
                 state.write_u8(1);
                 i.hash(state);
             }
@@ -311,8 +343,37 @@ impl Hash for MapKey {
                 state.write_u8(3);
                 (**s).hash(state);
             }
+            MapKey::Unit => state.write_u8(4),
+            MapKey::Tuple(items) => {
+                state.write_u8(5);
+                items.hash(state);
+            }
+            MapKey::Opt(inner) => {
+                state.write_u8(6);
+                inner.hash(state);
+            }
+            MapKey::Vec(items) => {
+                state.write_u8(7);
+                items.hash(state);
+            }
+            MapKey::Struct(shape, fields) => {
+                state.write_u8(8);
+                shape.name.hash(state);
+                fields.hash(state);
+            }
+            MapKey::Enum(def, variant, payload) => {
+                state.write_u8(9);
+                def.name.hash(state);
+                variant.hash(state);
+                payload.hash(state);
+            }
         }
     }
+}
+
+/// The keys of a list of values, `None` when any of them cannot key.
+fn keys_of(values: &[Value]) -> Option<Vec<MapKey>> {
+    values.iter().map(Value::as_key).collect()
 }
 
 /// A borrowed string key for map probes that hold the slice but not an
@@ -617,11 +678,24 @@ impl Value {
         Some(match self {
             Value::Bool(b) => MapKey::Bool(*b),
             Value::Int(i) => MapKey::Int(*i),
-            // Unique per value within one width, and one real map never
-            // mixes key widths.
-            Value::IntW(v, _) => MapKey::Int(*v),
+            Value::IntW(v, w) => MapKey::Wide(*v, *w),
             Value::Char(c) => MapKey::Char(*c),
             Value::Str(s) => MapKey::Str(s.clone()),
+            Value::Unit => MapKey::Unit,
+            Value::Tuple(items) => MapKey::Tuple(keys_of(&items.lock())?),
+            Value::Vec(items) => MapKey::Vec(keys_of(&items.lock())?),
+            Value::Struct(s) => MapKey::Struct(s.shape.clone(), keys_of(&s.values.lock())?),
+            Value::Enum { def, variant, data } if def.kind == EnumKind::Option => {
+                if *variant == SOME {
+                    MapKey::Opt(Some(Box::new(data.lock().first()?.as_key()?)))
+                } else {
+                    MapKey::Opt(None)
+                }
+            }
+            Value::Enum { def, variant, data } => {
+                MapKey::Enum(def.clone(), *variant, keys_of(&data.lock())?)
+            }
+            Value::Ref(reference) => return reference.get()?.as_key(),
             _ => return None,
         })
     }
@@ -632,10 +706,10 @@ impl Value {
         Some(match self {
             Value::Bool(b) => MapKey::Bool(b),
             Value::Int(i) => MapKey::Int(i),
-            Value::IntW(v, _) => MapKey::Int(v),
+            Value::IntW(v, w) => MapKey::Wide(v, w),
             Value::Char(c) => MapKey::Char(c),
             Value::Str(s) => MapKey::Str(s),
-            _ => return None,
+            other => return other.as_key(),
         })
     }
 
@@ -715,6 +789,16 @@ impl Value {
                     && da.len() == db.len()
                     && da.iter().zip(db.iter()).all(|(x, y)| x.eq_value(y))
             }
+            // Maps and sets compare by content, whatever the insertion order.
+            // Snapshots, not held guards, see the container arms above.
+            (Value::Map(a, ka), Value::Map(b, kb)) => {
+                let a = a.lock().clone();
+                let b = b.lock().clone();
+                ka == kb
+                    && a.len() == b.len()
+                    && a.iter()
+                        .all(|(key, value)| b.get(key).is_some_and(|other| value.eq_value(other)))
+            }
             // Snapshot both field vectors before comparing. The old code held
             // both guards and then called `b.get`, which locks `b` again, so
             // any struct comparison with at least one field deadlocked. That
@@ -731,7 +815,18 @@ impl Value {
                             .all(|(k, v)| b.shape.slot(k).is_some_and(|i| v.eq_value(&vb[i])))
                 }
             }
-            (Value::Native(a), Value::Native(b)) => Arc::ptr_eq(a, b),
+            // Two parse errors compare by kind, as their derived `PartialEq`
+            // does. Every other native is a handle and compares by identity.
+            (Value::Native(a), Value::Native(b)) => {
+                Arc::ptr_eq(a, b)
+                    || matches!(
+                        (&*a.lock(), &*b.lock()),
+                        (
+                            Native::ParseErr { debug: da, .. },
+                            Native::ParseErr { debug: db, .. }
+                        ) if da == db
+                    )
+            }
             _ => false,
         }
     }
@@ -760,7 +855,9 @@ impl Value {
                 None => "<dangling reference>".to_string(),
             },
             Value::Native(n) => match &*n.lock() {
-                Native::IoErr { display, .. } | Native::JoinErr { display, .. } => display.clone(),
+                Native::IoErr { display, .. }
+                | Native::JoinErr { display, .. }
+                | Native::ParseErr { display, .. } => display.clone(),
                 other => format!("<{}>", other.type_name()),
             },
             // `std::env::VarError` implements `Display` in real Rust, and
@@ -779,132 +876,12 @@ impl Value {
 
     /// `Debug`, the `{:?}` format.
     pub fn debug(&self) -> String {
-        let mut out = String::new();
-        self.write_debug(&mut out);
-        out
-    }
-
-    fn write_debug(&self, out: &mut String) {
-        match self {
-            Value::Unit => out.push_str("()"),
-            Value::Bool(b) => write!(out, "{b}").unwrap(),
-            Value::Int(i) => write!(out, "{i}").unwrap(),
-            Value::IntW(v, w) => write!(out, "{}", w.decode(*v)).unwrap(),
-            Value::Big(v, w) => out.push_str(&big_text(*v, *w)),
-            Value::Float(f) => out.push_str(&format_float_debug(*f)),
-            Value::F32(f) => write!(out, "{f:?}").unwrap(),
-            Value::Char(c) => write!(out, "{c:?}").unwrap(),
-            Value::Str(s) => write!(out, "{:?}", &**s).unwrap(),
-            Value::Range {
-                start,
-                end,
-                inclusive,
-            } => {
-                let sep = if *inclusive { "..=" } else { ".." };
-                write!(out, "{start}{sep}{end}").unwrap();
-            }
-            Value::Vec(items) => {
-                out.push('[');
-                for (i, v) in items.lock().iter().enumerate() {
-                    if i > 0 {
-                        out.push_str(", ");
-                    }
-                    v.write_debug(out);
-                }
-                out.push(']');
-            }
-            Value::Tuple(items) => {
-                out.push('(');
-                let items = items.lock();
-                for (i, v) in items.iter().enumerate() {
-                    if i > 0 {
-                        out.push_str(", ");
-                    }
-                    v.write_debug(out);
-                }
-                if items.len() == 1 {
-                    out.push(',');
-                }
-                out.push(')');
-            }
-            Value::Map(map, kind) => {
-                out.push('{');
-                for (i, (k, v)) in map.lock().iter().enumerate() {
-                    if i > 0 {
-                        out.push_str(", ");
-                    }
-                    k.write_debug(out);
-                    if *kind == MapKind::Map {
-                        out.push_str(": ");
-                        v.write_debug(out);
-                    }
-                }
-                out.push('}');
-            }
-            Value::Struct(s) => write_struct_debug(s, out),
-            Value::Closure(_) => out.push_str("<closure>"),
-            Value::Ref(reference) => match reference.get() {
-                Some(value) => value.write_debug(out),
-                None => out.push_str("<dangling reference>"),
-            },
-            Value::Cell(kind, slot) => write_cell_debug(*kind, slot, out),
-            Value::Native(n) => {
-                if let Native::IoErr { debug, .. } | Native::JoinErr { debug, .. } = &*n.lock() {
-                    out.push_str(debug);
-                } else {
-                    write!(out, "<{}>", n.lock().type_name()).unwrap();
-                }
-            }
-            Value::Enum { def, variant, data } => {
-                out.push_str(def.variant_name(*variant));
-                let data = data.lock().clone();
-                if !data.is_empty() {
-                    out.push('(');
-                    for (i, v) in data.iter().enumerate() {
-                        if i > 0 {
-                            out.push_str(", ");
-                        }
-                        v.write_debug(out);
-                    }
-                    out.push(')');
-                }
-            }
-        }
-    }
-}
-
-/// A shared cell's debug form, each wrapper rendering the way its real
-/// derive does. The slot is snapshotted, not held, so a nested read cannot
-/// relock it.
-fn write_cell_debug(kind: CellKind, slot: &Arc<Mutex<Value>>, out: &mut String) {
-    let inner = slot.lock().clone();
-    match kind {
-        CellKind::Rc | CellKind::Arc => inner.write_debug(out),
-        CellKind::RefCell => {
-            out.push_str("RefCell { value: ");
-            inner.write_debug(out);
-            out.push_str(" }");
-        }
-        CellKind::Cell => {
-            out.push_str("Cell { value: ");
-            inner.write_debug(out);
-            out.push_str(" }");
-        }
-        CellKind::Mutex => {
-            out.push_str("Mutex { data: ");
-            inner.write_debug(out);
-            out.push_str(", poisoned: false, .. }");
-        }
-        CellKind::TokioMutex => {
-            out.push_str("Mutex { data: ");
-            inner.write_debug(out);
-            out.push_str(" }");
-        }
+        super::debug_fmt::render(self, &super::debug_fmt::DebugOpts::plain())
     }
 }
 
 /// A 128-bit value as text, u128 through its reinterpreted bits.
-fn big_text(v: i128, w: IntWidth) -> String {
+pub(super) fn big_text(v: i128, w: IntWidth) -> String {
     if w == IntWidth::U128 {
         v.cast_unsigned().to_string()
     } else {
@@ -912,56 +889,27 @@ fn big_text(v: i128, w: IntWidth) -> String {
     }
 }
 
-/// The derived-Debug form of a struct.
-fn write_struct_debug(s: &StructData, out: &mut String) {
-    write!(out, "{}", super::resolver::bare(s.name())).unwrap();
-    let values = s.values.lock();
-    if values.is_empty() {
-        return;
-    }
-    if s.shape
-        .fields
-        .iter()
-        .enumerate()
-        .all(|(i, f)| **f == i.to_string())
-    {
-        out.push('(');
-        for (i, v) in values.iter().enumerate() {
-            if i > 0 {
-                out.push_str(", ");
-            }
-            v.write_debug(out);
-        }
-        out.push(')');
-        return;
-    }
-    out.push_str(" { ");
-    for (i, (k, v)) in s.shape.fields.iter().zip(values.iter()).enumerate() {
-        if i > 0 {
-            out.push_str(", ");
-        }
-        write!(out, "{k}: ").unwrap();
-        v.write_debug(out);
-    }
-    out.push_str(" }");
-}
-
 impl MapKey {
-    fn write_debug(&self, out: &mut String) {
-        match self {
-            MapKey::Bool(b) => write!(out, "{b}").unwrap(),
-            MapKey::Int(i) => write!(out, "{i}").unwrap(),
-            MapKey::Char(c) => write!(out, "{c:?}").unwrap(),
-            MapKey::Str(s) => write!(out, "{:?}", &**s).unwrap(),
-        }
-    }
-
     pub fn to_value(&self) -> Value {
         match self {
             MapKey::Bool(b) => Value::Bool(*b),
             MapKey::Int(i) => Value::Int(*i),
+            MapKey::Wide(v, w) => Value::IntW(*v, *w),
             MapKey::Char(c) => Value::Char(*c),
             MapKey::Str(s) => Value::Str(s.clone()),
+            MapKey::Unit => Value::Unit,
+            MapKey::Tuple(items) => Value::tuple(items.iter().map(MapKey::to_value).collect()),
+            MapKey::Vec(items) => Value::vec(items.iter().map(MapKey::to_value).collect()),
+            MapKey::Opt(None) => Value::none(),
+            MapKey::Opt(Some(inner)) => Value::some(inner.to_value()),
+            MapKey::Struct(shape, fields) => {
+                Value::structure(shape.clone(), fields.iter().map(MapKey::to_value).collect())
+            }
+            MapKey::Enum(def, variant, payload) => Value::Enum {
+                def: def.clone(),
+                variant: *variant,
+                data: Arc::new(Mutex::new(payload.iter().map(MapKey::to_value).collect())),
+            },
         }
     }
 }
@@ -972,6 +920,6 @@ fn format_float(f: f64) -> String {
     f.to_string()
 }
 
-fn format_float_debug(f: f64) -> String {
+pub(super) fn format_float_debug(f: f64) -> String {
     format!("{f:?}")
 }

@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU8, AtomicU16, Ordering};
 use parking_lot::Mutex;
 
 use super::enum_def::EnumDef;
+use super::numeric::IntWidth;
 use super::typeir::{CastIr, TypeIr};
 
 pub type Reg = u16;
@@ -22,7 +23,7 @@ pub type Reg = u16;
 #[derive(Clone)]
 pub enum Const {
     /// A 128-bit integer literal, i128 exact or u128 as reinterpreted bits.
-    Big(i128, super::numeric::IntWidth),
+    Big(i128, IntWidth),
     Float(f64),
     /// An f32 literal, parsed from its digits at f32 precision so the value
     /// never takes a detour through f64 rounding.
@@ -36,6 +37,9 @@ pub enum Const {
 /// Sentinel destination for a method call whose result a statement discards.
 /// The VM skips building and writing the return value, which lets hot ops
 /// like map insert avoid allocating a `Some(old)` nobody reads.
+/// A `?` whose error leaves unconverted.
+pub const NO_CONV: u16 = u16::MAX;
+
 pub const DISCARD: Reg = Reg::MAX;
 
 /// Binary operators, kept separate from `syn` so the hot loop carries no parse
@@ -156,6 +160,9 @@ impl CapSource {
 /// serialization matches the compiler. The shape is built once at compile
 /// time and shared by every instance the literal creates.
 pub struct StructLit {
+    /// One flag per shape field, true when the literal wrote it. The rest
+    /// fills the others by name.
+    pub filled: Arc<[bool]>,
     /// Field names in the register order `base..base+fields.len()`.
     pub shape: Arc<StructShape>,
     /// Whether a trailing `..rest` value sits in the register after the fields.
@@ -166,6 +173,33 @@ pub struct StructLit {
 pub struct EnumVariant {
     pub def: Arc<EnumDef>,
     pub variant: u16,
+}
+
+/// The value a `Default::default()` builds, lowered from the written type at
+/// compile time. The runtime has no types to ask, so the type the source
+/// stated, a turbofish, a qualified path, a `let` annotation, or a struct
+/// field, is the only place the answer can come from.
+#[derive(Clone)]
+pub enum DefaultIr {
+    Int(IntWidth),
+    F32,
+    F64,
+    Bool,
+    Char,
+    Str,
+    Unit,
+    Vec,
+    Map,
+    Set,
+    Opt,
+    Tuple(Vec<DefaultIr>),
+    /// A struct with a derived `Default`, every field defaulted in turn.
+    Struct {
+        shape: Arc<StructShape>,
+        fields: Vec<DefaultIr>,
+    },
+    /// The `#[default]` variant of an enum with a derived `Default`.
+    Enum(EnumVariant),
 }
 
 /// A method name with its builtin id resolved once at compile time, so hot
@@ -188,6 +222,17 @@ pub struct MethodName {
     /// extra operand. Without it `parse` had to guess its target from the
     /// text, which made `"300".parse::<u8>()` an `Ok(300)`.
     pub scalar: Option<ScalarTy>,
+    /// The written type behind an `unwrap_or_default`, when the source
+    /// states it anywhere the compiler can read: a `let` annotation, a
+    /// turbofish on the receiver's constructor, an annotated local, or a
+    /// helper's return type. Covers what `ScalarTy` cannot, tuples and user
+    /// types among them.
+    pub default: Option<Arc<DefaultIr>>,
+    /// Whether the receiver is a place the call can write, a local, a
+    /// field, or an element. A name with both a mutating form and a value
+    /// form, `String::clear` against the colored `clear`, takes the mutating
+    /// one only on a place, the way an inherent `&mut self` method wins.
+    pub place: bool,
 }
 
 impl MethodName {
@@ -199,6 +244,8 @@ impl MethodName {
             id,
             atom: NO_ATOM,
             scalar: None,
+            default: None,
+            place: false,
         }
     }
 }
@@ -215,7 +262,7 @@ impl Display for MethodName {
 /// `Some(None::<f64>).unwrap_or_default().unwrap_or_default()` needs.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ScalarTy {
-    Int(super::numeric::IntWidth),
+    Int(IntWidth),
     F32,
     F64,
     Bool,
@@ -272,7 +319,7 @@ impl ScalarTy {
             "bool" => Self::Bool,
             "char" => Self::Char,
             "String" | "str" => Self::Str,
-            name => Self::Int(super::numeric::IntWidth::parse(name)?),
+            name => Self::Int(IntWidth::parse(name)?),
         })
     }
 
@@ -482,7 +529,9 @@ impl PTag {
 
 #[derive(Clone)]
 pub enum PLit {
-    Int(i64),
+    /// Wide enough for any literal a pattern can name, `u64::MAX` and the
+    /// 128-bit widths included.
+    Int(i128),
     Float(f64),
     Bool(bool),
     Str(String),
@@ -857,6 +906,11 @@ pub enum Op {
         dst: Reg,
         src: Reg,
     },
+    /// `Default::default()` of a written type, `ir` indexing `defaults`.
+    BuildDefault {
+        dst: Reg,
+        ir: u16,
+    },
     /// Run user `Drop` impls for a scope's bindings, in reverse declaration
     /// order, at the point the scope ends. `list` indexes the chunk's
     /// `drop_lists`. Emitted only when the program has a `Drop` impl at all.
@@ -872,10 +926,14 @@ pub enum Op {
         src: Reg,
     },
 
-    /// The `?` operator. Unwraps Ok/Some into `dst`, or returns early on Err/None.
+    /// The `?` operator. Unwraps Ok/Some into `dst`, or returns early on
+    /// Err/None. `conv` indexes `try_targets` with the function's own error
+    /// type, whose `From` impl converts the error on the way out, `NO_CONV`
+    /// when the error leaves as it is.
     Try {
         dst: Reg,
         src: Reg,
+        conv: u16,
     },
     /// The `?` operator in a program with `Drop` impls. Ok/Some jumps to
     /// `to` with the unwrapped payload in `dst`. Err/None falls through
@@ -885,6 +943,7 @@ pub enum Op {
         dst: Reg,
         src: Reg,
         to: u32,
+        conv: u16,
     },
     Cast {
         dst: Reg,
@@ -957,6 +1016,9 @@ pub struct Chunk {
     pub name: String,
     /// Module this body was written in, for runtime type resolution.
     pub module: u16,
+    /// A `move` closure owns copies of what it captures, so a mutable
+    /// capture gets its own cell instead of sharing the outer binding's.
+    pub moves: bool,
 
     // Side tables referenced by instruction operands.
     pub consts: Vec<Const>,
@@ -966,6 +1028,10 @@ pub struct Chunk {
     pub struct_lits: Vec<StructLit>,
     pub enum_variants: Vec<EnumVariant>,
     pub casts: Vec<CastIr>,
+    /// Written types behind `BuildDefault`.
+    pub defaults: Vec<DefaultIr>,
+    /// The error types `?` converts into, by canonical name.
+    pub try_targets: Vec<Arc<str>>,
     /// Annotated `let` coercion targets, referenced by `Coerce`.
     pub coerces: Vec<TypeIr>,
     /// Path calls and path values.
@@ -1021,6 +1087,7 @@ impl Chunk {
             param_types: Vec::new(),
             name: name.into(),
             module: 0,
+            moves: false,
             consts: Vec::new(),
             members: Vec::new(),
             pats: Vec::new(),
@@ -1028,6 +1095,8 @@ impl Chunk {
             struct_lits: Vec::new(),
             enum_variants: Vec::new(),
             casts: Vec::new(),
+            defaults: Vec::new(),
+            try_targets: Vec::new(),
             coerces: Vec::new(),
             paths: Vec::new(),
             names: Vec::new(),

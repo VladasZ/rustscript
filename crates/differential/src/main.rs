@@ -43,6 +43,7 @@ fn real_main() -> Result<ExitCode> {
         "replay" => replay(&args[1..])?,
         "reduce" => reduce_artifact(&args[1..])?,
         "promote" => promote(&args[1..])?,
+        "surface" => surface_report(&args[1..])?,
         "help" | "-h" | "--help" => print_usage(),
         other => anyhow::bail!("unknown command `{other}`"),
     }
@@ -54,6 +55,27 @@ struct CampaignOptions {
     cases: usize,
     timeout_ms: u64,
     stop_on_first: bool,
+}
+
+/// The std surface against the catalog and the interpreter, see `surface`.
+/// `--refresh` harvests the list from `rust-src` first.
+fn surface_report(args: &[String]) -> Result<()> {
+    let root = workspace_root();
+    if args.iter().any(|arg| arg == "--refresh") {
+        rustscript_differential::surface::refresh(&root)?;
+        println!(
+            "refreshed {}",
+            rustscript_differential::surface::SURFACE_FILE
+        );
+    }
+    let surface = rustscript_differential::surface::load(&root)?;
+    let runner = Runner::build(&root, DEFAULT_TIMEOUT_MS)?;
+    let listing = runner.supported_listing()?;
+    print!(
+        "{}",
+        rustscript_differential::surface::report(&surface, &listing).render()
+    );
+    Ok(())
 }
 
 fn parse_campaign_options(args: &[String]) -> Result<CampaignOptions> {
@@ -109,6 +131,7 @@ fn record_case(
     result: RunResult,
 ) -> Result<()> {
     let case_seed = program.seed;
+    ctx.report.note_calls(&source);
     match &result.classification {
         Classification::Match => {
             ctx.report.matched += 1;
@@ -238,6 +261,7 @@ fn run_campaign(args: &[String]) -> Result<ExitCode> {
     })?;
 
     report.print(started.elapsed());
+    report.print_unexercised(&runner.supported_listing()?, &root)?;
     Ok(if report.bugs.is_empty() {
         ExitCode::SUCCESS
     } else {
@@ -269,6 +293,10 @@ struct CampaignReport {
     matched: usize,
     gaps: BTreeMap<String, BugGroup>,
     bugs: BTreeMap<String, BugGroup>,
+    /// Every method name the generated programs called, so the report can
+    /// list the interpreter surface this campaign never touched. That list
+    /// is the generator's blind spot by definition.
+    called: std::collections::BTreeSet<String>,
     /// Cases whose two native runs disagreed. Each one is a generator grammar
     /// hole, so they are counted with seeds rather than silently dropped.
     nondeterministic: BugGroup,
@@ -314,6 +342,65 @@ impl CampaignReport {
         if let Some(path) = path {
             group.artifacts.push(path);
         }
+    }
+
+    /// Every `.name(` the source calls.
+    fn note_calls(&mut self, source: &str) {
+        let mut rest = source;
+        while let Some(dot) = rest.find('.') {
+            rest = &rest[dot + 1..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if !name.is_empty() && rest[name.len()..].starts_with('(') {
+                self.called.insert(name);
+            }
+        }
+    }
+
+    /// The bridged names no generated program called, written next to the
+    /// artifacts and summarized on the console.
+    fn print_unexercised(&self, listing: &str, root: &Path) -> Result<()> {
+        let surface = rustscript_differential::surface::interpreter_surface_raw(listing);
+        let mut unexercised: Vec<String> = Vec::new();
+        let mut total = 0usize;
+        for (recv, names) in &surface {
+            // The bridge types of crates no generated program imports stay out,
+            // only the receivers the generator writes count.
+            if !matches!(
+                recv.as_str(),
+                "Vec"
+                    | "Map"
+                    | "Option"
+                    | "Result"
+                    | "String and str"
+                    | "Char"
+                    | "any value"
+                    | "Iterator"
+            ) {
+                continue;
+            }
+            for name in names {
+                total += 1;
+                if !self.called.contains(name) {
+                    unexercised.push(format!("{recv} {name}"));
+                }
+            }
+        }
+        unexercised.sort();
+        unexercised.dedup();
+        let dir = root.join("target/rustscript-differential");
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("unexercised.txt");
+        std::fs::write(&path, unexercised.join("\n") + "\n")?;
+        println!(
+            "\ninterpreter surface never called by this campaign: {} of {} names, list in {}",
+            unexercised.len(),
+            total,
+            path.display()
+        );
+        Ok(())
     }
 
     fn record_nondeterministic(&mut self, seed: u64) {
@@ -576,6 +663,7 @@ fn print_usage() {
         r"rustscript-differential
 
   run [--seed N] [--cases N] [--timeout-ms N] [--stop-on-first]
+  surface [--refresh]
   generate --seed N
   mutate ARTIFACT --seed N
   replay ARTIFACT

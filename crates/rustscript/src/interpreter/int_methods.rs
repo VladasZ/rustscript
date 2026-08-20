@@ -33,6 +33,10 @@ pub enum IntOut {
     Ordering(Ordering),
     /// `to_le_bytes` and its siblings, one byte per byte of the width.
     Bytes(Vec<u8>),
+    /// `overflowing_*`, the wrapped value and whether it wrapped.
+    Overflowing(i128, bool),
+    /// `checked_ilog2`, a bit count or `None`.
+    CheckedCount(Option<u32>),
 }
 
 /// Byte order of an integer byte conversion. `Ne` is the target's own order,
@@ -204,6 +208,10 @@ pub fn takes_amount_arg(name: BuiltinId) -> bool {
         BuiltinId::Pow
             | BuiltinId::Powi
             | BuiltinId::CheckedPow
+            | BuiltinId::SaturatingPow
+            | BuiltinId::WrappingPow
+            | BuiltinId::WrappingShl
+            | BuiltinId::WrappingShr
             | BuiltinId::RotateLeft
             | BuiltinId::RotateRight
             | BuiltinId::CheckedShl
@@ -225,7 +233,7 @@ pub fn int_method(
 /// The names here mirror the i128 pipeline above; new names must go into
 /// both, and the coverage harvest reads the pipeline's two halves.
 macro_rules! big_methods {
-    ($fn_name:ident, $ty:ty, $decode:expr, $encode:expr) => {
+    ($fn_name:ident, $query_name:ident, $ty:ty, $decode:expr, $encode:expr) => {
         fn $fn_name(name: BuiltinId, recv_bits: i128, args: &[i128]) -> Option<Result<IntOut>> {
             let decode = $decode;
             let encode = $encode;
@@ -254,6 +262,41 @@ macro_rules! big_methods {
                     None => bail!("attempt to multiply with overflow"),
                 }),
                 BuiltinId::CheckedPow => count_arg(args, 0).map(|e| checked(recv.checked_pow(e))),
+                BuiltinId::SaturatingPow => {
+                    count_arg(args, 0).map(|e| same(recv.saturating_pow(e)))
+                }
+                BuiltinId::WrappingPow => count_arg(args, 0).map(|e| same(recv.wrapping_pow(e))),
+                BuiltinId::WrappingShl => count_arg(args, 0).map(|n| same(recv.wrapping_shl(n))),
+                BuiltinId::WrappingShr => count_arg(args, 0).map(|n| same(recv.wrapping_shr(n))),
+                BuiltinId::Midpoint => val(0).map(|b| same(recv.midpoint(b))),
+                BuiltinId::OverflowingAdd => val(0).map(|b| {
+                    let (v, flag) = recv.overflowing_add(b);
+                    IntOut::Overflowing(encode(v), flag)
+                }),
+                BuiltinId::OverflowingSub => val(0).map(|b| {
+                    let (v, flag) = recv.overflowing_sub(b);
+                    IntOut::Overflowing(encode(v), flag)
+                }),
+                BuiltinId::OverflowingMul => val(0).map(|b| {
+                    let (v, flag) = recv.overflowing_mul(b);
+                    IntOut::Overflowing(encode(v), flag)
+                }),
+                BuiltinId::CheckedRemEuclid => val(0).map(|b| checked(recv.checked_rem_euclid(b))),
+                BuiltinId::Ilog2 => match recv.checked_ilog2() {
+                    Some(v) => Ok(IntOut::Count(v)),
+                    None => Err(anyhow::anyhow!(
+                        "argument of integer logarithm must be positive"
+                    )),
+                },
+                BuiltinId::Ilog10 => match recv.checked_ilog10() {
+                    Some(v) => Ok(IntOut::Count(v)),
+                    None => Err(anyhow::anyhow!(
+                        "argument of integer logarithm must be positive"
+                    )),
+                },
+                BuiltinId::CheckedIlog2 => Ok(IntOut::CheckedCount(recv.checked_ilog2())),
+                BuiltinId::LeadingOnes => Ok(IntOut::Count(recv.leading_ones())),
+                BuiltinId::TrailingOnes => Ok(IntOut::Count(recv.trailing_ones())),
                 BuiltinId::DivEuclid => val(0).and_then(|b| {
                     if b == 0 {
                         bail!("attempt to divide by zero");
@@ -272,6 +315,19 @@ macro_rules! big_methods {
                         None => bail!("attempt to calculate the remainder with overflow"),
                     }
                 }),
+                _ => return $query_name(name, recv_bits, args),
+            };
+            Some(out)
+        }
+
+        /// The comparison, bit, and byte half of the same type's surface.
+        fn $query_name(name: BuiltinId, recv_bits: i128, args: &[i128]) -> Option<Result<IntOut>> {
+            let decode = $decode;
+            let encode = $encode;
+            let recv: $ty = decode(recv_bits);
+            let val = |i: usize| -> Result<$ty> { Ok(decode(arg(args, i)?)) };
+            let same = |v: $ty| IntOut::Same(encode(v));
+            let out: Result<IntOut> = match name {
                 BuiltinId::Min => val(0).map(|b| same(recv.min(b))),
                 BuiltinId::Max => val(0).map(|b| same(recv.max(b))),
                 BuiltinId::Clamp => val(0).and_then(|low| {
@@ -312,11 +368,18 @@ macro_rules! big_methods {
 
 big_methods!(
     u128_method,
+    u128_query,
     u128,
     |bits: i128| bits.cast_unsigned(),
     |v: u128| { v.cast_signed() }
 );
-big_methods!(i128_method, i128, |bits: i128| bits, |v: i128| v);
+big_methods!(
+    i128_method,
+    i128_query,
+    i128,
+    |bits: i128| bits,
+    |v: i128| v
+);
 
 /// Native method cores for the 128-bit receivers. The i128 pipeline above
 /// cannot host them: a `u128` past `i128::MAX` stores as negative bits and
@@ -333,6 +396,37 @@ pub fn big_int_method(
     match width {
         IntWidth::U128 => match name {
             BuiltinId::Isqrt => Some(Ok(IntOut::Same(recv.cast_unsigned().isqrt().cast_signed()))),
+            BuiltinId::IsPowerOfTwo => {
+                Some(Ok(IntOut::Bool(recv.cast_unsigned().is_power_of_two())))
+            }
+            BuiltinId::NextPowerOfTwo => {
+                Some(match recv.cast_unsigned().checked_next_power_of_two() {
+                    Some(v) => Ok(IntOut::Same(v.cast_signed())),
+                    None => Err(anyhow::anyhow!("attempt to add with overflow")),
+                })
+            }
+            BuiltinId::DivCeil => Some(arg(args, 0).and_then(|b| {
+                if b == 0 {
+                    bail!("attempt to divide by zero");
+                }
+                Ok(IntOut::Same(
+                    recv.cast_unsigned()
+                        .div_ceil(b.cast_unsigned())
+                        .cast_signed(),
+                ))
+            })),
+            BuiltinId::NextMultipleOf => Some(arg(args, 0).and_then(|b| {
+                if b == 0 {
+                    bail!("attempt to calculate the remainder with a divisor of zero");
+                }
+                match recv
+                    .cast_unsigned()
+                    .checked_next_multiple_of(b.cast_unsigned())
+                {
+                    Some(v) => Ok(IntOut::Same(v.cast_signed())),
+                    None => bail!("attempt to add with overflow"),
+                }
+            })),
             _ => u128_method(name, recv, args),
         },
         IntWidth::I128 => match name {
@@ -349,6 +443,10 @@ pub fn big_int_method(
                 Ok(IntOut::Same(recv.abs()))
             }),
             BuiltinId::Signum => Some(Ok(IntOut::Same(recv.signum()))),
+            BuiltinId::IsPositive => Some(Ok(IntOut::Bool(recv.is_positive()))),
+            BuiltinId::IsNegative => Some(Ok(IntOut::Bool(recv.is_negative()))),
+            BuiltinId::WrappingAbs => Some(Ok(IntOut::Same(recv.wrapping_abs()))),
+            BuiltinId::CheckedAbs => Some(Ok(IntOut::Checked(recv.checked_abs()))),
             _ => i128_method(name, recv, args),
         },
         _ => None,
@@ -362,7 +460,11 @@ fn int_arith_method(
     recv: i128,
     args: &[i128],
 ) -> Option<Result<IntOut>> {
-    let bits = width.bits();
+    if let Some(out) = int_wrapping_family(name, width, recv, args)
+        .or_else(|| int_checked_family(name, width, recv, args))
+    {
+        return Some(out);
+    }
     let out = match name {
         BuiltinId::SaturatingAdd => {
             arg(args, 0).map(|b| IntOut::Same(saturate(width, recv.saturating_add(b))))
@@ -395,6 +497,57 @@ fn int_arith_method(
             width,
             AsPrimitive::<u128>::as_(-recv),
         ))),
+        BuiltinId::Pow => count_arg(args, 0).and_then(|e| pow(width, recv, e).map(IntOut::Same)),
+        BuiltinId::CheckedPow => {
+            count_arg(args, 0).map(|e| IntOut::Checked(pow(width, recv, e).ok()))
+        }
+        BuiltinId::WrappingAbs => {
+            if !width.is_signed() {
+                return None;
+            }
+            Ok(IntOut::Same(if recv == width.min() {
+                recv
+            } else {
+                recv.abs()
+            }))
+        }
+        BuiltinId::CheckedAbs => {
+            if !width.is_signed() {
+                return None;
+            }
+            Ok(IntOut::Checked((recv != width.min()).then(|| recv.abs())))
+        }
+        BuiltinId::Abs => {
+            if !width.is_signed() {
+                return None;
+            }
+            if recv == width.min() {
+                Err(anyhow::anyhow!("attempt to negate with overflow"))
+            } else {
+                Ok(IntOut::Same(recv.abs()))
+            }
+        }
+        BuiltinId::Signum => {
+            if !width.is_signed() {
+                return None;
+            }
+            Ok(IntOut::Same(recv.signum()))
+        }
+        _ => return None,
+    };
+    Some(out)
+}
+
+/// The `checked_*` arithmetic, `None` wherever the receiver's width would
+/// overflow.
+fn int_checked_family(
+    name: BuiltinId,
+    width: IntWidth,
+    recv: i128,
+    args: &[i128],
+) -> Option<Result<IntOut>> {
+    let bits = width.bits();
+    let out = match name {
         BuiltinId::CheckedAdd => arg(args, 0)
             .map(|b| IntOut::Checked(recv.checked_add(b).and_then(|v| in_range(width, v)))),
         BuiltinId::CheckedSub => arg(args, 0)
@@ -433,38 +586,217 @@ fn int_arith_method(
                 }
             }))
         }),
-        BuiltinId::Pow => count_arg(args, 0).and_then(|e| pow(width, recv, e).map(IntOut::Same)),
-        BuiltinId::CheckedPow => {
-            count_arg(args, 0).map(|e| IntOut::Checked(pow(width, recv, e).ok()))
-        }
-        BuiltinId::Abs => {
-            if !width.is_signed() {
-                return None;
-            }
-            if recv == width.min() {
-                Err(anyhow::anyhow!("attempt to negate with overflow"))
+        _ => return None,
+    };
+    Some(out)
+}
+
+/// The saturating and wrapping powers and shifts, and the overflowing
+/// family, all computed in the receiver's width.
+fn int_wrapping_family(
+    name: BuiltinId,
+    width: IntWidth,
+    recv: i128,
+    args: &[i128],
+) -> Option<Result<IntOut>> {
+    let bits = width.bits();
+    let out = match name {
+        BuiltinId::SaturatingPow => count_arg(args, 0).map(|e| {
+            IntOut::Same(match pow(width, recv, e) {
+                Ok(v) => v,
+                // A negative base with an odd exponent overflows downward.
+                Err(_) if recv < 0 && e % 2 == 1 => width.min(),
+                Err(_) => width.max(),
+            })
+        }),
+        BuiltinId::WrappingPow => count_arg(args, 0).map(|e| {
+            let mask = if bits == 128 {
+                u128::MAX
             } else {
-                Ok(IntOut::Same(recv.abs()))
+                (1u128 << bits) - 1
+            };
+            let base = raw(width, recv);
+            let mut acc: u128 = 1;
+            for _ in 0..e {
+                acc = acc.wrapping_mul(base) & mask;
             }
-        }
-        BuiltinId::Signum => {
-            if !width.is_signed() {
-                return None;
-            }
-            Ok(IntOut::Same(recv.signum()))
+            IntOut::Same(from_raw(width, acc))
+        }),
+        BuiltinId::WrappingShl => count_arg(args, 0)
+            .map(|n| IntOut::Same(from_raw(width, raw(width, recv) << (n % bits)))),
+        BuiltinId::WrappingShr => count_arg(args, 0).map(|n| {
+            IntOut::Same(if width.is_signed() {
+                recv >> (n % bits)
+            } else {
+                from_raw(width, raw(width, recv) >> (n % bits))
+            })
+        }),
+        BuiltinId::OverflowingAdd | BuiltinId::OverflowingSub | BuiltinId::OverflowingMul => {
+            arg(args, 0).map(|b| {
+                let exact = match name {
+                    BuiltinId::OverflowingAdd => recv + b,
+                    BuiltinId::OverflowingSub => recv - b,
+                    _ => recv * b,
+                };
+                match in_range(width, exact) {
+                    Some(v) => IntOut::Overflowing(v, false),
+                    None => {
+                        IntOut::Overflowing(from_raw(width, AsPrimitive::<u128>::as_(exact)), true)
+                    }
+                }
+            })
         }
         _ => return None,
     };
     Some(out)
 }
 
-/// Accessors, comparisons, euclid forms, and the bit and byte views.
+/// The logarithms, the sign tests, and the power of two and multiple
+/// families, some of which exist on one signedness only.
+fn int_range_family(
+    name: BuiltinId,
+    width: IntWidth,
+    recv: i128,
+    args: &[i128],
+) -> Option<Result<IntOut>> {
+    let out = match name {
+        BuiltinId::Ilog2 | BuiltinId::Ilog10 => {
+            if recv <= 0 {
+                Err(anyhow::anyhow!(
+                    "argument of integer logarithm must be positive"
+                ))
+            } else if name == BuiltinId::Ilog2 {
+                Ok(IntOut::Count(recv.ilog2()))
+            } else {
+                Ok(IntOut::Count(recv.ilog10()))
+            }
+        }
+        BuiltinId::CheckedIlog2 => Ok(IntOut::CheckedCount(recv.checked_ilog2())),
+        BuiltinId::IsPositive => {
+            if !width.is_signed() {
+                return None;
+            }
+            Ok(IntOut::Bool(recv > 0))
+        }
+        BuiltinId::IsNegative => {
+            if !width.is_signed() {
+                return None;
+            }
+            Ok(IntOut::Bool(recv < 0))
+        }
+        BuiltinId::IsPowerOfTwo => {
+            if width.is_signed() {
+                return None;
+            }
+            Ok(IntOut::Bool(raw(width, recv).is_power_of_two()))
+        }
+        BuiltinId::NextPowerOfTwo => {
+            if width.is_signed() {
+                return None;
+            }
+            let value = raw(width, recv);
+            let next = if value <= 1 {
+                1
+            } else {
+                1u128 << (128 - (value - 1).leading_zeros())
+            };
+            match in_range(width, AsPrimitive::<i128>::as_(next)) {
+                Some(v) => Ok(IntOut::Same(v)),
+                None => Err(anyhow::anyhow!("attempt to add with overflow")),
+            }
+        }
+        BuiltinId::DivCeil => {
+            if width.is_signed() {
+                return None;
+            }
+            arg(args, 0).and_then(|b| {
+                if b == 0 {
+                    bail!("attempt to divide by zero");
+                }
+                // Both sides are non-negative in an unsigned width.
+                Ok(IntOut::Same((recv + b - 1) / b))
+            })
+        }
+        BuiltinId::NextMultipleOf => {
+            if width.is_signed() {
+                return None;
+            }
+            arg(args, 0).and_then(|b| {
+                if b == 0 {
+                    bail!("attempt to calculate the remainder with a divisor of zero");
+                }
+                let rem = recv % b;
+                let next = if rem == 0 { recv } else { recv + (b - rem) };
+                match in_range(width, next) {
+                    Some(v) => Ok(IntOut::Same(v)),
+                    None => bail!("attempt to add with overflow"),
+                }
+            })
+        }
+        _ => return None,
+    };
+    Some(out)
+}
+
+/// The bit counts, rotations, and byte views, all over the raw bits of the
+/// receiver's width.
+fn int_bit_family(
+    name: BuiltinId,
+    width: IntWidth,
+    recv: i128,
+    args: &[i128],
+) -> Option<Result<IntOut>> {
+    let bits = width.bits();
+    let out = match name {
+        BuiltinId::CountOnes => Ok(IntOut::Count(raw(width, recv).count_ones())),
+        BuiltinId::CountZeros => Ok(IntOut::Count(bits - raw(width, recv).count_ones())),
+        BuiltinId::LeadingZeros => {
+            let value = raw(width, recv);
+            Ok(IntOut::Count(if value == 0 {
+                bits
+            } else {
+                value.leading_zeros() - (128 - bits)
+            }))
+        }
+        BuiltinId::TrailingZeros => {
+            let value = raw(width, recv);
+            Ok(IntOut::Count(if value == 0 {
+                bits
+            } else {
+                value.trailing_zeros()
+            }))
+        }
+        BuiltinId::RotateLeft => {
+            count_arg(args, 0).map(|n| IntOut::Same(rotate(width, recv, n, true)))
+        }
+        BuiltinId::RotateRight => {
+            count_arg(args, 0).map(|n| IntOut::Same(rotate(width, recv, n, false)))
+        }
+        BuiltinId::SwapBytes => Ok(IntOut::Same(from_raw(width, swap_bytes(width, recv)))),
+        BuiltinId::ToLeBytes => Ok(IntOut::Bytes(to_bytes(width, recv, ByteOrder::Le))),
+        BuiltinId::ToBeBytes => Ok(IntOut::Bytes(to_bytes(width, recv, ByteOrder::Be))),
+        BuiltinId::ToNeBytes => Ok(IntOut::Bytes(to_bytes(width, recv, ByteOrder::Ne))),
+        BuiltinId::ReverseBits => {
+            let value = raw(width, recv).reverse_bits() >> (128 - bits);
+            Ok(IntOut::Same(from_raw(width, value)))
+        }
+        _ => return None,
+    };
+    Some(out)
+}
+
+/// Accessors, comparisons, and the euclid forms.
 fn int_query_method(
     name: BuiltinId,
     width: IntWidth,
     recv: i128,
     args: &[i128],
 ) -> Option<Result<IntOut>> {
+    if let Some(out) = int_range_family(name, width, recv, args)
+        .or_else(|| int_bit_family(name, width, recv, args))
+    {
+        return Some(out);
+    }
     let bits = width.bits();
     let out = match name {
         // The serde_json integer accessors, answered from the real value
@@ -523,37 +855,25 @@ fn int_query_method(
                 Ok(IntOut::Same(isqrt(recv)))
             }
         }
-        BuiltinId::CountOnes => Ok(IntOut::Count(raw(width, recv).count_ones())),
-        BuiltinId::CountZeros => Ok(IntOut::Count(bits - raw(width, recv).count_ones())),
-        BuiltinId::LeadingZeros => {
+        // Rounds towards zero, as if computed in a wider signed type, which
+        // the i128 division does.
+        BuiltinId::Midpoint => arg(args, 0).map(|b| IntOut::Same(recv.midpoint(b))),
+        BuiltinId::CheckedRemEuclid => arg(args, 0).map(|b| {
+            IntOut::Checked(
+                if b == 0 || (width.is_signed() && b == -1 && recv == width.min()) {
+                    None
+                } else {
+                    in_range(width, recv.rem_euclid(b))
+                },
+            )
+        }),
+        BuiltinId::LeadingOnes => {
+            let value = raw(width, recv) << (128 - bits);
+            Ok(IntOut::Count(value.leading_ones()))
+        }
+        BuiltinId::TrailingOnes => {
             let value = raw(width, recv);
-            Ok(IntOut::Count(if value == 0 {
-                bits
-            } else {
-                value.leading_zeros() - (128 - bits)
-            }))
-        }
-        BuiltinId::TrailingZeros => {
-            let value = raw(width, recv);
-            Ok(IntOut::Count(if value == 0 {
-                bits
-            } else {
-                value.trailing_zeros()
-            }))
-        }
-        BuiltinId::RotateLeft => {
-            count_arg(args, 0).map(|n| IntOut::Same(rotate(width, recv, n, true)))
-        }
-        BuiltinId::RotateRight => {
-            count_arg(args, 0).map(|n| IntOut::Same(rotate(width, recv, n, false)))
-        }
-        BuiltinId::SwapBytes => Ok(IntOut::Same(from_raw(width, swap_bytes(width, recv)))),
-        BuiltinId::ToLeBytes => Ok(IntOut::Bytes(to_bytes(width, recv, ByteOrder::Le))),
-        BuiltinId::ToBeBytes => Ok(IntOut::Bytes(to_bytes(width, recv, ByteOrder::Be))),
-        BuiltinId::ToNeBytes => Ok(IntOut::Bytes(to_bytes(width, recv, ByteOrder::Ne))),
-        BuiltinId::ReverseBits => {
-            let value = raw(width, recv).reverse_bits() >> (128 - bits);
-            Ok(IntOut::Same(from_raw(width, value)))
+            Ok(IntOut::Count(value.trailing_ones().min(bits)))
         }
         _ => return None,
     };

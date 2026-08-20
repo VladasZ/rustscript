@@ -1,15 +1,24 @@
+//! Structured mutation by subtree splicing: pick a node somewhere in the
+//! parent's expression trees, pick a same-typed subtree from a donor
+//! program, fix the donor's free variables up for the target scope, and drop
+//! it in. This creates nesting shapes the top-down generator never emits
+//! while keeping the program compile-valid by construction.
+
+use std::collections::BTreeSet;
+
 use rand::RngExt;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
 use crate::generator::generate_base;
+use crate::lang::expr::{Expr, minimal};
+use crate::lang::pat::Pat;
+use crate::lang::pipe::{Bind, Stage, Term};
+use crate::lang::stmt::{Ann, Stmt};
+use crate::lang::ty::Ty;
 use crate::model::{MutationOperation, MutationOrigin, Program};
-use crate::slice_case::SliceCase;
-use crate::structural::{EnumCase, FlowStatement, StructuralCase};
-use crate::typed::{GeneratedExpr, GeneratedType};
-use crate::typed_gen::TypedBinding;
 
-const MUTATION_SALT: u64 = 0x9e37_79b9_7f4a_7c15;
+const MUTATION_SALT: u64 = 0x9E37_79B9_7F4A_7C15;
 
 pub fn generate_or_mutate(seed: u64) -> Program {
     if seed != 0 && seed.is_multiple_of(4) {
@@ -21,11 +30,6 @@ pub fn generate_or_mutate(seed: u64) -> Program {
     }
 }
 
-/// Structured mutation by subtree splicing: pick a node somewhere in the
-/// parent's expression trees, pick a same-typed subtree from the donor, fix
-/// the donor's free variables up for the target scope, and drop it in. This
-/// creates nesting shapes the top-down generator never emits while keeping
-/// the program compile-valid by construction.
 pub fn mutate(parent: &Program, parent_seed: u64, donor_seed: u64, output_seed: u64) -> Program {
     let donor = generate_base(donor_seed);
     let mut rng = StdRng::seed_from_u64(output_seed ^ MUTATION_SALT);
@@ -36,8 +40,8 @@ pub fn mutate(parent: &Program, parent_seed: u64, donor_seed: u64, output_seed: 
         if rng.random_bool(0.85) && splice(&mut program, &donor, &mut rng) {
             operations.push(MutationOperation::Splice);
         } else {
-            reverse_case_order(&mut program);
-            operations.push(MutationOperation::CaseOrder);
+            program.blocks.reverse();
+            operations.push(MutationOperation::BlockOrder);
         }
     }
     program.seed = output_seed;
@@ -49,374 +53,206 @@ pub fn mutate(parent: &Program, parent_seed: u64, donor_seed: u64, output_seed: 
     program
 }
 
-fn reverse_case_order(program: &mut Program) {
-    program.rich_cases.reverse();
-    program.closure_cases.reverse();
-    program.structural_cases.reverse();
-    program.semantic_cases.reverse();
-    program.method_cases.reverse();
+/// Whether a subtree can move between programs: nothing in it names an item
+/// or a type that only its own program declares, nothing needs a function
+/// body around it, and no bare reduction needs the annotation of the `let`
+/// it came from to be typed at all.
+fn is_portable(expr: &Expr) -> bool {
+    expr.nodes().iter().all(|node| {
+        let own = !matches!(
+            node,
+            Expr::Pipe(pipe) if pipe.term.is_bare()
+        ) && !matches!(
+            node,
+            Expr::FnCall { .. }
+                | Expr::ClosureCall { .. }
+                | Expr::ApplyCall { .. }
+                | Expr::ConstRef { .. }
+                | Expr::Method { .. }
+                | Expr::TraitCall { .. }
+                | Expr::Try { .. }
+                | Expr::Into { .. }
+                | Expr::StructLit { .. }
+                | Expr::EnumLit { .. }
+                | Expr::Field { .. }
+                | Expr::Block { .. }
+        );
+        let pats = match node {
+            Expr::Match { arms, .. } => arms
+                .iter()
+                .all(|arm| !matches!(arm.pat, Pat::Variant { .. } | Pat::Struct { .. })),
+            _ => true,
+        };
+        own && pats && !mentions_user(&node.ty())
+    })
 }
 
-/// One expression slot a splice may target, with the bindings its rendered
-/// position can see.
-struct Slot<'a> {
-    expr: &'a mut GeneratedExpr,
-    environment: Vec<TypedBinding>,
+fn mentions_user(ty: &Ty) -> bool {
+    match ty {
+        Ty::User(_) => true,
+        Ty::Vec(inner) | Ty::Opt(inner) | Ty::Set(inner) => mentions_user(inner),
+        Ty::Map(key, value) | Ty::Res(key, value) => mentions_user(key) || mentions_user(value),
+        Ty::Tuple(items) => items.iter().any(mentions_user),
+        _ => false,
+    }
 }
 
+/// Names bound inside the subtree itself: closure parameters of pipes,
+/// fold accumulators, and match bindings. They travel with the graft.
+fn binders(expr: &Expr, out: &mut BTreeSet<String>) {
+    for node in expr.nodes() {
+        match node {
+            Expr::Pipe(pipe) => {
+                for stage in &pipe.stages {
+                    match stage {
+                        Stage::Map { bind, .. }
+                        | Stage::PairWith { bind, .. }
+                        | Stage::Filter { bind, .. } => bind_names(bind, out),
+                        _ => {}
+                    }
+                }
+                match &pipe.term {
+                    Term::Any { bind, .. }
+                    | Term::All { bind, .. }
+                    | Term::Position { bind, .. } => {
+                        bind_names(bind, out);
+                    }
+                    Term::Fold { acc, bind, .. } => {
+                        out.insert(acc.clone());
+                        bind_names(bind, out);
+                    }
+                    _ => {}
+                }
+            }
+            Expr::Match { arms, .. } => {
+                for arm in arms {
+                    let mut binds = Vec::new();
+                    arm.pat.bindings(&mut binds);
+                    out.extend(binds.into_iter().map(|(name, _)| name));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn bind_names(bind: &Bind, out: &mut BTreeSet<String>) {
+    match bind {
+        Bind::One(name) => {
+            out.insert(name.clone());
+        }
+        Bind::Pair(key, value) => {
+            out.insert(key.clone());
+            out.insert(value.clone());
+        }
+    }
+}
+
+/// Rewire the graft's free variables to bindings the target scope actually
+/// has. A free variable with no same-typed binding in scope becomes the
+/// minimal literal of its type.
+fn rebind(
+    expr: &mut Expr,
+    environment: &[(String, Ty)],
+    bound: &BTreeSet<String>,
+    rng: &mut StdRng,
+) {
+    if let Expr::Var { name, ty } = expr {
+        if bound.contains(name) {
+            return;
+        }
+        let candidates: Vec<&(String, Ty)> = environment
+            .iter()
+            .filter(|(_, env_ty)| env_ty == ty)
+            .collect();
+        if candidates.is_empty() {
+            *expr = minimal(ty);
+        } else {
+            name.clone_from(&candidates[rng.random_range(0..candidates.len())].0);
+        }
+        return;
+    }
+    for child in expr.children_mut() {
+        rebind(child, environment, bound, rng);
+    }
+}
+
+/// The top level statements a splice may target, with the plain bindings
+/// each one can see: every `let` before it in the same block.
 fn splice(program: &mut Program, donor: &Program, rng: &mut StdRng) -> bool {
-    if program.structural_cases.is_empty() {
+    if program.blocks.is_empty() {
         return false;
     }
-    let case_index = rng.random_range(0..program.structural_cases.len());
-    let mut slots = case_slots(&mut program.structural_cases[case_index]);
-    if slots.is_empty() {
-        return false;
-    }
-    let slot_index = rng.random_range(0..slots.len());
-    let slot = &mut slots[slot_index];
-    let node_count = slot.expr.nodes().len();
-    let node_index = rng.random_range(0..node_count);
-    let Some(target) = slot.expr.nth_node_mut(node_index) else {
-        return false;
-    };
-    let wanted = target.ty();
-
-    let donor_nodes: Vec<&GeneratedExpr> = donor
-        .structural_cases
+    let block_index = rng.random_range(0..program.blocks.len());
+    let block = &mut program.blocks[block_index];
+    let targets: Vec<usize> = block
+        .statements
         .iter()
-        .flat_map(donor_expressions)
-        .flat_map(GeneratedExpr::nodes)
-        .filter(|node| node.ty() == wanted)
+        .enumerate()
+        .filter(|(_, stmt)| {
+            matches!(
+                stmt,
+                Stmt::Let { .. } | Stmt::Assign { .. } | Stmt::Print { .. } | Stmt::Compound { .. }
+            )
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if targets.is_empty() {
+        return false;
+    }
+    let stmt_index = targets[rng.random_range(0..targets.len())];
+    let environment: Vec<(String, Ty)> = block.statements[..stmt_index]
+        .iter()
+        .filter_map(|stmt| match stmt {
+            Stmt::Let { name, ty, .. } => Some((name.clone(), ty.clone())),
+            _ => None,
+        })
+        .collect();
+    let donor_nodes: Vec<&Expr> = donor
+        .blocks
+        .iter()
+        .flat_map(|block| block.statements.iter())
+        .flat_map(Stmt::exprs)
+        .flat_map(Expr::nodes)
+        .filter(|node| is_portable(node))
         .collect();
     if donor_nodes.is_empty() {
         return false;
     }
-    let mut graft = donor_nodes[rng.random_range(0..donor_nodes.len())].clone();
-    let mut bound = Vec::new();
-    rebind(&mut graft, &slot.environment, &mut bound, rng);
+    let stmt = &mut block.statements[stmt_index];
+    let mut slots = stmt.exprs_mut();
+    if slots.is_empty() {
+        return false;
+    }
+    let slot_index = rng.random_range(0..slots.len());
+    let slot = &mut *slots[slot_index];
+    let node_count = slot.nodes().len();
+    let node_index = rng.random_range(0..node_count);
+    let Some(target) = slot.nth_node_mut(node_index) else {
+        return false;
+    };
+    let wanted = target.ty();
+    let typed: Vec<&Expr> = donor_nodes
+        .iter()
+        .copied()
+        .filter(|node| node.ty() == wanted)
+        .collect();
+    if typed.is_empty() {
+        return false;
+    }
+    let mut graft = typed[rng.random_range(0..typed.len())].clone();
+    let mut bound = BTreeSet::new();
+    binders(&graft, &mut bound);
+    rebind(&mut graft, &environment, &bound, rng);
     *target = graft;
+    // A graft whose terminal states no type cannot initialize an
+    // unannotated binding.
+    if let Stmt::Let { expr, ann, .. } = stmt
+        && let Expr::Pipe(pipe) = expr
+        && !pipe.states_type()
+    {
+        *ann = Ann::Typed;
+    }
+    block.seal();
     true
-}
-
-/// Rewire the graft's free variables to bindings the target scope actually
-/// has. Names bound inside the graft itself, closure and match bindings,
-/// travel with it and stay untouched.
-fn rebind(
-    expr: &mut GeneratedExpr,
-    environment: &[TypedBinding],
-    bound: &mut Vec<String>,
-    rng: &mut StdRng,
-) {
-    match expr {
-        GeneratedExpr::Variable { name, ty } => {
-            if bound.iter().any(|b| b == name) {
-                return;
-            }
-            let candidates: Vec<&TypedBinding> = environment
-                .iter()
-                .filter(|binding| binding.ty == *ty)
-                .collect();
-            if candidates.is_empty() {
-                *expr = minimal_literal(*ty);
-            } else {
-                name.clone_from(&candidates[rng.random_range(0..candidates.len())].name);
-            }
-        }
-        GeneratedExpr::VecMap {
-            values,
-            binding,
-            body,
-        }
-        | GeneratedExpr::VecFilter {
-            values,
-            binding,
-            predicate: body,
-        }
-        | GeneratedExpr::OptionMap {
-            option: values,
-            binding,
-            body,
-        }
-        | GeneratedExpr::OptionFilter {
-            option: values,
-            binding,
-            predicate: body,
-        } => {
-            rebind(values, environment, bound, rng);
-            bound.push(binding.clone());
-            rebind(body, environment, bound, rng);
-            bound.pop();
-        }
-        GeneratedExpr::MatchOption {
-            option,
-            binding,
-            some,
-            none,
-            ..
-        } => {
-            rebind(option, environment, bound, rng);
-            bound.push(binding.clone());
-            rebind(some, environment, bound, rng);
-            bound.pop();
-            rebind(none, environment, bound, rng);
-        }
-        GeneratedExpr::ClosureCall {
-            binding,
-            input,
-            body,
-            ..
-        } => {
-            rebind(input, environment, bound, rng);
-            bound.push(binding.clone());
-            rebind(body, environment, bound, rng);
-            bound.pop();
-        }
-        other => {
-            for child in other.children_mut() {
-                rebind(child, environment, bound, rng);
-            }
-        }
-    }
-}
-
-fn minimal_literal(ty: GeneratedType) -> GeneratedExpr {
-    match ty {
-        GeneratedType::I64 => GeneratedExpr::I64(0),
-        GeneratedType::F64 => GeneratedExpr::F64("0.0".to_string()),
-        GeneratedType::Bool => GeneratedExpr::Bool(false),
-        GeneratedType::String => GeneratedExpr::Text(String::new()),
-        GeneratedType::VecI64 => GeneratedExpr::VecLiteral(Vec::new()),
-        GeneratedType::OptionI64 => GeneratedExpr::None,
-    }
-}
-
-fn binding(name: String, ty: GeneratedType) -> TypedBinding {
-    TypedBinding { name, ty }
-}
-
-/// The expression slots of one structural case together with what each can
-/// see, mirroring how the generators build their environments.
-fn case_slots(case: &mut StructuralCase) -> Vec<Slot<'_>> {
-    match case {
-        StructuralCase::Dataflow(dataflow) => {
-            let visible: Vec<TypedBinding> = dataflow
-                .bindings
-                .iter()
-                .map(|b| binding(b.name.clone(), b.ty))
-                .collect();
-            let mut slots = Vec::new();
-            for (index, flow_binding) in dataflow.bindings.iter_mut().enumerate() {
-                slots.push(Slot {
-                    expr: &mut flow_binding.expr,
-                    environment: visible[..index].to_vec(),
-                });
-            }
-            for statement in &mut dataflow.statements {
-                match statement {
-                    FlowStatement::Assign { value, .. } => slots.push(Slot {
-                        expr: value,
-                        environment: visible.clone(),
-                    }),
-                    FlowStatement::IfAssign {
-                        condition,
-                        then_value,
-                        else_value,
-                        ..
-                    } => {
-                        for expr in [condition, then_value, else_value] {
-                            slots.push(Slot {
-                                expr,
-                                environment: visible.clone(),
-                            });
-                        }
-                    }
-                    FlowStatement::LoopAssign { index, value, .. } => {
-                        let mut environment = visible.clone();
-                        environment.push(binding(index.clone(), GeneratedType::I64));
-                        slots.push(Slot {
-                            expr: value,
-                            environment,
-                        });
-                    }
-                }
-            }
-            slots
-        }
-        StructuralCase::MutableClosure(closure) => {
-            let id = closure.id;
-            let environment = vec![
-                binding(format!("closure_state_{id}"), GeneratedType::I64),
-                binding(format!("closure_item_{id}"), GeneratedType::I64),
-                binding(format!("closure_scale_{id}"), GeneratedType::I64),
-                binding(format!("closure_bias_{id}"), GeneratedType::I64),
-            ];
-            vec![Slot {
-                expr: &mut closure.update,
-                environment,
-            }]
-        }
-        StructuralCase::Enum(enum_case) => enum_slots(enum_case),
-        StructuralCase::Slice(slice_case) => slice_slots(slice_case),
-        // Numeric cases have their own statement language with no
-        // GeneratedExpr slots, so the splicer leaves them alone.
-        StructuralCase::Numeric(_) => Vec::new(),
-        StructuralCase::Function(function) => {
-            let environment: Vec<TypedBinding> = function
-                .parameters
-                .iter()
-                .map(|parameter| binding(parameter.name.clone(), parameter.ty))
-                .collect();
-            let mut slots = vec![Slot {
-                expr: &mut function.body,
-                environment,
-            }];
-            for argument in &mut function.arguments {
-                slots.push(Slot {
-                    expr: argument,
-                    environment: Vec::new(),
-                });
-            }
-            slots
-        }
-    }
-}
-
-fn enum_slots(enum_case: &mut EnumCase) -> Vec<Slot<'_>> {
-    let id = enum_case.id;
-    let number = vec![binding(format!("enum_number_{id}"), GeneratedType::I64)];
-    let text = vec![binding(format!("enum_text_{id}"), GeneratedType::String)];
-    let pair = vec![
-        binding(format!("enum_left_{id}"), GeneratedType::I64),
-        binding(format!("enum_right_{id}"), GeneratedType::I64),
-    ];
-    let values = vec![binding(format!("enum_values_{id}"), GeneratedType::VecI64)];
-    let some = vec![binding(format!("enum_some_{id}"), GeneratedType::I64)];
-    vec![
-        Slot {
-            expr: &mut enum_case.unit_arm,
-            environment: Vec::new(),
-        },
-        Slot {
-            expr: &mut enum_case.number_arm,
-            environment: number,
-        },
-        Slot {
-            expr: &mut enum_case.text_guard_arm,
-            environment: text.clone(),
-        },
-        Slot {
-            expr: &mut enum_case.text_arm,
-            environment: text,
-        },
-        Slot {
-            expr: &mut enum_case.pair_arm,
-            environment: pair,
-        },
-        Slot {
-            expr: &mut enum_case.values_arm,
-            environment: values,
-        },
-        Slot {
-            expr: &mut enum_case.some_arm,
-            environment: some,
-        },
-        Slot {
-            expr: &mut enum_case.none_arm,
-            environment: Vec::new(),
-        },
-    ]
-}
-
-fn slice_slots(slice_case: &mut SliceCase) -> Vec<Slot<'_>> {
-    let id = slice_case.id;
-    let first = binding(format!("slice_first_{id}"), GeneratedType::I64);
-    let last = binding(format!("slice_last_{id}"), GeneratedType::I64);
-    let single = vec![binding(format!("slice_only_{id}"), GeneratedType::I64)];
-    let bookend = vec![
-        first.clone(),
-        binding(format!("slice_penult_{id}"), GeneratedType::I64),
-        last.clone(),
-    ];
-    let pair = vec![first.clone(), last];
-    let tail = vec![binding(format!("slice_tail_{id}"), GeneratedType::I64)];
-    vec![
-        Slot {
-            expr: &mut slice_case.empty_arm,
-            environment: Vec::new(),
-        },
-        Slot {
-            expr: &mut slice_case.single_arm,
-            environment: single,
-        },
-        Slot {
-            expr: &mut slice_case.front_arm,
-            environment: vec![first],
-        },
-        Slot {
-            expr: &mut slice_case.bookend_arm,
-            environment: bookend,
-        },
-        Slot {
-            expr: &mut slice_case.pair_arm,
-            environment: pair,
-        },
-        Slot {
-            expr: &mut slice_case.tail_arm,
-            environment: tail,
-        },
-        Slot {
-            expr: &mut slice_case.ends_empty_arm,
-            environment: Vec::new(),
-        },
-    ]
-}
-
-/// The donor side reads the same slots immutably.
-fn donor_expressions(case: &StructuralCase) -> Vec<&GeneratedExpr> {
-    match case {
-        StructuralCase::Dataflow(dataflow) => {
-            let mut exprs: Vec<&GeneratedExpr> =
-                dataflow.bindings.iter().map(|b| &b.expr).collect();
-            for statement in &dataflow.statements {
-                match statement {
-                    FlowStatement::Assign { value, .. }
-                    | FlowStatement::LoopAssign { value, .. } => exprs.push(value),
-                    FlowStatement::IfAssign {
-                        condition,
-                        then_value,
-                        else_value,
-                        ..
-                    } => exprs.extend([condition, then_value, else_value]),
-                }
-            }
-            exprs
-        }
-        StructuralCase::MutableClosure(closure) => vec![&closure.update],
-        StructuralCase::Numeric(_) => Vec::new(),
-        StructuralCase::Enum(enum_case) => vec![
-            &enum_case.unit_arm,
-            &enum_case.number_arm,
-            &enum_case.text_guard_arm,
-            &enum_case.text_arm,
-            &enum_case.pair_arm,
-            &enum_case.values_arm,
-            &enum_case.some_arm,
-            &enum_case.none_arm,
-        ],
-        StructuralCase::Slice(slice_case) => vec![
-            &slice_case.empty_arm,
-            &slice_case.single_arm,
-            &slice_case.front_arm,
-            &slice_case.bookend_arm,
-            &slice_case.pair_arm,
-            &slice_case.tail_arm,
-            &slice_case.ends_empty_arm,
-        ],
-        StructuralCase::Function(function) => {
-            let mut exprs = vec![&function.body];
-            exprs.extend(function.arguments.iter());
-            exprs
-        }
-    }
 }

@@ -2583,6 +2583,7 @@ dependencies = [
  "parking_lot",
  "pretty_assertions",
  "proc-macro2",
+ "quote",
  "rand 0.10.2",
  "ratatui",
  "regex",

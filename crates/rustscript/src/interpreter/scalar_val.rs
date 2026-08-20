@@ -120,7 +120,7 @@ pub(super) fn s_value(v: SVal) -> Option<Value> {
 pub(super) fn s_map_key(v: SVal) -> Option<MapKey> {
     match v {
         SVal::Int(i) => Some(MapKey::Int(i)),
-        SVal::IntW(s, _) => Some(MapKey::Int(s)),
+        SVal::IntW(s, w) => Some(MapKey::Wide(s, w)),
         SVal::Bool(b) => Some(MapKey::Bool(b)),
         _ => None,
     }

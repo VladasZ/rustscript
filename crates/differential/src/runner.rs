@@ -199,6 +199,13 @@ pub struct Runner {
 const INTERPRETED_TIMEOUT_FACTOR: u32 = 4;
 
 impl Runner {
+    /// The interpreter's `rust supported` listing, its bridged surface by
+    /// receiver.
+    pub fn supported_listing(&self) -> Result<String> {
+        let output = Command::new(&self.interpreter).arg("supported").output()?;
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
     pub fn build(workspace: &Path, timeout_ms: u64) -> Result<Self> {
         let interpreter = if let Some(path) = std::env::var_os("RUSTSCRIPT_INTERPRETER") {
             PathBuf::from(path)

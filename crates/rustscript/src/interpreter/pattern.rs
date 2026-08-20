@@ -112,10 +112,9 @@ pub(super) fn try_bind(pat: &PPat, val: &Value, define: &mut dyn FnMut(&str, Val
 /// mismatch, which makes the range not match.
 fn endpoint_cmp(literal: &PLit, value: &Value) -> Option<Ordering> {
     match (literal, value) {
-        (PLit::Int(a), Value::Int(b)) => Some(a.cmp(b)),
-        (PLit::Int(a), Value::IntW(..)) => {
+        (PLit::Int(a), Value::Int(_) | Value::IntW(..) | Value::Big(..)) => {
             let (b, _) = value.int_parts()?;
-            Some(i128::from(*a).cmp(&b))
+            Some(a.cmp(&b))
         }
         (PLit::Float(a), Value::Float(b)) => a.partial_cmp(b),
         (PLit::Float(a), Value::F32(b)) => AsPrimitive::<f32>::as_(*a).partial_cmp(b),
@@ -193,8 +192,9 @@ fn bind_seq(pats: &[PPat], vals: &[Value], define: &mut dyn FnMut(&str, Value)) 
 
 fn plit_eq(l: &PLit, val: &Value) -> bool {
     match (l, val) {
-        (PLit::Int(a), Value::Int(b)) => a == b,
-        (PLit::Int(a), Value::IntW(..)) => val.int_parts().map(|(v, _)| v) == Some(i128::from(*a)),
+        (PLit::Int(a), Value::Int(_) | Value::IntW(..) | Value::Big(..)) => {
+            val.int_parts().map(|(v, _)| v) == Some(*a)
+        }
         (PLit::Float(a), Value::Float(b)) => a == b,
         (PLit::Float(a), Value::F32(b)) => AsPrimitive::<f32>::as_(*a) == *b,
         (PLit::Bool(a), Value::Bool(b)) => a == b,

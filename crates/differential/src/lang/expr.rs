@@ -2,14 +2,14 @@
 //! generator, the renderer and the shrinker all agree on what a subtree means
 //! without re-running inference.
 
-use std::collections::BTreeSet;
-
 use serde::{Deserialize, Serialize};
 
 use crate::lang::catalog::{METHODS, Method};
+use crate::lang::pat::Pat;
 use crate::lang::pipe::Pipe;
-use crate::lang::ty::Ty;
-use crate::numeric::{FloatWidth, IntWidth};
+use crate::lang::stmt::Stmt;
+use crate::lang::ty::{FloatWidth, IntWidth, StdErr, Ty};
+use crate::lang::user::{MethodKind, UserShape};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum BinOp {
@@ -75,6 +75,11 @@ impl BinOp {
         )
     }
 
+    /// The operators `a op= b` exists for.
+    pub fn has_compound(self) -> bool {
+        !self.is_comparison() && !matches!(self, Self::And | Self::Or)
+    }
+
     pub fn feature(self) -> &'static str {
         match self {
             Self::Add => "lang-op-add",
@@ -109,13 +114,29 @@ impl UnOp {
     }
 }
 
+/// One `match` arm.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Arm {
+    pub pat: Pat,
+    pub guard: Option<Expr>,
+    pub body: Expr,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Expr {
-    /// An integer literal. `opaque` routes it through a helper so the compiler
-    /// cannot fold it, which is what keeps an overflowing program a runtime
-    /// panic instead of a rejected compile.
+    /// A suffixed integer literal. `opaque` routes it through a helper so the
+    /// compiler cannot fold it, which is what keeps an overflowing program a
+    /// runtime panic instead of a rejected compile.
     IntLit {
         width: IntWidth,
+        value: i128,
+        opaque: bool,
+    },
+    /// An integer literal with no suffix, which rustc types `i32` unless
+    /// something around it says otherwise. The whole point is that nothing
+    /// does. `opaque` wraps it in the `if diff_opaque_true()` shield, which
+    /// hides the value from the overflow lint without naming a type.
+    BareInt {
         value: i128,
         opaque: bool,
     },
@@ -128,8 +149,21 @@ pub enum Expr {
         token: String,
         opaque: bool,
     },
-    BoolLit(bool),
-    CharLit(char),
+    /// A float literal with no suffix, `f64` by rustc's default.
+    BareFloat {
+        token: String,
+        opaque: bool,
+    },
+    /// `opaque` renders through a helper call, so rustc cannot fold the
+    /// value and reject a shift by `'7' as u32` at compile time.
+    BoolLit {
+        value: bool,
+        opaque: bool,
+    },
+    CharLit {
+        value: char,
+        opaque: bool,
+    },
     StrLit(String),
     VecLit {
         elem: Ty,
@@ -150,17 +184,56 @@ pub enum Expr {
         elem: Ty,
         items: Vec<Expr>,
     },
+    TupleLit(Vec<Expr>),
+    /// `Ok::<T, E>(..)` or `Err::<T, E>(..)`, both types pinned.
+    ResLit {
+        ok: Ty,
+        err: Ty,
+        value: Result<Box<Expr>, Box<Expr>>,
+    },
+    /// A std error value, made by a parse that fails.
+    StdErrLit(StdErr),
+    /// `Name { a: .., b: .. }`, or with `update` the first `fields.len()`
+    /// fields written and `..Default::default()` for the rest.
+    StructLit {
+        shape: Box<UserShape>,
+        fields: Vec<Expr>,
+        update: bool,
+    },
+    EnumLit {
+        shape: Box<UserShape>,
+        variant: usize,
+        payload: Vec<Expr>,
+    },
+    /// `<T>::default()`.
+    DefaultOf(Ty),
     /// An iterator pipeline, the collect-target shapes among it.
     Pipe(Box<Pipe>),
-    /// A call of a generated zero-argument helper function, the vehicle for a
-    /// bare `collect` whose target only the helper's return type states.
+    /// A call of a generated helper function. `by_ref` marks the arguments
+    /// the function takes by `&`.
     FnCall {
         name: String,
+        args: Vec<Expr>,
+        #[serde(default)]
+        by_ref: Vec<bool>,
+        ty: Ty,
+    },
+    /// A call of a closure bound by a `let`.
+    ClosureCall {
+        name: String,
+        args: Vec<Expr>,
         ty: Ty,
     },
     Var {
         name: String,
         ty: Ty,
+    },
+    /// A read of a program const. `opaque` shields it from the overflow
+    /// lint the same way a bare literal is shielded.
+    ConstRef {
+        name: String,
+        ty: Ty,
+        opaque: bool,
     },
     Bin {
         op: BinOp,
@@ -193,38 +266,279 @@ pub enum Expr {
         else_expr: Box<Expr>,
         ty: Ty,
     },
+    /// A struct field by position in the shape.
+    Field {
+        base: Box<Expr>,
+        index: usize,
+        ty: Ty,
+    },
+    TupleField {
+        base: Box<Expr>,
+        index: usize,
+        ty: Ty,
+    },
+    /// `v[i]`, which panics out of bounds exactly like debug Rust.
+    Index {
+        base: Box<Expr>,
+        index: Box<Expr>,
+        ty: Ty,
+    },
+    /// A user method, `base.name(args)`, or with `Assoc` kind
+    /// `Type::name(args)` and no base.
+    Method {
+        owner: Box<UserShape>,
+        name: String,
+        kind: MethodKind,
+        base: Option<Box<Expr>>,
+        args: Vec<Expr>,
+        ty: Ty,
+    },
+    /// `base.diff_describe()` through the program local trait.
+    TraitCall {
+        base: Box<Expr>,
+    },
+    /// `helper(&mut closure, arg)`, a closure handed to a generic helper.
+    ApplyCall {
+        helper: String,
+        closure: String,
+        arg: Box<Expr>,
+        ty: Ty,
+    },
+    /// `value?` inside a function whose error type converts from the
+    /// value's error type.
+    Try {
+        value: Box<Expr>,
+        ty: Ty,
+    },
+    /// `To::from(value)`, or `value.into()` when `bare` and the target is
+    /// stated by the `let` the expression initializes.
+    Into {
+        value: Box<Expr>,
+        to: Ty,
+        bare: bool,
+    },
+    Match {
+        scrutinee: Box<Expr>,
+        /// The scrutinee is a slice view, so bindings arrive as references
+        /// and each arm clones them into owned values first.
+        by_ref: bool,
+        arms: Vec<Arm>,
+        ty: Ty,
+    },
+    /// `{ stmts; tail }`, a function body or a closure body.
+    Block {
+        stmts: Vec<Stmt>,
+        tail: Box<Expr>,
+    },
 }
 
 impl Expr {
     pub fn ty(&self) -> Ty {
         match self {
             Self::IntLit { width, .. } => Ty::Int(*width),
+            Self::BareInt { .. } => Ty::I32,
             Self::FloatLit { width, .. } => Ty::Float(*width),
-            Self::BoolLit(_) => Ty::Bool,
-            Self::CharLit(_) => Ty::Char,
-            Self::StrLit(_) => Ty::Str,
+            Self::BareFloat { .. } => Ty::F64,
+            Self::BoolLit { .. } => Ty::Bool,
+            Self::CharLit { .. } => Ty::Char,
+            Self::StrLit(_) | Self::TraitCall { .. } => Ty::Str,
             Self::VecLit { elem, .. } => Ty::vec_of(elem.clone()),
             Self::OptLit { elem, .. } => Ty::opt_of(elem.clone()),
             Self::MapLit { key, value, .. } => Ty::map_of(key.clone(), value.clone()),
             Self::SetLit { elem, .. } => Ty::set_of(elem.clone()),
+            Self::TupleLit(items) => Ty::Tuple(items.iter().map(Expr::ty).collect()),
+            Self::ResLit { ok, err, .. } => Ty::res_of(ok.clone(), err.clone()),
+            Self::StdErrLit(err) => Ty::StdErr(*err),
+            Self::StructLit { shape, .. } | Self::EnumLit { shape, .. } => Ty::User(shape.clone()),
+            Self::DefaultOf(ty) | Self::Cast { to: ty, .. } | Self::Into { to: ty, .. } => {
+                ty.clone()
+            }
             Self::Pipe(pipe) => pipe.ty(),
-            Self::Cast { to, .. } => to.clone(),
+            Self::Block { tail, .. } => tail.ty(),
             Self::Var { ty, .. }
+            | Self::ConstRef { ty, .. }
             | Self::Bin { ty, .. }
             | Self::Unary { ty, .. }
             | Self::Call { ty, .. }
             | Self::If { ty, .. }
-            | Self::FnCall { ty, .. } => ty.clone(),
+            | Self::FnCall { ty, .. }
+            | Self::ClosureCall { ty, .. }
+            | Self::Field { ty, .. }
+            | Self::TupleField { ty, .. }
+            | Self::Index { ty, .. }
+            | Self::Method { ty, .. }
+            | Self::ApplyCall { ty, .. }
+            | Self::Try { ty, .. }
+            | Self::Match { ty, .. } => ty.clone(),
+        }
+    }
+
+    /// The expression as a place to read a field from or index into: a
+    /// binding by name, anything else parenthesized as a temporary.
+    fn render_place(&self) -> String {
+        match self {
+            Self::Var { name, .. } => name.clone(),
+            other => format!("({})", other.render()),
         }
     }
 
     pub fn render(&self) -> String {
+        if let Some(text) = self.render_literal() {
+            return text;
+        }
         match self {
+            Self::Pipe(pipe) => pipe.render(),
+            Self::FnCall {
+                name, args, by_ref, ..
+            } => {
+                let rendered: Vec<String> = args
+                    .iter()
+                    .enumerate()
+                    .map(|(index, arg)| {
+                        if by_ref.get(index).copied().unwrap_or(false) {
+                            format!("&({})", arg.render())
+                        } else {
+                            arg.render()
+                        }
+                    })
+                    .collect();
+                format!("{name}({})", rendered.join(", "))
+            }
+            Self::ClosureCall { name, args, .. } => {
+                let rendered: Vec<String> = args.iter().map(Expr::render).collect();
+                format!("{name}({})", rendered.join(", "))
+            }
+            // A non-copy binding is always read through a clone, which is what
+            // keeps generated programs free of move and borrow errors without
+            // the generator having to track liveness.
+            Self::Var { name, ty } if !ty.is_copy() => format!("{name}.clone()"),
+            Self::Var { name, .. } => name.clone(),
+            Self::ConstRef {
+                name, ty, opaque, ..
+            } => shield(name, &minimal(ty).render(), *opaque),
+            Self::Bin {
+                op, left, right, ..
+            } => {
+                format!("({} {} {})", left.render(), op.token(), right.render())
+            }
+            Self::Unary { op, value, .. } => format!("({}{})", op.token(), value.render()),
+            Self::Cast { value, to } => format!("({} as {})", value.render(), to.rust()),
+            Self::Call {
+                method,
+                recv,
+                args,
+                fish,
+                ..
+            } => render_call(method, recv, args, fish.as_ref()),
+            // Always parenthesized. Bare `if a { x } else { y }.len()` parses
+            // as `if a { x } else { y.len() }`, so the source would stop
+            // matching the tree and a shrink of the receiver would rewrite a
+            // different expression than the one it aimed at.
+            Self::If {
+                condition,
+                then_expr,
+                else_expr,
+                ..
+            } => format!(
+                "(if {} {{ {} }} else {{ {} }})",
+                condition.render(),
+                then_expr.render(),
+                else_expr.render()
+            ),
+            Self::Field { .. }
+            | Self::TupleField { .. }
+            | Self::Index { .. }
+            | Self::Method { .. }
+            | Self::TraitCall { .. }
+            | Self::ApplyCall { .. }
+            | Self::Try { .. }
+            | Self::Into { .. }
+            | Self::Match { .. }
+            | Self::Block { .. } => self.render_access(),
+            _ => unreachable!("every literal renders through render_literal"),
+        }
+    }
+
+    /// Accesses into values, user calls, conversions, matches, and blocks.
+    fn render_access(&self) -> String {
+        match self {
+            Self::Field { base, index, ty } => {
+                let Ty::User(shape) = base.ty() else {
+                    return base.render();
+                };
+                let name = &shape.fields()[*index].name;
+                owned(format!("{}.{name}", base.render_place()), ty)
+            }
+            Self::TupleField { base, index, ty } => {
+                owned(format!("{}.{index}", base.render_place()), ty)
+            }
+            Self::Index { base, index, ty } => {
+                owned(format!("{}[{}]", base.render_place(), index.render()), ty)
+            }
+            Self::Method {
+                owner,
+                name,
+                kind,
+                base,
+                args,
+                ..
+            } => {
+                let rendered: Vec<String> = args.iter().map(Expr::render).collect();
+                match (kind, base) {
+                    (MethodKind::Method, Some(base)) => {
+                        format!("{}.{name}({})", base.render_place(), rendered.join(", "))
+                    }
+                    _ => format!("{}::{name}({})", owner.name, rendered.join(", ")),
+                }
+            }
+            Self::TraitCall { base } => format!("{}.diff_describe()", base.render_place()),
+            Self::ApplyCall {
+                helper,
+                closure,
+                arg,
+                ..
+            } => format!("{helper}(&mut {closure}, {})", arg.render()),
+            Self::Try { value, .. } => format!("({}?)", value.render()),
+            Self::Into {
+                value, bare: true, ..
+            } => format!("{}.into()", value.render()),
+            Self::Into { value, to, .. } => format!("{}::from({})", to.rust(), value.render()),
+            Self::Match {
+                scrutinee,
+                by_ref,
+                arms,
+                ..
+            } => render_match(scrutinee, *by_ref, arms),
+            Self::Block { stmts, tail } => {
+                let mut out = String::from("{ ");
+                for stmt in stmts {
+                    out.push_str(stmt.render(&std::collections::BTreeSet::new(), 0).trim());
+                    out.push(' ');
+                }
+                out.push_str(&tail.render());
+                out.push_str(" }");
+                out
+            }
+            _ => unreachable!("render_access handles the access nodes only"),
+        }
+    }
+
+    /// The literal forms, `None` for every other node.
+    fn render_literal(&self) -> Option<String> {
+        Some(match self {
             Self::IntLit {
                 width,
                 value,
                 opaque,
             } => render_int_lit(*width, *value, *opaque),
+            Self::BareInt { value, opaque } => {
+                let text = if *value < 0 {
+                    format!("({value})")
+                } else {
+                    value.to_string()
+                };
+                shield(&text, "0", *opaque)
+            }
             Self::FloatLit {
                 token,
                 opaque: false,
@@ -235,9 +549,31 @@ impl Expr {
                 token,
                 opaque: true,
             } => format!("diff_opaque_{}({token})", width.rust()),
-            Self::BoolLit(value) => value.to_string(),
-            Self::CharLit(value) => format!("{value:?}"),
+            Self::BareFloat { token, opaque } => shield(token, "0.0", *opaque),
+            Self::BoolLit {
+                value,
+                opaque: true,
+            } => {
+                if *value {
+                    "diff_opaque_true()".to_string()
+                } else {
+                    "(!diff_opaque_true())".to_string()
+                }
+            }
+            Self::BoolLit { value, .. } => value.to_string(),
+            Self::CharLit {
+                value,
+                opaque: true,
+            } => format!("diff_opaque_char({value:?})"),
+            Self::CharLit { value, .. } => format!("{value:?}"),
             Self::StrLit(value) => format!("String::from({value:?})"),
+            _ => return self.render_collection_literal(),
+        })
+    }
+
+    /// Collections, tuples, results, and user values.
+    fn render_collection_literal(&self) -> Option<String> {
+        Some(match self {
             Self::VecLit { elem, items } if items.is_empty() => {
                 format!("Vec::<{}>::new()", elem.rust())
             }
@@ -284,376 +620,131 @@ impl Expr {
                     inserts.join(" ")
                 )
             }
-            Self::Pipe(pipe) => pipe.render(),
-            Self::FnCall { name, .. } => format!("{name}()"),
-            // A non-copy binding is always read through a clone, which is what
-            // keeps generated programs free of move and borrow errors without
-            // the generator having to track liveness.
-            Self::Var { name, ty } if !ty.is_copy() => format!("{name}.clone()"),
-            Self::Var { name, .. } => name.clone(),
-            Self::Bin {
-                op, left, right, ..
-            } => {
-                format!("({} {} {})", left.render(), op.token(), right.render())
-            }
-            Self::Unary { op, value, .. } => format!("({}{})", op.token(), value.render()),
-            Self::Cast { value, to } => format!("({} as {})", value.render(), to.rust()),
-            Self::Call {
-                method,
-                recv,
-                args,
-                fish,
-                ..
-            } => render_call(method, recv, args, fish.as_ref()),
-            // Always parenthesized. Bare `if a { x } else { y }.len()` parses
-            // as `if a { x } else { y.len() }`, so the source would stop
-            // matching the tree and a shrink of the receiver would rewrite a
-            // different expression than the one it aimed at.
-            Self::If {
-                condition,
-                then_expr,
-                else_expr,
-                ..
-            } => format!(
-                "(if {} {{ {} }} else {{ {} }})",
-                condition.render(),
-                then_expr.render(),
-                else_expr.render()
-            ),
-        }
-    }
-
-    pub fn uses_any(&self, names: &BTreeSet<String>) -> bool {
-        match self {
-            Self::Var { name, .. } => names.contains(name),
-            Self::IntLit { .. }
-            | Self::FloatLit { .. }
-            | Self::BoolLit(_)
-            | Self::CharLit(_)
-            | Self::StrLit(_)
-            | Self::FnCall { .. } => false,
-            Self::VecLit { items, .. } | Self::SetLit { items, .. } => {
-                items.iter().any(|item| item.uses_any(names))
-            }
-            Self::OptLit { value, .. } => value.as_ref().is_some_and(|inner| inner.uses_any(names)),
-            Self::MapLit { items, .. } => items
-                .iter()
-                .any(|(key, value)| key.uses_any(names) || value.uses_any(names)),
-            Self::Pipe(pipe) => pipe.uses_any(names),
-            Self::Bin { left, right, .. } => left.uses_any(names) || right.uses_any(names),
-            Self::Unary { value, .. } | Self::Cast { value, .. } => value.uses_any(names),
-            Self::Call { recv, args, .. } => {
-                recv.uses_any(names) || args.iter().any(|arg| arg.uses_any(names))
-            }
-            Self::If {
-                condition,
-                then_expr,
-                else_expr,
-                ..
-            } => {
-                condition.uses_any(names) || then_expr.uses_any(names) || else_expr.uses_any(names)
-            }
-        }
-    }
-
-    /// Whether the subtree contains an operator that can abort at runtime.
-    /// Drives the decision to launder integer literals.
-    pub fn has_fallible_op(&self) -> bool {
-        match self {
-            Self::Bin {
-                op, left, right, ..
-            } => op.is_fallible() || left.has_fallible_op() || right.has_fallible_op(),
-            Self::Unary { op, value, .. } => matches!(op, UnOp::Neg) || value.has_fallible_op(),
-            Self::Cast { value, .. } => value.has_fallible_op(),
-            Self::VecLit { items, .. } | Self::SetLit { items, .. } => {
-                items.iter().any(Expr::has_fallible_op)
-            }
-            Self::OptLit { value, .. } => {
-                value.as_ref().is_some_and(|inner| inner.has_fallible_op())
-            }
-            Self::MapLit { items, .. } => items
-                .iter()
-                .any(|(key, value)| key.has_fallible_op() || value.has_fallible_op()),
-            // Every catalog call reaches std code the const propagator can look
-            // through, `pow` and `sum` among them, so a call counts as fallible.
-            // A pipe carries `sum` and `fold`, a helper body is out of sight,
-            // both count the same way.
-            Self::Call { .. } | Self::Pipe(_) | Self::FnCall { .. } => true,
-            Self::If {
-                condition,
-                then_expr,
-                else_expr,
-                ..
-            } => {
-                condition.has_fallible_op()
-                    || then_expr.has_fallible_op()
-                    || else_expr.has_fallible_op()
-            }
-            _ => false,
-        }
-    }
-
-    /// Mark every integer literal in the subtree as needing the opaque helper.
-    pub fn make_opaque(&mut self) {
-        match self {
-            Self::IntLit { opaque, .. } | Self::FloatLit { opaque, .. } => *opaque = true,
-            Self::VecLit { items, .. } | Self::SetLit { items, .. } => {
-                for item in items {
-                    item.make_opaque();
+            Self::TupleLit(items) => {
+                let rendered: Vec<String> = items.iter().map(Expr::render).collect();
+                match items.len() {
+                    1 => format!("({},)", rendered[0]),
+                    _ => format!("({})", rendered.join(", ")),
                 }
             }
-            Self::OptLit {
-                value: Some(inner), ..
-            } => inner.make_opaque(),
-            Self::MapLit { items, .. } => {
-                for (key, value) in items {
-                    key.make_opaque();
-                    value.make_opaque();
-                }
-            }
-            Self::Pipe(pipe) => pipe.make_opaque(),
-            Self::Bin { left, right, .. } => {
-                left.make_opaque();
-                right.make_opaque();
-            }
-            Self::Unary { value, .. } | Self::Cast { value, .. } => value.make_opaque(),
-            Self::Call { recv, args, .. } => {
-                recv.make_opaque();
-                for arg in args {
-                    arg.make_opaque();
-                }
-            }
-            Self::If {
-                condition,
-                then_expr,
-                else_expr,
-                ..
+            Self::ResLit { ok, err, value } => match value {
+                Ok(inner) => format!("Ok::<{}, {}>({})", ok.rust(), err.rust(), inner.render()),
+                Err(inner) => format!("Err::<{}, {}>({})", ok.rust(), err.rust(), inner.render()),
+            },
+            Self::StdErrLit(err) => match err {
+                StdErr::ParseInt => "\"x\".parse::<i32>().unwrap_err()".to_string(),
+                StdErr::ParseFloat => "\"x\".parse::<f64>().unwrap_err()".to_string(),
+            },
+            Self::StructLit {
+                shape,
+                fields,
+                update,
             } => {
-                condition.make_opaque();
-                then_expr.make_opaque();
-                else_expr.make_opaque();
+                let mut parts: Vec<String> = shape
+                    .fields()
+                    .iter()
+                    .zip(fields)
+                    .map(|(field, expr)| format!("{}: {}", field.name, expr.render()))
+                    .collect();
+                if *update {
+                    parts.push("..Default::default()".to_string());
+                }
+                format!("{} {{ {} }}", shape.name, parts.join(", "))
             }
-            _ => {}
-        }
-    }
-
-    /// Which opaque helper functions this subtree needs emitted.
-    pub fn helpers(&self, out: &mut BTreeSet<Helper>) {
-        match self {
-            Self::IntLit {
-                width,
-                opaque: true,
-                ..
+            Self::EnumLit {
+                shape,
+                variant,
+                payload,
             } => {
-                out.insert(if width.is_signed() {
-                    Helper::I64
+                let name = &shape.variants()[*variant].name;
+                if payload.is_empty() {
+                    format!("{}::{name}", shape.name)
                 } else {
-                    Helper::U64
-                });
-            }
-            Self::FloatLit {
-                width,
-                opaque: true,
-                ..
-            } => {
-                out.insert(match width {
-                    FloatWidth::F32 => Helper::F32,
-                    FloatWidth::F64 => Helper::F64,
-                });
-            }
-            Self::VecLit { items, .. } | Self::SetLit { items, .. } => {
-                for item in items {
-                    item.helpers(out);
+                    let rendered: Vec<String> = payload.iter().map(Expr::render).collect();
+                    format!("{}::{name}({})", shape.name, rendered.join(", "))
                 }
             }
-            Self::OptLit {
-                value: Some(inner), ..
-            } => inner.helpers(out),
-            Self::MapLit { items, .. } => {
-                for (key, value) in items {
-                    key.helpers(out);
-                    value.helpers(out);
-                }
-            }
-            Self::Pipe(pipe) => pipe.helpers(out),
-            Self::Bin { left, right, .. } => {
-                left.helpers(out);
-                right.helpers(out);
-            }
-            Self::Unary { value, .. } | Self::Cast { value, .. } => value.helpers(out),
-            Self::Call { recv, args, .. } => {
-                recv.helpers(out);
-                for arg in args {
-                    arg.helpers(out);
-                }
-            }
-            Self::If {
-                condition,
-                then_expr,
-                else_expr,
-                ..
-            } => {
-                condition.helpers(out);
-                then_expr.helpers(out);
-                else_expr.helpers(out);
-            }
-            _ => {}
-        }
+            Self::DefaultOf(ty) => format!("<{}>::default()", ty.rust()),
+            _ => return None,
+        })
     }
+}
 
-    pub fn features(&self, out: &mut BTreeSet<&'static str>) {
-        out.insert(self.ty().feature());
-        match self {
-            Self::Bin {
-                op, left, right, ..
-            } => {
-                out.insert(op.feature());
-                left.features(out);
-                right.features(out);
-            }
-            Self::Unary { value, .. } => {
-                out.insert("lang-unary");
-                value.features(out);
-            }
-            Self::Cast { value, .. } => {
-                out.insert("lang-cast");
-                value.features(out);
-            }
-            Self::Call {
-                method, recv, args, ..
-            } => {
-                out.insert("lang-call");
-                if let Some(entry) = lookup(method) {
-                    out.insert(entry.name);
-                }
-                recv.features(out);
-                for arg in args {
-                    arg.features(out);
-                }
-            }
-            Self::If {
-                condition,
-                then_expr,
-                else_expr,
-                ..
-            } => {
-                out.insert("lang-if");
-                condition.features(out);
-                then_expr.features(out);
-                else_expr.features(out);
-            }
-            Self::VecLit { items, .. } | Self::SetLit { items, .. } => {
-                for item in items {
-                    item.features(out);
-                }
-            }
-            Self::OptLit {
-                value: Some(inner), ..
-            } => inner.features(out),
-            Self::MapLit { items, .. } => {
-                for (key, value) in items {
-                    key.features(out);
-                    value.features(out);
-                }
-            }
-            Self::Pipe(pipe) => pipe.features(out),
-            Self::FnCall { .. } => {
-                out.insert("lang-fn-call");
-            }
-            _ => {}
-        }
+/// A read of a place, cloned when its type does not copy.
+fn owned(place: String, ty: &Ty) -> String {
+    if ty.is_copy() {
+        place
+    } else {
+        format!("{place}.clone()")
     }
+}
 
-    /// Whether the tree contains a call of the helper function `name`.
-    pub fn calls_fn(&self, name: &str) -> bool {
-        if let Self::FnCall { name: called, .. } = self
-            && called == name
-        {
-            return true;
-        }
-        self.children().iter().any(|child| child.calls_fn(name))
+/// The `if diff_opaque_true()` shield, a branch the overflow lint cannot
+/// fold that states no type of its own, so rustc infers the value's type
+/// from the literal alone.
+fn shield(text: &str, other: &str, opaque: bool) -> String {
+    if opaque {
+        format!("(if diff_opaque_true() {{ {text} }} else {{ {other} }})")
+    } else {
+        text.to_string()
     }
+}
 
-    /// Direct children, so shrinking can hoist a same-typed subtree.
-    fn children(&self) -> Vec<&Expr> {
-        match self {
-            Self::Bin { left, right, .. } => vec![left, right],
-            Self::Unary { value, .. } | Self::Cast { value, .. } => vec![value],
-            Self::Call { recv, args, .. } => {
-                let mut out = vec![&**recv];
-                out.extend(args.iter());
-                out
-            }
-            Self::If {
-                condition,
-                then_expr,
-                else_expr,
-                ..
-            } => vec![condition, then_expr, else_expr],
-            Self::VecLit { items, .. } | Self::SetLit { items, .. } => items.iter().collect(),
-            Self::OptLit { value, .. } => value.iter().map(|inner| &**inner).collect(),
-            Self::MapLit { items, .. } => {
-                items.iter().flat_map(|(key, value)| [key, value]).collect()
-            }
-            Self::Pipe(pipe) => pipe.exprs(),
-            _ => Vec::new(),
+fn render_match(scrutinee: &Expr, by_ref: bool, arms: &[Arm]) -> String {
+    // A slice match views the vec through `as_slice`, the temporary lives
+    // for the whole match.
+    // The scrutinee is parenthesized because a struct literal is not
+    // allowed bare in that position.
+    let view = if by_ref { ".as_slice()" } else { "" };
+    let mut out = format!("(match ({}){view} {{ ", scrutinee.render());
+    for arm in arms {
+        out.push_str(&arm.pat.render());
+        if let Some(guard) = &arm.guard {
+            out.push_str(&format!(" if {}", guard.render()));
         }
+        out.push_str(" => ");
+        let mut binds = Vec::new();
+        arm.pat.bindings(&mut binds);
+        if by_ref && !binds.is_empty() {
+            out.push_str("{ ");
+            for (name, ty) in &binds {
+                // A slice rest binds `&[T]`, an element binds `&T`. Both
+                // become the owned value the body is typed against.
+                let make = if matches!(ty, Ty::Vec(_)) && is_rest(&arm.pat, name) {
+                    format!("{name}.to_vec()")
+                } else {
+                    format!("{name}.clone()")
+                };
+                out.push_str(&format!("let {name}: {} = {make}; ", ty.rust()));
+            }
+            out.push_str(&arm.body.render());
+            out.push_str(" }");
+        } else {
+            out.push_str(&arm.body.render());
+        }
+        out.push_str(", ");
     }
+    out.push_str("})");
+    out
+}
 
-    /// Simpler expressions of the same type, tried in order by the reducer.
-    pub fn shrinks(&self) -> Vec<Self> {
-        let ty = self.ty();
-        let mut candidates = Vec::new();
-        let smallest = minimal(&ty);
-        if *self != smallest {
-            candidates.push(smallest);
-        }
-        for child in self.children() {
-            if child.ty() == ty {
-                candidates.push(child.clone());
-            }
-        }
-        if let Self::VecLit { items, .. } = self
-            && !items.is_empty()
-        {
-            let mut shorter = self.clone();
-            if let Self::VecLit { items, .. } = &mut shorter {
-                items.pop();
-            }
-            candidates.push(shorter);
-        }
-        if let Self::MapLit { items, .. } = self
-            && !items.is_empty()
-        {
-            let mut shorter = self.clone();
-            if let Self::MapLit { items, .. } = &mut shorter {
-                items.pop();
-            }
-            candidates.push(shorter);
-        }
-        if let Self::SetLit { items, .. } = self
-            && !items.is_empty()
-        {
-            let mut shorter = self.clone();
-            if let Self::SetLit { items, .. } = &mut shorter {
-                items.pop();
-            }
-            candidates.push(shorter);
-        }
-        if let Self::Pipe(pipe) = self {
-            candidates.extend(pipe.shrinks().into_iter().map(|p| Self::Pipe(Box::new(p))));
-        }
-        candidates
+/// Whether `name` is the `rest @ ..` binding of a slice pattern.
+fn is_rest(pat: &Pat, name: &str) -> bool {
+    match pat {
+        Pat::Slice { rest, .. } => matches!(rest, Some(Some(rest)) if rest == name),
+        _ => false,
     }
 }
 
 /// The opaque helper functions a program needs, emitted only when used.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub enum Helper {
     I64,
     U64,
     F32,
     F64,
+    True,
+    Char,
 }
 
 impl Helper {
@@ -663,6 +754,8 @@ impl Helper {
             Self::U64 => "fn diff_opaque_u64(value: u64) -> u64 {\n    value\n}\n\n",
             Self::F32 => "fn diff_opaque_f32(value: f32) -> f32 {\n    value\n}\n\n",
             Self::F64 => "fn diff_opaque_f64(value: f64) -> f64 {\n    value\n}\n\n",
+            Self::True => "fn diff_opaque_true() -> bool {\n    true\n}\n\n",
+            Self::Char => "fn diff_opaque_char(value: char) -> char {\n    value\n}\n\n",
         }
     }
 }
@@ -693,7 +786,7 @@ fn render_call(method: &str, recv: &Expr, args: &[Expr], fish: Option<&Ty>) -> S
     let rendered_args: Vec<String> = args.iter().map(Expr::render).collect();
     let recv_ty = recv.ty();
     let elem = recv_ty.elem().map(Ty::rust).unwrap_or_default();
-    let (key, val) = match recv_ty.key_val() {
+    let (key, val) = match recv_ty.key_val().or_else(|| recv_ty.ok_err()) {
         Some((key, value)) => (key.rust(), value.rust()),
         None => (String::new(), String::new()),
     };
@@ -761,6 +854,30 @@ fn fill(
     out
 }
 
+/// A bare literal with its suffix restored. A method call on `{integer}`
+/// is ambiguous to rustc, so a bare literal never sits in receiver position.
+pub fn unbare(expr: Expr) -> Expr {
+    match expr {
+        Expr::BareInt { value, opaque } => Expr::IntLit {
+            width: IntWidth::I32,
+            value,
+            opaque,
+        },
+        Expr::BareFloat { token, opaque } => {
+            let token = match token.strip_suffix(')') {
+                Some(inner) => format!("{inner}f64)"),
+                None => format!("{token}f64"),
+            };
+            Expr::FloatLit {
+                width: FloatWidth::F64,
+                token,
+                opaque,
+            }
+        }
+        other => other,
+    }
+}
+
 /// The simplest expression of a type, the target every shrink step aims at.
 pub fn minimal(ty: &Ty) -> Expr {
     match ty {
@@ -777,8 +894,14 @@ pub fn minimal(ty: &Ty) -> Expr {
             },
             opaque: false,
         },
-        Ty::Bool => Expr::BoolLit(false),
-        Ty::Char => Expr::CharLit('a'),
+        Ty::Bool => Expr::BoolLit {
+            value: false,
+            opaque: false,
+        },
+        Ty::Char => Expr::CharLit {
+            value: 'a',
+            opaque: false,
+        },
         Ty::Str => Expr::StrLit(String::new()),
         Ty::Vec(elem) => Expr::VecLit {
             elem: (**elem).clone(),
@@ -797,5 +920,28 @@ pub fn minimal(ty: &Ty) -> Expr {
             elem: (**elem).clone(),
             items: Vec::new(),
         },
+        Ty::Tuple(items) => Expr::TupleLit(items.iter().map(minimal).collect()),
+        Ty::Res(ok, err) => Expr::ResLit {
+            ok: (**ok).clone(),
+            err: (**err).clone(),
+            value: Ok(Box::new(minimal(ok))),
+        },
+        Ty::StdErr(err) => Expr::StdErrLit(*err),
+        Ty::User(shape) => {
+            if shape.is_enum() {
+                let variant = &shape.variants()[0];
+                Expr::EnumLit {
+                    shape: shape.clone(),
+                    variant: 0,
+                    payload: variant.payload.iter().map(minimal).collect(),
+                }
+            } else {
+                Expr::StructLit {
+                    shape: shape.clone(),
+                    fields: shape.fields().iter().map(|f| minimal(&f.ty)).collect(),
+                    update: false,
+                }
+            }
+        }
     }
 }

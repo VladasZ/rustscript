@@ -498,6 +498,23 @@ impl Vm {
                     args.first().cloned().unwrap_or_else(Value::none)
                 }
             }
+            BuiltinId::And => {
+                if is_some {
+                    args.first().cloned().unwrap_or_else(Value::none)
+                } else {
+                    Value::none()
+                }
+            }
+            BuiltinId::Xor => {
+                let other = args.first().cloned().unwrap_or_else(Value::none);
+                let other_some = other.is_enum_kind(EnumKind::Option)
+                    && matches!(&other, Value::Enum { variant, .. } if *variant == SOME);
+                match (is_some, other_some) {
+                    (true, false) => Value::some(inner()?),
+                    (false, true) => other,
+                    _ => Value::none(),
+                }
+            }
             _ => return Ok(None),
         };
         Ok(Some(out))

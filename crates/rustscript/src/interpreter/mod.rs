@@ -6,6 +6,7 @@ mod compile;
 mod console;
 pub mod coverage;
 mod crates_bridge;
+mod debug_fmt;
 mod enum_def;
 mod format;
 mod higher_order;
@@ -61,6 +62,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, anyhow, bail};
+use quote::ToTokens;
 use syn::Item;
 
 use crate::loader::ModuleSrc;
@@ -210,6 +212,68 @@ fn main_err_uses_display(output: &syn::ReturnType, uses: &HashMap<String, Vec<St
 /// Stated return scalars of the script's own functions, one more place a
 /// `Default` payload is written down. A name defined in more than one module
 /// with differing returns answers for neither.
+/// The full written return type of every function whose name is declared
+/// once. A name defined twice with different returns is absent, the call
+/// site cannot tell which one it reaches.
+/// Register every item of every module, in module order.
+fn register_items(
+    resolver: &mut Resolver,
+    modules: &[ModuleSrc],
+    pending_fns: &mut Vec<(usize, Rc<syn::ItemFn>)>,
+    pending_impls: &mut Vec<(usize, Rc<syn::ItemImpl>)>,
+    pending_consts: &mut Vec<(usize, Rc<syn::Expr>)>,
+) -> Result<()> {
+    for (m, src) in modules.iter().enumerate() {
+        for item in &src.items {
+            register_item(
+                resolver,
+                m,
+                item,
+                pending_fns,
+                pending_impls,
+                pending_consts,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// The signature of every uniquely named function, so a call to a generic
+/// helper can read the type its arguments give a type parameter.
+fn collect_fn_signatures(
+    pending_fns: &[(usize, Rc<syn::ItemFn>)],
+) -> HashMap<String, syn::Signature> {
+    let mut seen: HashMap<String, Option<syn::Signature>> = HashMap::default();
+    for (_, f) in pending_fns {
+        seen.entry(f.sig.ident.to_string())
+            .and_modify(|known| *known = None)
+            .or_insert_with(|| Some(f.sig.clone()));
+    }
+    seen.into_iter()
+        .filter_map(|(name, sig)| sig.map(|sig| (name, sig)))
+        .collect()
+}
+
+fn collect_fn_return_types(pending_fns: &[(usize, Rc<syn::ItemFn>)]) -> HashMap<String, syn::Type> {
+    let mut seen: HashMap<String, Option<syn::Type>> = HashMap::default();
+    for (_, f) in pending_fns {
+        let ty = match &f.sig.output {
+            syn::ReturnType::Type(_, ty) => Some((**ty).clone()),
+            syn::ReturnType::Default => None,
+        };
+        seen.entry(f.sig.ident.to_string())
+            .and_modify(|known| {
+                if *known != ty {
+                    *known = None;
+                }
+            })
+            .or_insert(ty);
+    }
+    seen.into_iter()
+        .filter_map(|(name, ty)| ty.map(|t| (name, t)))
+        .collect()
+}
+
 fn collect_fn_returns(
     pending_fns: &[(usize, Rc<syn::ItemFn>)],
 ) -> HashMap<String, bytecode::ScalarTy> {
@@ -259,24 +323,21 @@ impl Interp {
         let mut pending_consts: Vec<(usize, Rc<syn::Expr>)> = Vec::new();
 
         let traits = collect_traits(modules);
-        for (m, src) in modules.iter().enumerate() {
-            for item in &src.items {
-                register_item(
-                    &mut resolver,
-                    m,
-                    item,
-                    &mut pending_fns,
-                    &mut pending_impls,
-                    &mut pending_consts,
-                )?;
-            }
-        }
+        register_items(
+            &mut resolver,
+            modules,
+            &mut pending_fns,
+            &mut pending_impls,
+            &mut pending_consts,
+        )?;
         resolver.reject_module_globs()?;
 
         let pending_methods =
             collect_impl_items(&mut resolver, &pending_impls, &traits, &mut pending_consts)?;
 
         let fn_returns = collect_fn_returns(&pending_fns);
+        let fn_return_types = collect_fn_return_types(&pending_fns);
+        let fn_signatures = collect_fn_signatures(&pending_fns);
 
         let (has_drop, mut_methods) = collect_mut_methods(&pending_methods);
         let (impl_methods, method_atoms) = impl_name_tables(&pending_methods);
@@ -290,6 +351,8 @@ impl Interp {
                 async_mode,
                 impl_type: None,
                 fn_returns: &fn_returns,
+                fn_return_types: &fn_return_types,
+                fn_signatures: &fn_signatures,
                 mut_methods: &mut_methods,
                 impl_methods: &impl_methods,
                 method_atoms: &method_atoms,
@@ -307,6 +370,8 @@ impl Interp {
                 async_mode,
                 impl_type: Some(ty),
                 fn_returns: &fn_returns,
+                fn_return_types: &fn_return_types,
+                fn_signatures: &fn_signatures,
                 mut_methods: &mut_methods,
                 impl_methods: &impl_methods,
                 method_atoms: &method_atoms,
@@ -329,6 +394,8 @@ impl Interp {
                 async_mode,
                 impl_type: None,
                 fn_returns: &fn_returns,
+                fn_return_types: &fn_return_types,
+                fn_signatures: &fn_signatures,
                 mut_methods: &mut_methods,
                 impl_methods: &impl_methods,
                 method_atoms: &method_atoms,
@@ -669,6 +736,30 @@ fn collect_mut_methods(pending_methods: &[PendingMethod]) -> (bool, HashSet<Stri
     (has_drop, mut_methods)
 }
 
+/// The bare name of `S` in `impl From<S> for T`.
+fn from_source_name(imp: &syn::ItemImpl) -> Option<String> {
+    let (path, _) = imp.trait_.as_ref()?;
+    let last = path.segments.last()?;
+    if last.ident != "From" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+        return None;
+    };
+    let ty = args.args.iter().find_map(|arg| match arg {
+        syn::GenericArgument::Type(ty) => Some(ty),
+        _ => None,
+    })?;
+    match ty {
+        syn::Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
+        syn::Type::Reference(r) => match &*r.elem {
+            syn::Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn collect_impl_items(
     resolver: &mut Resolver,
     pending_impls: &[(usize, Rc<syn::ItemImpl>)],
@@ -703,6 +794,19 @@ fn collect_impl_items(
                         Some("Drop") if method == "drop" => "Drop::drop".to_string(),
                         _ => method,
                     };
+                    // `impl From<S> for T` also registers under `from<S>`, so
+                    // a type with several `From` impls picks the one for the
+                    // value being converted.
+                    if key == "from"
+                        && let Some(source) = from_source_name(imp)
+                    {
+                        pending_methods.push((
+                            type_name.clone(),
+                            format!("from<{source}>"),
+                            *m,
+                            Rc::new(f.clone()),
+                        ));
+                    }
                     pending_methods.push((type_name.clone(), key, *m, Rc::new(f.clone())));
                 }
                 syn::ImplItem::Const(c) => {
@@ -753,10 +857,24 @@ fn impl_target(resolver: &Resolver, m: usize, ty: &syn::Type) -> Option<String> 
         .collect();
     match resolver.resolve(m, &segs) {
         Ok(Res::Struct(c) | Res::Enum(c)) => Some(c.to_string()),
-        // An impl on something else, a bridge type name for example, keeps
-        // the old bare name behavior.
-        _ => segs.last().cloned(),
+        // An impl on something else, a bridge type or a builtin, is keyed by
+        // the type as written with its generics, so `impl T for Vec<u8>` and
+        // `impl T for Vec<String>` in one script stay apart. A builtin value
+        // rebuilds the same key from itself at dispatch, see
+        // `ImplTable::of_builtin`.
+        _ => Some(foreign_impl_key(&p.path)),
     }
+}
+
+/// `Vec<String>` for a path written `Vec<String>` or `std::vec::Vec<String>`,
+/// the generics kept and the whitespace the token printer adds dropped.
+fn foreign_impl_key(path: &syn::Path) -> String {
+    let last = path.segments.last().expect("a type path has a segment");
+    last.to_token_stream()
+        .to_string()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect()
 }
 
 fn collect_use_tree(

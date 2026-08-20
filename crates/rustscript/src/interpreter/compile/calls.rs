@@ -7,20 +7,20 @@ use syn::{Expr, Lit, Pat, UnOp};
 
 use crate::interpreter::bytecode::StructShape;
 use crate::interpreter::bytecode::{
-    BinKind, BuiltinId, CapSource, Const, DISCARD, EnumVariant, FieldName, Member, Op, PLit, PPat,
-    PTag, PatInfo, PathId, PathRef, Reg, ScalarTy, StructLit,
+    BinKind, BuiltinId, CapSource, Const, DISCARD, DefaultIr, EnumVariant, FieldName, Member, Op,
+    PLit, PPat, PTag, PatInfo, PathId, PathRef, Reg, ScalarTy, StructLit,
 };
 use crate::interpreter::enum_def::{EnumDef, builtin_enum, prelude_variant};
 use crate::interpreter::numeric::IntWidth;
 use crate::interpreter::serde_attrs::serde_rename;
 use crate::interpreter::typeir::CastIr;
 
-use super::expr::annotation_scalar;
+use super::expr::{annotation_scalar, tail_exprs, takes_numeric_hint, unparen};
 use super::place;
-use super::written::{TyEnv, option_payload, turbofish_scalar, written_ty};
+use super::written::{TyEnv, element_of, option_payload, turbofish_scalar, written_ty};
 use super::{
-    CollectTarget, Compiler, FnState, NameLoc, Res, TypeIr, collect_pattern_names,
-    first_generic_type, idx16, int_literal, numeric_annotation,
+    CollectTarget, Compiler, FnState, NameLoc, NumericTy, Res, TypeIr, collect_pattern_names,
+    first_generic_type, idx16, int_literal, numeric_annotation, numeric_target,
 };
 
 impl Compiler<'_> {
@@ -113,6 +113,27 @@ impl Compiler<'_> {
                 _ => bail!("tokio::spawn needs an async block in this interpreter"),
             }
         }
+        if c.args.is_empty()
+            && path
+                .segments
+                .last()
+                .is_some_and(|seg| seg.ident == "default")
+        {
+            if let Some(ir) = self.default_call_ir(c, path_expr) {
+                self.emit_default(dst, ir);
+                return Ok(());
+            }
+            // `<S>::default()` on a type with its own `fn default` is the
+            // plain `S::default()` call.
+            if let Some(qself) = &path_expr.qself
+                && let syn::Type::Path(tp) = &*qself.ty
+            {
+                let mut merged = tp.path.clone();
+                merged.segments.extend(path.segments.iter().cloned());
+                let coerce = self.call_coerce(c, &merged);
+                return self.compile_resolved_call(dst, c, &merged, coerce, 0);
+            }
+        }
         let coerce = self.call_coerce(c, path);
         let argc = idx16(c.args.len());
 
@@ -120,6 +141,42 @@ impl Compiler<'_> {
             return Ok(());
         }
         self.compile_resolved_call(dst, c, path, coerce, argc)
+    }
+
+    /// The type a `default()` call builds, when it is the `Default` trait's
+    /// and not a user `fn default`: `<T>::default()` names it in the
+    /// qualified self, `T::default()` in the path, and a bare
+    /// `Default::default()` takes it from the context that recorded a hint.
+    fn default_call_ir(
+        &mut self,
+        c: &syn::ExprCall,
+        path_expr: &syn::ExprPath,
+    ) -> Option<DefaultIr> {
+        if let Some(qself) = &path_expr.qself {
+            return self.default_ir(&qself.ty);
+        }
+        let path = &path_expr.path;
+        let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        if segs.len() == 1 {
+            return None;
+        }
+        if segs[..segs.len() - 1] == ["Default"] {
+            return self.default_calls.remove(&std::ptr::from_ref(c));
+        }
+        // A user `impl Default` or an inherent `fn default` wins over the
+        // derive, its body is the one real Rust runs.
+        let owner = segs[segs.len() - 2].clone();
+        let user_defined = self.ctx.impl_methods.iter().any(|(ty, name)| {
+            name == "default" && (*ty == owner || super::super::resolver::bare(ty) == owner)
+        });
+        if user_defined {
+            return None;
+        }
+        let prefix = syn::Path {
+            leading_colon: path.leading_colon,
+            segments: path.segments.iter().take(segs.len() - 1).cloned().collect(),
+        };
+        self.default_ir_path_pub(&prefix)
     }
 
     /// `Some(x)`, `Ok(x)`, the other builtin tuple variants, and the empty
@@ -180,7 +237,14 @@ impl Compiler<'_> {
         argc: u16,
     ) -> Result<()> {
         let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
-        let resolved = self.resolve_path_res(&segs)?;
+        // `Self::Variant(..)` and `Self::assoc(..)` inside an impl name the
+        // impl's own type.
+        let resolved = match (segs.first().map(String::as_str), self.ctx.impl_type) {
+            (Some("Self"), Some(ty)) if segs.len() > 1 => {
+                Res::TypeMember(Arc::from(ty), segs[1..].to_vec())
+            }
+            _ => self.resolve_path_res(&segs)?,
+        };
         let path = match resolved {
             // A known function, called directly by id. Turbofish type args are
             // recorded so the callee can bind them to its generic parameters.
@@ -426,10 +490,37 @@ impl Compiler<'_> {
         {
             self.option_result = Some(std::ptr::from_ref(inner));
         }
+        // `v.into()` under a `let x: T` annotation is `T::from(v)`, the
+        // conversion the annotation picks. Without one the call is identity.
+        if m.method == "into"
+            && m.args.is_empty()
+            && let Some((ptr, canon)) = &self.into_let
+            && std::ptr::eq(*ptr, m)
+        {
+            let canon = canon.clone();
+            self.into_let = None;
+            let path = PathRef::user(vec![canon.to_string(), "from".to_string()], None);
+            let p = self.add_path(path);
+            let base = self.compile_args(std::iter::once(&*m.receiver))?;
+            self.emit(Op::CallPath {
+                dst,
+                path: p,
+                base,
+                argc: 1,
+            });
+            return Ok(());
+        }
         // A mutating method's receiver is a place: its storage splits from
         // any value sharing first, and the receiver value stores back after,
         // which lands the split buffer of a string mutation in its place.
         let method_text = m.method.to_string();
+        // `Sum<T> for T` types a `map` closure's body as `T`, so the literals
+        // in it adopt the reduction's width before the closure compiles.
+        if matches!(method_text.as_str(), "sum" | "product")
+            && let Some(target) = self.reduce_target(m)
+        {
+            self.seed_reduce_closure(&m.receiver, target);
+        }
         let mutating = BuiltinId::resolve(&method_text).mutates()
             || self.ctx.mut_methods.contains(&method_text);
         let (recv, receiver_place) = if mutating {
@@ -438,10 +529,16 @@ impl Compiler<'_> {
         } else {
             (self.compile_expr(&m.receiver)?, None)
         };
+        let place = mutating && place::is_place_expr(&m.receiver);
         self.option_result = outer_option_hint;
         let base = self.compile_args(m.args.iter())?;
         let (method, scalar) = self.method_name_and_scalar(m);
-        let name = self.add_name_with(method, scalar);
+        let default = if method == "unwrap_or_default" {
+            self.default_for_unwrap(m)
+        } else {
+            None
+        };
+        let name = self.add_name_full(method, scalar, default, place);
         // A multiline chain compiles its receiver and args first, so restamp
         // with the method's own line before the op lands, the line rustc
         // would name for this call.
@@ -556,6 +653,28 @@ impl Compiler<'_> {
             let env = TyEnv::new(&self.typed_locals, self.ctx.fn_returns);
             scalar = option_payload(&m.receiver, &env);
         }
+        // A script method on a builtin receiver dispatches on the value's
+        // own shape, which an empty vec does not have, so the receiver's
+        // written type rides along for that case.
+        if scalar.is_none() && self.ctx.method_atoms.contains_key(&method) {
+            scalar = self.stated_ty(&m.receiver);
+        }
+        // `concat` of nothing cannot tell nested vecs from strings, so the
+        // receiver's written element type rides along for that case.
+        if scalar.is_none() && method == "concat" {
+            let env = TyEnv::new(&self.typed_locals, self.ctx.fn_returns);
+            scalar = element_of(&m.receiver, &env);
+        }
+        // A pending `let x: T = ...sum()` annotation names the width of the
+        // outermost reduction in the chain.
+        if scalar.is_none()
+            && (method == "sum" || method == "product")
+            && let Some((ptr, ty)) = &self.reduce_let
+            && std::ptr::eq(*ptr, m)
+        {
+            scalar = Some(ty.clone());
+            self.reduce_let = None;
+        }
         // A pending `let x: T = ...unwrap_or_default()` annotation names the
         // payload of the outermost call in the chain.
         if scalar.is_none()
@@ -565,6 +684,14 @@ impl Compiler<'_> {
             scalar = Some(ty.clone());
             self.default_let = None;
         }
+        // A `-> T` signature names the type of a bare reduction or default
+        // the function hands back.
+        if scalar.is_none()
+            && matches!(method.as_str(), "sum" | "product" | "unwrap_or_default")
+            && let Some(ty) = self.return_tails.get(&std::ptr::from_ref(m))
+        {
+            scalar = ScalarTy::lower(ty);
+        }
         // Failing all of that, this call's own result is unwrapped again, so
         // whatever it holds, it produced an Option and defaults to None.
         if matches!(self.option_result, Some(ptr) if std::ptr::eq(ptr, m)) {
@@ -572,6 +699,72 @@ impl Compiler<'_> {
             scalar = scalar.or(Some(ScalarTy::Opt(Box::new(ScalarTy::Other))));
         }
         (method, scalar)
+    }
+
+    /// The numeric type a `sum` or `product` call is known to answer in,
+    /// from its turbofish, a pending `let` annotation, or the signature of
+    /// the function handing it back, read without consuming the hint.
+    fn reduce_target(&self, m: &syn::ExprMethodCall) -> Option<NumericTy> {
+        let scalar = turbofish_scalar(m.turbofish.as_ref())
+            .or_else(|| match &self.reduce_let {
+                Some((ptr, ty)) if std::ptr::eq(*ptr, m) => Some(ty.clone()),
+                _ => None,
+            })
+            .or_else(|| {
+                self.return_tails
+                    .get(&std::ptr::from_ref(m))
+                    .and_then(ScalarTy::lower)
+            })?;
+        numeric_target(&scalar)
+    }
+
+    /// Walk back through the pass-through stages of a reduction's chain to
+    /// the `map` closure feeding it, and type that closure's tails.
+    fn seed_reduce_closure(&mut self, expr: &Expr, target: NumericTy) {
+        let mut current = unparen(expr);
+        loop {
+            let Expr::MethodCall(mc) = current else {
+                return;
+            };
+            match mc.method.to_string().as_str() {
+                "map" => {
+                    if let Some(Expr::Closure(closure)) = mc.args.first() {
+                        let mut tails = Vec::new();
+                        tail_exprs(&closure.body, &mut tails);
+                        for tail in tails.into_iter().filter(|tail| takes_numeric_hint(tail)) {
+                            self.numeric_hints.insert(std::ptr::from_ref(tail), target);
+                        }
+                    }
+                    return;
+                }
+                "iter" | "into_iter" | "copied" | "cloned" | "rev" | "filter" | "take" | "skip"
+                | "take_while" | "skip_while" | "peekable" | "by_ref" => {
+                    current = unparen(&mc.receiver);
+                }
+                _ => return,
+            }
+        }
+    }
+
+    /// The written payload type behind `recv.unwrap_or_default()`, lowered
+    /// to a default: the `let` annotation attached to this call, or the
+    /// type the receiver chain states.
+    fn default_for_unwrap(&mut self, m: &syn::ExprMethodCall) -> Option<DefaultIr> {
+        if let Some((ptr, ty)) = &self.default_let_ty
+            && std::ptr::eq(*ptr, m)
+        {
+            let ty = ty.clone();
+            self.default_let_ty = None;
+            return self.default_ir(&ty);
+        }
+        if let Some(ty) = self.return_tails.get(&std::ptr::from_ref(m))
+            && let Some(ir) = self.default_ir(&ty.clone())
+        {
+            return Some(ir);
+        }
+        let recv_ty = self.written_type(&m.receiver)?;
+        let payload = super::written_type::payload_of(&recv_ty)?;
+        self.default_ir(&payload)
     }
 
     /// The type an expression states about itself, read against the current
@@ -736,6 +929,7 @@ impl Compiler<'_> {
         let caps: Vec<CapSource> = child.upvalues.iter().map(|(_, s)| *s).collect();
         let mut chunk = child.into_chunk(self.ctx.file.clone())?;
         chunk.module = idx16(self.ctx.module);
+        chunk.moves = c.capture.is_some();
         let chunk = Arc::new(chunk);
         let parent = self.cur();
         let child_idx = idx16(parent.children.len());
@@ -1044,38 +1238,13 @@ impl Compiler<'_> {
         // Field order follows the declaration when the struct is known.
         // Written fields in declaration order, then any extras. A trailing
         // `..rest` fills whatever was not written.
-        let (order, renames): (Vec<String>, Vec<Option<Arc<str>>>) = match def {
-            Some(def) => {
-                let mut ordered: Vec<String> = def
-                    .fields
-                    .iter()
-                    .filter_map(|f| f.ident.as_ref().map(std::string::ToString::to_string))
-                    .filter(|k| written.iter().any(|(w, _)| w == k))
-                    .collect();
-                for (k, _) in &written {
-                    if !ordered.contains(k) {
-                        ordered.push(k.clone());
-                    }
-                }
-                // One rename slot per ordered field, read from the struct def so
-                // a serialized literal uses the same json keys as deserialize.
-                let renames = ordered
-                    .iter()
-                    .map(|k| {
-                        def.fields
-                            .iter()
-                            .find(|f| f.ident.as_ref().is_some_and(|i| i == k))
-                            .and_then(serde_rename)
-                            .map(Arc::<str>::from)
-                    })
-                    .collect();
-                (ordered, renames)
-            }
-            None => (written.iter().map(|(k, _)| k.clone()).collect(), Vec::new()),
-        };
+        // With a `..rest` the shape lists every declared field, so the value
+        // keeps declaration order whichever fields the literal wrote. Without
+        // one, only written fields, since the literal must have written all.
+        let has_rest = s.rest.is_some();
+        let (order, renames) = literal_field_order(def.as_deref(), &written, has_rest);
         // Reserve a packed window, then fill it, so field temporaries do not
         // break the packing.
-        let has_rest = s.rest.is_some();
         let slots = order.len() + usize::from(has_rest);
         let base = self.cur().reg_top;
         for _ in 0..slots {
@@ -1084,13 +1253,21 @@ impl Compiler<'_> {
         for (i, fname) in order.iter().enumerate() {
             let dstf = base + idx16(i);
             match written.iter().find(|(k, _)| k == fname) {
-                Some((_, e)) => self.compile_into(dstf, e)?,
+                Some((_, e)) => {
+                    self.field_default_hint(e, def.as_deref(), fname);
+                    self.compile_into(dstf, e)?;
+                }
                 None => self.emit(Op::LoadUnit { dst: dstf }),
             }
         }
         if let Some(rest) = &s.rest {
+            self.rest_default_hint(rest, self_type, &s.path);
             self.compile_into(base + idx16(order.len()), rest)?;
         }
+        let filled: Vec<bool> = order
+            .iter()
+            .map(|k| written.iter().any(|(w, _)| w == k))
+            .collect();
         let info = {
             let fields: Vec<Arc<str>> = order.into_iter().map(Into::into).collect();
             let known = self
@@ -1106,7 +1283,11 @@ impl Compiler<'_> {
                 built
             };
             let f = self.cur();
-            f.struct_lits.push(StructLit { shape, has_rest });
+            f.struct_lits.push(StructLit {
+                shape,
+                has_rest,
+                filled: filled.into(),
+            });
             idx16(f.struct_lits.len() - 1)
         };
         self.emit(Op::MakeStruct { dst, info, base });
@@ -1317,7 +1498,7 @@ fn endpoint_lit(e: &Expr) -> Option<PLit> {
             Lit::Int(value) => value.base10_parse().ok().map(PLit::Int),
             Lit::Float(value) => value.base10_parse().ok().map(PLit::Float),
             Lit::Char(value) => Some(PLit::Char(value.value())),
-            Lit::Byte(value) => Some(PLit::Int(i64::from(value.value()))),
+            Lit::Byte(value) => Some(PLit::Int(i128::from(value.value()))),
             _ => None,
         },
         Expr::Unary(u) if matches!(u.op, syn::UnOp::Neg(_)) => match endpoint_lit(&u.expr) {
@@ -1339,21 +1520,11 @@ fn endpoint_lit(e: &Expr) -> Option<PLit> {
 /// The `MIN` or `MAX` associated const of an integer type, as the i64 the
 /// interpreter stores every integer in. Bounds outside i64, the u64 and u128
 /// maxima, clamp to i64's range, which acts as unbounded for stored values.
-fn int_type_bound(ty: &str, which: &str) -> Option<i64> {
-    let (lo, hi) = match ty {
-        "i8" => (i64::from(i8::MIN), i64::from(i8::MAX)),
-        "i16" => (i64::from(i16::MIN), i64::from(i16::MAX)),
-        "i32" => (i64::from(i32::MIN), i64::from(i32::MAX)),
-        "i64" | "isize" | "i128" => (i64::MIN, i64::MAX),
-        "u8" => (0, i64::from(u8::MAX)),
-        "u16" => (0, i64::from(u16::MAX)),
-        "u32" => (0, i64::from(u32::MAX)),
-        "u64" | "usize" | "u128" => (0, i64::MAX),
-        _ => return None,
-    };
+fn int_type_bound(ty: &str, which: &str) -> Option<i128> {
+    let width = IntWidth::parse(ty)?;
     match which {
-        "MIN" => Some(lo),
-        "MAX" => Some(hi),
+        "MIN" => Some(width.min()),
+        "MAX" => Some(width.max()),
         _ => None,
     }
 }
@@ -1369,7 +1540,7 @@ fn lower_literal(literal: &Lit) -> PPat {
         Lit::Bool(value) => PPat::Lit(PLit::Bool(value.value)),
         Lit::Str(value) => PPat::Lit(PLit::Str(value.value())),
         Lit::Char(value) => PPat::Lit(PLit::Char(value.value())),
-        Lit::Byte(value) => PPat::Lit(PLit::Int(i64::from(value.value()))),
+        Lit::Byte(value) => PPat::Lit(PLit::Int(i128::from(value.value()))),
         _ => PPat::Unsupported,
     }
 }
@@ -1407,4 +1578,93 @@ fn empty_container(id: PathId) -> Option<EmptyKind> {
         PathId::HashSetNew | PathId::HashSetWithCapacity | PathId::BTreeSetNew => EmptyKind::Set,
         _ => return None,
     })
+}
+
+impl Compiler<'_> {
+    /// `field: Default::default()` takes the field's written type from the
+    /// struct definition.
+    fn field_default_hint(&mut self, e: &Expr, def: Option<&syn::ItemStruct>, fname: &str) {
+        if let Some(call) = bare_default_call(e)
+            && let Some(field_ty) = def.and_then(|def| {
+                def.fields
+                    .iter()
+                    .find(|f| f.ident.as_ref().is_some_and(|i| i == fname))
+                    .map(|f| f.ty.clone())
+            })
+            && let Some(ir) = self.default_ir(&field_ty)
+        {
+            self.default_calls.insert(std::ptr::from_ref(call), ir);
+        }
+    }
+
+    /// `..Default::default()` completes the struct itself.
+    fn rest_default_hint(&mut self, rest: &Expr, self_type: Option<&str>, path: &syn::Path) {
+        if let Some(call) = bare_default_call(rest)
+            && let Some(canon) = self_type
+                .map(Arc::<str>::from)
+                .or_else(|| self.ctx.resolver.resolve_struct_key(self.ctx.module, path))
+            && let Some(ir) = self.default_ir_for_struct(&canon)
+        {
+            self.default_calls.insert(std::ptr::from_ref(call), ir);
+        }
+    }
+}
+
+/// Field order of a struct literal: the declaration order when the struct
+/// is known, written fields first otherwise, with the serde rename of each
+/// ordered field. With a `..rest` every declared field is listed.
+fn literal_field_order(
+    def: Option<&syn::ItemStruct>,
+    written: &[(String, &Expr)],
+    has_rest: bool,
+) -> (Vec<String>, Vec<Option<Arc<str>>>) {
+    match def {
+        Some(def) => {
+            let mut ordered: Vec<String> = def
+                .fields
+                .iter()
+                .filter_map(|f| f.ident.as_ref().map(std::string::ToString::to_string))
+                .filter(|k| has_rest || written.iter().any(|(w, _)| w == k))
+                .collect();
+            for (k, _) in written {
+                if !ordered.contains(k) {
+                    ordered.push(k.clone());
+                }
+            }
+            // One rename slot per ordered field, read from the struct def so
+            // a serialized literal uses the same json keys as deserialize.
+            let renames = ordered
+                .iter()
+                .map(|k| {
+                    def.fields
+                        .iter()
+                        .find(|f| f.ident.as_ref().is_some_and(|i| i == k))
+                        .and_then(serde_rename)
+                        .map(Arc::<str>::from)
+                })
+                .collect();
+            (ordered, renames)
+        }
+        None => (written.iter().map(|(k, _)| k.clone()).collect(), Vec::new()),
+    }
+}
+
+/// The call behind a bare `Default::default()` expression, parentheses
+/// stripped.
+pub(super) fn bare_default_call(e: &Expr) -> Option<&syn::ExprCall> {
+    match e {
+        Expr::Paren(p) => bare_default_call(&p.expr),
+        Expr::Group(g) => bare_default_call(&g.expr),
+        Expr::Call(c) if c.args.is_empty() => {
+            let Expr::Path(p) = &*c.func else { return None };
+            let segs: Vec<String> = p
+                .path
+                .segments
+                .iter()
+                .map(|s| s.ident.to_string())
+                .collect();
+            (p.qself.is_none() && segs == ["Default", "default"]).then_some(c)
+        }
+        _ => None,
+    }
 }

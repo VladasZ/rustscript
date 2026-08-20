@@ -400,6 +400,18 @@ impl Compiler<'_> {
 }
 
 /// The single identifier of a bare variable expression.
+/// Whether an expression names storage rather than a temporary: a plain
+/// name, a field, an element, or a dereference, seen through parens.
+pub(super) fn is_place_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Paren(p) => is_place_expr(&p.expr),
+        Expr::Group(g) => is_place_expr(&g.expr),
+        Expr::Field(_) | Expr::Index(_) => true,
+        Expr::Unary(u) => matches!(u.op, syn::UnOp::Deref(_)),
+        other => single_path_name(other).is_some(),
+    }
+}
+
 pub(super) fn single_path_name(expr: &Expr) -> Option<String> {
     if let Expr::Path(p) = expr
         && p.path.segments.len() == 1

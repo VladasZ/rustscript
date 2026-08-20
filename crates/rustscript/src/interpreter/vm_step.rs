@@ -15,7 +15,9 @@ use anyhow::{Result, anyhow, bail};
 use num_traits::AsPrimitive;
 use parking_lot::Mutex;
 
-use super::bytecode::{CapSource, Chunk, MacroKind, Member, Op, PathId, path_call_chunk};
+use super::bytecode::{
+    CapSource, Chunk, DefaultIr, MacroKind, Member, Op, PathId, path_call_chunk,
+};
 use super::iterator::FastNext;
 use super::native::Native;
 use super::numeric::{float_to_int, truncate};
@@ -193,9 +195,10 @@ pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
         | Op::DropScope { .. }
         | Op::MoveOut { .. }
         | Op::DefaultOf { .. }
+        | Op::BuildDefault { .. }
         | Op::MakeBorrow { .. } => place_step(ctx, op)?,
-        Op::Try { dst, src } => try_op(ctx, *dst, *src)?,
-        Op::TryJump { dst, src, to } => try_jump(ctx, *dst, *src, *to)?,
+        Op::Try { dst, src, conv } => try_op(ctx, *dst, *src, *conv)?,
+        Op::TryJump { dst, src, to, conv } => try_jump(ctx, *dst, *src, *to, *conv)?,
         Op::Cast { dst, src, ty } => cast_op(ctx, *dst, *src, *ty)?,
         Op::Coerce { dst, src, ty } => coerce_op(ctx, *dst, *src, *ty),
         Op::TestBind { val, pat, dst } => test_bind(ctx, *val, *pat, *dst),
@@ -347,6 +350,10 @@ fn place_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
         }
         Op::MoveOut { src } => move_out(ctx, *src),
         Op::DefaultOf { dst, src } => default_of(ctx, *dst, *src),
+        Op::BuildDefault { dst, ir } => {
+            let v = build_default(&ctx.cur.defaults[*ir as usize]);
+            ctx.set(*dst, v)
+        }
         Op::MakeBorrow { dst, src } => make_borrow(ctx, *dst, *src),
         _ => unreachable!("place_step handles only the place ops"),
     })
@@ -385,6 +392,32 @@ fn un_op(ctx: &mut StepCtx, dst: u16, a: u16, op: super::bytecode::UnKind) -> Re
         Ok(ctx.set(dst, v))
     } else {
         Ok(ctx.set(dst, apply_un(op, ctx.get(a))?))
+    }
+}
+
+/// The value of a written type's `Default::default()`.
+pub(super) fn build_default(ir: &DefaultIr) -> Value {
+    match ir {
+        DefaultIr::Int(width) => Value::int_of_width(0, *width),
+        DefaultIr::F32 => Value::F32(0.0),
+        DefaultIr::F64 => Value::Float(0.0),
+        DefaultIr::Bool => Value::Bool(false),
+        DefaultIr::Char => Value::Char('\0'),
+        DefaultIr::Str => Value::str(String::new()),
+        DefaultIr::Unit => Value::Unit,
+        DefaultIr::Vec => Value::vec(Vec::new()),
+        DefaultIr::Map => Value::map(),
+        DefaultIr::Set => Value::set(),
+        DefaultIr::Opt => Value::none(),
+        DefaultIr::Tuple(items) => Value::tuple(items.iter().map(build_default).collect()),
+        DefaultIr::Struct { shape, fields } => {
+            Value::structure(shape.clone(), fields.iter().map(build_default).collect())
+        }
+        DefaultIr::Enum(variant) => Value::Enum {
+            def: variant.def.clone(),
+            variant: variant.variant,
+            data: Arc::new(Mutex::new(Vec::new())),
+        },
     }
 }
 
@@ -696,11 +729,20 @@ fn make_struct(ctx: &mut StepCtx, dst: u16, info: u16, first: u16) -> Flow {
         if let Value::Struct(r) = rest {
             let rvals = r.values.lock();
             for (slot, (k, v)) in r.shape.fields.iter().zip(rvals.iter()).enumerate() {
-                if lit.shape.slot(k).is_none() {
-                    fields.push(k.clone());
-                    values.push(v.clone());
-                    if !renames.is_empty() {
-                        renames.push(r.shape.renames.get(slot).cloned().flatten());
+                match lit.shape.slot(k) {
+                    // A declared field the literal left to the rest.
+                    Some(index) if !lit.filled.get(index).copied().unwrap_or(true) => {
+                        values[index] = v.clone();
+                    }
+                    Some(_) => {}
+                    // A field the literal's shape does not know, when the
+                    // struct definition was out of reach at compile time.
+                    None => {
+                        fields.push(k.clone());
+                        values.push(v.clone());
+                        if !renames.is_empty() {
+                            renames.push(r.shape.renames.get(slot).cloned().flatten());
+                        }
                     }
                 }
             }
@@ -791,14 +833,29 @@ fn make_closure(ctx: &mut StepCtx, child: u16) -> Arc<ClosureData> {
     let cur = ctx.cur;
     let child_chunk = cur.children[child as usize].clone();
     let caps = &cur.child_caps[child as usize];
+    // A `move` closure takes its own copy of a mutable capture. The outer
+    // binding keeps its value, which is what a moved `Copy` integer does,
+    // and a moved non-`Copy` value cannot be read outside anyway.
+    let moves = child_chunk.moves;
+    let own = |value: Value| Upvalue::Mutable(Arc::new(Mutex::new(value)));
     let captured: Vec<Upvalue> = caps
         .iter()
         .map(|c| match c {
             CapSource::Local(reg) => Upvalue::Value(ctx.stack[ctx.base + *reg as usize].clone()),
-            CapSource::Upvalue(idx) | CapSource::MutableUpvalue(idx) => {
-                ctx.upvalues()[*idx as usize].clone()
+            CapSource::Upvalue(idx) => ctx.upvalues()[*idx as usize].clone(),
+            CapSource::MutableUpvalue(idx) => {
+                let shared = ctx.upvalues()[*idx as usize].clone();
+                if moves { own(shared.get()) } else { shared }
             }
-            CapSource::MutableLocal(reg) => Upvalue::Mutable(ctx.cell(*reg).clone()),
+            CapSource::MutableLocal(reg) => {
+                let cell = ctx.cell(*reg).clone();
+                if moves {
+                    let value = cell.lock().clone();
+                    own(value)
+                } else {
+                    Upvalue::Mutable(cell)
+                }
+            }
         })
         .collect();
     Arc::new(ClosureData {
@@ -1122,14 +1179,14 @@ fn ref_field(ctx: &mut StepCtx, dst: u16, base: u16, member: u16) -> Result<Flow
     Ok(ctx.set(dst, v))
 }
 
-fn try_op(ctx: &mut StepCtx, dst: u16, src: u16) -> Result<Flow> {
+fn try_op(ctx: &mut StepCtx, dst: u16, src: u16, conv: u16) -> Result<Flow> {
     Ok(match ops::eval_try(ctx.get(src).clone())? {
         Ok(v) => ctx.set(dst, v),
-        Err(early) => Flow::Ret(early),
+        Err(early) => Flow::Ret(convert_early(ctx, early, conv)?),
     })
 }
 
-fn try_jump(ctx: &mut StepCtx, dst: u16, src: u16, to: u32) -> Result<Flow> {
+fn try_jump(ctx: &mut StepCtx, dst: u16, src: u16, to: u32, conv: u16) -> Result<Flow> {
     Ok(match ops::eval_try(ctx.get(src).clone())? {
         Ok(v) => {
             ctx.put(dst, v);
@@ -1137,8 +1194,38 @@ fn try_jump(ctx: &mut StepCtx, dst: u16, src: u16, to: u32) -> Result<Flow> {
         }
         // Falls through into the scope drops and the `Ret` emitted after
         // this op, with the early-return value ready in `dst`.
-        Err(early) => ctx.set(dst, early),
+        Err(early) => {
+            let early = convert_early(ctx, early, conv)?;
+            ctx.set(dst, early)
+        }
     })
+}
+
+/// The early return of a `?`, its error converted into the frame's error
+/// type through that type's `From` impl, the way `?` does in real Rust. An
+/// error already of that type, or one no impl converts, leaves as it is.
+fn convert_early(ctx: &StepCtx, early: Value, conv: u16) -> Result<Value> {
+    if conv == super::bytecode::NO_CONV {
+        return Ok(early);
+    }
+    let target = &ctx.cur.try_targets[conv as usize];
+    let payload = match &early {
+        Value::Enum { def, variant, data }
+            if def.kind == super::enum_def::EnumKind::Result
+                && *variant == super::enum_def::ERR =>
+        {
+            data.lock().first().cloned()
+        }
+        _ => None,
+    };
+    let Some(payload) = payload else {
+        return Ok(early);
+    };
+    let Some(chunk) = ctx.vm.conversion_impl(target, &payload) else {
+        return Ok(early);
+    };
+    let converted = ctx.vm.run_chunk(&chunk, &[payload], &[])?;
+    Ok(Value::err(converted))
 }
 
 fn cast_op(ctx: &mut StepCtx, dst: u16, src: u16, ty: u16) -> Result<Flow> {
@@ -1272,12 +1359,15 @@ fn eval_cast(target: &CastIr, v: Value) -> Result<Value> {
         }
         CastIr::Char => {
             return Ok(match v {
-                Value::Int(i) => Value::Char(
-                    u32::try_from(i)
-                        .ok()
-                        .and_then(char::from_u32)
-                        .ok_or_else(|| anyhow!("invalid char code {i}"))?,
-                ),
+                Value::Int(_) | Value::IntW(..) => {
+                    let i = v.int_parts().map_or(0, |(value, _)| value);
+                    Value::Char(
+                        u32::try_from(i)
+                            .ok()
+                            .and_then(char::from_u32)
+                            .ok_or_else(|| anyhow!("invalid char code {i}"))?,
+                    )
+                }
                 Value::Char(c) => Value::Char(c),
                 other => bail!("cannot cast {} to char", other.type_name()),
             });

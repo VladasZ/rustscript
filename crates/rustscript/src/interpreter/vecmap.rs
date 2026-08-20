@@ -10,7 +10,7 @@ use indexmap::IndexMap;
 use parking_lot::Mutex;
 
 use super::bridge::arg;
-use super::bytecode::{BuiltinId, MethodName};
+use super::bytecode::{BuiltinId, MethodName, ScalarTy};
 use super::enum_def::EnumKind;
 use super::iterator;
 use super::native::Native;
@@ -79,7 +79,7 @@ pub(super) fn vec_method(v: &List, method: &MethodName, args: &mut [Value]) -> R
             Value::Unit
         }
         BuiltinId::Join => vec_join(v, args),
-        BuiltinId::Concat => vec_concat(v),
+        BuiltinId::Concat => vec_concat(v, method.scalar.as_ref()),
         BuiltinId::Sum => return vec_sum(v, method),
         BuiltinId::Product => return vec_product(v),
         BuiltinId::Rev => {
@@ -187,8 +187,14 @@ fn vec_product(v: &List) -> Result<Value> {
 /// A vec of vecs flattens like the real slice `concat`; anything else
 /// concatenates the display forms, which covers `Vec<String>`. The empty
 /// case cannot know its element type, so it is a string.
-fn vec_concat(v: &List) -> Value {
+/// `concat` flattens nested vecs or joins strings, told apart by the first
+/// element. An empty receiver has none, so the element type the call site
+/// wrote down decides, and without one the string form stays the answer.
+fn vec_concat(v: &List, element: Option<&ScalarTy>) -> Value {
     let items = v.lock();
+    if items.is_empty() && matches!(element, Some(ScalarTy::List(_))) {
+        return Value::vec(Vec::new());
+    }
     match items.first() {
         Some(Value::Vec(_)) => {
             let mut out = Vec::new();
@@ -230,6 +236,11 @@ fn vec_method_by_name(v: &List, method: &MethodName, args: &mut [Value]) -> Resu
             Some(item) => Value::some(item.clone()),
             None => Value::none(),
         },
+        BuiltinId::AsSlice
+        | BuiltinId::Windows
+        | BuiltinId::Chunks
+        | BuiltinId::Repeat
+        | BuiltinId::Swap => return vec_slice_view(v, method.id, args),
         BuiltinId::CollectString => {
             Value::str(v.lock().iter().map(Value::display).collect::<String>())
         }
@@ -460,6 +471,17 @@ pub(super) fn map_method(
             None => Value::none(),
         })?,
         BuiltinId::Contains if kind == MapKind::Set => lookup(0, &|v| Value::Bool(v.is_some()))?,
+        BuiltinId::IsSubset
+        | BuiltinId::IsSuperset
+        | BuiltinId::IsDisjoint
+        | BuiltinId::Union
+        | BuiltinId::Intersection
+        | BuiltinId::Difference
+        | BuiltinId::SymmetricDifference
+            if kind == MapKind::Set =>
+        {
+            return set_relation(m, method.id, args);
+        }
         BuiltinId::ContainsKey => lookup(0, &|v| Value::Bool(v.is_some()))?,
         BuiltinId::Remove => {
             let arg = args.first().ok_or_else(|| anyhow!("invalid map key"))?;
@@ -507,6 +529,97 @@ pub(super) fn map_method(
 }
 
 /// The elements of a set, for `iter` and `into_iter` and `drain`.
+/// The slice shaped views of a vec: `as_slice`, `windows`, `chunks`,
+/// `repeat`, and `swap`.
+fn vec_slice_view(v: &List, id: BuiltinId, args: &[Value]) -> Result<Value> {
+    Ok(match id {
+        // A slice view of a vec is the vec itself here, the value model has
+        // no separate slice type.
+        BuiltinId::AsSlice => Value::Vec(v.clone()),
+        BuiltinId::Windows => {
+            let size = usize::try_from(int_arg(args, 0)?)?;
+            if size == 0 {
+                bail!("window size must be non-zero");
+            }
+            let items = v.lock();
+            iterator::value_iter(Arc::new(Mutex::new(
+                items
+                    .windows(size)
+                    .map(|w| Value::vec(w.to_vec()))
+                    .collect(),
+            )))
+        }
+        BuiltinId::Chunks => {
+            let size = usize::try_from(int_arg(args, 0)?)?;
+            if size == 0 {
+                bail!("chunk size must be non-zero");
+            }
+            let items = v.lock();
+            iterator::value_iter(Arc::new(Mutex::new(
+                items.chunks(size).map(|c| Value::vec(c.to_vec())).collect(),
+            )))
+        }
+        BuiltinId::Repeat => {
+            let n = usize::try_from(int_arg(args, 0)?)?;
+            let items = v.lock();
+            let mut out = Vec::with_capacity(items.len().saturating_mul(n));
+            for _ in 0..n {
+                out.extend(items.iter().cloned());
+            }
+            Value::vec(out)
+        }
+        BuiltinId::Swap => {
+            let a = usize::try_from(int_arg(args, 0)?)?;
+            let b = usize::try_from(int_arg(args, 1)?)?;
+            let mut items = v.lock();
+            let len = items.len();
+            for i in [a, b] {
+                if i >= len {
+                    bail!("index out of bounds: the len is {len} but the index is {i}");
+                }
+            }
+            items.swap(a, b);
+            Value::Unit
+        }
+        _ => unreachable!("vec_slice_view handles the slice views only"),
+    })
+}
+
+/// The two-set methods. The relations answer a bool, the combinations answer
+/// an iterator over the elements in this set's order, then the other's, the
+/// order real Rust leaves unpromised.
+fn set_relation(m: &Arc<Mutex<MapStore>>, id: BuiltinId, args: &[Value]) -> Result<Value> {
+    let Some(Value::Map(other, MapKind::Set)) = args.first() else {
+        bail!("set operation needs a set argument");
+    };
+    // Snapshots, not held guards, a set compared with itself would relock.
+    let mine: Vec<MapKey> = m.lock().keys().cloned().collect();
+    let theirs: MapStore = other.lock().clone();
+    let has = |k: &MapKey| theirs.contains_key(k);
+    let elems = |keys: Vec<MapKey>| {
+        iterator::value_iter(Arc::new(Mutex::new(
+            keys.iter().map(MapKey::to_value).collect(),
+        )))
+    };
+    Ok(match id {
+        BuiltinId::IsSubset => Value::Bool(mine.iter().all(has)),
+        BuiltinId::IsSuperset => Value::Bool(theirs.keys().all(|k| mine.contains(k))),
+        BuiltinId::IsDisjoint => Value::Bool(!mine.iter().any(has)),
+        BuiltinId::Union => {
+            let mut keys = mine.clone();
+            keys.extend(theirs.keys().filter(|k| !mine.contains(k)).cloned());
+            elems(keys)
+        }
+        BuiltinId::Intersection => elems(mine.into_iter().filter(|k| has(k)).collect()),
+        BuiltinId::Difference => elems(mine.into_iter().filter(|k| !has(k)).collect()),
+        _ => {
+            let mut keys: Vec<MapKey> = mine.iter().filter(|k| !has(k)).cloned().collect();
+            keys.extend(theirs.keys().filter(|k| !mine.contains(k)).cloned());
+            elems(keys)
+        }
+    })
+}
+
 fn set_items(m: &Arc<Mutex<MapStore>>) -> Value {
     Value::vec(m.lock().keys().map(MapKey::to_value).collect())
 }
@@ -577,6 +690,15 @@ pub(super) fn sort_key(v: &Value) -> SortKey {
         Value::Tuple(items) | Value::Vec(items) => {
             SortKey::List(items.lock().iter().map(sort_key).collect())
         }
+        // A derived `Ord` orders by variant first, then by payload, so
+        // `None` sorts before every `Some` and `Some(-32767)` before
+        // `Some(-1)`. A struct orders by its fields in declaration order.
+        Value::Enum { variant, data, .. } => {
+            let mut keys = vec![SortKey::Int(i128::from(*variant))];
+            keys.extend(data.lock().iter().map(sort_key));
+            SortKey::List(keys)
+        }
+        Value::Struct(s) => SortKey::List(s.values.lock().iter().map(sort_key).collect()),
         other => SortKey::Str(other.display()),
     }
 }

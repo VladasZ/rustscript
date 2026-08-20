@@ -10,6 +10,7 @@ use super::bridge::{VArgs, arg};
 use super::bytecode::{BuiltinId, MethodName, ScalarTy};
 use super::enum_def::{EQUAL, EnumKind, GREATER, LESS, OK, ORDERING, SOME};
 use super::iterator;
+use super::native::Native;
 use super::ops::compare_values;
 use super::shared::{self, CharOut, JsonKind, Parsed, StrOut, usize_i64};
 use super::value::{Map, MapKey, RsStr, Value, ValueRef};
@@ -168,6 +169,7 @@ pub(super) fn generic_method(recv: &Value, method: &MethodName, args: &[Value]) 
                     super::numeric::IntWidth::U32,
                 )),
                 CharOut::OptU32(None) => Value::none(),
+                CharOut::USize(n) => shared::usize_value(n),
             })
         }
         (Value::Bool(b), BuiltinId::AsBool) => Ok(Value::some(Value::Bool(*b))),
@@ -327,6 +329,15 @@ fn default_of(target: Option<&ScalarTy>) -> Value {
     }
 }
 
+/// The payload default an `unwrap_or_default` call site wrote down, the
+/// full written type first and the scalar hint after it.
+fn payload_default(method: &MethodName) -> Value {
+    match &method.default {
+        Some(ir) => super::vm_step::build_default(ir),
+        None => default_of(method.scalar.as_ref()),
+    }
+}
+
 /// Materialize the neutral parse answer as a runtime value.
 pub(super) fn parse_value(text: &str, target: Option<&ScalarTy>) -> Value {
     match shared::parse_core(text, target) {
@@ -336,8 +347,32 @@ pub(super) fn parse_value(text: &str, target: Option<&ScalarTy>) -> Value {
         Parsed::Bool(value) => Value::ok(Value::Bool(value)),
         Parsed::Char(value) => Value::ok(Value::Char(value)),
         Parsed::Str(value) => Value::ok(Value::str(value)),
-        Parsed::Fail(message) => Value::err(Value::str(message)),
+        Parsed::Fail(message) => Value::err(parse_error(message)),
     }
+}
+
+/// The std error value behind a parse failure message, so `{:?}` shows
+/// `ParseIntError { kind: InvalidDigit }` and `{}` the message, exactly as
+/// the real types print. A message no std type produces stays a string.
+fn parse_error(message: String) -> Value {
+    let debug = match message.as_str() {
+        "cannot parse integer from empty string" => "ParseIntError { kind: Empty }",
+        "invalid digit found in string" => "ParseIntError { kind: InvalidDigit }",
+        "number too large to fit in target type" => "ParseIntError { kind: PosOverflow }",
+        "number too small to fit in target type" => "ParseIntError { kind: NegOverflow }",
+        "number would be zero for non-zero type" => "ParseIntError { kind: Zero }",
+        "invalid float literal" => "ParseFloatError { kind: Invalid }",
+        "cannot parse float from empty string" => "ParseFloatError { kind: Empty }",
+        "provided string was not `true` or `false`" => "ParseBoolError",
+        "cannot parse char from empty string" => "ParseCharError { kind: EmptyString }",
+        "too many characters in string" => "ParseCharError { kind: TooManyChars }",
+        _ => return Value::str(message),
+    };
+    Native::ParseErr {
+        display: message,
+        debug: debug.to_string(),
+    }
+    .wrap()
 }
 
 pub(super) fn str_method_slow(s: &RsStr, method: &MethodName, args: &[Value]) -> Result<Value> {
@@ -415,7 +450,7 @@ pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
             .ok_or_else(|| anyhow!("{}", args.first().map(Value::display).unwrap_or_default()))?,
         // There is no runtime type here, so the payload type's Default cannot
         // be built beyond what the call site wrote down.
-        BuiltinId::UnwrapOrDefault => inner.unwrap_or_else(|| default_of(method.scalar.as_ref())),
+        BuiltinId::UnwrapOrDefault => inner.unwrap_or_else(|| payload_default(method)),
         BuiltinId::AsRef | BuiltinId::AsDeref | BuiltinId::Take | BuiltinId::AsMut => recv.clone(),
         // Iterating an Option yields its payload or nothing, as a vec so the
         // chain's `collect`, `rev`, and friends compose on it.
@@ -439,6 +474,20 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
     Ok(match method.id {
         BuiltinId::IsOk => Value::Bool(is_ok),
         BuiltinId::IsErr => Value::Bool(!is_ok),
+        BuiltinId::And => {
+            if is_ok {
+                arg(args, 0)?
+            } else {
+                recv.clone()
+            }
+        }
+        BuiltinId::Or => {
+            if is_ok {
+                recv.clone()
+            } else {
+                arg(args, 0)?
+            }
+        }
         // The interpreter holds no references, so a reference view is the value.
         BuiltinId::Clone
         | BuiltinId::AsRef
@@ -484,7 +533,7 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
             if is_ok {
                 inner
             } else {
-                default_of(method.scalar.as_ref())
+                payload_default(method)
             }
         }
         BuiltinId::Ok => {

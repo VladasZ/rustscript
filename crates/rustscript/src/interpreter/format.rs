@@ -128,9 +128,16 @@ pub(super) fn apply_spec(
     display: &str,
     debug: &str,
     number: Option<SpecNumber>,
+    pads_debug: bool,
 ) -> String {
     let parsed = parse_spec(spec);
     let mut base = render_base(&parsed, display, debug, number);
+    // The `Debug` impls of str, char, and the containers write their text
+    // straight through and never pad, only the numbers and bool route
+    // `Debug` to a padding `Display`.
+    if parsed.repr == Repr::Debug && !pads_debug {
+        return base;
+    }
 
     // NaN ignores the sign flag entirely, `{:+}` of NaN is still `NaN`,
     // while infinities do take it.
@@ -168,7 +175,8 @@ pub(super) fn apply_spec(
     let pad = target - current;
     // The zero flag pads after the sign and radix prefix, `{:+06}` gives
     // `+00013` and `{:#010x}` gives `0x000000ff`, unlike an explicit fill.
-    if parsed.zero && parsed.align.is_none() && number.is_some() {
+    // The zero flag wins over an explicit fill and alignment for a number.
+    if parsed.zero && number.is_some() {
         let mut cut = usize::from(base.starts_with('+') || base.starts_with('-'));
         if base[cut..].starts_with("0x")
             || base[cut..].starts_with("0o")
@@ -314,6 +322,13 @@ pub(super) fn expand_widths_with(
             continue;
         }
         if c == '$' {
+            // `0w$` and `01$` are the zero flag followed by a width
+            // reference. An argument index never has a leading zero, so a
+            // longer token starting with one always carries the flag.
+            if token.len() > 1 && token.starts_with('0') {
+                out.push('0');
+                token.remove(0);
+            }
             out.push_str(&lookup(&token)?.to_string());
             token.clear();
             continue;

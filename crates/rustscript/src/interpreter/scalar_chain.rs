@@ -231,11 +231,13 @@ fn analyze(vm: &Vm, handle: &Handle) -> Option<(Vec<Stage>, Base, Handle)> {
 /// The running state of one reduction, mirroring the matching generic
 /// drain's accumulator.
 enum Acc {
-    /// The i128 accumulator and per-step bounds of `sum_values`.
+    /// The i128 accumulator and per-step bounds of `sum_values`. Without a
+    /// target the first tagged element sets the bounds, as there.
     Sum {
         total: i128,
         low: i128,
         high: i128,
+        bounded: bool,
     },
     Count(usize),
     Any(bool),
@@ -258,6 +260,7 @@ impl Acc {
                     total: 0,
                     low,
                     high,
+                    bounded: target.is_some(),
                 }
             }
             ChainReduce::Count => Acc::Count(0),
@@ -271,10 +274,21 @@ impl Acc {
     /// like the generic `any`/`all` exit.
     fn feed(&mut self, v: SVal) -> Option<bool> {
         match self {
-            Acc::Sum { total, low, high } => {
+            Acc::Sum {
+                total,
+                low,
+                high,
+                bounded,
+            } => {
                 let n = match v {
                     SVal::Int(i) => i128::from(i),
-                    SVal::IntW(s, w) => w.decode(s),
+                    SVal::IntW(s, w) => {
+                        if !*bounded {
+                            (*low, *high) = (w.min(), w.max());
+                            *bounded = true;
+                        }
+                        w.decode(s)
+                    }
                     _ => return None,
                 };
                 // The checked form and the per-step bounds mirror
