@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 use parking_lot::Mutex;
 
-use super::bytecode::{BuiltinId as B, MethodName};
+use super::bytecode::{BuiltinId, MethodName};
 use super::enum_def::{EnumKind, SOME};
 use super::native::Native;
 use super::native_methods;
@@ -200,14 +200,14 @@ pub(super) fn command_method(recv: &Value, name: &MethodName, args: &[Value]) ->
     };
     let cmd_value = || recv.clone();
     Ok(match name.id {
-        B::Arg => {
+        BuiltinId::Arg => {
             if let Some(Value::Vec(list)) = s.get("args") {
                 list.lock()
                     .push(args.first().cloned().unwrap_or(Value::Unit));
             }
             cmd_value()
         }
-        B::Args => {
+        BuiltinId::Args => {
             if let (Some(Value::Vec(list)), Some(Value::Vec(extra))) = (s.get("args"), args.first())
             {
                 let extra = extra.lock().clone();
@@ -215,11 +215,11 @@ pub(super) fn command_method(recv: &Value, name: &MethodName, args: &[Value]) ->
             }
             cmd_value()
         }
-        B::CurrentDir => {
+        BuiltinId::CurrentDir => {
             s.set("cwd", args.first().cloned().unwrap_or(Value::Unit));
             cmd_value()
         }
-        B::Env => {
+        BuiltinId::Env => {
             let key = args.first().map(Value::display).unwrap_or_default();
             let val = args.get(1).cloned().unwrap_or(Value::Unit);
             let envs = command_envs(s);
@@ -228,7 +228,7 @@ pub(super) fn command_method(recv: &Value, name: &MethodName, args: &[Value]) ->
             }
             cmd_value()
         }
-        B::EnvRemove => {
+        BuiltinId::EnvRemove => {
             let key = args.first().map(Value::display).unwrap_or_default();
             let envs = command_envs(s);
             if let Some(k) = Value::str(key).as_key() {
@@ -239,7 +239,7 @@ pub(super) fn command_method(recv: &Value, name: &MethodName, args: &[Value]) ->
         // Rejected rather than stored when it is not an Stdio, because a value
         // this does not understand used to be kept and then quietly ignored
         // when the command was built.
-        B::Stdin | B::Stdout | B::Stderr => {
+        BuiltinId::Stdin | BuiltinId::Stdout | BuiltinId::Stderr => {
             let arg = args.first().cloned().unwrap_or(Value::Unit);
             match &arg {
                 Value::Struct(m) if &**m.name() == "Stdio" => {}
@@ -251,9 +251,9 @@ pub(super) fn command_method(recv: &Value, name: &MethodName, args: &[Value]) ->
             s.set(&name.text, arg);
             cmd_value()
         }
-        B::Spawn => spawn_command(s),
-        B::Output => run_command(s),
-        B::Status => status_command(s),
+        BuiltinId::Spawn => spawn_command(s),
+        BuiltinId::Output => run_command(s),
+        BuiltinId::Status => status_command(s),
         _ => bail!("unknown method `{name}` on Command"),
     })
 }
@@ -300,14 +300,14 @@ pub(super) fn child_method(recv: &Value, name: &MethodName, args: &mut [Value]) 
     // whole call, so close it through the shared handle instead. The hidden
     // `stdin_pipe` alias reaches the pipe even after `stdin.take()` emptied
     // the visible field.
-    if matches!(name.id, B::Wait | B::WaitWithOutput) {
+    if matches!(name.id, BuiltinId::Wait | BuiltinId::WaitWithOutput) {
         if let Some(v) = s.get(STDIN_PIPE) {
             close_child_stdin(&v);
         }
         s.set("stdin", Value::none());
         s.set(STDIN_PIPE, Value::none());
     }
-    if name.id == B::WaitWithOutput {
+    if name.id == BuiltinId::WaitWithOutput {
         let out = drain_child_pipe(s, "stdout");
         let err = drain_child_pipe(s, "stderr");
         let status = {
@@ -355,8 +355,11 @@ fn drain_child_pipe(s: &StructData, key: &str) -> String {
         _ => return String::new(),
     };
     let mut target = [Value::str("")];
-    match native_methods::native_method(&handle, &MethodName::builtin(B::ReadToString), &mut target)
-    {
+    match native_methods::native_method(
+        &handle,
+        &MethodName::builtin(BuiltinId::ReadToString),
+        &mut target,
+    ) {
         Ok(_) => {}
         Err(_) => return String::new(),
     }

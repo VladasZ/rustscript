@@ -16,22 +16,22 @@
 
 use anyhow::Result;
 
-use super::bytecode::{MethodName, PathId as P};
+use super::bytecode::{MethodName, PathId};
 use super::std_bridge::as_i64;
 use super::value::{StructData, Value};
 
 /// The access mask constants, as plain ints. `ServiceAccess` and
 /// `ServiceManagerAccess` are bitflags in the crate, so `|` on the script side
 /// works on these directly.
-pub(super) fn service_const(id: P) -> Option<Value> {
+pub(super) fn service_const(id: PathId) -> Option<Value> {
     let n: i64 = match id {
         // ServiceManagerAccess and ServiceAccess share the low bit values.
-        P::Connect | P::QueryConfig => 0x0001,
-        P::CreateService | P::ChangeConfig => 0x0002,
-        P::EnumerateService | P::QueryStatus => 0x0004,
-        P::Start => 0x0010,
-        P::Stop => 0x0020,
-        P::Delete => 0x0001_0000,
+        PathId::Connect | PathId::QueryConfig => 0x0001,
+        PathId::CreateService | PathId::ChangeConfig => 0x0002,
+        PathId::EnumerateService | PathId::QueryStatus => 0x0004,
+        PathId::Start => 0x0010,
+        PathId::Stop => 0x0020,
+        PathId::Delete => 0x0001_0000,
         _ => return None,
     };
     Some(Value::Int(n))
@@ -58,7 +58,7 @@ pub(super) fn service_method(s: &StructData, name: &MethodName, args: &[Value]) 
 
 #[cfg(windows)]
 mod imp {
-    use super::super::bytecode::{BuiltinId as B, MethodName};
+    use super::super::bytecode::{BuiltinId, MethodName};
     use anyhow::{Result, bail};
     use windows_service::service::{
         Service, ServiceAccess, ServiceDependency, ServiceErrorControl, ServiceInfo,
@@ -225,7 +225,7 @@ mod imp {
         args: &[Value],
     ) -> Result<Value> {
         Ok(match name.id {
-            B::OpenService => {
+            BuiltinId::OpenService => {
                 let svc_name = args.first().map(Value::display).unwrap_or_default();
                 let access = args.get(1).and_then(as_i64).unwrap_or(0x0004);
                 let value = Value::struct_of(
@@ -256,7 +256,7 @@ mod imp {
         args: &[Value],
     ) -> Result<Value> {
         Ok(match name.id {
-            B::QueryStatus => match open(s).and_then(|svc| Ok(svc.query_status()?)) {
+            BuiltinId::QueryStatus => match open(s).and_then(|svc| Ok(svc.query_status()?)) {
                 Ok(st) => Value::ok(Value::struct_of(
                     "ServiceStatus",
                     [(
@@ -273,7 +273,7 @@ mod imp {
             // back. service_type and error_control are handed over as their raw
             // values so they round trip exactly without the bridge having to
             // model every variant.
-            B::QueryConfig => match open(s).and_then(|svc| Ok(svc.query_config()?)) {
+            BuiltinId::QueryConfig => match open(s).and_then(|svc| Ok(svc.query_config()?)) {
                 Ok(cfg) => Value::ok(Value::struct_of(
                     "ServiceConfig",
                     [
@@ -325,7 +325,7 @@ mod imp {
             // used. Nothing is silently substituted from the current config,
             // because a script that set executable_path and had it quietly
             // dropped would be the worst kind of bug to find later.
-            B::ChangeConfig => {
+            BuiltinId::ChangeConfig => {
                 let Some(Value::Struct(info)) = args.first() else {
                     bail!("change_config takes a ServiceInfo");
                 };
@@ -334,11 +334,11 @@ mod imp {
                     Ok(())
                 }))
             }
-            B::Start => io_result(open(s).and_then(|svc| {
+            BuiltinId::Start => io_result(open(s).and_then(|svc| {
                 svc.start(&[] as &[&std::ffi::OsStr])?;
                 Ok(())
             })),
-            B::Stop => io_result(open(s).and_then(|svc| {
+            BuiltinId::Stop => io_result(open(s).and_then(|svc| {
                 svc.stop()?;
                 Ok(())
             })),

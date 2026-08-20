@@ -16,27 +16,27 @@ use ratatui::text::Span;
 use ratatui::widgets::BorderType;
 use ratatui::widgets::Padding;
 
-use super::bytecode::PathId as P;
+use super::bytecode::PathId;
 use super::enum_def::{BORDER_TYPE, COLOR, CONSTRAINT, EnumKind};
 use super::value::Value;
 
 /// `Modifier::BOLD` and friends. The colour and border constants are enum
 /// variants, loaded in place by the compiler.
-pub(super) fn ratatui_const(id: P) -> Option<Value> {
+pub(super) fn ratatui_const(id: PathId) -> Option<Value> {
     modifier_const(id).map(modifier_value)
 }
 
-fn modifier_const(id: P) -> Option<Modifier> {
+fn modifier_const(id: PathId) -> Option<Modifier> {
     Some(match id {
-        P::ModifierBold => Modifier::BOLD,
-        P::ModifierDim => Modifier::DIM,
-        P::ModifierItalic => Modifier::ITALIC,
-        P::ModifierUnderlined => Modifier::UNDERLINED,
-        P::ModifierSlowBlink => Modifier::SLOW_BLINK,
-        P::ModifierRapidBlink => Modifier::RAPID_BLINK,
-        P::ModifierReversed => Modifier::REVERSED,
-        P::ModifierHidden => Modifier::HIDDEN,
-        P::ModifierCrossedOut => Modifier::CROSSED_OUT,
+        PathId::ModifierBold => Modifier::BOLD,
+        PathId::ModifierDim => Modifier::DIM,
+        PathId::ModifierItalic => Modifier::ITALIC,
+        PathId::ModifierUnderlined => Modifier::UNDERLINED,
+        PathId::ModifierSlowBlink => Modifier::SLOW_BLINK,
+        PathId::ModifierRapidBlink => Modifier::RAPID_BLINK,
+        PathId::ModifierReversed => Modifier::REVERSED,
+        PathId::ModifierHidden => Modifier::HIDDEN,
+        PathId::ModifierCrossedOut => Modifier::CROSSED_OUT,
         _ => return None,
     })
 }

@@ -218,4 +218,4 @@ the `supported_page_is_current` test enforces it.
 
 ## builtin (dispatched by id on matching receivers)
 
-`clone`, `clone_from`, `cloned`, `cmp`, `contains_key`, `copied`, `get`, `get_mut`, `insert`, `make_ascii_lowercase`, `make_ascii_uppercase`, `push`, `push_str`, `replace`, `take`, `to_string`, `unwrap`, `unwrap_or`
+`clone`, `clone_from`, `cloned`, `cmp`, `contains_key`, `copied`, `get`, `insert`, `make_ascii_lowercase`, `make_ascii_uppercase`, `push`, `push_str`, `replace`, `take`, `to_string`, `unwrap`, `unwrap_or`

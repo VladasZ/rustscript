@@ -10,7 +10,7 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow, bail};
 use parking_lot::Mutex;
 
-use super::bytecode::{BuiltinId, BuiltinId as B, MethodName, ScalarTy};
+use super::bytecode::{BuiltinId, MethodName, ScalarTy};
 use super::native::Native;
 use super::ops::compare_values;
 use super::regex_bridge::{CapturesValue, MatchValue, RegexValue};
@@ -652,6 +652,28 @@ impl Vm {
         Ok(items)
     }
 
+    /// `peek` pulls one item early and keeps it, so the value is still there
+    /// for the next `next`. `None` when the handle is not a peekable.
+    fn peek(self: &Arc<Self>, iterator: &Handle) -> Result<Option<Value>> {
+        let (buffered, source) = match &*iterator.lock() {
+            Native::Iterator(IteratorState::Peekable { buffered, source }) => {
+                (buffered.clone(), source.clone())
+            }
+            _ => return Ok(None),
+        };
+        if let Some(item) = buffered {
+            return Ok(Some(Value::some(item)));
+        }
+        let item = self.iterator_next(&source)?;
+        if let Native::Iterator(IteratorState::Peekable { buffered, .. }) = &mut *iterator.lock() {
+            buffered.clone_from(&item);
+        }
+        Ok(Some(match item {
+            Some(item) => Value::some(item),
+            None => Value::none(),
+        }))
+    }
+
     pub(super) fn iterator_method(
         self: &Arc<Self>,
         iterator: &Handle,
@@ -659,19 +681,19 @@ impl Vm {
         args: &[Value],
     ) -> Result<Option<Value>> {
         let value = match method.id {
-            B::Enumerate => wrap(IteratorState::Enumerate {
+            BuiltinId::Enumerate => wrap(IteratorState::Enumerate {
                 source: iterator.clone(),
                 index: 0,
             }),
-            B::Take => wrap(IteratorState::Take {
+            BuiltinId::Take => wrap(IteratorState::Take {
                 source: iterator.clone(),
                 remaining: usize::try_from(int_arg(args)?)?,
             }),
-            B::Skip => wrap(IteratorState::Skip {
+            BuiltinId::Skip => wrap(IteratorState::Skip {
                 source: iterator.clone(),
                 remaining: usize::try_from(int_arg(args)?)?,
             }),
-            B::Count => {
+            BuiltinId::Count => {
                 if let Some(v) = try_reduce(self, iterator, &ChainReduce::Count)? {
                     v
                 } else {
@@ -682,78 +704,61 @@ impl Vm {
                     super::shared::usize_value(count)
                 }
             }
-            B::Sum => {
+            BuiltinId::Sum => {
                 match try_reduce(self, iterator, &ChainReduce::Sum(method.scalar.as_ref()))? {
                     Some(v) => v,
                     None => self.iterator_sum(iterator, method.scalar.as_ref())?,
                 }
             }
-            B::Product => self.iterator_product(iterator, method.scalar.as_ref())?,
+            BuiltinId::Product => self.iterator_product(iterator, method.scalar.as_ref())?,
             _ => match method.id {
-                B::Next => self
+                BuiltinId::Next => self
                     .iterator_next(iterator)?
                     .map_or_else(Value::none, Value::some),
-                B::Last => {
+                BuiltinId::Last => {
                     let mut last = None;
                     while let Some(item) = self.iterator_next(iterator)? {
                         last = Some(item);
                     }
                     last.map_or_else(Value::none, Value::some)
                 }
-                B::Collect | B::ToVec => Value::vec(self.drain_iterator(iterator)?),
-                B::CollectString => Value::str(
+                BuiltinId::Collect | BuiltinId::ToVec => Value::vec(self.drain_iterator(iterator)?),
+                BuiltinId::CollectString => Value::str(
                     self.drain_iterator(iterator)?
                         .iter()
                         .map(Value::display)
                         .collect::<String>(),
                 ),
-                B::CollectMap => super::vecmap::collect_map(self.drain_iterator(iterator)?)?,
-                B::CollectSet => super::vecmap::collect_set(self.drain_iterator(iterator)?)?,
+                BuiltinId::CollectMap => {
+                    super::vecmap::collect_map(self.drain_iterator(iterator)?)?
+                }
+                BuiltinId::CollectSet => {
+                    super::vecmap::collect_set(self.drain_iterator(iterator)?)?
+                }
                 // `by_ref` borrows the iterator so the caller keeps it after
                 // the adaptor is done with it. Iterators are shared handles
                 // here, so handing the same one back is that borrow.
-                B::Cloned | B::Copied | B::ByRef => Value::Native(iterator.clone()),
-                B::Peekable => wrap(IteratorState::Peekable {
+                BuiltinId::Cloned | BuiltinId::Copied | BuiltinId::ByRef => {
+                    Value::Native(iterator.clone())
+                }
+                BuiltinId::Peekable => wrap(IteratorState::Peekable {
                     source: iterator.clone(),
                     buffered: None,
                 }),
-                // `peek` pulls one item early and keeps it, so the value is
-                // still there for the next `next`.
-                B::Peek => {
-                    let buffered = match &*iterator.lock() {
-                        Native::Iterator(IteratorState::Peekable { buffered, .. }) => {
-                            buffered.clone()
-                        }
-                        _ => return Ok(None),
-                    };
-                    if let Some(item) = buffered {
-                        return Ok(Some(Value::some(item)));
-                    }
-                    let source = match &*iterator.lock() {
-                        Native::Iterator(IteratorState::Peekable { source, .. }) => source.clone(),
-                        _ => return Ok(None),
-                    };
-                    let item = self.iterator_next(&source)?;
-                    if let Native::Iterator(IteratorState::Peekable { buffered, .. }) =
-                        &mut *iterator.lock()
-                    {
-                        buffered.clone_from(&item);
-                    }
-                    match item {
-                        Some(item) => Value::some(item),
-                        None => Value::none(),
-                    }
-                }
-                B::Rev => {
+                BuiltinId::Peek => match self.peek(iterator)? {
+                    Some(v) => v,
+                    None => return Ok(None),
+                },
+                BuiltinId::Rev => {
                     let mut items = self.drain_iterator(iterator)?;
                     items.reverse();
                     Value::vec(items)
                 }
-                B::Max | B::Min => self.iterator_extreme(iterator, method.id)?,
+                BuiltinId::Max | BuiltinId::Min => self.iterator_extreme(iterator, method.id)?,
                 // `Chars::as_str` gives the not yet consumed tail, which is what
                 // makes the `chars.next()` then `chars.as_str()` capitalize idiom
                 // work. Only a char iterator still knows its source text.
-                B::AsStr => match &*iterator.lock() {
+                BuiltinId::AsStr => match &*iterator.lock() {
                     Native::Iterator(IteratorState::Chars { source, offset }) => {
                         Value::str(source[*offset..].to_string())
                     }
@@ -773,36 +778,36 @@ impl Vm {
     ) -> Result<Option<Value>> {
         let closure = |index| as_closure(args.get(index));
         let value = match name {
-            B::Map => wrap(IteratorState::Map {
+            BuiltinId::Map => wrap(IteratorState::Map {
                 source: iterator.clone(),
                 closure: closure(0)?,
             }),
-            B::Filter => wrap(IteratorState::Filter {
+            BuiltinId::Filter => wrap(IteratorState::Filter {
                 source: iterator.clone(),
                 closure: closure(0)?,
             }),
-            B::FilterMap => wrap(IteratorState::FilterMap {
+            BuiltinId::FilterMap => wrap(IteratorState::FilterMap {
                 source: iterator.clone(),
                 closure: closure(0)?,
             }),
-            B::TakeWhile => wrap(IteratorState::TakeWhile {
+            BuiltinId::TakeWhile => wrap(IteratorState::TakeWhile {
                 source: iterator.clone(),
                 closure: closure(0)?,
                 done: false,
             }),
-            B::SkipWhile => wrap(IteratorState::SkipWhile {
+            BuiltinId::SkipWhile => wrap(IteratorState::SkipWhile {
                 source: iterator.clone(),
                 closure: closure(0)?,
                 skipping: true,
             }),
-            B::ForEach => {
+            BuiltinId::ForEach => {
                 let closure = closure(0)?;
                 while let Some(value) = self.iterator_next(iterator)? {
                     self.call_closure_data(&closure, &[value])?;
                 }
                 Value::Unit
             }
-            B::FindMap => {
+            BuiltinId::FindMap => {
                 let closure = closure(0)?;
                 let mut found = Value::none();
                 while let Some(value) = self.iterator_next(iterator)? {
@@ -814,11 +819,15 @@ impl Vm {
                 }
                 found
             }
-            B::Find | B::Position | B::Rposition | B::Any | B::All => {
+            BuiltinId::Find
+            | BuiltinId::Position
+            | BuiltinId::Rposition
+            | BuiltinId::Any
+            | BuiltinId::All => {
                 let closure = closure(0)?;
                 let reduce = match name {
-                    B::Any => Some(ChainReduce::Any(&closure)),
-                    B::All => Some(ChainReduce::All(&closure)),
+                    BuiltinId::Any => Some(ChainReduce::Any(&closure)),
+                    BuiltinId::All => Some(ChainReduce::All(&closure)),
                     _ => None,
                 };
                 if let Some(reduce) = reduce
@@ -842,7 +851,7 @@ impl Vm {
     ) -> Result<Option<Value>> {
         let closure = |index| as_closure(args.get(index));
         let value = match name {
-            B::Fold => {
+            BuiltinId::Fold => {
                 let closure = closure(1)?;
                 let mut accumulator = args.first().cloned().unwrap_or(Value::Unit);
                 while let Some(value) = self.iterator_next(iterator)? {
@@ -850,7 +859,7 @@ impl Vm {
                 }
                 accumulator
             }
-            B::Reduce => {
+            BuiltinId::Reduce => {
                 let closure = closure(0)?;
                 let Some(mut accumulator) = self.iterator_next(iterator)? else {
                     return Ok(Some(Value::none()));
@@ -860,7 +869,7 @@ impl Vm {
                 }
                 Value::some(accumulator)
             }
-            B::FlatMap => {
+            BuiltinId::FlatMap => {
                 let closure = closure(0)?;
                 let mut output = Vec::new();
                 while let Some(value) = self.iterator_next(iterator)? {
@@ -869,7 +878,7 @@ impl Vm {
                 }
                 Value::vec(output)
             }
-            B::Partition => {
+            BuiltinId::Partition => {
                 let closure = closure(0)?;
                 let (mut yes, mut no) = (Vec::new(), Vec::new());
                 while let Some(value) = self.iterator_next(iterator)? {
@@ -884,7 +893,7 @@ impl Vm {
                 }
                 Value::tuple(vec![Value::vec(yes), Value::vec(no)])
             }
-            B::MaxByKey | B::MinByKey => {
+            BuiltinId::MaxByKey | BuiltinId::MinByKey => {
                 let closure = closure(0)?;
                 let mut best: Option<(Value, Value)> = None;
                 while let Some(value) = self.iterator_next(iterator)? {
@@ -893,7 +902,7 @@ impl Vm {
                         None => true,
                         Some((best_key, _)) => {
                             let order = compare_values(&key, best_key)?;
-                            if name == B::MaxByKey {
+                            if name == BuiltinId::MaxByKey {
                                 order.is_ge()
                             } else {
                                 order.is_lt()
@@ -991,7 +1000,7 @@ impl Vm {
                 None => true,
                 Some(current) => {
                     let order = compare_values(&value, current)?;
-                    if name == B::Max {
+                    if name == BuiltinId::Max {
                         order.is_gt()
                     } else {
                         order.is_lt()
@@ -1021,20 +1030,22 @@ impl Vm {
                 .call_closure_data(closure, from_ref(&value))?
                 .is_truthy();
             match name {
-                B::Find if matches => return Ok(Value::some(value)),
-                B::Position if matches => return Ok(Value::some(Value::Int(index))),
-                B::Rposition if matches => last_match = Some(index),
-                B::Any if matches => return Ok(Value::Bool(true)),
-                B::All if !matches => return Ok(Value::Bool(false)),
+                BuiltinId::Find if matches => return Ok(Value::some(value)),
+                BuiltinId::Position if matches => return Ok(Value::some(Value::Int(index))),
+                BuiltinId::Rposition if matches => last_match = Some(index),
+                BuiltinId::Any if matches => return Ok(Value::Bool(true)),
+                BuiltinId::All if !matches => return Ok(Value::Bool(false)),
                 _ => {}
             }
             index += 1;
         }
         Ok(match name {
-            B::Find | B::Position => Value::none(),
-            B::Rposition => last_match.map_or_else(Value::none, |i| Value::some(Value::Int(i))),
-            B::Any => Value::Bool(false),
-            B::All => Value::Bool(true),
+            BuiltinId::Find | BuiltinId::Position => Value::none(),
+            BuiltinId::Rposition => {
+                last_match.map_or_else(Value::none, |i| Value::some(Value::Int(i)))
+            }
+            BuiltinId::Any => Value::Bool(false),
+            BuiltinId::All => Value::Bool(true),
             _ => unreachable!(),
         })
     }

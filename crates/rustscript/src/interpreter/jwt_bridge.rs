@@ -6,16 +6,16 @@ use std::str::FromStr;
 use anyhow::{Result, bail};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 
-use super::bytecode::PathId as P;
+use super::bytecode::PathId;
 use super::enum_def::ALGORITHM;
 use super::iterator::option_inner;
 use super::json_bridge::pvalue_to_json;
 use super::native_methods::value_to_bytes;
 use super::value::{StructData, Value};
 
-pub(super) fn jwt_assoc(id: P, args: &[Value]) -> Result<Option<Value>> {
+pub(super) fn jwt_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     Ok(Some(match id {
-        P::HeaderNew | P::HeaderDefault => {
+        PathId::HeaderNew | PathId::HeaderDefault => {
             let alg = match args.first() {
                 Some(v) => v.clone(),
                 None => Value::enum_named(&ALGORITHM, "HS256", Vec::new())
@@ -33,11 +33,13 @@ pub(super) fn jwt_assoc(id: P, args: &[Value]) -> Result<Option<Value>> {
                 ],
             )
         }
-        P::EncodingKeyFromSecret => key_value("secret", args),
-        P::EncodingKeyFromEcPem => match EncodingKey::from_ec_pem(&value_to_bytes(args.first())) {
-            Ok(_) => Value::ok(key_value("ec_pem", args)),
-            Err(e) => Value::err(Value::str(e.to_string())),
-        },
+        PathId::EncodingKeyFromSecret => key_value("secret", args),
+        PathId::EncodingKeyFromEcPem => {
+            match EncodingKey::from_ec_pem(&value_to_bytes(args.first())) {
+                Ok(_) => Value::ok(key_value("ec_pem", args)),
+                Err(e) => Value::err(Value::str(e.to_string())),
+            }
+        }
         _ => return Ok(None),
     }))
 }

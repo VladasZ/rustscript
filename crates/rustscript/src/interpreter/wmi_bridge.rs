@@ -39,7 +39,7 @@ pub(super) fn wmi_method(s: &StructData, name: &MethodName, args: &[Value]) -> R
 
 #[cfg(windows)]
 mod imp {
-    use super::super::bytecode::{BuiltinId as B, MethodName};
+    use super::super::bytecode::{BuiltinId, MethodName};
 
     use std::collections::HashMap;
 
@@ -103,7 +103,7 @@ mod imp {
             .map(|v| v.display())
             .unwrap_or_else(|| r"root\cimv2".to_string());
         Ok(match name.id {
-            B::RawQuery | B::Query => {
+            BuiltinId::RawQuery | BuiltinId::Query => {
                 let q = args.first().map(Value::display).unwrap_or_default();
                 match connect(&namespace)
                     .and_then(|c| Ok(c.raw_query::<HashMap<String, Variant>>(&q)?))

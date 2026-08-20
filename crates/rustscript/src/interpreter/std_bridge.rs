@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 
-use super::bytecode::{BuiltinId as B, MethodName, PathId as P};
+use super::bytecode::{BuiltinId, MethodName, PathId};
 use super::crates_bridge::crate_bridge;
 use super::enum_def::{NOT_PRESENT, NOT_UNICODE, VAR_ERROR};
 use super::json_bridge::bridge_serde_json;
@@ -14,7 +14,7 @@ use super::native_methods;
 use super::value::{StructData, Value};
 
 /// The `std::fs` free functions.
-fn fs_native_call(id: P, args: &[Value]) -> Result<Option<Value>> {
+fn fs_native_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     let s = |i: usize| -> Result<String> {
         match args.get(i) {
             Some(v) => Ok(path_like(v)),
@@ -22,20 +22,20 @@ fn fs_native_call(id: P, args: &[Value]) -> Result<Option<Value>> {
         }
     };
     Ok(Some(match id {
-        P::FsReadToString => wrap_io(std::fs::read_to_string(s(0)?)),
-        P::FsRead => wrap_bytes(std::fs::read(s(0)?)),
-        P::FsWrite => wrap_unit(std::fs::write(s(0)?, s(1)?)),
-        P::FsCreateDirAll => wrap_unit(std::fs::create_dir_all(s(0)?)),
-        P::FsCreateDir => wrap_unit(std::fs::create_dir(s(0)?)),
-        P::FsRemoveFile => wrap_unit(std::fs::remove_file(s(0)?)),
-        P::FsRemoveDirAll => wrap_unit(std::fs::remove_dir_all(s(0)?)),
-        P::FsRemoveDir => wrap_unit(std::fs::remove_dir(s(0)?)),
-        P::FsCopy => match std::fs::copy(s(0)?, s(1)?) {
+        PathId::FsReadToString => wrap_io(std::fs::read_to_string(s(0)?)),
+        PathId::FsRead => wrap_bytes(std::fs::read(s(0)?)),
+        PathId::FsWrite => wrap_unit(std::fs::write(s(0)?, s(1)?)),
+        PathId::FsCreateDirAll => wrap_unit(std::fs::create_dir_all(s(0)?)),
+        PathId::FsCreateDir => wrap_unit(std::fs::create_dir(s(0)?)),
+        PathId::FsRemoveFile => wrap_unit(std::fs::remove_file(s(0)?)),
+        PathId::FsRemoveDirAll => wrap_unit(std::fs::remove_dir_all(s(0)?)),
+        PathId::FsRemoveDir => wrap_unit(std::fs::remove_dir(s(0)?)),
+        PathId::FsCopy => match std::fs::copy(s(0)?, s(1)?) {
             Ok(n) => Value::ok(Value::Int(i64::try_from(n).unwrap_or(i64::MAX))),
             Err(e) => Value::err(super::native::io_error_value(&e)),
         },
-        P::FsRename => wrap_unit(std::fs::rename(s(0)?, s(1)?)),
-        P::FsReadDir => match std::fs::read_dir(s(0)?) {
+        PathId::FsRename => wrap_unit(std::fs::rename(s(0)?, s(1)?)),
+        PathId::FsReadDir => match std::fs::read_dir(s(0)?) {
             Ok(rd) => {
                 let mut items = Vec::new();
                 for e in rd {
@@ -48,30 +48,30 @@ fn fs_native_call(id: P, args: &[Value]) -> Result<Option<Value>> {
             }
             Err(e) => Value::err(super::native::io_error_value(&e)),
         },
-        P::FsCanonicalize => match std::fs::canonicalize(s(0)?) {
+        PathId::FsCanonicalize => match std::fs::canonicalize(s(0)?) {
             Ok(p) => Value::ok(make_path(p.display().to_string())),
             Err(e) => Value::err(super::native::io_error_value(&e)),
         },
-        P::FsMetadata => match std::fs::metadata(s(0)?) {
+        PathId::FsMetadata => match std::fs::metadata(s(0)?) {
             Ok(m) => Value::ok(make_metadata(&m)),
             Err(e) => Value::err(super::native::io_error_value(&e)),
         },
-        P::FsSymlinkMetadata => match std::fs::symlink_metadata(s(0)?) {
+        PathId::FsSymlinkMetadata => match std::fs::symlink_metadata(s(0)?) {
             Ok(m) => Value::ok(make_metadata(&m)),
             Err(e) => Value::err(super::native::io_error_value(&e)),
         },
-        P::FsReadLink => match std::fs::read_link(s(0)?) {
+        PathId::FsReadLink => match std::fs::read_link(s(0)?) {
             Ok(p) => Value::ok(make_path(p.display().to_string())),
             Err(e) => Value::err(super::native::io_error_value(&e)),
         },
-        P::FsHardLink => wrap_unit(std::fs::hard_link(s(0)?, s(1)?)),
+        PathId::FsHardLink => wrap_unit(std::fs::hard_link(s(0)?, s(1)?)),
         // The platform specific names are aliased to one cross-platform
         // helper, so the cfg gated `use` a script needs to type-check on
         // each os all dispatch here at runtime.
-        P::FsSymlink | P::FsSymlinkFile | P::FsSymlinkDir => {
+        PathId::FsSymlink | PathId::FsSymlinkFile | PathId::FsSymlinkDir => {
             wrap_unit(make_symlink(&s(0)?, &s(1)?))
         }
-        P::FsSetPermissions => wrap_unit(set_permissions_impl(
+        PathId::FsSetPermissions => wrap_unit(set_permissions_impl(
             &s(0)?,
             args.get(1).and_then(perm_mode),
         )),
@@ -79,7 +79,7 @@ fn fs_native_call(id: P, args: &[Value]) -> Result<Option<Value>> {
     }))
 }
 
-pub(super) fn native_call(id: P, args: &[Value]) -> Result<Option<Value>> {
+pub(super) fn native_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     if let Some(v) = fs_native_call(id, args)? {
         return Ok(Some(v));
     }
@@ -90,12 +90,12 @@ pub(super) fn native_call(id: P, args: &[Value]) -> Result<Option<Value>> {
         }
     };
     Ok(Some(match id {
-        P::SerdeJsonFromStr
-        | P::SerdeJsonToString
-        | P::SerdeJsonToStringPretty
-        | P::SerdeJsonToValue => return bridge_serde_json(id, args).map(Some),
-        P::EnvArgs => Value::vec(super::script_args().into_iter().map(Value::str).collect()),
-        P::EnvVar => match std::env::var(s(0)?) {
+        PathId::SerdeJsonFromStr
+        | PathId::SerdeJsonToString
+        | PathId::SerdeJsonToStringPretty
+        | PathId::SerdeJsonToValue => return bridge_serde_json(id, args).map(Some),
+        PathId::EnvArgs => Value::vec(super::script_args().into_iter().map(Value::str).collect()),
+        PathId::EnvVar => match std::env::var(s(0)?) {
             Ok(v) => Value::ok(Value::str(v)),
             // The structured `VarError`, so `Err(VarError::NotPresent)`
             // matches and `{e:?}` prints `NotPresent` like real Rust.
@@ -108,32 +108,32 @@ pub(super) fn native_call(id: P, args: &[Value]) -> Result<Option<Value>> {
                 vec![Value::str(os.to_string_lossy().into_owned())],
             )),
         },
-        P::EnvCurrentDir => match std::env::current_dir() {
+        PathId::EnvCurrentDir => match std::env::current_dir() {
             Ok(p) => Value::ok(make_path(p.display().to_string())),
             Err(e) => Value::err(super::native::io_error_value(&e)),
         },
-        P::EnvSetVar => {
+        PathId::EnvSetVar => {
             // Safety: scripts treat the environment as script-wide state, the
             // same trade a single threaded interpreter always made.
             unsafe { std::env::set_var(s(0)?, s(1)?) };
             Value::Unit
         }
-        P::EnvRemoveVar => {
+        PathId::EnvRemoveVar => {
             unsafe { std::env::remove_var(s(0)?) };
             Value::Unit
         }
-        P::EnvVarOs => match std::env::var_os(s(0)?) {
+        PathId::EnvVarOs => match std::env::var_os(s(0)?) {
             Some(v) => Value::some(make_os_string(v.to_string_lossy().into_owned())),
             None => Value::none(),
         },
-        P::EnvVars | P::EnvVarsOs => Value::vec(
+        PathId::EnvVars | PathId::EnvVarsOs => Value::vec(
             std::env::vars()
                 .map(|(k, v)| Value::tuple(vec![Value::str(k), Value::str(v)]))
                 .collect(),
         ),
-        P::EnvSetCurrentDir => wrap_unit(std::env::set_current_dir(s(0)?)),
-        P::EnvTempDir => make_path(std::env::temp_dir().display().to_string()),
-        P::ProcessExit => {
+        PathId::EnvSetCurrentDir => wrap_unit(std::env::set_current_dir(s(0)?)),
+        PathId::EnvTempDir => make_path(std::env::temp_dir().display().to_string()),
+        PathId::ProcessExit => {
             let code = args
                 .first()
                 .and_then(as_i64)
@@ -141,15 +141,15 @@ pub(super) fn native_call(id: P, args: &[Value]) -> Result<Option<Value>> {
                 .unwrap_or(0);
             std::process::exit(code);
         }
-        P::ProcessAbort => std::process::abort(),
-        P::ProcessId => Value::Int(i64::from(std::process::id())),
+        PathId::ProcessAbort => std::process::abort(),
+        PathId::ProcessId => Value::Int(i64::from(std::process::id())),
         // -- io -------------------------------------------------------
-        P::IoStdin => make_std_stream(
+        PathId::IoStdin => make_std_stream(
             "stdin",
             Native::Reader(std::io::BufReader::new(Box::new(std::io::stdin()))),
         ),
-        P::IoStdout => make_std_stream("stdout", Native::Writer(Box::new(std::io::stdout()))),
-        P::IoStderr => make_std_stream("stderr", Native::Writer(Box::new(std::io::stderr()))),
+        PathId::IoStdout => make_std_stream("stdout", Native::Writer(Box::new(std::io::stdout()))),
+        PathId::IoStderr => make_std_stream("stderr", Native::Writer(Box::new(std::io::stderr()))),
         _ => return crate_bridge(id, args),
     }))
 }
@@ -236,7 +236,7 @@ pub(super) fn std_stream_method(
     args: &mut [Value],
 ) -> Result<Value> {
     use std::io::IsTerminal;
-    if name.id == B::IsTerminal {
+    if name.id == BuiltinId::IsTerminal {
         let kind = s.get("kind").map(|v| v.display()).unwrap_or_default();
         let tty = match kind.as_str() {
             "stdin" => std::io::stdin().is_terminal(),
@@ -245,7 +245,7 @@ pub(super) fn std_stream_method(
         };
         return Ok(Value::Bool(tty));
     }
-    if matches!(name.id, B::Lock | B::ByRef) {
+    if matches!(name.id, BuiltinId::Lock | BuiltinId::ByRef) {
         return Ok(Value::Struct(s.clone()));
     }
     let inner = match s.get("inner") {
@@ -328,9 +328,9 @@ pub(super) fn make_os_string(s: impl Into<String>) -> Value {
 pub(super) fn os_string_method(s: &Arc<StructData>, method: &MethodName) -> Result<Value> {
     let value = s.get("s").map(|value| value.display()).unwrap_or_default();
     Ok(match method.id {
-        B::Into => make_path(value),
-        B::ToStringLossy | B::ToStr => Value::str(value),
-        B::IsEmpty => Value::Bool(value.is_empty()),
+        BuiltinId::Into => make_path(value),
+        BuiltinId::ToStringLossy | BuiltinId::ToStr => Value::str(value),
+        BuiltinId::IsEmpty => Value::Bool(value.is_empty()),
         _ => bail!("unknown method `{method}` on OsString"),
     })
 }
@@ -382,40 +382,46 @@ pub(super) fn path_method(
         None => Value::none(),
     };
     Ok(match method.id {
-        B::Display | B::ToStringLossy => Value::str(s.clone()),
-        B::ToStr => Value::some(Value::str(s.clone())),
-        B::IntoString | B::IntoOsString => Value::ok(Value::str(s.clone())),
-        B::ToOwned | B::ToPathBuf | B::Clone | B::AsPath | B::AsOsStr => make_path(s.clone()),
-        B::IsDir => Value::Bool(p.is_dir()),
-        B::IsFile => Value::Bool(p.is_file()),
-        B::IsAbsolute => Value::Bool(p.is_absolute()),
-        B::Exists => Value::Bool(p.exists()),
-        B::FileName => match p.file_name() {
+        BuiltinId::Display | BuiltinId::ToStringLossy => Value::str(s.clone()),
+        BuiltinId::ToStr => Value::some(Value::str(s.clone())),
+        BuiltinId::IntoString | BuiltinId::IntoOsString => Value::ok(Value::str(s.clone())),
+        BuiltinId::ToOwned
+        | BuiltinId::ToPathBuf
+        | BuiltinId::Clone
+        | BuiltinId::AsPath
+        | BuiltinId::AsOsStr => make_path(s.clone()),
+        BuiltinId::IsDir => Value::Bool(p.is_dir()),
+        BuiltinId::IsFile => Value::Bool(p.is_file()),
+        BuiltinId::IsAbsolute => Value::Bool(p.is_absolute()),
+        BuiltinId::Exists => Value::Bool(p.exists()),
+        BuiltinId::FileName => match p.file_name() {
             Some(n) => Value::some(make_path(n.to_string_lossy().into_owned())),
             None => Value::none(),
         },
-        B::FileStem => opt_str(p.file_stem()),
-        B::Extension => opt_str(p.extension()),
-        B::WithExtension => make_path(p.with_extension(arg_str(args, 0)).display().to_string()),
-        B::Parent => match p.parent() {
+        BuiltinId::FileStem => opt_str(p.file_stem()),
+        BuiltinId::Extension => opt_str(p.extension()),
+        BuiltinId::WithExtension => {
+            make_path(p.with_extension(arg_str(args, 0)).display().to_string())
+        }
+        BuiltinId::Parent => match p.parent() {
             Some(par) => Value::some(make_path(par.display().to_string())),
             None => Value::none(),
         },
-        B::Ancestors => Value::vec(
+        BuiltinId::Ancestors => Value::vec(
             p.ancestors()
                 .map(|ancestor| make_path(ancestor.display().to_string()))
                 .collect(),
         ),
-        B::Join | B::Push => {
+        BuiltinId::Join | BuiltinId::Push => {
             let joined = p.join(args.first().map(Value::display).unwrap_or_default());
             make_path(joined.display().to_string())
         }
         // Path compares whole components, so "/a/bc" does not start with "/a/b"
         // the way the str method would say it does.
-        B::StartsWith => {
+        BuiltinId::StartsWith => {
             Value::Bool(p.starts_with(args.first().map(Value::display).unwrap_or_default()))
         }
-        B::EndsWith => {
+        BuiltinId::EndsWith => {
             Value::Bool(p.ends_with(args.first().map(Value::display).unwrap_or_default()))
         }
         _ => bail!("unknown method `{method}` on Path"),
@@ -425,9 +431,9 @@ pub(super) fn path_method(
 pub(super) fn dir_entry_method(s: &Arc<StructData>, method: &MethodName) -> Result<Value> {
     let path = path_string(s, "path");
     Ok(match method.id {
-        B::Path => make_path(path),
-        B::FileName => make_path(path_string(s, "name")),
-        B::FileType => Value::ok(make_file_type(std::path::Path::new(&path))),
+        BuiltinId::Path => make_path(path),
+        BuiltinId::FileName => make_path(path_string(s, "name")),
+        BuiltinId::FileType => Value::ok(make_file_type(std::path::Path::new(&path))),
         _ => bail!("unknown method `{method}` on DirEntry"),
     })
 }
@@ -435,9 +441,9 @@ pub(super) fn dir_entry_method(s: &Arc<StructData>, method: &MethodName) -> Resu
 pub(super) fn file_type_method(s: &Arc<StructData>, method: &MethodName) -> Result<Value> {
     let get = |k: &str| s.get(k).unwrap_or(Value::Bool(false));
     Ok(match method.id {
-        B::IsDir => get("is_dir"),
-        B::IsFile => get("is_file"),
-        B::IsSymlink => get("is_symlink"),
+        BuiltinId::IsDir => get("is_dir"),
+        BuiltinId::IsFile => get("is_file"),
+        BuiltinId::IsSymlink => get("is_symlink"),
         _ => bail!("unknown method `{method}` on FileType"),
     })
 }
@@ -445,16 +451,21 @@ pub(super) fn file_type_method(s: &Arc<StructData>, method: &MethodName) -> Resu
 pub(super) fn metadata_method(s: &Arc<StructData>, name: &MethodName) -> Result<Value> {
     let get = |k: &str| s.get(k).unwrap_or(Value::Unit);
     Ok(match name.id {
-        B::Len => get("len"),
-        B::IsDir => get("is_dir"),
-        B::IsFile => get("is_file"),
-        B::IsSymlink => get("is_symlink"),
-        B::Modified | B::Created | B::Accessed => match s.get("modified") {
+        BuiltinId::Len => get("len"),
+        BuiltinId::IsDir => get("is_dir"),
+        BuiltinId::IsFile => get("is_file"),
+        BuiltinId::IsSymlink => get("is_symlink"),
+        BuiltinId::Modified | BuiltinId::Created | BuiltinId::Accessed => match s.get("modified") {
             Some(v) => Value::ok(v),
             None => Value::err(Value::str("timestamp not available".to_string())),
         },
-        B::Mode | B::Dev | B::Ino | B::Uid | B::Gid | B::Mtime => get(&name.text),
-        B::Permissions => Value::struct_of(
+        BuiltinId::Mode
+        | BuiltinId::Dev
+        | BuiltinId::Ino
+        | BuiltinId::Uid
+        | BuiltinId::Gid
+        | BuiltinId::Mtime => get(&name.text),
+        BuiltinId::Permissions => Value::struct_of(
             "Permissions",
             [
                 ("mode".into(), get("mode")),
@@ -544,7 +555,7 @@ pub(super) fn openoptions_method(
         });
         return Ok(Value::struct_of("OpenOptions", pairs));
     }
-    if name.id == B::Open {
+    if name.id == BuiltinId::Open {
         let path = args.first().map(path_like).unwrap_or_default();
         let mut opts = std::fs::OpenOptions::new();
         opts.read(field_bool("read"))

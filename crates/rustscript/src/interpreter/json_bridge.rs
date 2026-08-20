@@ -14,7 +14,7 @@ use anyhow::{Result, bail};
 use rustc_hash::FxHashMap;
 
 use super::Interp;
-use super::bytecode::PathId as P;
+use super::bytecode::PathId;
 use super::enum_def::{EnumKind, OK, SOME};
 use super::numeric::IntWidth;
 use super::typeir::{TypeIr, lower_type};
@@ -536,11 +536,11 @@ impl<'de> serde::de::Visitor<'de> for PlanVisitor<'_> {
 /// bridges that parse through `serde_json`'s model. Null maps to None, the same
 /// mapping the json parser uses.
 pub(super) fn json_to_pvalue(v: serde_json::Value) -> Value {
-    use serde_json::Value as J;
+    use serde_json::Value as JsonValue;
     match v {
-        J::Null => Value::none(),
-        J::Bool(b) => Value::Bool(b),
-        J::Number(n) => {
+        JsonValue::Null => Value::none(),
+        JsonValue::Bool(b) => Value::Bool(b),
+        JsonValue::Number(n) => {
             if let Some(i) = n.as_i64() {
                 Value::Int(i)
             } else if let Some(u) = n.as_u64() {
@@ -549,9 +549,9 @@ pub(super) fn json_to_pvalue(v: serde_json::Value) -> Value {
                 Value::Float(n.as_f64().unwrap_or(f64::NAN))
             }
         }
-        J::String(s) => Value::str(s),
-        J::Array(items) => Value::vec(items.into_iter().map(json_to_pvalue).collect()),
-        J::Object(map) => {
+        JsonValue::String(s) => Value::str(s),
+        JsonValue::Array(items) => Value::vec(items.into_iter().map(json_to_pvalue).collect()),
+        JsonValue::Object(map) => {
             let mut out = indexmap::IndexMap::default();
             for (k, v) in map {
                 if let Some(key) = Value::str(k).into_key() {
@@ -564,16 +564,16 @@ pub(super) fn json_to_pvalue(v: serde_json::Value) -> Value {
 }
 
 pub(super) fn pvalue_to_json(v: &Value) -> Result<serde_json::Value> {
-    use serde_json::Value as J;
+    use serde_json::Value as JsonValue;
     Ok(match v {
-        Value::Unit => J::Null,
-        Value::Bool(b) => J::Bool(*b),
-        Value::Int(i) => J::Number(serde_json::Number::from(*i)),
+        Value::Unit => JsonValue::Null,
+        Value::Bool(b) => JsonValue::Bool(*b),
+        Value::Int(i) => JsonValue::Number(serde_json::Number::from(*i)),
         Value::IntW(..) => {
             let (value, _) = v.int_parts().unwrap();
             match i64::try_from(value) {
-                Ok(small) => J::Number(serde_json::Number::from(small)),
-                Err(_) => J::Number(serde_json::Number::from(
+                Ok(small) => JsonValue::Number(serde_json::Number::from(small)),
+                Err(_) => JsonValue::Number(serde_json::Number::from(
                     u64::try_from(value).expect("width-tagged value fits u64"),
                 )),
             }
@@ -587,15 +587,19 @@ pub(super) fn pvalue_to_json(v: &Value) -> Result<serde_json::Value> {
                 i64::try_from(*raw).map_err(|_| ())
             };
             match as_i64 {
-                Ok(small) => J::Number(serde_json::Number::from(small)),
+                Ok(small) => JsonValue::Number(serde_json::Number::from(small)),
                 Err(()) => bail!("128-bit integer does not fit a json number"),
             }
         }
-        Value::Float(f) => serde_json::Number::from_f64(*f).map_or(J::Null, J::Number),
-        Value::F32(f) => serde_json::Number::from_f64(f64::from(*f)).map_or(J::Null, J::Number),
-        Value::Char(c) => J::String(c.to_string()),
-        Value::Str(s) => J::String(s.to_string()),
-        Value::Vec(items) | Value::Tuple(items) => J::Array(
+        Value::Float(f) => {
+            serde_json::Number::from_f64(*f).map_or(JsonValue::Null, JsonValue::Number)
+        }
+        Value::F32(f) => {
+            serde_json::Number::from_f64(f64::from(*f)).map_or(JsonValue::Null, JsonValue::Number)
+        }
+        Value::Char(c) => JsonValue::String(c.to_string()),
+        Value::Str(s) => JsonValue::String(s.to_string()),
+        Value::Vec(items) | Value::Tuple(items) => JsonValue::Array(
             items
                 .lock()
                 .iter()
@@ -607,7 +611,7 @@ pub(super) fn pvalue_to_json(v: &Value) -> Result<serde_json::Value> {
             for (k, val) in map.lock().iter() {
                 obj.insert(k.to_value().display(), pvalue_to_json(val)?);
             }
-            J::Object(obj)
+            JsonValue::Object(obj)
         }
         Value::Struct(s) => {
             let mut obj = serde_json::Map::default();
@@ -621,7 +625,7 @@ pub(super) fn pvalue_to_json(v: &Value) -> Result<serde_json::Value> {
                     .unwrap_or(field);
                 obj.insert(key.to_string(), pvalue_to_json(val)?);
             }
-            J::Object(obj)
+            JsonValue::Object(obj)
         }
         Value::Enum { def, variant, data } => {
             let payload = data.lock().clone();
@@ -629,17 +633,17 @@ pub(super) fn pvalue_to_json(v: &Value) -> Result<serde_json::Value> {
                 if *variant == SOME {
                     pvalue_to_json(&payload[0])?
                 } else {
-                    J::Null
+                    JsonValue::Null
                 }
             } else if payload.is_empty() {
-                J::String(def.variant_name(*variant).to_string())
+                JsonValue::String(def.variant_name(*variant).to_string())
             } else {
                 let mut obj = serde_json::Map::default();
                 obj.insert(
                     def.variant_name(*variant).to_string(),
-                    J::Array(payload.iter().map(pvalue_to_json).collect::<Result<_>>()?),
+                    JsonValue::Array(payload.iter().map(pvalue_to_json).collect::<Result<_>>()?),
                 );
-                J::Object(obj)
+                JsonValue::Object(obj)
             }
         }
         Value::Range { .. } => bail!("cannot serialize a range to json"),
@@ -661,9 +665,9 @@ pub(super) fn pvalue_to_json(v: &Value) -> Result<serde_json::Value> {
 
 /// The `serde_json` free functions on the dynamic path, `from_str` with no
 /// type information plus `to_string` and `to_string_pretty`.
-pub(super) fn bridge_serde_json(id: P, args: &[Value]) -> Result<Value> {
+pub(super) fn bridge_serde_json(id: PathId, args: &[Value]) -> Result<Value> {
     match id {
-        P::SerdeJsonFromStr => {
+        PathId::SerdeJsonFromStr => {
             let owned;
             let s: &str = match args.first() {
                 Some(Value::Str(s)) => s,
@@ -678,17 +682,17 @@ pub(super) fn bridge_serde_json(id: P, args: &[Value]) -> Result<Value> {
                 Err(e) => Ok(Value::err(Value::str(e.to_string()))),
             }
         }
-        P::SerdeJsonToString | P::SerdeJsonToStringPretty => {
+        PathId::SerdeJsonToString | PathId::SerdeJsonToStringPretty => {
             let v = args.first().cloned().unwrap_or(Value::Unit);
             let j = pvalue_to_json(&v)?;
-            let s = if id == P::SerdeJsonToStringPretty {
+            let s = if id == PathId::SerdeJsonToStringPretty {
                 serde_json::to_string_pretty(&j)?
             } else {
                 serde_json::to_string(&j)?
             };
             Ok(Value::ok(Value::str(s)))
         }
-        P::SerdeJsonToValue => {
+        PathId::SerdeJsonToValue => {
             let v = args.first().cloned().unwrap_or(Value::Unit);
             Ok(Value::ok(json_to_pvalue(pvalue_to_json(&v)?)))
         }

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 use parking_lot::Mutex;
 
-use super::bytecode::{BuiltinId as B, MethodName, PathId as P};
+use super::bytecode::{BuiltinId, MethodName, PathId};
 use super::json_bridge::{json_to_pvalue, pvalue_to_json};
 use super::native::Native;
 use super::native_methods::value_to_bytes;
@@ -26,28 +26,28 @@ pub(super) fn bytes_to_vec(b: &[u8]) -> Value {
 }
 
 /// `module::func` call that is not a plain std bridge.
-pub(super) fn crate_bridge(id: P, args: &[Value]) -> Result<Option<Value>> {
+pub(super) fn crate_bridge(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     let s0 = || args.first().map(Value::display).unwrap_or_default();
     Ok(Some(match id {
         // dirs -------------------------------------------------------------
-        P::DirsHomeDir => opt_path(dirs::home_dir()),
-        P::DirsCacheDir => opt_path(dirs::cache_dir()),
-        P::DirsConfigDir => opt_path(dirs::config_dir()),
-        P::DirsConfigLocalDir => opt_path(dirs::config_local_dir()),
-        P::DirsDataDir => opt_path(dirs::data_dir()),
-        P::DirsDataLocalDir => opt_path(dirs::data_local_dir()),
-        P::DirsExecutableDir => opt_path(dirs::executable_dir()),
-        P::DirsRuntimeDir => opt_path(dirs::runtime_dir()),
-        P::DirsDesktopDir => opt_path(dirs::desktop_dir()),
-        P::DirsDownloadDir => opt_path(dirs::download_dir()),
-        P::DirsDocumentDir => opt_path(dirs::document_dir()),
+        PathId::DirsHomeDir => opt_path(dirs::home_dir()),
+        PathId::DirsCacheDir => opt_path(dirs::cache_dir()),
+        PathId::DirsConfigDir => opt_path(dirs::config_dir()),
+        PathId::DirsConfigLocalDir => opt_path(dirs::config_local_dir()),
+        PathId::DirsDataDir => opt_path(dirs::data_dir()),
+        PathId::DirsDataLocalDir => opt_path(dirs::data_local_dir()),
+        PathId::DirsExecutableDir => opt_path(dirs::executable_dir()),
+        PathId::DirsRuntimeDir => opt_path(dirs::runtime_dir()),
+        PathId::DirsDesktopDir => opt_path(dirs::desktop_dir()),
+        PathId::DirsDownloadDir => opt_path(dirs::download_dir()),
+        PathId::DirsDocumentDir => opt_path(dirs::document_dir()),
         // which ------------------------------------------------------------
-        P::WhichWhich => match which::which(s0()) {
+        PathId::WhichWhich => match which::which(s0()) {
             Ok(p) => Value::ok(make_path(p.display().to_string())),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
         // glob -------------------------------------------------------------
-        P::GlobGlob => match glob::glob(&s0()) {
+        PathId::GlobGlob => match glob::glob(&s0()) {
             Ok(paths) => Value::ok(Value::vec(
                 paths
                     .map(|r| match r {
@@ -59,74 +59,74 @@ pub(super) fn crate_bridge(id: P, args: &[Value]) -> Result<Option<Value>> {
             Err(e) => Value::err(Value::str(e.to_string())),
         },
         // sha2 -------------------------------------------------------------
-        P::Sha256New | P::Sha256Default => {
+        PathId::Sha256New | PathId::Sha256Default => {
             use sha2::Digest;
             Native::Sha256(sha2::Sha256::new()).wrap()
         }
-        P::Sha256Digest => {
+        PathId::Sha256Digest => {
             use sha2::Digest;
             bytes_to_vec(&sha2::Sha256::digest(value_to_bytes(args.first())))
         }
         // regex free functions ---------------------------------------------
-        P::RegexEscape => Value::str(regex::escape(&s0())),
+        PathId::RegexEscape => Value::str(regex::escape(&s0())),
         // hex --------------------------------------------------------------
-        P::HexEncode => Value::str(hex::encode(value_to_bytes(args.first()))),
-        P::HexDecode => match hex::decode(s0()) {
+        PathId::HexEncode => Value::str(hex::encode(value_to_bytes(args.first()))),
+        PathId::HexDecode => match hex::decode(s0()) {
             Ok(b) => Value::ok(bytes_to_vec(&b)),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
         // toml -------------------------------------------------------------
-        P::TomlFromStr => match toml::from_str::<serde_json::Value>(&s0()) {
+        PathId::TomlFromStr => match toml::from_str::<serde_json::Value>(&s0()) {
             Ok(j) => Value::ok(json_to_pvalue(j)),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
-        P::TomlToString | P::TomlToStringPretty => {
+        PathId::TomlToString | PathId::TomlToStringPretty => {
             match toml::to_string(&pvalue_to_json(args.first().unwrap_or(&Value::Unit))?) {
                 Ok(s) => Value::ok(Value::str(s)),
                 Err(e) => Value::err(Value::str(e.to_string())),
             }
         }
         // serde_yaml -------------------------------------------------------
-        P::SerdeYamlFromStr => match serde_yaml::from_str::<serde_json::Value>(&s0()) {
+        PathId::SerdeYamlFromStr => match serde_yaml::from_str::<serde_json::Value>(&s0()) {
             Ok(j) => Value::ok(json_to_pvalue(j)),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
-        P::SerdeYamlToString => {
+        PathId::SerdeYamlToString => {
             match serde_yaml::to_string(&pvalue_to_json(args.first().unwrap_or(&Value::Unit))?) {
                 Ok(s) => Value::ok(Value::str(s)),
                 Err(e) => Value::err(Value::str(e.to_string())),
             }
         }
         // rand -------------------------------------------------------------
-        P::RandRng | P::RandThreadRng => Value::struct_of("Rng", []),
-        P::RandRandom => Value::Float(rand::random::<f64>()),
+        PathId::RandRng | PathId::RandThreadRng => Value::struct_of("Rng", []),
+        PathId::RandRandom => Value::Float(rand::random::<f64>()),
         // chrono is answered in `dispatch_call`, Utc/Local/DateTime.
         // jsonwebtoken -----------------------------------------------------
-        P::JsonwebtokenEncode => super::jwt_bridge::jwt_encode(args)?,
+        PathId::JsonwebtokenEncode => super::jwt_bridge::jwt_encode(args)?,
         // tempfile ---------------------------------------------------------
-        P::TempfileTempdir => match tempfile::tempdir() {
+        PathId::TempfileTempdir => match tempfile::tempdir() {
             Ok(d) => Value::ok(Native::TempDir(d).wrap()),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
-        P::TempfileTempfile => match tempfile::tempfile() {
+        PathId::TempfileTempfile => match tempfile::tempfile() {
             Ok(f) => Value::ok(Native::File(std::io::BufReader::new(f)).wrap()),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
-        P::NamedTempFileNew => match tempfile::NamedTempFile::new() {
+        PathId::NamedTempFileNew => match tempfile::NamedTempFile::new() {
             Ok(f) => Value::ok(Native::NamedTempFile(f).wrap()),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
         // winreg -----------------------------------------------------------
-        P::RegKeyPredef => super::winreg_bridge::predef(args),
+        PathId::RegKeyPredef => super::winreg_bridge::predef(args),
         // windows-service --------------------------------------------------
-        P::ServiceManagerLocalComputer => super::service_bridge::local_computer(args),
+        PathId::ServiceManagerLocalComputer => super::service_bridge::local_computer(args),
         // wmi --------------------------------------------------------------
-        P::WMIConnectionNew => super::wmi_bridge::connection(args, true),
-        P::WMIConnectionWithNamespacePath => super::wmi_bridge::connection(args, false),
+        PathId::WMIConnectionNew => super::wmi_bridge::connection(args, true),
+        PathId::WMIConnectionWithNamespacePath => super::wmi_bridge::connection(args, false),
         // crossterm --------------------------------------------------------
-        P::TerminalSize => terminal_size(),
+        PathId::TerminalSize => terminal_size(),
         // terminal-light ---------------------------------------------------
-        P::TerminalLightLuma => terminal_luma(),
+        PathId::TerminalLightLuma => terminal_luma(),
         _ => return Ok(None),
     }))
 }
@@ -155,12 +155,12 @@ fn terminal_luma() -> Value {
 
 /// Recognize a base64 engine constant name and build a marker value carrying
 /// which alphabet it uses, so `.encode`/`.decode` can pick the right engine.
-pub(super) fn base64_engine(id: P) -> Option<Value> {
+pub(super) fn base64_engine(id: PathId) -> Option<Value> {
     let kind = match id {
-        P::Standard | P::Base64Standard => "standard",
-        P::StandardNoPad | P::Base64StandardNoPad => "standard_no_pad",
-        P::UrlSafe | P::Base64UrlSafe => "url_safe",
-        P::UrlSafeNoPad | P::Base64UrlSafeNoPad => "url_safe_no_pad",
+        PathId::Standard | PathId::Base64Standard => "standard",
+        PathId::StandardNoPad | PathId::Base64StandardNoPad => "standard_no_pad",
+        PathId::UrlSafe | PathId::Base64UrlSafe => "url_safe",
+        PathId::UrlSafeNoPad | PathId::Base64UrlSafeNoPad => "url_safe_no_pad",
         _ => return None,
     };
     Some(Value::struct_of(
@@ -184,8 +184,8 @@ pub(super) fn base64_method(s: &StructData, method: &MethodName, args: &[Value])
         };
     }
     Ok(match method.id {
-        B::Encode => Value::str(pick!(encode, value_to_bytes(args.first()))),
-        B::Decode => {
+        BuiltinId::Encode => Value::str(pick!(encode, value_to_bytes(args.first()))),
+        BuiltinId::Decode => {
             let input = args.first().map(Value::display).unwrap_or_default();
             match pick!(decode, &input) {
                 Ok(b) => Value::ok(bytes_to_vec(&b)),
@@ -200,7 +200,7 @@ pub(super) fn rng_method(name: &MethodName, args: &[Value]) -> Result<Value> {
     use rand::RngExt;
     let mut rng = rand::rng();
     Ok(match name.id {
-        B::RandomRange | B::GenRange => match args.first() {
+        BuiltinId::RandomRange | BuiltinId::GenRange => match args.first() {
             Some(Value::Range {
                 start,
                 end,
@@ -215,7 +215,7 @@ pub(super) fn rng_method(name: &MethodName, args: &[Value]) -> Result<Value> {
             }
             _ => bail!("random_range needs a range"),
         },
-        B::RandomBool | B::GenBool => {
+        BuiltinId::RandomBool | BuiltinId::GenBool => {
             let p = match args.first() {
                 Some(Value::Float(f)) => *f,
                 Some(Value::Int(i)) => AsPrimitive::<f64>::as_(*i),
@@ -223,8 +223,8 @@ pub(super) fn rng_method(name: &MethodName, args: &[Value]) -> Result<Value> {
             };
             Value::Bool(rng.random_bool(p.clamp(0.0, 1.0)))
         }
-        B::Random | B::Gen => Value::Float(rng.random::<f64>()),
-        B::FillBytes | B::Fill => {
+        BuiltinId::Random | BuiltinId::Gen => Value::Float(rng.random::<f64>()),
+        BuiltinId::FillBytes | BuiltinId::Fill => {
             if let Some(Value::Vec(v)) = args.first() {
                 let mut buf = v.lock();
                 for slot in buf.iter_mut() {
@@ -253,15 +253,15 @@ pub(super) fn sha256_method(
         return Ok(None);
     };
     Ok(Some(match method.id {
-        B::Update => {
+        BuiltinId::Update => {
             hasher.update(value_to_bytes(args.first()));
             Value::Unit
         }
-        B::ChainUpdate => {
+        BuiltinId::ChainUpdate => {
             hasher.update(value_to_bytes(args.first()));
             Value::Native(handle.clone())
         }
-        B::Finalize => bytes_to_vec(&hasher.clone().finalize()),
+        BuiltinId::Finalize => bytes_to_vec(&hasher.clone().finalize()),
         _ => return Ok(None),
     }))
 }
