@@ -85,12 +85,11 @@ impl<'a> TyEnv<'a> {
             if let Some(block) = current.block
                 && let Some(local) = block_let_named(block, name)
             {
-                return match &local.pat {
-                    syn::Pat::Type(t) => ScalarTy::lower(&t.ty),
-                    _ => {
-                        let init = local.init.as_ref()?;
-                        written_ty(&init.expr, current.outer?)
-                    }
+                return if let syn::Pat::Type(t) = &local.pat {
+                    ScalarTy::lower(&t.ty)
+                } else {
+                    let init = local.init.as_ref()?;
+                    written_ty(&init.expr, current.outer?)
                 };
             }
             env = current.outer;

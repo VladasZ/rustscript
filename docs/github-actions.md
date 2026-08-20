@@ -137,8 +137,9 @@ a bare `rust update`. Naming it installs it, `rust update v0.2.0-rc.1`.
 ## CI
 
 `ci.yml` runs on every push to `main` and every pull request. It checks
-formatting, spelling and clippy on Linux, and runs the full test suite on Linux,
-macOS and Windows. Clippy runs with `-D warnings`, so a warning fails the build.
+formatting and spelling on Linux, and runs clippy and the full test suite on
+Linux, macOS and Windows. Clippy runs with `-D warnings`, so a warning fails
+the build.
 
 Spelling uses `crate-ci/typos`. Its dictionary rejects a few words that are
 correct here, such as the `ratatui` crate name, so `typos.toml` in the repo root
