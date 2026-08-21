@@ -874,7 +874,9 @@ impl Vm {
                 None => return Ok(None),
             },
             BuiltinId::Count => self.iterator_count(iterator)?,
-            BuiltinId::Last => self.iterator_last(iterator)?,
+            // Every iterator here is driven forwards, so taking from the
+            // back means draining to the final item.
+            BuiltinId::Last | BuiltinId::NextBack => self.iterator_last(iterator)?,
             BuiltinId::Sum => match try_reduce(self, iterator, &ChainReduce::Sum(scalar))? {
                 Some(v) => v,
                 None => self.iterator_sum(iterator, scalar)?,

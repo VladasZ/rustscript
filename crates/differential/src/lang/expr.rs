@@ -856,6 +856,24 @@ fn fill(
 
 /// A bare literal with its suffix restored. A method call on `{integer}`
 /// is ambiguous to rustc, so a bare literal never sits in receiver position.
+/// Un-bare every literal in the tree, not just the node itself. A receiver
+/// like `(if c { 0 } else { 0 })` is as ambiguous as a bare `0`, so the whole
+/// expression has to state its type before a method can be called on it.
+pub fn unbare_deep(mut expr: Expr) -> Expr {
+    expr = unbare(expr);
+    for child in expr.children_mut() {
+        let taken = std::mem::replace(
+            child,
+            Expr::BoolLit {
+                value: false,
+                opaque: false,
+            },
+        );
+        *child = unbare_deep(taken);
+    }
+    expr
+}
+
 pub fn unbare(expr: Expr) -> Expr {
     match expr {
         Expr::BareInt { value, opaque } => Expr::IntLit {

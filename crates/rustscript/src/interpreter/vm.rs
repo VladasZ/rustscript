@@ -382,8 +382,16 @@ impl Vm {
     /// the value.
     pub(super) fn conversion_impl(&self, target: &str, value: &Value) -> Option<Arc<Chunk>> {
         let source = source_type_name(value);
+        let base = source.split(['<', '(']).next().unwrap_or(&source);
+        // A value that already is the target type needs no conversion. `?`
+        // on an error the function already returns is identity, and running
+        // a `From` impl here picked an unrelated variant.
+        if base == super::resolver::bare(target) {
+            return None;
+        }
         self.impls
             .by_name(target, &format!("from<{source}>"))
+            .or_else(|| self.impls.by_name(target, &format!("from<{base}>")))
             .or_else(|| self.impls.by_name(target, "from"))
     }
 
@@ -464,7 +472,21 @@ impl Vm {
 fn source_type_name(value: &Value) -> String {
     match value {
         Value::Struct(s) => super::resolver::bare(s.name()).to_string(),
+        // `Some(x)` names its payload, so `From<Option<usize>>` and
+        // `From<Option<u16>>` stay apart. `None` carries nothing to name and
+        // answers through the bare `Option` key instead.
+        Value::Enum { def, data, .. } if def.kind == super::enum_def::EnumKind::Option => {
+            let base = super::resolver::bare(&def.name).to_string();
+            match data.lock().first() {
+                Some(inner) => format!("{base}<{}>", source_type_name(inner)),
+                None => base,
+            }
+        }
         Value::Enum { def, .. } => super::resolver::bare(&def.name).to_string(),
+        Value::Tuple(items) => {
+            let inner: Vec<String> = items.lock().iter().map(source_type_name).collect();
+            format!("({})", inner.join(","))
+        }
         Value::Str(_) => "String".to_string(),
         Value::Int(_) => "i64".to_string(),
         Value::IntW(_, w) | Value::Big(_, w) => format!("{w:?}").to_lowercase(),
@@ -472,7 +494,13 @@ fn source_type_name(value: &Value) -> String {
         Value::F32(_) => "f32".to_string(),
         Value::Bool(_) => "bool".to_string(),
         Value::Char(_) => "char".to_string(),
-        Value::Vec(_) => "Vec".to_string(),
+        // A non empty vec names its element, so `From<Vec<bool>>` and
+        // `From<Vec<char>>` stay apart. An empty one names nothing and
+        // answers through the bare `Vec` key.
+        Value::Vec(items) => match items.lock().first() {
+            Some(first) => format!("Vec<{}>", source_type_name(first)),
+            None => "Vec".to_string(),
+        },
         Value::Map(_, super::value::MapKind::Map) => "HashMap".to_string(),
         Value::Map(_, super::value::MapKind::Set) => "HashSet".to_string(),
         Value::Native(n) => match &*n.lock() {

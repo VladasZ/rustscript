@@ -327,6 +327,30 @@ impl Block {
     /// Every literal is laundered as soon as the block contains anything
     /// that can abort, so an overflow stays a runtime panic that the harness
     /// can compare instead of a compile error that wastes the case.
+    /// Rewrite every apply-helper call whose closure is used more than once
+    /// in the same expression, so no generated program hands the compiler a
+    /// borrow conflict.
+    pub fn fix_apply_borrows(&mut self) {
+        for stmt in &mut self.statements {
+            for expr in stmt.exprs_mut() {
+                expr.repair_apply_borrows();
+                expr.fix_call_receivers();
+            }
+        }
+        for def in &mut self.fns {
+            for expr in def.exprs_mut() {
+                expr.repair_apply_borrows();
+                expr.fix_call_receivers();
+            }
+        }
+        for def in &mut self.types {
+            for method in &mut def.methods {
+                method.body.repair_apply_borrows();
+                method.body.fix_call_receivers();
+            }
+        }
+    }
+
     pub fn seal(&mut self) {
         let fallible = self.statements.iter().any(Stmt::has_fallible_op)
             || self

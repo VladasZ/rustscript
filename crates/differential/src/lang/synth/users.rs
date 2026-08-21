@@ -483,14 +483,10 @@ impl Generator<'_> {
             let ty = self.any_ty();
             let name = self.fresh("diff_l");
             let expr = self.expr(&ty, 2);
-            let ann = if self.chance(0.5) {
-                Ann::Typed
-            } else {
+            let ann = if expr.states_concrete_ty() && self.chance(0.5) {
                 Ann::Inferred
-            };
-            let ann = match &expr {
-                Expr::Pipe(pipe) if !pipe.states_type() => Ann::Typed,
-                _ => ann,
+            } else {
+                Ann::Typed
             };
             self.push_local(name.clone(), ty.clone());
             stmts.push(Stmt::Let {

@@ -8,7 +8,7 @@ use crate::lang::block::{Param, ParamMode};
 use crate::lang::catalog::{
     ElemReq, FishReq, METHODS, Method, RecvClass, Solved, TyPat, arg_ty, fish_allows, solve,
 };
-use crate::lang::expr::{BinOp, Expr, UnOp, unbare};
+use crate::lang::expr::{BinOp, Expr, UnOp, unbare_deep};
 use crate::lang::pipe::Site;
 use crate::lang::synth::{BindKind, Generator, MAX_EXPR_DEPTH, is_partial_ord};
 use crate::lang::ty::{FloatWidth, IntWidth, Ty};
@@ -290,7 +290,7 @@ impl Generator<'_> {
                     continue;
                 }
             }
-            let recv = unbare(self.typed_only(|inner| inner.expr(&recv_ty, depth - 1)));
+            let recv = unbare_deep(self.typed_only(|inner| inner.expr(&recv_ty, depth - 1)));
             let mut args = Vec::with_capacity(method.args.len());
             let mut usable = true;
             for pattern in method.args {
@@ -713,7 +713,7 @@ impl Generator<'_> {
             0 if shape.derives.default => Some(Expr::DefaultOf(want.clone())),
             1 if !shape.froms.is_empty() => {
                 let src = self.pick(&shape.froms).clone();
-                let value = unbare(self.typed_only(|inner| inner.expr(&src, depth - 1)));
+                let value = unbare_deep(self.typed_only(|inner| inner.expr(&src, depth - 1)));
                 Some(Expr::Into {
                     value: Box::new(value),
                     to: want.clone(),
@@ -874,7 +874,14 @@ impl Generator<'_> {
                 ty: want.clone(),
             });
         }
-        let args = params.iter().map(|ty| self.expr(ty, depth - 1)).collect();
+        // Calling a closure borrows it, and a `FnMut` borrow is exclusive, so
+        // the arguments must not reach the same closure again.
+        let args = self.without_binding(&name, |inner| {
+            params
+                .iter()
+                .map(|ty| inner.expr(ty, depth - 1))
+                .collect::<Vec<_>>()
+        });
         Some(Expr::ClosureCall {
             name,
             args,
@@ -941,7 +948,7 @@ impl Generator<'_> {
             return None;
         }
         let ty = self.pick(&targets).clone();
-        let base = unbare(self.typed_only(|inner| inner.expr(&ty, depth - 1)));
+        let base = unbare_deep(self.typed_only(|inner| inner.expr(&ty, depth - 1)));
         Some(Expr::TraitCall {
             base: Box::new(base),
         })

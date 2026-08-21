@@ -356,6 +356,10 @@ pub struct Compiler<'a> {
     pub(super) typed_locals: HashMap<String, ScalarTy>,
     /// The full annotation of every annotated local, for `written_type`.
     pub(super) typed_local_types: HashMap<String, syn::Type>,
+    /// Closure parameters bound to the element type of the sequence being
+    /// walked, so a `map` body that reads its parameter still states a type.
+    /// Interior mutability keeps the whole `written_type` walk on `&self`.
+    pub(super) closure_param_types: std::cell::RefCell<HashMap<String, syn::Type>>,
     /// A `let x: T = ...unwrap_or_default()` annotation as written, waiting
     /// to attach to that exact call.
     pub(super) default_let_ty: Option<(*const syn::ExprMethodCall, syn::Type)>,
@@ -412,6 +416,7 @@ impl<'a> Compiler<'a> {
             default_calls: HashMap::new(),
             typed_locals: HashMap::new(),
             typed_local_types: HashMap::new(),
+            closure_param_types: std::cell::RefCell::new(HashMap::new()),
             default_let_ty: None,
             reduce_let: None,
             into_let: None,

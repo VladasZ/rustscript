@@ -9,6 +9,8 @@ use std::sync::Arc;
 use crate::interpreter::bytecode::{BinKind, Const, DISCARD, Op, PathRef, Reg, UnKind};
 use crate::interpreter::numeric::{IntWidth, truncate};
 
+use super::written::block_tail;
+
 use super::{
     CollectTarget, Compiler, FloatTy, LoopCtx, NameLoc, NumericTy, ScalarTy, bin_kind, expr_kind,
     first_generic_type, int_literal, is_assign_op, macro_yields_value, numeric_annotation,
@@ -188,6 +190,57 @@ pub(super) fn unconstrained_int(expr: &Expr) -> bool {
 /// `compile_numeric_annotated` handles, which always compile through
 /// `compile_into`. A hint on anything else would stay behind, keyed by an
 /// address a later parse of a macro body can reuse for an unrelated node.
+/// Whether the expression computes something rather than just naming a
+/// literal. Only a computation can overflow, and a plain `let x = 0` must
+/// stay open so a later `x += v.len()` can still make it a `usize`.
+fn bare_int_arithmetic(expr: &Expr) -> bool {
+    match expr {
+        Expr::Unary(un) => matches!(un.op, UnOp::Neg(_)),
+        Expr::Binary(_) => true,
+        Expr::Paren(inner) => bare_int_arithmetic(&inner.expr),
+        Expr::Group(inner) => bare_int_arithmetic(&inner.expr),
+        Expr::If(sel) => {
+            let then = block_tail(&sel.then_branch).is_some_and(bare_int_arithmetic);
+            let other = sel
+                .else_branch
+                .as_ref()
+                .is_some_and(|(_, e)| bare_int_arithmetic(e));
+            then || other
+        }
+        Expr::Block(block) => block_tail(&block.block).is_some_and(bare_int_arithmetic),
+        Expr::Match(m) => m.arms.iter().any(|arm| bare_int_arithmetic(&arm.body)),
+        _ => false,
+    }
+}
+
+/// Whether every numeric leaf the expression can produce is an unsuffixed
+/// integer literal. Rust types such an expression `i32` when nothing else
+/// constrains it, so its arithmetic has to overflow at `i32`.
+pub(super) fn bare_int_rooted(expr: &Expr) -> bool {
+    match expr {
+        Expr::Lit(lit) => match &lit.lit {
+            syn::Lit::Int(int) => int.suffix().is_empty(),
+            _ => false,
+        },
+        Expr::Paren(inner) => bare_int_rooted(&inner.expr),
+        Expr::Group(inner) => bare_int_rooted(&inner.expr),
+        Expr::Unary(un) => matches!(un.op, UnOp::Neg(_)) && bare_int_rooted(&un.expr),
+        Expr::Binary(bin) => bare_int_rooted(&bin.left) && bare_int_rooted(&bin.right),
+        Expr::If(sel) => {
+            let Some(then) = block_tail(&sel.then_branch) else {
+                return false;
+            };
+            let Some((_, other)) = sel.else_branch.as_ref() else {
+                return false;
+            };
+            bare_int_rooted(then) && bare_int_rooted(other)
+        }
+        Expr::Block(block) => block_tail(&block.block).is_some_and(bare_int_rooted),
+        Expr::Match(m) => !m.arms.is_empty() && m.arms.iter().all(|arm| bare_int_rooted(&arm.body)),
+        _ => false,
+    }
+}
+
 pub(super) fn takes_numeric_hint(expr: &Expr) -> bool {
     match expr {
         Expr::Lit(l) => matches!(&l.lit, Lit::Int(_) | Lit::Float(_)),
@@ -563,6 +616,7 @@ impl Compiler<'_> {
                 self.typed_local_types.insert(ident.ident.to_string(), ty);
             }
         }
+        self.record_tuple_pattern_types(local);
         let consumed = offered && self.json_let.is_none();
         self.json_let = None;
         self.collect_let = outer_collect_let;
@@ -583,14 +637,71 @@ impl Compiler<'_> {
 
     /// Without an annotation, a suffixed literal or a typed local in one
     /// branch of the init types the bare literals in the others.
+    /// Record a type for each name of a `let` with a tuple pattern. Without
+    /// this the names carry no type at all and a later `unwrap_or_default()`
+    /// on one of them falls back to a string. The annotation wins where there
+    /// is one, otherwise each name answers through its own initializer
+    /// element.
+    fn record_tuple_pattern_types(&mut self, local: &syn::Local) {
+        if let Some(init) = &local.init {
+            let bare = match &local.pat {
+                Pat::Type(t) => &*t.pat,
+                other => other,
+            };
+            if let Pat::Tuple(names) = bare
+                && let Expr::Tuple(values) = unparen(&init.expr)
+                && names.elems.len() == values.elems.len()
+            {
+                for (pat, value) in names.elems.iter().zip(&values.elems) {
+                    let Pat::Ident(ident) = pat else {
+                        continue;
+                    };
+                    let name = ident.ident.to_string();
+                    if let Some(stated) = self.stated_ty(value) {
+                        self.typed_locals.insert(name.clone(), stated);
+                    }
+                    if let Some(ty) = self.written_type(value) {
+                        self.typed_local_types.insert(name, ty);
+                    }
+                }
+            }
+        }
+        if let Pat::Type(t) = &local.pat
+            && let Pat::Tuple(names) = &*t.pat
+            && let syn::Type::Tuple(types) = &*t.ty
+            && names.elems.len() == types.elems.len()
+        {
+            for (pat, ty) in names.elems.iter().zip(&types.elems) {
+                let Pat::Ident(ident) = pat else {
+                    continue;
+                };
+                let name = ident.ident.to_string();
+                if let Some(scalar) = annotation_scalar(ty) {
+                    self.typed_locals.insert(name.clone(), scalar);
+                }
+                self.typed_local_types.insert(name, ty.clone());
+            }
+        }
+    }
+
     fn seed_unannotated_hint(&mut self, local: &syn::Local) {
         if !matches!(&local.pat, Pat::Type(_))
             && let Some(init) = &local.init
             && takes_numeric_hint(&init.expr)
-            && let Some(target) = self.stated_ty(&init.expr).as_ref().and_then(numeric_target)
         {
-            self.numeric_hints
-                .insert(std::ptr::from_ref(&*init.expr), target);
+            // An unsuffixed integer literal that nothing else constrains is
+            // `i32` in real Rust, so arithmetic over nothing but bare
+            // literals overflows at `i32`. Without this `-(i32::MIN)` kept
+            // widening into an i64 and never panicked.
+            let target = match self.stated_ty(&init.expr).as_ref().and_then(numeric_target) {
+                Some(stated) => Some(stated),
+                None => (bare_int_rooted(&init.expr) && bare_int_arithmetic(&init.expr))
+                    .then_some(NumericTy::Int(IntWidth::I32)),
+            };
+            if let Some(target) = target {
+                self.numeric_hints
+                    .insert(std::ptr::from_ref(&*init.expr), target);
+            }
         }
     }
 
@@ -882,7 +993,7 @@ impl Compiler<'_> {
     /// Compile an annotated numeric init directly at the annotated type when
     /// it is a plain literal, possibly negated or parenthesized. False means
     /// the init needs a runtime cast after normal compilation.
-    fn compile_numeric_annotated(
+    pub(super) fn compile_numeric_annotated(
         &mut self,
         dst: Reg,
         expr: &Expr,
@@ -1095,6 +1206,19 @@ impl Compiler<'_> {
                 Lit::Float(f) => return self.compile_float_lit(dst, f, true, None),
                 _ => {}
             }
+        }
+        // Negating an expression built from nothing but unsuffixed integer
+        // literals overflows at `i32`, the type Rust gives a literal that
+        // nothing else constrains. Without the hint the operand widened to
+        // i64 and `-(i32::MIN)` produced 2147483648 instead of panicking.
+        if matches!(u.op, UnOp::Neg(_))
+            && !self
+                .numeric_hints
+                .contains_key(&std::ptr::from_ref(&*u.expr))
+            && bare_int_rooted(&u.expr)
+        {
+            self.numeric_hints
+                .insert(std::ptr::from_ref(&*u.expr), NumericTy::Int(IntWidth::I32));
         }
         let a = self.compile_expr(&u.expr)?;
         let op = match u.op {

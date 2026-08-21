@@ -443,6 +443,7 @@ impl Compiler<'_> {
     }
 
     pub(super) fn compile_method(&mut self, dst: Reg, m: &syn::ExprMethodCall) -> Result<()> {
+        self.seed_bare_receiver_width(m);
         // `v[a..b].copy_from_slice(src)` must write through to `v`. Indexing
         // with a range builds a copied temporary, so the call is compiled
         // against the base vec with the bounds as leading arguments instead.
@@ -521,8 +522,13 @@ impl Compiler<'_> {
         {
             self.seed_reduce_closure(&m.receiver, target);
         }
-        let mutating = BuiltinId::resolve(&method_text).mutates()
-            || self.ctx.mut_methods.contains(&method_text);
+        let mutating = (BuiltinId::resolve(&method_text).mutates()
+            || self.ctx.mut_methods.contains(&method_text))
+            // `rotate_left` and `rotate_right` mutate a slice in place but
+            // return a value on an integer. Writing back over an integer
+            // receiver undid whatever the call's own result was assigned to.
+            && !(matches!(method_text.as_str(), "rotate_left" | "rotate_right")
+                && matches!(self.stated_ty(&m.receiver), Some(ScalarTy::Int(_))));
         let (recv, receiver_place) = if mutating {
             let p = self.compile_mut_receiver(&m.receiver)?;
             (p.reg, Some(p))
@@ -531,7 +537,18 @@ impl Compiler<'_> {
         };
         let place = mutating && place::is_place_expr(&m.receiver);
         self.option_result = outer_option_hint;
+        // A `fold` closure's parameters have no annotation of their own: the
+        // accumulator is the init's type and the item is the sequence's
+        // element. Binding them lets a default built inside the body know
+        // what it is building.
+        let folded = self.bind_fold_params(m);
         let base = self.compile_args(m.args.iter())?;
+        for (name, previous) in folded {
+            match previous {
+                Some(ty) => self.typed_local_types.insert(name, ty),
+                None => self.typed_local_types.remove(&name),
+            };
+        }
         let (method, scalar) = self.method_name_and_scalar(m);
         let default = if method == "unwrap_or_default" {
             self.default_for_unwrap(m)
@@ -720,6 +737,62 @@ impl Compiler<'_> {
 
     /// Walk back through the pass-through stages of a reduction's chain to
     /// the `map` closure feeding it, and type that closure's tails.
+    /// A receiver built from nothing but unsuffixed integer literals is
+    /// `i32`, the type Rust gives a literal that nothing else constrains. The
+    /// receiver's width picks both the method and the `From` impl an `into`
+    /// goes through, so it is settled before anything else runs.
+    fn seed_bare_receiver_width(&mut self, m: &syn::ExprMethodCall) {
+        if self
+            .numeric_hints
+            .contains_key(&std::ptr::from_ref(&*m.receiver))
+            || !super::expr::bare_int_rooted(&m.receiver)
+        {
+            return;
+        }
+        self.numeric_hints.insert(
+            std::ptr::from_ref(&*m.receiver),
+            NumericTy::Int(IntWidth::I32),
+        );
+    }
+
+    /// Bind a `fold` closure's two parameters to the types the call gives
+    /// them, returning what each name held before so the caller can put it
+    /// back. Anything the walk cannot type is simply left alone.
+    fn bind_fold_params(&mut self, m: &syn::ExprMethodCall) -> Vec<(String, Option<syn::Type>)> {
+        if m.method != "fold" || m.args.len() != 2 {
+            return Vec::new();
+        }
+        let Some(Expr::Closure(closure)) = m.args.get(1) else {
+            return Vec::new();
+        };
+        let names: Vec<String> = closure
+            .inputs
+            .iter()
+            .map(|input| match input {
+                Pat::Ident(id) => Some(id.ident.to_string()),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .unwrap_or_default();
+        if names.len() != 2 {
+            return Vec::new();
+        }
+        let acc = m.args.first().and_then(|init| self.written_type(init));
+        let item = self
+            .written_type(&m.receiver)
+            .and_then(|recv| super::written_type::sequence_element(&recv))
+            .or_else(|| acc.clone());
+        let mut saved = Vec::new();
+        for (name, ty) in names.into_iter().zip([acc, item]) {
+            let Some(ty) = ty else {
+                continue;
+            };
+            let previous = self.typed_local_types.insert(name.clone(), ty);
+            saved.push((name, previous));
+        }
+        saved
+    }
+
     fn seed_reduce_closure(&mut self, expr: &Expr, target: NumericTy) {
         let mut current = unparen(expr);
         loop {
@@ -962,12 +1035,31 @@ impl Compiler<'_> {
         ((reg as usize) < frame.num_params).then_some(reg)
     }
 
+    /// The value stored by `name = expr`. A local declared with a numeric
+    /// type types a bare literal here, the way an annotated `let` does, so
+    /// the stored value never exists at the wrong width. Without this a
+    /// reassigned `i32` keeps a 64 bit pattern and `{:b}` prints 64 digits.
+    fn compile_stored_value(&mut self, name: &str, value: &Expr) -> Result<Reg> {
+        let Some(target) = self
+            .typed_local_types
+            .get(name)
+            .and_then(numeric_annotation)
+        else {
+            return self.compile_expr(value);
+        };
+        let dst = self.alloc();
+        if !self.compile_numeric_annotated(dst, value, target)? {
+            self.compile_into(dst, value)?;
+        }
+        Ok(dst)
+    }
+
     pub(super) fn compile_assign(&mut self, target: &Expr, value: &Expr) -> Result<()> {
         match target {
             Expr::Path(p) if p.path.segments.len() == 1 => {
                 let name = p.path.segments[0].ident.to_string();
                 let location = self.resolve_for_write(&name);
-                let value = self.compile_expr(value)?;
+                let value = self.compile_stored_value(&name, value)?;
                 self.emit_name_store(location, value, &name)?;
             }
             Expr::Index(idx) => {
@@ -995,7 +1087,7 @@ impl Compiler<'_> {
                     };
                     if let Some(target) = target {
                         let location = self.resolve_for_write(&target);
-                        let val = self.compile_expr(value)?;
+                        let val = self.compile_stored_value(&target, value)?;
                         self.emit_name_store(location, val, &target)?;
                         return Ok(());
                     }

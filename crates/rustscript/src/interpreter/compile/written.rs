@@ -206,8 +206,16 @@ pub(super) fn option_payload(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
             // `text.parse::<T>()` states its payload in its own turbofish.
             "parse" => turbofish_scalar(call.turbofish.as_ref()),
             // `a.or(b)` keeps the payload both sides share, so either side
-            // that states it answers for both.
-            "or" => call
+            // that states it answers for both. `xor` pairs the same way.
+            "or" | "xor" => call
+                .args
+                .first()
+                .and_then(|a| option_payload(a, env))
+                .or_else(|| option_payload(&call.receiver, env)),
+            // `a.and(b)` answers `b`'s `Option`, so the argument states the
+            // payload. The receiver answers only when the argument does not,
+            // which is the common case of both sides being the same type.
+            "and" => call
                 .args
                 .first()
                 .and_then(|a| option_payload(a, env))
@@ -269,9 +277,8 @@ pub(super) fn option_payload(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
             // The accessors and the reductions all answer one item of what
             // the receiver holds. A keyed reduction's argument only decides
             // which item, not what type it is.
-            "first" | "last" | "pop" | "next" | "nth" | "reduce" | "min_by_key" | "max_by_key" => {
-                element_ty(&call.receiver, env)
-            }
+            "first" | "last" | "next_back" | "pop" | "next" | "nth" | "reduce" | "min_by_key"
+            | "max_by_key" => element_ty(&call.receiver, env),
             "min" | "max" if call.args.is_empty() => element_ty(&call.receiver, env),
             // `x.checked_add(y)` answers an `Option` of the receiver's own
             // integer width.
@@ -328,7 +335,7 @@ fn block_let_named<'b>(block: &'b syn::Block, name: &str) -> Option<&'b syn::Loc
 }
 
 /// The tail expression of a block, when the block ends in one.
-fn block_tail(block: &syn::Block) -> Option<&Expr> {
+pub(super) fn block_tail(block: &syn::Block) -> Option<&Expr> {
     match block.stmts.last()? {
         syn::Stmt::Expr(expr, None) => Some(expr),
         _ => None,
@@ -385,6 +392,14 @@ fn element_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
             "iter" | "into_iter" | "iter_mut" | "cloned" | "copied" | "clone" | "to_vec"
             | "rev" | "filter" | "take" | "skip" | "take_while" | "skip_while" | "peekable"
             | "by_ref" => element_ty(&call.receiver, env),
+            // `concat` flattens one layer away, so what the next stage of
+            // the chain iterates is the element of the concat's own type.
+            // Without this a second `concat` sees no element type and falls
+            // back to joining strings.
+            "concat" => match written_ty(expr, env) {
+                Some(ScalarTy::List(element)) => Some(*element),
+                _ => None,
+            },
             // `it.map(|x| e)` makes whatever `e` states its own type to be
             // the element type.
             "map" => match call.args.first() {
@@ -470,6 +485,7 @@ fn keeps_receiver_ty(method: &str) -> bool {
             | "rotate_right"
             | "rem_euclid"
             | "div_euclid"
+            | "midpoint"
             | "pow"
             | "powi"
             | "powf"

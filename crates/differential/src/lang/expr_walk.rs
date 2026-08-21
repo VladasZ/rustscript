@@ -2,9 +2,9 @@
 //! coverage features, and shrinking. Every walk goes through `children`, so
 //! a new node kind is handled in one place.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use crate::lang::expr::{Arm, Expr, Helper, UnOp, lookup, minimal};
+use crate::lang::expr::{Arm, BinOp, Expr, Helper, UnOp, lookup, minimal};
 use crate::lang::stmt::Stmt;
 use crate::lang::ty::FloatWidth;
 
@@ -359,6 +359,95 @@ impl Expr {
         }
         for child in self.children() {
             child.features(out);
+        }
+    }
+
+    /// Un-bare the receiver of every catalog call in the tree. A receiver has
+    /// to state its own type before a method can be called on it, and a bare
+    /// literal states nothing, so `(if c { 0 } else { 0 }).abs()` is rejected
+    /// as an ambiguous `{integer}`. Run over the finished program so a
+    /// receiver rebuilt after its own call was generated is covered too.
+    pub fn fix_call_receivers(&mut self) {
+        if let Self::Call { recv, .. } = self {
+            let taken = std::mem::replace(
+                &mut **recv,
+                Self::BoolLit {
+                    value: false,
+                    opaque: false,
+                },
+            );
+            **recv = crate::lang::expr::unbare_deep(taken);
+        }
+        for child in self.children_mut() {
+            child.fix_call_receivers();
+        }
+    }
+
+    /// `helper(&mut cl, arg)` holds the closure mutably while the argument
+    /// runs, so any second use of that closure in the same expression is a
+    /// borrow conflict the real compiler rejects. The direct call means the
+    /// same thing and holds the borrow for less time, so the apply form is
+    /// the one that gives way.
+    pub fn repair_apply_borrows(&mut self) {
+        let mut uses: BTreeMap<String, usize> = BTreeMap::new();
+        for node in self.nodes() {
+            let (Self::ApplyCall { closure: name, .. }
+            | Self::ClosureCall { name, .. }
+            | Self::Var { name, .. }) = node
+            else {
+                continue;
+            };
+            *uses.entry(name.clone()).or_default() += 1;
+        }
+        self.demote_shared_applies(&uses);
+    }
+
+    fn demote_shared_applies(&mut self, uses: &BTreeMap<String, usize>) {
+        if let Self::ApplyCall {
+            closure, arg, ty, ..
+        } = self
+            && uses.get(closure).copied().unwrap_or_default() > 1
+        {
+            *self = Self::ClosureCall {
+                name: closure.clone(),
+                args: vec![(**arg).clone()],
+                ty: ty.clone(),
+            };
+        }
+        for child in self.children_mut() {
+            child.demote_shared_applies(uses);
+        }
+    }
+
+    /// Whether the rendered expression pins a concrete numeric type for the
+    /// real compiler. A bare literal leaves `{integer}` or `{float}`, and a
+    /// local bound to one with no annotation stays ambiguous, so an inherent
+    /// numeric method on it is rejected with E0689.
+    pub fn states_concrete_ty(&self) -> bool {
+        match self {
+            Self::BareInt { .. } | Self::BareFloat { .. } => false,
+            Self::Pipe(pipe) => pipe.states_type(),
+            Self::Into { bare, .. } => !bare,
+            Self::If {
+                then_expr,
+                else_expr,
+                ..
+            } => then_expr.states_concrete_ty() && else_expr.states_concrete_ty(),
+            Self::Match { arms, .. } => arms.iter().all(|arm| arm.body.states_concrete_ty()),
+            Self::Block { tail, .. } => tail.states_concrete_ty(),
+            // A shift takes its type from the left operand alone, so a typed
+            // count on the right does not rescue a bare value on the left.
+            Self::Bin {
+                op: BinOp::Shl | BinOp::Shr,
+                left,
+                ..
+            } => left.states_concrete_ty(),
+            // Either operand of the other operators types the whole thing.
+            Self::Bin { left, right, .. } => {
+                left.states_concrete_ty() || right.states_concrete_ty()
+            }
+            Self::Unary { value, .. } => value.states_concrete_ty(),
+            _ => true,
         }
     }
 

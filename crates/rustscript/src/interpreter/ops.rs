@@ -309,7 +309,16 @@ fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
 fn to_float(v: &Value) -> Result<f64> {
     match v {
         Value::Int(i) => Ok(AsPrimitive::<f64>::as_(*i)),
+        // A width carrying integer is still a number. Leaving these out made
+        // a plain `u8` or `i16` operand abort with a type error.
+        Value::IntW(i, width) => Ok(AsPrimitive::<f64>::as_(width.decode(*i))),
+        Value::Big(i, width) => Ok(if *width == super::numeric::IntWidth::U128 {
+            AsPrimitive::<f64>::as_(i.cast_unsigned())
+        } else {
+            AsPrimitive::<f64>::as_(*i)
+        }),
         Value::Float(f) => Ok(*f),
+        Value::F32(f) => Ok(f64::from(*f)),
         other => bail!("expected a number, got {}", other.type_name()),
     }
 }
