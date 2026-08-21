@@ -444,6 +444,7 @@ impl Compiler<'_> {
 
     pub(super) fn compile_method(&mut self, dst: Reg, m: &syn::ExprMethodCall) -> Result<()> {
         self.seed_bare_receiver_width(m);
+        self.seed_bare_fallback_width(m);
         // `v[a..b].copy_from_slice(src)` must write through to `v`. Indexing
         // with a range builds a copied temporary, so the call is compiled
         // against the base vec with the bounds as leading arguments instead.
@@ -755,6 +756,31 @@ impl Compiler<'_> {
         );
     }
 
+    /// `opt.unwrap_or(v)` gives the fallback the payload's own type, so one
+    /// built from nothing but unsuffixed literals adopts that width instead
+    /// of widening to i64. Without a payload to read it is `i32`, the type
+    /// Rust gives an unconstrained literal.
+    fn seed_bare_fallback_width(&mut self, m: &syn::ExprMethodCall) {
+        if m.method != "unwrap_or" {
+            return;
+        }
+        let Some(arg) = m.args.first() else {
+            return;
+        };
+        if self.numeric_hints.contains_key(&std::ptr::from_ref(arg))
+            || !super::expr::bare_int_rooted(arg)
+        {
+            return;
+        }
+        let target = self
+            .stated_ty(&m.receiver)
+            .and_then(|ty| ty.payload().cloned())
+            .as_ref()
+            .and_then(numeric_target)
+            .unwrap_or(NumericTy::Int(IntWidth::I32));
+        self.numeric_hints.insert(std::ptr::from_ref(arg), target);
+    }
+
     /// Bind a `fold` closure's two parameters to the types the call gives
     /// them, returning what each name held before so the caller can put it
     /// back. Anything the walk cannot type is simply left alone.
@@ -776,6 +802,22 @@ impl Compiler<'_> {
             .unwrap_or_default();
         if names.len() != 2 {
             return Vec::new();
+        }
+        // The body produces the next accumulator, so it carries the init's
+        // width. Without it a bare literal there widens to i64 and the whole
+        // fold answers at the wrong width.
+        if let Some(target) = m
+            .args
+            .first()
+            .and_then(|init| self.stated_ty(init))
+            .as_ref()
+            .and_then(numeric_target)
+        {
+            let mut tails = Vec::new();
+            tail_exprs(&closure.body, &mut tails);
+            for tail in tails.into_iter().filter(|tail| takes_numeric_hint(tail)) {
+                self.numeric_hints.insert(std::ptr::from_ref(tail), target);
+            }
         }
         let acc = m.args.first().and_then(|init| self.written_type(init));
         let item = self
