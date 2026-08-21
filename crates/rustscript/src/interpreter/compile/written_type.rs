@@ -145,6 +145,14 @@ impl Compiler<'_> {
                 _ => {}
             }
         }
+        // A fold answers in its init's type, which the accumulator keeps
+        // through every step whatever the items are.
+        if method == "fold"
+            && let Some(init) = m.args.first()
+            && let Some(ty) = self.written_type_in(init, blocks)
+        {
+            return Some(ty);
+        }
         // The methods whose type never depends on the receiver.
         match method.as_str() {
             "len" | "count" | "capacity" => return Some(named_type("usize")),
