@@ -2,6 +2,8 @@
 //! with `break` and `continue`, compound assignment, in place mutation,
 //! borrowing helpers, and the formatted observations.
 
+use std::collections::BTreeSet;
+
 use rand::RngExt;
 
 use crate::lang::expr::{BinOp, Expr};
@@ -40,10 +42,10 @@ impl Generator<'_> {
             for (name, ty) in &names {
                 self.push_local(name.clone(), ty.clone());
             }
-            let ann = if self.chance(0.5) {
-                Ann::Typed
-            } else {
+            let ann = if expr.states_concrete_ty() && self.chance(0.5) {
                 Ann::Inferred
+            } else {
+                Ann::Typed
             };
             return Stmt::LetTuple { names, expr, ann };
         }
@@ -103,14 +105,11 @@ impl Generator<'_> {
         }
     }
 
-    /// An unannotated `let` is only legal when the initializer states its
-    /// own type, which every tree node does except a bare pipe terminal.
+    /// An unannotated `let` is only legal when the initializer pins its own
+    /// concrete type. A bare literal does not, and the local then stays an
+    /// ambiguous `{integer}` or `{float}` that no inherent method can use.
     fn ann_for(&mut self, expr: &Expr) -> Ann {
-        let states = match expr {
-            Expr::Pipe(pipe) => pipe.states_type(),
-            Expr::Into { bare, .. } => !bare,
-            _ => true,
-        };
+        let states = expr.states_concrete_ty();
         if states && self.chance(0.4) {
             Ann::Inferred
         } else {
@@ -206,6 +205,19 @@ impl Generator<'_> {
             });
             (ret, body)
         };
+        // A `move` closure takes ownership of every non `Copy` local it names,
+        // so those locals are gone for the rest of the block and must leave
+        // the scope. Reading one afterwards is a use of a moved value.
+        if capture_move {
+            let moved: Vec<String> = self
+                .scope
+                .iter()
+                .filter(|binding| matches!(binding.kind, BindKind::Local) && !binding.ty.is_copy())
+                .map(|binding| binding.name.clone())
+                .filter(|name| body.uses_any(&BTreeSet::from([name.clone()])))
+                .collect();
+            self.scope.retain(|binding| !moved.contains(&binding.name));
+        }
         let param_tys: Vec<Ty> = params.iter().map(|(_, ty)| ty.clone()).collect();
         // The calls run while a borrowing closure still holds the counter,
         // so their arguments must not read it.

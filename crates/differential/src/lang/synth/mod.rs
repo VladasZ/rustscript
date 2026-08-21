@@ -137,6 +137,7 @@ impl<'a> Generator<'a> {
             types: std::mem::take(&mut self.types),
             describes: std::mem::take(&mut self.describes),
         };
+        block.fix_apply_borrows();
         block.seal();
         block
     }

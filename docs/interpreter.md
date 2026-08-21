@@ -278,6 +278,19 @@ function handing the value back, a generic helper whose `T` an argument
 states, and a local declared inside the block whose value is read, each
 block by its own `let`.
 
+`into()` picks the `From` impl whose source type matches the value being
+converted, so a type with several of them stays apart: `From<Option<usize>>`
+and `From<Option<u16>>`, or `From<Vec<bool>>` and `From<Vec<char>>`, each
+answer for their own. A payload that names no inner type, `None` or an empty
+`Vec`, falls back to the outer name. A value that already is the target type
+needs no conversion at all, so `?` on an error the function already returns
+is identity rather than a `From` call.
+
+An assignment keeps the width the binding was declared with. `a = LITERAL`
+types the literal at `a`'s own width the way an annotated `let` does, so a
+reassigned `i32` prints 32 digits under `{:b}` and not the 64 of a wider
+image.
+
 Bare literals are typed by the context rustc would type them from. A `let`
 annotation reaches through the branches of an `if`, the arms of a `match`,
 a negation, the elements of a `vec!` or an array, the items of a tuple, and
@@ -285,7 +298,10 @@ the payload of a `Some`, so `let v: i32 = -(if c { i32::MIN } else { 0 })`
 overflows at `i32`, and a `sum` or `product` with a known target types the
 `map` closure feeding it. A literal with no other use, a print argument of
 only literals for one, is the `i32` rustc falls back to, so `{:x}` of `-1`
-shows eight digits. A float `sum` of nothing is `-0.0`, as in std.
+shows eight digits. An expression built from nothing but unsuffixed integer
+literals is `i32` in the same way, whether it is negated, initializes an
+unannotated `let`, or is the receiver a method is called on, so
+`-(if c { -2147483648 } else { 0 })` panics rather than widening. A float `sum` of nothing is `-0.0`, as in std.
 
 `u128` and `i128` are real: their values live in dedicated 128-bit storage,
 arithmetic checks overflow natively at 128 bits, and casts, comparisons,

@@ -94,7 +94,7 @@ the `supported_page_is_current` test enforces it.
 
 ## Iterator
 
-`all`, `any`, `as_str`, `by_ref`, `chain`, `cloned`, `collect`, `collect_map`, `collect_set`, `collect_string`, `copied`, `count`, `enumerate`, `filter`, `filter_map`, `find`, `find_map`, `for_each`, `last`, `map`, `max`, `min`, `next`, `nth`, `peek`, `peekable`, `position`, `product`, `rev`, `rposition`, `skip`, `skip_while`, `step_by`, `sum`, `take`, `take_while`, `to_vec`, `zip`
+`all`, `any`, `as_str`, `by_ref`, `chain`, `cloned`, `collect`, `collect_map`, `collect_set`, `collect_string`, `copied`, `count`, `enumerate`, `filter`, `filter_map`, `find`, `find_map`, `for_each`, `last`, `map`, `max`, `min`, `next`, `next_back`, `nth`, `peek`, `peekable`, `position`, `product`, `rev`, `rposition`, `skip`, `skip_while`, `step_by`, `sum`, `take`, `take_while`, `to_vec`, `zip`
 
 ## Line
 
@@ -210,7 +210,7 @@ the `supported_page_is_current` test enforces it.
 
 ## Vec
 
-`all`, `any`, `append`, `as_array`, `as_array_mut`, `as_object`, `as_object_mut`, `as_slice`, `by_ref`, `chunks`, `clear`, `clone`, `cloned`, `collect`, `collect_map`, `collect_set`, `collect_string`, `concat`, `contains`, `copied`, `copy_from_slice`, `count`, `dedup`, `enumerate`, `extend`, `extend_from_slice`, `filter`, `filter_map`, `find`, `find_map`, `first`, `first_mut`, `flat_map`, `flatten`, `fold`, `for_each`, `get`, `get_mut`, `insert`, `into_iter`, `is_empty`, `iter`, `iter_mut`, `join`, `last`, `last_mut`, `len`, `map`, `max`, `max_by_key`, `min`, `min_by_key`, `next`, `nth`, `partition`, `peekable`, `pop`, `position`, `product`, `push`, `reduce`, `remove`, `repeat`, `retain`, `rev`, `reverse`, `skip`, `skip_while`, `sort`, `sort_by`, `sort_by_cached_key`, `sort_by_key`, `sort_unstable`, `split_first`, `sum`, `swap`, `swap_remove`, `take`, `take_while`, `to_vec`, `truncate`, `windows`
+`all`, `any`, `append`, `as_array`, `as_array_mut`, `as_object`, `as_object_mut`, `as_slice`, `by_ref`, `chunks`, `clear`, `clone`, `cloned`, `collect`, `collect_map`, `collect_set`, `collect_string`, `concat`, `contains`, `copied`, `copy_from_slice`, `count`, `dedup`, `enumerate`, `extend`, `extend_from_slice`, `filter`, `filter_map`, `find`, `find_map`, `first`, `first_mut`, `flat_map`, `flatten`, `fold`, `for_each`, `get`, `get_mut`, `insert`, `into_iter`, `is_empty`, `iter`, `iter_mut`, `join`, `last`, `last_mut`, `len`, `map`, `max`, `max_by_key`, `min`, `min_by_key`, `next`, `next_back`, `nth`, `partition`, `peekable`, `pop`, `position`, `product`, `push`, `reduce`, `remove`, `repeat`, `retain`, `rev`, `reverse`, `skip`, `skip_while`, `sort`, `sort_by`, `sort_by_cached_key`, `sort_by_key`, `sort_unstable`, `split_first`, `sum`, `swap`, `swap_remove`, `take`, `take_while`, `to_vec`, `truncate`, `windows`
 
 ## WmiConnection
 

@@ -58,7 +58,7 @@ pub(super) fn vec_method(v: &List, method: &MethodName, args: &mut [Value]) -> R
             .first()
             .cloned()
             .map_or_else(Value::none, Value::some),
-        BuiltinId::Last => v
+        BuiltinId::Last | BuiltinId::NextBack => v
             .lock()
             .last()
             .cloned()
@@ -560,11 +560,29 @@ fn vec_slice_view(v: &List, id: BuiltinId, args: &[Value]) -> Result<Value> {
             )))
         }
         BuiltinId::Repeat => {
-            let n = usize::try_from(int_arg(args, 0)?)?;
+            // A count past `usize` cannot be represented, and it is only ever
+            // reached by a `u64` the i64 image reads back as negative, so it
+            // stands for a huge count rather than a conversion failure.
+            let n = usize::try_from(int_arg(args, 0)?).unwrap_or(usize::MAX);
             let items = v.lock();
-            let mut out = Vec::with_capacity(items.len().saturating_mul(n));
-            for _ in 0..n {
-                out.extend(items.iter().cloned());
+            // Real `repeat` aborts the program here rather than allocating,
+            // so the check has to be a script panic, not an allocation the
+            // interpreter itself dies on with a different exit code. Rust
+            // refuses any allocation past `isize::MAX`, so that is the line.
+            // Rust measures the limit in bytes, not elements, so the check
+            // has to weigh each element the same way the allocator does.
+            let total = items.len().saturating_mul(n);
+            let bytes = total.saturating_mul(size_of::<Value>());
+            if bytes > isize::MAX.cast_unsigned() {
+                bail!("capacity overflow");
+            }
+            let mut out = Vec::with_capacity(total);
+            // Repeating nothing is nothing however many times it is asked
+            // for, and the loop would otherwise run for the whole count.
+            if !items.is_empty() {
+                for _ in 0..n {
+                    out.extend(items.iter().cloned());
+                }
             }
             Value::vec(out)
         }

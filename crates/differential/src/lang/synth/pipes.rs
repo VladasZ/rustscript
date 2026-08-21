@@ -91,9 +91,16 @@ impl Generator<'_> {
     }
 
     /// Generate `body` with `bind: ty` visible as a variable.
+    /// A map stage body states the item type for every stage after it, so a
+    /// bare literal here would leave a `{float}` that a later closure
+    /// parameter inherits and no method can be called on.
     fn body_with(&mut self, bind: &str, bind_ty: &Ty, want: &Ty, depth: usize) -> Expr {
         let locals = [(bind.to_string(), bind_ty.clone())];
-        self.closure_body(|inner| inner.with_locals(&locals, |inner| inner.expr(want, depth)))
+        self.closure_body(|inner| {
+            inner.with_locals(&locals, |inner| {
+                inner.typed_only(|inner| inner.expr(want, depth))
+            })
+        })
     }
 
     /// Scalar items collected into a vec or set of `elem`.

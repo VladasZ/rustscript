@@ -31,6 +31,9 @@ impl Compiler<'_> {
                 if name == "None" {
                     return generic_arg(seg, 0).map(|t| option_of(&t));
                 }
+                if let Some(bound) = self.bound_param_type(&name) {
+                    return Some(bound);
+                }
                 for (depth, block) in blocks.iter().enumerate().rev() {
                     if let Some(local) = block_let(block, expr) {
                         return match &local.pat {
@@ -42,6 +45,11 @@ impl Compiler<'_> {
                     }
                 }
                 self.typed_local_types.get(&name).cloned()
+            }
+            // `Enum::Variant` states the enum it belongs to, so a chain that
+            // ends in `unwrap_or_default` can build that enum's default.
+            Expr::Path(p) if p.qself.is_none() && p.path.segments.len() > 1 => {
+                self.variant_owner_type(&p.path)
             }
             Expr::Call(call) => self.written_call_type(call, blocks),
             Expr::MethodCall(m) => self.written_method_type(m, blocks),
@@ -77,6 +85,9 @@ impl Compiler<'_> {
             Expr::Repeat(rep) => self
                 .written_type_in(&rep.expr, blocks)
                 .map(|t| generic_type("Vec", vec![t])),
+            Expr::Range(range) => self.range_type(range, blocks),
+            // `S { .. }` names the struct outright.
+            Expr::Struct(lit) => self.named_user_type(lit.path.clone()),
             // A tuple states its type when every item states its own.
             Expr::Tuple(t) => t
                 .elems
@@ -217,6 +228,18 @@ impl Compiler<'_> {
         }
         let segs = &path.path.segments;
         let last = segs.last()?;
+        // `Enum::Variant(payload)` states the enum it belongs to, the same
+        // way the bare `Enum::Variant` path does.
+        if segs.len() > 1
+            && let Some(owner) = variant_owner(&path.path)
+            && self.user_type_key(&owner).is_some()
+        {
+            return Some(syn::Type::Path(syn::TypePath {
+                attrs: Vec::new(),
+                qself: None,
+                path: owner,
+            }));
+        }
         if segs.len() == 1 {
             let name = last.ident.to_string();
             let first_arg = || {
@@ -303,6 +326,44 @@ impl Compiler<'_> {
 
     /// `seq.map(|p| body)` over a sequence yields whatever `body` states,
     /// when `body` never names `p`. A body that reads the parameter has a
+    /// `Enum::Variant` states the enum it belongs to.
+    fn variant_owner_type(&self, path: &syn::Path) -> Option<Type> {
+        self.named_user_type(variant_owner(path)?)
+    }
+
+    /// The type a path names, when the program declares it.
+    fn named_user_type(&self, path: syn::Path) -> Option<Type> {
+        self.user_type_key(&path).map(|_| {
+            syn::Type::Path(syn::TypePath {
+                attrs: Vec::new(),
+                qself: None,
+                path,
+            })
+        })
+    }
+
+    /// The type bound to a closure parameter for the walk of its body. A
+    /// parameter shadows anything outside it.
+    fn bound_param_type(&self, name: &str) -> Option<Type> {
+        self.closure_param_types.borrow().get(name).cloned()
+    }
+
+    /// `a..b` iterates whatever its ends are, so it stands in for a sequence
+    /// of them and a `map` over it can hop the closure.
+    fn range_type(&self, range: &syn::ExprRange, blocks: &[&syn::Block]) -> Option<Type> {
+        range
+            .start
+            .as_ref()
+            .and_then(|e| self.written_type_in(e, blocks))
+            .or_else(|| {
+                range
+                    .end
+                    .as_ref()
+                    .and_then(|e| self.written_type_in(e, blocks))
+            })
+            .map(|t| generic_type("Vec", vec![t]))
+    }
+
     /// type this walk cannot state without knowing the item type, so it
     /// answers `None` rather than reading an outer local of the same name.
     fn closure_hop(
@@ -332,11 +393,37 @@ impl Compiler<'_> {
                 _ => return None,
             }
         }
-        if mentions_any(&closure.body, &params) {
+        // A body that reads the parameter needs its type to answer. The
+        // element type of the sequence being mapped is exactly that, so bind
+        // it for the walk of the body and drop it again after. A struct
+        // literal or a cast names its own type and needs no binding.
+        let element = element_of_sequence(recv);
+        let reads_params = mentions_any(&closure.body, &params);
+        if reads_params && element.is_none() && !states_own_type(&closure.body) {
             return None;
         }
-        let item = self.written_type_in(&closure.body, blocks)?;
-        Some(generic_type("Vec", vec![item]))
+        let bound = match (&element, reads_params) {
+            (Some(ty), true) => {
+                let mut map = self.closure_param_types.borrow_mut();
+                let saved: Vec<(String, Option<Type>)> = params
+                    .iter()
+                    .map(|name| (name.clone(), map.insert(name.clone(), ty.clone())))
+                    .collect();
+                saved
+            }
+            _ => Vec::new(),
+        };
+        let item = self.written_type_in(&closure.body, blocks);
+        {
+            let mut map = self.closure_param_types.borrow_mut();
+            for (name, previous) in bound {
+                match previous {
+                    Some(ty) => map.insert(name, ty),
+                    None => map.remove(&name),
+                };
+            }
+        }
+        Some(generic_type("Vec", vec![item?]))
     }
 }
 
@@ -355,6 +442,50 @@ fn mentions_any(expr: &Expr, names: &[String]) -> bool {
 }
 
 /// A vec, deque, or set, the containers this walk iterates as themselves.
+/// Whether the expression names its own type without reading anything, so a
+/// closure body of this shape answers even when it mentions the parameter.
+fn states_own_type(expr: &Expr) -> bool {
+    match expr {
+        Expr::Struct(_) | Expr::Cast(_) => true,
+        Expr::Paren(inner) => states_own_type(&inner.expr),
+        Expr::Group(inner) => states_own_type(&inner.expr),
+        _ => false,
+    }
+}
+
+/// The element type of a sequence type, the item its iteration hands out.
+pub(super) fn sequence_element(ty: &Type) -> Option<Type> {
+    element_of_sequence(ty)
+}
+
+fn element_of_sequence(ty: &Type) -> Option<Type> {
+    let seg = last_segment(ty)?;
+    match seg.ident.to_string().as_str() {
+        "Vec" | "VecDeque" | "HashSet" | "BTreeSet" => generic_arg(seg, 0),
+        _ => None,
+    }
+}
+
+/// Whether the name is one of the built in number types.
+fn is_primitive_number(name: &str) -> bool {
+    matches!(
+        name,
+        "i8" | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "f32"
+            | "f64"
+    )
+}
+
 fn is_sequence(ty: &Type) -> bool {
     last_segment(ty).is_some_and(|seg| {
         matches!(
@@ -362,6 +493,22 @@ fn is_sequence(ty: &Type) -> bool {
             "Vec" | "VecDeque" | "HashSet" | "BTreeSet"
         )
     })
+}
+
+/// The path with its final segment dropped: the owner of `Enum::Variant`.
+fn variant_owner(path: &syn::Path) -> Option<syn::Path> {
+    if path.segments.len() < 2 {
+        return None;
+    }
+    let mut owner = path.clone();
+    let kept: Vec<syn::PathSegment> = owner
+        .segments
+        .iter()
+        .take(path.segments.len() - 1)
+        .cloned()
+        .collect();
+    owner.segments = kept.into_iter().collect();
+    Some(owner)
 }
 
 fn block_tail(block: &syn::Block) -> Option<&Expr> {
@@ -491,10 +638,29 @@ fn hop(recv: &Type, method: &str) -> Option<Type> {
         {
             Some(recv.clone())
         }
+        // A map's values and keys iterate one side of it, so the chain
+        // after them walks a sequence of that side, not the map.
+        "values" | "into_values" | "values_mut"
+            if matches!(name.as_str(), "HashMap" | "BTreeMap") =>
+        {
+            generic_arg(seg, 1).map(|v| generic_type("Vec", vec![v]))
+        }
+        "keys" | "into_keys" if matches!(name.as_str(), "HashMap" | "BTreeMap") => {
+            generic_arg(seg, 0).map(|k| generic_type("Vec", vec![k]))
+        }
         "clone" | "cloned" | "copied" | "as_ref" | "as_mut" | "take" | "or" | "xor" | "and"
         | "filter" | "or_else" | "or_default" | "iter" | "into_iter" | "values" | "into_values" => {
             Some(recv.clone())
         }
+        // The arithmetic methods answer in their receiver's own type, which
+        // is how `(x as u8).saturating_add(y)` states a `u8`.
+        "saturating_add" | "saturating_sub" | "saturating_mul" | "wrapping_add"
+        | "wrapping_sub" | "wrapping_mul" | "rem_euclid" | "div_euclid" | "midpoint" | "pow"
+        | "powi" | "powf" | "abs" | "signum" | "isqrt" | "to_ascii_lowercase"
+        | "to_ascii_uppercase" => Some(recv.clone()),
+        // On a number these pick between two of the same type. On a sequence
+        // they reduce to an `Option`, which the container arm answers.
+        "min" | "max" | "clamp" if is_primitive_number(&name) => Some(recv.clone()),
         // The middle of a chain drops and reorders items without changing
         // what they are.
         "rev" | "skip" | "take_while" | "skip_while" | "peekable" | "by_ref"
@@ -509,7 +675,8 @@ fn hop(recv: &Type, method: &str) -> Option<Type> {
             let index = usize::from(method == "err");
             generic_arg(seg, index).map(|t| option_of(&t))
         }
-        "get" | "first" | "last" | "pop" | "iter_max" | "max" | "min" | "next" | "nth"
+        "get" | "first" | "last" | "next_back" | "pop" | "iter_max" | "max" | "min" | "next"
+        | "nth"
             if matches!(name.as_str(), "Vec" | "VecDeque" | "HashSet" | "BTreeSet") =>
         {
             generic_arg(seg, 0).map(|t| option_of(&t))

@@ -44,6 +44,12 @@ pub fn mutate(parent: &Program, parent_seed: u64, donor_seed: u64, output_seed: 
             operations.push(MutationOperation::BlockOrder);
         }
     }
+    // A spliced subtree can land in a place its own program never put it, a
+    // receiver most of all, so the whole program is repaired again after the
+    // operations rather than trusting what each side was.
+    for block in &mut program.blocks {
+        block.fix_apply_borrows();
+    }
     program.seed = output_seed;
     program.mutation = Some(MutationOrigin {
         parent_seed,

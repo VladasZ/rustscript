@@ -750,12 +750,39 @@ fn from_source_name(imp: &syn::ItemImpl) -> Option<String> {
         syn::GenericArgument::Type(ty) => Some(ty),
         _ => None,
     })?;
+    from_type_key(ty)
+}
+
+/// The registration key for a `From` source type. The generic arguments are
+/// part of it, so `From<Option<usize>>` and `From<Option<u16>>` on the same
+/// target stay apart instead of both answering to `Option`.
+fn from_type_key(ty: &syn::Type) -> Option<String> {
     match ty {
-        syn::Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
-        syn::Type::Reference(r) => match &*r.elem {
-            syn::Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
-            _ => None,
-        },
+        syn::Type::Path(p) => {
+            let last = p.path.segments.last()?;
+            let base = last.ident.to_string();
+            let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                return Some(base);
+            };
+            let inner: Vec<String> = args
+                .args
+                .iter()
+                .filter_map(|arg| match arg {
+                    syn::GenericArgument::Type(inner) => from_type_key(inner),
+                    _ => None,
+                })
+                .collect();
+            if inner.len() == args.args.len() {
+                Some(format!("{base}<{}>", inner.join(",")))
+            } else {
+                Some(base)
+            }
+        }
+        syn::Type::Reference(r) => from_type_key(&r.elem),
+        syn::Type::Tuple(t) => {
+            let inner: Vec<String> = t.elems.iter().filter_map(from_type_key).collect();
+            (inner.len() == t.elems.len()).then(|| format!("({})", inner.join(",")))
+        }
         _ => None,
     }
 }
@@ -806,6 +833,19 @@ fn collect_impl_items(
                             *m,
                             Rc::new(f.clone()),
                         ));
+                        // A value that cannot name its own payload, `None`
+                        // most of all, still reaches a single impl through
+                        // the bare outer name.
+                        if let Some(base) = source.split(['<', '(']).next()
+                            && base != source
+                        {
+                            pending_methods.push((
+                                type_name.clone(),
+                                format!("from<{base}>"),
+                                *m,
+                                Rc::new(f.clone()),
+                            ));
+                        }
                     }
                     pending_methods.push((type_name.clone(), key, *m, Rc::new(f.clone())));
                 }

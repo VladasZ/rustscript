@@ -440,6 +440,21 @@ pub(super) enum StrOut {
     Ordering(Ordering),
 }
 
+/// `repeat` past the allocation limit aborts the real program instead of
+/// allocating, so the check raises a script panic rather than letting the
+/// interpreter itself die on the allocation with a different exit code. Rust
+/// refuses any allocation past `isize::MAX`, so that is the line. A count too
+/// large for `usize` stands for a huge count, not a zero one.
+fn str_repeat(s: &str, args: &impl Args) -> Result<String> {
+    let n = args
+        .int(0)
+        .map_or(0, |n| usize::try_from(n).unwrap_or(usize::MAX));
+    if s.len().saturating_mul(n) > isize::MAX.cast_unsigned() {
+        bail!("capacity overflow");
+    }
+    Ok(s.repeat(n))
+}
+
 /// The untyped `parse` guess: int first, then float, then bool.
 pub(super) fn str_core(s: &str, name: BuiltinId, args: &impl Args) -> Result<Option<StrOut>> {
     let a = |i: usize| args.text(i);
@@ -472,13 +487,7 @@ pub(super) fn str_core(s: &str, name: BuiltinId, args: &impl Args) -> Result<Opt
             Some(cs) => StrOut::Owned(s.replacen(cs.as_slice(), &a(1), usize_arg(args, 2)?)),
             None => StrOut::Owned(s.replacen(&a(0), &a(1), usize_arg(args, 2)?)),
         },
-        BuiltinId::Repeat => {
-            let n = args
-                .int(0)
-                .and_then(|n| usize::try_from(n).ok())
-                .unwrap_or(0);
-            StrOut::Owned(s.repeat(n))
-        }
+        BuiltinId::Repeat => StrOut::Owned(str_repeat(s, args)?),
         // String::as_str gives the string back. serde_json::Value::as_str
         // gives an Option, and a json string is a plain Str here, so unwrap
         // and expect on a string are identity to keep serde chains working.
