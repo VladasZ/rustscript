@@ -169,8 +169,11 @@ fn container_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     Ok(Some(match id {
         // a shape can't grow after the instance exists, so it has every field a builder call can set
         PathId::CommandNew => command_new(args.first().cloned().unwrap_or_else(|| Value::str(""))),
-        PathId::VecNew | PathId::VecWithCapacity => Value::vec(vec![]),
-        PathId::VecFrom => match args.first() {
+        PathId::VecNew
+        | PathId::VecWithCapacity
+        | PathId::VecDequeNew
+        | PathId::VecDequeWithCapacity => Value::vec(vec![]),
+        PathId::VecFrom | PathId::VecDequeFrom => match args.first() {
             Some(Value::Vec(v)) => Value::vec(v.lock().clone()),
             Some(other) => Value::vec(vec![other.clone()]),
             None => Value::vec(vec![]),

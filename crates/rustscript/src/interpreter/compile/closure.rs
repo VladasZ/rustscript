@@ -103,8 +103,9 @@ impl Compiler<'_> {
         self.frames.push(FnState::new("<closure>".to_string()));
         let params: Vec<&Pat> = c.inputs.iter().collect();
         self.cur().num_params = params.len();
-        for p in &params {
-            let reg = self.alloc();
+        // a pattern param binds more registers, so every param slot is claimed before any binding
+        let regs: Vec<Reg> = params.iter().map(|_| self.alloc()).collect();
+        for (p, reg) in params.iter().zip(regs) {
             // a reference param shares the caller's storage, so it never splits
             if let Pat::Type(t) = p
                 && matches!(&*t.ty, syn::Type::Reference(_))
@@ -147,6 +148,7 @@ impl Compiler<'_> {
         }
         let ret = self.alloc();
         self.compile_into(ret, &c.body)?;
+        self.release_guard_temps(0, Some(ret));
         if let Some(idx) = self.cur().ret_cast {
             self.emit(Op::Cast {
                 dst: ret,

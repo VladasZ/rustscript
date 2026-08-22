@@ -32,6 +32,19 @@ impl Compiler<'_> {
 
     /// The bindings of a pattern over a borrowed scrutinee hold borrowed handles, so scope end
     /// must not drop them.
+    /// Bindings out of a scrutinee that holds a `RefCell` guard keep the borrow alive until
+    /// their scope ends, `Ok(g)` of a `try_borrow`.
+    pub(super) fn guard_pattern_binds(&mut self, pat: u16) {
+        let regs: Vec<Reg> = self.cur().pats[usize::from(pat)]
+            .binds
+            .iter()
+            .map(|(_, reg)| *reg)
+            .collect();
+        let f = self.cur();
+        f.guard_regs.extend(regs);
+        f.has_guards = true;
+    }
+
     pub(super) fn exempt_pattern_binds(&mut self, pat: u16) {
         let regs: Vec<Reg> = self.cur().pats[usize::from(pat)]
             .binds

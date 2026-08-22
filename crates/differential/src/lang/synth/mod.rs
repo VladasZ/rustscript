@@ -48,6 +48,8 @@ pub struct Generator<'a> {
     pub(super) fn_ret: Option<Ty>,
     /// lets `break` and `continue` appear
     pub(super) in_loop: bool,
+    /// the labeled loops around the current body, a `break` or `continue` may name one
+    pub(super) loop_labels: Vec<String>,
     /// a bare literal here would be an ambiguous `{integer}`
     pub(super) forbid_bare: bool,
 }
@@ -65,6 +67,7 @@ impl<'a> Generator<'a> {
             describes: Vec::new(),
             fn_ret: None,
             in_loop: false,
+            loop_labels: Vec::new(),
             forbid_bare: false,
         }
     }

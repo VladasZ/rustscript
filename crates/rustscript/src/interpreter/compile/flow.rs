@@ -55,6 +55,9 @@ impl Compiler<'_> {
                     if !owned {
                         self.exempt_pattern_binds(pat);
                     }
+                    if self.init_holds_guard(&let_expr.expr) {
+                        self.guard_pattern_binds(pat);
+                    }
                     self.emit(Op::TestBind {
                         val: scrut,
                         pat,
@@ -88,12 +91,18 @@ impl Compiler<'_> {
             self.patch_jump(jmp_end, end);
             return Ok(());
         }
+        let guard_mark = self.cur().guard_temps.len();
         let jmp_else = self.emit_cond_jump(&if_expr.cond)?;
+        // the condition's borrows end before either branch runs, on both paths
+        let released = self.release_guard_temps(guard_mark, None);
         self.compile_block(&if_expr.then_branch, dst)?;
         let jmp_end = self.here();
         self.emit(Op::Jump { to: 0 });
         let else_at = self.mark()?;
         self.patch_jump(jmp_else, else_at);
+        if let Some(list) = released {
+            self.emit(Op::DropScope { list });
+        }
         match &if_expr.else_branch {
             Some((_, e)) => self.compile_into(dst, e)?,
             None => self.emit(Op::LoadUnit { dst }),
@@ -115,6 +124,9 @@ impl Compiler<'_> {
             if !owned {
                 self.exempt_pattern_binds(pat);
             }
+            if self.init_holds_guard(&let_expr.expr) {
+                self.guard_pattern_binds(pat);
+            }
             self.emit(Op::TestBind {
                 val: scrut,
                 pat,
@@ -127,9 +139,10 @@ impl Compiler<'_> {
             });
             self.loops.push(LoopCtx {
                 breaks: vec![exit],
-                continue_to: head,
+                continue_to: Some(head),
                 result: dst,
                 scope_depth: while_let_depth,
+                label: label_name(w.label.as_ref()),
             });
             let body = self.alloc();
             self.compile_block_inner(&w.body, body)?;
@@ -146,13 +159,17 @@ impl Compiler<'_> {
             self.emit(Op::LoadUnit { dst });
             return Ok(());
         }
+        let guard_mark = self.cur().guard_temps.len();
         let exit = self.emit_cond_jump(&w.cond)?;
+        // the condition's borrows end before the body runs, and again on the way out
+        let released = self.release_guard_temps(guard_mark, None);
         let scope_depth = self.cur().scope_order.len();
         self.loops.push(LoopCtx {
             breaks: vec![exit],
-            continue_to: head,
+            continue_to: Some(head),
             result: dst,
             scope_depth,
+            label: label_name(w.label.as_ref()),
         });
         let body = self.alloc();
         self.compile_block(&w.body, body)?;
@@ -164,6 +181,9 @@ impl Compiler<'_> {
         for b in lc.breaks {
             self.patch_jump(b, end);
         }
+        if let Some(list) = released {
+            self.emit(Op::DropScope { list });
+        }
         self.emit(Op::LoadUnit { dst });
         Ok(())
     }
@@ -174,9 +194,10 @@ impl Compiler<'_> {
         let scope_depth = self.cur().scope_order.len();
         self.loops.push(LoopCtx {
             breaks: Vec::new(),
-            continue_to: head,
+            continue_to: Some(head),
             result: dst,
             scope_depth,
+            label: label_name(l.label.as_ref()),
         });
         let body = self.alloc();
         self.compile_block(&l.body, body)?;
@@ -276,9 +297,10 @@ impl Compiler<'_> {
         }
         self.loops.push(LoopCtx {
             breaks: vec![next],
-            continue_to: head,
+            continue_to: Some(head),
             result: dst,
             scope_depth,
+            label: label_name(f.label.as_ref()),
         });
         let body = self.alloc();
         self.compile_block_inner(&f.body, body)?;
@@ -302,29 +324,61 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    pub(super) fn compile_break(&mut self, b: &syn::ExprBreak) -> Result<()> {
-        let result = self.loops.last().map(|l| l.result);
-        if let Some(result) = result {
-            if let Some(e) = &b.expr {
-                self.compile_into(result, e)?;
-            }
-        } else {
-            bail!("break outside a loop");
+    /// `'a: { .. break 'a v .. }`, a loop that runs once, so `break` shares the loop machinery.
+    pub(super) fn compile_labeled_block(&mut self, dst: Reg, b: &syn::ExprBlock) -> Result<()> {
+        let scope_depth = self.cur().scope_order.len();
+        self.loops.push(LoopCtx {
+            breaks: Vec::new(),
+            continue_to: None,
+            result: dst,
+            scope_depth,
+            label: label_name(b.label.as_ref()),
+        });
+        self.compile_block(&b.block, dst)?;
+        let end = self.mark()?;
+        let lc = self.loops.pop().unwrap();
+        for jmp in lc.breaks {
+            self.patch_jump(jmp, end);
         }
-        self.emit_loop_exit_drops();
-        let jmp = self.here();
-        self.emit(Op::Jump { to: 0 });
-        self.loops.last_mut().unwrap().breaks.push(jmp);
         Ok(())
     }
 
-    pub(super) fn compile_continue(&mut self) -> Result<()> {
-        let to = self
-            .loops
-            .last()
-            .map(|l| l.continue_to)
-            .ok_or_else(|| anyhow!("continue outside a loop"))?;
-        self.emit_loop_exit_drops();
+    /// The innermost loop, or the one the label names.
+    fn loop_target(&self, label: Option<&syn::Lifetime>, what: &str) -> Result<usize> {
+        let found = match label {
+            Some(lt) => {
+                let name = lt.ident.to_string();
+                self.loops
+                    .iter()
+                    .rposition(|l| l.label.as_deref() == Some(name.as_str()))
+            }
+            None => self.loops.iter().rposition(|l| l.continue_to.is_some()),
+        };
+        found.ok_or_else(|| match label {
+            Some(lt) => anyhow!("`{what} '{}` has no matching labeled loop", lt.ident),
+            None => anyhow!("{what} outside a loop"),
+        })
+    }
+
+    pub(super) fn compile_break(&mut self, b: &syn::ExprBreak) -> Result<()> {
+        let target = self.loop_target(b.label.as_ref(), "break")?;
+        if let Some(e) = &b.expr {
+            let result = self.loops[target].result;
+            self.compile_into(result, e)?;
+        }
+        self.emit_loop_exit_drops(target);
+        let jmp = self.here();
+        self.emit(Op::Jump { to: 0 });
+        self.loops[target].breaks.push(jmp);
+        Ok(())
+    }
+
+    pub(super) fn compile_continue(&mut self, c: &syn::ExprContinue) -> Result<()> {
+        let target = self.loop_target(c.label.as_ref(), "continue")?;
+        let Some(to) = self.loops[target].continue_to else {
+            bail!("`continue` cannot target a labeled block");
+        };
+        self.emit_loop_exit_drops(target);
         self.emit(Op::Jump {
             to: u32::try_from(to)?,
         });
@@ -332,13 +386,8 @@ impl Compiler<'_> {
     }
 
     /// The scopes a `break` or `continue` leaves drop first.
-    pub(super) fn emit_loop_exit_drops(&mut self) {
-        if !self.ctx.has_drop {
-            return;
-        }
-        let Some(entry) = self.loops.last().map(|l| l.scope_depth) else {
-            return;
-        };
+    pub(super) fn emit_loop_exit_drops(&mut self, target: usize) {
+        let entry = self.loops[target].scope_depth;
         let depth = self.cur().scope_order.len().saturating_sub(entry);
         self.emit_scope_drops(depth);
     }
@@ -356,6 +405,7 @@ impl Compiler<'_> {
                 .iter()
                 .any(|arm| pattern_borrows(arm_pattern(&arm.pat)));
         let scrut = self.compile_scrutinee(&m.expr, owned)?;
+        let holds_guard = self.init_holds_guard(&m.expr);
         let mut end_jumps = Vec::new();
         for arm in &m.arms {
             self.push_scope();
@@ -368,6 +418,9 @@ impl Compiler<'_> {
             let pat = self.pattern_info(arm_pat)?;
             if !owned {
                 self.exempt_pattern_binds(pat);
+            }
+            if holds_guard {
+                self.guard_pattern_binds(pat);
             }
             self.emit(Op::TestBind {
                 val: scrut,
@@ -414,4 +467,8 @@ impl Compiler<'_> {
     }
 
     // calls
+}
+
+fn label_name(label: Option<&syn::Label>) -> Option<String> {
+    label.map(|l| l.name.ident.to_string())
 }

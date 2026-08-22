@@ -57,6 +57,7 @@ pub const BRIDGES: &[Bridge] = &[
     b("native_methods.rs", "joinerr_method", "Native"),
     b("methods.rs", "generic_method", "*"),
     b("vecmap.rs", "vec_method", "Vec"),
+    b("vecmap.rs", "deque_method", "Vec"),
     b("vecmap.rs", "vec_get", "Vec"),
     b("vecmap.rs", "edge_element_ref", "Vec"),
     b("vecmap.rs", "vec_method_by_name", "Vec"),

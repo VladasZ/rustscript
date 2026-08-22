@@ -57,9 +57,13 @@ impl Compiler<'_> {
                 let args =
                     mac.parse_body_with(Punctuated::<Expr, syn::Token![,]>::parse_terminated)?;
                 let mut iter = args.iter();
-                let Some(target) = iter.next() else {
+                let Some(mut target) = iter.next() else {
                     bail!("{name}! needs a destination as its first argument");
                 };
+                // `write!(&mut s, ..)` writes to `s` itself, a copy of the handle would lose it
+                while let Expr::Reference(r) = target {
+                    target = &r.expr;
+                }
                 let recv = self.compile_expr(target)?;
                 let spec = self.build_fmt_spec_from(iter, name == "writeln")?;
                 let text = self.alloc();

@@ -25,6 +25,8 @@ pub enum IntOut {
     Overflowing(i128, bool),
     /// `checked_ilog2`
     CheckedCount(Option<u32>),
+    /// `abs_diff`, the unsigned type of the receiver's size
+    Unsigned(i128),
 }
 
 /// `Ne` is the host's own order.
@@ -220,6 +222,7 @@ fn int_arith_method(
         BuiltinId::SaturatingSub => {
             arg(args, 0).map(|b| IntOut::Same(saturate(width, recv.saturating_sub(b))))
         }
+        BuiltinId::AbsDiff => arg(args, 0).map(|b| IntOut::Unsigned((recv - b).abs())),
         BuiltinId::SaturatingMul => {
             arg(args, 0).map(|b| IntOut::Same(saturate(width, recv.saturating_mul(b))))
         }

@@ -1,4 +1,5 @@
 abs
+abs_diff
 accept
 access
 accessed
@@ -45,9 +46,12 @@ as_usize
 asin
 atan
 atan2
+back
+back_mut mut
 basic_auth
 bearer_auth
 bg
+binary_search
 bits
 black
 block
@@ -199,6 +203,8 @@ fold
 for_each
 format
 fract
+front
+front_mut mut
 gen
 gen_bool
 gen_range
@@ -330,6 +336,7 @@ log2
 magenta
 make_ascii_lowercase mut
 make_ascii_uppercase mut
+make_contiguous mut
 manager_access
 map
 map_err
@@ -393,6 +400,8 @@ permissions
 pointer
 pointer_mut
 pop mut
+pop_back mut
+pop_front mut
 position
 post
 pow
@@ -401,6 +410,8 @@ powi
 product
 purple
 push mut
+push_back mut
+push_front mut
 push_str mut
 put
 query
@@ -554,6 +565,8 @@ trim_start_matches
 trim_string
 trunc
 truncate mut
+try_borrow
+try_borrow_mut
 try_clone
 try_lock
 try_wait

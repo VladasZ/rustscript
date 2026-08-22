@@ -50,6 +50,7 @@ impl Compiler<'_> {
             Expr::Group(g) => self.compile_into(dst, &g.expr)?,
             Expr::Reference(r) => self.compile_into(dst, &r.expr)?,
             Expr::Unsafe(u) => self.compile_block(&u.block, dst)?,
+            Expr::Block(b) if b.label.is_some() => self.compile_labeled_block(dst, b)?,
             Expr::Block(b) => self.compile_block(&b.block, dst)?,
             // `<[T]>::len` as a value is a method reference
             Expr::Path(p) if p.qself.is_some() && p.path.segments.len() == 1 => {
@@ -70,7 +71,7 @@ impl Compiler<'_> {
             Expr::Match(m) => self.compile_match(dst, m)?,
             Expr::Return(r) => self.compile_return(r)?,
             Expr::Break(b) => self.compile_break(b)?,
-            Expr::Continue(_) => self.compile_continue()?,
+            Expr::Continue(c) => self.compile_continue(c)?,
             Expr::Call(c) => self.compile_call(dst, c)?,
             Expr::MethodCall(m) => self.compile_method(dst, m)?,
             Expr::Macro(m) => self.compile_macro(&m.mac, dst)?,

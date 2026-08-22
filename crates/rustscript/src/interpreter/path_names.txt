@@ -158,6 +158,9 @@ Value::String
 Vec::from
 Vec::new
 Vec::with_capacity
+VecDeque::from
+VecDeque::new
+VecDeque::with_capacity
 WMIConnection::new
 WMIConnection::with_namespace_path
 Widget::render

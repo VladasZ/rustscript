@@ -118,7 +118,7 @@ fn binders(expr: &Expr, out: &mut BTreeSet<String>) {
                         bind_names(bind, out);
                     }
                     Term::Fold { acc, bind, .. } => {
-                        out.insert(acc.clone());
+                        bind_names(acc, out);
                         bind_names(bind, out);
                     }
                     _ => {}

@@ -77,6 +77,12 @@ fn builtin_fast(
         {
             str_push(ctx, recv, name.id, s)
         }
+        // `write!` into a `String` is `fmt::Write`, the result is `fmt::Result`
+        BuiltinId::WriteAll | BuiltinId::WriteStr | BuiltinId::WriteFmt
+            if argc == 1 && matches!(ctx.stack[base + recv], Value::Str(_)) =>
+        {
+            str_push(ctx, recv, BuiltinId::PushStr, s).map(|_| Value::ok(Value::Unit))
+        }
         // off a place `clear` is the colored crate's one, which returns a value
         BuiltinId::Clear
             if argc == 0 && name.place && matches!(ctx.stack[base + recv], Value::Str(_)) =>

@@ -73,6 +73,18 @@ impl IntWidth {
         matches!(self, Self::I128 | Self::U128)
     }
 
+    /// The unsigned type of the same size, what `abs_diff` answers in.
+    pub fn unsigned(self) -> Self {
+        match self {
+            Self::I8 => Self::U8,
+            Self::I16 => Self::U16,
+            Self::I32 => Self::U32,
+            Self::I64 => Self::U64,
+            Self::I128 => Self::U128,
+            other => other,
+        }
+    }
+
     pub fn bits(self) -> u32 {
         match self {
             Self::U8 | Self::I8 => 8,

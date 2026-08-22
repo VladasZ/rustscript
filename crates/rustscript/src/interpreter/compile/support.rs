@@ -382,7 +382,8 @@ pub(super) fn init_is_owned(expr: &Expr) -> bool {
         Expr::MethodCall(m) => match m.method.to_string().as_str() {
             "clone" | "cloned" | "copied" | "to_vec" | "to_owned" | "to_string" | "collect"
             | "pop" | "remove" | "take" | "replace" | "swap_remove" | "split_off"
-            | "into_inner" | "new" | "default" | "with_capacity" => true,
+            | "into_inner" | "new" | "default" | "with_capacity" | "borrow" | "borrow_mut"
+            | "try_borrow" | "try_borrow_mut" | "lock" => true,
             "unwrap" | "expect" | "unwrap_or" | "unwrap_or_else" | "unwrap_or_default" | "ok"
             | "err" | "map" | "and_then" | "await" => init_is_owned(&m.receiver),
             _ => false,

@@ -276,11 +276,27 @@ impl Generator<'_> {
             item = want.clone();
         }
         if ordered && self.chance(0.3) {
-            let acc = self.fresh_bind();
+            // a pair accumulator is taken apart in the parameter list, `|(lo, hi), x|`
+            let (acc, mut locals) = match want {
+                Ty::Tuple(parts) if parts.len() == 2 && self.chance(0.5) => {
+                    let first = self.fresh_bind();
+                    let second = self.fresh_bind();
+                    let locals = vec![
+                        (first.clone(), parts[0].clone()),
+                        (second.clone(), parts[1].clone()),
+                    ];
+                    (Bind::Pair(first, second), locals)
+                }
+                _ => {
+                    let acc = self.fresh_bind();
+                    let locals = vec![(acc.clone(), want.clone())];
+                    (Bind::One(acc), locals)
+                }
+            };
             let bind = self.fresh_bind();
+            locals.push((bind.clone(), item));
             // a bare literal init leaves a `{float}` no method can be called on
             let init = self.typed_only(|inner| inner.expr(want, depth - 1));
-            let locals = [(acc.clone(), want.clone()), (bind.clone(), item)];
             let body = self.closure_body(|inner| {
                 inner.with_locals(&locals, |inner| inner.expr(want, depth - 1))
             });

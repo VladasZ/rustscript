@@ -39,6 +39,9 @@ pub(super) fn set_index(ctx: &mut StepCtx, base: u16, key: u16, val: u16) -> Res
                     Flow::Next
                 }
                 Value::Ref(reference) => {
+                    if !reference.writable() {
+                        bail!("assignment through a shared `RefCell` borrow");
+                    }
                     if !reference.set(new) {
                         bail!("assignment through a dangling reference");
                     }
@@ -74,6 +77,9 @@ pub(super) fn set_deref(ctx: &StepCtx, target: u16, val: u16) -> Result<Flow> {
     let Value::Ref(reference) = ctx.get(target) else {
         bail!("assignment through a non-reference value");
     };
+    if !reference.writable() {
+        bail!("assignment through a shared `RefCell` borrow");
+    }
     if !reference.set(ctx.get(val).clone()) {
         bail!("assignment through a dangling reference");
     }

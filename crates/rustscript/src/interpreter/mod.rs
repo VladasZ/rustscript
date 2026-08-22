@@ -1,4 +1,5 @@
 mod assoc;
+mod borrow;
 mod bridge;
 mod bytecode;
 mod cell;

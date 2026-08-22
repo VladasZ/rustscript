@@ -122,6 +122,7 @@ pub(super) fn int_out(
     use crate::interpreter::int_methods::IntOut;
     match out {
         IntOut::Same(value) => Value::int_of_width(value, width),
+        IntOut::Unsigned(value) => Value::int_of_width(value, width.unsigned()),
         // counts are u32, otherwise `!x.count_ones()` prints -1 instead of 4294967295
         IntOut::Count(count) => Value::int_of_width(
             i128::from(count),

@@ -55,6 +55,7 @@ impl Compiler<'_> {
         for (i, stmt) in block.stmts.iter().enumerate() {
             let is_last = i == last;
             self.set_line(stmt.span());
+            let guard_mark = self.cur().guard_temps.len();
             match stmt {
                 Stmt::Local(local)
                     if local
@@ -100,6 +101,7 @@ impl Compiler<'_> {
                     }
                 }
             }
+            self.release_guard_temps(guard_mark, is_last.then_some(dst));
         }
         Ok(())
     }
@@ -202,6 +204,9 @@ impl Compiler<'_> {
             self.bind_pattern_irrefutable(&t.pat, val)?;
         } else {
             self.bind_pattern_irrefutable(&local.pat, val)?;
+        }
+        if let Some(init) = &local.init {
+            self.note_guard_binding(&init.expr, before);
         }
         let owned = local
             .init

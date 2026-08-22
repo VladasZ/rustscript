@@ -7,7 +7,7 @@ use rand::RngExt;
 use crate::lang::expr::{BinOp, Expr};
 use crate::lang::fmt::{Align, FmtSpec, FmtTrait};
 use crate::lang::pipe::Site;
-use crate::lang::stmt::{Ann, ClosureSource, MutOp, PrintForm, Stmt};
+use crate::lang::stmt::{Ann, ClosureParam, ClosureSource, MutOp, PrintForm, Stmt};
 use crate::lang::synth::{BindKind, Binding, Generator, MAX_EXPR_DEPTH};
 use crate::lang::ty::Ty;
 
@@ -153,10 +153,8 @@ impl Generator<'_> {
         if self.chance(0.25) {
             return self.factory_closure(name);
         }
-        let count = self.rng.random_range(0..=2);
-        let params: Vec<(String, Ty)> = (0..count)
-            .map(|_| (self.fresh("diff_p"), self.scalar_ty()))
-            .collect();
+        let params = self.closure_params();
+        let locals: Vec<(String, Ty)> = params.iter().flat_map(ClosureParam::locals).collect();
         let capture_move = self.chance(0.5);
         let ints: Vec<String> = self
             .scope
@@ -175,7 +173,7 @@ impl Generator<'_> {
                 .find(|binding| binding.name == acc)
                 .map_or(Ty::I64, |binding| binding.ty.clone());
             let expr = self
-                .closure_body(|inner| inner.with_locals(&params, |inner| inner.expr(&acc_ty, 1)));
+                .closure_body(|inner| inner.with_locals(&locals, |inner| inner.expr(&acc_ty, 1)));
             let op = *self.pick(&[BinOp::Add, BinOp::Sub, BinOp::BitXor, BinOp::Mul]);
             let body = Expr::Block {
                 stmts: vec![Stmt::Compound {
@@ -192,7 +190,7 @@ impl Generator<'_> {
         } else {
             let ret = self.scalar_ty();
             let body = self.closure_body(|inner| {
-                inner.without_scope(|inner| inner.with_locals(&params, |inner| inner.expr(&ret, 2)))
+                inner.without_scope(|inner| inner.with_locals(&locals, |inner| inner.expr(&ret, 2)))
             });
             (ret, body)
         };
@@ -207,7 +205,7 @@ impl Generator<'_> {
                 .collect();
             self.scope.retain(|binding| !moved.contains(&binding.name));
         }
-        let param_tys: Vec<Ty> = params.iter().map(|(_, ty)| ty.clone()).collect();
+        let param_tys: Vec<Ty> = params.iter().map(|param| param.ty().clone()).collect();
         // the closure still holds the counter, so the arguments must not read it
         let hidden = match &body {
             Expr::Block { stmts, .. } => stmts.iter().flat_map(Stmt::declared_targets).collect(),
@@ -248,6 +246,28 @@ impl Generator<'_> {
             },
             calls,
         }
+    }
+
+    /// Up to 2 parameters, a pair pattern among them now and then.
+    fn closure_params(&mut self) -> Vec<ClosureParam> {
+        let count = self.rng.random_range(0..=2);
+        (0..count)
+            .map(|_| {
+                if self.chance(0.3) {
+                    let ty = Ty::Tuple(vec![self.scalar_ty(), self.scalar_ty()]);
+                    ClosureParam::Pair {
+                        first: self.fresh("diff_pa"),
+                        second: self.fresh("diff_pb"),
+                        ty,
+                    }
+                } else {
+                    ClosureParam::Plain {
+                        name: self.fresh("diff_p"),
+                        ty: self.scalar_ty(),
+                    }
+                }
+            })
+            .collect()
     }
 
     fn factory_closure(&mut self, name: String) -> Stmt {
@@ -391,40 +411,50 @@ impl Generator<'_> {
 
     fn for_stmt(&mut self) -> Stmt {
         let count = self.rng.random_range(0..=3);
-        let body = self.loop_body();
+        let (body, label) = self.loop_body();
         // the counter is never read, a name would make every program warn
         Stmt::ForRange {
             var: "_".to_string(),
             count,
             body,
+            label,
         }
     }
 
     fn while_stmt(&mut self) -> Stmt {
         let counter = self.fresh("diff_i");
         let limit = self.rng.random_range(0..=4);
-        let body = self.loop_body();
+        let (body, label) = self.loop_body();
         if self.chance(0.5) {
             Stmt::While {
                 counter,
                 limit,
                 body,
+                label,
             }
         } else {
             Stmt::Loop {
                 counter,
                 limit,
                 body,
+                label,
             }
         }
     }
 
+    /// A labeled exit may name any loop around it, so a nested loop exits through its parent.
     fn break_or_continue(&mut self) -> Stmt {
         let condition = self.expr(&Ty::Bool, 2);
-        if self.chance(0.5) {
-            Stmt::Break { condition }
+        let label = if !self.loop_labels.is_empty() && self.chance(0.5) {
+            let labels = self.loop_labels.clone();
+            Some(self.pick(&labels).clone())
         } else {
-            Stmt::Continue { condition }
+            None
+        };
+        if self.chance(0.5) {
+            Stmt::Break { condition, label }
+        } else {
+            Stmt::Continue { condition, label }
         }
     }
 
@@ -455,11 +485,20 @@ impl Generator<'_> {
         body
     }
 
-    fn loop_body(&mut self) -> Vec<Stmt> {
+    /// The body and the loop's label. A label nobody names is dropped, it would only warn.
+    fn loop_body(&mut self) -> (Vec<Stmt>, Option<String>) {
         let was = std::mem::replace(&mut self.in_loop, true);
+        let label = self.chance(0.5).then(|| self.fresh("diff_l"));
+        if let Some(label) = &label {
+            self.loop_labels.push(label.clone());
+        }
         let body = self.nested_body();
+        if label.is_some() {
+            self.loop_labels.pop();
+        }
         self.in_loop = was;
-        body
+        let label = label.filter(|l| body.iter().any(|stmt| stmt.targets_label(l)));
+        (body, label)
     }
 
     /// `name` is hidden because an `entry()` chain holds the map while its arguments evaluate.
@@ -481,7 +520,13 @@ impl Generator<'_> {
                 match self.rng.random_range(0..11) {
                     0 => MutOp::VecPush(self.expr(&elem, 1)),
                     1 if elem.is_ord() => MutOp::VecSort,
-                    2 => MutOp::VecDedup,
+                    2 => match &elem {
+                        Ty::Vec(inner) => MutOp::VecRowPush {
+                            index: self.rng.random_range(0..=2),
+                            value: self.expr(inner, 1),
+                        },
+                        _ => MutOp::VecDedup,
+                    },
                     3 => MutOp::VecSetIndex {
                         index: self.rng.random_range(0..=6),
                         value: self.expr(&elem, 1),

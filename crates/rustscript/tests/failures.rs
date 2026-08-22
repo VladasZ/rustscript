@@ -341,3 +341,39 @@ fn runtime_unsupported_constant_names_the_gap() {
         "missing gap name in: {stderr}"
     );
 }
+
+#[test]
+fn second_borrow_mut_panics_alike() {
+    assert_parity(
+        "use std::cell::RefCell;\nfn main() {\n    let cell = RefCell::new(vec![1]);\n    let first = cell.borrow_mut();\n    let second = cell.borrow_mut();\n    println!(\"{} {}\", first.len(), second.len());\n}\n",
+        101,
+        "RefCell already borrowed",
+    );
+}
+
+#[test]
+fn borrow_mut_during_borrow_panics_alike() {
+    assert_parity(
+        "use std::cell::RefCell;\nfn main() {\n    let cell = RefCell::new(5);\n    let reader = cell.borrow();\n    *cell.borrow_mut() += 1;\n    println!(\"{reader}\");\n}\n",
+        101,
+        "RefCell already borrowed",
+    );
+}
+
+#[test]
+fn borrow_during_borrow_mut_panics_alike() {
+    assert_parity(
+        "use std::cell::RefCell;\nfn main() {\n    let cell = RefCell::new(String::new());\n    let mut writer = cell.borrow_mut();\n    writer.push('a');\n    println!(\"{}\", cell.borrow().len());\n}\n",
+        101,
+        "RefCell already mutably borrowed",
+    );
+}
+
+#[test]
+fn borrow_inside_same_statement_panics_alike() {
+    assert_parity(
+        "use std::cell::RefCell;\nfn main() {\n    let cell = RefCell::new(vec![1, 2]);\n    cell.borrow_mut().push(cell.borrow().len() as i32);\n    println!(\"{:?}\", cell.borrow());\n}\n",
+        101,
+        "RefCell already mutably borrowed",
+    );
+}

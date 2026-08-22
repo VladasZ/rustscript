@@ -9,6 +9,7 @@ use indexmap::IndexMap;
 use parking_lot::Mutex;
 use rustc_hash::FxBuildHasher;
 
+use super::borrow::BorrowGuard;
 use super::bytecode::Const;
 use super::enum_def::{ERR, EnumDef, EnumKind, NONE, NOT_UNICODE, OK, OPTION, RESULT, SOME};
 use super::native::Native;
@@ -61,9 +62,11 @@ pub enum ValueRef {
         data: Arc<StructData>,
         slot: usize,
     },
-    /// from `borrow_mut` and `lock`
+    /// from `borrow`, `borrow_mut` and `lock`
     CellSlot {
         slot: Arc<Mutex<Value>>,
+        /// the live `RefCell` borrow, `None` for a `lock`
+        guard: Option<Arc<BorrowGuard>>,
     },
     /// From accessors like `as_object_mut`. No mutation split here, only in place mutation goes through.
     Borrowed {
@@ -85,7 +88,14 @@ impl ValueRef {
     }
 
     pub fn cell_slot(slot: Arc<Mutex<Value>>) -> Self {
-        Self::CellSlot { slot }
+        Self::CellSlot { slot, guard: None }
+    }
+
+    pub fn borrowed_cell_slot(slot: Arc<Mutex<Value>>, guard: Arc<BorrowGuard>) -> Self {
+        Self::CellSlot {
+            slot,
+            guard: Some(guard),
+        }
     }
 
     pub fn borrowed(value: Value) -> Self {
@@ -97,7 +107,7 @@ impl ValueRef {
             Self::VecElement { values, index } => values.lock().get(*index).cloned(),
             Self::MapEntry { map, key } => map.lock().get(key).cloned(),
             Self::StructField { data, slot } => data.values.lock().get(*slot).cloned(),
-            Self::CellSlot { slot } => Some(slot.lock().clone()),
+            Self::CellSlot { slot, .. } => Some(slot.lock().clone()),
             Self::Borrowed { value } => Some(value.clone()),
         }
     }
@@ -110,8 +120,19 @@ impl ValueRef {
             Self::VecElement { values, index } => values.lock().get_mut(*index).map(f),
             Self::MapEntry { map, key } => map.lock().get_mut(key).map(f),
             Self::StructField { data, slot } => data.values.lock().get_mut(*slot).map(f),
-            Self::CellSlot { slot } => Some(f(&mut slot.lock())),
+            Self::CellSlot { slot, .. } => Some(f(&mut slot.lock())),
             Self::Borrowed { .. } => None,
+        }
+    }
+
+    /// A shared `borrow()` cannot be written through. Valid Rust never tries, so this only
+    /// shows for a script that skipped `rust check`.
+    pub fn writable(&self) -> bool {
+        match self {
+            Self::CellSlot {
+                guard: Some(guard), ..
+            } => guard.is_exclusive(),
+            _ => true,
         }
     }
 
@@ -137,7 +158,7 @@ impl ValueRef {
                 *target = value;
                 true
             }
-            Self::CellSlot { slot } => {
+            Self::CellSlot { slot, .. } => {
                 *slot.lock() = value;
                 true
             }
