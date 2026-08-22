@@ -1,5 +1,5 @@
-//! The script's own `impl` methods, found by type id and method id, so a
-//! call on a user value is 2 integer lookups with no string built.
+//! The script's own `impl` methods, found by type id and method id, so a call on a user value is
+//! 2 integer lookups with no string built.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -10,17 +10,17 @@ use super::value::Value;
 
 #[derive(Default)]
 pub struct TypeMethods {
-    /// Names a bridge knows too, sorted by id for a binary search.
+    /// names a bridge knows too, sorted by id for a binary search
     by_builtin: Vec<(BuiltinId, Arc<Chunk>)>,
-    /// Script only names, sorted by atom.
+    /// script only names, sorted by atom
     by_atom: Vec<(u32, Arc<Chunk>)>,
     pub display: Option<Arc<Chunk>>,
     pub debug: Option<Arc<Chunk>>,
     pub drop: Option<Arc<Chunk>>,
     pub next: Option<Arc<Chunk>>,
-    /// `Add::add` and friends, by `bin_slot`.
+    /// `Add::add` and friends, by `bin_slot`
     bin: [Option<Arc<Chunk>>; BIN_SLOTS],
-    /// `AddAssign::add_assign` and friends, by `bin_slot`.
+    /// `AddAssign::add_assign` and friends, by `bin_slot`
     bin_assign: [Option<Arc<Chunk>>; BIN_SLOTS],
     pub neg: Option<Arc<Chunk>>,
     pub not: Option<Arc<Chunk>>,
@@ -28,12 +28,12 @@ pub struct TypeMethods {
 
 const BIN_SLOTS: usize = 10;
 
-/// In `bin_slot` order.
+/// in `bin_slot` order
 const BIN_NAMES: [&str; BIN_SLOTS] = [
     "add", "sub", "mul", "div", "rem", "bitand", "bitor", "bitxor", "shl", "shr",
 ];
 
-/// Same order as `BIN_NAMES`.
+/// same order as `BIN_NAMES`
 const BIN_ASSIGN_NAMES: [&str; BIN_SLOTS] = [
     "add_assign",
     "sub_assign",
@@ -47,7 +47,7 @@ const BIN_ASSIGN_NAMES: [&str; BIN_SLOTS] = [
     "shr_assign",
 ];
 
-/// None for the comparisons, which answer through the derived semantics.
+/// None for the comparisons, those go through the derived semantics.
 fn bin_slot(op: BinKind) -> Option<usize> {
     Some(match op {
         BinKind::Add => 0,
@@ -114,14 +114,13 @@ pub fn method_atoms<'a>(names: impl IntoIterator<Item = &'a str>) -> HashMap<Str
 
 pub struct ImplTable {
     types: Vec<TypeMethods>,
-    /// For the cold lookups that start from a name.
+    /// for the cold lookups that start from a name
     type_ids: HashMap<Arc<str>, u16>,
     atoms: HashMap<String, u32>,
-    /// Some impl targets a type the script did not declare, like
-    /// `impl MyTrait for PathBuf`. Only then does a bridge value look up its
-    /// methods.
+    /// Some impl targets a type the script didn't declare, like `impl MyTrait for PathBuf`. Only
+    /// then does a bridge value look up its methods.
     foreign: bool,
-    /// For the coverage report.
+    /// for the coverage report
     names: Vec<(String, String)>,
 }
 
@@ -191,14 +190,12 @@ impl ImplTable {
         self.of_receiver(value, None)
     }
 
-    /// An empty vec has no element to name its type, so the written
-    /// `Vec<u8>` picks its impl.
+    /// An empty vec has no element to name its type, so the written `Vec<u8>` picks its impl.
     pub fn of_receiver(&self, value: &Value, written: Option<&ScalarTy>) -> Option<&TypeMethods> {
         let (type_id, name) = match value {
             Value::Struct(s) => (s.shape.type_id, &s.shape.name),
             Value::Enum { def, .. } => (def.type_id, &def.name),
-            // `impl Describe for Vec<String>` only exists when some impl
-            // targets an undeclared type.
+            // `impl Describe for Vec<String>` only exists when some impl targets an undeclared type
             other => {
                 return self
                     .foreign
@@ -215,9 +212,8 @@ impl ImplTable {
         self.of_name(name)
     }
 
-    /// Keyed the way `impl_target` wrote it. An empty vec falls back to the
-    /// one `Vec<..>` impl when there is exactly one, an untagged integer to
-    /// the one integer impl.
+    /// Keyed the way `impl_target` wrote it. An empty vec falls back to the 1 `Vec<..>` impl when there
+    /// is exactly 1, an untagged integer to the 1 integer impl.
     fn of_builtin(&self, value: &Value, written: Option<&ScalarTy>) -> Option<&TypeMethods> {
         match value {
             Value::Vec(items) => {

@@ -1,6 +1,5 @@
-//! A binding inside a loop starts a new capture cell every iteration. The
-//! interpreter once kept the first cell, so later bindings read the value
-//! the closure left behind. Every binding form that can rerun is here.
+//! A binding inside a loop gets a new capture cell every iteration, later bindings must not see
+//! what the closure left in the old one. Every binding form that can rerun is here.
 
 fn opaque(value: i64) -> i64 {
     value
@@ -47,8 +46,8 @@ fn main() {
         }
     }
 
-    // A `DropCell` shifts every jump target past it, so these loops jump in
-    // every direction over the bindings that carry one.
+    // a `DropCell` shifts every jump target past it, so these loops jump in every direction over
+    // the bindings that carry one
     for step in 0..4i64 {
         if step % 2 == 0 {
             continue;

@@ -1,6 +1,5 @@
-//! The string payload behind `Value::Str`. `push` appends in place when
-//! this handle is the only one, so an append loop is linear. A shared
-//! buffer is copied once on the first append.
+//! The string payload behind `Value::Str`. `push` appends in place when this handle is the only one,
+//! so an append loop is linear. A shared buffer is copied once on the first append.
 
 use std::fmt::{self, Debug, Display};
 use std::hash::{Hash, Hasher};
@@ -66,7 +65,7 @@ impl PartialEq for RsStr {
 
 impl Eq for RsStr {}
 
-/// Hashes as the bare `str` so a key hashes the same however built.
+/// Hashes as the bare `str` so a key hashes the same however it was built.
 impl Hash for RsStr {
     fn hash<H: Hasher>(&self, state: &mut H) {
         (**self).hash(state);

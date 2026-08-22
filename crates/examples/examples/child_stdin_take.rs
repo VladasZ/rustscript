@@ -1,7 +1,7 @@
 #!/usr/bin/env rust
 
-// Guards the hidden stdin alias in `spawn_command`. Without it this
-// deadlocks in `wait_with_output` with `cat` waiting for input forever.
+// Guards the hidden stdin alias in `spawn_command`. Without it this deadlocks in
+// `wait_with_output` with `cat` waiting for input forever.
 
 use std::io::Write;
 use std::process::{Command, Stdio};

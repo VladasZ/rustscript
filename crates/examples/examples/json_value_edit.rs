@@ -1,12 +1,11 @@
 #!/usr/bin/env rust
 
-// The mut accessors hand back the real container, so an insert through one
-// lands in the value it was taken from. Whole objects are printed only with
-// keys in alphabetical order, since serde_json sorts them.
+// The mut accessors hand back the real container, so an insert through one lands in the value it was
+// taken from. Whole objects are printed only with keys in alphabetical order, serde_json sorts them.
 
 use serde_json::Value;
 
-// The shape every real caller has.
+// the shape every real caller has
 fn tag(value: &mut Value, console: &str) {
     if let Some(object) = value.as_object_mut() {
         object.insert("console".to_string(), Value::String(console.to_string()));
@@ -25,8 +24,7 @@ fn main() {
         request.get("timeout_ms").unwrap().as_i64().unwrap()
     );
 
-    // A second insert through a fresh handle proves the first one changed the
-    // value and not a copy.
+    // a second insert through a fresh handle proves the first one changed the value and not a copy
     if let Some(object) = request.as_object_mut() {
         object.insert("newline".to_string(), Value::Bool(true));
         object.insert("retries".to_string(), Value::Number(2.into()));
@@ -41,7 +39,7 @@ fn main() {
         request.get("retries").unwrap().as_i64().unwrap()
     );
 
-    // The array side.
+    // the array side
     let mut list: Value = serde_json::from_str(r#"["a","b"]"#).unwrap();
     if let Some(items) = list.as_array_mut() {
         items.push(Value::String("c".to_string()));
@@ -49,7 +47,7 @@ fn main() {
     println!("list {}", serde_json::to_string(&list).unwrap());
     println!("len {}", list.as_array().unwrap().len());
 
-    // A wrong type accessor is None, the mut ones too.
+    // a wrong type accessor is None, the mut ones too
     println!("object as array {}", list.as_object_mut().is_none());
     println!("array as object {}", request.as_array_mut().is_none());
     println!("null as object {}", Value::Null.as_object_mut().is_none());
@@ -60,7 +58,7 @@ fn main() {
     }
     println!("stamped {}", serde_json::to_string(&stamped).unwrap());
 
-    // Built from parts.
+    // built from parts
     let built = Value::Array(vec![Value::String("x".to_string()), Value::Bool(false)]);
     println!("built {}", serde_json::to_string(&built).unwrap());
 }

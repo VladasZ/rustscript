@@ -11,10 +11,10 @@ fn scores() -> HashMap<String, i64> {
 }
 
 fn main() {
-    // Through the return type.
+    // through the return type
     let mut tally = scores();
 
-    // `+=` through the entry API lands in the map.
+    // `+=` through the entry API lands in the map
     *tally.entry(String::from("ada")).or_insert(0) += 10;
     *tally.entry(String::from("eve")).or_insert(7) += 1;
     *tally.entry(String::from("bob")).or_insert_with(|| 100) -= 2;
@@ -26,7 +26,7 @@ fn main() {
     lines.sort();
     println!("{}", lines.join(","));
 
-    // Sorted so the print order is deterministic.
+    // sorted so the print order is deterministic
     let mut names: Vec<String> = scores().into_keys().collect();
     names.sort();
     println!("{names:?}");
@@ -34,7 +34,7 @@ fn main() {
     points.sort_unstable();
     println!("{points:?}");
 
-    // Through a `let` annotation and a turbofish.
+    // through a `let` annotation and a turbofish
     let squares: HashMap<i64, i64> = vec![1i64, 2, 3].into_iter().map(|n| (n, n * n)).collect();
     println!("{:?}", squares.get(&3));
     let doubled = vec![4i64, 5]

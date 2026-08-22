@@ -1,7 +1,7 @@
 #!/usr/bin/env rust
 
-//! Conformance program for multifile scripts. The test compiles it with cargo,
-//! runs it through the interpreter and asserts identical output.
+//! Conformance program for multifile scripts. The test compiles it with cargo, runs it through
+//! the interpreter and asserts identical output.
 
 mod data;
 mod geometry;

@@ -1,5 +1,5 @@
-//! A length is a real `usize`. `!vec.len()` once answered a small negative
-//! i64 instead of a huge unsigned. From seed 20675317577.
+//! A length is a real `usize`, so `!vec.len()` is a huge unsigned and not a small negative i64.
+//! Seed 20675317577.
 
 fn opaque(v: u64) -> u64 {
     v

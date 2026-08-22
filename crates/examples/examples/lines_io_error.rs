@@ -1,6 +1,6 @@
 #!/usr/bin/env rust
 
-// A failing `lines()` item answers a structured `std::io::Error`.
+// A failing `lines()` item gives a structured `std::io::Error`.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, ErrorKind, Write};

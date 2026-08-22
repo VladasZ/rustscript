@@ -1,6 +1,5 @@
-//! The ratatui bridge, widget side. `Widget::render` rebuilds real widgets
-//! from the script values and lets ratatui draw them, so the output matches
-//! the compiled file.
+//! The ratatui bridge, widget side. `Widget::render` rebuilds real widgets from the script values and
+//! lets ratatui draw them, so the output matches the compiled file.
 
 use std::sync::Arc;
 
@@ -284,7 +283,7 @@ pub(super) fn sparkline_method(s: &StructData, name: &MethodName, args: &[Value]
 
 pub(super) fn buffer_method(s: &StructData, name: &MethodName, args: &[Value]) -> Result<Value> {
     Ok(match name.id {
-        // In place, cloning the buffer per lookup makes drawing quadratic.
+        // in place, cloning the buffer per lookup makes drawing quadratic
         BuiltinId::Cell => {
             let (x, y) = coords(args.first());
             let area = s
@@ -448,8 +447,7 @@ fn build_sparkline(s: &StructData) -> Sparkline<'static> {
     spark
 }
 
-/// The script buffer is refilled from a real ratatui buffer, so ratatui
-/// decides every cell.
+/// The script buffer is refilled from a real ratatui buffer, so ratatui decides every cell.
 fn render_into(widget: &Value, area: &Value, target: &Value) -> Result<Value> {
     let Value::Struct(buffer) = target else {
         bail!("Widget::render expects a Buffer");

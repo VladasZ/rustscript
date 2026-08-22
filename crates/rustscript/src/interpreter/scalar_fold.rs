@@ -2,7 +2,7 @@
 
 use super::scalar_loop::{LOp, LTo, MAX_SLOTS, NO_SLOT};
 
-/// Jumps and discarded method results write none.
+/// Jumps and discarded method results write nothing.
 pub(super) fn op_write(op: &LOp) -> Option<u16> {
     match op {
         LOp::LoadUnit { dst }
@@ -43,8 +43,8 @@ pub(super) fn op_write(op: &LOp) -> Option<u16> {
     }
 }
 
-/// The conditional payload bindings of a `TestSome` or `TestVariant`, so
-/// the write counting stays honest.
+/// The conditional payload bindings of a `TestSome` or `TestVariant`, so the write counting stays
+/// correct.
 pub(super) fn op_write_extras(op: &LOp, mut write: impl FnMut(u16)) {
     match op {
         LOp::TestSome { bind, .. } => write(*bind),
@@ -162,10 +162,9 @@ fn set_write(op: &mut LOp, to: u16) {
     }
 }
 
-/// Fold `op -> Move` pairs through a temporary written once and read once.
-/// The compiler never reuses a register, so the op can write the move's
-/// destination directly. Also drops constant loads nothing reads. Runs to a
-/// fixpoint.
+/// Fold `op -> Move` pairs through a temporary written once and read once. The compiler never reuses
+/// a register, so the op can write the move destination directly. Also drops constant loads
+/// nothing reads. Runs to a fixpoint.
 pub(super) fn fold_moves(
     ops: &mut Vec<LOp>,
     val_slot: u16,
@@ -214,8 +213,7 @@ pub(super) fn fold_moves(
             remove_op(ops, at + 1);
             continue;
         }
-        // A constant load nothing reads is a dead store. Jumps that targeted
-        // it run its successor.
+        // a constant load nothing reads is a dead store, jumps that targeted it run its successor
         let dead = |i: &usize| {
             let op = &ops[*i];
             let constant = matches!(

@@ -1,5 +1,5 @@
-// Float formatting and comparison. The values cover negative zero, rounding
-// bait, extremes, subnormals, NaN and the special constants.
+// Float formatting and comparison. Negative zero, rounding bait, extremes, subnormals, NaN and
+// the special constants.
 
 fn main() {
     let values: [f64; 16] = [

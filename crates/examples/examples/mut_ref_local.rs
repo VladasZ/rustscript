@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-// `*r += 10` on a borrowed scalar once panicked with "assignment through a
-// non-reference value".
+// `*r += 10` on a borrowed scalar.
 
 fn main() {
     let mut a = 1;

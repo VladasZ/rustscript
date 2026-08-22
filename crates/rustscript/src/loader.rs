@@ -1,6 +1,5 @@
-//! Loads every module a script pulls in through `mod` with the `rustc`
-//! directory rules. Local `path` crates are grafted in as top level modules,
-//! the checker sees them as real path dependencies.
+//! Loads every module a script pulls in with `mod`, same directory rules as `rustc`.
+//! Local `path` crates are grafted in as top level modules. The checker adds them as real path deps.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -11,29 +10,29 @@ use syn::{Item, LitStr};
 
 pub struct ModuleSrc {
     pub path: Vec<String>,
-    /// `mod` declarations are already expanded away.
+    /// `mod` declarations are already expanded away
     pub items: Vec<Item>,
-    /// Inline modules carry their parent's file. Shown in error traces.
+    /// Inline modules keep the parent file. Shown in error traces.
     pub file: Arc<str>,
-    /// `crate::` pins here and `super` must not walk past it.
+    /// `crate::` stops here and `super` must not go past it
     pub crate_root: bool,
 }
 
 pub struct CrateDep {
-    /// Also the top level module it grafts as.
+    /// also the name of the top level module it becomes
     pub name: String,
     pub dir: PathBuf,
-    /// Kept only so a change re-triggers the check.
+    /// only here so a change re-triggers the check
     pub files: Vec<(PathBuf, String)>,
 }
 
 pub struct Program {
-    /// Root first, then discovery order, then grafted crates.
+    /// root first, then discovery order, then grafted crates
     pub modules: Vec<ModuleSrc>,
-    /// The root script is first under its own name so diagnostics show it.
+    /// the root script goes first under its own name so diagnostics show it
     pub files: Vec<(PathBuf, String)>,
     pub crate_deps: Vec<CrateDep>,
-    /// `fn main` carries `#[tokio::main]`.
+    /// `fn main` has `#[tokio::main]`
     pub tokio_main: bool,
 }
 
@@ -65,7 +64,7 @@ pub fn load(script_path: &Path, root_source: &str) -> Result<Program> {
     })
 }
 
-/// An extensionless name falls back to `main.rs` so cargo builds it.
+/// No extension means `main.rs`, so cargo can build it.
 fn root_file_name(script_path: &Path) -> String {
     match script_path.file_name().and_then(|n| n.to_str()) {
         Some(name) if Path::new(name).extension() == Some(OsStr::new("rs")) => name.to_string(),
@@ -73,7 +72,7 @@ fn root_file_name(script_path: &Path) -> String {
     }
 }
 
-/// Only the multi thread runtime exists, so any explicit flavor is rejected.
+/// We only have the multi thread runtime, so an explicit flavor is rejected.
 fn detect_tokio_main(items: &[Item]) -> Result<bool> {
     for item in items {
         let Item::Fn(f) = item else { continue };
@@ -110,7 +109,7 @@ fn detect_tokio_main(items: &[Item]) -> Result<bool> {
     Ok(false)
 }
 
-/// Matched narrowly so `#[cfg(not(test))]` is still kept.
+/// Narrow on purpose, `#[cfg(not(test))]` has to stay.
 fn is_cfg_test(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|a| {
         a.path().is_ident("cfg")
@@ -134,11 +133,10 @@ fn item_attrs(item: &Item) -> &[syn::Attribute] {
     }
 }
 
-/// Real trees are a handful of levels, so this only ever catches a loop.
+/// Real trees are a few levels deep, this only catches a loop.
 const MAX_MODULE_DEPTH: usize = 64;
 
-/// Returns this module with its `mod` items stripped. Children are appended
-/// depth first.
+/// Returns this module without its `mod` items. Children are appended depth first.
 fn collect(
     modules: &mut Vec<ModuleSrc>,
     files: &mut Vec<(PathBuf, String)>,
@@ -148,10 +146,9 @@ fn collect(
     file: Arc<str>,
     items: Vec<Item>,
 ) -> Result<ModuleSrc> {
-    // A `#[path]` pointing at its own file once overflowed the native stack
-    // with a bare "fatal runtime error".
+    // A `#[path]` pointing at its own file overflows the native stack with a bare "fatal runtime error".
     if path.len() > MAX_MODULE_DEPTH {
-        // Only the tail, the full path is one segment repeated 60 times.
+        // only the tail, the full path is 1 segment repeated 60 times
         bail!(
             "module `{}` nests deeper than {MAX_MODULE_DEPTH} levels, which usually means a `#[path]` points back at its own file",
             path.last().map_or("", String::as_str)
@@ -160,8 +157,7 @@ fn collect(
     let mut kept = Vec::with_capacity(items.len());
     let mut seen: Vec<String> = Vec::new();
     for item in items {
-        // A `#[cfg(test)]` item never runs here, so skip its test only
-        // constructs.
+        // `#[cfg(test)]` items never run here, skip them
         if is_cfg_test(item_attrs(&item)) {
             continue;
         }
@@ -179,9 +175,8 @@ fn collect(
         seen.push(name.clone());
         let mut child_path = path.clone();
         child_path.push(name.clone());
-        // A `#[path]` file's own submodules resolve relative to that file's
-        // directory, like Rust does. This lets a bin keep its modules in a
-        // subdirectory so cargo does not treat each as a binary.
+        // Submodules of a `#[path]` file resolve relative to that file's dir, like in Rust.
+        // So a bin can keep its modules in a subdirectory and cargo doesn't treat each one as a binary.
         let path_attr = mod_path_attr(&m);
         let child_dir;
         let (child_items, child_file) = match m.content {
@@ -237,7 +232,7 @@ fn mod_path_attr(m: &syn::ItemMod) -> Option<String> {
     None
 }
 
-/// `name.rs` then `name/mod.rs`.
+/// `name.rs` first, then `name/mod.rs`.
 fn load_file(
     files: &mut Vec<(PathBuf, String)>,
     script_dir: &Path,
@@ -289,9 +284,9 @@ fn load_file_at(
     Ok((ast.items, display))
 }
 
-/// Whether the script's own sources name this crate. Grafting an unused one
-/// pulls its whole surface into `rust check`, which once rejected a script for
-/// methods only a helper library calls.
+/// Does the script itself name this crate. Grafting an unused one pulls its whole surface into
+/// `rust check`,
+/// which can reject a script for methods only a helper library calls.
 fn uses_crate(files: &[(PathBuf, String)], module_name: &str) -> bool {
     let needle = format!("{module_name}::");
     files.iter().any(|(_, source)| source.contains(&needle))
@@ -309,8 +304,7 @@ fn graft_crate_deps(
         if !lib.is_file() {
             continue;
         }
-        // `verify-common` is `verify_common` in `use`, the grafted module must
-        // match.
+        // `verify-common` is `verify_common` in `use`, the module must match
         let module_name = name.replace('-', "_");
         if !uses_crate(files, &module_name) {
             continue;
@@ -340,7 +334,7 @@ fn graft_crate_deps(
     Ok(deps)
 }
 
-/// The local `path` entries of the nearest `Cargo.toml`, as absolute dirs.
+/// Local `path` entries of the nearest `Cargo.toml`, as absolute dirs.
 fn local_path_deps(script_path: &Path) -> Vec<(String, PathBuf)> {
     let Some(manifest) = nearest_manifest(script_path) else {
         return Vec::new();
@@ -362,8 +356,8 @@ fn local_path_deps(script_path: &Path) -> Vec<(String, PathBuf)> {
             .and_then(|t| t.get("path"))
             .and_then(|p| p.as_str())
         {
-            // The checker writes this into a manifest under the cache dir, so
-            // a relative path would resolve against the wrong root.
+            // The checker writes this into a manifest under the cache dir, a relative path would
+            // point at the wrong root.
             let dir = manifest_dir.join(rel);
             let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
             out.push((name.clone(), dir));
@@ -372,7 +366,7 @@ fn local_path_deps(script_path: &Path) -> Vec<(String, PathBuf)> {
     out
 }
 
-/// Canonicalized first, so `rust kimai.rs` still walks up the real tree.
+/// Canonicalized first, so `rust kimai.rs` walks up the real tree and not the symlink.
 fn nearest_manifest(script_path: &Path) -> Option<PathBuf> {
     let absolute = std::fs::canonicalize(script_path).unwrap_or_else(|_| script_path.to_path_buf());
     let mut dir = absolute.parent();

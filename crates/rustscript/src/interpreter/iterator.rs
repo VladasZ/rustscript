@@ -1,22 +1,16 @@
-//! Lazy, stateful iterators. An iterator is a shared native handle, so
-//! `by_ref`, `peekable` and open ended ranges keep their real semantics.
+//! Lazy, stateful iterators. An iterator is a shared native handle, so `by_ref`, `peekable` and
+//! open ended ranges keep their real semantics.
 
 use num_traits::AsPrimitive;
-use std::slice::from_ref;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
 use parking_lot::Mutex;
 
-use super::bridge::arg;
-use super::bytecode::{BuiltinId, MethodName, ScalarTy};
+use super::bytecode::ScalarTy;
 use super::native::Native;
-use super::ops::compare_values;
 use super::regex_bridge::{CapturesValue, MatchValue, RegexValue};
-use super::scalar_chain::{ChainReduce, try_reduce};
-use super::shared::usize_i64;
-use super::value::{ClosureData, List, MapKind, RsStr, Value, ValueRef};
-use super::vm::Vm;
+use super::value::{ClosureData, List, RsStr, Value, ValueRef};
 
 type Handle = Arc<Mutex<Native>>;
 
@@ -29,13 +23,12 @@ pub enum IteratorState {
         values: List,
         index: usize,
     },
-    /// A user type with its own `Iterator` impl. Each pull calls its `next`.
+    /// a user type with its own `Iterator` impl, each pull calls its `next`
     UserNext {
         value: Value,
     },
-    /// A `by_ref` borrow of an eager vector. It takes from the front of the
-    /// shared vector, so whatever it hands out is gone from the borrowed one
-    /// too.
+    /// A `by_ref` borrow of an eager vector. It takes from the front of the shared vector, so
+    /// whatever it hands out is gone from the borrowed one too.
     DrainingValues {
         values: List,
     },
@@ -74,12 +67,12 @@ pub enum IteratorState {
         source: RsStr,
         offset: usize,
     },
-    /// `a.zip(b)`.
+    /// `a.zip(b)`
     Zip {
         left: Handle,
         right: Handle,
     },
-    /// `a.chain(b)`.
+    /// `a.chain(b)`
     Chain {
         left: Handle,
         right: Handle,
@@ -109,7 +102,7 @@ pub enum IteratorState {
         source: Handle,
         remaining: usize,
     },
-    /// `step_by`.
+    /// `step_by`
     StepBy {
         source: Handle,
         step: usize,
@@ -125,7 +118,7 @@ pub enum IteratorState {
         closure: Arc<ClosureData>,
         skipping: bool,
     },
-    /// `peekable`, holds at most one item pulled early by `peek`.
+    /// `peekable`, holds at most 1 item pulled early by `peek`
     Peekable {
         source: Handle,
         buffered: Option<Value>,
@@ -140,8 +133,7 @@ enum Step {
     FilterMap(Handle, Arc<ClosureData>),
     Enumerate(Handle, usize),
     Zip(Handle, Handle),
-    /// The state remembers when the left answered `None`, so it is never
-    /// asked again.
+    /// the bool remembers that the left side returned `None`, so it is never asked again
     Chain(Handle, Handle, bool),
     Take(Handle),
     Skip(Handle, usize),
@@ -172,8 +164,8 @@ pub(super) fn draining_iter(items: List) -> Value {
     wrap(IteratorState::DrainingValues { values: items })
 }
 
-/// `peekable` on an eager vector. The buffer sits over a draining view, so
-/// `peek` agrees with what `by_ref` on the same vector would hand out.
+/// `peekable` on an eager vector. The buffer sits over a draining view, so `peek` agrees with
+/// what `by_ref` on the same vector would hand out.
 pub(super) fn peekable_draining(items: List) -> Value {
     let source = Arc::new(Mutex::new(Native::Iterator(
         IteratorState::DrainingValues { values: items },
@@ -243,8 +235,7 @@ fn next_line(source: &str, offset: &mut usize) -> Option<Value> {
     Some(Value::str(line))
 }
 
-/// Shared by the generic step and the scalar for plan, so both walk the
-/// source identically.
+/// Shared by the generic step and the scalar for plan, so both walk the source the same way.
 pub(super) fn next_word_span(source: &str, offset: &mut usize) -> Option<(usize, usize)> {
     let rest = &source[*offset..];
     let word = rest.split_whitespace().next()?;
@@ -274,8 +265,8 @@ pub(super) enum FastNext {
 }
 
 impl IteratorState {
-    /// Produced in place for the simple sources, so a tight loop skips the
-    /// full `iterator_next` machinery.
+    /// Produced in place for the simple sources, so a tight loop skips the full `iterator_next`
+    /// machinery.
     pub(super) fn fast_next(&mut self) -> FastNext {
         FastNext::Ready(match self {
             IteratorState::Range {
@@ -289,7 +280,7 @@ impl IteratorState {
         })
     }
 
-    /// The adaptors with their own state.
+    /// the adaptors with their own state
     fn step_adaptor(&mut self) -> Step {
         match self {
             IteratorState::StepBy {
@@ -436,8 +427,7 @@ fn range_step(next: &mut i64, end: i64, inclusive: bool) -> Option<Value> {
     }
 }
 
-/// Shared by the generic step and the scalar for plan, so both walk the
-/// source identically.
+/// Shared by the generic step and the scalar for plan, so both walk the source the same way.
 pub(super) fn regex_find_span(
     regex: &RegexValue,
     source: &str,
@@ -502,671 +492,6 @@ fn lines_next(handle: &Handle) -> Option<Value> {
     }
 }
 
-impl Vm {
-    /// The receiver mutates in place through its `&mut self`.
-    fn call_user_next(self: &Arc<Self>, value: &Value) -> Result<Value> {
-        let Some(chunk) = self
-            .impls
-            .of_value(value)
-            .and_then(|methods| methods.next.clone())
-        else {
-            bail!("{} is not an iterator", value.type_name());
-        };
-        self.run_chunk(&chunk, from_ref(value), &[])
-    }
-
-    pub(super) fn has_user_next(&self, value: &Value) -> bool {
-        self.impls
-            .of_value(value)
-            .is_some_and(|methods| methods.next.is_some())
-    }
-
-    pub(super) fn iterator_value(self: &Arc<Self>, value: Value) -> Result<Value> {
-        if self.has_user_next(&value) {
-            return Ok(wrap(IteratorState::UserNext { value }));
-        }
-        Ok(match value {
-            Value::Native(native)
-                if matches!(&*native.lock(), Native::Iterator(_) | Native::Lines(_)) =>
-            {
-                Value::Native(native)
-            }
-            Value::Vec(values) | Value::Tuple(values) => value_iter(values),
-            Value::Map(map, kind) => {
-                let map = map.lock();
-                let owned = match kind {
-                    MapKind::Map => map
-                        .iter()
-                        .map(|(k, v)| Value::tuple(vec![k.to_value(), v.clone()]))
-                        .collect(),
-                    MapKind::Set => map.keys().map(super::value::MapKey::to_value).collect(),
-                };
-                wrap(IteratorState::Owned {
-                    values: owned,
-                    index: 0,
-                })
-            }
-            Value::Range {
-                start,
-                end,
-                inclusive,
-            } => wrap(IteratorState::Range {
-                next: start,
-                end,
-                inclusive,
-            }),
-            Value::Str(source) => chars(source),
-            other => bail!("{} is not iterable", other.type_name()),
-        })
-    }
-
-    fn skip_then_next(self: &Arc<Self>, source: &Handle, count: usize) -> Result<Option<Value>> {
-        for _ in 0..count {
-            if self.iterator_next(source)?.is_none() {
-                return Ok(None);
-            }
-        }
-        self.iterator_next(source)
-    }
-
-    fn zip_next(self: &Arc<Self>, left: &Handle, right: &Handle) -> Result<Option<Value>> {
-        let Some(first) = self.iterator_next(left)? else {
-            return Ok(None);
-        };
-        let Some(second) = self.iterator_next(right)? else {
-            return Ok(None);
-        };
-        Ok(Some(Value::tuple(vec![first, second])))
-    }
-
-    fn chain_next(
-        self: &Arc<Self>,
-        iterator: &Handle,
-        left: &Handle,
-        right: &Handle,
-        left_done: bool,
-    ) -> Result<Option<Value>> {
-        if !left_done {
-            if let Some(value) = self.iterator_next(left)? {
-                return Ok(Some(value));
-            }
-            if let Native::Iterator(IteratorState::Chain { left_done, .. }) = &mut *iterator.lock()
-            {
-                *left_done = true;
-            }
-        }
-        self.iterator_next(right)
-    }
-
-    pub(super) fn iterator_next(self: &Arc<Self>, iterator: &Handle) -> Result<Option<Value>> {
-        if matches!(&*iterator.lock(), Native::Lines(_)) {
-            return Ok(lines_next(iterator));
-        }
-        let step = {
-            let mut native = iterator.lock();
-            let Native::Iterator(state) = &mut *native else {
-                bail!("{} is not an iterator", native.type_name());
-            };
-            state.step()
-        };
-        match step {
-            Step::Ready(value) => Ok(value),
-            Step::User(value) => {
-                let out = self.call_user_next(&value)?;
-                Ok(out.some_payload())
-            }
-            Step::Map(source, closure) => match self.iterator_next(&source)? {
-                Some(value) => Ok(Some(self.call_closure_data(&closure, &[value])?)),
-                None => Ok(None),
-            },
-            Step::Filter(source, closure) => loop {
-                let Some(value) = self.iterator_next(&source)? else {
-                    return Ok(None);
-                };
-                if self
-                    .call_closure_data(&closure, from_ref(&value))?
-                    .is_truthy()
-                {
-                    return Ok(Some(value));
-                }
-            },
-            Step::FilterMap(source, closure) => loop {
-                let Some(value) = self.iterator_next(&source)? else {
-                    return Ok(None);
-                };
-                if let Some(inner) = option_inner(&self.call_closure_data(&closure, &[value])?) {
-                    return Ok(Some(inner));
-                }
-            },
-            Step::Enumerate(source, index) => Ok(self
-                .iterator_next(&source)?
-                .map(|value| Value::tuple(vec![Value::Int(usize_i64(index)), value]))),
-            Step::Zip(left, right) => self.zip_next(&left, &right),
-            Step::Chain(left, right, left_done) => {
-                self.chain_next(iterator, &left, &right, left_done)
-            }
-            Step::Take(source) => self.iterator_next(&source),
-            Step::Stride(source, count) | Step::Skip(source, count) => {
-                self.skip_then_next(&source, count)
-            }
-            Step::TakeWhile(source, closure) => {
-                let Some(value) = self.iterator_next(&source)? else {
-                    return Ok(None);
-                };
-                if self
-                    .call_closure_data(&closure, from_ref(&value))?
-                    .is_truthy()
-                {
-                    Ok(Some(value))
-                } else {
-                    if let Native::Iterator(IteratorState::TakeWhile { done, .. }) =
-                        &mut *iterator.lock()
-                    {
-                        *done = true;
-                    }
-                    Ok(None)
-                }
-            }
-            Step::SkipWhile(source, closure, skipping) => {
-                let mut still_skipping = skipping;
-                loop {
-                    let Some(value) = self.iterator_next(&source)? else {
-                        return Ok(None);
-                    };
-                    if !still_skipping
-                        || !self
-                            .call_closure_data(&closure, from_ref(&value))?
-                            .is_truthy()
-                    {
-                        if still_skipping
-                            && let Native::Iterator(IteratorState::SkipWhile { skipping, .. }) =
-                                &mut *iterator.lock()
-                        {
-                            *skipping = false;
-                        }
-                        return Ok(Some(value));
-                    }
-                    still_skipping = true;
-                }
-            }
-        }
-    }
-
-    pub(super) fn call_closure_data(
-        self: &Arc<Self>,
-        clo: &Arc<ClosureData>,
-        args: &[Value],
-    ) -> Result<Value> {
-        self.run_chunk(&clo.chunk, args, &clo.captured)
-    }
-
-    pub(super) fn drain_items(self: &Arc<Self>, value: Value) -> Result<Vec<Value>> {
-        let Value::Native(iterator) = self.iterator_value(value)? else {
-            unreachable!();
-        };
-        let mut items = Vec::new();
-        while let Some(item) = self.iterator_next(&iterator)? {
-            items.push(item);
-        }
-        Ok(items)
-    }
-
-    /// `None` when the handle is not a peekable.
-    fn peek(self: &Arc<Self>, iterator: &Handle) -> Result<Option<Value>> {
-        let (buffered, source) = match &*iterator.lock() {
-            Native::Iterator(IteratorState::Peekable { buffered, source }) => {
-                (buffered.clone(), source.clone())
-            }
-            _ => return Ok(None),
-        };
-        if let Some(item) = buffered {
-            return Ok(Some(Value::some(item)));
-        }
-        let item = self.iterator_next(&source)?;
-        if let Native::Iterator(IteratorState::Peekable { buffered, .. }) = &mut *iterator.lock() {
-            buffered.clone_from(&item);
-        }
-        Ok(Some(match item {
-            Some(item) => Value::some(item),
-            None => Value::none(),
-        }))
-    }
-
-    fn iterator_count(self: &Arc<Self>, iterator: &Handle) -> Result<Value> {
-        if let Some(v) = try_reduce(self, iterator, &ChainReduce::Count)? {
-            return Ok(v);
-        }
-        let mut count: usize = 0;
-        while self.iterator_next(iterator)?.is_some() {
-            count += 1;
-        }
-        Ok(super::shared::usize_value(count))
-    }
-
-    fn iterator_last(self: &Arc<Self>, iterator: &Handle) -> Result<Value> {
-        let mut last = None;
-        while let Some(item) = self.iterator_next(iterator)? {
-            last = Some(item);
-        }
-        Ok(last.map_or_else(Value::none, Value::some))
-    }
-
-    /// `b` is any value that iterates.
-    fn zip_or_chain(
-        self: &Arc<Self>,
-        iterator: &Handle,
-        method: &MethodName,
-        args: &[Value],
-    ) -> Result<Value> {
-        let other = args
-            .first()
-            .cloned()
-            .ok_or_else(|| anyhow!("{} takes an iterator", method.text))?;
-        let Value::Native(right) = self.iterator_value(other)? else {
-            bail!("{} takes an iterator", method.text);
-        };
-        Ok(if method.id == BuiltinId::Zip {
-            wrap(IteratorState::Zip {
-                left: iterator.clone(),
-                right,
-            })
-        } else {
-            wrap(IteratorState::Chain {
-                left: iterator.clone(),
-                right,
-                left_done: false,
-            })
-        })
-    }
-
-    pub(super) fn iterator_method(
-        self: &Arc<Self>,
-        iterator: &Handle,
-        method: &MethodName,
-        args: &[Value],
-    ) -> Result<Option<Value>> {
-        let scalar = method.scalar.as_ref();
-        let value = match method.id {
-            BuiltinId::Enumerate => wrap(IteratorState::Enumerate {
-                source: iterator.clone(),
-                index: 0,
-            }),
-            BuiltinId::Zip | BuiltinId::Chain => self.zip_or_chain(iterator, method, args)?,
-            BuiltinId::Take => wrap(IteratorState::Take {
-                source: iterator.clone(),
-                remaining: usize::try_from(int_arg(args)?)?,
-            }),
-            BuiltinId::Skip => wrap(IteratorState::Skip {
-                source: iterator.clone(),
-                remaining: usize::try_from(int_arg(args)?)?,
-            }),
-            BuiltinId::StepBy => {
-                let step = usize::try_from(int_arg(args)?)?;
-                if step == 0 {
-                    bail!("assertion failed: step != 0");
-                }
-                wrap(IteratorState::StepBy {
-                    source: iterator.clone(),
-                    step,
-                    first: true,
-                })
-            }
-            BuiltinId::Peekable => wrap(IteratorState::Peekable {
-                source: iterator.clone(),
-                buffered: None,
-            }),
-            // Iterators are shared handles, so handing the same one back is
-            // the `by_ref` borrow.
-            BuiltinId::Cloned | BuiltinId::Copied | BuiltinId::ByRef => {
-                Value::Native(iterator.clone())
-            }
-            BuiltinId::Next => self
-                .iterator_next(iterator)?
-                .map_or_else(Value::none, Value::some),
-            BuiltinId::Nth => {
-                let index = usize::try_from(int_arg(args)?)?;
-                let mut item = None;
-                for _ in 0..=index {
-                    item = self.iterator_next(iterator)?;
-                    if item.is_none() {
-                        break;
-                    }
-                }
-                item.map_or_else(Value::none, Value::some)
-            }
-            BuiltinId::Peek => match self.peek(iterator)? {
-                Some(v) => v,
-                None => return Ok(None),
-            },
-            BuiltinId::Count => self.iterator_count(iterator)?,
-            // Every iterator is driven forwards, so `last` drains to the end.
-            BuiltinId::Last | BuiltinId::NextBack => self.iterator_last(iterator)?,
-            BuiltinId::Sum => match try_reduce(self, iterator, &ChainReduce::Sum(scalar))? {
-                Some(v) => v,
-                None => self.iterator_sum(iterator, scalar)?,
-            },
-            BuiltinId::Product => self.iterator_product(iterator, scalar)?,
-            BuiltinId::Max | BuiltinId::Min => self.iterator_extreme(iterator, method.id)?,
-            BuiltinId::Collect | BuiltinId::ToVec => Value::vec(self.drain_iterator(iterator)?),
-            BuiltinId::CollectString => Value::str(
-                self.drain_iterator(iterator)?
-                    .iter()
-                    .map(Value::display)
-                    .collect::<String>(),
-            ),
-            BuiltinId::CollectMap => super::vecmap::collect_map(self.drain_iterator(iterator)?)?,
-            BuiltinId::CollectSet => super::vecmap::collect_set(self.drain_iterator(iterator)?)?,
-            BuiltinId::Rev => {
-                let mut items = self.drain_iterator(iterator)?;
-                items.reverse();
-                Value::vec(items)
-            }
-            // `Chars::as_str` is the unconsumed tail, the capitalize idiom.
-            // Only a char iterator still knows its source.
-            BuiltinId::AsStr => match &*iterator.lock() {
-                Native::Iterator(IteratorState::Chars { source, offset }) => {
-                    Value::str(source[*offset..].to_string())
-                }
-                _ => return Ok(None),
-            },
-            _ => return Ok(None),
-        };
-        Ok(Some(value))
-    }
-
-    pub(super) fn iterator_higher_order(
-        self: &Arc<Self>,
-        iterator: &Handle,
-        name: BuiltinId,
-        args: &[Value],
-    ) -> Result<Option<Value>> {
-        let closure = |index| as_closure(args.get(index));
-        let value = match name {
-            BuiltinId::Map => wrap(IteratorState::Map {
-                source: iterator.clone(),
-                closure: closure(0)?,
-            }),
-            BuiltinId::Filter => wrap(IteratorState::Filter {
-                source: iterator.clone(),
-                closure: closure(0)?,
-            }),
-            BuiltinId::FilterMap => wrap(IteratorState::FilterMap {
-                source: iterator.clone(),
-                closure: closure(0)?,
-            }),
-            BuiltinId::TakeWhile => wrap(IteratorState::TakeWhile {
-                source: iterator.clone(),
-                closure: closure(0)?,
-                done: false,
-            }),
-            BuiltinId::SkipWhile => wrap(IteratorState::SkipWhile {
-                source: iterator.clone(),
-                closure: closure(0)?,
-                skipping: true,
-            }),
-            BuiltinId::ForEach => {
-                let closure = closure(0)?;
-                while let Some(value) = self.iterator_next(iterator)? {
-                    self.call_closure_data(&closure, &[value])?;
-                }
-                Value::Unit
-            }
-            BuiltinId::FindMap => {
-                let closure = closure(0)?;
-                let mut found = Value::none();
-                while let Some(value) = self.iterator_next(iterator)? {
-                    if let Some(inner) = option_inner(&self.call_closure_data(&closure, &[value])?)
-                    {
-                        found = Value::some(inner);
-                        break;
-                    }
-                }
-                found
-            }
-            BuiltinId::Find
-            | BuiltinId::Position
-            | BuiltinId::Rposition
-            | BuiltinId::Any
-            | BuiltinId::All => {
-                let closure = closure(0)?;
-                let reduce = match name {
-                    BuiltinId::Any => Some(ChainReduce::Any(&closure)),
-                    BuiltinId::All => Some(ChainReduce::All(&closure)),
-                    _ => None,
-                };
-                if let Some(reduce) = reduce
-                    && let Some(v) = try_reduce(self, iterator, &reduce)?
-                {
-                    return Ok(Some(v));
-                }
-                return self.iterator_predicate(iterator, name, &closure).map(Some);
-            }
-            _ => return self.iterator_reduce_ho(iterator, name, args),
-        };
-        Ok(Some(value))
-    }
-
-    fn iterator_reduce_ho(
-        self: &Arc<Self>,
-        iterator: &Handle,
-        name: BuiltinId,
-        args: &[Value],
-    ) -> Result<Option<Value>> {
-        let closure = |index| as_closure(args.get(index));
-        let value = match name {
-            BuiltinId::Fold => {
-                let closure = closure(1)?;
-                let mut accumulator = arg(args, 0)?;
-                while let Some(value) = self.iterator_next(iterator)? {
-                    accumulator = self.call_closure_data(&closure, &[accumulator, value])?;
-                }
-                accumulator
-            }
-            BuiltinId::Reduce => {
-                let closure = closure(0)?;
-                let Some(mut accumulator) = self.iterator_next(iterator)? else {
-                    return Ok(Some(Value::none()));
-                };
-                while let Some(value) = self.iterator_next(iterator)? {
-                    accumulator = self.call_closure_data(&closure, &[accumulator, value])?;
-                }
-                Value::some(accumulator)
-            }
-            BuiltinId::FlatMap => {
-                let closure = closure(0)?;
-                let mut output = Vec::new();
-                while let Some(value) = self.iterator_next(iterator)? {
-                    let mapped = self.call_closure_data(&closure, &[value])?;
-                    output.extend(self.drain_items(mapped)?);
-                }
-                Value::vec(output)
-            }
-            BuiltinId::Flatten => {
-                let mut output = Vec::new();
-                while let Some(value) = self.iterator_next(iterator)? {
-                    output.extend(self.drain_items(value)?);
-                }
-                Value::vec(output)
-            }
-            BuiltinId::Partition => {
-                let closure = closure(0)?;
-                let (mut yes, mut no) = (Vec::new(), Vec::new());
-                while let Some(value) = self.iterator_next(iterator)? {
-                    if self
-                        .call_closure_data(&closure, from_ref(&value))?
-                        .is_truthy()
-                    {
-                        yes.push(value);
-                    } else {
-                        no.push(value);
-                    }
-                }
-                Value::tuple(vec![Value::vec(yes), Value::vec(no)])
-            }
-            BuiltinId::MaxByKey | BuiltinId::MinByKey => {
-                let closure = closure(0)?;
-                let mut best: Option<(Value, Value)> = None;
-                while let Some(value) = self.iterator_next(iterator)? {
-                    let key = self.call_closure_data(&closure, from_ref(&value))?;
-                    let take = match &best {
-                        None => true,
-                        Some((best_key, _)) => {
-                            let order = compare_values(&key, best_key)?;
-                            if name == BuiltinId::MaxByKey {
-                                order.is_ge()
-                            } else {
-                                order.is_lt()
-                            }
-                        }
-                    };
-                    if take {
-                        best = Some((key, value));
-                    }
-                }
-                best.map_or_else(Value::none, |(_, value)| Value::some(value))
-            }
-            _ => return Ok(None),
-        };
-        Ok(Some(value))
-    }
-
-    fn drain_iterator(self: &Arc<Self>, iterator: &Handle) -> Result<Vec<Value>> {
-        let mut values = Vec::new();
-        while let Some(value) = self.iterator_next(iterator)? {
-            values.push(value);
-        }
-        Ok(values)
-    }
-
-    fn iterator_sum(
-        self: &Arc<Self>,
-        iterator: &Handle,
-        target: Option<&ScalarTy>,
-    ) -> Result<Value> {
-        let items = self.drain_iterator(iterator)?;
-        sum_values(items, target)
-    }
-
-    fn iterator_product(
-        self: &Arc<Self>,
-        iterator: &Handle,
-        target: Option<&ScalarTy>,
-    ) -> Result<Value> {
-        // i128 for the same reason as `sum_values`. A `product::<u16>()`
-        // overflows at the target width.
-        let mut integers = 1i128;
-        let mut floats = 1f64;
-        let mut has_float = false;
-        let mut has_int = false;
-        let (mut low, mut high) = match target {
-            Some(ScalarTy::Int(width)) => (width.min(), width.max()),
-            _ => (i128::from(i64::MIN), i128::from(i64::MAX)),
-        };
-        let mut bounded = matches!(target, Some(ScalarTy::Int(_)));
-        let mut seen_width = None;
-        while let Some(value) = self.iterator_next(iterator)? {
-            if let Some((value, width)) = value.int_parts() {
-                // See `sum_values`.
-                if !bounded {
-                    (low, high) = (width.min(), width.max());
-                    bounded = true;
-                    seen_width = Some(width);
-                }
-                has_int = true;
-                integers = integers
-                    .checked_mul(value)
-                    .ok_or_else(|| anyhow!("attempt to multiply with overflow"))?;
-                if integers < low || integers > high {
-                    bail!("attempt to multiply with overflow");
-                }
-                continue;
-            }
-            match value.bridge_image().unwrap_or(value) {
-                Value::Float(value) => {
-                    floats *= value;
-                    has_float = true;
-                }
-                other => bail!("product needs numbers, got {}", other.type_name()),
-            }
-        }
-        // Only a `product::<f64>()` turbofish tells an empty float product
-        // from an integer one.
-        let float_target = matches!(target, Some(ScalarTy::F32 | ScalarTy::F64));
-        Ok(if has_float || (float_target && !has_int) {
-            let total = floats * AsPrimitive::<f64>::as_(integers);
-            if matches!(target, Some(ScalarTy::F32)) {
-                Value::F32(AsPrimitive::<f32>::as_(total))
-            } else {
-                Value::Float(total)
-            }
-        } else if let Some(ScalarTy::Int(width)) = target {
-            // An untagged result once made `product::<u16>().checked_mul(..)`
-            // miss its overflow.
-            Value::int_of_width(integers, *width)
-        } else if let Some(width) = seen_width {
-            Value::int_of_width(integers, width)
-        } else {
-            Value::Int(i64::try_from(integers).expect("product is range-checked per step"))
-        })
-    }
-
-    fn iterator_extreme(self: &Arc<Self>, iterator: &Handle, name: BuiltinId) -> Result<Value> {
-        let mut best: Option<Value> = None;
-        while let Some(value) = self.iterator_next(iterator)? {
-            let take = match &best {
-                None => true,
-                Some(current) => {
-                    let order = compare_values(&value, current)?;
-                    if name == BuiltinId::Max {
-                        order.is_gt()
-                    } else {
-                        order.is_lt()
-                    }
-                }
-            };
-            if take {
-                best = Some(value);
-            }
-        }
-        Ok(best.map_or_else(Value::none, Value::some))
-    }
-
-    fn iterator_predicate(
-        self: &Arc<Self>,
-        iterator: &Handle,
-        name: BuiltinId,
-        closure: &Arc<ClosureData>,
-    ) -> Result<Value> {
-        let mut index = 0;
-        // `rposition` walks to the end and keeps the last match, the same
-        // index without a reversible iterator.
-        let mut last_match = None;
-        while let Some(value) = self.iterator_next(iterator)? {
-            let matches = self
-                .call_closure_data(closure, from_ref(&value))?
-                .is_truthy();
-            match name {
-                BuiltinId::Find if matches => return Ok(Value::some(value)),
-                BuiltinId::Position if matches => return Ok(Value::some(Value::Int(index))),
-                BuiltinId::Rposition if matches => last_match = Some(index),
-                BuiltinId::Any if matches => return Ok(Value::Bool(true)),
-                BuiltinId::All if !matches => return Ok(Value::Bool(false)),
-                _ => {}
-            }
-            index += 1;
-        }
-        Ok(match name {
-            BuiltinId::Find | BuiltinId::Position => Value::none(),
-            BuiltinId::Rposition => {
-                last_match.map_or_else(Value::none, |i| Value::some(Value::Int(i)))
-            }
-            BuiltinId::Any => Value::Bool(false),
-            BuiltinId::All => Value::Bool(true),
-            _ => unreachable!(),
-        })
-    }
-}
-
 fn int_arg(args: &[Value]) -> Result<i64> {
     match args.first() {
         Some(Value::Int(value)) if *value >= 0 => Ok(*value),
@@ -1176,12 +501,12 @@ fn int_arg(args: &[Value]) -> Result<i64> {
 
 /// Shared by the lazy and the eager path so both agree on every width.
 pub(super) fn sum_values(items: Vec<Value>, target: Option<&ScalarTy>) -> Result<Value> {
-    // i128 so a `u64` element past `i64::MAX` keeps its value.
+    // i128 so a `u64` element past `i64::MAX` keeps its value
     let mut integers = 0i128;
-    // `Sum` for floats starts at -0.0, so negative zeros keep the sign.
+    // `Sum` for floats starts at -0.0, so negative zeros keep the sign
     let mut floats = -0.0f64;
     let mut has_float = false;
-    // Without a target the first tagged element's width is the sum's.
+    // without a target the width of the first tagged element is the width of the sum
     let (mut low, mut high) = match target {
         Some(ScalarTy::Int(width)) => (width.min(), width.max()),
         _ => (i128::from(i64::MIN), i128::from(i64::MAX)),
@@ -1198,7 +523,7 @@ pub(super) fn sum_values(items: Vec<Value>, target: Option<&ScalarTy>) -> Result
             integers = integers
                 .checked_add(value)
                 .ok_or_else(|| anyhow!("attempt to add with overflow"))?;
-            // A `sum::<u8>()` overflows at 255.
+            // a `sum::<u8>()` overflows at 255
             if integers < low || integers > high {
                 bail!("attempt to add with overflow");
             }
@@ -1212,12 +537,10 @@ pub(super) fn sum_values(items: Vec<Value>, target: Option<&ScalarTy>) -> Result
             other => bail!("sum needs numbers, got {}", other.type_name()),
         }
     }
-    // Only a `sum::<f64>()` turbofish tells an empty float sum from an
-    // integer one.
+    // only a `sum::<f64>()` turbofish tells an empty float sum from an integer one
     let float_target = matches!(target, Some(ScalarTy::F32 | ScalarTy::F64));
     Ok(if has_float || (float_target && integers == 0) {
-        // The integer side only joins with a value, so it cannot cancel the
-        // -0.0 identity.
+        // the integer side only joins with a value, so it can't cancel the -0.0 identity
         let total = if integers == 0 {
             floats
         } else {
@@ -1229,7 +552,7 @@ pub(super) fn sum_values(items: Vec<Value>, target: Option<&ScalarTy>) -> Result
             Value::Float(total)
         }
     } else if let Some(ScalarTy::Int(width)) = target {
-        // An untagged zero once made `!0u16` answer -1.
+        // keep the tag, otherwise `!0u16` gives -1
         Value::int_of_width(integers, *width)
     } else if let Some(width) = seen_width {
         Value::int_of_width(integers, width)
@@ -1237,3 +560,6 @@ pub(super) fn sum_values(items: Vec<Value>, target: Option<&ScalarTy>) -> Result
         Value::Int(i64::try_from(integers).expect("sum is range-checked per step"))
     })
 }
+
+mod drive;
+mod reduce;

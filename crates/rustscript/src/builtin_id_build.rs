@@ -1,6 +1,6 @@
-//! Generates `BuiltinId` from `src/interpreter/method_names.txt` at build
-//! time. One name per line, sorted, with a trailing `mut` on a method that
-//! mutates its receiver. A typo in a bridge arm is a compile error.
+//! Generates `BuiltinId` from `src/interpreter/method_names.txt`.
+//! One name per line, sorted. A trailing `mut` marks a method that mutates its receiver.
+//! So a typo in a bridge arm is a compile error.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -45,7 +45,7 @@ pub fn read_table(path: &Path) -> Vec<MethodRow> {
     rows
 }
 
-/// `split_first` becomes `SplitFirst`.
+/// `split_first` -> `SplitFirst`
 pub fn camel(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for part in name.split('_') {
@@ -71,8 +71,9 @@ pub fn generate(rows: &[MethodRow]) -> String {
     out.push_str("    /// A name the table does not list, a user method or an error.\n");
     out.push_str("    Other,\n}\n\n");
 
-    // Variant order, so `NAMES[id as usize]` is the name and a binary search
-    // resolves a name. `Other` is last and owns the empty name.
+    // Same order as the variants, so `NAMES[id as usize]` gives the name and a binary search
+    // finds an id.
+    // `Other` is last and has the empty name.
     out.push_str("const NAMES: &[&str] = &[\n");
     for row in rows {
         let _ = writeln!(out, "    {:?},", row.name);

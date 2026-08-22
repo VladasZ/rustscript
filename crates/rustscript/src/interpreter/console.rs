@@ -1,6 +1,5 @@
-//! Decoding child process output. `Windows` console tools write in the
-//! console code page, so `from_utf8_lossy` mangled every non ASCII byte.
-//! UTF-8 is tried first, it is the right answer when it parses.
+//! Decoding child process output. `Windows` console tools write in the console code page, so
+//! `from_utf8_lossy` mangles every non ASCII byte. UTF-8 is tried first, if it parses it is right.
 
 /// Falls back to the console code page when the bytes are not UTF-8.
 pub(super) fn decode(bytes: &[u8]) -> String {
@@ -14,9 +13,8 @@ pub(super) fn decode(bytes: &[u8]) -> String {
 fn decode_native(bytes: &[u8]) -> String {
     use windows_sys::Win32::System::Console::GetConsoleOutputCP;
 
-    // A detached process has no console and `GetConsoleOutputCP` returns 0.
-    // 65001 is UTF-8, which already failed. cp1252 is the sane default for
-    // both.
+    // A detached process has no console and `GetConsoleOutputCP` returns 0. 65001 is UTF-8, which
+    // already failed. cp1252 is the sane default for both.
     let cp = match unsafe { GetConsoleOutputCP() } {
         0 | 65001 => 1252,
         n => n,

@@ -1,6 +1,5 @@
-//! `xmltree::Element` is a plain data struct, so it maps onto an interpreter
-//! struct one to one. `write` rebuilds a real `Element` and lets xmltree
-//! serialize it, so output bytes match the compiled crate.
+//! `xmltree::Element` is a plain data struct, so it maps onto an interpreter struct 1 to 1. `write`
+//! rebuilds a real `Element` and lets xmltree serialize it, so output bytes match the compiled crate.
 
 use anyhow::{Result, bail};
 use xmltree::{Element, Namespace, XMLNode};
@@ -11,7 +10,7 @@ use super::bytecode::{BuiltinId, MethodName};
 use super::enum_def::XML_NODE;
 use super::value::{StructData, Value};
 
-/// `Element::parse(bytes_or_str)`.
+/// `Element::parse(bytes_or_str)`
 pub(super) fn parse(args: &[Value]) -> Value {
     let bytes = arg_bytes(args.first());
     match Element::parse(bytes.as_slice()) {
@@ -20,7 +19,7 @@ pub(super) fn parse(args: &[Value]) -> Value {
     }
 }
 
-/// `Element::new(name)`.
+/// `Element::new(name)`
 pub(super) fn new_element(name: &str) -> Value {
     element_to_value(&Element::new(name))
 }
@@ -31,8 +30,7 @@ pub(super) fn element_method(
     args: &[Value],
 ) -> Result<Value> {
     match name.id {
-        // Scripts hand in a shared `Vec<u8>`, so the bytes land in the
-        // caller's vec.
+        // scripts hand in a shared `Vec<u8>`, so the bytes land in the caller's vec
         BuiltinId::Write => {
             let el = value_to_element(recv)?;
             let mut out: Vec<u8> = Vec::new();
@@ -47,7 +45,7 @@ pub(super) fn element_method(
                 Err(e) => Ok(Value::err(Value::str(e.to_string()))),
             }
         }
-        // `Option<Cow<str>>` of the direct text and cdata children.
+        // `Option<Cow<str>>` of the direct text and cdata children
         BuiltinId::GetText => {
             let el = value_to_element(recv)?;
             Ok(match el.get_text() {

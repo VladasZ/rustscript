@@ -1,5 +1,5 @@
-//! The lopdf bridge, the real `Document` API subset. An `ObjectId` is the
-//! `(u32, u16)` tuple lopdf defines.
+//! The lopdf bridge, the real `Document` API subset. An `ObjectId` is the `(u32, u16)` tuple
+//! lopdf defines.
 
 use anyhow::{Result, bail};
 use indexmap::IndexMap;
@@ -22,7 +22,7 @@ pub(super) fn document_method(
     args: &[Value],
 ) -> Result<Option<Value>> {
     Ok(Some(match name.id {
-        // Page number to `ObjectId`, as a map of int to tuple.
+        // page number to `ObjectId`, as a map of int to tuple
         BuiltinId::GetPages => {
             let mut map = IndexMap::default();
             for (num, id) in doc.get_pages() {
@@ -51,7 +51,7 @@ pub(super) fn document_method(
                 Err(e) => Value::err(Value::str(e.to_string())),
             }
         }
-        // The real save returns the File, scripts drop it.
+        // the real save returns the File, scripts drop it
         BuiltinId::Save => {
             let path = args.first().map(Value::display).unwrap_or_default();
             match doc.save(&path) {

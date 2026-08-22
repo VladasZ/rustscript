@@ -1,8 +1,7 @@
-/// A script panic as a typed error, so `main` can print the header and exit
-/// 101.
+/// A script panic as a typed error, so `main` can print the header and exit 101.
 #[derive(Debug)]
 pub struct ScriptPanic {
-    /// For the panic header.
+    /// for the panic header
     pub file: String,
     pub line: u32,
     pub rendered: String,
@@ -16,8 +15,7 @@ impl std::fmt::Display for ScriptPanic {
 
 impl std::error::Error for ScriptPanic {}
 
-/// A compiled binary prints `Error: ...` and exits 1, so this is marked
-/// apart from a panic.
+/// A compiled binary prints `Error: ...` and exits 1, so this is kept apart from a panic.
 #[derive(Debug)]
 pub struct ErrReturn(pub String);
 
@@ -29,16 +27,15 @@ impl std::fmt::Display for ErrReturn {
 
 impl std::error::Error for ErrReturn {}
 
-/// Frames arrive innermost first, line 0 meaning unknown. Deep chains cap
-/// so runaway recursion stays readable.
+/// Frames arrive innermost first, line 0 means unknown. Deep chains are capped so runaway
+/// recursion stays readable.
 pub(super) fn trace_error(
     e: anyhow::Error,
     frames: impl Iterator<Item = (String, String, u32)>,
 ) -> anyhow::Error {
     const SHOWN: usize = 15;
     let mut msg = format!("{e:#}");
-    // A closure inside a bridge wraps first, the panic origin must stay that
-    // innermost site.
+    // a closure inside a bridge wraps first, the panic origin must stay that innermost site
     let mut origin: Option<(String, u32)> = e
         .downcast_ref::<ScriptPanic>()
         .map(|p| (p.file.clone(), p.line));

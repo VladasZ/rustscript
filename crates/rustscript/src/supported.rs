@@ -1,5 +1,5 @@
-//! `rust supported` and `docs/supported.md`, both from the harvested tables.
-//! A test keeps the page in sync.
+//! `rust supported` and `docs/supported.md`, both from the harvested tables. A test keeps the
+//! page in sync.
 
 use crate::interpreter::coverage::surface;
 
@@ -53,7 +53,7 @@ mod tests {
     use super::*;
     use std::fs::read_to_string;
 
-    /// Regenerate with `rust supported md > docs/supported.md`.
+    /// regenerate with `rust supported md > docs/supported.md`
     #[test]
     fn supported_page_is_current() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/supported.md");

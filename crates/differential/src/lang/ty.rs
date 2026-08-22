@@ -1,6 +1,6 @@
-//! The type universe. A type the generator cannot name is a bug it cannot
-//! find, the first model knew only `i64` while the bug lived on `u8`. Every
-//! capability question is answered here from the type itself.
+//! The type universe. A type the generator can't name is a bug it can't find, the first model knew
+//! only `i64` while the bug lived on `u8`. Every capability question is decided here from the
+//! type itself.
 
 use serde::{Deserialize, Serialize};
 
@@ -35,14 +35,14 @@ pub enum Ty {
     Str,
     Vec(Box<Ty>),
     Opt(Box<Ty>),
-    /// Never printed raw, real Rust randomizes the order per process.
+    /// never printed raw, real Rust randomizes the order per process
     Map(Box<Ty>, Box<Ty>),
-    /// Same observation rule as `Map`.
+    /// same observation rule as `Map`
     Set(Box<Ty>),
     Tuple(Vec<Ty>),
     Res(Box<Ty>, Box<Ty>),
     StdErr(StdErr),
-    /// The shape carries what typing needs, the bodies live on the block.
+    /// the shape carries what typing needs, the bodies live on the block
     User(Box<UserShape>),
 }
 
@@ -71,13 +71,11 @@ impl Ty {
         }
     }
 
-    /// A non copy read renders with `.clone()`, which keeps programs free of
-    /// borrow errors.
+    /// A non copy read renders with `.clone()`, which keeps programs free of borrow errors.
     pub fn is_copy(&self) -> bool {
         match self {
             Self::Int(_) | Self::Float(_) | Self::Bool | Self::Char => true,
-            // User types never derive Copy, so every read clones and
-            // exercises the value model.
+            // user types never derive Copy, so every read clones and exercises the value model
             Self::Str
             | Self::Vec(_)
             | Self::Map(..)

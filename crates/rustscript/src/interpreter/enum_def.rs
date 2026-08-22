@@ -1,5 +1,5 @@
-//! An enum value points at its definition and carries a variant index, so a
-//! variant test is a pointer compare and an int compare.
+//! An enum value points at its definition and carries a variant index, so a variant test is a
+//! pointer compare and an int compare.
 
 use std::sync::{Arc, LazyLock};
 
@@ -22,11 +22,11 @@ pub struct VariantDef {
 
 pub struct EnumDef {
     pub kind: EnumKind,
-    /// Declared by the script.
+    /// declared by the script
     pub user: bool,
-    /// `crate::Shape` for a user enum, the bare name for a builtin.
+    /// `crate::Shape` for a user enum, the bare name for a builtin
     pub name: Arc<str>,
-    /// `NO_TYPE` for a builtin.
+    /// `NO_TYPE` for a builtin
     pub type_id: u16,
     pub variants: Vec<VariantDef>,
 }
@@ -111,8 +111,7 @@ pub const GREATER: u16 = 2;
 pub const NOT_PRESENT: u16 = 0;
 pub const NOT_UNICODE: u16 = 1;
 
-// Variant order follows the std declaration, so the derived `PartialOrd`
-// falls out of the index compare.
+// variant order follows the std declaration, so the derived `PartialOrd` falls out of the index compare
 pub static OPTION: LazyLock<Arc<EnumDef>> = LazyLock::new(|| {
     EnumDef::tuples(
         EnumKind::Option,
@@ -140,8 +139,7 @@ pub static VAR_ERROR: LazyLock<Arc<EnumDef>> = LazyLock::new(|| {
     )
 });
 
-/// Every name `{:?}` of an `ErrorKind` can print, `io_error_value` formats
-/// the real kind.
+/// Every name `{:?}` of an `ErrorKind` can print, `io_error_value` formats the real kind.
 pub static ERROR_KIND: LazyLock<Arc<EnumDef>> = LazyLock::new(|| {
     EnumDef::units(
         EnumKind::Other,
@@ -360,7 +358,7 @@ pub fn builtin_enum(name: &str) -> Option<&'static Arc<EnumDef>> {
     })
 }
 
-/// `Some` without `Option::`.
+/// `Some` without `Option::`
 pub fn prelude_variant(name: &str) -> Option<(&'static Arc<EnumDef>, u16)> {
     Some(match name {
         "None" => (&OPTION, NONE),

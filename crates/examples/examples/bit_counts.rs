@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-//! Bit counts answer from the receiver's width and are u32, so `!count` wraps
-//! at 32 bits.
+//! Bit counts use the receiver width and are u32, so `!count` wraps at 32 bits.
 
 fn main() {
     let byte: u8 = 0b1111_0111;
@@ -22,7 +21,7 @@ fn main() {
     println!("wide ones:       {}", wide.count_ones());
     println!("signed ones:     {}", (-1i32).count_ones());
 
-    // A count is a u32.
+    // a count is a u32
     println!("as u64:          {}", u64::from(byte.count_ones()));
     println!("compare:         {}", byte.count_ones() == 7);
 }

@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-//! Defaults built from container and element types the source states. These
-//! shapes once answered an empty string.
+//! Defaults built from container and element types the source states.
 
 use std::collections::{HashMap, HashSet};
 
@@ -10,22 +9,22 @@ fn lookup() -> Option<HashMap<i64, i64>> {
 }
 
 fn main() {
-    // Through the receiver's annotated `Option` payload.
+    // through the annotated `Option` payload of the receiver
     let found = lookup();
     let missing = found.unwrap_or_default();
     println!("{}", missing.len());
 
-    // Through an annotated vec and an out of range get.
+    // through an annotated vec and an out of range get
     let stack: Vec<HashMap<i64, i64>> = Vec::new();
     let chained = stack.get(4).cloned().unwrap_or_default();
     println!("{}", chained.len());
 
-    // Through a `let` annotation.
+    // through a `let` annotation
     let sets: Vec<HashSet<i64>> = Vec::new();
     let empty_set: HashSet<i64> = sets.first().cloned().unwrap_or_default();
     println!("{}", empty_set.len());
 
-    // From a vec literal behind a block local binding.
+    // from a vec literal behind a block local binding
     let sorted_default = ({
         let mut sorted = vec!['b', 'a'];
         sorted.sort_unstable();
@@ -36,11 +35,11 @@ fn main() {
     .unwrap_or_default();
     println!("{sorted_default:?}");
 
-    // Through a closure's stated element type.
+    // through the stated element type of a closure
     let mapped = (Vec::<i8>::new().into_iter().map(|_n: i8| 'a').max()).unwrap_or_default();
     println!("{:?}", mapped.to_ascii_uppercase());
 
-    // Through `HashMap::get` on an empty map.
+    // through `HashMap::get` on an empty map
     let key: i64 = 4;
     let inverted: i64 = !HashMap::<i64, i64>::new()
         .get(&key)
@@ -48,7 +47,7 @@ fn main() {
         .unwrap_or_default();
     println!("{inverted}");
 
-    // A vec of strings through a closure, then methods on it.
+    // a vec of strings through a closure, then methods on it
     let empty_names: Option<String> = (HashSet::<i64>::new()
         .into_iter()
         .map(|_n: i64| vec![String::from("a"), String::from("b")])
@@ -59,7 +58,7 @@ fn main() {
     .cloned();
     println!("{empty_names:?}");
 
-    // From vec elements stated by block tails, no annotation on the vec.
+    // from vec elements stated by block tails, no annotation on the vec
     let mut maps = vec![
         ({
             let mut m: HashMap<i64, i64> = HashMap::new();

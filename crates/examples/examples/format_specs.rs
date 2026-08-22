@@ -1,4 +1,4 @@
-// The format spec surface.
+// the format spec surface
 
 fn main() {
     let number = 255i64;

@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-// Writes through `&mut` borrows in every binding shape must land in the
-// borrowed place.
+// Writes through `&mut` borrows in every binding shape must land in the borrowed place.
 
 use std::mem::take;
 

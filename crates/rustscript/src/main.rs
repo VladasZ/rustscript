@@ -14,13 +14,11 @@ use std::process::{Command, exit};
 use anyhow::{Error, Result, anyhow, bail};
 use mimalloc::MiMalloc;
 
-/// The interpreter is allocation bound and mimalloc handles that far better
-/// than the system allocator.
+/// The interpreter is allocation bound, mimalloc is much faster than the system allocator here.
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-/// A deadlock is always an interpreter bug. Without this it is a silent hang
-/// with nothing to say which locks are held where.
+/// A deadlock is always an interpreter bug. Without this it is just a silent hang.
 #[cfg(feature = "deadlock-detection")]
 fn spawn_deadlock_watchdog() {
     use std::process::abort;
@@ -52,8 +50,7 @@ fn main() {
     #[cfg(feature = "deadlock-detection")]
     spawn_deadlock_watchdog();
     if let Err(e) = real_main() {
-        // Exit like a compiled panic or a compiled anyhow main, so `$?` and
-        // stderr look the same either way.
+        // Exit like a compiled panic or a compiled anyhow main would, same `$?` and same stderr.
         if let Some(p) = e.downcast_ref::<interpreter::ScriptPanic>() {
             if p.file.is_empty() {
                 eprintln!("thread 'main' panicked:");
@@ -67,8 +64,7 @@ fn main() {
             eprintln!("Error: {}", r.0);
             exit(1);
         }
-        // A stable prefix so the differential harness can tell gaps from real
-        // failures. The wording check lives next to the messages it matches.
+        // Stable prefix so the differential harness can tell a gap from a real failure.
         let rendered = format!("{e:#}");
         if rendered.contains("unsupported")
             || rendered.contains("not supported")
@@ -90,9 +86,9 @@ fn real_main() -> Result<()> {
             let file = all.get(1).ok_or_else(err_usage)?;
             let source = fs::read_to_string(file)?;
             let program = loader::load(Path::new(file), &source)?;
-            // Gate 1, valid Rust.
+            // gate 1, valid Rust
             checker::check(Path::new(file), &program.files, &program.crate_deps)?;
-            // Gate 2, the interpreter implements everything it calls.
+            // gate 2, the interpreter has everything the script calls
             check_coverage(&program)?;
             println!("ok");
             Ok(())
@@ -125,8 +121,7 @@ fn real_main() -> Result<()> {
             print_usage();
             Ok(())
         }
-        // An extensionless path still runs when it is a real file, for
-        // example a launcher symlink.
+        // A path without extension still runs if it is a real file, for example a launcher symlink.
         path if Path::new(path).extension() == Some(OsStr::new("rs"))
             || Path::new(path).is_file() =>
         {
@@ -136,21 +131,20 @@ fn real_main() -> Result<()> {
     }
 }
 
-/// Compiling rejects unsupported macros and expressions, the coverage walk
-/// adds every method call on every branch.
+/// Compiling rejects unsupported macros and expressions, the coverage walk checks every method
+/// call on every branch.
 fn check_coverage(program: &loader::Program) -> Result<()> {
     let interp = interpreter::Interp::load(&program.modules, program.tokio_main)?;
     interp.coverage_gate()
 }
 
 fn run(file: &str, script_args: &[String]) -> Result<()> {
-    // `NAME cmp ...` runs the script compiled. The word is reserved as a
-    // script's first argument.
+    // `NAME cmp ...` runs the script compiled. So `cmp` is reserved as a first argument.
     if script_args.first().is_some_and(|a| a == "cmp") {
         return build_run(file, &script_args[1..]);
     }
 
-    // Module files are found next to the real script, not the symlink.
+    // module files live next to the real script, not the symlink
     let path = Path::new(file)
         .canonicalize()
         .unwrap_or_else(|_| Path::new(file).to_path_buf());
@@ -158,7 +152,7 @@ fn run(file: &str, script_args: &[String]) -> Result<()> {
 
     let program = loader::load(&path, &source)?;
 
-    // A real binary sees its own path as argv[0].
+    // a real binary sees its own path as argv[0]
     let mut args = vec![file.to_string()];
     args.extend(script_args.iter().cloned());
     interpreter::set_script_args(args);
@@ -166,18 +160,18 @@ fn run(file: &str, script_args: &[String]) -> Result<()> {
     interpreter::run(&program.modules, program.tokio_main)
 }
 
-/// `rust -e 'println!("hi")'`. A complete program runs as written, anything
-/// else becomes the body of `fn main`. `?` still works there because an
-/// `Err` out of `main` propagates regardless of the signature.
+/// `rust -e 'println!("hi")'`. A complete program runs as is, anything else becomes the body of
+/// `fn main`.
+/// `?` still works there because an `Err` out of `main` propagates regardless of the signature.
 fn eval(code: &str, script_args: &[String]) -> Result<()> {
     let source = if is_program(code) {
         code.to_string()
     } else {
-        // The wrapper shares the snippet's first line so trace line numbers
-        // match. The newline before `}` survives a trailing comment.
+        // Same first line as the snippet so trace line numbers match. The newline before `}`
+        // survives a trailing comment.
         format!("fn main() {{ {code}\n}}\n")
     };
-    // No file, so lookups anchor to the working directory.
+    // no file, so lookups use the working directory
     let dir = env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
     let program = loader::load(&dir.join("-e.rs"), &source)?;
 
@@ -188,8 +182,8 @@ fn eval(code: &str, script_args: &[String]) -> Result<()> {
     interpreter::run(&program.modules, program.tokio_main)
 }
 
-/// `println!("hi");` alone parses as a file of one macro item, so the
-/// `fn main` requirement is what keeps plain statements on the wrapped path.
+/// `println!("hi");` alone parses as a file with 1 macro item, so we require `fn main` to treat
+/// it as a program.
 fn is_program(code: &str) -> bool {
     let Ok(ast) = syn::parse_file(code) else {
         return false;
@@ -199,7 +193,6 @@ fn is_program(code: &str) -> bool {
         .any(|item| matches!(item, syn::Item::Fn(f) if f.sig.ident == "main"))
 }
 
-/// Never touches the interpreter.
 fn build_run(file: &str, script_args: &[String]) -> Result<()> {
     let path = Path::new(file)
         .canonicalize()

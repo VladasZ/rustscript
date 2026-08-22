@@ -1,5 +1,4 @@
-//! A string literal assigned in a `for` body once skipped writeback on the
-//! scalar plan, so the variable kept its old value. See
+//! A string literal assigned in a `for` body must write back on the scalar plan. See
 //! `loop_move_non_scalar.rs`.
 
 fn main() {

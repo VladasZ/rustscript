@@ -1,7 +1,7 @@
 #!/usr/bin/env rust
 
-// Unwinding runs drops innermost frame first. The panic is inside a spawned
-// task so the program still exits cleanly.
+// Unwinding runs drops innermost frame first. The panic is inside a spawned task so the program
+// still exits cleanly.
 
 struct Guard {
     name: String,

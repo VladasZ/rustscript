@@ -1,5 +1,5 @@
-//! The full written type of an expression, read off the source. This is not
-//! inference. Anything not written down answers `None`.
+//! The full written type of an expression, read off the source. This is not inference. Anything
+//! not written down gives `None`.
 
 use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens;
@@ -14,8 +14,8 @@ impl Compiler<'_> {
         self.written_type_in(expr, &[])
     }
 
-    /// Innermost last, so a name resolves to its own block's `let` even after
-    /// the compiler has left the block.
+    /// Innermost last, so a name resolves to its own block's `let` even after the compiler has
+    /// left the block.
     fn written_type_in(&self, expr: &Expr, blocks: &[&syn::Block]) -> Option<Type> {
         match expr {
             Expr::Paren(p) => self.written_type_in(&p.expr, blocks),
@@ -42,7 +42,7 @@ impl Compiler<'_> {
                 }
                 self.typed_local_types.get(&name).cloned()
             }
-            // `Enum::Variant` states the enum it belongs to.
+            // `Enum::Variant` states the enum it belongs to
             Expr::Path(p) if p.qself.is_none() && p.path.segments.len() > 1 => {
                 self.variant_owner_type(&p.path)
             }
@@ -56,7 +56,7 @@ impl Compiler<'_> {
             Expr::Macro(mac) if mac.mac.path.is_ident("vec") => {
                 self.written_vec_macro_type(mac, blocks)
             }
-            // A range index keeps the sequence itself.
+            // a range index keeps the sequence itself
             Expr::Index(ix) => {
                 let base = self.written_type_in(&ix.expr, blocks)?;
                 if matches!(&*ix.index, Expr::Range(_)) {
@@ -92,7 +92,7 @@ impl Compiler<'_> {
                 Lit::Char(_) => Some(named_type("char")),
                 _ => None,
             },
-            // The first branch that states its type answers for all.
+            // the first branch that states its type wins for all
             Expr::If(e) => block_tail(&e.then_branch)
                 .and_then(|tail| self.written_type_in(tail, blocks))
                 .or_else(|| {
@@ -104,8 +104,8 @@ impl Compiler<'_> {
                 .arms
                 .iter()
                 .find_map(|arm| self.written_type_in(&arm.body, blocks)),
-            // A tail naming a block local reads that `let`, so 2 blocks reusing
-            // a name never read each other's type.
+            // a tail naming a block local reads that `let`, so 2 blocks reusing a name never read
+            // each other's type
             Expr::Block(b) => {
                 let tail = block_tail(&b.block)?;
                 let mut inner: Vec<&syn::Block> = blocks.to_vec();
@@ -116,11 +116,10 @@ impl Compiler<'_> {
         }
     }
 
-    /// Its own turbofish, a receiver independent name, or one hop from the
-    /// receiver's type.
+    /// Its own turbofish, a receiver independent name, or 1 hop from the receiver type.
     fn written_method_type(&self, m: &syn::ExprMethodCall, blocks: &[&syn::Block]) -> Option<Type> {
         let method = m.method.to_string();
-        // `parse::<T>()` is a `Result<T, _>`.
+        // `parse::<T>()` is a `Result<T, _>`
         if let Some(turbofish) = &m.turbofish
             && let Some(stated) = turbofish.args.iter().find_map(|arg| match arg {
                 syn::GenericArgument::Type(ty) => Some(ty.clone()),
@@ -133,7 +132,7 @@ impl Compiler<'_> {
                 _ => {}
             }
         }
-        // A fold answers in its init's type.
+        // a fold has its init's type
         if method == "fold"
             && let Some(init) = m.args.first()
             && let Some(ty) = self.written_type_in(init, blocks)
@@ -162,8 +161,7 @@ impl Compiler<'_> {
             Some(recv) => {
                 hop(&recv, &method).or_else(|| self.closure_hop(&recv, &method, m, blocks))
             }
-            // `unwrap_or(d)` answers in `d`'s type when the receiver does not
-            // state its own.
+            // `unwrap_or(d)` has the type of `d` when the receiver doesn't state its own
             None if method == "unwrap_or" => {
                 m.args.first().and_then(|d| self.written_type_in(d, blocks))
             }
@@ -171,8 +169,7 @@ impl Compiler<'_> {
         }
     }
 
-    /// Either arithmetic side that states its type answers, a shift the
-    /// shifted side alone.
+    /// Either arithmetic side that states its type wins, for a shift the shifted side alone.
     fn written_binary_type(&self, b: &syn::ExprBinary, blocks: &[&syn::Block]) -> Option<Type> {
         use syn::BinOp::{
             Add, And, BitAnd, BitOr, BitXor, Div, Eq, Ge, Gt, Le, Lt, Mul, Ne, Or, Rem, Shl, Shr,
@@ -216,7 +213,7 @@ impl Compiler<'_> {
         }
         let segs = &path.path.segments;
         let last = segs.last()?;
-        // `Enum::Variant(payload)` states the enum it belongs to.
+        // `Enum::Variant(payload)` states the enum it belongs to
         if segs.len() > 1
             && let Some(owner) = variant_owner(&path.path)
             && self.user_type_key(&owner).is_some()
@@ -236,7 +233,7 @@ impl Compiler<'_> {
             };
             return match name.as_str() {
                 "None" => generic_arg(last, 0).map(|t| option_of(&t)),
-                // `Err::<T, E>(e)` only states `T` in a turbofish.
+                // `Err::<T, E>(e)` only states `T` in a turbofish
                 "Some" => generic_arg(last, 0)
                     .or_else(first_arg)
                     .map(|t| option_of(&t)),
@@ -250,7 +247,7 @@ impl Compiler<'_> {
                 }
             };
         }
-        // `Vec::<T>` from `Vec::<T>::new()`.
+        // `Vec::<T>` from `Vec::<T>::new()`
         let type_path = syn::Path {
             leading_colon: path.path.leading_colon,
             segments: segs.iter().take(segs.len() - 1).cloned().collect(),
@@ -277,8 +274,7 @@ impl Compiler<'_> {
         Some(path_type(type_path))
     }
 
-    /// `fn pick<T>(a: T, b: T) -> T` answers in the written type of an
-    /// argument passed for `T`.
+    /// `fn pick<T>(a: T, b: T) -> T` has the written type of an argument passed for `T`.
     fn generic_return(
         &self,
         name: &str,
@@ -342,7 +338,7 @@ impl Compiler<'_> {
             .map(|t| generic_type("Vec", vec![t]))
     }
 
-    /// Answers `None` rather than reading an outer local of the same name.
+    /// Gives `None` rather than reading an outer local of the same name.
     fn closure_hop(
         &self,
         recv: &Type,
@@ -356,8 +352,7 @@ impl Compiler<'_> {
         let Some(Expr::Closure(closure)) = m.args.first() else {
             return None;
         };
-        // Any pattern beyond a plain name binds names this walk does not
-        // track.
+        // any pattern beyond a plain name binds names this walk doesn't track
         let mut params = Vec::new();
         for input in &closure.inputs {
             let pat = match input {
@@ -370,8 +365,7 @@ impl Compiler<'_> {
                 _ => return None,
             }
         }
-        // Bind the element type for the walk of the body. A struct literal or
-        // a cast needs no binding.
+        // bind the element type for the walk of the body, a struct literal or a cast needs no binding
         let element = element_of_sequence(recv);
         let reads_params = mentions_any(&closure.body, &params);
         if reads_params && element.is_none() && !states_own_type(&closure.body) {
@@ -402,8 +396,7 @@ impl Compiler<'_> {
     }
 }
 
-/// A field or method of the same name counts too, which only makes the
-/// answer more cautious.
+/// A field or method of the same name counts too, that only makes the result more cautious.
 fn mentions_any(expr: &Expr, names: &[String]) -> bool {
     fn walk(tokens: TokenStream, names: &[String]) -> bool {
         tokens.into_iter().any(|tree| match tree {
@@ -415,8 +408,8 @@ fn mentions_any(expr: &Expr, names: &[String]) -> bool {
     walk(expr.to_token_stream(), names)
 }
 
-/// Names its own type without reading anything, so a closure body of this
-/// shape answers even when it mentions the parameter.
+/// Names its own type without reading anything, so a closure body of this shape works even when
+/// it mentions the parameter.
 fn states_own_type(expr: &Expr) -> bool {
     match expr {
         Expr::Struct(_) | Expr::Cast(_) => true,
@@ -578,8 +571,7 @@ pub(super) fn payload_of(ty: &Type) -> Option<Type> {
 }
 
 fn hop(recv: &Type, method: &str) -> Option<Type> {
-    // A tuple has no segment but still hands itself through the identity
-    // methods.
+    // a tuple has no segment but still hands itself through the identity methods
     match recv {
         Type::Array(syn::TypeArray { elem, .. }) | Type::Slice(syn::TypeSlice { elem, .. }) => {
             return hop(&generic_type("Vec", vec![(**elem).clone()]), method);
@@ -601,7 +593,7 @@ fn hop(recv: &Type, method: &str) -> Option<Type> {
         {
             Some(recv.clone())
         }
-        // After `values` or `keys` the chain walks a sequence of that side.
+        // after `values` or `keys` the chain walks a sequence of that side
         "values" | "into_values" | "values_mut"
             if matches!(name.as_str(), "HashMap" | "BTreeMap") =>
         {
@@ -614,15 +606,14 @@ fn hop(recv: &Type, method: &str) -> Option<Type> {
         | "filter" | "or_else" | "or_default" | "iter" | "into_iter" | "values" | "into_values" => {
             Some(recv.clone())
         }
-        // `(x as u8).saturating_add(y)` states a `u8`.
+        // `(x as u8).saturating_add(y)` states a `u8`
         "saturating_add" | "saturating_sub" | "saturating_mul" | "wrapping_add"
         | "wrapping_sub" | "wrapping_mul" | "rem_euclid" | "div_euclid" | "midpoint" | "pow"
         | "powi" | "powf" | "abs" | "signum" | "isqrt" | "to_ascii_lowercase"
         | "to_ascii_uppercase" => Some(recv.clone()),
-        // On a number `min` and `max` keep the type, on a sequence they
-        // reduce to an `Option`.
+        // on a number `min` and `max` keep the type, on a sequence they reduce to an `Option`
         "min" | "max" | "clamp" if is_primitive_number(&name) => Some(recv.clone()),
-        // The middle of a chain keeps the item type.
+        // the middle of a chain keeps the item type
         "rev" | "skip" | "take_while" | "skip_while" | "peekable" | "by_ref"
             if matches!(name.as_str(), "Vec" | "VecDeque" | "HashSet" | "BTreeSet") =>
         {

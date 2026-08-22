@@ -1,5 +1,5 @@
-//! Type directed generation. Every shape is chosen by type, so a catalog
-//! method appears at any depth at once.
+//! Type directed generation. Every shape is chosen by type, so a catalog method appears at any
+//! depth at once.
 
 mod exprs;
 mod matches;
@@ -38,17 +38,17 @@ pub struct Generator<'a> {
     pub(super) rng: &'a mut StdRng,
     pub(super) scope: Vec<Binding>,
     pub(super) labels: usize,
-    /// Baked into every item name so 2 blocks never collide.
+    /// baked into every item name so 2 blocks never collide
     pub(super) tag: usize,
     pub(super) types: Vec<UserDef>,
     pub(super) fns: Vec<FnDef>,
     pub(super) consts: Vec<ConstDef>,
     pub(super) describes: Vec<Ty>,
-    /// Lets `?` and an early `return` appear.
+    /// lets `?` and an early `return` appear
     pub(super) fn_ret: Option<Ty>,
-    /// Lets `break` and `continue` appear.
+    /// lets `break` and `continue` appear
     pub(super) in_loop: bool,
-    /// A bare literal here would be an ambiguous `{integer}`.
+    /// a bare literal here would be an ambiguous `{integer}`
     pub(super) forbid_bare: bool,
 }
 
@@ -69,8 +69,7 @@ impl<'a> Generator<'a> {
         }
     }
 
-    /// `?`, `break`, `continue` and `return` would answer to the closure,
-    /// so none is offered.
+    /// `?`, `break`, `continue` and `return` would apply to the closure, so none is offered.
     pub(super) fn closure_body<T>(&mut self, build: impl FnOnce(&mut Self) -> T) -> T {
         let saved_ret = self.fn_ret.take();
         let saved_loop = std::mem::replace(&mut self.in_loop, false);
@@ -100,8 +99,7 @@ impl<'a> Generator<'a> {
         for _ in 0..extras {
             statements.push(self.mutation());
         }
-        // A few free standing expressions, so a value that was never stored
-        // still shows up.
+        // a few free standing expressions, so a value that was never stored still shows up
         let observed: Vec<(String, Ty)> = self
             .scope
             .iter()
@@ -129,7 +127,7 @@ impl<'a> Generator<'a> {
         block
     }
 
-    // -- names and draws ------------------------------------------------------
+    // names and draws
 
     pub(super) fn fresh(&mut self, prefix: &str) -> String {
         let name = format!("{prefix}_{}_{}", self.tag, self.labels);
@@ -207,7 +205,7 @@ impl<'a> Generator<'a> {
         out
     }
 
-    // -- types --------------------------------------------------------------
+    // types
 
     pub(super) fn any_ty(&mut self) -> Ty {
         match self.rng.random_range(0..16) {
@@ -294,8 +292,7 @@ impl<'a> Generator<'a> {
         Ty::Tuple(items)
     }
 
-    /// A user error enum when the block has one, else a parse error or
-    /// `String`.
+    /// A user error enum when the block has one, else a parse error or `String`.
     pub(super) fn res_ty(&mut self) -> Ty {
         let ok = if self.chance(0.3) {
             Ty::vec_of(self.scalar_ty())

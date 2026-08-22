@@ -46,8 +46,8 @@ fn io_err<T>(r: std::io::Result<T>, on_ok: impl FnOnce(T) -> Value) -> Value {
     }
 }
 
-/// The buffer arrives as a copy, the vm moves it back into the variable
-/// after the call, see `compile_method`.
+/// The buffer arrives as a copy, the vm moves it back into the variable after the call, see
+/// `compile_method`.
 fn append_string(target: &mut Value, text: &str) {
     if let Value::Str(s) = target {
         let mut out = s.to_string();
@@ -80,8 +80,8 @@ pub(super) fn native_method(
     method: &MethodName,
     args: &mut [Value],
 ) -> Result<Option<Value>> {
-    // A lopdf Document dispatches by receiver first, its names must not
-    // collide with the name keyed arms below.
+    // a lopdf Document dispatches by receiver first, its names must not collide with the name
+    // keyed arms below
     if matches!(&*handle.lock(), Native::Pdf(_)) {
         let mut h = handle.lock();
         let Native::Pdf(doc) = &mut *h else {
@@ -100,8 +100,8 @@ pub(super) fn native_method(
     if let Some(v) = joinerr_method(handle, method) {
         return Ok(Some(v));
     }
-    // The families use disjoint names. Handles that consume self move out of
-    // the Mutex inside their helper.
+    // the families use disjoint names, handles that consume self move out of the Mutex inside
+    // their helper
     if let Some(v) = reader_native_method(handle, method, args)? {
         return Ok(Some(v));
     }
@@ -141,8 +141,7 @@ pub(super) fn io_error_method(handle: &Handle, method: &MethodName) -> Option<Va
     }
 }
 
-/// A task can end early only by panicking, so cancellation always answers
-/// false.
+/// A task can end early only by panicking, so cancellation is always false.
 pub(super) fn joinerr_method(handle: &Handle, method: &MethodName) -> Option<Value> {
     let h = handle.lock();
     let Native::JoinErr { is_panic, .. } = &*h else {
@@ -196,7 +195,7 @@ fn reader_native_method(
             let Some(r) = h.as_read() else {
                 bail!("read on non-reader {}", h.type_name());
             };
-            // The buffer arrives as a shared Vec, so copy back into it.
+            // the buffer arrives as a shared Vec, so copy back into it
             let len = match args.first() {
                 Some(Value::Vec(v)) => v.lock().len(),
                 _ => 0,
@@ -229,8 +228,8 @@ fn reader_native_method(
                 Value::Int(int_len(n))
             })));
         }
-        // The delimiter is kept in the buffer like the real method, so a
-        // caller can tell a final unterminated line.
+        // the delimiter is kept in the buffer like the real method, so a caller can tell a final
+        // unterminated line
         BuiltinId::ReadUntil => {
             let delim = byte_arg(args.first(), "read_until")?;
             let mut h = handle.lock();
@@ -259,7 +258,7 @@ fn reader_native_method(
 fn lines_native_method(handle: &Handle, method: &MethodName) -> Option<Value> {
     match method.id {
         BuiltinId::Lines => {
-            // The original handle is left empty.
+            // the original handle is left empty
             let taken = std::mem::replace(&mut *handle.lock(), Native::Taken);
             let iter: super::native::LineIter = match taken {
                 Native::File(r) => {
@@ -298,8 +297,7 @@ fn lines_native_method(handle: &Handle, method: &MethodName) -> Option<Value> {
 
 fn writer_native_method(handle: &Handle, method: &MethodName, args: &mut [Value]) -> Option<Value> {
     match method.id {
-        // The formatter buffer of a user `fmt` impl, the answer is
-        // `fmt::Result`.
+        // the formatter buffer of a user `fmt` impl, the result is `fmt::Result`
         BuiltinId::WriteAll
         | BuiltinId::Write
         | BuiltinId::WriteStr
@@ -698,7 +696,7 @@ fn as_int(v: Option<&Value>) -> Option<i64> {
 }
 
 fn seek_from(v: Option<&Value>) -> SeekFrom {
-    // `SeekFrom::Start(n)` is an enum value carrying the offset.
+    // `SeekFrom::Start(n)` is an enum value carrying the offset
     if let Some(Value::Enum { def, variant, data }) = v {
         let n = data.lock().first().and_then(|x| match x {
             Value::Int(i) => Some(*i),

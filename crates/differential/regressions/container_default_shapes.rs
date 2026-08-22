@@ -1,5 +1,4 @@
-//! Container and element defaults in generated shapes. The interpreter once
-//! answered an empty string for them and clamped a `u64` sum at `i64::MAX`.
+//! Container and element defaults in generated shapes. A `u64` sum must not clamp at `i64::MAX`.
 
 use std::collections::{HashMap, HashSet};
 

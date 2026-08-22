@@ -1,7 +1,6 @@
-//! The while and loop side of the scalar plans. The plan IR lives in
-//! `scalar_loop`. This side also runs vec indexing, with the bases locked
-//! for the run, writes journaled and the registers snapshot at every
-//! iteration boundary, so a failing iteration restores its entry state.
+//! The while and loop side of the scalar plans. The plan IR lives in `scalar_loop`. This side also
+//! runs vec indexing, with the bases locked for the run, writes journaled and the registers
+//! snapshot at every iteration boundary, so a failing iteration restores its entry state.
 
 use std::mem::replace;
 use std::sync::Arc;
@@ -21,49 +20,44 @@ use super::value::{List, StructData, Value};
 use super::vm::Vm;
 use super::vm_step::{Flow, StepCtx};
 
-/// Backward jumps between Ctrl-C polls. The vec runner drops its locks
-/// around each poll.
+/// Backward jumps between Ctrl-C polls. The vec runner drops its locks around each poll.
 const WHILE_POLL: u32 = 65_536;
 
-/// Bounds the replay a failure needs.
+/// bounds the replay a failure needs
 const WHILE_SNAPSHOT: u32 = 4096;
 
-/// Zero progress failures before a plan stops being retried.
+/// zero progress failures before a plan stops being retried
 const MAX_ZERO_FAILS: u32 = 32;
 
-/// Bounds the entry split and lock cost.
+/// bounds the entry split and lock cost
 const MAX_VECS: usize = 8;
 
-/// Every field access site holds its own element temporary, so a few
-/// structs still need a dozen handles.
+/// Every field access site holds its own element temporary, so a few structs still need a dozen handles.
 const MAX_HANDLES: usize = 32;
 
-/// The whole region from the head to the backward `Jump`. Its only exits
-/// are the jump back and the jumps to the op after it, so the plan and the
-/// generic path leave the loop at the same point.
+/// The whole region from the head to the backward `Jump`. Its only exits are the jump back and the
+/// jumps to the op after it, so the plan and the generic path leave the loop at the same point.
 pub struct WhilePlan {
     ops: Vec<LOp>,
     regs: Vec<u16>,
-    /// Plus whether the region writes it, which decides the entry split.
+    /// plus whether the region writes it, which decides the entry split
     vecs: Vec<u16>,
     written: Vec<bool>,
-    /// See `handle_regs`.
+    /// see `handle_regs`
     num_handles: usize,
-    /// Past `MAX_ZERO_FAILS` the plan is dropped.
+    /// past `MAX_ZERO_FAILS` the plan is dropped
     fails: AtomicU32,
 }
 
-/// The vec bases in first appearance order, plus which the region writes.
-/// A `UniqueReg` target counts as written, the compiler emits it only
-/// before a mutation.
+/// The vec bases in first appearance order, plus which ones the region writes. A `UniqueReg` target
+/// counts as written, the compiler only emits it before a mutation.
 fn vec_bases(chunk: &Chunk, head: usize, exit: usize) -> Option<(Vec<u16>, Vec<bool>)> {
     let mut vecs: Vec<u16> = Vec::new();
     let mut written: Vec<bool> = Vec::new();
     for op in &chunk.code[head..exit] {
         let (base, writes) = match op {
             Op::Index { base, .. } => (*base, false),
-            // A `UniqueIndex` splits the element, so its base counts as
-            // written.
+            // a `UniqueIndex` splits the element, so its base counts as written
             Op::SetIndex { base, .. }
             | Op::UniqueIndex { base, .. }
             | Op::UniqueReg { reg: base } => (*base, true),
@@ -82,8 +76,8 @@ fn vec_bases(chunk: &Chunk, head: usize, exit: usize) -> Option<(Vec<u16>, Vec<b
     Some((vecs, written))
 }
 
-/// Each `dst` of an index into a base whose value the region reads fields
-/// through. Any other field access rejects the plan in `translate_vec`.
+/// Each `dst` of an index into a base whose value the region reads fields through. Any other
+/// field access rejects the plan in `translate_vec`.
 fn handle_regs(chunk: &Chunk, head: usize, exit: usize, bases: &[u16]) -> Option<Vec<u16>> {
     let mut field_bases: Vec<u16> = Vec::new();
     for op in &chunk.code[head..exit] {
@@ -111,9 +105,9 @@ fn handle_regs(chunk: &Chunk, head: usize, exit: usize, bases: &[u16]) -> Option
     Some(handles)
 }
 
-/// Every handle use must be preceded by its `ElemRef` on every path from
-/// the iteration start, a jump target invalidates every handle. On failure
-/// the generic re-run has pre loop values in the handle registers.
+/// Every handle use must be preceded by its `ElemRef` on every path from the iteration start, a jump
+/// target invalidates every handle. On failure the generic re-run has pre loop values in the
+/// handle registers.
 fn handles_dominated(ops: &[LOp], num_handles: usize) -> bool {
     let mut targets = vec![false; ops.len() + 1];
     for op in ops {
@@ -149,8 +143,8 @@ fn handles_dominated(ops: &[LOp], num_handles: usize) -> bool {
     true
 }
 
-/// None when any op falls outside the subset. A jump leaving the region
-/// anywhere but the shared exit rejects the plan through `target`.
+/// None when any op falls outside the subset. A jump leaving the region anywhere but the shared
+/// exit rejects the plan through `target`.
 fn build_while(vm: &Vm, chunk: &Chunk, head: usize, jump_ip: usize) -> Option<WhilePlan> {
     let exit = jump_ip + 1;
     let (vecs, written) = vec_bases(chunk, head, exit)?;
@@ -178,8 +172,7 @@ fn build_while(vm: &Vm, chunk: &Chunk, head: usize, jump_ip: usize) -> Option<Wh
             )
         })
         .collect::<Option<Vec<_>>>()?;
-    // A register cannot serve 2 tables at once, a region that mixes roles
-    // stays generic.
+    // a register can't serve 2 tables at once, a region that mixes roles stays generic
     if regs.iter().any(|reg| vecs.contains(reg)) {
         return None;
     }
@@ -200,9 +193,8 @@ fn build_while(vm: &Vm, chunk: &Chunk, head: usize, jump_ip: usize) -> Option<Wh
     })
 }
 
-/// Re-run the iterations that finished since the snapshot. A scalar only
-/// body touches nothing but registers, so the replay is deterministic. Vec
-/// plans snapshot every iteration instead.
+/// Re-run the iterations that finished since the snapshot. A scalar only body touches nothing but
+/// registers, so the replay is deterministic. Vec plans snapshot every iteration instead.
 fn replay_while(plan: &WhilePlan, regs: &mut [SVal], count: u32) {
     let mut done = 0u32;
     let mut ip = 0usize;
@@ -233,23 +225,22 @@ enum WhileOut {
     Fail,
 }
 
-/// `None` means the generic path should take the jump itself, with the
-/// frame rebuilt to the start of the unfinished iteration.
+/// `None` means the generic path should take the jump itself, with the frame rebuilt to the start
+/// of the unfinished iteration.
 pub(super) fn try_run_while(ctx: &mut StepCtx, head: usize) -> Result<Option<Flow>> {
     let jump_ip = ctx.ip;
     try_run(ctx, head, jump_ip)
 }
 
-/// The `LoopHead` entry, so the plan takes over before the first iteration.
-/// `None` falls through into the head.
+/// The `LoopHead` entry, so the plan takes over before the first iteration. `None` falls through
+/// into the head.
 pub(super) fn try_run_entry(ctx: &mut StepCtx, jump_ip: usize) -> Result<Option<Flow>> {
     let head = ctx.ip + 1;
     try_run(ctx, head, jump_ip)
 }
 
 fn try_run(ctx: &mut StepCtx, head: usize, jump_ip: usize) -> Result<Option<Flow>> {
-    // A rejected loop's answer is an atomic load, never the plan map's
-    // mutex.
+    // a rejected loop costs 1 atomic load, never the mutex of the plan map
     let Some(rejected) = ctx.cur.while_rejected.get(jump_ip) else {
         return Ok(None);
     };
@@ -279,8 +270,8 @@ fn try_run(ctx: &mut StepCtx, head: usize, jump_ip: usize) -> Result<Option<Flow
     }
 }
 
-/// Registers only. Failure recovery replays from a periodic snapshot, which
-/// is deterministic because there are no side effects.
+/// Registers only. Failure recovery replays from a periodic snapshot, deterministic because there
+/// are no side effects.
 fn run_scalar(
     ctx: &mut StepCtx,
     plan: &WhilePlan,
@@ -294,14 +285,14 @@ fn run_scalar(
     let mut work: u32 = 0;
     let mut ip = 0usize;
     let out = loop {
-        // Poll Ctrl-C in place, with the registers written back first so an
-        // interrupt unwinds over a consistent frame.
+        // Poll Ctrl-C in place, with the registers written back first so an interrupt unwinds
+        // over a consistent frame.
         if work >= WHILE_POLL {
             write_regs(ctx, &plan.regs, &regs);
             ctx.vm.run_pending_ctrlc()?;
             work = 0;
         }
-        // The last op is the backward jump, the lookup only guards a plan bug.
+        // the last op is the backward jump, the lookup only guards a plan bug
         let Some(op) = plan.ops.get(ip) else {
             break WhileOut::Fail;
         };
@@ -321,7 +312,7 @@ fn run_scalar(
             }
             OpOut::Jump(LTo::Op(t)) => {
                 let t = t as usize;
-                // Only backward jumps count, so straight runs pay no counter.
+                // only backward jumps count, so straight runs pay no counter
                 if t <= ip {
                     work += 1;
                 }
@@ -344,16 +335,14 @@ fn run_scalar(
     }
 }
 
-/// Undone newest first so a doubly written location ends on its original
-/// value.
+/// Undone newest first so a doubly written location ends on its original value.
 enum Undo {
     Elem {
         vec: u16,
         idx: usize,
         old: Value,
     },
-    /// The arc keeps the write undoable after an `ElemBack` moved the
-    /// element.
+    /// the arc keeps the write undoable after an `ElemBack` moved the element
     Field {
         data: Arc<StructData>,
         slot: usize,
@@ -367,13 +356,12 @@ struct VecRun {
     snapshot: Vec<SVal>,
     handles: Vec<Option<Arc<StructData>>>,
     undo: Vec<Undo>,
-    /// Elements already split this run. The handle table and journal hold
-    /// internal references, so splitting per `UniqueIndex` would clone on
-    /// every write. One split per element per run is the same observable
-    /// state.
+    /// Elements already split this run. The handle table and journal hold internal references, so
+    /// splitting per `UniqueIndex` would clone on every write. 1 split per element per run gives
+    /// the same observable state.
     split: Vec<Vec<bool>>,
-    /// Per op member slot cache. Field names resolve by string, which the
-    /// loop would pay millions of times for the same sites.
+    /// Per op member slot cache. Field names resolve by string, the loop would pay that millions
+    /// of times for the same sites.
     slots: Vec<(usize, u32)>,
     ip: usize,
     work: u32,
@@ -386,8 +374,8 @@ enum SpanOut {
     Poll,
 }
 
-/// Split each written base and take the storage handles. `None` when a
-/// base is not a vec or 2 bases share one storage.
+/// Split each written base and take the storage handles. `None` when a base is not a vec or 2
+/// bases share 1 storage.
 fn vec_setup(ctx: &mut StepCtx, plan: &WhilePlan) -> Option<Vec<List>> {
     let mut handles: Vec<List> = Vec::with_capacity(plan.vecs.len());
     for (&reg, &written) in plan.vecs.iter().zip(&plan.written) {
@@ -404,8 +392,8 @@ fn vec_setup(ctx: &mut StepCtx, plan: &WhilePlan) -> Option<Vec<List>> {
     (!aliased).then_some(handles)
 }
 
-/// The locks drop around every Ctrl-C poll. A written base is unique to
-/// this frame, so nothing can touch it in between.
+/// The locks drop around every Ctrl-C poll. A written base is unique to this frame, so nothing
+/// can touch it in between.
 fn run_vec(
     ctx: &mut StepCtx,
     plan: &WhilePlan,
@@ -448,8 +436,8 @@ fn run_vec(
     }
 }
 
-/// Run until the loop exits, an iteration fails or the locks should drop
-/// for a poll. Every iteration boundary snapshots and clears the journal.
+/// Run until the loop exits, an iteration fails or the locks should drop for a poll. Every
+/// iteration boundary snapshots and clears the journal.
 fn run_vec_span(
     plan: &WhilePlan,
     run: &mut VecRun,
@@ -562,8 +550,8 @@ fn cached_slot(
     Some(found)
 }
 
-/// A non scalar element fails over instead of loading as `Opaque`, which
-/// would skip writeback and leave the register stale.
+/// A non scalar element fails over instead of loading as `Opaque`, that would skip writeback and
+/// leave the register stale.
 #[inline]
 fn vec_get(
     run: &mut VecRun,
@@ -584,7 +572,7 @@ fn vec_get(
     true
 }
 
-/// Journaled.
+/// journaled
 #[inline]
 fn vec_set(
     run: &mut VecRun,
@@ -609,9 +597,8 @@ fn vec_set(
     true
 }
 
-/// The element arc into the handle table, split once per element per run
-/// for a `UniqueIndex`, see `VecRun::split`. A pure split needs no undo
-/// entry. False fails over.
+/// The element arc into the handle table, split once per element per run for a `UniqueIndex`, see
+/// `VecRun::split`. A pure split needs no undo entry. False fails over.
 #[inline]
 fn elem_ref(
     run: &mut VecRun,
@@ -650,7 +637,7 @@ fn field_get(run: &mut VecRun, ip: usize, dst: u16, handle: u16, member: &Member
     let Some(data) = &run.handles[usize::from(handle)] else {
         return false;
     };
-    // The slot cache inline so the read path pays no arc clone.
+    // the slot cache inline so the read path pays no arc clone
     let shape_addr = Arc::as_ptr(&data.shape).addr();
     let (addr, cached) = run.slots[ip];
     let slot = if addr == shape_addr {
@@ -675,7 +662,7 @@ fn field_get(run: &mut VecRun, ip: usize, dst: u16, handle: u16, member: &Member
     true
 }
 
-/// Journaled.
+/// journaled
 #[inline]
 fn field_set(run: &mut VecRun, ip: usize, handle: u16, member: &Member, val: u16) -> bool {
     let Some(data) = run.handles[usize::from(handle)].clone() else {
@@ -722,8 +709,7 @@ fn elem_back(
     true
 }
 
-/// Registers from the snapshot, writes by unwinding the journal newest
-/// first.
+/// Registers from the snapshot, writes by unwinding the journal newest first.
 fn fail_vec(run: &mut VecRun, guards: &mut [MutexGuard<'_, Vec<Value>>]) -> SpanOut {
     run.regs.copy_from_slice(&run.snapshot);
     while let Some(entry) = run.undo.pop() {

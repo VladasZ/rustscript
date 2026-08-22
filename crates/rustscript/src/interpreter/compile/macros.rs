@@ -8,7 +8,7 @@ use syn::{Expr, Lit};
 
 use crate::interpreter::bytecode::{BinKind, Const, FmtSpec, MacroKind, Op, PathRef, Reg};
 
-use super::expr::{takes_numeric_hint, unconstrained_int};
+use super::walks::{takes_numeric_hint, unconstrained_int};
 use super::{
     Compiler, NumericTy, inline_holes, numeric_target, parse_exprs, parse_matches, parse_vec_repeat,
 };
@@ -25,7 +25,7 @@ impl Compiler<'_> {
         match name.as_str() {
             "println" | "print" | "eprintln" | "eprint" | "panic" | "anyhow" | "bail"
             | "unreachable" | "todo" | "unimplemented" => {
-                // A default message with no arguments, like real Rust.
+                // a default message with no arguments, like real Rust
                 let spec = match name.as_str() {
                     "unreachable" | "todo" | "unimplemented" if mac.tokens.is_empty() => {
                         let msg = match name.as_str() {
@@ -52,8 +52,8 @@ impl Compiler<'_> {
                 let spec = self.build_fmt_spec(mac)?;
                 self.emit(Op::Fmt { dst, spec });
             }
-            // `write!` lowers to build the string then `write_all`, so every
-            // writer the bridge supports works and the `io::Result` is real.
+            // `write!` lowers to build the string then `write_all`, so every writer the bridge
+            // supports works and the `io::Result` is real
             "write" | "writeln" => {
                 let args =
                     mac.parse_body_with(Punctuated::<Expr, syn::Token![,]>::parse_terminated)?;
@@ -80,7 +80,7 @@ impl Compiler<'_> {
             "matches" => self.compile_matches_macro(dst, mac)?,
             "ensure" => self.compile_ensure_macro(dst, mac)?,
             "cfg" => {
-                // Folds to a constant for the host, like real Rust.
+                // folds to a constant for the host, like real Rust
                 let meta = mac.parse_body::<syn::Meta>()?;
                 self.emit(Op::LoadBool {
                     dst,
@@ -215,7 +215,7 @@ impl Compiler<'_> {
             bail!("`join!` is only available under #[tokio::main]");
         }
         let args = parse_exprs(mac)?;
-        // All tasks must be running before any await, or nothing overlaps.
+        // all tasks must be running before any await, or nothing overlaps
         let handles: Vec<Reg> = args
             .iter()
             .map(|a| self.compile_expr(a))
@@ -264,8 +264,7 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    /// For the no argument forms of `unreachable!`, `todo!` and
-    /// `unimplemented!`.
+    /// For the no argument forms of `unreachable!`, `todo!` and `unimplemented!`.
     pub(super) fn literal_fmt_spec(&mut self, text: &str) -> Result<u16> {
         let f = self.cur();
         f.fmts.push(FmtSpec {
@@ -281,8 +280,7 @@ impl Compiler<'_> {
         self.build_fmt_spec_from(args.iter(), false)
     }
 
-    /// `newline` extends the template, not the value, so a bare `writeln!(f)`
-    /// is a lone newline.
+    /// `newline` extends the template, not the value, so a bare `writeln!(f)` is a lone newline.
     pub(super) fn build_fmt_spec_from<'a>(
         &mut self,
         mut iter: impl Iterator<Item = &'a Expr>,
@@ -308,8 +306,7 @@ impl Compiler<'_> {
                 }
                 other => other,
             };
-            // A bare literal argument is `i32`, so `{:x}` of a negative one
-            // shows 8 digits.
+            // a bare literal argument is `i32`, so `{:x}` of a negative one shows 8 digits
             let target = if unconstrained_int(value) {
                 Some(NumericTy::Int(IntWidth::I32))
             } else {
@@ -330,7 +327,7 @@ impl Compiler<'_> {
             }
             positional.push(r);
         }
-        // Inline identifiers not given explicitly.
+        // inline identifiers not given explicitly
         for hole in inline_holes(&template) {
             if named.iter().all(|(n, _)| n != &hole) {
                 let r = self.alloc();
@@ -347,11 +344,10 @@ impl Compiler<'_> {
         Ok(u16::try_from(f.fmts.len() - 1)?)
     }
 
-    // -- jump patching -----------------------------------------------------
+    // jump patching
 }
 
-/// Anything unhandled is an error, a silent false would pick the wrong
-/// branch.
+/// Anything unhandled is an error, a silent false would pick the wrong branch.
 fn eval_cfg(meta: &syn::Meta) -> Result<bool> {
     match meta {
         syn::Meta::Path(path) => {

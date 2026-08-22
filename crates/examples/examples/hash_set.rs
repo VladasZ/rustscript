@@ -11,8 +11,7 @@ fn main() {
     println!("{}", seen.contains("LL-1"));
     println!("{}", seen.len());
 
-    // Iteration order is unspecified, so only order insensitive reads are
-    // printed.
+    // iteration order is unspecified, so only order insensitive reads are printed
     let mut total = 0;
     for key in &seen {
         total += key.len();

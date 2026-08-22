@@ -1,5 +1,5 @@
-//! The `cargo check` gate behind `rust check`. Never runs when a script
-//! runs. Results cache by source hash.
+//! The `cargo check` gate for `rust check`. Not used when a script just runs. Results are cached
+//! by source hash.
 
 use hex::encode;
 use sha2::{Digest, Sha256};
@@ -20,21 +20,19 @@ fn cache_root() -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
         return PathBuf::from(home).join(".cache/rustscript");
     }
-    // `dirs` knows the per user cache dir even on `Windows`. The old fallback
-    // was the shared `/tmp`, so `cmp` would exec a binary from a path any
-    // other user could create first.
+    // `dirs` knows the per user cache dir on `Windows` too. Don't fall back to `/tmp`,
+    // `cmp` would exec a binary from a path any other user could create first.
     if let Some(dir) = dirs::cache_dir() {
         return dir.join("rustscript");
     }
     std::env::temp_dir().join("rustscript")
 }
 
-/// Compiled script binaries, one per source hash.
 fn bin_cache() -> PathBuf {
     cache_root().join("bin")
 }
 
-/// Entries unused this long are swept after every check and build.
+/// Cache entries older than this are removed after every check and build.
 const GC_MAX_AGE: Duration = Duration::from_hours(720);
 
 fn touch(path: &Path) {
@@ -50,9 +48,8 @@ fn touch(path: &Path) {
     }
 }
 
-/// A project's use time is its `.checked` stamp, or the mirrored `Cargo.toml`
-/// when it never earned one. The shared `target` dir is never removed,
-/// rebuilding it is the cost the cache exists to avoid.
+/// Last use is the `.checked` stamp, or the mirrored `Cargo.toml` if there is no stamp.
+/// The shared `target` dir is never removed, rebuilding it is exactly what the cache avoids.
 fn sweep() {
     sweep_root(&cache_root(), SystemTime::now());
 }
@@ -120,8 +117,7 @@ fn mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
-/// Missing metadata and a clock that ran backwards read as fresh, so only a
-/// known age is swept.
+/// Missing metadata or a clock that went backwards count as fresh. Only a known age is swept.
 fn is_expired(used: Option<SystemTime>, now: SystemTime) -> bool {
     let Some(used) = used else { return false };
     now.duration_since(used).is_ok_and(|age| age > GC_MAX_AGE)
@@ -138,8 +134,8 @@ pub fn clean() -> Result<()> {
     Ok(())
 }
 
-/// `files` are mirrored into the cache project so `mod` resolves the same
-/// way. `crate_deps` join it as path dependencies.
+/// `files` are mirrored into the cache project so `mod` resolves the same way. `crate_deps` are
+/// added as path deps.
 pub fn check(
     script_path: &Path,
     files: &[(PathBuf, String)],
@@ -159,8 +155,7 @@ pub fn check(
 
     write_project(&project, files, crate_deps)?;
 
-    // One shared target dir, or every source hash recompiles the whole dep
-    // set and piles up gigabytes.
+    // One shared target dir. Otherwise every source hash recompiles all deps and eats gigabytes.
     let output = Command::new("cargo")
         .args(["check", "--quiet"])
         .env("CARGO_TARGET_DIR", cache_root().join("target"))
@@ -186,7 +181,6 @@ pub fn check(
     Ok(())
 }
 
-/// Shared by the check gate and the compiled build.
 fn write_project(
     project: &Path,
     files: &[(PathBuf, String)],
@@ -205,8 +199,7 @@ fn write_project(
     Ok(())
 }
 
-/// A successful build also stands in for the check gate. The binary is
-/// cached by source hash, no per hash target dirs are ever created.
+/// A successful build also counts as a passed check. The binary is cached by source hash.
 pub fn build(
     script_path: &Path,
     files: &[(PathBuf, String)],
@@ -242,15 +235,14 @@ pub fn build(
         .join("debug")
         .join(format!("script{}", std::env::consts::EXE_SUFFIX));
     std::fs::create_dir_all(bin_cache())?;
-    // Copy to a temp path then rename, so a concurrent run never execs a half
-    // written binary.
+    // Copy to a temp path and rename, so a concurrent run never runs a half written binary.
     let tmp = bin_cache().join(format!(".{hash}.{}", std::process::id()));
     std::fs::copy(&built, &tmp)
         .map_err(|e| anyhow!("cannot copy built binary {}: {e}", built.display()))?;
     match std::fs::rename(&tmp, &bin) {
         Ok(()) => {}
         Err(e) => {
-            // A concurrent build may have placed the identical binary first.
+            // a concurrent build may have put the same binary there first
             if let Err(rm) = std::fs::remove_file(&tmp) {
                 eprintln!("rust: could not remove temp binary {}: {rm}", tmp.display());
             }
@@ -263,7 +255,7 @@ pub fn build(
     Ok(bin)
 }
 
-/// Always available, so a script can `use` them without declaring anything.
+/// Always there, a script can `use` them without declaring anything.
 const MANIFEST: &str = r#"[dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -297,9 +289,8 @@ windows-service = "0.8"
 wmi = "0.18"
 "#;
 
-/// The empty `[workspace]` detaches the project from any workspace above the
-/// cache dir. The bin path is the script's real name, so diagnostics name
-/// the script the user ran.
+/// The empty `[workspace]` detaches the project from any workspace above the cache dir.
+/// The bin is named after the script so diagnostics show the real name.
 fn manifest(root: Option<&Path>, crate_deps: &[CrateDep]) -> String {
     let root = root.unwrap_or(Path::new("main.rs")).to_string_lossy();
     let mut out = format!(
@@ -316,19 +307,18 @@ path = {root:?}
     );
     for dep in crate_deps {
         let dir = dep.dir.to_string_lossy();
-        // An explicit `[dependencies.name]` header, because `MANIFEST` ends
-        // with the `[target."cfg(windows)".dependencies]` table and a bare key
-        // would join it and make the crate `Windows` only.
+        // Explicit `[dependencies.name]` header. `MANIFEST` ends with the
+        // `[target."cfg(windows)".dependencies]` table, a bare key would land there and make the
+        // crate `Windows` only.
         out.push_str(&format!("\n[dependencies.{}]\npath = {dir:?}\n", dep.name));
     }
     out.push_str("\n[workspace]\n");
     out
 }
 
-/// The key covers the `MANIFEST` and the compiler too, not only the sources.
-/// Without that a `rust update` left old stamps vouching for sources the new
-/// dep set might reject. Sha256 because `DefaultHasher` is not stable across
-/// releases.
+/// The key covers `MANIFEST` and the compiler too, not only the sources. Otherwise after `rust update`
+/// old stamps vouch for sources the new dep set may reject. Sha256 because `DefaultHasher` is not
+/// stable across releases.
 fn hash_files(files: &[(PathBuf, String)], crate_deps: &[CrateDep]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(MANIFEST.as_bytes());
@@ -337,7 +327,7 @@ fn hash_files(files: &[(PathBuf, String)], crate_deps: &[CrateDep]) -> String {
         hasher.update(rel.to_string_lossy().as_bytes());
         hasher.update(source.as_bytes());
     }
-    // A grafted crate change must re-trigger the check.
+    // a grafted crate change must re-trigger the check
     for dep in crate_deps {
         hasher.update(dep.name.as_bytes());
         for (rel, source) in &dep.files {
@@ -345,7 +335,7 @@ fn hash_files(files: &[(PathBuf, String)], crate_deps: &[CrateDep]) -> String {
             hasher.update(source.as_bytes());
         }
     }
-    // Half the digest is still 128 bits and keeps the dir names readable.
+    // half the digest is still 128 bits and dir names stay readable
     encode(&hasher.finalize()[..16])
 }
 
@@ -353,8 +343,8 @@ fn hash_files(files: &[(PathBuf, String)], crate_deps: &[CrateDep]) -> String {
 mod tests {
     use super::*;
 
-    /// A regression once appended the graft after the `Windows` target table,
-    /// so `use shared::..` failed to compile off `Windows`.
+    /// The graft must not land after the `Windows` target table, `use shared::..` fails off
+    /// `Windows` then.
     #[test]
     fn graft_dep_is_all_target_not_windows_only() {
         let dep = CrateDep {
@@ -391,7 +381,7 @@ mod tests {
         vec![(PathBuf::from(name), body.to_string())]
     }
 
-    /// Anything that could change cargo's answer belongs in the key.
+    /// Anything that can change the cargo result belongs in the key.
     #[test]
     fn the_cache_key_separates_different_inputs() {
         let base = hash_files(&source("a.rs", "fn main() {}"), &[]);
@@ -410,7 +400,7 @@ mod tests {
         let with_dep = hash_files(&source("a.rs", "fn main() {}"), &[dep]);
         assert_ne!(base, with_dep);
 
-        // A grafted crate change must re-trigger the check.
+        // a grafted crate change must re-trigger the check
         let changed_dep = CrateDep {
             name: "shared".to_string(),
             dir: PathBuf::from("/tmp/shared"),
@@ -449,7 +439,7 @@ mod tests {
 
         project_entry(root, "stale", true, old);
         project_entry(root, "fresh", true, now);
-        // A project that never earned a stamp must still age out.
+        // a project without a stamp must still age out
         project_entry(root, "unstamped", false, old);
         std::fs::create_dir_all(root.join("target/debug")).unwrap();
         let bin = root.join("bin");
@@ -471,7 +461,7 @@ mod tests {
         assert!(bin.join("bbbb").exists(), "fresh binary must stay");
     }
 
-    /// A diagnostic must point at `notes.rs`, not `main.rs`.
+    /// The diagnostic must point at `notes.rs`, not `main.rs`.
     #[test]
     fn manifest_bin_path_is_the_real_script_name() {
         let text = manifest(Some(Path::new("notes.rs")), &[]);

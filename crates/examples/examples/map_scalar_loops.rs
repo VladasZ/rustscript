@@ -1,12 +1,11 @@
 #!/usr/bin/env rust
 
-// Map probes and inserts inside scalar `for` plans, with a mid loop failover
-// after a journaled insert.
+// Map probes and inserts inside scalar `for` plans, with a mid loop failover after a journaled insert.
 
 use std::collections::HashMap;
 
 fn counting(n: i64) -> (usize, i64) {
-    // The hashmap_int shape.
+    // the hashmap_int shape
     let mut counts: HashMap<i64, i64> = HashMap::new();
     let mut x: i64 = 12345;
     for _ in 0..n {
@@ -25,7 +24,7 @@ fn counting(n: i64) -> (usize, i64) {
 }
 
 fn kept_old_values() -> i64 {
-    // `insert` answering the old value.
+    // `insert` returning the old value
     let mut m: HashMap<i64, i64> = HashMap::new();
     let mut reclaimed = 0;
     for k in 0..30 {
@@ -51,8 +50,8 @@ fn membership() -> i64 {
 }
 
 fn failing_over() -> (usize, f64) {
-    // The float valued `weights` map fails every iteration over after the
-    // insert into `counts`. A missed undo would skew the sum.
+    // The float valued `weights` map fails every iteration over after the insert into `counts`. A
+    // missed undo would skew the sum.
     let mut weights: HashMap<i64, f64> = HashMap::new();
     for k in 0..20 {
         weights.insert(k, f64::from(u32::try_from(k).unwrap()) * 0.5);
@@ -72,7 +71,7 @@ fn failing_over() -> (usize, f64) {
 }
 
 fn width_tagged_keys() -> i64 {
-    // u32 keys.
+    // u32 keys
     let mut m: HashMap<u32, i64> = HashMap::new();
     for k in 0u32..50 {
         let key = k % 7;

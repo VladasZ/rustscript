@@ -1,6 +1,6 @@
 #!/usr/bin/env rust
 
-//! A tuple pattern `let` states each name's type through its own element.
+//! A tuple pattern `let` states the type of each name through its own element.
 
 fn opaque_i64(v: i64) -> i64 {
     v
@@ -21,7 +21,7 @@ fn main() {
         letter.unwrap_or_default()
     );
 
-    // Annotated.
+    // annotated
     let (level, label): (Option<u8>, Option<String>) = (None, None);
     println!(
         "{:?} {:?}",

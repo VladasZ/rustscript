@@ -1,6 +1,5 @@
-// Reduced from seed 20673100883. The default after `checked_add` once came
-// out as an empty string and panicked with "expected a number" instead of
-// the divide by zero message.
+// The default after `checked_add` is a number, so the divide by zero message must show. Seed
+// 20673100883.
 
 fn diff_opaque_u64(value: u64) -> u64 {
     value

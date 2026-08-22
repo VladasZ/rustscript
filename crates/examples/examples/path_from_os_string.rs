@@ -1,16 +1,15 @@
-// `PathBuf::from` of an `OsString` must unwrap the inner path, and
-// `UNIX_EPOCH` must be a `SystemTime`. Only booleans and a zero delta are
-// printed.
+// `PathBuf::from` of an `OsString` must unwrap the inner path, and `UNIX_EPOCH` must be a
+// `SystemTime`. Only booleans and a zero delta are printed.
 
 use std::env;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
-    // PATH is always set.
+    // PATH is always set
     if let Some(v) = env::var_os("PATH") {
         let p = PathBuf::from(v);
-        // Once printed as "OsString { s: .. }".
+        // must not print as "OsString { s: .. }"
         println!(
             "has_debug_wrapper: {}",
             p.display().to_string().contains("OsString {")

@@ -1,6 +1,5 @@
-//! Runs every script in `tests/cases` compiled and interpreted and asserts
-//! identical stdout. The cases pin numeric semantics, casts and float
-//! formatting, so they use those constructs on purpose.
+//! Runs every script in `tests/cases` compiled and interpreted and asserts identical stdout. The cases
+//! pin numeric semantics, casts and float formatting, so they use those constructs on purpose.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -31,7 +30,7 @@ fn semantics_cases_match_compiler() {
         let name = path.file_stem().unwrap().to_str().unwrap().to_string();
         let binary = out_dir.join(&name);
 
-        // Overflow checks match the debug profile of the equivalence examples.
+        // overflow checks match the debug profile of the equivalence examples
         let compile = Command::new("rustc")
             .args(["--edition", "2024", "-C", "overflow-checks=yes", "-o"])
             .arg(&binary)

@@ -59,13 +59,13 @@ impl Generator<'_> {
                 let ann = self.ann_for(&expr);
                 (expr, ann)
             }
-            // Only the annotation states the type.
+            // only the annotation states the type
             Route::BareLet => (
                 self.pipe_collect(&ty, Site::Bare, MAX_EXPR_DEPTH)
                     .unwrap_or_else(|| self.expr(&ty, MAX_EXPR_DEPTH)),
                 Ann::Typed,
             ),
-            // The helper's return type states it.
+            // the helper return type states it
             Route::Helper => {
                 let expr = if let Some((fn_name, params)) = self.helper_fn(&ty) {
                     self.fn_call(fn_name, &params, &ty, MAX_EXPR_DEPTH - 1)
@@ -75,7 +75,7 @@ impl Generator<'_> {
                 let ann = self.ann_for(&expr);
                 (expr, ann)
             }
-            // `let x: T = value.into();`, the annotation picks the `From`.
+            // `let x: T = value.into();`, the annotation picks the `From`
             Route::Into => {
                 let Ty::User(shape) = &ty else {
                     unreachable!("into route only on user types");
@@ -101,8 +101,8 @@ impl Generator<'_> {
         }
     }
 
-    /// An unannotated `let` needs an initializer that pins its type, a bare
-    /// literal leaves an `{integer}` no inherent method can use.
+    /// An unannotated `let` needs an initializer that pins its type, a bare literal leaves an
+    /// `{integer}` no inherent method can use.
     fn ann_for(&mut self, expr: &Expr) -> Ann {
         let states = expr.states_concrete_ty();
         if states && self.chance(0.4) {
@@ -133,8 +133,8 @@ impl Generator<'_> {
         }
     }
 
-    /// For a clone initialized `let`. Later mutations must stay private to
-    /// the binding they hit, the copy on write regression.
+    /// For a clone initialized `let`. Later mutations must stay private to the binding they hit,
+    /// this checks copy on write.
     fn clone_source(&mut self, ty: &Ty) -> Option<Expr> {
         let candidates = self.locals_of(ty);
         if candidates.is_empty() {
@@ -146,7 +146,7 @@ impl Generator<'_> {
         })
     }
 
-    // -- closures -------------------------------------------------------------
+    // closures
 
     fn closure_stmt(&mut self) -> Stmt {
         let name = self.fresh("diff_cl");
@@ -196,8 +196,7 @@ impl Generator<'_> {
             });
             (ret, body)
         };
-        // A `move` closure owns every non `Copy` local it names, so those
-        // leave the scope.
+        // a `move` closure owns every non `Copy` local it names, so those leave the scope
         if capture_move {
             let moved: Vec<String> = self
                 .scope
@@ -209,8 +208,7 @@ impl Generator<'_> {
             self.scope.retain(|binding| !moved.contains(&binding.name));
         }
         let param_tys: Vec<Ty> = params.iter().map(|(_, ty)| ty.clone()).collect();
-        // The closure still holds the counter, so the arguments must not read
-        // it.
+        // the closure still holds the counter, so the arguments must not read it
         let hidden = match &body {
             Expr::Block { stmts, .. } => stmts.iter().flat_map(Stmt::declared_targets).collect(),
             _ => Vec::new(),
@@ -227,8 +225,8 @@ impl Generator<'_> {
             .collect();
         let calls = self.closure_calls(&name, &param_tys, &ret);
         self.scope.extend(removed);
-        // A mutably borrowing closure is called right after its definition
-        // and never again. `move` and pure closures stay callable.
+        // A mutably borrowing closure is called right after its definition and never again.
+        // `move` and pure closures stay callable.
         if capture_move || !mutates {
             self.scope.push(Binding {
                 name: name.clone(),
@@ -272,8 +270,8 @@ impl Generator<'_> {
         }
     }
 
-    /// The calls printed right after a closure binding. A closure over its
-    /// own return type also goes through the apply helper.
+    /// The calls printed right after a closure binding. A closure over its own return type also
+    /// goes through the apply helper.
     fn closure_calls(&mut self, name: &str, params: &[Ty], ret: &Ty) -> Vec<Expr> {
         let count = self.rng.random_range(1..=3);
         let applies = params.len() == 1 && params[0] == *ret;
@@ -299,7 +297,7 @@ impl Generator<'_> {
             .collect()
     }
 
-    // -- mutations ------------------------------------------------------------
+    // mutations
 
     pub(super) fn mutation(&mut self) -> Stmt {
         match self.rng.random_range(0..12) {
@@ -394,7 +392,7 @@ impl Generator<'_> {
     fn for_stmt(&mut self) -> Stmt {
         let count = self.rng.random_range(0..=3);
         let body = self.loop_body();
-        // The counter is never read, a name would make every program warn.
+        // the counter is never read, a name would make every program warn
         Stmt::ForRange {
             var: "_".to_string(),
             count,
@@ -437,8 +435,7 @@ impl Generator<'_> {
         Stmt::Return { condition, value }
     }
 
-    /// A nested block declares nothing, so the reducer never has to reason
-    /// about shadowing.
+    /// A nested block declares nothing, so the reducer never has to reason about shadowing.
     pub(super) fn nested_body(&mut self) -> Vec<Stmt> {
         let count = self.rng.random_range(1..=2);
         let mut body = Vec::new();
@@ -465,8 +462,7 @@ impl Generator<'_> {
         body
     }
 
-    /// `name` is hidden because an `entry()` chain holds the map while its
-    /// arguments evaluate.
+    /// `name` is hidden because an `entry()` chain holds the map while its arguments evaluate.
     fn op_without(&mut self, name: &str, build: impl FnOnce(&mut Self) -> MutOp) -> MutOp {
         let index = self.scope.iter().position(|binding| binding.name == name);
         let removed = index.map(|found| self.scope.remove(found));
@@ -497,8 +493,7 @@ impl Generator<'_> {
                     8 => {
                         let bind = self.fresh("diff_r");
                         let locals = [(bind.clone(), elem.clone())];
-                        // `retain` holds the vec, so the predicate must not
-                        // read it.
+                        // `retain` holds the vec, so the predicate must not read it
                         let pred = self.without_binding(&name, |inner| {
                             inner.closure_body(|inner| {
                                 inner.with_locals(&locals, |inner| inner.expr(&Ty::Bool, 1))
@@ -560,8 +555,7 @@ impl Generator<'_> {
         Some(Stmt::Mutate { name, op })
     }
 
-    /// `for item in vec { accumulate into collection }`. The source is a vec,
-    /// so order is defined.
+    /// `for item in vec { accumulate into collection }`. The source is a vec, so order is defined.
     fn accumulation_loop(&mut self) -> Option<Stmt> {
         let (target, ty) = self.pick_collection()?;
         let var = self.fresh("diff_item");
@@ -640,7 +634,7 @@ impl Generator<'_> {
         }
         let (name, elem) = self.pick(&vecs).clone();
         let var = self.fresh("diff_e");
-        // The vec is borrowed for the loop, so its name is hidden.
+        // the vec is borrowed for the loop, so its name is hidden
         let index = self.scope.iter().position(|binding| binding.name == name);
         let removed = index.map(|found| self.scope.remove(found));
         let locals = [(var.clone(), elem.clone())];
@@ -656,12 +650,11 @@ impl Generator<'_> {
         })
     }
 
-    /// `helper(&mut binding, args)`.
+    /// `helper(&mut binding, args)`
     fn call_mut_stmt(&mut self) -> Option<Stmt> {
         let (name, ty) = self.pick_local()?;
         let (fn_name, params) = self.writer_fn(&ty);
-        // The target is borrowed for the call, so the arguments cannot read
-        // it.
+        // the target is borrowed for the call, so the arguments can't read it
         let index = self.scope.iter().position(|binding| binding.name == name);
         let removed = index.map(|found| self.scope.remove(found));
         let args = params.iter().map(|param| self.expr(param, 1)).collect();
@@ -710,7 +703,7 @@ impl Generator<'_> {
         Some(self.pick(&matching).clone())
     }
 
-    // -- observations ---------------------------------------------------------
+    // observations
 
     pub(super) fn print_stmt(&mut self, expr: Expr) -> Stmt {
         let label = self.next_label();

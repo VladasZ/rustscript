@@ -1,6 +1,6 @@
 #!/usr/bin/env rust
 
-// Only stable facts are printed.
+// only stable facts are printed
 
 use std::time::{Duration, Instant};
 

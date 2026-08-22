@@ -1,7 +1,7 @@
 #!/usr/bin/env rust
 
-//! A `fold` answers in its init's type and `unwrap_or` types its fallback
-//! from the payload. Neither widens to i64.
+//! A `fold` has its init's type and `unwrap_or` types its fallback from the payload. Neither
+//! widens to i64.
 
 fn opaque_i32(v: i32) -> i32 {
     v
@@ -36,7 +36,7 @@ fn wide_of(v: i64) -> Option<i64> {
 }
 
 fn main() {
-    // Bare literals in the body, `i32` from the init.
+    // bare literals in the body, `i32` from the init
     let folded = Vec::<i64>::new().into_iter().map(|_| opaque_i32(2)).fold(
         opaque_i32(950_127_717),
         |_acc, _item| {
@@ -45,7 +45,7 @@ fn main() {
     );
     println!("folded: {:#x}", !folded);
 
-    // With items.
+    // with items
     let summed = vec![opaque_i64(1), opaque_i64(2)]
         .into_iter()
         .fold(opaque_i16(0), |acc, _item| acc);
@@ -60,7 +60,7 @@ fn main() {
         wide_of(1).unwrap_or(if opaque_bool(true) { -2 } else { 0 })
     );
 
-    // The fold type reaches a default at the end of the chain.
+    // the fold type reaches a default at the end of the chain
     let scaled = Vec::<i8>::new()
         .into_iter()
         .map(|_| opaque_f64(0.0))

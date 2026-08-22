@@ -130,12 +130,12 @@ impl FmtSpec {
         out
     }
 
-    /// `{}` or `{:spec}`.
+    /// `{}` or `{:spec}`
     pub fn placeholder(&self) -> String {
         self.placeholder_for("")
     }
 
-    /// `{arg}` or `{arg:spec}`, `arg` a position or a name.
+    /// `{arg}` or `{arg:spec}`, `arg` a position or a name
     pub fn placeholder_for(&self, arg: &str) -> String {
         let body = self.body();
         if body.is_empty() {
@@ -151,7 +151,7 @@ impl FmtSpec {
         }
         if self.precision.is_some() {
             let ok = match self.fmt {
-                // Precision on an integer is legal but observes nothing.
+                // precision on an integer is legal but observes nothing
                 FmtTrait::Display => matches!(ty, Ty::Float(_) | Ty::Str),
                 FmtTrait::Debug | FmtTrait::LowerExp | FmtTrait::UpperExp => {
                     matches!(ty, Ty::Float(_))

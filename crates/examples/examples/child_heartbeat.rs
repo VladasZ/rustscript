@@ -1,8 +1,7 @@
 #!/usr/bin/env rust
 
-// Polling a child with `try_wait`. The output goes to a file through
-// `Stdio::from`, because a pipe nobody drains deadlocks. Nothing is printed
-// inside the poll loop because the poll count depends on machine speed.
+// Polling a child with `try_wait`. Output goes to a file through `Stdio::from`, a pipe nobody drains
+// deadlocks. Nothing is printed inside the poll loop, the poll count depends on machine speed.
 
 use std::fs::{File, read_to_string};
 use std::io::Write;
@@ -48,7 +47,7 @@ fn main() {
     }
     println!("captured {} lines: {}", lines.len(), lines.join(","));
 
-    // The script's own handle survives the child taking a clone of it.
+    // the script's own handle survives the child taking a clone of it
     let mut again = File::create(&path).expect("reopen");
     let how = "writeln";
     writeln!(again, "rewritten by {how}").expect("write");

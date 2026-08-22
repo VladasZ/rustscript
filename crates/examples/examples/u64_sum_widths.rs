@@ -1,6 +1,6 @@
 #!/usr/bin/env rust
 
-//! The eager vec path once clamped elements at `i64::MAX` before adding.
+//! The eager vec path must not clamp elements at `i64::MAX` before adding.
 
 use std::collections::HashSet;
 
@@ -11,14 +11,14 @@ fn opaque(v: u64) -> u64 {
 fn main() {
     let big: u64 = opaque(17_387_282_529_756_548_797u64);
 
-    // Lazy.
+    // lazy
     let lazy: u64 = vec![1i64]
         .into_iter()
         .map(|_n| big.min(opaque(u64::MAX)))
         .sum::<u64>();
     println!("{lazy}");
 
-    // Eager.
+    // eager
     let mut source: HashSet<i64> = HashSet::new();
     source.insert(0);
     let eager = source

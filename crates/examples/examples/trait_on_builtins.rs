@@ -1,7 +1,7 @@
 #!/usr/bin/env rust
 
-//! A script trait on builtin types is keyed by the written type, so `Vec<u8>`
-//! and `Vec<String>` get their own bodies.
+//! A script trait on builtin types is keyed by the written type, so `Vec<u8>` and `Vec<String>`
+//! get their own bodies.
 
 trait Describe {
     fn describe(&self) -> String;
@@ -66,7 +66,7 @@ impl Describe for Vec<String> {
     }
 }
 
-/// Through a generic bound.
+/// through a generic bound
 fn both<T: Describe>(left: &T, right: &T) -> String {
     format!("{} / {}", left.describe(), right.describe())
 }

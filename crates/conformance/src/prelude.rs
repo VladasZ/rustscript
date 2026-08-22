@@ -1,4 +1,4 @@
-//! Re-export hub for `pub use` chains and renames.
+//! re-export hub for `pub use` chains and renames
 
 pub use crate::data::models::Item as ItemAlias;
 pub use crate::geometry::shapes::Rect;

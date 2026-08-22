@@ -1,5 +1,5 @@
-//! Runs every example compiled and interpreted and asserts byte for byte
-//! identical stdout. This is the strongest check the interpreter has.
+//! Runs every example compiled and interpreted and asserts identical stdout. This is the
+//! strongest check the interpreter has.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -8,9 +8,8 @@ use pretty_assertions::assert_eq;
 
 mod common;
 
-/// Network ones depend on a live response, `args_echo` prints its own path,
-/// `registry_demo` is behind a required feature, and `parallel` prints in a
-/// different order every run.
+/// Network ones depend on a live response, `args_echo` prints its own path, `registry_demo` is behind
+/// a required feature, and `parallel` prints in a different order every run.
 const SKIP: &[&str] = &[
     "net_get",
     "net_query",
@@ -62,8 +61,8 @@ fn interpreter_matches_compiler() {
         if SKIP.contains(&name.as_str()) {
             continue;
         }
-        // A symlink on `Windows` needs privileges, so compare only where it is
-        // reliable. The build above still proves the example compiles.
+        // A symlink on `Windows` needs privileges, so compare only where it is reliable. The
+        // build above still proves the example compiles.
         if !cfg!(unix) && name == "symlink_demo" {
             continue;
         }

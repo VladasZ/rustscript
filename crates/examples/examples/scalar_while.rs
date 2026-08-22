@@ -1,4 +1,4 @@
-//! Loops the scalar while plan specializes, one edge per block.
+//! Loops the scalar while plan specializes, 1 edge per block.
 
 fn steps(start: u64) -> u64 {
     let mut n = start;
@@ -32,7 +32,7 @@ fn main() {
 
     println!("gcd {}", gcd(1_071_000_000, 462_000_123));
 
-    // Nested while loops in one region.
+    // nested while loops in 1 region
     let mut pairs: u64 = 0;
     let mut i: u64 = 0;
     while i < 40 {
@@ -47,8 +47,7 @@ fn main() {
     }
     println!("pairs {pairs}");
 
-    // A continue's own backward jump must not become a plan for half the
-    // loop.
+    // the backward jump of a continue must not become a plan for half the loop
     let mut n: i64 = 0;
     let mut skipped: i64 = 0;
     let mut seen: i64 = 0;
@@ -62,7 +61,7 @@ fn main() {
     }
     println!("skipped {skipped} seen {seen}");
 
-    // A `loop` with a break is the same region.
+    // a `loop` with a break is the same region
     let mut doubling: u32 = 1;
     let mut rounds: u32 = 0;
     loop {
@@ -74,7 +73,7 @@ fn main() {
     }
     println!("doubling {doubling} rounds {rounds}");
 
-    // Integer methods in the body.
+    // integer methods in the body
     let mut clamped_sum: u64 = 0;
     let mut edges: u64 = 0;
     let mut bits: u32 = 0;
@@ -87,7 +86,7 @@ fn main() {
     }
     println!("clamped {clamped_sum} edges {edges} bits {bits}");
 
-    // A mid loop fallback on a string read.
+    // a mid loop fallback on a string read
     let low = String::from("aa");
     let high = String::from("zz");
     let mut caught: i64 = 0;
@@ -100,7 +99,7 @@ fn main() {
     }
     println!("ticks {ticks} caught {caught}");
 
-    // A call in the body stays generic.
+    // a call in the body stays generic
     let mut called: u64 = 0;
     let mut m: u64 = 1;
     while m < 20 {
@@ -109,7 +108,7 @@ fn main() {
     }
     println!("called {called}");
 
-    // A `while let` head stays generic.
+    // a `while let` head stays generic
     let mut stack = vec![3, 9, 27, 81];
     let mut drained: i64 = 0;
     while let Some(top) = stack.pop() {
@@ -117,7 +116,7 @@ fn main() {
     }
     println!("drained {drained}");
 
-    // An unsigned value past the i64 midpoint.
+    // an unsigned value past the i64 midpoint
     let mut big: u64 = u64::MAX - 5000;
     let mut wraps: u64 = 0;
     while big != u64::MAX {

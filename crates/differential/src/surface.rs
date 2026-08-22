@@ -1,6 +1,6 @@
-//! The std method surface harvested from `rust-src` into `std_surface.txt`,
-//! against the catalog rows and the interpreter's bridged surface. The
-//! catalog is hand written, so this makes its gaps measurable.
+//! The std method surface harvested from `rust-src` into `std_surface.txt`, against the catalog rows
+//! and the interpreter's bridged surface. The catalog is hand written, so this makes its gaps
+//! measurable.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -45,7 +45,7 @@ const SOURCES: &[(&str, &[&str])] = &[
     ("Iter", &["core/src/iter/traits/iterator.rs"]),
 ];
 
-/// Std trait methods the harvested files do not declare.
+/// Std trait methods the harvested files don't declare.
 pub const TRAIT_METHODS: &[&str] = &[
     "clone",
     "cloned",
@@ -177,9 +177,8 @@ fn rust_src_library() -> Result<PathBuf> {
     Ok(library)
 }
 
-/// Stable, documented, safe `fn`s taking `self` in one source file, inherent
-/// impls only. Trait impl blocks are skipped by brace depth so `fmt` and
-/// `eq` do not count.
+/// Stable, documented, safe `fn`s taking `self` in 1 source file, inherent impls only. Trait impl
+/// blocks are skipped by brace depth so `fmt` and `eq` don't count.
 fn stable_self_methods(text: &str) -> BTreeSet<String> {
     let lines: Vec<&str> = text.lines().collect();
     let mut out = BTreeSet::new();
@@ -212,7 +211,7 @@ fn stable_self_methods(text: &str) -> BTreeSet<String> {
         if name.starts_with('_') || name.starts_with("spec_") || trimmed.contains("unsafe fn ") {
             continue;
         }
-        // The receiver may sit on the next line.
+        // the receiver may sit on the next line
         let head: String = lines[index..(index + 4).min(lines.len())].join(" ");
         let after_paren = head.split_once('(').map_or("", |(_, rest)| rest);
         if !after_paren.trim_start().starts_with("self")
@@ -272,7 +271,7 @@ fn attributes_above<'a>(lines: &[&'a str], index: usize) -> Vec<&'a str> {
 
 fn catalog_by_group() -> BTreeMap<&'static str, BTreeSet<String>> {
     let mut out: BTreeMap<&'static str, BTreeSet<String>> = BTreeMap::new();
-    for method in METHODS {
+    for method in METHODS.iter() {
         let group = match method.recv {
             RecvClass::Int | RecvClass::SignedInt | RecvClass::UnsignedInt => "Int",
             RecvClass::Float => "Float",
@@ -309,8 +308,7 @@ pub fn template_methods(template: &str) -> Vec<String> {
     out
 }
 
-/// The `rust supported` listing per receiver, universal rows copied into
-/// every receiver.
+/// The `rust supported` listing per receiver, universal rows copied into every receiver.
 pub fn interpreter_surface(listing: &str) -> BTreeMap<String, BTreeSet<String>> {
     let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut universal = BTreeSet::new();
@@ -335,14 +333,12 @@ pub fn interpreter_surface(listing: &str) -> BTreeMap<String, BTreeSet<String>> 
     for names in out.values_mut() {
         names.extend(universal.iter().cloned());
     }
-    // Number methods have no table of their own, so the universal rows are
-    // the whole number surface.
+    // number methods have no table of their own, so the universal rows are the whole number surface
     out.insert("number".to_string(), universal);
     out
 }
 
-/// Universal rows kept apart under `any value`, so the count does not
-/// multiply them per receiver.
+/// Universal rows kept apart under `any value`, so the count doesn't multiply them per receiver.
 pub fn interpreter_surface_raw(listing: &str) -> BTreeMap<String, BTreeSet<String>> {
     let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut current: Option<String> = None;
@@ -380,11 +376,11 @@ fn interpreter_label(group: &str) -> &'static str {
 }
 
 pub struct Report {
-    /// Std names the catalog never generates.
+    /// std names the catalog never generates
     pub uncovered_by_catalog: BTreeMap<String, Vec<String>>,
-    /// Std names the interpreter does not implement.
+    /// std names the interpreter doesn't implement
     pub missing_in_interpreter: BTreeMap<String, Vec<String>>,
-    /// Template calls that are not std on any receiver.
+    /// template calls that are not std on any receiver
     pub catalog_not_std: Vec<String>,
     pub std_total: usize,
 }

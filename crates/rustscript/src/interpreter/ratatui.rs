@@ -1,5 +1,5 @@
-//! Router for the ratatui bridge. The value side lives in `ratatui_bridge`,
-//! the widget side in `ratatui_render`.
+//! Router for the ratatui bridge. The value side lives in `ratatui_bridge`, the widget side in
+//! `ratatui_render`.
 
 use anyhow::Result;
 

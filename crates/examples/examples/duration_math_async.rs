@@ -1,4 +1,4 @@
-// A Duration `+=` under `#[tokio::main]` once died with "expected a number".
+// Duration `+=` under `#[tokio::main]`.
 
 use std::time::Duration;
 

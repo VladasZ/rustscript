@@ -1,5 +1,4 @@
-// The interpreter once accepted only scalars as map keys and dropped the
-// width.
+// Composite map keys keep their width.
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]

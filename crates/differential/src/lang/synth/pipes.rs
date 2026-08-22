@@ -87,8 +87,8 @@ impl Generator<'_> {
         self.fresh("diff_x")
     }
 
-    /// A map body states the item type for every later stage, so a bare
-    /// literal would leave a `{float}` no method can be called on.
+    /// A map body states the item type for every later stage, so a bare literal would leave a
+    /// `{float}` no method can be called on.
     fn body_with(&mut self, bind: &str, bind_ty: &Ty, want: &Ty, depth: usize) -> Expr {
         let locals = [(bind.to_string(), bind_ty.clone())];
         self.closure_body(|inner| {
@@ -141,7 +141,7 @@ impl Generator<'_> {
                 ann: self.param_ann(),
             });
         }
-        // A vec keeps arrival order, a set forgets it.
+        // a vec keeps arrival order, a set forgets it
         if matches!(target, Ty::Vec(_)) {
             if !ordered {
                 if !item.is_ord() {
@@ -150,7 +150,7 @@ impl Generator<'_> {
                 stages.push(Stage::Sorted);
             }
             if self.chance(0.3) {
-                // See the panic reach rule in `pipe`.
+                // see the panic reach rule in `pipe`
                 let choices = if fallible_pending(&stages) { 3 } else { 4 };
                 stages.push(match self.rng.random_range(0..choices) {
                     0 => Stage::Rev,
@@ -170,8 +170,8 @@ impl Generator<'_> {
         })
     }
 
-    /// 3 roads to a pair, a map source, a scalar source paired with a
-    /// computed value, or an enumerated ordered source.
+    /// 3 roads to a pair, a map source, a scalar source paired with a computed value, or an
+    /// enumerated ordered source.
     fn pipe_to_map(&mut self, key: &Ty, value: &Ty, site: Site, depth: usize) -> Pipe {
         let target = Ty::map_of(key.clone(), value.clone());
         let choice = self.rng.random_range(0..3);
@@ -190,8 +190,7 @@ impl Generator<'_> {
                 });
                 let mut ordered = false;
                 let pair = Item::Pair(key.clone(), value.clone());
-                // When the pair cannot sort, the filter is dropped rather than
-                // the whole pipe.
+                // when the pair can't sort, the filter is dropped rather than the whole pipe
                 if sort_before_fallible(&mut stages, &mut ordered, &pair, &pred) {
                     stages.push(Stage::Filter {
                         bind: Bind::Pair(key_bind, val_bind),
@@ -210,7 +209,7 @@ impl Generator<'_> {
             };
         }
         if choice == 1 && *key == Ty::I64 {
-            // Enumerate needs order.
+            // enumerate needs order
             let expr = self.expr(&Ty::vec_of(value.clone()), depth - 1);
             return Pipe {
                 source: Source::Coll {
@@ -279,8 +278,7 @@ impl Generator<'_> {
         if ordered && self.chance(0.3) {
             let acc = self.fresh_bind();
             let bind = self.fresh_bind();
-            // A bare literal init leaves a `{float}` no method can be called
-            // on.
+            // a bare literal init leaves a `{float}` no method can be called on
             let init = self.typed_only(|inner| inner.expr(want, depth - 1));
             let locals = [(acc.clone(), want.clone()), (bind.clone(), item)];
             let body = self.closure_body(|inner| {
@@ -298,7 +296,7 @@ impl Generator<'_> {
             });
         }
         let product = self.chance(0.3);
-        // Signed sums, float sums and products all depend on order.
+        // signed sums, float sums and products all depend on order
         let order_matters =
             product || want.contains_float() || matches!(want, Ty::Int(width) if width.is_signed());
         if !ordered && order_matters {
@@ -418,8 +416,8 @@ impl Generator<'_> {
     }
 }
 
-/// A fallible body on unordered items sorts first. When the items cannot
-/// sort, report false so the caller gives the pipe up.
+/// A fallible body on unordered items sorts first. When the items can't sort, report false so the
+/// caller gives the pipe up.
 fn sort_before_fallible(
     stages: &mut Vec<Stage>,
     ordered: &mut bool,

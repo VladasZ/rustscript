@@ -13,8 +13,8 @@ use super::native_methods;
 use super::std_bridge::path_like;
 use super::value::{StructData, Value};
 
-/// Every OS string field goes through `path_like`, a `PathBuf` debug string
-/// in `current_dir` once made every spawn fail with ENOENT.
+/// Every OS string field goes through `path_like`. A `PathBuf` debug string in `current_dir`
+/// makes every spawn fail with ENOENT.
 pub(super) fn build_command(s: &StructData) -> std::process::Command {
     let program = s.get("program").map(|v| path_like(&v)).unwrap_or_default();
     let mut cmd = std::process::Command::new(&program);
@@ -43,8 +43,7 @@ pub(super) fn build_command(s: &StructData) -> std::process::Command {
 }
 
 pub(super) fn run_command(s: &StructData) -> Value {
-    // `output()` pipes by default but explicit stdio settings win, like real
-    // std.
+    // `output()` pipes by default but explicit stdio settings win, like real std
     let mut cmd = build_command(s);
     cmd.stdin(stdio_or(s, "stdin", std::process::Stdio::null()));
     cmd.stdout(stdio_or(s, "stdout", std::process::Stdio::piped()));
@@ -132,8 +131,8 @@ pub(super) fn spawn_command(s: &StructData) -> Value {
         "Child",
         [
             ("handle".into(), Native::Child(child).wrap()),
-            // A hidden alias of the stdin handle, so the close on wait still
-            // finds the pipe after `stdin.take()`, see `child_method`.
+            // a hidden alias of the stdin handle, so the close on wait still finds the pipe after
+            // `stdin.take()`, see `child_method`
             (STDIN_PIPE.into(), stdin.clone()),
             ("stdin".into(), stdin),
             ("stdout".into(), stdout),
@@ -220,7 +219,7 @@ pub(super) fn command_method(recv: &Value, name: &MethodName, args: &[Value]) ->
             }
             cmd_value()
         }
-        // A non Stdio value used to be kept and quietly ignored.
+        // a non Stdio value must be an error, not silently ignored
         BuiltinId::Stdin | BuiltinId::Stdout | BuiltinId::Stderr => {
             let target = arg(args, 0)?;
             match &target {
@@ -250,8 +249,7 @@ fn command_envs(s: &StructData) -> super::value::Map {
     }
 }
 
-/// A constant rather than a literal so the surface harvest does not list it
-/// as a method.
+/// A constant and not a literal, so the surface harvest doesn't list it as a method.
 const STDIN_PIPE: &str = "stdin_pipe";
 
 /// Walks a `Some(Native)` wrapper from `child.stdin.take()`.
@@ -272,9 +270,8 @@ pub(super) fn child_method(recv: &Value, name: &MethodName, args: &mut [Value]) 
     let Value::Struct(s) = recv else {
         unreachable!()
     };
-    // The stdin pipe must close before waiting or the child blocks on EOF.
-    // The VM keeps values alive in registers, so close it through the hidden
-    // alias.
+    // The stdin pipe must close before waiting or the child blocks on EOF. The VM keeps values alive
+    // in registers, so close it through the hidden alias.
     if matches!(name.id, BuiltinId::Wait | BuiltinId::WaitWithOutput) {
         if let Some(v) = s.get(STDIN_PIPE) {
             close_child_stdin(&v);

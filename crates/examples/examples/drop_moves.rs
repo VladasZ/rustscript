@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-// Drops on `?` early return, by value arguments, and guards inside
-// containers, cells and `Rc`.
+// Drops on `?` early return, by value arguments, and guards inside containers, cells and `Rc`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;

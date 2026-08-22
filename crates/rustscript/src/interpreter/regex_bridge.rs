@@ -87,7 +87,7 @@ enum Kind {
 
 fn regex_method(regex: &RegexValue, method: &MethodName, args: &[Value]) -> Result<Value> {
     let source = text_arg(args, 0);
-    // The iterator forms are lazy, so they stay out of the shared core.
+    // the iterator forms are lazy, so they stay out of the shared core
     match method.id {
         BuiltinId::FindIter => return Ok(super::iterator::regex_find(regex.clone(), source)),
         BuiltinId::CapturesIter => {
@@ -146,7 +146,7 @@ fn group_by_name(captures: &CapturesValue, name: &str) -> Option<usize> {
         .find_map(|(candidate, index)| (candidate.as_ref() == name).then_some(*index))
 }
 
-/// `caps[1]` and `caps["name"]`, which panic on a missing group.
+/// `caps[1]` and `caps["name"]`, they panic on a missing group.
 pub(super) fn capture_index(handle: &Arc<Mutex<Native>>, key: &Value) -> Result<Value> {
     let captures = {
         let native = handle.lock();

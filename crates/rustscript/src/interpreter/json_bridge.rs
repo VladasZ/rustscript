@@ -1,6 +1,5 @@
-//! `serde_json` parsing, serialization and the coercion pass for annotated
-//! lets. Struct layouts are precomputed at load, so nothing here touches
-//! the syn AST, which is not `Send`.
+//! `serde_json` parsing, serialization and the coercion pass for annotated lets. Struct layouts are
+//! precomputed at load, so nothing here touches the syn AST, which is not `Send`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -18,13 +17,13 @@ use super::typeir::{TypeIr, lower_type};
 use super::value::{MapKey, RsStr, StructShape, Value};
 use super::vm::Vm;
 
-/// Precomputed at load.
+/// precomputed at load
 pub struct StructInfo {
     pub shape: Arc<StructShape>,
     pub coerce: Vec<Option<TypeIr>>,
     pub json: Vec<TypeIr>,
     pub optional: Vec<bool>,
-    /// `#[serde(rename)]` applied.
+    /// `#[serde(rename)]` applied
     pub key_map: FxHashMap<String, usize>,
 }
 
@@ -85,7 +84,7 @@ impl Interp {
     }
 }
 
-// -- coercion ---------------------------------------------------------------
+// coercion
 
 impl Vm {
     pub(super) fn coerce_value(&self, value: Value, ty: &TypeIr) -> Value {
@@ -96,7 +95,7 @@ impl Vm {
                     return value;
                 };
                 match &**inner {
-                    // A struct element type resolves once for the whole vector.
+                    // a struct element type resolves once for the whole vector
                     TypeIr::Struct(canon) => match self.structs.get(&**canon) {
                         Some(info) => Value::vec(
                             items
@@ -122,8 +121,7 @@ impl Vm {
                 }
             }
             TypeIr::Set(inner) => {
-                // A `collect()` lands here as a Vec and packs into the shared
-                // map storage.
+                // a `collect()` lands here as a Vec and packs into the shared map storage
                 if let Value::Map(m, _) = &value {
                     return Value::Map(m.clone(), super::value::MapKind::Set);
                 }
@@ -132,7 +130,7 @@ impl Vm {
                 };
                 let mut set = indexmap::IndexMap::default();
                 for v in items.lock().iter() {
-                    // An element that cannot be a key leaves the value alone.
+                    // an element that can't be a key leaves the value alone
                     let Some(key) = self.coerce_value(v.clone(), inner).into_key() else {
                         return value.clone();
                     };
@@ -186,7 +184,7 @@ impl Vm {
         Value::structure(info.shape.clone(), values)
     }
 
-    /// `building` guards recursive structs.
+    /// `building` guards recursive structs
     pub(super) fn json_plan(
         &self,
         ty: &TypeIr,
@@ -199,7 +197,7 @@ impl Vm {
                 Some((_, bound)) => self.json_plan(bound, building, tenv),
                 None => JsonPlan::Dynamic,
             },
-            // A set parses as a list, the coercion packs it afterwards.
+            // a set parses as a list, the coercion packs it afterwards
             TypeIr::Vec(inner) | TypeIr::Set(inner) => {
                 JsonPlan::Vec(Box::new(self.json_plan(inner, building, tenv)))
             }
@@ -229,7 +227,7 @@ impl Vm {
         }
     }
 
-    /// `serde_json::from_str::<T>` with a known target type.
+    /// `serde_json::from_str::<T>` with a known target type
     pub(super) fn typed_from_str(
         &self,
         args: &[Value],
@@ -253,7 +251,7 @@ impl Vm {
     }
 }
 
-// -- parsing ----------------------------------------------------------------
+// parsing
 
 pub(super) enum JsonPlan {
     Dynamic,
@@ -267,8 +265,8 @@ pub(super) struct StructPlan {
     fields: Vec<JsonPlan>,
 }
 
-/// Object keys repeat for every array element, so each parse interns them.
-/// The parse runs on one thread, so a `RefCell` is fine.
+/// Object keys repeat for every array element, so each parse interns them. The parse runs on 1
+/// thread, so a `RefCell` is fine.
 type JsonKeys = RefCell<FxHashMap<String, RsStr>>;
 
 pub(super) fn parse_json(text: &str) -> std::result::Result<Value, serde_json::Error> {
@@ -357,8 +355,7 @@ impl serde::de::Visitor<'_> for KeySeed<'_> {
     }
 }
 
-/// Resolves an object key to its slot without allocating. Unknown keys are
-/// skipped.
+/// Resolves an object key to its slot without allocating. Unknown keys are skipped.
 struct FieldSeed<'a> {
     key_map: &'a FxHashMap<String, usize>,
 }
@@ -407,7 +404,7 @@ impl<'de> serde::de::Visitor<'de> for PlanVisitor<'_> {
     }
 
     fn visit_u64<E>(self, u: u64) -> std::result::Result<Value, E> {
-        // A u64 past `i64::MAX` keeps its width instead of becoming a float.
+        // a u64 past `i64::MAX` keeps its width instead of becoming a float
         Ok(match i64::try_from(u) {
             Ok(i) => Value::Int(i),
             Err(_) => Value::int_of_width(i128::from(u), IntWidth::U64),
@@ -467,7 +464,7 @@ impl<'de> serde::de::Visitor<'de> for PlanVisitor<'_> {
                                 plan: &sp.fields[i],
                                 keys: self.keys,
                             })?;
-                            // An Option field wraps a present value in Some.
+                            // an Option field wraps a present value in Some
                             values[i] = if sp.info.optional[i] && !v.is_none_value() {
                                 Value::some(v)
                             } else {
@@ -480,8 +477,7 @@ impl<'de> serde::de::Visitor<'de> for PlanVisitor<'_> {
                         }
                     }
                 }
-                // A missing required field fails the parse like real serde,
-                // Option fields stay None.
+                // a missing required field fails the parse like real serde, Option fields stay None
                 missing_field(&filled, &sp.info.optional, &sp.info.key_map)?;
                 Ok(Value::structure(sp.info.shape.clone(), values))
             }
@@ -506,7 +502,7 @@ impl<'de> serde::de::Visitor<'de> for PlanVisitor<'_> {
     }
 }
 
-// -- serialization ----------------------------------------------------------
+// serialization
 
 /// For the toml and yaml bridges. Null maps to None like the json parser.
 pub(super) fn json_to_pvalue(v: serde_json::Value) -> Value {
@@ -552,7 +548,7 @@ pub(super) fn pvalue_to_json(v: &Value) -> Result<serde_json::Value> {
                 )),
             }
         }
-        // A 128 bit integer is a number only while it fits the json range.
+        // a 128 bit integer is a number only while it fits the json range
         Value::Big(raw, w) => {
             let as_i64 = if *w == super::numeric::IntWidth::U128 {
                 i64::try_from(raw.cast_unsigned()).map_err(|_| ())
@@ -621,7 +617,7 @@ pub(super) fn pvalue_to_json(v: &Value) -> Result<serde_json::Value> {
         }
         Value::Range { .. } => bail!("cannot serialize a range to json"),
         Value::Closure(_) => bail!("cannot serialize a closure to json"),
-        // Serde serializes cells by content.
+        // serde serializes cells by content
         Value::Cell(_, slot) => {
             let inner = slot.lock().clone();
             pvalue_to_json(&inner)?
@@ -636,8 +632,7 @@ pub(super) fn pvalue_to_json(v: &Value) -> Result<serde_json::Value> {
     })
 }
 
-/// The dynamic path, `from_str` with no type plus `to_string` and
-/// `to_string_pretty`.
+/// The dynamic path, `from_str` with no type plus `to_string` and `to_string_pretty`.
 pub(super) fn bridge_serde_json(id: PathId, args: &[Value]) -> Result<Value> {
     match id {
         PathId::SerdeJsonFromStr => {

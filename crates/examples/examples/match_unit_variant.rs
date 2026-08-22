@@ -1,8 +1,7 @@
 #!/usr/bin/env rust
 
-// A bare unit variant pattern like `None` or an imported `Red` must be
-// refutable, not a binding. A broken lowering made a leading `None =>`
-// swallow a `Some`. A lowercase ident is still a catch all.
+// A bare unit variant pattern like `None` or an imported `Red` must be refutable, not a binding. A
+// leading `None =>` must not swallow a `Some`. A lowercase ident is still a catch all.
 
 use serde_json::Value;
 
@@ -15,7 +14,7 @@ enum Color {
     Blue,
 }
 
-// Imported unit variants, the leading arm first.
+// imported unit variants, the leading arm first
 fn bare_name(c: &Color) -> &str {
     match c {
         Red => "red",
@@ -24,7 +23,7 @@ fn bare_name(c: &Color) -> &str {
     }
 }
 
-// A lowercase ident still binds as a catch all.
+// a lowercase ident still binds as a catch all
 fn is_red(c: &Color) -> String {
     match c {
         Red => "yes".to_string(),
@@ -32,8 +31,8 @@ fn is_red(c: &Color) -> String {
     }
 }
 
-// The exact shape that regressed. `as_str` avoids displaying a `Value`, whose
-// text differs between compiled and interpreted for a json string.
+// The exact shape that regressed. `as_str` avoids displaying a `Value`, its text differs between
+// compiled and interpreted for a json string.
 fn field(data: &Value, key: &str) -> String {
     match data.get(key) {
         None => "absent".to_string(),

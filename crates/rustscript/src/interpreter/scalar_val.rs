@@ -1,6 +1,5 @@
-//! The unboxed value model of the scalar plans. Every operation mirrors one
-//! generic path exactly through the same cores in `numeric`. A `None`
-//! answer means the generic path must run this operation.
+//! The unboxed value model of the scalar plans. Every operation mirrors 1 generic path exactly through
+//! the same cores in `numeric`. `None` means the generic path must run this operation.
 
 use std::cmp::Ordering;
 
@@ -15,45 +14,43 @@ use super::numeric::{
 };
 use super::value::{MapKey, Value};
 
-/// `Opaque` is a frame value the plan cannot read. Reading it fails the
-/// iteration, overwriting it is fine, an untouched one keeps its frame
-/// value. It is never a `Bool`, so its truthiness is false like `is_truthy`.
+/// `Opaque` is a frame value the plan can't read. Reading it fails the iteration, overwriting it is
+/// fine, an untouched one keeps its frame value. It is never a `Bool`, so its truthiness is false
+/// like `is_truthy`.
 #[derive(Clone, Copy)]
 pub(super) enum SVal {
     Opaque,
     Unit,
     Int(i64),
-    /// Mirrors `Value::IntW`.
+    /// mirrors `Value::IntW`
     IntW(i64, IntWidth),
-    /// An f32 stays `Opaque`, its rounding rules live on the generic path.
+    /// an f32 stays `Opaque`, its rounding rules live on the generic path
     Float(f64),
     Bool(bool),
-    /// A regex match span over the locked source. Only `MatchGet` reads one.
-    /// A match past 4 GiB fails over before it becomes an item.
+    /// A regex match span over the locked source. Only `MatchGet` reads one. A match past 4 GiB
+    /// fails over before it becomes an item.
     Span {
         start: u32,
         end: u32,
     },
-    /// A slice of the locked source, a `split_whitespace` item or the
-    /// `AsStr` of a match. The map ops read one as a borrowed key.
+    /// A slice of the locked source, a `split_whitespace` item or the `AsStr` of a match. The map
+    /// ops read one as a borrowed key.
     StrSpan {
         start: u32,
         end: u32,
     },
-    /// `Ok(n)` of an `IntTryFrom`. Only `UnwrapOk` reads one.
+    /// `Ok(n)` of an `IntTryFrom`, only `UnwrapOk` reads one
     OkInt(i64),
-    /// `Some(n)` of a map probe or a checked method. Only `TestSome` and
-    /// `UnwrapOk` read one.
+    /// `Some(n)` of a map probe or a checked method, only `TestSome` and `UnwrapOk` read one
     SomeInt(i64),
-    /// The `None` twin of `SomeInt`.
+    /// the `None` twin of `SomeInt`
     NoneOpt,
-    /// A string constant, an `it["key"]` key. Only the probe ops read one.
+    /// a string constant, an `it["key"]` key, only the probe ops read one
     StrConst(u16),
-    /// The boxed item at this index of the effects runner's source. Only
-    /// `ItemIndex` reads one.
+    /// the boxed item at this index of the source of the effects runner, only `ItemIndex` reads one
     Item(u32),
-    /// A boxed value in the function runner's table, see `scalar_fn`. Only
-    /// the enum ops and a self call read one.
+    /// a boxed value in the table of the function runner, see `scalar_fn`, only the enum ops and
+    /// a self call read one
     Boxed(u32),
 }
 
@@ -73,8 +70,8 @@ impl SVal {
 /// `None` for `Opaque`.
 pub(super) fn s_value(v: SVal) -> Option<Value> {
     match v {
-        // A span needs its source string, which only `scalar_for` holds, and
-        // it builds every span before `write_regs` runs.
+        // a span needs its source string, only `scalar_for` has it and it builds every span
+        // before `write_regs` runs
         SVal::Opaque
         | SVal::Span { .. }
         | SVal::StrSpan { .. }
@@ -92,8 +89,7 @@ pub(super) fn s_value(v: SVal) -> Option<Value> {
     }
 }
 
-/// Mirrors `Value::as_key`. `None` sends the access to the generic path for
-/// its exact error.
+/// Mirrors `Value::as_key`. `None` sends the access to the generic path for its exact error.
 pub(super) fn s_map_key(v: SVal) -> Option<MapKey> {
     match v {
         SVal::Int(i) => Some(MapKey::Int(i)),
@@ -103,8 +99,7 @@ pub(super) fn s_map_key(v: SVal) -> Option<MapKey> {
     }
 }
 
-/// Mirrors `ops::index`. `None` sends the access to the generic path for
-/// its exact error.
+/// Mirrors `ops::index`. `None` sends the access to the generic path for its exact error.
 pub(super) fn s_index(v: SVal) -> Option<usize> {
     match v {
         SVal::Int(i) => usize::try_from(i).ok(),
@@ -131,8 +126,8 @@ fn from_i128(v: i128, w: IntWidth) -> Option<SVal> {
     }
 }
 
-/// Mirrors `ops::float_pair`. A width tagged int beside a float answers
-/// `None`, the generic path rejects that pair.
+/// Mirrors `ops::float_pair`. A width tagged int next to a float gives `None`, the generic path
+/// rejects that pair.
 #[inline]
 fn s_float_pair(a: SVal, b: SVal) -> Option<(f64, f64)> {
     match (a, b) {
@@ -143,15 +138,14 @@ fn s_float_pair(a: SVal, b: SVal) -> Option<(f64, f64)> {
     }
 }
 
-/// The cheap gate in front of the float paths, so all integer loops pay one
-/// discriminant test.
+/// The cheap gate in front of the float paths, so all integer loops pay 1 discriminant test.
 #[inline]
 fn is_float(v: SVal) -> bool {
     matches!(v, SVal::Float(_))
 }
 
-/// Mirrors `ops::arith`. The float gate sits behind the integer fast paths
-/// so all integer loops pay nothing for it.
+/// Mirrors `ops::arith`. The float gate sits behind the integer fast paths so integer loops pay
+/// nothing for it.
 #[inline]
 fn s_arith(op: BinKind, a: SVal, b: SVal) -> Option<SVal> {
     if let (SVal::Int(lhs), SVal::Int(rhs)) = (a, b) {
@@ -178,8 +172,7 @@ fn s_arith(op: BinKind, a: SVal, b: SVal) -> Option<SVal> {
     from_i128(int_arith(op, width, lhs, rhs).ok()?, width)
 }
 
-/// Mirrors the integer and bool arms of `ops::partial_compare` and
-/// `Value::eq_value`.
+/// Mirrors the integer and bool arms of `ops::partial_compare` and `Value::eq_value`.
 fn s_order(a: SVal, b: SVal) -> Option<Ordering> {
     match (a, b) {
         (SVal::Int(lhs), SVal::Int(rhs)) => Some(lhs.cmp(&rhs)),
@@ -194,8 +187,7 @@ fn s_order(a: SVal, b: SVal) -> Option<Ordering> {
 
 #[inline]
 pub(super) fn s_cmp(op: BinKind, a: SVal, b: SVal) -> Option<bool> {
-    // Integer order first, so all integer loops pay nothing for the float
-    // paths.
+    // integer order first, so integer loops pay nothing for the float paths
     if let Some(o) = s_order(a, b) {
         return Some(match op {
             BinKind::Eq => o.is_eq(),
@@ -207,8 +199,7 @@ pub(super) fn s_cmp(op: BinKind, a: SVal, b: SVal) -> Option<bool> {
             _ => return None,
         });
     }
-    // `partial_cmp` carries the NaN semantics, every comparison on a NaN is
-    // false and `!=` is true.
+    // `partial_cmp` has the NaN semantics, every comparison on a NaN is false and `!=` is true
     if is_float(a) || is_float(b) {
         let (lhs, rhs) = s_float_pair(a, b)?;
         let o = lhs.partial_cmp(&rhs);
@@ -320,8 +311,8 @@ pub(super) fn s_cast_f64(v: SVal) -> Option<SVal> {
     }
 }
 
-/// Mirrors the f64 arm of `assoc::conversion_assoc` after `bridge_image`,
-/// i64 saturation included. A unit argument fails over.
+/// Mirrors the f64 arm of `assoc::conversion_assoc` after `bridge_image`, i64 saturation
+/// included. A unit argument fails over.
 pub(super) fn s_f64_from(v: SVal) -> Option<SVal> {
     match v {
         SVal::Float(f) => Some(SVal::Float(f)),
@@ -344,7 +335,7 @@ pub(super) fn s_f64_from(v: SVal) -> Option<SVal> {
     }
 }
 
-/// One variant per distinct arm of `assoc::int_fits`.
+/// 1 variant per distinct arm of `assoc::int_fits`.
 #[derive(Clone, Copy)]
 pub(super) enum TryFits {
     I8,
@@ -372,9 +363,8 @@ pub(super) fn try_fits_of(ty: &str) -> Option<TryFits> {
     })
 }
 
-/// `as_str`, `to_string` or `to_owned` on a span slot stays a span, the
-/// owned copy is deferred to the site that needs one. Any other receiver
-/// fails over.
+/// `as_str`, `to_string` or `to_owned` on a span slot stays a span, the owned copy is deferred to the
+/// site that needs one. Any other receiver fails over.
 pub(super) fn s_as_str(v: SVal) -> Option<SVal> {
     match v {
         SVal::Span { start, end } | SVal::StrSpan { start, end } => {
@@ -384,8 +374,7 @@ pub(super) fn s_as_str(v: SVal) -> Option<SVal> {
     }
 }
 
-/// Mirrors the `MatchOut::Int` arms of `shared::match_core`. Any other
-/// receiver fails over.
+/// Mirrors the `MatchOut::Int` arms of `shared::match_core`. Any other receiver fails over.
 pub(super) fn s_match_get(v: SVal, end: bool) -> Option<SVal> {
     match v {
         SVal::Span { start, end: stop } => {
@@ -395,8 +384,8 @@ pub(super) fn s_match_get(v: SVal, end: bool) -> Option<SVal> {
     }
 }
 
-/// `.unwrap()` on an `OkInt` or `SomeInt` slot. Any other receiver fails
-/// over, the `Err` or `None` panic included.
+/// `.unwrap()` on an `OkInt` or `SomeInt` slot. Any other receiver fails over, the `Err` or
+/// `None` panic included.
 pub(super) fn s_unwrap_ok(v: SVal) -> Option<SVal> {
     match v {
         SVal::OkInt(n) | SVal::SomeInt(n) => Some(SVal::Int(n)),
@@ -404,8 +393,8 @@ pub(super) fn s_unwrap_ok(v: SVal) -> Option<SVal> {
     }
 }
 
-/// Mirrors the `try_from` arm of `assoc::conversion_assoc`. `None` sends
-/// the call to the generic path, which builds the real `Err`.
+/// Mirrors the `try_from` arm of `assoc::conversion_assoc`. `None` sends the call to the generic
+/// path, which builds the real `Err`.
 pub(super) fn s_try_from(fits: TryFits, v: SVal) -> Option<SVal> {
     let n = match v {
         SVal::Int(n) => n,
@@ -426,9 +415,8 @@ pub(super) fn s_try_from(fits: TryFits, v: SVal) -> Option<SVal> {
     ok.then_some(SVal::OkInt(n))
 }
 
-/// Pure, scalar in and out, and answered by `int_method` so the plan and
-/// the generic call hit the same table. A name the table rejects fails
-/// over.
+/// Pure, scalar in and out, and goes through `int_method` so the plan and the generic call hit the
+/// same table. A name the table rejects fails over.
 pub(super) fn scalar_int_method(name: BuiltinId) -> bool {
     matches!(
         name,
@@ -462,7 +450,7 @@ pub(super) fn scalar_int_method(name: BuiltinId) -> bool {
     )
 }
 
-/// Pure, scalar in and out, answered by `s_float_method`.
+/// Pure, scalar in and out, goes through `s_float_method`.
 pub(super) fn scalar_float_method(name: BuiltinId) -> bool {
     matches!(
         name,
@@ -484,15 +472,15 @@ pub(super) fn scalar_float_method(name: BuiltinId) -> bool {
     )
 }
 
-/// Mirrors `bridge::int_method` and the `int_methods::int_method` table.
-/// `None` sends the call to the generic path.
+/// Mirrors `bridge::int_method` and the `int_methods::int_method` table. `None` sends the call to
+/// the generic path.
 pub(super) fn s_int_method(name: BuiltinId, recv: SVal, args: &[SVal]) -> Option<SVal> {
     let (value, mut width) = parts(recv)?;
     let mut decoded = [0i128; 2];
     for (slot, arg) in decoded.iter_mut().zip(args) {
         let (arg_value, arg_width) = parts(*arg)?;
         *slot = arg_value;
-        // Either width answers for both, except a shift amount's u32.
+        // either width works for both, except a shift amount's u32
         if !takes_amount_arg(name)
             && let Ok(unified) = unify(width, arg_width)
         {
@@ -504,10 +492,10 @@ pub(super) fn s_int_method(name: BuiltinId, recv: SVal, args: &[SVal]) -> Option
     }
     match int_method(name, width, value, &decoded[..args.len()])?.ok()? {
         IntOut::Same(v) => from_i128(v, width),
-        // Counts are u32, see `int_out`.
+        // counts are u32, see `int_out`
         IntOut::Count(count) => from_i128(i128::from(count), IntWidth::U32),
         IntOut::Bool(b) => Some(SVal::Bool(b)),
-        // Only the plain int width has the `SomeInt` slot form.
+        // only the plain int width has the `SomeInt` slot form
         IntOut::Checked(opt) if width == IntWidth::I64 => Some(match opt {
             Some(v) => SVal::SomeInt(i64::try_from(v).ok()?),
             None => SVal::NoneOpt,
@@ -529,8 +517,8 @@ fn s_float_arg(v: SVal) -> Option<f64> {
     }
 }
 
-/// Mirrors the `Num::Float` arms of `shared::num_core`, which nothing
-/// intercepts for a plain float. `None` sends the call to the generic path.
+/// Mirrors the `Num::Float` arms of `shared::num_core`, nothing intercepts those for a plain
+/// float. `None` sends the call to the generic path.
 pub(super) fn s_float_method(name: BuiltinId, recv: SVal, args: &[SVal]) -> Option<SVal> {
     let SVal::Float(f) = recv else {
         return None;

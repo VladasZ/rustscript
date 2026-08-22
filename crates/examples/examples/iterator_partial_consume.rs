@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-// An iterator read part way and handed on must not give the first item
-// twice.
+// An iterator read part way and handed on must not give the first item twice.
 
 fn main() {
     let mut words = "max 20x extra".split(' ');
@@ -10,9 +9,8 @@ fn main() {
     println!("split first: {first:?}");
     println!("split rest: {rest:?}");
 
-    // The shape this came from.
-    let mut parts = "default_claude_max_20x"
-        .trim_start_matches("default_claude_")
+    let mut parts = "default_plan_max_20x"
+        .trim_start_matches("default_plan_")
         .split('_');
     let head = parts.next().unwrap_or_default();
     let tail: Vec<&str> = parts.collect();
@@ -31,7 +29,7 @@ fn main() {
     println!("first letter: {:?}", letters.next());
     println!("rest of letters: {}", letters.as_str());
 
-    // The 2 halves must not overlap.
+    // the 2 halves must not overlap
     let mut rest = "a b c d e".split(' ');
     let head: Vec<&str> = rest.by_ref().take(2).collect();
     let tail: Vec<&str> = rest.collect();

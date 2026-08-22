@@ -1,16 +1,13 @@
-//! Does the interpreter implement everything this script calls? `cargo
-//! check` cannot answer this and running only proves the lines that run, so
-//! this walks the compiled bytecode, where every method call is visible on
-//! every branch.
+//! Does the interpreter implement everything this script calls? `cargo check` can't tell and running
+//! only proves the lines that run. So this walks the compiled bytecode, where every method call is
+//! visible on every branch.
 //!
-//! Known gap, path calls like `std::process::exit(1)` are not checked. A
-//! first attempt reported constructors as missing, and a noisy check is
-//! worse than none.
+//! Known gap, path calls like `std::process::exit(1)` are not checked. A first attempt reported
+//! constructors as missing, and a noisy check is worse than none.
 //!
-//! Where the receiver type is knowable it is used. A `serde_json::Value` is
-//! checked against every shape it can be, a name only answer once passed a
-//! `get` that aborted on a null. An unknown receiver reports nothing rather
-//! than guessing.
+//! Where the receiver type is knowable it is used. A `serde_json::Value` is checked against every
+//! shape it can be, a name only check would pass a `get` that aborts on a null. An unknown receiver
+//! reports nothing rather than guessing.
 
 use std::collections::BTreeSet;
 
@@ -25,7 +22,7 @@ pub struct BridgeTable {
 
 pub struct Finding {
     pub method: String,
-    /// For a sharper message.
+    /// for a sharper message
     pub recv: Option<String>,
     pub func: String,
 }
@@ -54,9 +51,9 @@ enum Ty<'a> {
     Char,
     Vec,
     Map,
-    /// Any json shape at runtime.
+    /// any json shape at runtime
     Json,
-    /// Checked against the script's own impls.
+    /// checked against the script's own impls
     User(&'a str),
     Unknown,
 }
@@ -69,14 +66,12 @@ impl<'a> Ty<'a> {
             Ty::Map => Some("Map"),
             Ty::Json => Some("Value"),
             Ty::User(name) => Some(name),
-            // The scalar bridges share one table, so they are checked by
-            // name.
+            // the scalar bridges share 1 table, so they are checked by name
             Ty::Int | Ty::Float | Ty::Bool | Ty::Char | Ty::Unknown => None,
         }
     }
 
-    /// Only the shapes the tables can check are mapped, the rest stays
-    /// `Unknown`.
+    /// Only the shapes the tables can check are mapped, the rest stays `Unknown`.
     fn from_annotation(name: &'a str, user: &UserMethods) -> Ty<'a> {
         match name {
             "Value" => Ty::Json,
@@ -102,8 +97,7 @@ impl UserMethods {
         let mut types = BTreeSet::new();
         let mut names = BTreeSet::new();
         for (ty, method) in methods {
-            // `impl T for Vec<u8>` is keyed with generics the checker's shapes
-            // do not carry.
+            // `impl T for Vec<u8>` is keyed with generics the checker shapes don't carry
             let bare = super::resolver::bare(&ty);
             let bare = bare.split('<').next().unwrap_or(bare).to_string();
             types.insert(bare.clone());
@@ -122,8 +116,7 @@ impl UserMethods {
             .contains(&(super::resolver::bare(ty).to_string(), method.to_string()))
     }
 
-    /// `Str` stands for `String`, `Map` for either map, `Vec` for either
-    /// sequence.
+    /// `Str` stands for `String`, `Map` for either map, `Vec` for either sequence.
     fn has_on_builtin(&self, recv: &str, method: &str) -> bool {
         let names: &[&str] = match recv {
             "Str" => &["String", "str"],
@@ -135,20 +128,19 @@ impl UserMethods {
     }
 }
 
-/// A method on a `serde_json::Value` must work on every shape, a map has
-/// `get` and a json null did not.
+/// A method on a `serde_json::Value` must work on every shape. A map has `get`, a json null doesn't.
 const JSON_SHAPES: &[&str] = &["Map", "Vec", "Str", "Option"];
 
-/// `BUILTIN_IDS` only says a name has a dispatch id, not which path
-/// implements it, so it must not vouch for the name tables.
+/// `BUILTIN_IDS` only says a name has a dispatch id, not which path implements it, so it must not
+/// vouch for the name tables.
 fn any_name(method: &str) -> bool {
     BUILTIN_IDS.contains(&method)
         || VM_BUILTINS.contains(&method)
         || BRIDGE_TABLES.iter().any(|t| t.names.contains(&method))
 }
 
-/// Methods the VM answers itself by `BuiltinId`, so the harvest cannot see
-/// them. `parse` is answered from the turbofish before name dispatch.
+/// Methods the VM handles itself by `BuiltinId`, so the harvest can't see them. `parse` is
+/// resolved from the turbofish before name dispatch.
 const VM_BUILTINS: &[&str] = &[
     "clone_from",
     "push",
@@ -167,25 +159,24 @@ fn on_recv(recv: &str, method: &str) -> bool {
                 return true;
             }
         }
-        // Any receiver tables are always in play.
+        // any receiver tables are always in play
         if table.recv == "*" && table.names.contains(&method) {
             return true;
         }
     }
-    // No table for this receiver, defer to `any_name`.
+    // no table for this receiver, defer to `any_name`
     if !saw_table {
         return any_name(method);
     }
-    // `BuiltinId` methods carry their own receiver tags, so a `Vec` only name
-    // does not vouch for a `String`.
+    // `BuiltinId` methods have their own receiver tags, so a `Vec` only name doesn't vouch for a
+    // `String`
     let tagged = BuiltinId::resolve(method).receivers();
     tagged.contains(&"*") || tagged.contains(&recv)
 }
 
 const UNIVERSAL: &[&str] = &["clone", "to_string"];
 
-/// Message literals the harvest picks up are filtered like the drift test
-/// filters them.
+/// Message literals the harvest picks up are filtered like the drift test filters them.
 pub fn surface() -> Vec<(&'static str, &'static str)> {
     let mut merged: std::collections::BTreeSet<(&str, &str)> = std::collections::BTreeSet::new();
     for table in BRIDGE_TABLES {
@@ -214,9 +205,8 @@ fn walk(chunk: &Chunk, user: &UserMethods, out: &mut Vec<Finding>) {
             let ty = infer(chunk, index, *recv, user);
             let known = match ty {
                 Ty::Json => JSON_SHAPES.iter().all(|shape| on_recv(shape, method)),
-                // A user type answers from its own impls plus the any receiver
-                // surface. A type with its own `next` is an iterator, so the
-                // check falls back to name only.
+                // A user type is checked against its own impls plus the any receiver surface. A type
+                // with its own `next` is an iterator, so the check falls back to name only.
                 Ty::User(ty_name) => {
                     user.has(ty_name, method)
                         || BRIDGE_TABLES
@@ -245,8 +235,8 @@ fn walk(chunk: &Chunk, user: &UserMethods, out: &mut Vec<Finding>) {
     }
 }
 
-/// From the nearest earlier write, or the signature for an untouched
-/// parameter. Anything less direct is `Unknown`.
+/// From the nearest earlier write, or the signature for an untouched parameter. Anything less
+/// direct is `Unknown`.
 fn infer<'a>(chunk: &'a Chunk, before: usize, reg: u16, user: &UserMethods) -> Ty<'a> {
     for op in chunk.code[..before].iter().rev() {
         match op {
@@ -275,7 +265,7 @@ fn infer<'a>(chunk: &'a Chunk, before: usize, reg: u16, user: &UserMethods) -> T
                     Ty::Unknown
                 };
             }
-            // `let d = Dog;` is a unit struct.
+            // `let d = Dog;` is a unit struct
             Op::PathValue { dst, path } if *dst == reg => {
                 let segs = &chunk.paths[*path as usize].segs;
                 if let [name] = segs.as_slice()
@@ -292,7 +282,7 @@ fn infer<'a>(chunk: &'a Chunk, before: usize, reg: u16, user: &UserMethods) -> T
             }
         }
     }
-    // Nothing wrote it, so a parameter register holds the argument.
+    // nothing wrote it, so a parameter register holds the argument
     match chunk.param_types.get(reg as usize) {
         Some(Some(name)) => Ty::from_annotation(name, user),
         _ => Ty::Unknown,
@@ -330,7 +320,7 @@ pub fn report(
     for chunk in functions {
         walk(chunk, &user, &mut out);
     }
-    // One report per distinct method.
+    // 1 report per distinct method
     let mut seen = BTreeSet::new();
     out.retain(|f| seen.insert((f.method.clone(), f.recv.clone())));
     out
@@ -340,8 +330,7 @@ pub fn report(
 mod tests {
     use super::*;
 
-    /// The harvest keeps every string literal, so error texts ride along and
-    /// must not count as names.
+    /// The harvest keeps every string literal, so error texts ride along and must not count as names.
     fn table_names() -> BTreeSet<&'static str> {
         BRIDGE_TABLES
             .iter()
@@ -357,7 +346,7 @@ mod tests {
             assert!(any_name(method), "`{method}` must be known to the checker");
         }
         assert!(on_recv("Vec", "sort_by_key"));
-        // The VM answers these itself.
+        // the VM handles these itself
         for method in VM_BUILTINS {
             assert!(on_recv("Str", method));
             assert!(any_name(method));

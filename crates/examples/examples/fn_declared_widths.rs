@@ -1,8 +1,7 @@
 #!/usr/bin/env rust
 
-//! Declared numeric types are real widths at runtime. A helper declared
-//! `-> u8` once answered a wide value, so a checked multiply answered Some
-//! past the u8 bound.
+//! Declared numeric types are real widths at runtime. A helper declared `-> u8` returns a u8, so
+//! a checked multiply past the u8 bound is None.
 
 fn opaque(value: u8) -> u8 {
     value
@@ -20,24 +19,24 @@ fn early(v: u8) -> u8 {
 }
 
 fn main() {
-    // 254 * 209 overflows u8.
+    // 254 * 209 overflows u8
     println!("checked product: {:?}", opaque(254).checked_mul(209));
     println!(
         "overflow default: {:?}",
         opaque(254).checked_mul(209).unwrap_or_default()
     );
 
-    // The parameter width inside the body.
+    // the parameter width inside the body
     println!("wrapped in body: {}", add_ten(250));
 
-    // An early return.
+    // an early return
     println!("early return: {:?}", early(200).checked_add(100));
     println!("tail return: {:?}", early(50).checked_add(100));
 
-    // An annotated closure.
+    // an annotated closure
     let keep = |x: u8| -> u8 { x };
     println!("closure width: {:?}", keep(250).checked_add(50));
 
-    // Wrapping arithmetic on 2 returned values.
+    // wrapping arithmetic on 2 returned values
     println!("wrapping sum: {}", opaque(200).wrapping_add(opaque(100)));
 }

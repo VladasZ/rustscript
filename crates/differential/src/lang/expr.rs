@@ -1,5 +1,5 @@
-//! Every node carries its result type, so the generator, renderer and
-//! shrinker agree without re-running inference.
+//! Every node carries its result type, so the generator, renderer and shrinker agree without
+//! re-running inference.
 
 use serde::{Deserialize, Serialize};
 
@@ -56,8 +56,8 @@ impl BinOp {
         }
     }
 
-    /// Whether the operator can abort at runtime. Literals are laundered
-    /// before they reach one, so the abort stays a runtime event.
+    /// Whether the operator can abort at runtime. Literals are laundered before they reach one,
+    /// so the abort stays a runtime event.
     pub fn is_fallible(self) -> bool {
         matches!(
             self,
@@ -119,32 +119,30 @@ pub struct Arm {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Expr {
-    /// `opaque` routes it through a helper so the compiler cannot fold it.
+    /// `opaque` routes it through a helper so the compiler can't fold it
     IntLit {
         width: IntWidth,
         value: i128,
         opaque: bool,
     },
-    /// Unsuffixed, so `i32` by default. `opaque` wraps it in the
-    /// `if diff_opaque_true()` shield, which hides it from the overflow lint
-    /// without naming a type.
+    /// Unsuffixed, so `i32` by default. `opaque` wraps it in the `if diff_opaque_true()` shield,
+    /// which hides it from the overflow lint without naming a type.
     BareInt {
         value: i128,
         opaque: bool,
     },
-    /// Laundered too, `f32::NEG_INFINITY as u16` is an integer constant the
-    /// lints fold.
+    /// laundered too, `f32::NEG_INFINITY as u16` is an integer constant the lints fold
     FloatLit {
         width: FloatWidth,
         token: String,
         opaque: bool,
     },
-    /// Unsuffixed, `f64` by default.
+    /// unsuffixed, `f64` by default
     BareFloat {
         token: String,
         opaque: bool,
     },
-    /// `opaque` keeps `rustc` from folding a shift by `'7' as u32`.
+    /// `opaque` keeps `rustc` from folding a shift by `'7' as u32`
     BoolLit {
         value: bool,
         opaque: bool,
@@ -162,7 +160,7 @@ pub enum Expr {
         elem: Ty,
         value: Option<Box<Expr>>,
     },
-    /// Built through `insert`. Empty renders as a turbofished `new`.
+    /// built through `insert`, empty renders as a turbofished `new`
     MapLit {
         key: Ty,
         value: Ty,
@@ -173,16 +171,16 @@ pub enum Expr {
         items: Vec<Expr>,
     },
     TupleLit(Vec<Expr>),
-    /// `Ok::<T, E>(..)` or `Err::<T, E>(..)`, both types pinned.
+    /// `Ok::<T, E>(..)` or `Err::<T, E>(..)`, both types pinned
     ResLit {
         ok: Ty,
         err: Ty,
         value: Result<Box<Expr>, Box<Expr>>,
     },
-    /// Made by a parse that fails.
+    /// made by a parse that fails
     StdErrLit(StdErr),
-    /// `Name { a: .., b: .. }`, or with `update` the first `fields.len()`
-    /// fields written and `..Default::default()` for the rest.
+    /// `Name { a: .., b: .. }`, or with `update` the first `fields.len()` fields written and
+    /// `..Default::default()` for the rest
     StructLit {
         shape: Box<UserShape>,
         fields: Vec<Expr>,
@@ -193,11 +191,11 @@ pub enum Expr {
         variant: usize,
         payload: Vec<Expr>,
     },
-    /// `<T>::default()`.
+    /// `<T>::default()`
     DefaultOf(Ty),
-    /// An iterator pipeline.
+    /// an iterator pipeline
     Pipe(Box<Pipe>),
-    /// `by_ref` marks the arguments the function takes by `&`.
+    /// `by_ref` marks the arguments the function takes by `&`
     FnCall {
         name: String,
         args: Vec<Expr>,
@@ -214,7 +212,7 @@ pub enum Expr {
         name: String,
         ty: Ty,
     },
-    /// `opaque` shields it from the overflow lint like a bare literal.
+    /// `opaque` shields it from the overflow lint like a bare literal
     ConstRef {
         name: String,
         ty: Ty,
@@ -235,7 +233,7 @@ pub enum Expr {
         value: Box<Expr>,
         to: Ty,
     },
-    /// `method` is the catalog key, the template comes from the catalog.
+    /// `method` is the catalog key, the template comes from the catalog
     Call {
         method: String,
         recv: Box<Expr>,
@@ -259,13 +257,13 @@ pub enum Expr {
         index: usize,
         ty: Ty,
     },
-    /// `v[i]`, panics out of bounds.
+    /// `v[i]`, panics out of bounds
     Index {
         base: Box<Expr>,
         index: Box<Expr>,
         ty: Ty,
     },
-    /// `base.name(args)`, or `Type::name(args)` with `Assoc` kind.
+    /// `base.name(args)`, or `Type::name(args)` with `Assoc` kind
     Method {
         owner: Box<UserShape>,
         name: String,
@@ -274,23 +272,23 @@ pub enum Expr {
         args: Vec<Expr>,
         ty: Ty,
     },
-    /// `base.diff_describe()` through the program local trait.
+    /// `base.diff_describe()` through the program local trait
     TraitCall {
         base: Box<Expr>,
     },
-    /// `helper(&mut closure, arg)`, a closure handed to a generic helper.
+    /// `helper(&mut closure, arg)`, a closure handed to a generic helper
     ApplyCall {
         helper: String,
         closure: String,
         arg: Box<Expr>,
         ty: Ty,
     },
-    /// `value?`.
+    /// `value?`
     Try {
         value: Box<Expr>,
         ty: Ty,
     },
-    /// `To::from(value)`, or `value.into()` when `bare`.
+    /// `To::from(value)`, or `value.into()` when `bare`
     Into {
         value: Box<Expr>,
         to: Ty,
@@ -298,13 +296,12 @@ pub enum Expr {
     },
     Match {
         scrutinee: Box<Expr>,
-        /// A slice view, so bindings arrive as references and each arm
-        /// clones them.
+        /// a slice view, so bindings arrive as references and each arm clones them
         by_ref: bool,
         arms: Vec<Arm>,
         ty: Ty,
     },
-    /// `{ stmts; tail }`.
+    /// `{ stmts; tail }`
     Block {
         stmts: Vec<Stmt>,
         tail: Box<Expr>,
@@ -386,8 +383,7 @@ impl Expr {
                 let rendered: Vec<String> = args.iter().map(Expr::render).collect();
                 format!("{name}({})", rendered.join(", "))
             }
-            // A non copy binding is read through a clone, so the generator
-            // never has to track liveness.
+            // a non copy binding is read through a clone, so the generator never has to track liveness
             Self::Var { name, ty } if !ty.is_copy() => format!("{name}.clone()"),
             Self::Var { name, .. } => name.clone(),
             Self::ConstRef {
@@ -407,9 +403,8 @@ impl Expr {
                 fish,
                 ..
             } => render_call(method, recv, args, fish.as_ref()),
-            // Bare `if a { x } else { y }.len()` parses as
-            // `if a { x } else { y.len() }`, so the source would stop matching
-            // the tree.
+            // Bare `if a { x } else { y }.len()` parses as `if a { x } else { y.len() }`, so the
+            // source would stop matching the tree.
             Self::If {
                 condition,
                 then_expr,
@@ -651,8 +646,8 @@ fn owned(place: String, ty: &Ty) -> String {
     }
 }
 
-/// A branch the overflow lint cannot fold and that states no type, so
-/// `rustc` infers the type from the literal alone.
+/// A branch the overflow lint can't fold and that states no type, so `rustc` infers the type from
+/// the literal alone.
 fn shield(text: &str, other: &str, opaque: bool) -> String {
     if opaque {
         format!("(if diff_opaque_true() {{ {text} }} else {{ {other} }})")
@@ -662,8 +657,7 @@ fn shield(text: &str, other: &str, opaque: bool) -> String {
 }
 
 fn render_match(scrutinee: &Expr, by_ref: bool, arms: &[Arm]) -> String {
-    // The scrutinee is parenthesized because a struct literal is not allowed
-    // bare there.
+    // the scrutinee is parenthesized because a struct literal is not allowed bare there
     let view = if by_ref { ".as_slice()" } else { "" };
     let mut out = format!("(match ({}){view} {{ ", scrutinee.render());
     for arm in arms {
@@ -677,8 +671,7 @@ fn render_match(scrutinee: &Expr, by_ref: bool, arms: &[Arm]) -> String {
         if by_ref && !binds.is_empty() {
             out.push_str("{ ");
             for (name, ty) in &binds {
-                // Slice binds are references, the body is typed against owned
-                // values.
+                // slice binds are references, the body is typed against owned values
                 let make = if matches!(ty, Ty::Vec(_)) && is_rest(&arm.pat, name) {
                     format!("{name}.to_vec()")
                 } else {
@@ -770,8 +763,7 @@ fn render_call(method: &str, recv: &Expr, args: &[Expr], fish: Option<&Ty>) -> S
     )
 }
 
-/// `{{` and `}}` escape a literal brace like `format!`, so a template can
-/// carry a block.
+/// `{{` and `}}` escape a literal brace like `format!`, so a template can carry a block.
 fn fill(
     template: &str,
     recv: &str,
@@ -822,8 +814,8 @@ fn fill(
     out
 }
 
-/// Un-bare every literal in the tree. A receiver like
-/// `(if c { 0 } else { 0 })` is as ambiguous as a bare `0`.
+/// Un-bare every literal in the tree. A receiver like `(if c { 0 } else { 0 })` is as ambiguous
+/// as a bare `0`.
 pub fn unbare_deep(mut expr: Expr) -> Expr {
     expr = unbare(expr);
     for child in expr.children_mut() {

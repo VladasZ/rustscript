@@ -1,7 +1,7 @@
 #!/usr/bin/env rust
 
-// An ES256 JWT for the App Store Connect API with a throwaway key. The
-// signature is random per run, so only its length is printed.
+// An ES256 JWT for the App Store Connect API with a throwaway key. The signature is random per
+// run, so only its length is printed.
 
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::Serialize;

@@ -20,7 +20,7 @@ pub type BoxFut = Pin<Box<dyn Future<Output = Value> + Send>>;
 pub type LineIter = Box<dyn Iterator<Item = std::io::Result<String>> + Send>;
 
 pub enum Native {
-    /// A `HashMap::entry` handle.
+    /// a `HashMap::entry` handle
     Entry {
         map: Map,
         key: MapKey,
@@ -28,8 +28,7 @@ pub enum Native {
     Task(tokio::task::JoinHandle<Value>),
     Future(BoxFut),
     HttpClient(reqwest::Client),
-    /// Safe because script code always runs on blocking threads, never on a
-    /// runtime worker.
+    /// safe because script code always runs on blocking threads, never on a runtime worker
     BlockingHttpClient(reqwest::blocking::Client),
     Instant(Instant),
     SystemTime(SystemTime),
@@ -41,50 +40,47 @@ pub enum Native {
     Listener(TcpListener),
     Stream(TcpStream),
     Udp(UdpSocket),
-    /// The real lopdf value.
+    /// the real lopdf value
     Pdf(Box<lopdf::Document>),
-    /// Deleted when the value drops or on `close`.
+    /// deleted when the value drops or on `close`
     TempDir(tempfile::TempDir),
     NamedTempFile(tempfile::NamedTempFile),
     Sha256(sha2::Sha256),
-    /// Lazy, so `for line in reader.lines()` streams a pipe.
+    /// lazy, so `for line in reader.lines()` streams a pipe
     Lines(LineIter),
-    /// Kept undecoded so a script that only wants the byte count never pays
-    /// for a UTF-8 conversion.
+    /// kept undecoded so a script that only wants the byte count never pays for a UTF-8 conversion
     Body(Vec<u8>),
-    /// Shared across tasks so it compiles once.
+    /// shared across tasks so it compiles once
     Regex(super::regex_bridge::RegexValue),
     RegexMatch(super::regex_bridge::MatchValue),
     RegexCaptures(super::regex_bridge::CapturesValue),
-    /// Shared like every other handle so `by_ref` and `peekable` keep their
-    /// real semantics.
+    /// shared like every other handle so `by_ref` and `peekable` keep their real semantics
     Iterator(super::iterator::IteratorState),
-    /// Real `Display` and `Debug` text captured at conversion, plus the kind
-    /// and code.
+    /// real `Display` and `Debug` text captured at conversion, plus the kind and code
     IoErr {
         display: String,
         debug: String,
         kind: String,
         code: Option<i32>,
     },
-    /// A parse error with its real `Display` and `Debug` texts.
+    /// a parse error with its real `Display` and `Debug` texts
     ParseErr {
         display: String,
         debug: String,
     },
-    /// A `JoinError` with its real `Display` and `Debug` texts.
+    /// a `JoinError` with its real `Display` and `Debug` texts
     JoinErr {
         display: String,
         debug: String,
         is_panic: bool,
     },
-    /// The buffer behind a `fmt::Formatter` handed to a user `fmt` impl.
+    /// the buffer behind a `fmt::Formatter` handed to a user `fmt` impl
     Fmt {
         text: String,
-        /// The impl went through `f.pad`, which honors the caller's width.
+        /// the impl went through `f.pad`, which honors the caller's width
         padded: bool,
     },
-    /// Left behind after a task is taken to await or a stdin pipe is closed.
+    /// left behind after a task is taken to await or a stdin pipe is closed
     Taken,
 }
 
@@ -131,8 +127,8 @@ impl Native {
         }
     }
 
-    /// Hands out the existing `BufReader` instead of wrapping a second one,
-    /// which would eat bytes the next call expects.
+    /// Hands out the existing `BufReader` instead of wrapping a second one, that would eat bytes
+    /// the next call expects.
     pub fn as_buf_read(&mut self) -> Option<&mut dyn BufRead> {
         match self {
             Native::File(r) => Some(r),
@@ -146,8 +142,8 @@ impl Native {
     }
 }
 
-/// Both format forms are captured from the real error, so `{:?}` prints
-/// the exact `Os { code: 2, kind: NotFound, .. }` shape.
+/// Both format forms are captured from the real error, so `{:?}` prints the exact `Os { code: 2,
+/// kind: NotFound, .. }` shape.
 pub(super) fn io_error_value(e: &std::io::Error) -> Value {
     Native::IoErr {
         display: e.to_string(),

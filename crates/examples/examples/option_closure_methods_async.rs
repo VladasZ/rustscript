@@ -1,4 +1,4 @@
-// Option's closure methods under `#[tokio::main]`.
+// Option closure methods under `#[tokio::main]`.
 
 fn triple(x: i64) -> i64 {
     x * 3

@@ -78,7 +78,7 @@ fn surface_report(args: &[String]) -> Result<()> {
 }
 
 fn parse_campaign_options(args: &[String]) -> Result<CampaignOptions> {
-    // A u32 seed leaves room for the per case offsets.
+    // a u32 seed leaves room for the per case offsets
     let mut options = CampaignOptions {
         seed: rand::random::<u32>().into(),
         cases: 100,
@@ -220,8 +220,8 @@ fn run_campaign(args: &[String]) -> Result<ExitCode> {
         }
         drop(sender);
 
-        // Workers finish out of order. Report in batch order so stop on first
-        // behaves like a sequential run.
+        // workers finish out of order, report in batch order so stop on first behaves like a
+        // sequential run
         let mut report = CampaignReport::default();
         let mut last_progress = started;
         let mut pending: BTreeMap<usize, BatchOutcome> = BTreeMap::new();
@@ -259,14 +259,12 @@ fn run_campaign(args: &[String]) -> Result<ExitCode> {
     Ok(if report.bugs.is_empty() {
         ExitCode::SUCCESS
     } else {
-        // Real divergences fail the run so a scheduled campaign can gate on
-        // the exit code.
+        // real divergences fail the run so a scheduled campaign can gate on the exit code
         ExitCode::FAILURE
     })
 }
 
-/// Buckets group by the concrete failure, so 2 bugs with the same
-/// classification are reported apart.
+/// Buckets group by the concrete failure, so 2 bugs with the same classification are reported apart.
 fn bucket_key(classification: &Classification, result: &RunResult) -> String {
     let signature = result.signature();
     if signature.is_empty() {
@@ -278,7 +276,7 @@ fn bucket_key(classification: &Classification, result: &RunResult) -> String {
 
 const MAX_SEEDS_PER_GROUP: usize = 8;
 const MAX_ARTIFACTS_PER_GROUP: usize = 3;
-/// One saved case per gap reason is enough.
+/// 1 saved case per gap reason is enough.
 const MAX_ARTIFACTS_PER_GAP: usize = 1;
 
 #[derive(Default)]
@@ -287,10 +285,9 @@ struct CampaignReport {
     matched: usize,
     gaps: BTreeMap<String, BugGroup>,
     bugs: BTreeMap<String, BugGroup>,
-    /// Every method name called, so the report can list the surface this
-    /// campaign never touched.
+    /// every method name called, so the report can list the surface this campaign never touched
     called: std::collections::BTreeSet<String>,
-    /// Cases whose 2 native runs disagreed, each a grammar hole.
+    /// cases whose 2 native runs disagreed, each a grammar hole
     nondeterministic: BugGroup,
 }
 
@@ -356,7 +353,7 @@ impl CampaignReport {
         let mut unexercised: Vec<String> = Vec::new();
         let mut total = 0usize;
         for (recv, names) in &surface {
-            // Only the receivers the generator writes count.
+            // only the receivers the generator writes count
             if !matches!(
                 recv.as_str(),
                 "Vec"
@@ -596,8 +593,7 @@ fn promote(args: &[String]) -> Result<()> {
             current.classification
         );
     }
-    // A panicking case cannot live under examples, the equivalence suite
-    // requires a clean exit there.
+    // a panicking case can't live under examples, the equivalence suite requires a clean exit there
     let destination = if current.native.status == Some(0) {
         root.join("crates/examples/examples")
             .join(format!("{name}.rs"))

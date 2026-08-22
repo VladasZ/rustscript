@@ -43,7 +43,7 @@ impl IntWidth {
         }
     }
 
-    /// The harness only runs on 64 bit targets.
+    /// the harness only runs on 64 bit targets
     pub fn min(self) -> i128 {
         if self.is_signed() {
             -(1i128 << (self.bits() - 1))

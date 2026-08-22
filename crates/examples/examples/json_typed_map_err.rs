@@ -1,7 +1,7 @@
 #!/usr/bin/env rust
 
-// A `map_err` before the `?` must not lose the annotated struct. Getting it
-// wrong is silent, every renamed field comes back empty.
+// A `map_err` before the `?` must not lose the annotated struct. Getting it wrong is silent,
+// every renamed field comes back empty.
 
 use serde::Deserialize;
 

@@ -1,8 +1,7 @@
-// Pins the scalar chain reductions and the for plan vec pushes against the
-// compiler, early exits and fallback shapes included.
+// Scalar chain reductions and for plan vec pushes, early exits and fallback shapes included.
 
 fn main() {
-    // The specialized shapes.
+    // the specialized shapes
     let mut x: i64 = 12345;
     let mut v: Vec<i64> = Vec::new();
     for _ in 0..1000 {
@@ -17,7 +16,7 @@ fn main() {
     let rs: i64 = (1..=100).filter(|n| n % 3 == 0).map(|n| n * n).sum();
     println!("rs={rs}");
 
-    // Early exits consume up to and including the match, the rest stays.
+    // early exits consume up to and including the match, the rest stays
     let probe: Vec<i64> = vec![1, 5, 3, 9, 2];
     let mut it = probe.iter();
     let found = it.by_ref().any(|a| *a > 4);
@@ -28,7 +27,7 @@ fn main() {
     let rest2: Vec<i64> = it2.copied().collect();
     println!("all={all} rest2={rest2:?}");
 
-    // A mutable capture and non integer elements fall back.
+    // a mutable capture and non integer elements fall back
     let k = 10i64;
     let ks: i64 = probe.iter().map(|a| a * k).sum();
     let mut seen = 0i64;
@@ -50,12 +49,12 @@ fn main() {
     let el = e.iter().all(|a| *a > 0);
     println!("es={es} ec={ec} ea={ea} el={el}");
 
-    // A typed sum keeps its width.
+    // a typed sum keeps its width
     let small: Vec<u8> = vec![10, 20, 30];
     let ts: u8 = small.iter().map(|a| *a).sum::<u8>();
     println!("ts={ts}");
 
-    // Push loops.
+    // push loops
     let mut evens: Vec<i64> = Vec::new();
     let mut halves: Vec<f64> = Vec::new();
     for i in 0..20 {
@@ -70,7 +69,7 @@ fn main() {
     }
     println!("evens={evens:?} halves={halves:?}");
 
-    // A nested push loop rolls its inner pushes into the outer iteration.
+    // a nested push loop rolls its inner pushes into the outer iteration
     let mut pairs: Vec<i64> = Vec::new();
     for i in 0..4 {
         for j in 0..3 {
@@ -79,7 +78,7 @@ fn main() {
     }
     println!("pairs={pairs:?}");
 
-    // A non scalar push falls back.
+    // a non scalar push falls back
     let mut names: Vec<String> = Vec::new();
     for i in 0..3 {
         names.push(format!("n{i}"));

@@ -1,6 +1,4 @@
-//! A non scalar copy in a loop body once loaded as poison on the scalar plan
-//! and skipped writeback, so the variable kept its old value. From seed
-//! 20685011353.
+//! A non scalar copy in a loop body must still write back on the scalar plan. Seed 20685011353.
 
 fn main() {
     let source: char = ' ';

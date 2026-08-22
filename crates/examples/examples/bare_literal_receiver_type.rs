@@ -1,7 +1,7 @@
 #!/usr/bin/env rust
 
-//! An expression of only unsuffixed integer literals is `i32`. That width
-//! picks the method and the `From` impl an `into()` goes through.
+//! An expression of only unsuffixed integer literals is `i32`. That width picks the method and
+//! the `From` impl an `into()` goes through.
 
 #[derive(Debug)]
 enum Wrapped {
@@ -39,14 +39,14 @@ fn opaque_i8(v: i8) -> i8 {
 }
 
 fn main() {
-    // The receiver is `i32`, so `into()` picks `From<i32>`.
+    // the receiver is `i32`, so `into()` picks `From<i32>`
     let branched: Wrapped = (if opaque_bool(true) { -1_315_330_440 } else { 0 }).into();
     println!("branched: {branched:?} {}", branched.tag());
 
     let plain: Wrapped = 7.into();
     println!("plain: {plain:?} {}", plain.tag());
 
-    // `min` on a number keeps the width, so the default is an `i8`.
+    // `min` on a number keeps the width, so the default is an `i8`
     let narrowed = Vec::<Option<i8>>::new()
         .into_iter()
         .map(|_| opaque_i8(-1).min(opaque_i8(126)))
@@ -54,7 +54,7 @@ fn main() {
         .unwrap_or_default();
     println!("narrowed: {narrowed:+2X}");
 
-    // The sequence reductions still answer an `Option`.
+    // the sequence reductions still return an `Option`
     let reduced = vec![opaque_i8(3), opaque_i8(1)].into_iter().min();
     println!("reduced: {reduced:?}");
 }

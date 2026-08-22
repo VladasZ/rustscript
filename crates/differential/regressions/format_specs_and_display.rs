@@ -1,5 +1,4 @@
-// Format spec edges, including a user `Display` that pads only through
-// `f.pad`.
+// Format spec edges, including a user `Display` that pads only through `f.pad`.
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;

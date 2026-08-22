@@ -21,7 +21,7 @@ pub(super) fn jwt_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
                 None => Value::enum_named(&ALGORITHM, "HS256", Vec::new())
                     .expect("HS256 is a known algorithm"),
             };
-            // A shape cannot grow after the instance exists.
+            // a shape can't grow after the instance exists
             Value::struct_of(
                 "Header",
                 [
@@ -43,8 +43,7 @@ pub(super) fn jwt_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     }))
 }
 
-/// The real `EncodingKey` is opaque, so the key is rebuilt when `encode`
-/// runs.
+/// The real `EncodingKey` is opaque, so the key is rebuilt when `encode` runs.
 fn key_value(kind: &str, args: &[Value]) -> Result<Value> {
     Ok(Value::struct_of(
         "EncodingKey",

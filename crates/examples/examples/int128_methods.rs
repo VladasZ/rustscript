@@ -1,6 +1,6 @@
 #!/usr/bin/env rust
 
-// The 128 bit method surface.
+// the 128 bit method surface
 
 fn main() {
     let max: u128 = u128::MAX;

@@ -8,8 +8,7 @@ use super::enum_def::{EnumKind, NONE};
 use super::resolver::bare;
 use super::value::{List, StructData, Value, ValueRef};
 
-/// Decoded json is held as plain values, so `Value::String(s)` matches by
-/// shape.
+/// Decoded json is held as plain values, so `Value::String(s)` matches by shape.
 fn json_variant_kind_matches(name: Option<&str>, val: &Value) -> bool {
     matches!(
         (name, val),
@@ -51,8 +50,8 @@ pub(super) fn try_bind(pat: &PPat, val: &Value, define: &mut dyn FnMut(&str, Val
                 let vals: Vec<Value> = st.values.lock().clone();
                 bind_seq(elems, &vals, define)
             }
-            // `Some(x)` still matches a pre unwrapped payload. A `Value::Unit`
-            // never does, that is a real unit value.
+            // `Some(x)` still matches a pre unwrapped payload, a `Value::Unit` never does, that
+            // is a real unit value
             Value::Unit => false,
             other => {
                 if json_variant_kind_matches(tag.name.as_deref(), other) {
@@ -65,7 +64,7 @@ pub(super) fn try_bind(pat: &PPat, val: &Value, define: &mut dyn FnMut(&str, Val
         PPat::Path { tag } => match val {
             Value::Enum { def, variant, .. } => {
                 tag.matches(def, *variant)
-                    // A json null is `Option::None`.
+                    // a json null is `Option::None`
                     || (tag.is_named("Null") && def.kind == EnumKind::Option && *variant == NONE)
             }
             _ => false,
@@ -197,17 +196,15 @@ fn plit_eq(l: &PLit, val: &Value) -> bool {
     }
 }
 
-/// A slotless value binds as a borrow wrapper when composite, as a copy
-/// when scalar.
+/// A slotless value binds as a borrow wrapper when composite, as a copy when scalar.
 enum BindSlot {
     None,
     Elem(List, usize),
     Field(Arc<StructData>, usize),
 }
 
-/// Every binding anchors to the matched storage, so `*x += 1` through it
-/// lands in the place. Runs after `try_bind` matched and must walk the same
-/// shapes.
+/// Every binding anchors to the matched storage, so `*x += 1` through it lands in the place. Runs
+/// after `try_bind` matched and must walk the same shapes.
 fn bind_refs(pat: &PPat, val: &Value, slot: BindSlot, define: &mut dyn FnMut(&str, Value)) {
     match pat {
         PPat::Ident { name, sub } => {
@@ -262,7 +259,7 @@ fn bind_refs(pat: &PPat, val: &Value, slot: BindSlot, define: &mut dyn FnMut(&st
             }
         }
         PPat::Or(alts) => {
-            // The first matching alternative, the same choice `try_bind` made.
+            // the first matching alternative, the same choice `try_bind` made
             for alt in alts {
                 if try_bind(alt, val, &mut |_, _| {}) {
                     bind_refs(alt, val, slot, define);
@@ -284,8 +281,8 @@ fn bind_refs(pat: &PPat, val: &Value, slot: BindSlot, define: &mut dyn FnMut(&st
     }
 }
 
-/// The element half of `bind_refs`. A named rest binds a copy, so writing
-/// through it does not reach the scrutinee. Element bindings still do.
+/// The element half of `bind_refs`. A named rest binds a copy, so writing through it doesn't
+/// reach the scrutinee. Element bindings still do.
 fn bind_refs_seq(pats: &[PPat], list: &List, define: &mut dyn FnMut(&str, Value)) {
     let vals: Vec<Value> = list.lock().clone();
     if let Some((head, rest_name, tail)) = split_rest(pats) {

@@ -1,6 +1,5 @@
-//! Comparator sorts with an int only closure run on flat `i64` registers.
-//! Anything outside the subset or any arithmetic failure falls back to the
-//! generic path.
+//! Comparator sorts with an int only closure run on flat `i64` registers. Anything outside the subset
+//! or any arithmetic failure falls back to the generic path.
 
 use std::cmp::Ordering;
 
@@ -10,14 +9,14 @@ use super::numeric::i64_arith;
 use super::value::{ClosureData, Upvalue, Value};
 use super::vm::Vm;
 
-/// One plan op per bytecode op, so jump targets carry over as is.
+/// 1 plan op per bytecode op, so jump targets carry over as is.
 enum SOp {
-    /// A literal, or a captured int snapshotted at build.
+    /// a literal, or a captured int snapshotted at build
     Load {
         dst: u16,
         v: i64,
     },
-    /// `Ordering` as -1, 0 or 1.
+    /// `Ordering` as -1, 0 or 1
     LoadOrd {
         dst: u16,
         v: i64,
@@ -61,7 +60,7 @@ enum SOp {
         op: BinKind,
         to: u32,
     },
-    /// `recv.cmp(arg)` as -1, 0 or 1.
+    /// `recv.cmp(arg)` as -1, 0 or 1
     Cmp {
         dst: u16,
         recv: u16,
@@ -72,8 +71,7 @@ enum SOp {
     },
 }
 
-/// Flow insensitive, a register used with 2 kinds anywhere is `Mixed` and
-/// rejects the plan.
+/// Flow insensitive, a register used with 2 kinds anywhere is `Mixed` and rejects the plan.
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
     Unset,
@@ -126,8 +124,8 @@ fn translate_op(clo: &ClosureData, num_regs: usize, op: &Op) -> Option<SOp> {
             v: *v,
         },
         Op::LoadUpvalue { dst, idx } => {
-            // A mutable cell could change between calls, so only an immutable
-            // int capture is a safe constant.
+            // a mutable cell could change between calls, so only an immutable int capture is a
+            // safe constant
             let Some(Upvalue::Value(Value::Int(v))) = clo.captured.get(*idx as usize) else {
                 return None;
             };
@@ -180,7 +178,7 @@ fn translate_op(clo: &ClosureData, num_regs: usize, op: &Op) -> Option<SOp> {
             base,
             argc,
         } if chunk.names[*name as usize].id == BuiltinId::Cmp && *argc == 1 => SOp::Cmp {
-            // A discarded destination stays `u16::MAX`, matching `set_opt`.
+            // a discarded destination stays `u16::MAX`, same as `set_opt`
             dst: if *dst == u16::MAX { *dst } else { reg(*dst)? },
             recv: reg(*recv)?,
             arg: reg(*base)?,
@@ -207,7 +205,7 @@ impl ScalarPlan {
         if chunk.num_params != 2 {
             return None;
         }
-        // A script enum named `Ordering` would shadow the builtin constants.
+        // a script enum named `Ordering` would shadow the builtin constants
         if vm
             .enums
             .iter()
@@ -226,8 +224,8 @@ impl ScalarPlan {
         Some(plan)
     }
 
-    /// Infer every register's kind to a fixpoint, then require every use to
-    /// match, so the returned value is an `Ordering`.
+    /// Infer every register's kind to a fixpoint, then require every use to match, so the
+    /// returned value is an `Ordering`.
     fn check_kinds(&self, num_params: usize) -> Option<()> {
         let mut kinds = vec![Kind::Unset; self.num_regs];
         kinds[..num_params].fill(Kind::Int);
@@ -363,8 +361,7 @@ fn scalar_bin(op: BinKind, x: i64, y: i64) -> Option<i64> {
         BinKind::BitAnd => x & y,
         BinKind::BitOr => x | y,
         BinKind::BitXor => x ^ y,
-        // Mirrors `i64_arith`, so an overflow falls back and the generic
-        // path raises the error.
+        // mirrors `i64_arith`, so an overflow falls back and the generic path raises the error
         _ => i64_arith(op, x, y).ok()?,
     })
 }
@@ -381,7 +378,7 @@ fn compare_i64(op: BinKind, x: i64, y: i64) -> bool {
     }
 }
 
-/// A pair the plan cannot answer aborts the whole fast sort.
+/// A pair the plan can't handle aborts the whole fast sort.
 pub(super) fn scalar_sort_by(vm: &Vm, list: &[Value], clo: &ClosureData) -> Option<Vec<Value>> {
     let plan = ScalarPlan::comparator(vm, clo)?;
     let mut ints = Vec::with_capacity(list.len());

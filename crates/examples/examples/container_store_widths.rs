@@ -16,7 +16,7 @@ fn main() {
     values.push(big.saturating_add(opaque_usize(3)));
     println!("pushed: {values:?}");
 
-    // u64 values past `i64::MAX` sort by value.
+    // u64 values past `i64::MAX` sort by value
     let mut ordered: Vec<u64> = vec![opaque(u64::MAX)];
     ordered.push(opaque(18_446_744_073_709_551_614));
     ordered.sort_unstable();

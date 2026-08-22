@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-//! f32 methods stay f32, so `{:?}` prints `3.4028235e38` for `f32::MAX` and
-//! not the f64 image.
+//! f32 methods stay f32, so `{:?}` prints `3.4028235e38` for `f32::MAX` and not the f64 image.
 
 fn main() {
     let largest: f32 = f32::MAX;
@@ -34,7 +33,7 @@ fn main() {
     println!("is finite:  {:?}", f32::INFINITY.is_finite());
     println!("infinite:   {:?}", f32::NEG_INFINITY.is_infinite());
 
-    // Chained results stay f32.
+    // chained results stay f32
     let tiny: f32 = f32::MIN_POSITIVE;
     println!("tiny:       {tiny:?}");
     println!("chained:    {:?}", tiny.max(0.1f32).sqrt().min(largest));

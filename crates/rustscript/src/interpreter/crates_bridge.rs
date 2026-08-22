@@ -27,7 +27,7 @@ pub(super) fn bytes_to_vec(b: &[u8]) -> Value {
 pub(super) fn crate_bridge(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     let s0 = || args.first().map(Value::display).unwrap_or_default();
     Ok(Some(match id {
-        // dirs -------------------------------------------------------------
+        // dirs
         PathId::DirsHomeDir => opt_path(dirs::home_dir()),
         PathId::DirsCacheDir => opt_path(dirs::cache_dir()),
         PathId::DirsConfigDir => opt_path(dirs::config_dir()),
@@ -39,12 +39,12 @@ pub(super) fn crate_bridge(id: PathId, args: &[Value]) -> Result<Option<Value>> 
         PathId::DirsDesktopDir => opt_path(dirs::desktop_dir()),
         PathId::DirsDownloadDir => opt_path(dirs::download_dir()),
         PathId::DirsDocumentDir => opt_path(dirs::document_dir()),
-        // which ------------------------------------------------------------
+        // which
         PathId::WhichWhich => match which::which(s0()) {
             Ok(p) => Value::ok(make_path(p.display().to_string())),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
-        // glob -------------------------------------------------------------
+        // glob
         PathId::GlobGlob => match glob::glob(&s0()) {
             Ok(paths) => Value::ok(Value::vec(
                 paths
@@ -56,7 +56,7 @@ pub(super) fn crate_bridge(id: PathId, args: &[Value]) -> Result<Option<Value>> 
             )),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
-        // sha2 -------------------------------------------------------------
+        // sha2
         PathId::Sha256New | PathId::Sha256Default => {
             use sha2::Digest;
             Native::Sha256(sha2::Sha256::new()).wrap()
@@ -65,15 +65,15 @@ pub(super) fn crate_bridge(id: PathId, args: &[Value]) -> Result<Option<Value>> 
             use sha2::Digest;
             bytes_to_vec(&sha2::Sha256::digest(value_to_bytes(args.first())))
         }
-        // regex free functions ---------------------------------------------
+        // regex free functions
         PathId::RegexEscape => Value::str(regex::escape(&s0())),
-        // hex --------------------------------------------------------------
+        // hex
         PathId::HexEncode => Value::str(hex::encode(value_to_bytes(args.first()))),
         PathId::HexDecode => match hex::decode(s0()) {
             Ok(b) => Value::ok(bytes_to_vec(&b)),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
-        // toml -------------------------------------------------------------
+        // toml
         PathId::TomlFromStr => match toml::from_str::<serde_json::Value>(&s0()) {
             Ok(j) => Value::ok(json_to_pvalue(j)),
             Err(e) => Value::err(Value::str(e.to_string())),
@@ -84,7 +84,7 @@ pub(super) fn crate_bridge(id: PathId, args: &[Value]) -> Result<Option<Value>> 
                 Err(e) => Value::err(Value::str(e.to_string())),
             }
         }
-        // serde_yaml -------------------------------------------------------
+        // serde_yaml
         PathId::SerdeYamlFromStr => match serde_yaml::from_str::<serde_json::Value>(&s0()) {
             Ok(j) => Value::ok(json_to_pvalue(j)),
             Err(e) => Value::err(Value::str(e.to_string())),
@@ -95,13 +95,13 @@ pub(super) fn crate_bridge(id: PathId, args: &[Value]) -> Result<Option<Value>> 
                 Err(e) => Value::err(Value::str(e.to_string())),
             }
         }
-        // rand -------------------------------------------------------------
+        // rand
         PathId::RandRng | PathId::RandThreadRng => Value::struct_of("Rng", []),
         PathId::RandRandom => Value::Float(rand::random::<f64>()),
-        // chrono is answered in `dispatch_call`.
-        // jsonwebtoken -----------------------------------------------------
+        // chrono is handled in `dispatch_call`
+        // jsonwebtoken
         PathId::JsonwebtokenEncode => super::jwt_bridge::jwt_encode(args)?,
-        // tempfile ---------------------------------------------------------
+        // tempfile
         PathId::TempfileTempdir => match tempfile::tempdir() {
             Ok(d) => Value::ok(Native::TempDir(d).wrap()),
             Err(e) => Value::err(Value::str(e.to_string())),
@@ -114,23 +114,22 @@ pub(super) fn crate_bridge(id: PathId, args: &[Value]) -> Result<Option<Value>> 
             Ok(f) => Value::ok(Native::NamedTempFile(f).wrap()),
             Err(e) => Value::err(Value::str(e.to_string())),
         },
-        // winreg -----------------------------------------------------------
+        // winreg
         PathId::RegKeyPredef => super::winreg_bridge::predef(args),
-        // windows-service --------------------------------------------------
+        // windows-service
         PathId::ServiceManagerLocalComputer => super::service_bridge::local_computer(args),
-        // wmi --------------------------------------------------------------
+        // wmi
         PathId::WMIConnectionNew => super::wmi_bridge::connection(args, true),
         PathId::WMIConnectionWithNamespacePath => super::wmi_bridge::connection(args, false),
-        // crossterm --------------------------------------------------------
+        // crossterm
         PathId::TerminalSize => terminal_size(),
-        // terminal-light ---------------------------------------------------
+        // terminal-light
         PathId::TerminalLightLuma => terminal_luma(),
         _ => return Ok(None),
     }))
 }
 
-/// The pair is columns then rows like the real call, the opposite of a
-/// `Rect`.
+/// Columns then rows like the real call, the opposite of a `Rect`.
 fn terminal_size() -> Value {
     match crossterm::terminal::size() {
         Ok((cols, rows)) => Value::ok(Value::tuple(vec![
@@ -141,8 +140,8 @@ fn terminal_size() -> Value {
     }
 }
 
-/// Background brightness from 0 to 1. An error means neither the terminal
-/// nor `$COLORFGBG` answered.
+/// Background brightness from 0 to 1. An error means neither the terminal nor `$COLORFGBG` gave
+/// anything.
 fn terminal_luma() -> Value {
     match terminal_light::luma() {
         Ok(luma) => Value::ok(Value::F32(luma)),
@@ -150,7 +149,7 @@ fn terminal_luma() -> Value {
     }
 }
 
-/// A marker carrying the alphabet, so `.encode` picks the right engine.
+/// A marker with the alphabet, so `.encode` picks the right engine.
 pub(super) fn base64_engine(id: PathId) -> Option<Value> {
     let kind = match id {
         PathId::Standard | PathId::Base64Standard => "standard",
@@ -233,7 +232,7 @@ pub(super) fn rng_method(name: &MethodName, args: &[Value]) -> Result<Value> {
     })
 }
 
-/// `finalize` clones the hasher rather than consuming it.
+/// `finalize` clones the hasher instead of consuming it.
 pub(super) fn sha256_method(
     handle: &Arc<Mutex<Native>>,
     method: &MethodName,

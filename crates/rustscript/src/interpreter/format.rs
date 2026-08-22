@@ -3,17 +3,16 @@
 use anyhow::Result;
 use num_traits::AsPrimitive;
 
-/// Radix forms need the exact integer, and integers ignore precision where
-/// floats round by it.
+/// Radix forms need the exact integer, and integers ignore precision where floats round by it.
 #[derive(Clone, Copy)]
 pub(super) enum SpecNumber {
     Int(i64),
-    /// Radix forms print the image at that width, `{:x}` of `-1i8` is `ff`.
+    /// radix forms print the image at that width, `{:x}` of `-1i8` is `ff`
     Sized {
         value: i128,
         bits: u32,
     },
-    /// Raw storage bits. Only the exponent forms need the sign.
+    /// raw storage bits, only the exponent forms need the sign
     Big {
         bits: i128,
         signed: bool,
@@ -23,13 +22,13 @@ pub(super) enum SpecNumber {
 }
 
 impl SpecNumber {
-    /// Masked to the value's own width.
+    /// masked to the value's own width
     fn radix_bits(value: i128, bits: u32) -> u64 {
         AsPrimitive::<u64>::as_(value) & (u64::MAX >> (64 - bits))
     }
 }
 
-/// `[[fill]align][+][#][0][width][.precision][type]`.
+/// `[[fill]align][+][#][0][width][.precision][type]`
 struct ParsedSpec {
     fill: char,
     align: Option<char>,
@@ -75,7 +74,7 @@ fn parse_spec(spec: &str) -> ParsedSpec {
         parsed.plus = true;
         index += 1;
     }
-    // `-` is accepted and does nothing.
+    // `-` is accepted and does nothing
     if chars.get(index) == Some(&'-') {
         index += 1;
     }
@@ -123,13 +122,13 @@ pub(super) fn apply_spec(
 ) -> String {
     let parsed = parse_spec(spec);
     let mut base = render_base(&parsed, display, debug, number);
-    // The `Debug` of str, char and containers never pads, only numbers and
-    // bool route `Debug` to a padding `Display`.
+    // the `Debug` of str, char and containers never pads, only numbers and bool route `Debug` to
+    // a padding `Display`
     if parsed.repr == Repr::Debug && !pads_debug {
         return base;
     }
 
-    // `{:+}` of NaN is still `NaN`, infinities take the sign.
+    // `{:+}` of NaN is still `NaN`, infinities take the sign
     let is_nan = match number {
         Some(SpecNumber::Float(f)) => f.is_nan(),
         Some(SpecNumber::F32(f)) => f.is_nan(),
@@ -162,8 +161,8 @@ pub(super) fn apply_spec(
         return base;
     }
     let pad = target - current;
-    // The zero flag pads after the sign and prefix, `{:#010x}` gives
-    // `0x000000ff`, and wins over an explicit fill.
+    // the zero flag pads after the sign and prefix, `{:#010x}` gives `0x000000ff`, and wins over
+    // an explicit fill
     if parsed.zero && number.is_some() {
         let mut cut = usize::from(base.starts_with('+') || base.starts_with('-'));
         if base[cut..].starts_with("0x")
@@ -307,8 +306,7 @@ pub(super) fn expand_widths_with(
             continue;
         }
         if c == '$' {
-            // `0w$` is the zero flag plus a width reference, an argument index
-            // never has a leading zero.
+            // `0w$` is the zero flag plus a width reference, an argument index never has a leading zero
             if token.len() > 1 && token.starts_with('0') {
                 out.push('0');
                 token.remove(0);
