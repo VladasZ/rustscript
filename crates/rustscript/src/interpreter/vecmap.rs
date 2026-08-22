@@ -5,7 +5,6 @@ use std::mem::take;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
-use indexmap::IndexMap;
 use parking_lot::Mutex;
 
 use super::bridge::arg;
@@ -16,7 +15,7 @@ use super::native::Native;
 use super::ops::compare_values;
 use super::value::{List, MapKey, MapKind, Value};
 
-pub(super) type MapStore = IndexMap<MapKey, Value>;
+pub(super) use super::value::MapStore;
 
 pub(super) fn vec_method(v: &List, method: &MethodName, args: &mut [Value]) -> Result<Value> {
     Ok(match method.id {

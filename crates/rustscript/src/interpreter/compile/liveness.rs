@@ -317,42 +317,49 @@ fn successors(op: &Op, at: usize, out: &mut Vec<usize>) {
     }
 }
 
-impl FnState {
-    /// Every `Own` becomes a `Take` or a `Copy`, and `child_moves` is filled.
-    pub(super) fn resolve_owns(&mut self) {
-        let regs = usize::from(self.max_reg).max(1);
-        let n = self.code.len();
+/// Live-in per op, to a fixpoint.
+struct Liveness {
+    succ: Vec<Vec<usize>>,
+    writes: Vec<Vec<Reg>>,
+    live_in: Vec<Bits>,
+    /// never dead, see `Liveness::of`
+    pinned: HashSet<Reg>,
+}
+
+impl Liveness {
+    fn of(func: &FnState) -> Liveness {
+        let regs = usize::from(func.max_reg).max(1);
+        let count = func.code.len();
         // A register a closure captured is read by every later call of that closure, so it is
         // never dead. A cell promoted local is shared the same way.
-        let mut pinned: HashSet<Reg> = self.mutable_locals.iter().copied().collect();
-        for caps in &self.child_caps {
+        let mut pinned: HashSet<Reg> = func.mutable_locals.iter().copied().collect();
+        for caps in &func.child_caps {
             for cap in caps {
                 if let CapSource::Local(reg) | CapSource::MutableLocal(reg) = cap {
                     pinned.insert(*reg);
                 }
             }
         }
-        let mut reads: Vec<Vec<Reg>> = Vec::with_capacity(n);
-        let mut writes: Vec<Vec<Reg>> = Vec::with_capacity(n);
-        let mut succ: Vec<Vec<usize>> = Vec::with_capacity(n);
-        for (at, op) in self.code.iter().enumerate() {
-            let (mut r, mut w, mut s) = (Vec::new(), Vec::new(), Vec::new());
-            effects(self, op, &mut r, &mut w);
-            successors(op, at, &mut s);
-            reads.push(r);
-            writes.push(w);
-            succ.push(s);
+        let mut reads: Vec<Vec<Reg>> = Vec::with_capacity(count);
+        let mut writes: Vec<Vec<Reg>> = Vec::with_capacity(count);
+        let mut succ: Vec<Vec<usize>> = Vec::with_capacity(count);
+        for (at, op) in func.code.iter().enumerate() {
+            let (mut op_reads, mut op_writes, mut op_succ) = (Vec::new(), Vec::new(), Vec::new());
+            effects(func, op, &mut op_reads, &mut op_writes);
+            successors(op, at, &mut op_succ);
+            reads.push(op_reads);
+            writes.push(op_writes);
+            succ.push(op_succ);
         }
-        // live-in per op, to a fixpoint
-        let mut live_in: Vec<Bits> = (0..n).map(|_| Bits::new(regs)).collect();
+        let mut live_in: Vec<Bits> = (0..count).map(|_| Bits::new(regs)).collect();
         let mut changed = true;
         while changed {
             changed = false;
-            for at in (0..n).rev() {
+            for at in (0..count).rev() {
                 let mut out = Bits::new(regs);
-                for &s in &succ[at] {
-                    if s < n {
-                        out.union(&live_in[s]);
+                for &next in &succ[at] {
+                    if next < count {
+                        out.union(&live_in[next]);
                     }
                 }
                 for &w in &writes[at] {
@@ -364,9 +371,28 @@ impl FnState {
                 changed |= live_in[at].union(&out);
             }
         }
-        let live_out = |at: usize, reg: Reg| -> bool {
-            pinned.contains(&reg) || succ[at].iter().any(|&s| s < n && live_in[s].get(reg))
-        };
+        Liveness {
+            succ,
+            writes,
+            live_in,
+            pinned,
+        }
+    }
+
+    fn live_out(&self, at: usize, reg: Reg) -> bool {
+        self.pinned.contains(&reg)
+            || self.succ[at]
+                .iter()
+                .any(|&s| s < self.live_in.len() && self.live_in[s].get(reg))
+    }
+}
+
+impl FnState {
+    /// Every `Own` becomes a `Take` or a `Copy`, and `child_moves` is filled.
+    pub(super) fn resolve_owns(&mut self) {
+        let n = self.code.len();
+        let live = Liveness::of(self);
+        let live_out = |at: usize, reg: Reg| live.live_out(at, reg);
         for at in 0..n {
             let Op::Own { dst, src, root } = self.code[at] else {
                 if let Op::MakeClosure { child, .. } | Op::Spawn { child, .. } = self.code[at] {
@@ -395,5 +421,51 @@ impl FnState {
                 Op::Take { dst, src }
             };
         }
+    }
+
+    /// The `LoadUnit` stores nobody reads, the value of a statement position `if` or of a
+    /// block that ends in a `;`. Only a register no other op writes qualifies, so it holds
+    /// unit or nothing either way and the store can go without a trace.
+    pub(super) fn dead_unit_loads(&self) -> Vec<bool> {
+        let live = Liveness::of(self);
+        let regs = usize::from(self.max_reg).max(1);
+        let mut unit_only = vec![true; regs];
+        for slot in unit_only.iter_mut().take(self.num_params) {
+            *slot = false;
+        }
+        for (at, op) in self.code.iter().enumerate() {
+            if matches!(op, Op::LoadUnit { .. }) {
+                continue;
+            }
+            for &w in &live.writes[at] {
+                if let Some(slot) = unit_only.get_mut(usize::from(w)) {
+                    *slot = false;
+                }
+            }
+        }
+        self.code
+            .iter()
+            .enumerate()
+            .map(|(at, op)| match op {
+                Op::LoadUnit { dst } => {
+                    unit_only.get(usize::from(*dst)).copied().unwrap_or(false)
+                        && !live.live_out(at, *dst)
+                }
+                _ => false,
+            })
+            .collect()
+    }
+
+    /// A `Jump` to the op right after it, the end of a `then` branch with no `else` once the
+    /// unit stores around it are gone.
+    pub(super) fn dead_jumps(&self) -> Vec<bool> {
+        self.code
+            .iter()
+            .enumerate()
+            .map(|(at, op)| match op {
+                Op::Jump { to } => usize::try_from(*to).is_ok_and(|to| to == at + 1),
+                _ => false,
+            })
+            .collect()
     }
 }

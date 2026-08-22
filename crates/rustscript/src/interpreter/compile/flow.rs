@@ -10,7 +10,7 @@ use crate::interpreter::bytecode::{Op, PathRef, Reg};
 use super::support::{iterable_is_owned, pattern_borrows, pattern_owns};
 use super::walks::flatten_and;
 
-use super::{Compiler, LoopCtx, idx16};
+use super::{Compiler, LoopCtx, NameLoc, idx16};
 
 impl Compiler<'_> {
     /// The value moves to a fresh register first, so the retag doesn't touch a local's own slot
@@ -191,7 +191,35 @@ impl Compiler<'_> {
         Ok(())
     }
 
+    /// A `&[T]` or `&Vec<T>` parameter, and a `let r = &v` local, both forward the
+    /// caller's storage rather than owning it. Iterating one has to borrow, because an
+    /// owning iterator drains the elements out from under the caller.
+    fn iterates_borrowed(&mut self, expr: &Expr) -> bool {
+        let mut inner = expr;
+        loop {
+            match inner {
+                Expr::Paren(p) => inner = &p.expr,
+                Expr::Group(g) => inner = &g.expr,
+                _ => break,
+            }
+        }
+        let Expr::Path(path) = inner else {
+            return false;
+        };
+        let Some(ident) = path.path.get_ident() else {
+            return false;
+        };
+        match self.resolve(&ident.to_string()) {
+            NameLoc::Local(reg) => {
+                let state = self.cur();
+                state.borrow_params.contains(&reg) || state.ref_locals.contains(&reg)
+            }
+            _ => false,
+        }
+    }
+
     pub(super) fn compile_for(&mut self, dst: Reg, f: &syn::ExprForLoop) -> Result<()> {
+        let borrowed = self.iterates_borrowed(&f.expr);
         // `for x in &mut place` lowers to `place.iter_mut()`, so `*x` writes land in the elements
         let src = match &*f.expr {
             Expr::Reference(r) if r.mutability.is_some() => {
@@ -207,10 +235,10 @@ impl Compiler<'_> {
                 });
                 out
             }
-            e if iterable_is_owned(e) => self.compile_owned_expr(e)?,
+            e if iterable_is_owned(e) && !borrowed => self.compile_owned_expr(e)?,
             e => self.compile_expr(e)?,
         };
-        let owned = iterable_is_owned(&f.expr);
+        let owned = iterable_is_owned(&f.expr) && !borrowed;
         let iter = self.alloc();
         self.emit(Op::IterInit {
             dst: iter,

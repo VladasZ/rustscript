@@ -9,7 +9,7 @@ use super::bridge::arg;
 use super::bytecode::PathId;
 use super::cell;
 use super::enum_def::{SEEK_FROM, XML_NODE};
-use super::int_methods::{from_bytes, from_bytes_order};
+use super::int_methods::{ByteOrder, from_bytes, from_bytes_order};
 use super::jwt_bridge::jwt_assoc;
 use super::native::Native;
 use super::numeric::IntWidth;
@@ -76,7 +76,6 @@ fn conversion_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
 }
 
 fn int_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
-    let ty = id.namespace();
     Ok(Some(match id {
         // the 128 bit types parse in their real width below
         PathId::I8FromStrRadix
@@ -112,8 +111,12 @@ fn int_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
         }
         // a widening `T::from(x)` keeps the value, `from` on a bool gives 0 or 1
         PathId::U128From | PathId::I128From => {
-            let width = IntWidth::parse(ty).expect("128-bit width parses");
-            Value::int_of_width(i128::from(int_from_arg(ty, args.first())?), width)
+            let width = if id == PathId::U128From {
+                IntWidth::U128
+            } else {
+                IntWidth::I128
+            };
+            Value::int_of_width(i128::from(int_from_arg(id, args.first())?), width)
         }
         PathId::I8From
         | PathId::I16From
@@ -124,12 +127,12 @@ fn int_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
         | PathId::U16From
         | PathId::U32From
         | PathId::U64From
-        | PathId::UsizeFrom => Value::Int(int_from_arg(ty, args.first())?),
+        | PathId::UsizeFrom => Value::Int(int_from_arg(id, args.first())?),
         PathId::F32From | PathId::F64From => match args.first() {
             Some(Value::Float(f)) => Value::Float(*f),
             Some(Value::Int(n)) => Value::Float(AsPrimitive::<f64>::as_(*n)),
             Some(Value::Bool(b)) => Value::Float(if *b { 1.0 } else { 0.0 }),
-            _ => bail!("`{ty}::from` needs a number"),
+            _ => bail!("`{}::from` needs a number", id.namespace()),
         },
         // `T::try_from(x)` reports overflow with the real `TryFromIntError` message
         PathId::I8TryFrom
@@ -144,8 +147,8 @@ fn int_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
         | PathId::U64TryFrom
         | PathId::U128TryFrom
         | PathId::UsizeTryFrom => {
-            let n = int_from_arg(ty, args.first())?;
-            if int_fits(ty, n) {
+            let n = int_from_arg(id, args.first())?;
+            if int_fits(id, n) {
                 Value::ok(Value::Int(n))
             } else {
                 Value::err(Value::str(
@@ -153,7 +156,12 @@ fn int_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
                 ))
             }
         }
-        _ => return int_bytes_assoc(id, args),
+        _ => {
+            return float_bytes_assoc(id, args).and_then(|v| match v {
+                Some(value) => Ok(Some(value)),
+                None => int_bytes_assoc(id, args),
+            });
+        }
     }))
 }
 
@@ -221,6 +229,40 @@ fn container_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
             }
         }
         _ => return Ok(None),
+    }))
+}
+
+/// `f32::from_le_bytes` and friends. The bit pattern is read at the named width, so an
+/// f32 read of four bytes is not the f64 read of the same bytes widened.
+fn float_bytes_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
+    let narrow = match id {
+        PathId::F32FromLeBytes | PathId::F32FromBeBytes | PathId::F32FromNeBytes => true,
+        PathId::F64FromLeBytes | PathId::F64FromBeBytes | PathId::F64FromNeBytes => false,
+        _ => return Ok(None),
+    };
+    let Some(order) = from_bytes_order(id.name()) else {
+        bail!("`{id}` is not a byte conversion");
+    };
+    let bytes = byte_array(id, args.first())?;
+    let width = if narrow { 4 } else { 8 };
+    if bytes.len() != width {
+        bail!("`{id}` needs {width} bytes, got {}", bytes.len());
+    }
+    let mut raw = Vec::with_capacity(width);
+    for byte in &bytes {
+        raw.push(u8::try_from(*byte)?);
+    }
+    if matches!(order, ByteOrder::Be)
+        || (matches!(order, ByteOrder::Ne) && cfg!(target_endian = "big"))
+    {
+        raw.reverse();
+    }
+    Ok(Some(if narrow {
+        Value::F32(f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
+    } else {
+        Value::Float(f64::from_le_bytes([
+            raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+        ]))
     }))
 }
 
@@ -403,17 +445,20 @@ fn radix_arg(args: &[Value]) -> u32 {
         .unwrap_or(10)
 }
 
-fn int_from_arg(ty: &str, v: Option<&Value>) -> Result<i64> {
+/// The path name is only spelled out in the error, `namespace` splits strings and this runs on
+/// every `i64::try_from`.
+fn int_from_arg(id: PathId, v: Option<&Value>) -> Result<i64> {
     match v {
         Some(Value::Int(n)) => Ok(*n),
         Some(Value::Bool(b)) => Ok(i64::from(*b)),
         Some(Value::Char(c)) => Ok(*c as i64),
         // the callers check the target's own range on top of this
         Some(tagged @ (Value::IntW(..) | Value::Big(..))) => match tagged.int_parts() {
-            Some((n, _)) => i64::try_from(n).map_err(|_| anyhow!("`{ty}` conversion out of range")),
-            None => bail!("`{ty}` conversion out of range"),
+            Some((n, _)) => i64::try_from(n)
+                .map_err(|_| anyhow!("`{}` conversion out of range", id.namespace())),
+            None => bail!("`{}` conversion out of range", id.namespace()),
         },
-        _ => bail!("`{ty}` conversion needs an integer"),
+        _ => bail!("`{}` conversion needs an integer", id.namespace()),
     }
 }
 
@@ -446,15 +491,15 @@ fn byte_array(id: PathId, arg: Option<&Value>) -> Result<Vec<i128>> {
     Ok(out)
 }
 
-fn int_fits(ty: &str, n: i64) -> bool {
-    match ty {
-        "i8" => i8::try_from(n).is_ok(),
-        "i16" => i16::try_from(n).is_ok(),
-        "i32" => i32::try_from(n).is_ok(),
-        "u8" => u8::try_from(n).is_ok(),
-        "u16" => u16::try_from(n).is_ok(),
-        "u32" => u32::try_from(n).is_ok(),
-        "u64" | "u128" | "usize" => n >= 0,
+fn int_fits(id: PathId, n: i64) -> bool {
+    match id {
+        PathId::I8TryFrom => i8::try_from(n).is_ok(),
+        PathId::I16TryFrom => i16::try_from(n).is_ok(),
+        PathId::I32TryFrom => i32::try_from(n).is_ok(),
+        PathId::U8TryFrom => u8::try_from(n).is_ok(),
+        PathId::U16TryFrom => u16::try_from(n).is_ok(),
+        PathId::U32TryFrom => u32::try_from(n).is_ok(),
+        PathId::U64TryFrom | PathId::U128TryFrom | PathId::UsizeTryFrom => n >= 0,
         _ => true,
     }
 }

@@ -442,8 +442,7 @@ impl Compiler<'_> {
         }
         let op = bin_kind(&b.op).ok_or_else(|| anyhow!("unsupported operator {:?}", b.op))?;
         let a = self.compile_expr(&b.left)?;
-        // a comparison as a value stays generic, the typed compare is a jump
-        let typed = self.typed_arith(&b.left, &b.right, op);
+        let typed = self.typed_operands(&b.left, &b.right, op);
         // a literal immediate adopts the width of the left side like a bare literal
         if let Some(imm) = int_literal(&b.right) {
             self.set_line(b.left.span());

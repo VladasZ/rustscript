@@ -1,9 +1,10 @@
 //! One dispatch step. `step` executes the op at `ctx.ip` and returns the `Flow` the frame loop in
 //! `vm.rs` applies.
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::mem::take;
+
+use rustc_hash::FxHashMap;
+use std::mem::{forget, replace, take};
 use std::slice::from_ref;
 use std::sync::Arc;
 
@@ -17,11 +18,13 @@ use super::value::{ClosureData, Upvalue, Value};
 use super::vm::{TypeEnv, Vm};
 use super::vm_method::{get_or_default, method_op};
 
+/// Two words, so every op returns it in registers. The value of a `Ret` and the request of a
+/// `Call` wait in the context.
 pub(super) enum Flow {
     Next,
     Jump(usize),
-    Ret(Value),
-    Call(CallReq),
+    Ret,
+    Call,
 }
 
 pub(super) struct CallReq {
@@ -39,13 +42,18 @@ pub(super) struct StepCtx<'a> {
     pub cur_clo: &'a Option<Arc<ClosureData>>,
     pub cur_tenv: &'a TypeEnv,
     pub entry_upvalues: &'a [Upvalue],
-    pub local_cells: &'a mut HashMap<usize, Arc<Mutex<Value>>>,
+    pub local_cells: &'a mut FxHashMap<usize, Arc<Mutex<Value>>>,
     pub stack: &'a mut Vec<Value>,
     pub base: usize,
     pub ip: usize,
+    /// what `Flow::Ret` returns
+    pub ret: Value,
+    /// what `Flow::Call` enters
+    pub call: Option<CallReq>,
 }
 
 impl StepCtx<'_> {
+    #[inline]
     pub(super) fn get(&self, reg: u16) -> &Value {
         &self.stack[self.base + reg as usize]
     }
@@ -54,10 +62,16 @@ impl StepCtx<'_> {
         take(&mut self.stack[self.base + reg as usize])
     }
 
+    #[inline]
     pub(super) fn put(&mut self, reg: u16, v: Value) {
-        self.stack[self.base + reg as usize] = v;
+        let old = replace(&mut self.stack[self.base + reg as usize], v);
+        // the drop glue of `Value` is an out of line call, a plain old value has nothing to drop
+        if old.is_plain() {
+            forget(old);
+        }
     }
 
+    #[inline]
     pub(super) fn set(&mut self, reg: u16, v: Value) -> Flow {
         self.put(reg, v);
         Flow::Next
@@ -138,7 +152,10 @@ pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
             key,
             default,
         } => get_or_default(ctx, *dst, *recv, *key, *default)?,
-        Op::Ret { src } => Flow::Ret(ctx.take(*src)),
+        Op::Ret { src } => {
+            ctx.ret = ctx.take(*src);
+            Flow::Ret
+        }
         Op::MakeVec { .. }
         | Op::MakeMap { .. }
         | Op::MakeTuple { .. }
@@ -407,6 +424,7 @@ fn bin_imm_op(
 
 /// The pass said both sides are `w`. When the values agree the width runs natively, otherwise
 /// the generic op decides, so a wrong guess costs time and never correctness.
+#[inline]
 fn bin_int(
     ctx: &mut StepCtx,
     dst: u16,
@@ -421,6 +439,7 @@ fn bin_int(
     }
 }
 
+#[inline]
 fn bin_int_imm(
     ctx: &mut StepCtx,
     dst: u16,
@@ -449,6 +468,7 @@ fn bin_float(
     }
 }
 
+#[inline]
 fn cmp_int(l: &Value, r: &Value, op: super::bytecode::BinKind, w: IntWidth) -> Result<bool> {
     match ops::typed_cmp(op, w, l, r) {
         Some(hit) => Ok(hit),
@@ -510,6 +530,7 @@ fn index_op(ctx: &mut StepCtx, dst: u16, base: u16, key: u16) -> Result<Flow> {
     Ok(ctx.set(dst, ops::index(&target, ctx.get(key))?))
 }
 
+#[inline]
 fn branch(jump: bool, to: u32) -> Flow {
     if jump {
         Flow::Jump(to as usize)

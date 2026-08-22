@@ -15,6 +15,24 @@ use super::enum_def::EnumDef;
 use super::resolver::{Res, Resolver};
 use super::typeir::{CastIr, TypeIr, lower_cast, lower_type};
 
+/// `moved[i]` is the new index of the op that was at `i`, one entry past the end included.
+fn retarget_jumps(code: &mut [Op], moved: &[u32]) {
+    for op in code {
+        match op {
+            Op::Jump { to: t }
+            | Op::JumpIfFalse { to: t, .. }
+            | Op::JumpIfTrue { to: t, .. }
+            | Op::CmpJump { to: t, .. }
+            | Op::CmpJumpImm { to: t, .. }
+            | Op::CmpJumpInt { to: t, .. }
+            | Op::CmpJumpIntImm { to: t, .. }
+            | Op::ForNext { to: t, .. }
+            | Op::TryJump { to: t, .. } => *t = moved[*t as usize],
+            _ => {}
+        }
+    }
+}
+
 /// Filled before any body is compiled.
 pub struct Ctx<'r> {
     pub resolver: &'r Resolver,
@@ -180,20 +198,34 @@ impl FnState {
             cols.push(self.cols[at]);
         }
         moved.push(u32::try_from(code.len())?);
-        for op in &mut code {
-            match op {
-                Op::Jump { to: t }
-                | Op::JumpIfFalse { to: t, .. }
-                | Op::JumpIfTrue { to: t, .. }
-                | Op::CmpJump { to: t, .. }
-                | Op::CmpJumpImm { to: t, .. }
-                | Op::CmpJumpInt { to: t, .. }
-                | Op::CmpJumpIntImm { to: t, .. }
-                | Op::ForNext { to: t, .. }
-                | Op::TryJump { to: t, .. } => *t = moved[*t as usize],
-                _ => {}
-            }
+        retarget_jumps(&mut code, &moved);
+        self.code = code;
+        self.lines = lines;
+        self.cols = cols;
+        Ok(())
+    }
+
+    /// Drops the ops flagged in `dead` and retargets every jump.
+    fn remove_ops(&mut self, dead: &[bool]) -> Result<()> {
+        if !dead.iter().any(|d| *d) {
+            return Ok(());
         }
+        let mut code = Vec::with_capacity(self.code.len());
+        let mut lines = Vec::with_capacity(self.lines.len());
+        let mut cols = Vec::with_capacity(self.cols.len());
+        let mut moved = Vec::with_capacity(self.code.len() + 1);
+        for (at, op) in take(&mut self.code).into_iter().enumerate() {
+            // a jump to a removed op lands on the op after it
+            moved.push(u32::try_from(code.len())?);
+            if dead[at] {
+                continue;
+            }
+            code.push(op);
+            lines.push(self.lines[at]);
+            cols.push(self.cols[at]);
+        }
+        moved.push(u32::try_from(code.len())?);
+        retarget_jumps(&mut code, &moved);
         self.code = code;
         self.lines = lines;
         self.cols = cols;
@@ -213,6 +245,10 @@ impl FnState {
             .map(|_| Arc::from(Vec::new()))
             .collect();
         self.resolve_owns();
+        let dead = self.dead_unit_loads();
+        self.remove_ops(&dead)?;
+        let dead = self.dead_jumps();
+        self.remove_ops(&dead)?;
         let mut droppable: Vec<Reg> = self
             .drop_lists
             .iter()

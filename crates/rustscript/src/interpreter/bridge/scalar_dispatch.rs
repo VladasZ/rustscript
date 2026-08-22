@@ -103,6 +103,13 @@ pub(super) fn f32_method(recv: f32, name: BuiltinId, args: &[Value]) -> Result<O
         shared::f32_core(recv, name, &VArgs(args))?.map(|out| match out {
             F32Out::Val(value) => Value::F32(value),
             F32Out::Bool(value) => Value::Bool(value),
+            F32Out::Bytes(bytes) => Value::vec(
+                bytes
+                    .into_iter()
+                    .map(|byte| Value::Int(i64::from(byte)))
+                    .collect(),
+            ),
+            F32Out::Ordering(ordering) => make_ordering(ordering),
             F32Out::SomeOrdering(ordering) => Value::some(make_ordering(ordering)),
         }),
     )
@@ -213,6 +220,12 @@ pub(super) fn num_out(out: NumOut) -> Value {
         NumOut::Int(i) => Value::Int(i),
         NumOut::Float(f) => Value::Float(f),
         NumOut::Bool(b) => Value::Bool(b),
+        NumOut::Bytes(bytes) => Value::vec(
+            bytes
+                .into_iter()
+                .map(|byte| Value::Int(i64::from(byte)))
+                .collect(),
+        ),
         NumOut::SomeInt(i) => Value::some(Value::Int(i)),
         NumOut::SomeFloat(f) => Value::some(Value::Float(f)),
         NumOut::Nothing => Value::none(),

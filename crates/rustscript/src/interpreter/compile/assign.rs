@@ -93,20 +93,24 @@ impl Compiler<'_> {
                 let name = p.path.segments[0].ident.to_string();
                 let location = self.resolve_for_write(&name);
                 let typed = self.typed_arith(target, rhs, op);
-                if let Some(imm) = int_literal(rhs) {
-                    let current = self.load_name_location(location, &name)?;
-                    let result = self.alloc();
-                    self.set_line(target.span());
-                    self.emit_bin_imm(result, current, imm, op, typed);
-                    self.emit_name_store(location, result, &name)?;
+                let rhs_reg = if int_literal(rhs).is_some() {
+                    None
                 } else {
-                    let b = self.compile_expr(rhs)?;
-                    let current = self.load_name_location(location, &name)?;
-                    let result = self.alloc();
-                    self.set_line(target.span());
-                    self.emit_bin(result, current, b, op, typed);
-                    self.emit_name_store(location, result, &name)?;
+                    Some(self.compile_expr(rhs)?)
+                };
+                let current = self.load_name_location(location, &name)?;
+                // a plain local takes the result in place, every op reads before it writes
+                let result = match location {
+                    NameLoc::Local(reg) => reg,
+                    _ => self.alloc(),
+                };
+                self.set_line(target.span());
+                match (int_literal(rhs), rhs_reg) {
+                    (Some(imm), _) => self.emit_bin_imm(result, current, imm, op, typed),
+                    (None, Some(b)) => self.emit_bin(result, current, b, op, typed),
+                    (None, None) => unreachable!("the right side compiled above"),
                 }
+                self.emit_name_store(location, result, &name)?;
             }
             Expr::Index(idx) => {
                 let b = self.compile_expr(rhs)?;

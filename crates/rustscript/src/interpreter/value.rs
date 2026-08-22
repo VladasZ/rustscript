@@ -7,6 +7,7 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use indexmap::IndexMap;
 use parking_lot::Mutex;
+use rustc_hash::FxBuildHasher;
 
 use super::bytecode::Const;
 use super::enum_def::{ERR, EnumDef, EnumKind, NONE, NOT_UNICODE, OK, OPTION, RESULT, SOME};
@@ -15,7 +16,10 @@ use super::numeric::IntWidth;
 pub use super::rs_str::RsStr;
 
 pub type List = Arc<Mutex<Vec<Value>>>;
-pub type Map = Arc<Mutex<IndexMap<MapKey, Value>>>;
+/// Insertion ordered like every script map, hashed with Fx, `SipHash` was the top of the
+/// `word_count` profile.
+pub type MapStore = IndexMap<MapKey, Value, FxBuildHasher>;
+pub type Map = Arc<Mutex<MapStore>>;
 
 /// A set is a map with Unit values. The kind makes iteration yield elements and picks the set
 /// half of the methods.
@@ -344,7 +348,7 @@ impl Value {
         Value::Map(Arc::new(Mutex::new(IndexMap::default())), MapKind::Map)
     }
 
-    pub fn map_of(map: IndexMap<MapKey, Value>) -> Value {
+    pub fn map_of(map: MapStore) -> Value {
         Value::Map(Arc::new(Mutex::new(map)), MapKind::Map)
     }
 
@@ -352,7 +356,7 @@ impl Value {
         Value::Map(Arc::new(Mutex::new(IndexMap::default())), MapKind::Set)
     }
 
-    pub fn set_of(map: IndexMap<MapKey, Value>) -> Value {
+    pub fn set_of(map: MapStore) -> Value {
         Value::Map(Arc::new(Mutex::new(map)), MapKind::Set)
     }
 
@@ -545,6 +549,31 @@ impl Value {
             }
             Value::F32(f) => Some(Value::Float(f64::from(*f))),
             _ => None,
+        }
+    }
+
+    /// Holds no heap handle, so dropping it does nothing.
+    #[inline]
+    pub fn is_plain(&self) -> bool {
+        matches!(
+            self,
+            Value::Unit
+                | Value::Bool(_)
+                | Value::Int(_)
+                | Value::IntW(..)
+                | Value::Big(..)
+                | Value::Float(_)
+                | Value::F32(_)
+                | Value::Char(_)
+                | Value::Range { .. }
+        )
+    }
+
+    /// Releases a heap handle. A plain value stays, it is not worth the write.
+    #[inline]
+    pub fn release(&mut self) {
+        if !self.is_plain() {
+            *self = Value::Unit;
         }
     }
 

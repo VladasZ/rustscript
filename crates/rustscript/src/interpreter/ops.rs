@@ -40,12 +40,19 @@ pub(super) fn apply_bin(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
 
 /// Arithmetic on 2 values the inference pass typed as `w`. `None` when a value is not what the
 /// pass said, the caller then runs the generic op.
+#[inline]
 pub(super) fn typed_int(
     op: BinKind,
     w: IntWidth,
     lhs: &Value,
     rhs: &Value,
 ) -> Option<Result<Value>> {
+    if matches!(
+        op,
+        BinKind::Eq | BinKind::Ne | BinKind::Lt | BinKind::Le | BinKind::Gt | BinKind::Ge
+    ) {
+        return typed_cmp(op, w, lhs, rhs).map(|hit| Ok(Value::Bool(hit)));
+    }
     Some(match (lhs, rhs) {
         (Value::Int(x), Value::Int(y)) if w == IntWidth::I64 => {
             i64_arith(op, *x, *y).map(Value::Int)
@@ -71,6 +78,7 @@ fn typed_width(op: BinKind, w: IntWidth, x: i64, y: i64) -> Result<Value> {
 }
 
 /// `typed_int` for 2 floats of one precision.
+#[inline]
 pub(super) fn typed_float(op: BinKind, f32: bool, lhs: &Value, rhs: &Value) -> Option<Value> {
     Some(match (lhs, rhs, f32) {
         (Value::Float(x), Value::Float(y), false) => Value::Float(float_arith(op, *x, *y)),
@@ -80,6 +88,7 @@ pub(super) fn typed_float(op: BinKind, f32: bool, lhs: &Value, rhs: &Value) -> O
 }
 
 /// A comparison on 2 integers the pass typed as `w`. `None` sends it to the generic compare.
+#[inline]
 pub(super) fn typed_cmp(op: BinKind, w: IntWidth, lhs: &Value, rhs: &Value) -> Option<bool> {
     let (x, y) = match (lhs, rhs) {
         (Value::Int(x), Value::Int(y)) if w == IntWidth::I64 => (i128::from(*x), i128::from(*y)),
