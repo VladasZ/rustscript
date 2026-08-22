@@ -38,6 +38,68 @@ pub(super) fn apply_bin(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
     })
 }
 
+/// Arithmetic on 2 values the inference pass typed as `w`. `None` when a value is not what the
+/// pass said, the caller then runs the generic op.
+pub(super) fn typed_int(
+    op: BinKind,
+    w: IntWidth,
+    lhs: &Value,
+    rhs: &Value,
+) -> Option<Result<Value>> {
+    Some(match (lhs, rhs) {
+        (Value::Int(x), Value::Int(y)) if w == IntWidth::I64 => {
+            i64_arith(op, *x, *y).map(Value::Int)
+        }
+        (Value::IntW(x, wx), Value::IntW(y, wy)) if *wx == w && *wy == w => {
+            typed_width(op, w, *x, *y)
+        }
+        // a literal immediate arrives as a plain `Int`
+        (Value::IntW(x, wx), Value::Int(y)) if *wx == w => {
+            typed_width(op, w, *x, w.encode(i128::from(*y)))
+        }
+        _ => return None,
+    })
+}
+
+fn typed_width(op: BinKind, w: IntWidth, x: i64, y: i64) -> Result<Value> {
+    if matches!(w, IntWidth::U64 | IntWidth::USize) {
+        let out = u64_arith(op, x.cast_unsigned(), y.cast_unsigned())?;
+        return Ok(Value::IntW(out.cast_signed(), w));
+    }
+    let out = int_arith(op, w, w.decode(x), w.decode(y))?;
+    Ok(Value::IntW(w.encode(out), w))
+}
+
+/// `typed_int` for 2 floats of one precision.
+pub(super) fn typed_float(op: BinKind, f32: bool, lhs: &Value, rhs: &Value) -> Option<Value> {
+    Some(match (lhs, rhs, f32) {
+        (Value::Float(x), Value::Float(y), false) => Value::Float(float_arith(op, *x, *y)),
+        (Value::F32(x), Value::F32(y), true) => Value::F32(float_arith(op, *x, *y)),
+        _ => return None,
+    })
+}
+
+/// A comparison on 2 integers the pass typed as `w`. `None` sends it to the generic compare.
+pub(super) fn typed_cmp(op: BinKind, w: IntWidth, lhs: &Value, rhs: &Value) -> Option<bool> {
+    let (x, y) = match (lhs, rhs) {
+        (Value::Int(x), Value::Int(y)) if w == IntWidth::I64 => (i128::from(*x), i128::from(*y)),
+        (Value::IntW(x, wx), Value::IntW(y, wy)) if *wx == w && *wy == w => {
+            (w.decode(*x), w.decode(*y))
+        }
+        (Value::IntW(x, wx), Value::Int(y)) if *wx == w => (w.decode(*x), i128::from(*y)),
+        _ => return None,
+    };
+    Some(match op {
+        BinKind::Eq => x == y,
+        BinKind::Ne => x != y,
+        BinKind::Lt => x < y,
+        BinKind::Le => x <= y,
+        BinKind::Gt => x > y,
+        BinKind::Ge => x >= y,
+        _ => return None,
+    })
+}
+
 pub(super) fn apply_bin_imm(op: BinKind, l: &Value, imm: i64) -> Result<Value> {
     apply_bin(op, l, &Value::Int(imm))
 }

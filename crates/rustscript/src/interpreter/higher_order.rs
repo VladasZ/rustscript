@@ -11,7 +11,6 @@ use super::enum_def::{EQUAL, EnumKind, OK, SOME};
 use super::iterator::{as_closure, option_inner};
 use super::methods::ordering_from_value;
 use super::native::Native;
-use super::scalar::scalar_sort_by;
 use super::shared::usize_i64;
 use super::value::{List, Map, MapKey, Value, ValueRef};
 use super::vecmap::{SortKey, sort_key};
@@ -351,11 +350,6 @@ impl Vm {
             }
             BuiltinId::SortBy => {
                 let f = clo(0)?;
-                // an int only comparator sorts unboxed
-                if let Some(sorted) = scalar_sort_by(self, &list, &f) {
-                    *items.lock() = sorted;
-                    return Ok(Some(Value::Unit));
-                }
                 let mut sorted = list;
                 let mut err = None;
                 sorted.sort_by(|a, b| {

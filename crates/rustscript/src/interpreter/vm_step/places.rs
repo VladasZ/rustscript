@@ -1,4 +1,4 @@
-//! The place ops, derefs, field and index writes and the unique splits before a mutation.
+//! The place ops, derefs, field and index writes and element references.
 
 use std::sync::Arc;
 
@@ -7,7 +7,7 @@ use anyhow::{Result, anyhow, bail};
 use super::{Flow, StepCtx, user_bin};
 use crate::interpreter::bytecode::Member;
 use crate::interpreter::ops::{self, apply_bin, int_of};
-use crate::interpreter::value::{Upvalue, Value};
+use crate::interpreter::value::Value;
 use crate::interpreter::vm::Vm;
 
 /// A reference base resolves to its referent and a shared pointer auto derefs.
@@ -159,105 +159,6 @@ pub(super) fn set_field_op(ctx: &StepCtx, base: u16, member: u16, val: u16) -> R
     Ok(Flow::Next)
 }
 
-/// `base` was made unique by the ops before this one, so the split can't leak into a sibling copy.
-pub(super) fn unique_reg(ctx: &mut StepCtx, reg: u16) -> Flow {
-    ctx.stack[ctx.base + reg as usize].make_unique();
-    Flow::Next
-}
-
-pub(super) fn unique_field(ctx: &mut StepCtx, dst: u16, base: u16, member: u16) -> Result<Flow> {
-    let member = &ctx.cur.members[member as usize];
-    let target = place_base(ctx.get(base))?;
-    let v = match (&target, member) {
-        (Value::Struct(s), Member::Named(n)) => {
-            let Some(i) = n.slot_in(&s.shape) else {
-                bail!("no field `{n}`");
-            };
-            let mut values = s.values.lock();
-            values[i].make_unique();
-            values[i].clone()
-        }
-        (Value::Struct(s), Member::Indexed(i)) => {
-            let mut values = s.values.lock();
-            let Some(slot) = values.get_mut(*i) else {
-                bail!("no field {i}");
-            };
-            slot.make_unique();
-            slot.clone()
-        }
-        (Value::Tuple(t), Member::Indexed(i)) => {
-            let mut items = t.lock();
-            let Some(slot) = items.get_mut(*i) else {
-                bail!("no tuple index {i}");
-            };
-            slot.make_unique();
-            slot.clone()
-        }
-        (recv, _) => Vm::get_field(recv, member)?,
-    };
-    Ok(ctx.set(dst, v))
-}
-
-/// `unique_field` for an element. Anything else falls back to the plain index path, its error
-/// wording is the real one.
-pub(super) fn unique_index(ctx: &mut StepCtx, dst: u16, base: u16, key: u16) -> Result<Flow> {
-    let target = place_base(ctx.get(base))?;
-    let split = match (&target, ctx.get(key)) {
-        (Value::Vec(list), key_val) => {
-            match int_of(key_val).ok().and_then(|i| usize::try_from(i).ok()) {
-                Some(i) => {
-                    let mut items = list.lock();
-                    items.get_mut(i).map(|slot| {
-                        slot.make_unique();
-                        slot.clone()
-                    })
-                }
-                None => None,
-            }
-        }
-        (Value::Map(map, _), key_val) => match key_val.as_key() {
-            Some(k) => {
-                let mut entries = map.lock();
-                entries.get_mut(&k).map(|slot| {
-                    slot.make_unique();
-                    slot.clone()
-                })
-            }
-            None => None,
-        },
-        _ => None,
-    };
-    // fall back to the ordinary index path for its error wording
-    let v = match split {
-        Some(v) => v,
-        None => ops::index(&target, ctx.get(key))?,
-    };
-    Ok(ctx.set(dst, v))
-}
-
-pub(super) fn unique_cell(ctx: &mut StepCtx, dst: u16, cell: u16) -> Flow {
-    let cell = ctx.cell(cell).clone();
-    let v = {
-        let mut slot = cell.lock();
-        slot.make_unique();
-        slot.clone()
-    };
-    ctx.set(dst, v)
-}
-
-pub(super) fn unique_upvalue(ctx: &mut StepCtx, dst: u16, idx: u16) -> Flow {
-    let v = match &ctx.upvalues()[idx as usize] {
-        Upvalue::Value(v) => v.clone(),
-        Upvalue::Mutable(cell) => {
-            let mut slot = cell.lock();
-            slot.make_unique();
-            slot.clone()
-        }
-    };
-    ctx.set(dst, v)
-}
-
-/// The compiler makes the element unique first.
 pub(super) fn ref_index(ctx: &mut StepCtx, dst: u16, base: u16, key: u16) -> Result<Flow> {
     let target = place_base(ctx.get(base))?;
     let v = match (&target, ctx.get(key)) {

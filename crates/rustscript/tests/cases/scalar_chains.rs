@@ -1,4 +1,4 @@
-// Scalar chain reductions and for plan vec pushes, early exits and fallback shapes included.
+// Scalar chain reductions and vec pushes inside loops, early exits included.
 
 fn main() {
     // the specialized shapes

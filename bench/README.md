@@ -92,7 +92,12 @@ the same on every machine.
 ## Performance goal
 
 Judged on total time including startup. The target is to beat both `node`
-and `python` on every case. All cases currently do.
+and `python` on every case. The committed results are from before the
+ownership rewrite that replaced copy on write with real moves and removed the
+hot loop plans. That rewrite is slower on tight loops, `sort`, `regex` and
+file work, and loses to `node` or `python` on about ten cases until the typed
+loop tier and the per call overhead are done. A fresh run on a quiet machine
+replaces the results then.
 
 ## Scope limits
 

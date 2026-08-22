@@ -24,6 +24,7 @@ hex = "0.4"
 indexmap = "2"
 indicatif = "0.18"
 jsonwebtoken = { version = "11.0", features = ["rust_crypto"] }
+libc = "0.2"
 lopdf = "0.44"
 mimalloc = "0.1"
 num-traits = "0.2"
@@ -63,7 +64,7 @@ tokio = { version = "1", features = ["full"] }
 toml = "1.1"
 which = "8.0"
 windows-service = "0.8"
-windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_System_Threading"] }
 winreg = "0.56"
 wmi = "0.18"
 xmltree = { version = "0.12", features = ["attribute-order"] }

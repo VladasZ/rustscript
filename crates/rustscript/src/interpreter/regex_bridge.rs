@@ -156,10 +156,12 @@ pub(super) fn capture_index(handle: &Arc<Mutex<Native>>, key: &Value) -> Result<
         captures.clone()
     };
     let index = match key {
-        Value::Int(index) if *index >= 0 => usize::try_from(*index)?,
         Value::Str(name) => group_by_name(&captures, name)
             .ok_or_else(|| anyhow!("no capture group named `{name}`"))?,
-        _ => bail!("invalid capture index"),
+        other => match other.int_parts() {
+            Some((index, _)) if index >= 0 => usize::try_from(index)?,
+            _ => bail!("invalid capture index"),
+        },
     };
     let Some((start, end)) = captures.groups.get(index).copied().flatten() else {
         bail!("no match for capture group {index}");

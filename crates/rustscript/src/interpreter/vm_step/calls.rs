@@ -1,6 +1,7 @@
 //! The call, constructor and closure ops.
 
 use std::iter::repeat_n;
+use std::mem::take;
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
@@ -23,12 +24,6 @@ pub(super) fn call_fn(
     targ: u32,
 ) -> Result<Flow> {
     let callee = ctx.vm.functions[func as usize].clone();
-    // see `scalar_fn`
-    if targ == u32::MAX
-        && let Some(v) = crate::interpreter::scalar_fn::try_call(ctx, &callee, abase, argc)?
-    {
-        return Ok(ctx.set(dst, v));
-    }
     let type_env: TypeEnv = if targ == u32::MAX {
         empty_type_env()
     } else {
@@ -175,13 +170,6 @@ pub(super) fn make_range(
 }
 
 pub(super) fn for_next(ctx: &mut StepCtx, iter: u16, idx: u16, val: u16, to: u32) -> Result<Flow> {
-    // The first iteration tries the scalar plan, see `scalar_loop.rs`. A mid loop fallback leaves
-    // the index at the consumed count, so the attempt happens only once.
-    if matches!(ctx.get(idx), Value::Int(0))
-        && let Some(flow) = crate::interpreter::scalar_for::try_run(ctx, iter, idx, to)?
-    {
-        return Ok(flow);
-    }
     let i = match ctx.get(idx) {
         Value::Int(i) => *i,
         _ => unreachable!("for index is an integer"),
@@ -286,28 +274,15 @@ pub(super) fn spawn_op(ctx: &mut StepCtx, dst: u16, child: u16) -> Flow {
             // `resume_unwind` skips the hook so the header is not printed twice.
             Err(e) => {
                 if let Some(p) = e.downcast_ref::<crate::interpreter::vm_support::ScriptPanic>() {
-                    if p.file.is_empty() {
-                        eprintln!("thread 'tokio-runtime-worker' panicked:");
-                    } else {
-                        eprintln!(
-                            "thread 'tokio-runtime-worker' panicked at {}:{}:",
-                            p.file, p.line
-                        );
-                    }
-                    eprintln!("{}", p.rendered);
-                    eprintln!(
-                        "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace"
-                    );
+                    eprint!("{}", p.header("tokio-rt-worker"));
                 } else {
                     eprintln!("rust error in task: {e:#}");
                 }
                 // the bare message, so the `JoinError` formats like tokio's `task 11 panicked
                 // with message "boom"`
-                let payload = match e.downcast_ref::<crate::interpreter::vm_support::ScriptPanic>() {
-                    Some(p) => {
-                        let first = p.rendered.lines().next().unwrap_or_default();
-                        first.strip_prefix("panicked: ").unwrap_or(first).to_string()
-                    }
+                let payload = match e.downcast_ref::<crate::interpreter::vm_support::ScriptPanic>()
+                {
+                    Some(p) => p.message.clone(),
                     None => format!("{e:#}"),
                 };
                 std::panic::resume_unwind(Box::new(payload))
@@ -321,22 +296,40 @@ pub(super) fn make_closure(ctx: &mut StepCtx, child: u16) -> Arc<ClosureData> {
     let cur = ctx.cur;
     let child_chunk = cur.children[child as usize].clone();
     let caps = &cur.child_caps[child as usize];
-    // a `move` closure takes its own copy of a mutable capture
+    let takes = &cur.child_moves[child as usize];
+    // A `move` closure owns its captures. A local that is dead after this op moves in, a live
+    // one is `Copy` and copies. A plain closure shares.
     let moves = child_chunk.moves;
     let own = |value: Value| Upvalue::Mutable(Arc::new(Mutex::new(value)));
     let captured: Vec<Upvalue> = caps
         .iter()
-        .map(|c| match c {
-            CapSource::Local(reg) => Upvalue::Value(ctx.stack[ctx.base + *reg as usize].clone()),
+        .zip(takes.iter())
+        .map(|(c, &taken)| match c {
+            CapSource::Local(reg) => {
+                let slot = ctx.base + *reg as usize;
+                Upvalue::Value(if taken {
+                    take(&mut ctx.stack[slot])
+                } else if moves {
+                    ctx.stack[slot].deep_clone()
+                } else {
+                    ctx.stack[slot].clone()
+                })
+            }
             CapSource::Upvalue(idx) => ctx.upvalues()[*idx as usize].clone(),
             CapSource::MutableUpvalue(idx) => {
                 let shared = ctx.upvalues()[*idx as usize].clone();
-                if moves { own(shared.get()) } else { shared }
+                if moves {
+                    own(shared.get().deep_clone())
+                } else {
+                    shared
+                }
             }
             CapSource::MutableLocal(reg) => {
                 let cell = ctx.cell(*reg).clone();
-                if moves {
-                    let value = cell.lock().clone();
+                if taken {
+                    own(take(&mut *cell.lock()))
+                } else if moves {
+                    let value = cell.lock().deep_clone();
                     own(value)
                 } else {
                     Upvalue::Mutable(cell)

@@ -6,12 +6,12 @@ use std::collections::hash_map::Entry;
 use std::mem::take;
 use std::slice::from_ref;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use anyhow::{Result, bail};
 use parking_lot::Mutex;
 
 use super::bytecode::{Chunk, DefaultIr, Op};
+use super::numeric::IntWidth;
 use super::ops::{self, apply_bin, apply_bin_imm, apply_un, cmp_test, cmp_test_imm};
 use super::value::{ClosureData, Upvalue, Value};
 use super::vm::{TypeEnv, Vm};
@@ -43,8 +43,6 @@ pub(super) struct StepCtx<'a> {
     pub stack: &'a mut Vec<Value>,
     pub base: usize,
     pub ip: usize,
-    /// for the depth budget of the function plan
-    pub depth: usize,
 }
 
 impl StepCtx<'_> {
@@ -100,23 +98,27 @@ impl StepCtx<'_> {
 
 pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
     Ok(match op {
-        Op::LoadConst { dst, k } => ctx.set(*dst, Value::from_const(&ctx.cur.consts[*k as usize])),
-        Op::LoadInt { dst, v } => ctx.set(*dst, Value::Int(*v)),
-        Op::LoadIntW { dst, v, w } => ctx.set(*dst, Value::IntW(*v, *w)),
-        Op::LoadBool { dst, v } => ctx.set(*dst, Value::Bool(*v)),
-        Op::LoadUnit { dst } => ctx.set(*dst, Value::Unit),
-        Op::LoadGlobal { dst, idx } => ctx.set(*dst, ctx.vm.global(*idx as usize)?),
-        Op::LoadUpvalue { dst, idx } => ctx.set(*dst, ctx.upvalues()[*idx as usize].get()),
-        Op::LoadCell { dst, cell } => load_cell(ctx, *dst, *cell),
-        Op::StoreCell { cell, src } => store_cell(ctx, *cell, *src),
-        Op::DropCell { cell } => drop_cell(ctx, *cell),
-        Op::StoreUpvalue { idx, src } => store_upvalue(ctx, *idx, *src)?,
-        Op::Move { dst, src } => ctx.set(*dst, ctx.get(*src).clone()),
-        Op::Bin { dst, a, b, op } => bin_op(ctx, *dst, *a, *b, *op)?,
-        Op::BinImm { dst, a, imm, op } => bin_imm_op(ctx, *dst, *a, *imm, *op)?,
-        Op::Un { dst, a, op } => un_op(ctx, *dst, *a, *op)?,
+        Op::LoadConst { .. }
+        | Op::LoadInt { .. }
+        | Op::LoadIntW { .. }
+        | Op::LoadBool { .. }
+        | Op::LoadUnit { .. }
+        | Op::LoadGlobal { .. }
+        | Op::LoadUpvalue { .. }
+        | Op::LoadCell { .. }
+        | Op::StoreCell { .. }
+        | Op::DropCell { .. }
+        | Op::StoreUpvalue { .. }
+        | Op::Move { .. } => load_step(ctx, op)?,
+        Op::Bin { .. }
+        | Op::BinImm { .. }
+        | Op::Un { .. }
+        | Op::BinInt { .. }
+        | Op::BinIntImm { .. }
+        | Op::BinFloat { .. }
+        | Op::CmpJumpInt { .. }
+        | Op::CmpJumpIntImm { .. } => arith_step(ctx, op)?,
         Op::Jump { to } => jump(ctx, *to as usize)?,
-        Op::LoopHead { jump } => loop_head(ctx, *jump)?,
         Op::JumpIfFalse { cond, to } => branch(!ctx.get(*cond).is_truthy(), *to),
         Op::JumpIfTrue { cond, to } => branch(ctx.get(*cond).is_truthy(), *to),
         Op::CmpJump { a, b, op, to } => branch(!cmp_test(*op, ctx.get(*a), ctx.get(*b))?, *to),
@@ -137,27 +139,17 @@ pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
             default,
         } => get_or_default(ctx, *dst, *recv, *key, *default)?,
         Op::Ret { src } => Flow::Ret(ctx.take(*src)),
-        Op::MakeVec { dst, base, count } => make_vec(ctx, *dst, *base, *count),
-        Op::MakeMap { dst, set } => ctx.set(*dst, if *set { Value::set() } else { Value::map() }),
-        Op::MakeTuple { dst, base, count } => make_tuple(ctx, *dst, *base, *count),
-        Op::MakeArrayRepeat { dst, val, count } => array_repeat(ctx, *dst, *val, *count)?,
-        Op::MakeRange {
-            dst,
-            start,
-            end,
-            inclusive,
-        } => make_range(ctx, *dst, *start, *end, *inclusive)?,
-        Op::IterInit { dst, src } => ctx.set(*dst, ctx.vm.iterator_value(ctx.get(*src).clone())?),
-        Op::ForNext { iter, idx, val, to } => for_next(ctx, *iter, *idx, *val, *to)?,
-        Op::MakeStruct { dst, info, base } => make_struct(ctx, *dst, *info, *base),
-        Op::MakeEnum {
-            dst,
-            info,
-            base,
-            count,
-        } => make_enum(ctx, *dst, *info, *base, *count),
-        Op::LoadEnum { dst, info } => load_enum(ctx, *dst, *info),
-        Op::MakeClosure { dst, child } => closure_op(ctx, *dst, *child),
+        Op::MakeVec { .. }
+        | Op::MakeMap { .. }
+        | Op::MakeTuple { .. }
+        | Op::MakeArrayRepeat { .. }
+        | Op::MakeRange { .. }
+        | Op::IterInit { .. }
+        | Op::ForNext { .. }
+        | Op::MakeStruct { .. }
+        | Op::MakeEnum { .. }
+        | Op::LoadEnum { .. }
+        | Op::MakeClosure { .. } => build_step(ctx, op)?,
         Op::Index { .. }
         | Op::SetIndex { .. }
         | Op::Deref { .. }
@@ -166,15 +158,18 @@ pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
         | Op::GetField { .. }
         | Op::SetField { .. } => access_step(ctx, op)?,
         Op::DerefBinAssign { target, val, op } => deref_bin_assign(ctx, *target, *val, *op)?,
-        Op::UniqueReg { .. }
-        | Op::UniqueField { .. }
-        | Op::UniqueIndex { .. }
-        | Op::UniqueCell { .. }
-        | Op::UniqueUpvalue { .. }
-        | Op::RefIndex { .. }
+        Op::Take { dst, src } => {
+            let v = ctx.take(*src);
+            ctx.set(*dst, v)
+        }
+        Op::Copy { dst, src } => {
+            let v = ctx.get(*src).deep_clone();
+            ctx.set(*dst, v)
+        }
+        Op::Own { .. } => unreachable!("`Own` is resolved by the liveness pass"),
+        Op::RefIndex { .. }
         | Op::RefField { .. }
         | Op::DropScope { .. }
-        | Op::MoveOut { .. }
         | Op::DefaultOf { .. }
         | Op::BuildDefault { .. }
         | Op::MakeBorrow { .. } => place_step(ctx, op)?,
@@ -191,21 +186,7 @@ pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
     })
 }
 
-/// So the copy in the argument window is the last holder and the guard drops at the destination.
-fn move_out(ctx: &mut StepCtx, src: u16) -> Flow {
-    let has_drop = ctx
-        .vm
-        .impls
-        .of_value(ctx.get(src))
-        .is_some_and(|methods| methods.drop.is_some());
-    if has_drop {
-        ctx.put(src, Value::Unit);
-    }
-    Flow::Next
-}
-
-/// Reverse declaration order. A binding with another holder was moved or is shared, its real
-/// owner drops it.
+/// Reverse declaration order. A moved binding was cleared by its `Take`, so it holds `Unit` here.
 fn drop_scope(ctx: &mut StepCtx, list: u16) -> Result<()> {
     let regs = ctx.cur.drop_lists[list as usize].clone();
     for reg in regs.iter().rev() {
@@ -265,6 +246,79 @@ fn user_un(ctx: &StepCtx, op: super::bytecode::UnKind, a: &Value) -> Result<Opti
 }
 
 /// Split out of `step` to keep the dispatch match readable.
+fn build_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
+    Ok(match op {
+        Op::MakeVec { dst, base, count } => make_vec(ctx, *dst, *base, *count),
+        Op::MakeMap { dst, set } => ctx.set(*dst, if *set { Value::set() } else { Value::map() }),
+        Op::MakeTuple { dst, base, count } => make_tuple(ctx, *dst, *base, *count),
+        Op::MakeArrayRepeat { dst, val, count } => array_repeat(ctx, *dst, *val, *count)?,
+        Op::MakeRange {
+            dst,
+            start,
+            end,
+            inclusive,
+        } => make_range(ctx, *dst, *start, *end, *inclusive)?,
+        Op::IterInit { dst, src, owned } => {
+            let source = if *owned {
+                ctx.take(*src)
+            } else {
+                ctx.get(*src).clone()
+            };
+            ctx.set(*dst, ctx.vm.loop_iterator(source, *owned)?)
+        }
+        Op::ForNext { iter, idx, val, to } => for_next(ctx, *iter, *idx, *val, *to)?,
+        Op::MakeStruct { dst, info, base } => make_struct(ctx, *dst, *info, *base),
+        Op::MakeEnum {
+            dst,
+            info,
+            base,
+            count,
+        } => make_enum(ctx, *dst, *info, *base, *count),
+        Op::LoadEnum { dst, info } => load_enum(ctx, *dst, *info),
+        Op::MakeClosure { dst, child } => closure_op(ctx, *dst, *child),
+        _ => unreachable!("build_step handles only the constructor and loop ops"),
+    })
+}
+
+/// Split out of `step` to keep the dispatch match readable.
+fn load_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
+    Ok(match op {
+        Op::LoadConst { dst, k } => ctx.set(*dst, Value::from_const(&ctx.cur.consts[*k as usize])),
+        Op::LoadInt { dst, v } => ctx.set(*dst, Value::Int(*v)),
+        Op::LoadIntW { dst, v, w } => ctx.set(*dst, Value::IntW(*v, *w)),
+        Op::LoadBool { dst, v } => ctx.set(*dst, Value::Bool(*v)),
+        Op::LoadUnit { dst } => ctx.set(*dst, Value::Unit),
+        Op::LoadGlobal { dst, idx } => ctx.set(*dst, ctx.vm.global(*idx as usize)?),
+        Op::LoadUpvalue { dst, idx } => ctx.set(*dst, ctx.upvalues()[*idx as usize].get()),
+        Op::LoadCell { dst, cell } => load_cell(ctx, *dst, *cell),
+        Op::StoreCell { cell, src } => store_cell(ctx, *cell, *src),
+        Op::DropCell { cell } => drop_cell(ctx, *cell),
+        Op::StoreUpvalue { idx, src } => store_upvalue(ctx, *idx, *src)?,
+        Op::Move { dst, src } => ctx.set(*dst, ctx.get(*src).clone()),
+        _ => unreachable!("load_step handles only the load and store ops"),
+    })
+}
+
+/// Split out of `step` to keep the dispatch match readable.
+fn arith_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
+    Ok(match op {
+        Op::Bin { dst, a, b, op } => bin_op(ctx, *dst, *a, *b, *op)?,
+        Op::BinImm { dst, a, imm, op } => bin_imm_op(ctx, *dst, *a, *imm, *op)?,
+        Op::Un { dst, a, op } => un_op(ctx, *dst, *a, *op)?,
+        Op::BinInt { dst, a, b, op, w } => bin_int(ctx, *dst, *a, *b, *op, *w)?,
+        Op::BinIntImm { dst, a, imm, op, w } => bin_int_imm(ctx, *dst, *a, *imm, *op, *w)?,
+        Op::BinFloat { dst, a, b, op, f32 } => bin_float(ctx, *dst, *a, *b, *op, *f32)?,
+        Op::CmpJumpInt { a, b, op, w, to } => {
+            branch(!cmp_int(ctx.get(*a), ctx.get(*b), *op, *w)?, *to)
+        }
+        Op::CmpJumpIntImm { a, imm, op, w, to } => {
+            branch(!cmp_int(ctx.get(*a), &Value::Int(*imm), *op, *w)?, *to)
+        }
+        _ => unreachable!("arith_step handles only the arithmetic ops"),
+    })
+}
+
+/// Split out of `step` to keep the dispatch match readable.
 fn call_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
     match op {
         Op::CallFn {
@@ -307,18 +361,12 @@ fn access_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
 /// Split out of `step` to keep the dispatch match readable.
 fn place_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
     Ok(match op {
-        Op::UniqueReg { reg } => unique_reg(ctx, *reg),
-        Op::UniqueField { dst, base, member } => unique_field(ctx, *dst, *base, *member)?,
-        Op::UniqueIndex { dst, base, key } => unique_index(ctx, *dst, *base, *key)?,
-        Op::UniqueCell { dst, cell } => unique_cell(ctx, *dst, *cell),
-        Op::UniqueUpvalue { dst, idx } => unique_upvalue(ctx, *dst, *idx),
         Op::RefIndex { dst, base, key } => ref_index(ctx, *dst, *base, *key)?,
         Op::RefField { dst, base, member } => ref_field(ctx, *dst, *base, *member)?,
         Op::DropScope { list } => {
             drop_scope(ctx, *list)?;
             Flow::Next
         }
-        Op::MoveOut { src } => move_out(ctx, *src),
         Op::DefaultOf { dst, src } => default_of(ctx, *dst, *src),
         Op::BuildDefault { dst, ir } => {
             let v = build_default(&ctx.cur.defaults[*ir as usize]);
@@ -354,6 +402,57 @@ fn bin_imm_op(
         Ok(ctx.set(dst, v))
     } else {
         Ok(ctx.set(dst, apply_bin_imm(op, ctx.get(a), imm)?))
+    }
+}
+
+/// The pass said both sides are `w`. When the values agree the width runs natively, otherwise
+/// the generic op decides, so a wrong guess costs time and never correctness.
+fn bin_int(
+    ctx: &mut StepCtx,
+    dst: u16,
+    a: u16,
+    b: u16,
+    op: super::bytecode::BinKind,
+    w: IntWidth,
+) -> Result<Flow> {
+    match ops::typed_int(op, w, ctx.get(a), ctx.get(b)) {
+        Some(v) => Ok(ctx.set(dst, v?)),
+        None => bin_op(ctx, dst, a, b, op),
+    }
+}
+
+fn bin_int_imm(
+    ctx: &mut StepCtx,
+    dst: u16,
+    a: u16,
+    imm: i64,
+    op: super::bytecode::BinKind,
+    w: IntWidth,
+) -> Result<Flow> {
+    match ops::typed_int(op, w, ctx.get(a), &Value::Int(imm)) {
+        Some(v) => Ok(ctx.set(dst, v?)),
+        None => bin_imm_op(ctx, dst, a, imm, op),
+    }
+}
+
+fn bin_float(
+    ctx: &mut StepCtx,
+    dst: u16,
+    a: u16,
+    b: u16,
+    op: super::bytecode::BinKind,
+    f32: bool,
+) -> Result<Flow> {
+    match ops::typed_float(op, f32, ctx.get(a), ctx.get(b)) {
+        Some(v) => Ok(ctx.set(dst, v)),
+        None => bin_op(ctx, dst, a, b, op),
+    }
+}
+
+fn cmp_int(l: &Value, r: &Value, op: super::bytecode::BinKind, w: IntWidth) -> Result<bool> {
+    match ops::typed_cmp(op, w, l, r) {
+        Some(hit) => Ok(hit),
+        None => cmp_test(op, l, r),
     }
 }
 
@@ -419,50 +518,12 @@ fn branch(jump: bool, to: u32) -> Flow {
     }
 }
 
-/// A backward jump runs a pending Ctrl-C handler and lets the while plan take over, see
-/// `scalar_loop.rs`. A rejected loop pays 1 atomic load.
+/// A backward jump runs a pending Ctrl-C handler.
 fn jump(ctx: &mut StepCtx, to: usize) -> Result<Flow> {
     if to <= ctx.ip {
         ctx.vm.run_pending_ctrlc()?;
-        if ctx
-            .cur
-            .while_rejected
-            .get(ctx.ip)
-            .is_some_and(|rejected| rejected.load(Ordering::Relaxed) == 0)
-            && let Some(flow) = loop_plan_jump(ctx, to)?
-        {
-            return Ok(flow);
-        }
     }
     Ok(Flow::Jump(to))
-}
-
-/// Out of the hot path. The back jump of a `for` body is rejected on first sight, the `for` plan
-/// owns that loop.
-#[cold]
-fn loop_plan_jump(ctx: &mut StepCtx, to: usize) -> Result<Option<Flow>> {
-    if matches!(ctx.cur.code.get(to), Some(Op::ForNext { .. })) {
-        if let Some(rejected) = ctx.cur.while_rejected.get(ctx.ip) {
-            rejected.store(1, Ordering::Relaxed);
-        }
-        return Ok(None);
-    }
-    super::scalar_while::try_run_while(ctx, to)
-}
-
-/// Hand the loop to the while plan before the first iteration, or fall through.
-fn loop_head(ctx: &mut StepCtx, jump: u32) -> Result<Flow> {
-    let jump_ip = jump as usize;
-    if ctx
-        .cur
-        .while_rejected
-        .get(jump_ip)
-        .is_some_and(|rejected| rejected.load(Ordering::Relaxed) == 0)
-        && let Some(flow) = super::scalar_while::try_run_entry(ctx, jump_ip)?
-    {
-        return Ok(flow);
-    }
-    Ok(Flow::Next)
 }
 
 fn load_cell(ctx: &mut StepCtx, dst: u16, cell: u16) -> Flow {
@@ -503,6 +564,5 @@ use control::{
 };
 use places::{
     deref_bin_assign, deref_op, get_field_op, place_base, ref_field, ref_index, set_deref,
-    set_deref_param, set_field_op, set_index, unique_cell, unique_field, unique_index, unique_reg,
-    unique_upvalue,
+    set_deref_param, set_field_op, set_index,
 };

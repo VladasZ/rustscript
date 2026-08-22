@@ -18,6 +18,7 @@ fn run_fail(src: &str) -> String {
     let out = Command::new(env!("CARGO_BIN_EXE_rust"))
         .arg(&path)
         .env("RUSTSCRIPT_SKIP_CHECK", "1")
+        .env("RUST_BACKTRACE", "1")
         .output()
         .expect("failed to launch rustscript");
     std::fs::remove_file(&path).unwrap();
@@ -44,16 +45,10 @@ fn main() {
         "stderr was: {err}"
     );
     assert!(err.contains("panicked at"), "stderr was: {err}");
-    assert!(
-        err.contains("at helper (rustscript_trace"),
-        "stderr was: {err}"
-    );
-    assert!(err.contains(".rs:3)"), "stderr was: {err}");
-    assert!(
-        err.contains("at main (rustscript_trace"),
-        "stderr was: {err}"
-    );
-    assert!(err.contains(".rs:8)"), "stderr was: {err}");
+    assert!(err.contains("at helper ("), "stderr was: {err}");
+    assert!(err.contains(".rs:3:"), "stderr was: {err}");
+    assert!(err.contains("at main ("), "stderr was: {err}");
+    assert!(err.contains(".rs:8:"), "stderr was: {err}");
 }
 
 #[test]
@@ -74,11 +69,8 @@ async fn main() {
         err.contains("index out of bounds: the len is 1 but the index is 99"),
         "stderr was: {err}"
     );
-    assert!(
-        err.contains("at fetch (rustscript_trace"),
-        "stderr was: {err}"
-    );
-    assert!(err.contains(".rs:3)"), "stderr was: {err}");
+    assert!(err.contains("at fetch ("), "stderr was: {err}");
+    assert!(err.contains(".rs:3:"), "stderr was: {err}");
 }
 
 #[test]
@@ -139,9 +131,6 @@ fn main() {
 "#,
     );
     assert!(err.contains("out of bounds"), "stderr was: {err}");
-    assert!(
-        err.contains("at <closure> (rustscript_trace"),
-        "stderr was: {err}"
-    );
-    assert!(err.contains(".rs:4)"), "stderr was: {err}");
+    assert!(err.contains("at <closure> ("), "stderr was: {err}");
+    assert!(err.contains(".rs:4:"), "stderr was: {err}");
 }

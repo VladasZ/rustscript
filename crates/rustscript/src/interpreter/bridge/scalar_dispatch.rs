@@ -10,19 +10,31 @@ use crate::interpreter::methods::{self, make_ordering};
 use crate::interpreter::shared::{self, CharOut, F32Out, Num, NumOut};
 use crate::interpreter::value::Value;
 
-pub(super) fn int_method(recv: &Value, name: &MethodName, args: &[Value]) -> Option<Result<Value>> {
+pub(in crate::interpreter) fn int_method(
+    recv: &Value,
+    name: &MethodName,
+    args: &[Value],
+) -> Option<Result<Value>> {
     let m = name.id;
     // An operand with no i128 image is a u128 past `i128::MAX`. Checking through the `int_parts`
     // failure keeps this off the hot path.
     let Some((value, mut width)) = recv.int_parts() else {
         return big_int_route(recv, name, args);
     };
-    let mut decoded = Vec::with_capacity(args.len());
+    // no method takes more than 3 integers, so the decoded arguments live on the stack
+    let mut buffer = [0i128; 4];
+    let mut spill = Vec::new();
+    let mut count = 0usize;
     for arg in args {
         let Some((arg_value, arg_width)) = arg.int_parts() else {
             return big_int_route(recv, name, args);
         };
-        decoded.push(arg_value);
+        if count < buffer.len() {
+            buffer[count] = arg_value;
+        } else {
+            spill.push(arg_value);
+        }
+        count += 1;
         // Receiver and argument have 1 type, so either width works for both. A shift amount's u32
         // must not redefine the receiver.
         if !crate::interpreter::int_methods::takes_amount_arg(m)
@@ -31,13 +43,19 @@ pub(super) fn int_method(recv: &Value, name: &MethodName, args: &[Value]) -> Opt
             width = unified;
         }
     }
+    let decoded: &[i128] = if count <= buffer.len() {
+        &buffer[..count]
+    } else {
+        spill.splice(0..0, buffer);
+        &spill
+    };
     // `value` is already the raw bit pattern the native cores take
     if width.is_big() {
-        let out = crate::interpreter::int_methods::big_int_method(m, width, value, &decoded)?;
+        let out = crate::interpreter::int_methods::big_int_method(m, width, value, decoded)?;
         return Some(out.map(|o| int_out(o, width)));
     }
     Some(
-        match crate::interpreter::int_methods::int_method(m, width, value, &decoded)? {
+        match crate::interpreter::int_methods::int_method(m, width, value, decoded)? {
             Ok(out) => Ok(int_out(out, width)),
             Err(error) => Err(error),
         },

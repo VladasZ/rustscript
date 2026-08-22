@@ -134,7 +134,7 @@ pub(super) fn macro_call(ctx: &mut StepCtx, kind: MacroKind, dst: u16, spec: u16
             eprint!("{text}");
             ctx.set(dst, Value::Unit)
         }
-        MacroKind::Panic => bail!("panicked: {text}"),
+        MacroKind::Panic => bail!("{text}"),
         MacroKind::Anyhow => ctx.set(dst, Value::err(Value::str(text))),
         MacroKind::Bail => Flow::Ret(Value::err(Value::str(text))),
     })

@@ -30,7 +30,7 @@ pub(super) fn cell_method(
         return cell_method(inner_kind, &inner_slot, name, args);
     }
     Ok(Some(match name {
-        BuiltinId::Clone => Value::Cell(kind, slot.clone()),
+        BuiltinId::Clone => Value::Cell(kind, slot.clone()).deep_clone(),
         BuiltinId::Borrow => {
             require(kind, CellKind::RefCell, name)?;
             slot.lock().clone()

@@ -1,20 +1,23 @@
 //! Control flow, `if`, loops, `match`, `return`, `break` and `continue`.
 
+use std::sync::Arc;
+
 use anyhow::{Result, anyhow, bail};
 use syn::{Expr, Pat};
 
 use crate::interpreter::bytecode::{Op, PathRef, Reg};
 
+use super::support::{iterable_is_owned, pattern_borrows, pattern_owns};
 use super::walks::flatten_and;
 
-use super::{Compiler, LoopCtx};
+use super::{Compiler, LoopCtx, idx16};
 
 impl Compiler<'_> {
     /// The value moves to a fresh register first, so the retag doesn't touch a local's own slot
     /// and the value stays shared past the drops.
     pub(super) fn compile_return(&mut self, r: &syn::ExprReturn) -> Result<()> {
         let mut src = if let Some(e) = &r.expr {
-            self.compile_expr(e)?
+            self.compile_owned_expr(e)?
         } else {
             let u = self.alloc();
             self.emit(Op::LoadUnit { dst: u });
@@ -30,9 +33,6 @@ impl Compiler<'_> {
             src = out;
         }
         if self.ctx.has_drop {
-            let out = self.alloc();
-            self.emit(Op::Move { dst: out, src });
-            src = out;
             let depth = self.cur().scope_order.len();
             self.emit_scope_drops(depth);
         }
@@ -48,9 +48,13 @@ impl Compiler<'_> {
             let mut else_jumps = Vec::new();
             for term in &terms {
                 if let Expr::Let(let_expr) = term {
-                    let scrut = self.compile_scrutinee(&let_expr.expr)?;
+                    let owned = pattern_owns(&let_expr.pat);
+                    let scrut = self.compile_scrutinee(&let_expr.expr, owned)?;
                     let matched = self.alloc();
                     let pat = self.pattern_info(&let_expr.pat)?;
+                    if !owned {
+                        self.exempt_pattern_binds(pat);
+                    }
                     self.emit(Op::TestBind {
                         val: scrut,
                         pat,
@@ -100,21 +104,17 @@ impl Compiler<'_> {
     }
 
     pub(super) fn compile_while(&mut self, dst: Reg, w: &syn::ExprWhile) -> Result<()> {
-        // only the plain form gets a `LoopHead`, the while plan never runs a `while let` head
-        let entry = if matches!(&*w.cond, Expr::Let(_)) {
-            None
-        } else {
-            let at = self.here();
-            self.emit(Op::LoopHead { jump: 0 });
-            Some(at)
-        };
         let head = self.here();
         if let Expr::Let(let_expr) = &*w.cond {
-            let scrut = self.compile_scrutinee(&let_expr.expr)?;
+            let owned = pattern_owns(&let_expr.pat);
+            let scrut = self.compile_scrutinee(&let_expr.expr, owned)?;
             let while_let_depth = self.cur().scope_order.len();
             self.push_scope();
             let matched = self.alloc();
             let pat = self.pattern_info(&let_expr.pat)?;
+            if !owned {
+                self.exempt_pattern_binds(pat);
+            }
             self.emit(Op::TestBind {
                 val: scrut,
                 pat,
@@ -156,13 +156,9 @@ impl Compiler<'_> {
         });
         let body = self.alloc();
         self.compile_block(&w.body, body)?;
-        let jump_ip = self.mark()?;
         self.emit(Op::Jump {
             to: u32::try_from(head)?,
         });
-        if let Some(at) = entry {
-            self.patch_jump(at, jump_ip);
-        }
         let end = self.mark()?;
         let lc = self.loops.pop().unwrap();
         for b in lc.breaks {
@@ -174,8 +170,6 @@ impl Compiler<'_> {
 
     pub(super) fn compile_loop(&mut self, dst: Reg, l: &syn::ExprLoop) -> Result<()> {
         self.emit(Op::LoadUnit { dst });
-        let entry = self.here();
-        self.emit(Op::LoopHead { jump: 0 });
         let head = self.here();
         let scope_depth = self.cur().scope_order.len();
         self.loops.push(LoopCtx {
@@ -186,11 +180,9 @@ impl Compiler<'_> {
         });
         let body = self.alloc();
         self.compile_block(&l.body, body)?;
-        let jump_ip = self.mark()?;
         self.emit(Op::Jump {
             to: u32::try_from(head)?,
         });
-        self.patch_jump(entry, jump_ip);
         let end = self.mark()?;
         let lc = self.loops.pop().unwrap();
         for b in lc.breaks {
@@ -215,10 +207,22 @@ impl Compiler<'_> {
                 });
                 out
             }
-            _ => self.compile_expr(&f.expr)?,
+            e if iterable_is_owned(e) => self.compile_owned_expr(e)?,
+            e => self.compile_expr(e)?,
         };
+        let owned = iterable_is_owned(&f.expr);
         let iter = self.alloc();
-        self.emit(Op::IterInit { dst: iter, src });
+        self.emit(Op::IterInit {
+            dst: iter,
+            src,
+            owned,
+        });
+        // an owning iterator drops what a `break` leaves behind, at loop end like real Rust, and
+        // at scope end for a `return` out of the loop
+        let drops_iter = owned && self.ctx.has_drop;
+        if drops_iter {
+            self.cur().scope_order.last_mut().unwrap().push(iter);
+        }
         let idx = self.alloc();
         self.emit(Op::LoadInt { dst: idx, v: 0 });
         let val = self.alloc();
@@ -232,7 +236,16 @@ impl Compiler<'_> {
         });
         let scope_depth = self.cur().scope_order.len();
         self.push_scope();
+        let before = self.cur().scope_order.last().map_or(0, Vec::len);
         self.bind_pattern_irrefutable(&f.pat, val)?;
+        if !owned {
+            let bound: Vec<Reg> = self
+                .cur()
+                .scope_order
+                .last()
+                .map_or(Vec::new(), |regs| regs[before..].to_vec());
+            self.cur().drop_exempt.extend(bound);
+        }
         self.loops.push(LoopCtx {
             breaks: vec![next],
             continue_to: head,
@@ -250,6 +263,12 @@ impl Compiler<'_> {
         let lc = self.loops.pop().unwrap();
         for b in lc.breaks {
             self.patch_jump(b, end);
+        }
+        if drops_iter {
+            let f = self.cur();
+            f.drop_lists.push(Arc::from(vec![iter]));
+            let list = idx16(f.drop_lists.len() - 1);
+            self.emit(Op::DropScope { list });
         }
         self.emit(Op::LoadUnit { dst });
         Ok(())
@@ -297,7 +316,18 @@ impl Compiler<'_> {
     }
 
     pub(super) fn compile_match(&mut self, dst: Reg, m: &syn::ExprMatch) -> Result<()> {
-        let scrut = self.compile_scrutinee(&m.expr)?;
+        fn arm_pattern(pat: &Pat) -> &Pat {
+            match pat {
+                Pat::Guard(g) => &g.pat,
+                p => p,
+            }
+        }
+        let owned = m.arms.iter().any(|arm| pattern_owns(arm_pattern(&arm.pat)))
+            && !m
+                .arms
+                .iter()
+                .any(|arm| pattern_borrows(arm_pattern(&arm.pat)));
+        let scrut = self.compile_scrutinee(&m.expr, owned)?;
         let mut end_jumps = Vec::new();
         for arm in &m.arms {
             self.push_scope();
@@ -308,6 +338,9 @@ impl Compiler<'_> {
                 p => (p, None),
             };
             let pat = self.pattern_info(arm_pat)?;
+            if !owned {
+                self.exempt_pattern_binds(pat);
+            }
             self.emit(Op::TestBind {
                 val: scrut,
                 pat,
@@ -325,7 +358,7 @@ impl Compiler<'_> {
                 self.emit(Op::JumpIfFalse { cond: g, to: 0 });
                 guard_skip = Some(gs);
             }
-            self.compile_into(dst, &arm.body)?;
+            self.compile_owned_into(dst, &arm.body)?;
             self.emit_scope_drops(1);
             let je = self.here();
             self.emit(Op::Jump { to: 0 });

@@ -1,24 +1,63 @@
 //! Method calls, the `collect`, `sum` and `unwrap_or_default` type hints they read, and fold closures.
 
 use anyhow::{Result, bail};
-use syn::{Expr, Pat};
+use syn::Expr;
 
-use crate::interpreter::bytecode::{
-    BinKind, BuiltinId, DISCARD, DefaultIr, Op, PathRef, Reg, ScalarTy,
-};
-use crate::interpreter::numeric::IntWidth;
+use crate::interpreter::bytecode::{BinKind, BuiltinId, DISCARD, Op, PathRef, Reg, ScalarTy};
 
+use super::infer::Ty;
 use super::place;
-use super::walks::{tail_exprs, takes_numeric_hint, unparen};
-use super::written::{TyEnv, element_of, option_payload, turbofish_scalar, written_ty};
-use super::{CollectTarget, Compiler, NumericTy, idx16, numeric_target};
+use super::walks::unparen;
+use super::{CollectTarget, Compiler, NameLoc, idx16};
 
 impl Compiler<'_> {
+    /// Whether a by value `self` call owns its receiver. A local that is not a borrow, a place
+    /// rooted in one, or a temporary. A borrow parameter forwards a handle it does not own.
+    fn consumes_receiver(&mut self, expr: &Expr) -> bool {
+        match unparen(expr) {
+            Expr::Path(p) if p.path.segments.len() == 1 && p.qself.is_none() => {
+                let name = p.path.segments[0].ident.to_string();
+                if self.cur().aliases.contains_key(&name) {
+                    return false;
+                }
+                match self.resolve(&name) {
+                    NameLoc::Local(reg) => !self.cur().shares_only(reg),
+                    NameLoc::Cell(_) => true,
+                    NameLoc::Upvalue(_) | NameLoc::None => false,
+                }
+            }
+            Expr::Field(_) | Expr::Index(_) => self.place_root(expr).is_some(),
+            Expr::Call(_) | Expr::Macro(_) | Expr::Struct(_) | Expr::Array(_) | Expr::Tuple(_) => {
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// `v.into_iter()` consumes `v`, so the iterator takes the items like a `for` over `v`.
+    fn compile_into_iter(&mut self, dst: Reg, m: &syn::ExprMethodCall) -> Result<bool> {
+        if m.method != "into_iter"
+            || !m.args.is_empty()
+            || m.turbofish.is_some()
+            || !self.consumes_receiver(&m.receiver)
+        {
+            return Ok(false);
+        }
+        let src = self.compile_owned_expr(&m.receiver)?;
+        self.emit(Op::IterInit {
+            dst,
+            src,
+            owned: true,
+        });
+        Ok(true)
+    }
+
     pub(super) fn compile_method(&mut self, dst: Reg, m: &syn::ExprMethodCall) -> Result<()> {
-        self.seed_bare_receiver_width(m);
-        self.seed_bare_fallback_width(m);
         if m.method == "copy_from_slice" {
             return self.compile_copy_from_slice(dst, m);
+        }
+        if self.compile_into_iter(dst, m)? {
+            return Ok(());
         }
         // `x.get(k).copied().unwrap_or(d)` builds and tears down an Option per call, that
         // dominates counting loops
@@ -43,24 +82,13 @@ impl Compiler<'_> {
             });
             return Ok(());
         }
-        // an `unwrap_or_default` unwrapped again must have produced an `Option`, so its default
-        // is `None`
-        let outer_option_hint = self.option_result.take();
-        if m.method == "unwrap_or_default"
-            && let Expr::MethodCall(inner) = &*m.receiver
-            && inner.method == "unwrap_or_default"
-        {
-            self.option_result = Some(std::ptr::from_ref(inner));
-        }
-        // `v.into()` under `let x: T` is `T::from(v)`, without one it is identity
+        // `v.into()` into a script type is `T::from(v)`, anything else is identity
         if m.method == "into"
             && m.args.is_empty()
-            && let Some((ptr, canon)) = &self.into_let
-            && std::ptr::eq(*ptr, m)
+            && let Ty::Struct(canon) | Ty::Enum(canon) = self.types.of_node(m)
         {
-            let canon = canon.clone();
-            self.into_let = None;
-            let path = PathRef::user(vec![canon.to_string(), "from".to_string()], None);
+            let source = self.types.of(&m.receiver);
+            let path = PathRef::user(self.impl_path_for_from(&canon, &source), None);
             let p = self.add_path(path);
             let base = self.compile_args(std::iter::once(&*m.receiver))?;
             self.emit(Op::CallPath {
@@ -72,19 +100,12 @@ impl Compiler<'_> {
             return Ok(());
         }
         let method_text = m.method.to_string();
-        // `Sum<T> for T` types the body of a `map` closure as `T`, so its literals adopt the
-        // width of the reduction
-        if matches!(method_text.as_str(), "sum" | "product")
-            && let Some(target) = self.reduce_target(m)
-        {
-            self.seed_reduce_closure(&m.receiver, target);
-        }
         let mutating = (BuiltinId::resolve(&method_text).mutates()
             || self.ctx.mut_methods.contains(&method_text))
             // `rotate_left` mutates a slice but returns a value on an integer, writing back over
             // an integer receiver would undo the assignment
             && !(matches!(method_text.as_str(), "rotate_left" | "rotate_right")
-                && matches!(self.stated_ty(&m.receiver), Some(ScalarTy::Int(_))));
+                && matches!(self.types.of(&m.receiver), Ty::Int(_)));
         let (recv, receiver_place) = if mutating {
             let p = self.compile_mut_receiver(&m.receiver)?;
             (p.reg, Some(p))
@@ -92,20 +113,11 @@ impl Compiler<'_> {
             (self.compile_expr(&m.receiver)?, None)
         };
         let place = mutating && place::is_place_expr(&m.receiver);
-        self.option_result = outer_option_hint;
-        // The accumulator of a `fold` closure is the init's type and the item is the element, so
-        // a default built inside the body knows its type.
-        let folded = self.bind_fold_params(m);
         let base = self.compile_args(m.args.iter())?;
-        for (name, previous) in folded {
-            match previous {
-                Some(ty) => self.typed_local_types.insert(name, ty),
-                None => self.typed_local_types.remove(&name),
-            };
-        }
         let (method, scalar) = self.method_name_and_scalar(m);
         let default = if method == "unwrap_or_default" {
-            self.default_for_unwrap(m)
+            let ty = self.types.of_node(m);
+            self.default_ir_of(&ty)
         } else {
             None
         };
@@ -183,233 +195,27 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    /// `collect` into a String renames to `collect_string` from a turbofish, a pending `let s: String`,
-    /// or a `-> String` signature. See `Compiler::string_let` and `Compiler::string_tails`.
+    /// `collect` into a String renames to `collect_string`, a map to `collect_map`, a set to
+    /// `collect_set`, from the turbofish or the inferred result. The scalar a method needs at
+    /// runtime rides on the name, see `method_scalar`.
     pub(super) fn method_name_and_scalar(
         &mut self,
         m: &syn::ExprMethodCall,
     ) -> (String, Option<ScalarTy>) {
         let mut method = m.method.to_string();
         if method == "collect" {
-            let from_turbofish = m.turbofish.as_ref().and_then(turbofish_collect_target);
-            let from_let = match self.collect_let {
-                Some((ptr, target)) if std::ptr::eq(ptr, m) => Some(target),
-                _ => None,
-            };
-            let from_tail = self.collect_tails.get(&std::ptr::from_ref(m)).copied();
-            if let Some(target) = from_turbofish.or(from_let).or(from_tail) {
-                // Cleared only when this call consumed the hint. A nested turbofish collect must not
-                // clear it, otherwise the outer collect falls back to a vec of pairs.
-                if from_let.is_some() {
-                    self.collect_let = None;
-                }
+            let target = m
+                .turbofish
+                .as_ref()
+                .and_then(turbofish_collect_target)
+                .or_else(|| self.collect_target_of(m));
+            if let Some(target) = target {
                 method = target.method_name().to_string();
             }
         }
-        // the turbofish rides on the name for the methods that need it
-        let mut scalar = turbofish_scalar(m.turbofish.as_ref());
-        // `unwrap_or_default` takes its type from the receiver payload, as `None::<u64>` or
-        // `then_some(1u8)` state it
-        if scalar.is_none() && m.method == "unwrap_or_default" {
-            let env = TyEnv::new(&self.typed_locals, self.ctx.fn_returns);
-            scalar = option_payload(&m.receiver, &env);
-        }
-        // an empty vec has no shape to dispatch a script method on, so the written type rides along
-        if scalar.is_none() && self.ctx.method_atoms.contains_key(&method) {
-            scalar = self.stated_ty(&m.receiver);
-        }
-        // `concat` of nothing can't tell nested vecs from strings
-        if scalar.is_none() && method == "concat" {
-            let env = TyEnv::new(&self.typed_locals, self.ctx.fn_returns);
-            scalar = element_of(&m.receiver, &env);
-        }
-        // `let x: T = ...sum()` names the width of the outermost reduction
-        if scalar.is_none()
-            && (method == "sum" || method == "product")
-            && let Some((ptr, ty)) = &self.reduce_let
-            && std::ptr::eq(*ptr, m)
-        {
-            scalar = Some(ty.clone());
-            self.reduce_let = None;
-        }
-        // `let x: T = ...unwrap_or_default()` names the outermost payload
-        if scalar.is_none()
-            && let Some((ptr, ty)) = &self.default_let
-            && std::ptr::eq(*ptr, m)
-        {
-            scalar = Some(ty.clone());
-            self.default_let = None;
-        }
-        // a `-> T` signature names a bare reduction or default handed back
-        if scalar.is_none()
-            && matches!(method.as_str(), "sum" | "product" | "unwrap_or_default")
-            && let Some(ty) = self.return_tails.get(&std::ptr::from_ref(m))
-        {
-            scalar = ScalarTy::lower(ty);
-        }
-        // failing all that, a result unwrapped again is an Option
-        if matches!(self.option_result, Some(ptr) if std::ptr::eq(ptr, m)) {
-            self.option_result = None;
-            scalar = scalar.or(Some(ScalarTy::Opt(Box::new(ScalarTy::Other))));
-        }
+        let scalar =
+            turbofish_scalar(m.turbofish.as_ref()).or_else(|| self.method_scalar(m, &method));
         (method, scalar)
-    }
-
-    /// Read without consuming the hint.
-    pub(super) fn reduce_target(&self, m: &syn::ExprMethodCall) -> Option<NumericTy> {
-        let scalar = turbofish_scalar(m.turbofish.as_ref())
-            .or_else(|| match &self.reduce_let {
-                Some((ptr, ty)) if std::ptr::eq(*ptr, m) => Some(ty.clone()),
-                _ => None,
-            })
-            .or_else(|| {
-                self.return_tails
-                    .get(&std::ptr::from_ref(m))
-                    .and_then(ScalarTy::lower)
-            })?;
-        numeric_target(&scalar)
-    }
-
-    /// A receiver of only unsuffixed literals is `i32`. Its width picks the method and the `From`
-    /// impl, so it is settled first.
-    pub(super) fn seed_bare_receiver_width(&mut self, m: &syn::ExprMethodCall) {
-        if self
-            .numeric_hints
-            .contains_key(&std::ptr::from_ref(&*m.receiver))
-            || !super::walks::bare_int_rooted(&m.receiver)
-        {
-            return;
-        }
-        self.numeric_hints.insert(
-            std::ptr::from_ref(&*m.receiver),
-            NumericTy::Int(IntWidth::I32),
-        );
-    }
-
-    /// `unwrap_or(v)` gives the fallback the payload type. Without one it is `i32`.
-    pub(super) fn seed_bare_fallback_width(&mut self, m: &syn::ExprMethodCall) {
-        if m.method != "unwrap_or" {
-            return;
-        }
-        let Some(arg) = m.args.first() else {
-            return;
-        };
-        if self.numeric_hints.contains_key(&std::ptr::from_ref(arg))
-            || !super::walks::bare_int_rooted(arg)
-        {
-            return;
-        }
-        let target = self
-            .stated_ty(&m.receiver)
-            .and_then(|ty| ty.payload().cloned())
-            .as_ref()
-            .and_then(numeric_target)
-            .unwrap_or(NumericTy::Int(IntWidth::I32));
-        self.numeric_hints.insert(std::ptr::from_ref(arg), target);
-    }
-
-    /// Returns what each name held before so the caller can put it back.
-    pub(super) fn bind_fold_params(
-        &mut self,
-        m: &syn::ExprMethodCall,
-    ) -> Vec<(String, Option<syn::Type>)> {
-        if m.method != "fold" || m.args.len() != 2 {
-            return Vec::new();
-        }
-        let Some(Expr::Closure(closure)) = m.args.get(1) else {
-            return Vec::new();
-        };
-        let names: Vec<String> = closure
-            .inputs
-            .iter()
-            .map(|input| match input {
-                Pat::Ident(id) => Some(id.ident.to_string()),
-                _ => None,
-            })
-            .collect::<Option<Vec<_>>>()
-            .unwrap_or_default();
-        if names.len() != 2 {
-            return Vec::new();
-        }
-        // the body produces the next accumulator, so it has the init's width
-        if let Some(target) = m
-            .args
-            .first()
-            .and_then(|init| self.stated_ty(init))
-            .as_ref()
-            .and_then(numeric_target)
-        {
-            let mut tails = Vec::new();
-            tail_exprs(&closure.body, &mut tails);
-            for tail in tails.into_iter().filter(|tail| takes_numeric_hint(tail)) {
-                self.numeric_hints.insert(std::ptr::from_ref(tail), target);
-            }
-        }
-        let acc = m.args.first().and_then(|init| self.written_type(init));
-        let item = self
-            .written_type(&m.receiver)
-            .and_then(|recv| super::written_type::sequence_element(&recv))
-            .or_else(|| acc.clone());
-        let mut saved = Vec::new();
-        for (name, ty) in names.into_iter().zip([acc, item]) {
-            let Some(ty) = ty else {
-                continue;
-            };
-            let previous = self.typed_local_types.insert(name.clone(), ty);
-            saved.push((name, previous));
-        }
-        saved
-    }
-
-    pub(super) fn seed_reduce_closure(&mut self, expr: &Expr, target: NumericTy) {
-        let mut current = unparen(expr);
-        loop {
-            let Expr::MethodCall(mc) = current else {
-                return;
-            };
-            match mc.method.to_string().as_str() {
-                "map" => {
-                    if let Some(Expr::Closure(closure)) = mc.args.first() {
-                        let mut tails = Vec::new();
-                        tail_exprs(&closure.body, &mut tails);
-                        for tail in tails.into_iter().filter(|tail| takes_numeric_hint(tail)) {
-                            self.numeric_hints.insert(std::ptr::from_ref(tail), target);
-                        }
-                    }
-                    return;
-                }
-                "iter" | "into_iter" | "copied" | "cloned" | "rev" | "filter" | "take" | "skip"
-                | "take_while" | "skip_while" | "peekable" | "by_ref" => {
-                    current = unparen(&mc.receiver);
-                }
-                _ => return,
-            }
-        }
-    }
-
-    /// From the `let` annotation or the receiver chain.
-    pub(super) fn default_for_unwrap(&mut self, m: &syn::ExprMethodCall) -> Option<DefaultIr> {
-        if let Some((ptr, ty)) = &self.default_let_ty
-            && std::ptr::eq(*ptr, m)
-        {
-            let ty = ty.clone();
-            self.default_let_ty = None;
-            return self.default_ir(&ty);
-        }
-        if let Some(ty) = self.return_tails.get(&std::ptr::from_ref(m))
-            && let Some(ir) = self.default_ir(&ty.clone())
-        {
-            return Some(ir);
-        }
-        let recv_ty = self.written_type(&m.receiver)?;
-        let payload = super::written_type::payload_of(&recv_ty)?;
-        self.default_ir(&payload)
-    }
-
-    /// Lets `compile_let` record an unannotated `let sorted = vec!['a', 'b']`.
-    pub(super) fn stated_ty(&self, expr: &Expr) -> Option<ScalarTy> {
-        let env = TyEnv::new(&self.typed_locals, self.ctx.fn_returns);
-        written_ty(expr, &env)
     }
 }
 
@@ -420,4 +226,17 @@ pub(super) fn turbofish_collect_target(
         syn::GenericArgument::Type(ty) => CollectTarget::of_type(ty),
         _ => None,
     })
+}
+
+pub(super) fn turbofish_scalar(
+    args: Option<&syn::AngleBracketedGenericArguments>,
+) -> Option<ScalarTy> {
+    args?
+        .args
+        .iter()
+        .find_map(|arg| match arg {
+            syn::GenericArgument::Type(ty) => Some(ty),
+            _ => None,
+        })
+        .and_then(ScalarTy::lower)
 }

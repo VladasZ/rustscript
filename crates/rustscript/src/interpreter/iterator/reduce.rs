@@ -10,7 +10,6 @@ use super::{Handle, IteratorState, as_closure, option_inner, sum_values, wrap};
 use crate::interpreter::bridge::arg;
 use crate::interpreter::bytecode::{BuiltinId, ScalarTy};
 use crate::interpreter::ops::compare_values;
-use crate::interpreter::scalar_chain::{ChainReduce, try_reduce};
 use crate::interpreter::value::{ClosureData, Value};
 use crate::interpreter::vm::Vm;
 
@@ -70,16 +69,6 @@ impl Vm {
             | BuiltinId::Any
             | BuiltinId::All => {
                 let closure = closure(0)?;
-                let reduce = match name {
-                    BuiltinId::Any => Some(ChainReduce::Any(&closure)),
-                    BuiltinId::All => Some(ChainReduce::All(&closure)),
-                    _ => None,
-                };
-                if let Some(reduce) = reduce
-                    && let Some(v) = try_reduce(self, iterator, &reduce)?
-                {
-                    return Ok(Some(v));
-                }
                 return self.iterator_predicate(iterator, name, &closure).map(Some);
             }
             _ => return self.iterator_reduce_ho(iterator, name, args),

@@ -4,7 +4,7 @@ use anyhow::Result;
 use syn::punctuated::Punctuated;
 use syn::{BinOp, Expr, Lit, Pat, UnOp};
 
-use crate::interpreter::bytecode::{BinKind, ScalarTy};
+use crate::interpreter::bytecode::BinKind;
 use crate::interpreter::numeric::IntWidth;
 
 pub(super) fn is_assign_op(op: &BinOp) -> bool {
@@ -65,15 +65,6 @@ pub(in crate::interpreter) enum FloatTy {
 pub(in crate::interpreter) enum NumericTy {
     Int(IntWidth),
     Float(FloatTy),
-}
-
-pub(super) fn numeric_target(scalar: &ScalarTy) -> Option<NumericTy> {
-    match scalar {
-        ScalarTy::Int(width) => Some(NumericTy::Int(*width)),
-        ScalarTy::F32 => Some(NumericTy::Float(FloatTy::F32)),
-        ScalarTy::F64 => Some(NumericTy::Float(FloatTy::F64)),
-        _ => None,
-    }
 }
 
 pub(super) fn numeric_annotation(ty: &syn::Type) -> Option<NumericTy> {
@@ -268,5 +259,144 @@ pub(super) fn expr_kind(expr: &Expr) -> &'static str {
         Expr::Const(_) => "const block",
         Expr::Verbatim(_) => "unparsed tokens",
         _ => "this expression",
+    }
+}
+
+/// Whether the pattern binds a name by value, `Some(x)`, which moves or copies out of the
+/// scrutinee. `ref` bindings and wildcards do not.
+pub(super) fn pattern_owns(pat: &Pat) -> bool {
+    match pat {
+        Pat::Ident(id) if super::pattern::is_unit_variant_ident(id) => false,
+        Pat::Ident(id) => {
+            id.by_ref.is_none() || id.subpat.as_ref().is_some_and(|sub| pattern_owns(&sub.1))
+        }
+        Pat::Tuple(t) => t.elems.iter().any(pattern_owns),
+        Pat::TupleStruct(ts) => ts.elems.iter().any(pattern_owns),
+        Pat::Slice(s) => s.elems.iter().any(pattern_owns),
+        Pat::Struct(s) => s.fields.iter().any(|f| pattern_owns(&f.pat)),
+        Pat::Paren(p) => pattern_owns(&p.pat),
+        Pat::Type(t) => pattern_owns(&t.pat),
+        Pat::Or(o) => o.cases.iter().any(pattern_owns),
+        // a `&x` pattern binds through a reference, the scrutinee is not moved
+        _ => false,
+    }
+}
+
+/// Whether the pattern has a `ref` binding, which must see the scrutinee's own storage.
+pub(super) fn pattern_borrows(pat: &Pat) -> bool {
+    match pat {
+        Pat::Ident(id) => {
+            id.by_ref.is_some()
+                || id
+                    .subpat
+                    .as_ref()
+                    .is_some_and(|sub| pattern_borrows(&sub.1))
+        }
+        Pat::Tuple(t) => t.elems.iter().any(pattern_borrows),
+        Pat::TupleStruct(ts) => ts.elems.iter().any(pattern_borrows),
+        Pat::Slice(s) => s.elems.iter().any(pattern_borrows),
+        Pat::Struct(s) => s.fields.iter().any(|f| pattern_borrows(&f.pat)),
+        Pat::Paren(p) => pattern_borrows(&p.pat),
+        Pat::Type(t) => pattern_borrows(&t.pat),
+        Pat::Reference(r) => pattern_borrows(&r.pat),
+        Pat::Or(o) => o.cases.iter().any(pattern_borrows),
+        _ => false,
+    }
+}
+
+/// `for x in EXPR` consumes `EXPR` unless it is a borrow or an iterator method on a borrowed
+/// receiver. Only a consumed vec hands its items to the loop.
+pub(super) fn iterable_is_owned(expr: &Expr) -> bool {
+    match expr {
+        Expr::Paren(p) => iterable_is_owned(&p.expr),
+        Expr::Group(g) => iterable_is_owned(&g.expr),
+        Expr::Reference(_) | Expr::MethodCall(_) | Expr::Range(_) => false,
+        _ => true,
+    }
+}
+
+/// Whether a `let mut` init already owns unique storage. A local or a place read is handled by
+/// `Own`, a constructor or a call is fresh, and a method in the list hands back a fresh value.
+/// Anything else may share storage with a live value and the binding copies first.
+pub(super) fn init_is_unique(expr: &Expr) -> bool {
+    match expr {
+        Expr::Paren(p) => init_is_unique(&p.expr),
+        Expr::Group(g) => init_is_unique(&g.expr),
+        Expr::Try(t) => init_is_unique(&t.expr),
+        Expr::Await(a) => init_is_unique(&a.base),
+        Expr::MethodCall(m) => matches!(
+            m.method.to_string().as_str(),
+            "clone"
+                | "cloned"
+                | "copied"
+                | "to_vec"
+                | "to_owned"
+                | "to_string"
+                | "collect"
+                | "pop"
+                | "remove"
+                | "take"
+                | "replace"
+                | "swap_remove"
+                | "split_off"
+                | "drain"
+                | "into_iter"
+                | "iter"
+                | "iter_mut"
+                | "chars"
+                | "bytes"
+                | "lines"
+                | "split"
+                | "split_whitespace"
+                | "map"
+                | "filter"
+                | "rev"
+                | "enumerate"
+                | "zip"
+                | "keys"
+                | "values"
+                | "new"
+                | "with_capacity"
+                | "parse"
+                | "join"
+                | "concat"
+                | "format"
+                | "trim"
+                | "len"
+                | "is_empty"
+        ),
+        _ => true,
+    }
+}
+
+/// Whether a `let` init hands the binding a value of its own, so scope end drops it. A borrow
+/// or an accessor that hands out a handle into other storage does not. An unknown method is
+/// treated as a borrow, a missed drop is safer than a drop of storage someone else owns.
+pub(super) fn init_is_owned(expr: &Expr) -> bool {
+    match expr {
+        Expr::Paren(p) => init_is_owned(&p.expr),
+        Expr::Group(g) => init_is_owned(&g.expr),
+        Expr::Try(t) => init_is_owned(&t.expr),
+        Expr::Await(a) => init_is_owned(&a.base),
+        Expr::Reference(_) => false,
+        Expr::MethodCall(m) => match m.method.to_string().as_str() {
+            "clone" | "cloned" | "copied" | "to_vec" | "to_owned" | "to_string" | "collect"
+            | "pop" | "remove" | "take" | "replace" | "swap_remove" | "split_off"
+            | "into_inner" | "new" | "default" | "with_capacity" => true,
+            "unwrap" | "expect" | "unwrap_or" | "unwrap_or_else" | "unwrap_or_default" | "ok"
+            | "err" | "map" | "and_then" | "await" => init_is_owned(&m.receiver),
+            _ => false,
+        },
+        Expr::Block(b) => b.block.stmts.last().is_some_and(|stmt| match stmt {
+            syn::Stmt::Expr(e, None) => init_is_owned(e),
+            _ => false,
+        }),
+        Expr::If(i) => i
+            .then_branch
+            .stmts
+            .last()
+            .is_some_and(|stmt| matches!(stmt, syn::Stmt::Expr(e, None) if init_is_owned(e))),
+        Expr::Match(m) => m.arms.iter().any(|arm| init_is_owned(&arm.body)),
+        _ => true,
     }
 }

@@ -5,7 +5,6 @@ use std::mem::take;
 use std::sync::Arc;
 
 use anyhow::Result;
-use parking_lot::Mutex;
 use syn::{Block, Expr, FnArg, Pat};
 
 use super::bytecode::{
@@ -15,10 +14,6 @@ use super::bytecode::{
 use super::enum_def::EnumDef;
 use super::resolver::{Res, Resolver};
 use super::typeir::{CastIr, TypeIr, lower_cast, lower_type};
-use walks::{
-    annotation_scalar, collect_return_target, returned_collects, returned_from_strs,
-    returned_json_type,
-};
 
 /// Filled before any body is compiled.
 pub struct Ctx<'r> {
@@ -30,12 +25,7 @@ pub struct Ctx<'r> {
     /// lets `.await`, `tokio::spawn` and `join!` compile
     pub async_mode: bool,
     pub impl_type: Option<&'r str>,
-    /// `f()` is an f32 when `fn f() -> f32` says so. A name defined twice with differing returns
-    /// is absent.
-    pub fn_returns: &'r HashMap<String, ScalarTy>,
-    /// what `written_type` reads a helper call's type from
-    pub fn_return_types: &'r HashMap<String, syn::Type>,
-    /// for a generic helper whose return type its arguments state
+    /// every script function by name, for the inference pass. A name defined twice is absent.
     pub fn_signatures: &'r HashMap<String, syn::Signature>,
     /// `&mut self` method names. A call compiles its receiver as a place split from sharing.
     pub mut_methods: &'r HashSet<String>,
@@ -44,6 +34,10 @@ pub struct Ctx<'r> {
     pub impl_methods: &'r HashSet<(String, String)>,
     /// atoms of the impl method names no bridge knows
     pub method_atoms: &'r HashMap<String, u32>,
+    /// every impl method by type and name, for the inference pass
+    pub impl_sigs: &'r HashMap<(String, String), syn::Signature>,
+    /// the declared type of every const and static, for the inference pass
+    pub const_types: &'r HashMap<String, syn::Type>,
     /// false skips all scope drop bookkeeping
     pub has_drop: bool,
 }
@@ -52,6 +46,7 @@ pub struct Ctx<'r> {
 struct FnState {
     code: Vec<Op>,
     lines: Vec<u32>,
+    cols: Vec<u32>,
     consts: Vec<Const>,
     members: Vec<Member>,
     pats: Vec<PatInfo>,
@@ -68,13 +63,20 @@ struct FnState {
     names: Vec<MethodName>,
     children: Vec<Arc<Chunk>>,
     child_caps: Vec<Vec<CapSource>>,
+    /// filled by the liveness pass, see `liveness.rs`
+    child_moves: Vec<Arc<[bool]>>,
     upvalues: Vec<(String, CapSource)>,
     mutable_locals: HashSet<Reg>,
     /// Whether a register needs a capture cell is only known once the frame is compiled, so
     /// `into_chunk` turns these into `DropCell` ops later.
     binding_sites: Vec<(usize, Reg)>,
-    /// A mutable access through a `&T` or `&mut T` parameter must not split, the caller made it unique.
+    /// Reference parameters. They forward the caller's handle, so they are never moved, copied
+    /// or dropped here.
     borrow_params: HashSet<Reg>,
+    /// `let r = &place` bindings, shared like a borrow parameter
+    ref_locals: HashSet<Reg>,
+    /// Bindings that hold a borrowed handle, so scope end must not drop them.
+    drop_exempt: HashSet<Reg>,
     /// `let r = &mut v` aliases, access compiles as access to `v` itself
     aliases: HashMap<String, String>,
     scopes: Vec<HashMap<String, Reg>>,
@@ -97,6 +99,7 @@ impl FnState {
         FnState {
             code: Vec::new(),
             lines: Vec::new(),
+            cols: Vec::new(),
             consts: Vec::new(),
             members: Vec::new(),
             pats: Vec::new(),
@@ -112,10 +115,13 @@ impl FnState {
             names: Vec::new(),
             children: Vec::new(),
             child_caps: Vec::new(),
+            child_moves: Vec::new(),
             upvalues: Vec::new(),
             mutable_locals: HashSet::new(),
             binding_sites: Vec::new(),
             borrow_params: HashSet::new(),
+            ref_locals: HashSet::new(),
+            drop_exempt: HashSet::new(),
             aliases: HashMap::default(),
             scopes: vec![HashMap::default()],
             scope_order: vec![Vec::new()],
@@ -155,6 +161,7 @@ impl FnState {
         sites.sort_unstable();
         let mut code = Vec::with_capacity(self.code.len() + sites.len());
         let mut lines = Vec::with_capacity(self.lines.len() + sites.len());
+        let mut cols = Vec::with_capacity(self.cols.len() + sites.len());
         // 1 entry longer than the code so a jump to the end remaps too
         let mut moved = Vec::with_capacity(self.code.len() + 1);
         let mut next = 0;
@@ -164,11 +171,13 @@ impl FnState {
                     cell: sites[next].1,
                 });
                 lines.push(self.lines[at]);
+                cols.push(self.cols[at]);
                 next += 1;
             }
             moved.push(u32::try_from(code.len())?);
             code.push(op);
             lines.push(self.lines[at]);
+            cols.push(self.cols[at]);
         }
         moved.push(u32::try_from(code.len())?);
         for op in &mut code {
@@ -178,27 +187,43 @@ impl FnState {
                 | Op::JumpIfTrue { to: t, .. }
                 | Op::CmpJump { to: t, .. }
                 | Op::CmpJumpImm { to: t, .. }
+                | Op::CmpJumpInt { to: t, .. }
+                | Op::CmpJumpIntImm { to: t, .. }
                 | Op::ForNext { to: t, .. }
-                | Op::TryJump { to: t, .. }
-                | Op::LoopHead { jump: t } => *t = moved[*t as usize],
+                | Op::TryJump { to: t, .. } => *t = moved[*t as usize],
                 _ => {}
             }
         }
         self.code = code;
         self.lines = lines;
+        self.cols = cols;
         Ok(())
+    }
+
+    /// A borrow parameter or a reference local forwards a handle, never a value of its own.
+    fn shares_only(&self, reg: Reg) -> bool {
+        self.borrow_params.contains(&reg) || self.ref_locals.contains(&reg)
     }
 
     fn into_chunk(mut self, file: std::sync::Arc<str>) -> Result<Chunk> {
         self.insert_cell_drops()?;
-        let while_rejected = self
-            .code
+        self.child_moves = self
+            .children
             .iter()
-            .map(|_| std::sync::atomic::AtomicU8::new(0))
+            .map(|_| Arc::from(Vec::new()))
             .collect();
+        self.resolve_owns();
+        let mut droppable: Vec<Reg> = self
+            .drop_lists
+            .iter()
+            .flat_map(|list| list.iter().copied())
+            .collect();
+        droppable.sort_unstable_by(|a, b| b.cmp(a));
+        droppable.dedup();
         Ok(Chunk {
             code: self.code,
             lines: self.lines,
+            cols: self.cols,
             file,
             num_regs: self.max_reg as usize,
             num_params: self.num_params,
@@ -220,15 +245,12 @@ impl FnState {
             names: self.names,
             children: self.children,
             child_caps: self.child_caps,
+            child_moves: self.child_moves,
             generics: self.generics,
             drop_lists: self.drop_lists,
+            droppable: droppable.into(),
             call_type_args: self.call_type_args,
             path_forwarder: false,
-            loop_plans: Mutex::new(HashMap::new()),
-            while_plans: Mutex::new(HashMap::new()),
-            while_rejected,
-            fn_plan: Mutex::new(None),
-            fn_rejected: std::sync::atomic::AtomicU8::new(0),
         })
     }
 }
@@ -273,46 +295,13 @@ impl CollectTarget {
 
 pub struct Compiler<'a> {
     ctx: &'a Ctx<'a>,
+    /// the type of every expression of the body being compiled, see `infer`
+    types: infer::Types,
     frames: Vec<FnState>,
     loops: Vec<LoopCtx>,
     /// stamped onto every emitted op
     cur_line: u32,
-    /// A `let x: T = from_str(..)` annotation keyed by the call's address, so a nested call can't
-    /// steal it.
-    pub(super) json_let: Option<(*const syn::ExprCall, TypeIr)>,
-    /// a `let s: String = ...collect()` annotation, keyed like `json_let`
-    pub(super) collect_let: Option<(*const syn::ExprMethodCall, CollectTarget)>,
-    /// Every `collect` the function hands back under a `-> String`, map or set signature. A map
-    /// because a tail `if` returns from several sites.
-    pub(super) collect_tails: HashMap<*const syn::ExprMethodCall, CollectTarget>,
-    /// `collect_tails` for `from_str`
-    pub(super) json_tails: HashMap<*const syn::ExprCall, TypeIr>,
-    /// an `unwrap_or_default` unwrapped again, so its default is `None`
-    pub(super) option_result: Option<*const syn::ExprMethodCall>,
-    /// a `let x: T = ...unwrap_or_default()` annotation
-    pub(super) default_let: Option<(*const syn::ExprMethodCall, ScalarTy)>,
-    /// a bare `Default::default()` and the type its context states
-    pub(super) default_calls: HashMap<*const syn::ExprCall, DefaultIr>,
-    /// locals annotated `Option<T>`, `Result<T, _>` or `Vec<T>`, only ever read to pick a `Default`
-    pub(super) typed_locals: HashMap<String, ScalarTy>,
-    /// for `written_type`
-    pub(super) typed_local_types: HashMap<String, syn::Type>,
-    /// Closure parameters bound to the element type. Interior mutability keeps the `written_type`
-    /// walk on `&self`.
-    pub(super) closure_param_types: std::cell::RefCell<HashMap<String, syn::Type>>,
-    /// the same as written
-    pub(super) default_let_ty: Option<(*const syn::ExprMethodCall, syn::Type)>,
-    /// a `let x: T = ...sum()` annotation, the width the reduction runs in
-    pub(super) reduce_let: Option<(*const syn::ExprMethodCall, ScalarTy)>,
-    /// a `let x: T = v.into()` annotation
-    pub(super) into_let: Option<(*const syn::ExprMethodCall, Arc<str>)>,
-    /// every bare `sum`, `product` or `unwrap_or_default` handed back, mapped to the return type
-    pub(super) return_tails: HashMap<*const syn::ExprMethodCall, syn::Type>,
-    /// Tails and elements an annotation types ahead of compilation, so a bare literal adopts the
-    /// width instead of existing as an i64 first.
-    pub(super) numeric_hints: HashMap<*const Expr, NumericTy>,
-    /// a `vec![..]` body is parsed only when it compiles, so the hint waits on the macro
-    pub(super) vec_hints: HashMap<*const syn::Macro, syn::Type>,
+    cur_col: u32,
     /// 1 shape per layout, so shape identity means layout identity. The member slot cache of the
     /// scalar plan keys on it.
     pub(super) shapes: Vec<std::sync::Arc<crate::interpreter::bytecode::StructShape>>,
@@ -331,31 +320,19 @@ impl<'a> Compiler<'a> {
     pub fn new(ctx: &'a Ctx<'a>) -> Compiler<'a> {
         Compiler {
             ctx,
+            types: infer::Types::empty(),
             frames: Vec::new(),
             loops: Vec::new(),
             cur_line: 0,
-            json_let: None,
-            collect_let: None,
-            collect_tails: HashMap::new(),
-            json_tails: HashMap::new(),
-            option_result: None,
-            default_let: None,
-            default_calls: HashMap::new(),
-            typed_locals: HashMap::new(),
-            typed_local_types: HashMap::new(),
-            closure_param_types: std::cell::RefCell::new(HashMap::new()),
-            default_let_ty: None,
-            reduce_let: None,
-            into_let: None,
-            return_tails: HashMap::new(),
-            numeric_hints: HashMap::new(),
-            vec_hints: HashMap::new(),
+            cur_col: 0,
             shapes: Vec::new(),
         }
     }
 
     pub(super) fn set_line(&mut self, span: proc_macro2::Span) {
-        self.cur_line = u32::try_from(span.start().line).unwrap_or(u32::MAX);
+        let start = span.start();
+        self.cur_line = u32::try_from(start.line).unwrap_or(u32::MAX);
+        self.cur_col = u32::try_from(start.column + 1).unwrap_or(u32::MAX);
     }
 
     pub(super) fn resolve_path_res(&self, segs: &[String]) -> Result<Res> {
@@ -363,6 +340,7 @@ impl<'a> Compiler<'a> {
     }
 
     pub fn compile_fn(&mut self, sig: &syn::Signature, block: &Block) -> Result<Chunk> {
+        self.types = infer::infer_fn(self.ctx, sig, block);
         self.frames.push(FnState::new(sig.ident.to_string()));
         // so a caller's turbofish type args can be bound, `from_str::<T>`
         let generics: Vec<Arc<str>> = sig
@@ -386,12 +364,6 @@ impl<'a> Compiler<'a> {
                     borrows.push(matches!(r.kind, syn::ReceiverKind::Reference(..)));
                 }
                 FnArg::Typed(t) => {
-                    // recorded like an annotated let for defaults built from the param
-                    if let Pat::Ident(id) = &*t.pat
-                        && let Some(declared) = annotation_scalar(&t.ty)
-                    {
-                        self.typed_locals.insert(id.ident.to_string(), declared);
-                    }
                     params.push(Some(&t.pat));
                     types.push(type_head(&t.ty));
                     annotations.push(Some(&t.ty));
@@ -401,31 +373,7 @@ impl<'a> Compiler<'a> {
         }
         self.cur().num_params = params.len();
         self.cur().param_types = types;
-        for (i, p) in params.iter().enumerate() {
-            let reg = self.alloc();
-            debug_assert_eq!(reg as usize, i);
-            if borrows[i] {
-                self.cur().borrow_params.insert(reg);
-            }
-            match p {
-                None => self.define("self", reg),
-                Some(Pat::Ident(id)) if id.subpat.is_none() => {
-                    self.define(&id.ident.to_string(), reg);
-                }
-                Some(pat) => self.bind_pattern_irrefutable(pat, reg)?,
-            }
-            // a numeric param retags the value, so u8 arithmetic in the body panics at the u8 bound
-            if let Some(ty) = annotations[i]
-                && numeric_annotation(ty).is_some()
-            {
-                let idx = self.add_cast(ty);
-                self.emit(Op::Cast {
-                    dst: reg,
-                    src: reg,
-                    ty: idx,
-                });
-            }
-        }
+        self.bind_params(sig, &params, &annotations, &borrows)?;
         // the return type retags the tail and every early `return`
         if let syn::ReturnType::Type(_, ty) = &sig.output
             && numeric_annotation(ty).is_some()
@@ -433,31 +381,9 @@ impl<'a> Compiler<'a> {
             let idx = self.add_cast(ty);
             self.cur().ret_cast = Some(idx);
         }
-        // saved and restored so a nested item fn can't inherit the hints
-        let outer_collect_tails = std::mem::take(&mut self.collect_tails);
-        if let Some(target) = collect_return_target(&sig.output) {
-            self.collect_tails = returned_collects(block)
-                .into_iter()
-                .map(|call| (call, target))
-                .collect();
-        }
-        let outer_return_tails = take(&mut self.return_tails);
-        self.install_return_hints(&sig.output, block);
-        // the same for a `from_str` the body hands back
-        let outer_json_tails = std::mem::take(&mut self.json_tails);
-        if let Some(ty) = returned_json_type(&sig.output) {
-            let ir = self.lower_ir(ty);
-            self.json_tails = returned_from_strs(block)
-                .into_iter()
-                .map(|call| (call, ir.clone()))
-                .collect();
-        }
+        self.install_return_error(&sig.output);
         let ret = self.alloc();
-        let res = self.compile_block(block, ret);
-        self.collect_tails = outer_collect_tails;
-        self.json_tails = outer_json_tails;
-        self.return_tails = outer_return_tails;
-        res?;
+        self.compile_block(block, ret)?;
         if let Some(idx) = self.cur().ret_cast {
             self.emit(Op::Cast {
                 dst: ret,
@@ -471,7 +397,65 @@ impl<'a> Compiler<'a> {
         self.finish_chunk()
     }
 
+    /// Parameters occupy the first registers, in order.
+    fn bind_params(
+        &mut self,
+        sig: &syn::Signature,
+        params: &[Option<&Pat>],
+        annotations: &[Option<&syn::Type>],
+        borrows: &[bool],
+    ) -> Result<()> {
+        for (i, p) in params.iter().enumerate() {
+            let reg = self.alloc();
+            debug_assert_eq!(reg as usize, i);
+            if borrows[i] {
+                self.cur().borrow_params.insert(reg);
+            }
+            match p {
+                None => self.define("self", reg),
+                Some(Pat::Ident(id)) if id.subpat.is_none() => {
+                    self.define(&id.ident.to_string(), reg);
+                }
+                Some(pat) => self.bind_pattern_irrefutable(pat, reg)?,
+            }
+            // A `mut` by value parameter may be a `Copy` of a caller value that stays live, so it
+            // owns a copy unless its type rules `Copy` out.
+            let mutable = match (p, &sig.inputs[i]) {
+                (None, FnArg::Receiver(r)) => {
+                    matches!(r.kind, syn::ReceiverKind::Value)
+                        && r.mutability.is_some()
+                        && self
+                            .ctx
+                            .impl_type
+                            .is_none_or(|ty| !self.is_non_copy_name(ty))
+                }
+                (Some(Pat::Ident(id)), _) => {
+                    id.mutability.is_some()
+                        && !borrows[i]
+                        && !self.is_non_copy_annotation(annotations[i])
+                }
+                _ => false,
+            };
+            if mutable {
+                self.emit(Op::Copy { dst: reg, src: reg });
+            }
+            // a numeric param retags the value, so u8 arithmetic in the body panics at the u8 bound
+            if let Some(ty) = annotations[i]
+                && numeric_annotation(ty).is_some()
+            {
+                let idx = self.add_cast(ty);
+                self.emit(Op::Cast {
+                    dst: reg,
+                    src: reg,
+                    ty: idx,
+                });
+            }
+        }
+        Ok(())
+    }
+
     pub fn compile_const(&mut self, expr: &Expr) -> Result<Chunk> {
+        self.types = infer::infer_const(self.ctx, expr, None);
         self.frames.push(FnState::new("<const>".to_string()));
         let ret = self.alloc();
         self.compile_into(ret, expr)?;
@@ -497,9 +481,11 @@ impl<'a> Compiler<'a> {
 
     fn emit(&mut self, op: Op) {
         let line = self.cur_line;
+        let col = self.cur_col;
         let f = self.cur();
         f.code.push(op);
         f.lines.push(line);
+        f.cols.push(col);
     }
 
     fn here(&mut self) -> usize {
@@ -558,7 +544,10 @@ impl<'a> Compiler<'a> {
         for regs in lists {
             let regs: Vec<Reg> = regs
                 .into_iter()
-                .filter(|r| !self.cur().borrow_params.contains(r))
+                .filter(|r| {
+                    let f = self.cur();
+                    !f.borrow_params.contains(r) && !f.drop_exempt.contains(r)
+                })
                 .collect();
             if regs.is_empty() {
                 continue;
@@ -685,9 +674,10 @@ impl<'a> Compiler<'a> {
             | Op::JumpIfTrue { to: t, .. }
             | Op::CmpJump { to: t, .. }
             | Op::CmpJumpImm { to: t, .. }
+            | Op::CmpJumpInt { to: t, .. }
+            | Op::CmpJumpIntImm { to: t, .. }
             | Op::ForNext { to: t, .. }
-            | Op::TryJump { to: t, .. }
-            | Op::LoopHead { jump: t } => *t = to,
+            | Op::TryJump { to: t, .. } => *t = to,
             _ => panic!("patch target is not a jump"),
         }
     }
@@ -702,6 +692,8 @@ mod closure;
 mod defaults;
 mod expr;
 mod flow;
+mod infer;
+mod liveness;
 mod macros;
 mod method;
 mod names;
@@ -709,15 +701,102 @@ mod pattern;
 mod place;
 mod struct_lit;
 mod support;
+mod typed;
 mod walks;
-mod written;
-mod written_type;
 
 use support::{
     FloatTy, NumericTy, bin_kind, collect_pattern_names, expr_kind, first_generic_type,
-    inline_holes, int_literal, is_assign_op, macro_yields_value, numeric_annotation,
-    numeric_target, parse_exprs, parse_matches, parse_vec_repeat, type_head,
+    inline_holes, int_literal, is_assign_op, macro_yields_value, numeric_annotation, parse_exprs,
+    parse_matches, parse_vec_repeat, type_head,
 };
+
+impl Compiler<'_> {
+    /// True when the type can not be `Copy`, a `String`, a container, a cell, a user type that
+    /// does not derive `Copy`. Unknown types answer false, so they copy to be safe.
+    pub(super) fn is_non_copy_annotation(&self, ty: Option<&syn::Type>) -> bool {
+        let Some(ty) = ty else { return false };
+        match ty {
+            syn::Type::Paren(p) => self.is_non_copy_annotation(Some(&p.elem)),
+            syn::Type::Group(g) => self.is_non_copy_annotation(Some(&g.elem)),
+            syn::Type::Tuple(t) => t
+                .elems
+                .iter()
+                .any(|elem| self.is_non_copy_annotation(Some(elem))),
+            syn::Type::Array(a) => self.is_non_copy_annotation(Some(&a.elem)),
+            syn::Type::Path(p) => {
+                let Some(last) = p.path.segments.last() else {
+                    return false;
+                };
+                let name = last.ident.to_string();
+                if matches!(
+                    name.as_str(),
+                    "String"
+                        | "Vec"
+                        | "VecDeque"
+                        | "HashMap"
+                        | "HashSet"
+                        | "BTreeMap"
+                        | "BTreeSet"
+                        | "Box"
+                        | "Rc"
+                        | "Arc"
+                        | "RefCell"
+                        | "Cell"
+                        | "Mutex"
+                        | "PathBuf"
+                        | "OsString"
+                ) {
+                    return true;
+                }
+                let segs: Vec<String> = p
+                    .path
+                    .segments
+                    .iter()
+                    .map(|s| s.ident.to_string())
+                    .collect();
+                let segs = match (segs.first().map(String::as_str), self.ctx.impl_type) {
+                    (Some("Self"), Some(ty)) => vec![ty.to_string()],
+                    _ => segs,
+                };
+                match self.resolve_path_res(&segs) {
+                    Ok(Res::Struct(canon)) => self.is_non_copy_name(&canon),
+                    Ok(Res::Enum(canon)) => self
+                        .ctx
+                        .resolver
+                        .enums
+                        .get(&canon)
+                        .is_some_and(|e| !derives_copy(&e.attrs)),
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    pub(super) fn is_non_copy_name(&self, canon: &str) -> bool {
+        self.ctx
+            .resolver
+            .structs
+            .get(canon)
+            .is_some_and(|def| !derives_copy(&def.ast.attrs))
+    }
+}
+
+pub(super) fn derives_copy(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        if !attr.path().is_ident("derive") {
+            return false;
+        }
+        let mut found = false;
+        let parsed = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("Copy") {
+                found = true;
+            }
+            Ok(())
+        });
+        parsed.is_ok() && found
+    })
+}
 
 /// Past u16 is a compiler bug, an abort beats a wrapped index.
 pub(super) fn idx16(i: usize) -> u16 {

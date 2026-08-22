@@ -16,7 +16,7 @@ use super::native::Native;
 use super::typeir::TypeIr;
 use super::value::{ClosureData, StructShape, Upvalue, Value};
 use super::vm_step::{Flow, StepCtx, step};
-use super::vm_support::trace_error;
+use super::vm_support::{FrameSite, trace_error};
 
 pub(super) const MAX_CALL_DEPTH: usize = 100_000;
 
@@ -37,9 +37,13 @@ fn swap_option<T>(current: &mut Option<T>, next: Option<T>) -> Option<T> {
     }
 }
 
-fn frame_line(chunk: &Chunk, ip: usize) -> (String, String, u32) {
-    let line = chunk.lines.get(ip).copied().unwrap_or(0);
-    (chunk.name.clone(), chunk.file.to_string(), line)
+fn frame_line(chunk: &Chunk, ip: usize) -> FrameSite {
+    FrameSite {
+        func: chunk.name.clone(),
+        file: chunk.file.to_string(),
+        line: chunk.lines.get(ip).copied().unwrap_or(0),
+        col: chunk.cols.get(ip).copied().unwrap_or(0),
+    }
 }
 
 /// Each slot has its own lock so tasks on different threads can read globals.
@@ -213,7 +217,6 @@ impl Vm {
                             stack: &mut *stack,
                             base,
                             ip,
-                            depth: frames.len(),
                         },
                         op,
                     )?,
@@ -289,11 +292,11 @@ impl Vm {
         frames: &[Frame],
         stack: &mut [Value],
     ) {
-        let spans = std::iter::once((base, cur.num_regs))
-            .chain(frames.iter().rev().map(|f| (f.base, f.chunk.num_regs)));
-        for (base, num_regs) in spans {
-            for reg in (0..num_regs).rev() {
-                let Some(slot) = stack.get_mut(base + reg) else {
+        let spans =
+            std::iter::once((base, cur)).chain(frames.iter().rev().map(|f| (f.base, &f.chunk)));
+        for (base, chunk) in spans {
+            for &reg in chunk.droppable.iter() {
+                let Some(slot) = stack.get_mut(base + usize::from(reg)) else {
                     continue;
                 };
                 let value = take(slot);

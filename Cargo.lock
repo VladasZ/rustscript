@@ -2577,6 +2577,7 @@ dependencies = [
  "indexmap",
  "indicatif",
  "jsonwebtoken",
+ "libc",
  "lopdf",
  "mimalloc",
  "num-traits",

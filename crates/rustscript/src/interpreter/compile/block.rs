@@ -5,28 +5,15 @@ use syn::spanned::Spanned;
 use syn::{Block, Expr, Pat, Stmt};
 
 use crate::interpreter::bytecode::{DISCARD, Op, Reg};
-use crate::interpreter::numeric::IntWidth;
 
-use super::walks::{
-    annotation_scalar, bare_int_arithmetic, bare_int_rooted, collect_root, from_str_root,
-    takes_numeric_hint, unparen,
-};
-
-use super::{
-    CollectTarget, Compiler, NumericTy, ScalarTy, macro_yields_value, numeric_annotation,
-    numeric_target,
-};
+use super::support::{init_is_owned, init_is_unique, pattern_borrows, pattern_owns};
+use super::walks::{from_str_root, unparen};
+use super::{Compiler, macro_yields_value, numeric_annotation};
 
 impl Compiler<'_> {
     pub(super) fn compile_block(&mut self, block: &Block, dst: Reg) -> Result<()> {
         self.push_scope();
-        // the written locals of the block end with it, so a later block reusing a name can't read
-        // the wrong type
-        let typed_locals = self.typed_locals.clone();
-        let typed_local_types = self.typed_local_types.clone();
         let res = self.compile_block_inner(block, dst);
-        self.typed_locals = typed_locals;
-        self.typed_local_types = typed_local_types;
         // the block value already moved into `dst`, so a returned binding reads as shared and is
         // not dropped here
         if res.is_ok() {
@@ -83,7 +70,7 @@ impl Compiler<'_> {
                 }
                 Stmt::Expr(expr, semi) => {
                     if is_last && semi.is_none() {
-                        self.compile_into(dst, expr)?;
+                        self.compile_owned_into(dst, expr)?;
                     } else {
                         // a statement position call discards its result
                         if let Expr::MethodCall(m) = expr {
@@ -127,9 +114,17 @@ impl Compiler<'_> {
         let init = local.init.as_ref().unwrap();
         let else_expr = &init.diverge.as_ref().unwrap().1;
         let val = self.alloc();
-        self.compile_into(val, &init.expr)?;
+        let owned = pattern_owns(&local.pat) && !pattern_borrows(&local.pat);
+        if owned {
+            self.compile_owned_into(val, &init.expr)?;
+        } else {
+            self.compile_into(val, &init.expr)?;
+        }
         let matched = self.alloc();
         let pidx = self.pattern_info(&local.pat)?;
+        if !owned || !init_is_owned(&init.expr) {
+            self.exempt_pattern_binds(pidx);
+        }
         self.emit(Op::TestBind {
             val,
             pat: pidx,
@@ -162,173 +157,73 @@ impl Compiler<'_> {
             return Ok(());
         }
         let val = self.alloc();
-        // an annotated `let` rooted in `from_str` hands its type to the call, so no coerce op is needed
-        let mut offered = false;
-        // a nested let runs this again before the outer collect consumes its hint, so the outer
-        // hint is restored
-        let outer_collect_let = self.collect_let.take();
-        if let Pat::Type(t) = &local.pat
-            && let Some(init) = &local.init
-        {
-            if let Some(call) = from_str_root(&init.expr) {
-                self.json_let = Some((std::ptr::from_ref(call), self.lower_ir(&t.ty)));
-                offered = true;
-            } else if let Some(call) = super::struct_lit::bare_default_call(&init.expr) {
-                // `let x: T = Default::default()`
-                if let Some(ir) = self.default_ir(&t.ty) {
-                    self.default_calls.insert(std::ptr::from_ref(call), ir);
-                }
-            } else if let Some(target) = CollectTarget::of_type(&t.ty)
-                && let Some(mc) = collect_root(&init.expr)
-            {
-                self.collect_let = Some((std::ptr::from_ref(mc), target));
-            }
-            // `let x: T = ...unwrap_or_default()`
-            if let Expr::MethodCall(mc) = unparen(&init.expr)
-                && mc.method == "unwrap_or_default"
-            {
-                if let Some(ty) = ScalarTy::lower(&t.ty) {
-                    self.default_let = Some((std::ptr::from_ref(mc), ty));
-                }
-                self.default_let_ty = Some((std::ptr::from_ref(mc), (*t.ty).clone()));
-            }
-            // `let x: T = ...sum()` names the width like a turbofish
-            if let Expr::MethodCall(mc) = unparen(&init.expr)
-                && (mc.method == "sum" || mc.method == "product")
-                && mc.turbofish.is_none()
-                && let Some(ty) = ScalarTy::lower(&t.ty)
-            {
-                self.reduce_let = Some((std::ptr::from_ref(mc), ty));
-            }
-            // `let x: T = v.into()`
-            if let Expr::MethodCall(mc) = unparen(&init.expr)
-                && mc.method == "into"
-                && mc.args.is_empty()
-                && let syn::Type::Path(p) = &*t.ty
-                && let Some(canon) = self.user_type_key(&p.path)
-            {
-                self.into_let = Some((std::ptr::from_ref(mc), canon));
-            }
+        match &local.init {
+            Some(init) => self.compile_owned_into(val, &init.expr)?,
+            None => self.emit(Op::LoadUnit { dst: val }),
         }
-        // `let opt: Option<T>` and `let v: Vec<T>` record the type for a later `unwrap_or_default()`
-        if let Pat::Type(t) = &local.pat
-            && let Pat::Ident(ident) = &*t.pat
-        {
-            self.typed_local_types
-                .insert(ident.ident.to_string(), (*t.ty).clone());
-            if let Some(declared) = annotation_scalar(&t.ty) {
-                self.typed_locals.insert(ident.ident.to_string(), declared);
-            }
-        }
-        // a numeric annotation types a bare literal at compile time
-        let mut typed_literal = false;
-        if let Pat::Type(t) = &local.pat
-            && let Some(init) = &local.init
-        {
-            if let Some(target) = numeric_annotation(&t.ty) {
-                typed_literal = self.compile_numeric_annotated(val, &init.expr, target)?;
-            } else {
-                self.offer_literal_hints(&t.ty, &init.expr);
-            }
-        }
-        self.seed_unannotated_hint(local);
-        if !typed_literal {
-            match &local.init {
-                Some(init) => self.compile_into(val, &init.expr)?,
-                None => self.emit(Op::LoadUnit { dst: val }),
-            }
-        }
-        // `let sorted = vec!['a', 'b']` states its type through the init, read after the init
-        // compiles so its block locals are recorded
-        if !matches!(&local.pat, Pat::Type(_))
-            && let Pat::Ident(ident) = &local.pat
-            && let Some(init) = &local.init
-        {
-            if let Some(stated) = self.stated_ty(&init.expr) {
-                self.typed_locals.insert(ident.ident.to_string(), stated);
-            }
-            if let Some(ty) = self.written_type(&init.expr) {
-                self.typed_local_types.insert(ident.ident.to_string(), ty);
-            }
-        }
-        self.record_tuple_pattern_types(local);
-        let consumed = offered && self.json_let.is_none();
-        self.json_let = None;
-        self.collect_let = outer_collect_let;
-        if let Pat::Type(t) = &local.pat {
-            if !consumed && !typed_literal {
-                self.emit_annotation(val, &t.ty);
-            }
-            self.bind_pattern_irrefutable(&t.pat, val)?;
-        } else {
-            self.bind_pattern_irrefutable(&local.pat, val)?;
-        }
+        self.copy_mut_binding(local, val);
+        // a `from_str` init already parsed into the annotated type, see `call_coerce`
+        let parsed = local
+            .init
+            .as_ref()
+            .is_some_and(|init| from_str_root(&init.expr).is_some());
+        self.bind_let(local, val, parsed)?;
         if is_last {
             self.emit(Op::LoadUnit { dst });
         }
         Ok(())
     }
 
-    /// A type for each name of a tuple pattern `let`. The annotation wins, otherwise each name
-    /// reads its own init element.
-    pub(super) fn record_tuple_pattern_types(&mut self, local: &syn::Local) {
-        if let Some(init) = &local.init {
-            let bare = match &local.pat {
-                Pat::Type(t) => &*t.pat,
-                other => other,
-            };
-            if let Pat::Tuple(names) = bare
-                && let Expr::Tuple(values) = unparen(&init.expr)
-                && names.elems.len() == values.elems.len()
-            {
-                for (pat, value) in names.elems.iter().zip(&values.elems) {
-                    let Pat::Ident(ident) = pat else {
-                        continue;
-                    };
-                    let name = ident.ident.to_string();
-                    if let Some(stated) = self.stated_ty(value) {
-                        self.typed_locals.insert(name.clone(), stated);
-                    }
-                    if let Some(ty) = self.written_type(value) {
-                        self.typed_local_types.insert(name, ty);
-                    }
-                }
-            }
-        }
-        if let Pat::Type(t) = &local.pat
-            && let Pat::Tuple(names) = &*t.pat
-            && let syn::Type::Tuple(types) = &*t.ty
-            && names.elems.len() == types.elems.len()
+    /// A `let mut` of a value that may share storage with something live copies first, so its
+    /// mutations stay its own. A type that can't be `Copy` never shares.
+    fn copy_mut_binding(&mut self, local: &syn::Local, val: Reg) {
+        let (binding, annotation) = match &local.pat {
+            Pat::Type(t) => (&*t.pat, Some(&*t.ty)),
+            other => (other, None),
+        };
+        if let Pat::Ident(id) = binding
+            && id.mutability.is_some()
+            && let Some(init) = &local.init
+            && !init_is_unique(&init.expr)
+            && !self.is_non_copy_annotation(annotation)
         {
-            for (pat, ty) in names.elems.iter().zip(&types.elems) {
-                let Pat::Ident(ident) = pat else {
-                    continue;
-                };
-                let name = ident.ident.to_string();
-                if let Some(scalar) = annotation_scalar(ty) {
-                    self.typed_locals.insert(name.clone(), scalar);
-                }
-                self.typed_local_types.insert(name, ty.clone());
-            }
+            self.emit(Op::Copy { dst: val, src: val });
         }
     }
 
-    pub(super) fn seed_unannotated_hint(&mut self, local: &syn::Local) {
-        if !matches!(&local.pat, Pat::Type(_))
-            && let Some(init) = &local.init
-            && takes_numeric_hint(&init.expr)
-        {
-            // bare literals are `i32`, otherwise `-(i32::MIN)` widens to i64 and never panics
-            let target = match self.stated_ty(&init.expr).as_ref().and_then(numeric_target) {
-                Some(stated) => Some(stated),
-                None => (bare_int_rooted(&init.expr) && bare_int_arithmetic(&init.expr))
-                    .then_some(NumericTy::Int(IntWidth::I32)),
-            };
-            if let Some(target) = target {
-                self.numeric_hints
-                    .insert(std::ptr::from_ref(&*init.expr), target);
+    /// Binds the pattern and records which bindings own their value, so scope end drops only
+    /// those.
+    fn bind_let(&mut self, local: &syn::Local, val: Reg, parsed: bool) -> Result<()> {
+        let before = self.cur().scope_order.last().map_or(0, Vec::len);
+        if let Pat::Type(t) = &local.pat {
+            if !parsed {
+                self.emit_annotation(val, &t.ty);
             }
+            self.bind_pattern_irrefutable(&t.pat, val)?;
+        } else {
+            self.bind_pattern_irrefutable(&local.pat, val)?;
         }
+        let owned = local
+            .init
+            .as_ref()
+            .is_none_or(|init| init_is_owned(&init.expr));
+        let borrowed = local
+            .init
+            .as_ref()
+            .is_some_and(|init| matches!(unparen(&init.expr), Expr::Reference(_)));
+        if !owned || borrowed {
+            let bound: Vec<Reg> = self
+                .cur()
+                .scope_order
+                .last()
+                .map_or(Vec::new(), |regs| regs[before..].to_vec());
+            let f = self.cur();
+            if borrowed {
+                f.ref_locals.extend(bound.iter().copied());
+            }
+            f.drop_exempt.extend(bound);
+        }
+        Ok(())
     }
 
     /// A numeric primitive retags through a cast, which only ever acts on a bare literal.

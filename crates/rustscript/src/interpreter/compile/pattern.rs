@@ -30,6 +30,17 @@ impl Compiler<'_> {
         Ok(u16::try_from(f.pats.len() - 1)?)
     }
 
+    /// The bindings of a pattern over a borrowed scrutinee hold borrowed handles, so scope end
+    /// must not drop them.
+    pub(super) fn exempt_pattern_binds(&mut self, pat: u16) {
+        let regs: Vec<Reg> = self.cur().pats[usize::from(pat)]
+            .binds
+            .iter()
+            .map(|(_, reg)| *reg)
+            .collect();
+        self.cur().drop_exempt.extend(regs);
+    }
+
     /// User enums first, builtin tables second. An unresolved path keeps its last segment and the
     /// runtime test falls back to the name.
     pub(super) fn variant_tag(&self, path: &syn::Path) -> PTag {
