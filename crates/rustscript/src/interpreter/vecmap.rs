@@ -1,6 +1,7 @@
 //! Builtin methods on `Vec`, `HashMap` and `HashSet`.
 
 use num_traits::AsPrimitive;
+use std::cmp::Ordering;
 use std::mem::take;
 use std::sync::Arc;
 
@@ -18,17 +19,20 @@ use super::value::{List, MapKey, MapKind, Value};
 pub(super) use super::value::MapStore;
 
 pub(super) fn vec_method(v: &List, method: &MethodName, args: &mut [Value]) -> Result<Value> {
+    if let Some(out) = deque_method(v, method.id, args)? {
+        return Ok(out);
+    }
     Ok(match method.id {
         BuiltinId::Len | BuiltinId::Count => super::shared::usize_value(v.lock().len()),
         BuiltinId::IsEmpty => Value::Bool(v.lock().is_empty()),
         BuiltinId::Clone => Value::Vec(v.clone()).deep_clone(),
         BuiltinId::Iter | BuiltinId::IntoIter => iterator::value_iter(v.clone()),
         BuiltinId::IterMut => iterator::value_iter_mut(v.clone()),
-        BuiltinId::Push => {
+        BuiltinId::Push | BuiltinId::PushBack => {
             v.lock().push(args.first_mut().map_or(Value::Unit, take));
             Value::Unit
         }
-        BuiltinId::Pop => match v.lock().pop() {
+        BuiltinId::Pop | BuiltinId::PopBack => match v.lock().pop() {
             Some(x) => Value::some(x),
             None => Value::none(),
         },
@@ -49,14 +53,14 @@ pub(super) fn vec_method(v: &List, method: &MethodName, args: &mut [Value]) -> R
             items.remove(i)
         }
         BuiltinId::Get | BuiltinId::GetMut => vec_get(v, method, args),
-        BuiltinId::FirstMut => edge_element_ref(v, true),
-        BuiltinId::LastMut => edge_element_ref(v, false),
-        BuiltinId::First => v
+        BuiltinId::FirstMut | BuiltinId::FrontMut => edge_element_ref(v, true),
+        BuiltinId::LastMut | BuiltinId::BackMut => edge_element_ref(v, false),
+        BuiltinId::First | BuiltinId::Front => v
             .lock()
             .first()
             .cloned()
             .map_or_else(Value::none, Value::some),
-        BuiltinId::Last | BuiltinId::NextBack => v
+        BuiltinId::Last | BuiltinId::Back | BuiltinId::NextBack => v
             .lock()
             .last()
             .cloned()
@@ -133,6 +137,44 @@ fn vec_get(v: &List, method: &MethodName, args: &[Value]) -> Value {
 }
 
 /// Real element references, so writes land in the vec.
+/// The `VecDeque` front end and the search, a `VecDeque` is a `Vec` here.
+fn deque_method(v: &List, id: BuiltinId, args: &mut [Value]) -> Result<Option<Value>> {
+    Ok(Some(match id {
+        BuiltinId::PushFront => {
+            v.lock()
+                .insert(0, args.first_mut().map_or(Value::Unit, take));
+            Value::Unit
+        }
+        BuiltinId::PopFront => {
+            let mut items = v.lock();
+            if items.is_empty() {
+                Value::none()
+            } else {
+                Value::some(items.remove(0))
+            }
+        }
+        // the slice is the storage itself
+        BuiltinId::MakeContiguous => Value::Vec(v.clone()),
+        BuiltinId::BinarySearch => binary_search(&v.lock(), &arg(args, 0)?)?,
+        _ => return Ok(None),
+    }))
+}
+
+/// `Ok(index)` of a match, `Err(index)` where it would go. Elements are compared with the value
+/// order, so a mixed list reports its error like a comparison would.
+fn binary_search(items: &[Value], needle: &Value) -> Result<Value> {
+    let (mut lo, mut hi) = (0usize, items.len());
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        match compare_values(&items[mid], needle)? {
+            Ordering::Less => lo = mid + 1,
+            Ordering::Greater => hi = mid,
+            Ordering::Equal => return Ok(Value::ok(super::shared::usize_value(mid))),
+        }
+    }
+    Ok(Value::err(super::shared::usize_value(lo)))
+}
+
 fn edge_element_ref(v: &List, first: bool) -> Value {
     let len = v.lock().len();
     if len == 0 {

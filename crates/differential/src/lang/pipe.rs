@@ -318,8 +318,9 @@ pub enum Term {
         bind: Bind,
         pred: Expr,
     },
+    /// `.fold(init, |acc, item| body)`, the accumulator may be a `(a, b)` pattern
     Fold {
-        acc: String,
+        acc: Bind,
         bind: Bind,
         init: Expr,
         body: Expr,
@@ -432,8 +433,9 @@ impl Term {
                 init,
                 body,
             } => format!(
-                ".fold({}, |{acc}, {}| {})",
+                ".fold({}, |{}, {}| {})",
                 init.render(),
+                acc.pattern(),
                 bind.pattern(),
                 body.render()
             ),

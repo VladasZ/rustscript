@@ -65,12 +65,13 @@ Arguments after the file go to the script.
 
 ## What works
 
-Functions, closures, structs, enums, patterns, loops, iterators, `Vec`,
-strings, maps, sets, `Option`, `Result`, `?`, formatting, modules and local
-path crates. Async with `#[tokio::main]`, spawned tasks, timers and HTTP.
+Functions, closures, structs, enums, patterns, loops with labels, iterators,
+`Vec`, `VecDeque`, strings, maps, sets, `Option`, `Result`, `?`, formatting,
+modules and local path crates. Async with `#[tokio::main]`, spawned tasks, timers and HTTP.
 Traits with default methods, user `Display`, `Debug`, `Drop`, operator and
 `Iterator` impls, associated consts, `u128` and `i128`. Real sharing through
-`Rc`, `Arc`, `RefCell`, `Cell` and `Mutex`. Values move and copy exactly like
+`Rc`, `Arc`, `RefCell`, `Cell` and `Mutex`, and a conflicting `RefCell`
+borrow panics like it does in compiled Rust. Values move and copy exactly like
 compiled Rust.
 
 The std bridge covers files, paths, stdio, processes, TCP, env, time and

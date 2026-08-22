@@ -35,6 +35,7 @@ impl Expr {
             Self::VecLit { items, .. } | Self::SetLit { items, .. } | Self::TupleLit(items) => {
                 items.iter().collect()
             }
+            Self::VecRepeat { item, .. } => vec![&**item],
             Self::OptLit { value, .. } => value.iter().map(|inner| &**inner).collect(),
             Self::MapLit { items, .. } => {
                 items.iter().flat_map(|(key, value)| [key, value]).collect()
@@ -106,6 +107,7 @@ impl Expr {
             Self::VecLit { items, .. } | Self::SetLit { items, .. } | Self::TupleLit(items) => {
                 items.iter_mut().collect()
             }
+            Self::VecRepeat { item, .. } => vec![&mut **item],
             Self::OptLit { value, .. } => value.iter_mut().map(|inner| &mut **inner).collect(),
             Self::MapLit { items, .. } => items
                 .iter_mut()
@@ -314,6 +316,7 @@ impl Expr {
             Self::Field { .. } => Some("lang-field"),
             Self::TupleField { .. } => Some("lang-tuple-field"),
             Self::Index { .. } => Some("lang-index"),
+            Self::VecRepeat { .. } => Some("lang-vec-repeat"),
             Self::Method {
                 kind: crate::lang::user::MethodKind::Assoc,
                 ..
@@ -494,6 +497,9 @@ impl Expr {
         match &mut shorter {
             Self::VecLit { items, .. } | Self::SetLit { items, .. } if !items.is_empty() => {
                 items.pop();
+            }
+            Self::VecRepeat { count, .. } if *count > 0 => {
+                *count -= 1;
             }
             Self::MapLit { items, .. } if !items.is_empty() => {
                 items.pop();

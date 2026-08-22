@@ -41,11 +41,54 @@ impl PrintForm {
     }
 }
 
+/// One closure parameter.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ClosureParam {
+    /// `name: ty`
+    Plain { name: String, ty: Ty },
+    /// `(first, second): (A, B)`, the body reads the pieces. A pattern next to a plain parameter
+    /// is where the interpreter once lost the parameter order.
+    Pair {
+        first: String,
+        second: String,
+        ty: Ty,
+    },
+}
+
+impl ClosureParam {
+    pub fn ty(&self) -> &Ty {
+        match self {
+            Self::Plain { ty, .. } | Self::Pair { ty, .. } => ty,
+        }
+    }
+
+    fn pattern(&self) -> String {
+        match self {
+            Self::Plain { name, ty } => format!("{name}: {}", ty.rust()),
+            Self::Pair { first, second, ty } => format!("({first}, {second}): {}", ty.rust()),
+        }
+    }
+
+    /// The names the body can read, with their types.
+    pub fn locals(&self) -> Vec<(String, Ty)> {
+        match self {
+            Self::Plain { name, ty } => vec![(name.clone(), ty.clone())],
+            Self::Pair { first, second, ty } => match ty {
+                Ty::Tuple(parts) if parts.len() == 2 => vec![
+                    (first.clone(), parts[0].clone()),
+                    (second.clone(), parts[1].clone()),
+                ],
+                _ => Vec::new(),
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ClosureSource {
     /// `|params| -> ret { body }`, `move` when `capture_move`
     Literal {
-        params: Vec<(String, Ty)>,
+        params: Vec<ClosureParam>,
         ret: Ty,
         body: Expr,
         capture_move: bool,
@@ -103,25 +146,36 @@ pub enum Stmt {
         var: String,
         count: usize,
         body: Vec<Stmt>,
+        /// `'label: for`, only when a `break` or `continue` in the body names it
+        #[serde(default)]
+        label: Option<String>,
     },
     /// The counter is incremented first so a `continue` can't loop forever.
     While {
         counter: String,
         limit: u8,
         body: Vec<Stmt>,
+        #[serde(default)]
+        label: Option<String>,
     },
     Loop {
         counter: String,
         limit: u8,
         body: Vec<Stmt>,
+        #[serde(default)]
+        label: Option<String>,
     },
-    /// `if condition { break; }`, inside a loop body only
+    /// `if condition { break 'label; }`, inside a loop body only
     Break {
         condition: Expr,
+        #[serde(default)]
+        label: Option<String>,
     },
-    /// `if condition { continue; }`, inside a loop body only
+    /// `if condition { continue 'label; }`, inside a loop body only
     Continue {
         condition: Expr,
+        #[serde(default)]
+        label: Option<String>,
     },
     /// `if condition { return value; }`, inside a function body only
     Return {
@@ -167,6 +221,12 @@ pub enum MutOp {
     VecSwap(u8, u8),
     /// `name[i] = value;`, panics out of bounds
     VecSetIndex {
+        index: u8,
+        value: Expr,
+    },
+    /// `name[i].push(value);` into a vec of vecs, panics out of bounds. Rows built with
+    /// `vec![row; n]` must not share storage, so a push into one row shows in that row alone.
+    VecRowPush {
         index: u8,
         value: Expr,
     },
@@ -222,7 +282,7 @@ impl MutOp {
             | Self::VecSwap(..)
             | Self::StrClear
             | Self::OptTake => Vec::new(),
-            Self::VecSetIndex { value, .. } => vec![value],
+            Self::VecSetIndex { value, .. } | Self::VecRowPush { value, .. } => vec![value],
             Self::VecRetain { pred, .. } => vec![pred],
             Self::MapInsert { key, value } | Self::MapEntryPush { key, value } => vec![key, value],
             Self::MapRemove { key } => vec![key],
@@ -248,7 +308,7 @@ impl MutOp {
             | Self::VecSwap(..)
             | Self::StrClear
             | Self::OptTake => Vec::new(),
-            Self::VecSetIndex { value, .. } => vec![value],
+            Self::VecSetIndex { value, .. } | Self::VecRowPush { value, .. } => vec![value],
             Self::VecRetain { pred, .. } => vec![pred],
             Self::MapInsert { key, value } | Self::MapEntryPush { key, value } => vec![key, value],
             Self::MapRemove { key } => vec![key],
@@ -260,6 +320,9 @@ impl MutOp {
         match self {
             Self::VecPush(expr) | Self::StrPush(expr) => {
                 format!("{name}.push({});", expr.render())
+            }
+            Self::VecRowPush { index, value } => {
+                format!("{name}[{index}usize].push({});", value.render())
             }
             Self::VecSort => format!("{name}.sort();"),
             Self::VecDedup => format!("{name}.dedup();"),
@@ -303,13 +366,17 @@ impl MutOp {
     pub fn has_fallible_op(&self) -> bool {
         matches!(
             self,
-            Self::MapEntryAdd { .. } | Self::VecSetIndex { .. } | Self::VecSwap(..)
+            Self::MapEntryAdd { .. }
+                | Self::VecSetIndex { .. }
+                | Self::VecRowPush { .. }
+                | Self::VecSwap(..)
         ) || self.exprs().iter().any(|expr| expr.has_fallible_op())
     }
 
     pub fn feature(&self) -> &'static str {
         match self {
             Self::VecPush(_) => "lang-mut-push",
+            Self::VecRowPush { .. } => "lang-mut-row-push",
             Self::VecSort => "lang-mut-sort",
             Self::VecDedup => "lang-mut-dedup",
             Self::VecReverse => "lang-mut-reverse",
@@ -335,6 +402,19 @@ impl MutOp {
 }
 
 impl Stmt {
+    /// Whether a `break` or `continue` in here, at any depth, names `label`.
+    pub fn targets_label(&self, label: &str) -> bool {
+        match self {
+            Self::Break { label: Some(l), .. } | Self::Continue { label: Some(l), .. } => {
+                l == label
+            }
+            _ => self
+                .bodies()
+                .iter()
+                .any(|body| body.iter().any(|stmt| stmt.targets_label(label))),
+        }
+    }
+
     pub fn bodies(&self) -> Vec<&Vec<Stmt>> {
         match self {
             Self::If {
@@ -381,8 +461,8 @@ impl Stmt {
                 out.extend(calls.iter());
             }
             Self::If { condition, .. }
-            | Self::Break { condition }
-            | Self::Continue { condition } => out.push(condition),
+            | Self::Break { condition, .. }
+            | Self::Continue { condition, .. } => out.push(condition),
             Self::Return { condition, value } => {
                 out.push(condition);
                 out.push(value);
@@ -429,7 +509,9 @@ impl Stmt {
                     out.extend(stmt.exprs_mut());
                 }
             }
-            Self::Break { condition } | Self::Continue { condition } => out.push(condition),
+            Self::Break { condition, .. } | Self::Continue { condition, .. } => {
+                out.push(condition);
+            }
             Self::Return { condition, value } => {
                 out.push(condition);
                 out.push(value);
@@ -573,10 +655,15 @@ impl Stmt {
             Self::Compound { .. } => &["lang-compound"],
             Self::Print { .. } | Self::Mutate { .. } => &[],
             Self::If { .. } => &["lang-if-stmt"],
+            Self::ForRange { label: Some(_), .. } => &["lang-for", "lang-loop-label"],
             Self::ForRange { .. } => &["lang-for"],
+            Self::While { label: Some(_), .. } => &["lang-while", "lang-loop-label"],
             Self::While { .. } => &["lang-while"],
+            Self::Loop { label: Some(_), .. } => &["lang-loop", "lang-loop-label"],
             Self::Loop { .. } => &["lang-loop"],
+            Self::Break { label: Some(_), .. } => &["lang-break", "lang-break-label"],
             Self::Break { .. } => &["lang-break"],
+            Self::Continue { label: Some(_), .. } => &["lang-continue", "lang-continue-label"],
             Self::Continue { .. } => &["lang-continue"],
             Self::Return { .. } => &["lang-early-return"],
             Self::ForAccum { .. } => &["lang-for-accum"],
@@ -584,6 +671,16 @@ impl Stmt {
             Self::CallMut { .. } => &["lang-borrow-mut"],
         };
         out.extend(own.iter().copied());
+        if let Self::LetClosure {
+            source: ClosureSource::Literal { params, .. },
+            ..
+        } = self
+            && params
+                .iter()
+                .any(|param| matches!(param, ClosureParam::Pair { .. }))
+        {
+            out.insert("lang-closure-tuple-param");
+        }
         match self {
             Self::Print { spec, form, .. } => {
                 spec.features(out);
@@ -733,16 +830,18 @@ impl Stmt {
             Self::ForRange { .. } | Self::While { .. } | Self::Loop { .. } => {
                 self.render_loop(mutable, indent, &pad)
             }
-            Self::Break { condition } => {
+            Self::Break { condition, label } => {
                 format!(
-                    "{pad}if {} {{\n{pad}    break;\n{pad}}}\n",
-                    condition.render()
+                    "{pad}if {} {{\n{pad}    break{};\n{pad}}}\n",
+                    condition.render(),
+                    label_suffix(label.as_deref())
                 )
             }
-            Self::Continue { condition } => {
+            Self::Continue { condition, label } => {
                 format!(
-                    "{pad}if {} {{\n{pad}    continue;\n{pad}}}\n",
-                    condition.render()
+                    "{pad}if {} {{\n{pad}    continue{};\n{pad}}}\n",
+                    condition.render(),
+                    label_suffix(label.as_deref())
                 )
             }
             Self::Return { condition, value } => format!(
@@ -755,8 +854,16 @@ impl Stmt {
 
     fn render_loop(&self, mutable: &BTreeSet<String>, indent: usize, pad: &str) -> String {
         match self {
-            Self::ForRange { var, count, body } => {
-                let mut out = format!("{pad}for {var} in 0usize..{count}usize {{\n");
+            Self::ForRange {
+                var,
+                count,
+                body,
+                label,
+            } => {
+                let mut out = format!(
+                    "{pad}{}for {var} in 0usize..{count}usize {{\n",
+                    label_prefix(label.as_deref())
+                );
                 for stmt in body {
                     out.push_str(&stmt.render(mutable, indent + 1));
                 }
@@ -767,19 +874,22 @@ impl Stmt {
                 counter,
                 limit,
                 body,
+                label,
             }
             | Self::Loop {
                 counter,
                 limit,
                 body,
+                label,
             } => {
+                let prefix = label_prefix(label.as_deref());
                 let head = if matches!(self, Self::While { .. }) {
                     format!(
-                        "{pad}let mut {counter}: usize = 0usize;\n{pad}while {counter} < {limit}usize {{\n{pad}    {counter} += 1usize;\n"
+                        "{pad}let mut {counter}: usize = 0usize;\n{pad}{prefix}while {counter} < {limit}usize {{\n{pad}    {counter} += 1usize;\n"
                     )
                 } else {
                     format!(
-                        "{pad}let mut {counter}: usize = 0usize;\n{pad}loop {{\n{pad}    {counter} += 1usize;\n{pad}    if {counter} > {limit}usize {{\n{pad}        break;\n{pad}    }}\n"
+                        "{pad}let mut {counter}: usize = 0usize;\n{pad}{prefix}loop {{\n{pad}    {counter} += 1usize;\n{pad}    if {counter} > {limit}usize {{\n{pad}        break;\n{pad}    }}\n"
                     )
                 };
                 let mut out = head;
@@ -882,6 +992,14 @@ impl Stmt {
     }
 }
 
+fn label_prefix(label: Option<&str>) -> String {
+    label.map(|l| format!("'{l}: ")).unwrap_or_default()
+}
+
+fn label_suffix(label: Option<&str>) -> String {
+    label.map(|l| format!(" '{l}")).unwrap_or_default()
+}
+
 fn render_closure(
     pad: &str,
     name: &str,
@@ -897,10 +1015,7 @@ fn render_closure(
             capture_move,
             mutates,
         } => {
-            let params: Vec<String> = params
-                .iter()
-                .map(|(name, ty)| format!("{name}: {}", ty.rust()))
-                .collect();
+            let params: Vec<String> = params.iter().map(ClosureParam::pattern).collect();
             let mutability = if *mutates || mutable { "mut " } else { "" };
             let keyword = if *capture_move { "move " } else { "" };
             let body_text = match body {

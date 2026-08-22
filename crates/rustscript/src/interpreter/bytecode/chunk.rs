@@ -452,6 +452,9 @@ pub struct Chunk {
     pub call_type_args: Vec<Arc<[TypeIr]>>,
     /// A forwarder's arity is a guess, a call with a different count rebuilds it.
     pub path_forwarder: bool,
+    /// The frame holds `RefCell` guards somewhere, so its registers clear on return. A stale
+    /// guard in a dead frame would block the next borrow.
+    pub clears_frame: bool,
 }
 
 impl Chunk {
@@ -487,6 +490,7 @@ impl Chunk {
             droppable: Arc::from(Vec::new()),
             call_type_args: Vec::new(),
             path_forwarder: false,
+            clears_frame: false,
         }
     }
 }

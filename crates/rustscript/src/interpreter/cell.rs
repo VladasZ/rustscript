@@ -6,6 +6,7 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow, bail};
 use parking_lot::Mutex;
 
+use super::borrow::{self, BorrowGuard};
 use super::bridge::arg;
 use super::bytecode::BuiltinId;
 use super::value::{CellKind, Value, ValueRef};
@@ -31,13 +32,19 @@ pub(super) fn cell_method(
     }
     Ok(Some(match name {
         BuiltinId::Clone => Value::Cell(kind, slot.clone()).deep_clone(),
-        BuiltinId::Borrow => {
+        BuiltinId::Borrow | BuiltinId::BorrowMut => {
             require(kind, CellKind::RefCell, name)?;
-            slot.lock().clone()
+            match borrow::acquire(slot, name == BuiltinId::BorrowMut) {
+                Ok(guard) => borrowed(slot, guard),
+                Err(failure) => bail!("{}", failure.message()),
+            }
         }
-        BuiltinId::BorrowMut => {
+        BuiltinId::TryBorrow | BuiltinId::TryBorrowMut => {
             require(kind, CellKind::RefCell, name)?;
-            Value::Ref(Arc::new(ValueRef::cell_slot(slot.clone())))
+            match borrow::acquire(slot, name == BuiltinId::TryBorrowMut) {
+                Ok(guard) => Value::ok(borrowed(slot, guard)),
+                Err(failure) => Value::err(failure.value()),
+            }
         }
         BuiltinId::Lock | BuiltinId::TryLock | BuiltinId::BlockingLock => {
             // The tokio mutex hands its guard out directly, only `try_lock` wraps a `Result`. The
@@ -88,12 +95,18 @@ pub(super) fn cell_method(
     }))
 }
 
+fn borrowed(slot: &Arc<Mutex<Value>>, guard: Arc<BorrowGuard>) -> Value {
+    Value::Ref(Arc::new(ValueRef::borrowed_cell_slot(slot.clone(), guard)))
+}
+
 /// An interior mutability method that auto derefs through `Rc` and `Arc`.
 fn interior_method(name: BuiltinId) -> bool {
     matches!(
         name,
         BuiltinId::Borrow
             | BuiltinId::BorrowMut
+            | BuiltinId::TryBorrow
+            | BuiltinId::TryBorrowMut
             | BuiltinId::Lock
             | BuiltinId::TryLock
             | BuiltinId::BlockingLock

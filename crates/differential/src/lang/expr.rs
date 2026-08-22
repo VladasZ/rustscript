@@ -156,6 +156,12 @@ pub enum Expr {
         elem: Ty,
         items: Vec<Expr>,
     },
+    /// `vec![item; count]`, every element must own its own storage
+    VecRepeat {
+        elem: Ty,
+        item: Box<Expr>,
+        count: u8,
+    },
     OptLit {
         elem: Ty,
         value: Option<Box<Expr>>,
@@ -318,7 +324,7 @@ impl Expr {
             Self::BoolLit { .. } => Ty::Bool,
             Self::CharLit { .. } => Ty::Char,
             Self::StrLit(_) | Self::TraitCall { .. } => Ty::Str,
-            Self::VecLit { elem, .. } => Ty::vec_of(elem.clone()),
+            Self::VecLit { elem, .. } | Self::VecRepeat { elem, .. } => Ty::vec_of(elem.clone()),
             Self::OptLit { elem, .. } => Ty::opt_of(elem.clone()),
             Self::MapLit { key, value, .. } => Ty::map_of(key.clone(), value.clone()),
             Self::SetLit { elem, .. } => Ty::set_of(elem.clone()),
@@ -548,6 +554,9 @@ impl Expr {
             Self::VecLit { items, .. } => {
                 let rendered: Vec<String> = items.iter().map(Expr::render).collect();
                 format!("vec![{}]", rendered.join(", "))
+            }
+            Self::VecRepeat { item, count, .. } => {
+                format!("vec![{}; {count}usize]", item.render())
             }
             Self::OptLit { elem, value } => match value {
                 Some(inner) => format!("Some({})", inner.render()),

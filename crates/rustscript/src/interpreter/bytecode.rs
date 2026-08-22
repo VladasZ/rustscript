@@ -325,6 +325,17 @@ impl PathRef {
 }
 
 impl BuiltinId {
+    /// A `RefCell` borrow, the result is a guard the compiler releases with its statement.
+    pub fn is_borrow(self) -> bool {
+        matches!(
+            self,
+            BuiltinId::Borrow
+                | BuiltinId::BorrowMut
+                | BuiltinId::TryBorrow
+                | BuiltinId::TryBorrowMut
+        )
+    }
+
     /// The receivers the coverage walk can infer, `Str`, `Vec`, `Map`, `Option`, or `*`.
     /// So a `Vec` only name doesn't vouch for a `String`.
     pub fn receivers(self) -> &'static [&'static str] {
@@ -333,7 +344,7 @@ impl BuiltinId {
             Entry, Filter, First, Get, Insert, IsEmpty, Iter, IterMut, Join, Keys, Last, Len,
             Lines, Map, MapOr, OkOrElse, Parse, Pop, Push, PushStr, Remove, Retain, Sort, SortBy,
             SortByCachedKey, SortByKey, Split, SplitFirst, SplitWhitespace, StartsWith, Take,
-            ToString, Trim, Unwrap, UnwrapOr, UnwrapOrElse, Values,
+            ToString, Trim, Unwrap, UnwrapOr, UnwrapOrElse, Values, WriteAll, WriteFmt, WriteStr,
         };
         match self {
             Clone | ToString | CloneFrom => &["*"],
@@ -345,7 +356,7 @@ impl BuiltinId {
             | SortBy | Join | Concat | Retain => &["Vec"],
             Push | Contains => &["Str", "Vec"],
             PushStr | SplitWhitespace | Split | Chars | Lines | Trim | StartsWith | EndsWith
-            | Parse => &["Str"],
+            | Parse | WriteAll | WriteStr | WriteFmt => &["Str"],
             Take | Unwrap | UnwrapOr | UnwrapOrElse | Copied | Map | Filter | AndThen | MapOr
             | OkOrElse => &["Option"],
             _ => &[],

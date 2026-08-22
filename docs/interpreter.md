@@ -46,6 +46,12 @@ move is never copied. A `&mut` borrow works on the place itself. `Rc`, `Arc`,
 `RefCell`, `Cell` and `Mutex` are real shared cells. `*guard += n` is one
 fused op that holds the lock across the read-modify-write.
 
+A `RefCell` borrow is a guard value, and the live borrows of every cell sit in
+one table, so a second `borrow_mut` panics with the std message. The compiler
+releases a guard where Rust would, a temporary with its statement, a binding at
+scope end, `break`, `continue` and `drop`, and a frame that held guards clears
+its registers on return.
+
 Strings are `Arc<String>` read lock free. `push` grows in place when the
 buffer is not shared, so a build up loop stays linear.
 

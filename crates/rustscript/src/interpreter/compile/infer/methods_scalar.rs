@@ -34,8 +34,9 @@ impl Infer<'_, '_> {
                 for arg in args {
                     self.expr(arg, &want);
                 }
-                match name {
-                    "ilog2" | "ilog10" => Ty::Int(IntWidth::U32),
+                match (name, recv) {
+                    ("ilog2" | "ilog10", _) => Ty::Int(IntWidth::U32),
+                    ("abs_diff", Ty::Int(width)) => Ty::Int(width.unsigned()),
                     _ => recv.clone(),
                 }
             }

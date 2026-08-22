@@ -185,6 +185,7 @@ fn leave(
 ) {
     let callee_base = at.base;
     let callee_end = callee_base + at.chunk.num_regs;
+    let clears_frame = at.chunk.clears_frame;
     local_cells.retain(|slot, _| *slot < callee_base || *slot >= callee_end);
     at.chunk = frame.chunk;
     at.closure = frame.closure;
@@ -194,6 +195,12 @@ fn leave(
     // the `&mut` argument writeback picks these up from the caller's arg window
     for i in 0..frame.argc as usize {
         stack[at.base + frame.abase as usize + i] = take(&mut stack[callee_base + i]);
+    }
+    // a guard left in a dead frame would still count as a live borrow
+    if clears_frame {
+        for slot in &mut stack[callee_base + frame.argc as usize..callee_end] {
+            *slot = Value::Unit;
+        }
     }
     stack[at.base + frame.dst as usize] = result;
 }

@@ -101,6 +101,11 @@ struct FnState {
     /// for scope end `Drop` runs
     scope_order: Vec<Vec<Reg>>,
     drop_lists: Vec<std::sync::Arc<[Reg]>>,
+    /// `borrow` results not yet released, see `release_guard_temps`
+    guard_temps: Vec<Reg>,
+    /// named bindings that hold a `RefCell` guard, released at scope end even without `Drop` impls
+    guard_regs: HashSet<Reg>,
+    has_guards: bool,
     reg_top: Reg,
     max_reg: Reg,
     num_params: usize,
@@ -152,6 +157,9 @@ impl FnState {
             generics: Vec::new(),
             call_type_args: Vec::new(),
             ret_cast: None,
+            guard_temps: Vec::new(),
+            guard_regs: HashSet::new(),
+            has_guards: false,
         }
     }
 
@@ -287,6 +295,7 @@ impl FnState {
             droppable: droppable.into(),
             call_type_args: self.call_type_args,
             path_forwarder: false,
+            clears_frame: self.has_guards,
         })
     }
 }
@@ -294,11 +303,14 @@ impl FnState {
 struct LoopCtx {
     /// patched to the end
     breaks: Vec<usize>,
-    continue_to: usize,
+    /// `None` for a labeled block, which only `break` can leave
+    continue_to: Option<usize>,
     /// for `loop { break v }`
     result: Reg,
     /// a `break` or `continue` ends every scope deeper than this first
     scope_depth: usize,
+    /// `'name` on the loop
+    label: Option<String>,
 }
 
 /// Where the source states a `collect` target, the call is renamed to a target specific method.
@@ -441,8 +453,9 @@ impl<'a> Compiler<'a> {
         annotations: &[Option<&syn::Type>],
         borrows: &[bool],
     ) -> Result<()> {
-        for (i, p) in params.iter().enumerate() {
-            let reg = self.alloc();
+        // a pattern param binds more registers, so every param slot is claimed before any binding
+        let regs: Vec<Reg> = params.iter().map(|_| self.alloc()).collect();
+        for (i, (p, reg)) in params.iter().zip(regs).enumerate() {
             debug_assert_eq!(reg as usize, i);
             if borrows[i] {
                 self.cur().borrow_params.insert(reg);
@@ -519,6 +532,12 @@ impl<'a> Compiler<'a> {
         let line = self.cur_line;
         let col = self.cur_col;
         let f = self.cur();
+        if let Op::Method { dst, name, .. } = &op
+            && f.names[usize::from(*name)].id.is_borrow()
+        {
+            f.guard_temps.push(*dst);
+            f.has_guards = true;
+        }
         f.code.push(op);
         f.lines.push(line);
         f.cols.push(col);
@@ -564,8 +583,10 @@ impl<'a> Compiler<'a> {
     }
 
     /// `depth` 1 is the current scope alone, a `return` uses every open scope. Scopes are not popped.
+    /// Without `Drop` impls only `RefCell` guard bindings drop, everything else can stay.
     fn emit_scope_drops(&mut self, depth: usize) {
-        if !self.ctx.has_drop {
+        let has_drop = self.ctx.has_drop;
+        if !has_drop && self.cur().guard_regs.is_empty() {
             return;
         }
         let f = self.cur();
@@ -582,7 +603,8 @@ impl<'a> Compiler<'a> {
                 .into_iter()
                 .filter(|r| {
                     let f = self.cur();
-                    !f.borrow_params.contains(r) && !f.drop_exempt.contains(r)
+                    !f.borrow_params.contains(r)
+                        && (f.guard_regs.contains(r) || (has_drop && !f.drop_exempt.contains(r)))
                 })
                 .collect();
             if regs.is_empty() {
@@ -728,6 +750,7 @@ mod closure;
 mod defaults;
 mod expr;
 mod flow;
+mod guards;
 mod infer;
 mod liveness;
 mod macros;

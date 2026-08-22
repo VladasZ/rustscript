@@ -89,6 +89,14 @@ impl Generator<'_> {
             Ty::Str => Expr::StrLit(self.string_value()),
             Ty::Vec(elem) => {
                 let count = self.rng.random_range(0..=3);
+                // a repeat of a nested container is where shared rows would show
+                if self.chance(0.3) {
+                    return Expr::VecRepeat {
+                        elem: (**elem).clone(),
+                        item: Box::new(self.leaf(elem)),
+                        count,
+                    };
+                }
                 let items = (0..count).map(|_| self.leaf(elem)).collect();
                 Expr::VecLit {
                     elem: (**elem).clone(),

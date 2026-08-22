@@ -417,7 +417,10 @@ pub(super) enum EmptyKind {
 
 pub(super) fn empty_container(id: PathId) -> Option<EmptyKind> {
     Some(match id {
-        PathId::VecNew | PathId::VecWithCapacity => EmptyKind::Vec,
+        PathId::VecNew
+        | PathId::VecWithCapacity
+        | PathId::VecDequeNew
+        | PathId::VecDequeWithCapacity => EmptyKind::Vec,
         PathId::StringNew | PathId::StringWithCapacity => EmptyKind::Str,
         PathId::HashMapNew | PathId::HashMapWithCapacity | PathId::BTreeMapNew => EmptyKind::Map,
         PathId::HashSetNew | PathId::HashSetWithCapacity | PathId::BTreeSetNew => EmptyKind::Set,
