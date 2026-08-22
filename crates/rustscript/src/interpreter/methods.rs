@@ -142,7 +142,8 @@ pub(super) fn generic_method(recv: &Value, method: &MethodName, args: &[Value]) 
     match (recv, method.id) {
         // A conversion that only changes the static type is a no-op. A real conversion like
         // `OsString` to `PathBuf` handles `into` in its own bridge first.
-        (_, BuiltinId::Clone | BuiltinId::Into) => Ok(recv.clone()),
+        (_, BuiltinId::Clone) => Ok(recv.deep_clone()),
+        (_, BuiltinId::Into) => Ok(recv.clone()),
         (_, BuiltinId::ToString) => Ok(Value::str(recv.display())),
         (Value::Char(ch), id) if let Some(out) = shared::char_method(*ch, id, &VArgs(args)) => {
             Ok(match out? {
@@ -386,7 +387,7 @@ fn str_out(s: &RsStr, out: StrOut) -> Value {
 pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> Result<Value> {
     // the hot accessors dispatch on the id first, the payload is cloned only where it is handed out
     if let BuiltinId::Clone | BuiltinId::Copied | BuiltinId::Cloned = method.id {
-        return Ok(recv.clone());
+        return Ok(recv.deep_clone());
     }
     let (is_some, inner) = match recv {
         Value::Enum { variant, data, .. } => (*variant == SOME, data.lock().first().cloned()),

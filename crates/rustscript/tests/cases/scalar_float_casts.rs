@@ -1,4 +1,4 @@
-// Float casts inside scalar plans. `s_cast` and `s_cast_f64` must match the compiled program on
+// Float casts inside loops. They must match the compiled program on
 // the saturated, NaN and precision loss edges.
 
 fn main() {

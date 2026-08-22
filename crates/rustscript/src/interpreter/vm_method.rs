@@ -26,6 +26,19 @@ pub(super) fn method_op(
     if let Some(v) = builtin_fast(ctx, recv, name, s, argc, dst) {
         return Ok(ctx.set_opt(dst, v));
     }
+    // an integer method with integer arguments skips the whole dispatch walk
+    if matches!(ctx.stack[base + recv], Value::Int(_) | Value::IntW(..))
+        && ctx.stack[s..s + argc]
+            .iter()
+            .all(|arg| matches!(arg, Value::Int(_) | Value::IntW(..)))
+        && let Some(result) = crate::interpreter::bridge::int_method(
+            &ctx.stack[base + recv],
+            name,
+            &ctx.stack[s..s + argc],
+        )
+    {
+        return Ok(ctx.set_opt(dst, result?));
+    }
     // The arg window holds dead temporaries, so a `read_line(&mut s)` buffer lands back in its
     // register this way.
     let v = if argc == 0 {
@@ -174,7 +187,7 @@ fn option_fast(
     match id {
         // `copied` and `cloned` return the Option itself
         BuiltinId::Copied | BuiltinId::Cloned if kind == EnumKind::Option => {
-            Some(ctx.stack[ctx.base + recv].clone())
+            Some(ctx.stack[ctx.base + recv].deep_clone())
         }
         BuiltinId::Unwrap | BuiltinId::UnwrapOr if success => {
             let Value::Enum { data, .. } = &ctx.stack[ctx.base + recv] else {

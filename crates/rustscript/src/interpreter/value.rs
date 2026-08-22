@@ -98,24 +98,6 @@ impl ValueRef {
         }
     }
 
-    /// `get` for mutating access, the slot is split from sharing first.
-    pub fn get_unique(&self) -> Option<Value> {
-        let unique = |slot: Option<&mut Value>| {
-            slot.map(|v| {
-                v.make_unique();
-                v.clone()
-            })
-        };
-        match self {
-            Self::VecElement { values, index } => unique(values.lock().get_mut(*index)),
-            Self::MapEntry { map, key } => unique(map.lock().get_mut(key)),
-            Self::StructField { data, slot } => unique(data.values.lock().get_mut(*slot)),
-            Self::CellSlot { slot } => unique(Some(&mut *slot.lock())),
-            // splitting the borrowed storage would disconnect the mutation
-            Self::Borrowed { value } => Some(value.clone()),
-        }
-    }
-
     /// One atomic read-modify-write under the slot lock. `None` for a dangling reference or a
     /// `Borrowed` view, then the caller runs the unfused sequence. `f` must not run user code or
     /// lock other values.
@@ -250,13 +232,12 @@ pub enum Value {
     },
     Closure(Arc<ClosureData>),
     Ref(Arc<ValueRef>),
-    /// A real shared cell. Cloning shares on purpose and `make_unique` leaves it alone.
+    /// A real shared cell. Cloning shares on purpose.
     Cell(CellKind, Arc<Mutex<Value>>),
     Native(Arc<Mutex<Native>>),
 }
 
-/// Manual `Hash` so the exact bytes per variant are fixed and the borrowed `StrKey` can probe a
-/// map without an owned key.
+/// Manual `Hash` so the exact bytes per variant are fixed.
 #[derive(Clone)]
 pub enum MapKey {
     Bool(bool),
@@ -344,22 +325,6 @@ impl Hash for MapKey {
 
 fn keys_of(values: &[Value]) -> Option<Vec<MapKey>> {
     values.iter().map(Value::as_key).collect()
-}
-
-/// Hashes and compares exactly like `MapKey::Str`.
-pub struct StrKey<'a>(pub &'a str);
-
-impl Hash for StrKey<'_> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        state.write_u8(3);
-        self.0.hash(state);
-    }
-}
-
-impl indexmap::Equivalent<MapKey> for StrKey<'_> {
-    fn equivalent(&self, key: &MapKey) -> bool {
-        matches!(key, MapKey::Str(s) if **s == *self.0)
-    }
 }
 
 impl Value {
@@ -504,37 +469,30 @@ impl Value {
         }
     }
 
-    /// Replaces shared storage with a fresh copy. Only 1 level deep, nested values split at their own
-    /// mutable access, so a deep copy is paid lazily along the access path. Strings split inside their
-    /// methods, native handles and closures keep their identity.
-    pub(super) fn make_unique(&mut self) {
+    /// What `clone()` and a `Copy` read do. Composites copy all the way down, so the copy and the
+    /// original never share storage. `Rc` and `Arc` share on purpose. Strings are copy on write
+    /// inside their own methods, so the handle is enough. A reference stays a reference, `&T` is
+    /// `Copy`. Natives and closures keep their identity.
+    pub fn deep_clone(&self) -> Value {
+        let items = |list: &Mutex<Vec<Value>>| list.lock().iter().map(Value::deep_clone).collect();
         match self {
-            Value::Vec(list) | Value::Tuple(list) => {
-                if Arc::strong_count(list) > 1 {
-                    let copy = list.lock().clone();
-                    *list = Arc::new(Mutex::new(copy));
-                }
+            Value::Vec(list) => Value::vec(items(list)),
+            Value::Tuple(list) => Value::tuple(items(list)),
+            Value::Map(map, kind) => {
+                let copy = map
+                    .lock()
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.deep_clone()))
+                    .collect();
+                Value::Map(Arc::new(Mutex::new(copy)), *kind)
             }
-            Value::Map(map, _) => {
-                if Arc::strong_count(map) > 1 {
-                    let copy = map.lock().clone();
-                    *map = Arc::new(Mutex::new(copy));
-                }
+            Value::Struct(data) => Value::structure(data.shape.clone(), items(&data.values)),
+            Value::Enum { def, variant, data } => Value::enum_of(def, *variant, items(data)),
+            Value::Cell(kind, slot) if !kind.is_shared_pointer() => {
+                let inner = slot.lock().deep_clone();
+                Value::Cell(*kind, Arc::new(Mutex::new(inner)))
             }
-            Value::Struct(data) => {
-                if Arc::strong_count(data) > 1 {
-                    let values = data.values.lock().clone();
-                    *data = Arc::new(StructData {
-                        shape: data.shape.clone(),
-                        values: Mutex::new(values),
-                    });
-                }
-            }
-            Value::Enum { data, .. } if Arc::strong_count(data) > 1 => {
-                let copy = data.lock().clone();
-                *data = Arc::new(Mutex::new(copy));
-            }
-            _ => {}
+            other => other.clone(),
         }
     }
 

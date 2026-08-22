@@ -1,12 +1,13 @@
 //! Plain and compound assignment.
 
 use anyhow::{Result, bail};
+use syn::spanned::Spanned;
 use syn::{Expr, UnOp};
 
 use crate::interpreter::bytecode::{BinKind, FieldName, Member, Op, Reg};
 
 use super::place;
-use super::{Compiler, NameLoc, int_literal, numeric_annotation};
+use super::{Compiler, NameLoc, int_literal};
 
 impl Compiler<'_> {
     /// `*seq` for a `seq: &mut usize` parameter. A cell promoted or captured name keeps the strict op.
@@ -24,21 +25,10 @@ impl Compiler<'_> {
         ((reg as usize) < frame.num_params).then_some(reg)
     }
 
-    /// A numeric local types a bare literal here like an annotated `let`, otherwise a reassigned
-    /// `i32` prints 64 digits under `{:b}`.
-    pub(super) fn compile_stored_value(&mut self, name: &str, value: &Expr) -> Result<Reg> {
-        let Some(target) = self
-            .typed_local_types
-            .get(name)
-            .and_then(numeric_annotation)
-        else {
-            return self.compile_expr(value);
-        };
-        let dst = self.alloc();
-        if !self.compile_numeric_annotated(dst, value, target)? {
-            self.compile_into(dst, value)?;
-        }
-        Ok(dst)
+    /// The value stored into a local, owned. Its literals carry the local's width from the
+    /// inference pass.
+    pub(super) fn compile_stored_value(&mut self, value: &Expr) -> Result<Reg> {
+        self.compile_owned_expr(value)
     }
 
     pub(super) fn compile_assign(&mut self, target: &Expr, value: &Expr) -> Result<()> {
@@ -46,18 +36,18 @@ impl Compiler<'_> {
             Expr::Path(p) if p.path.segments.len() == 1 => {
                 let name = p.path.segments[0].ident.to_string();
                 let location = self.resolve_for_write(&name);
-                let value = self.compile_stored_value(&name, value)?;
+                let value = self.compile_stored_value(value)?;
                 self.emit_name_store(location, value, &name)?;
             }
             Expr::Index(idx) => {
-                let val = self.compile_expr(value)?;
-                // the base splits from sharing before the write
+                let val = self.compile_owned_expr(value)?;
                 let base = self.compile_place_base(&idx.expr)?;
                 let key = self.compile_expr(&idx.index)?;
+                self.set_line(idx.bracket_token.span.open());
                 self.emit(Op::SetIndex { base, key, val });
             }
             Expr::Field(f) => {
-                let val = self.compile_expr(value)?;
+                let val = self.compile_owned_expr(value)?;
                 let base = self.compile_place_base(&f.base)?;
                 let member = self.member_of(&f.member);
                 self.emit(Op::SetField { base, member, val });
@@ -72,12 +62,12 @@ impl Compiler<'_> {
                     };
                     if let Some(target) = target {
                         let location = self.resolve_for_write(&target);
-                        let val = self.compile_stored_value(&target, value)?;
+                        let val = self.compile_stored_value(value)?;
                         self.emit_name_store(location, val, &target)?;
                         return Ok(());
                     }
                 }
-                let val = self.compile_expr(value)?;
+                let val = self.compile_owned_expr(value)?;
                 if let Some(target) = self.deref_param_reg(&u.expr) {
                     self.emit(Op::SetDerefParam { target, val });
                 } else {
@@ -102,26 +92,19 @@ impl Compiler<'_> {
             Expr::Path(p) if p.path.segments.len() == 1 => {
                 let name = p.path.segments[0].ident.to_string();
                 let location = self.resolve_for_write(&name);
+                let typed = self.typed_arith(target, rhs, op);
                 if let Some(imm) = int_literal(rhs) {
                     let current = self.load_name_location(location, &name)?;
                     let result = self.alloc();
-                    self.emit(Op::BinImm {
-                        dst: result,
-                        a: current,
-                        imm,
-                        op,
-                    });
+                    self.set_line(target.span());
+                    self.emit_bin_imm(result, current, imm, op, typed);
                     self.emit_name_store(location, result, &name)?;
                 } else {
                     let b = self.compile_expr(rhs)?;
                     let current = self.load_name_location(location, &name)?;
                     let result = self.alloc();
-                    self.emit(Op::Bin {
-                        dst: result,
-                        a: current,
-                        b,
-                        op,
-                    });
+                    self.set_line(target.span());
+                    self.emit_bin(result, current, b, op, typed);
                     self.emit_name_store(location, result, &name)?;
                 }
             }
@@ -136,12 +119,9 @@ impl Compiler<'_> {
                     key,
                 });
                 let res = self.alloc();
-                self.emit(Op::Bin {
-                    dst: res,
-                    a: cur,
-                    b,
-                    op,
-                });
+                self.set_line(target.span());
+                let typed = self.typed_arith(target, rhs, op);
+                self.emit_bin(res, cur, b, op, typed);
                 self.emit(Op::SetIndex {
                     base,
                     key,
@@ -159,12 +139,9 @@ impl Compiler<'_> {
                     member,
                 });
                 let res = self.alloc();
-                self.emit(Op::Bin {
-                    dst: res,
-                    a: cur,
-                    b,
-                    op,
-                });
+                self.set_line(target.span());
+                let typed = self.typed_arith(target, rhs, op);
+                self.emit_bin(res, cur, b, op, typed);
                 self.emit(Op::SetField {
                     base,
                     member,
@@ -198,6 +175,7 @@ impl Compiler<'_> {
                 let location = self.resolve_for_write(&target);
                 let current = self.load_name_location(location, &target)?;
                 let result = self.alloc();
+                self.set_line(u.span());
                 self.emit(Op::Bin {
                     dst: result,
                     a: current,
@@ -211,6 +189,7 @@ impl Compiler<'_> {
         let b = self.compile_expr(rhs)?;
         let param = self.deref_param_reg(&u.expr);
         let target = self.compile_expr(&u.expr)?;
+        self.set_line(u.span());
         let Some(target) = param else {
             // the fused op holds the lock across the read-modify-write, so concurrent tasks can't
             // lose updates

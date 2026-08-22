@@ -9,15 +9,18 @@ use std::sync::Arc;
 use crate::interpreter::bytecode::{BinKind, Const, Op, Reg, UnKind};
 use crate::interpreter::numeric::{IntWidth, truncate};
 
-use super::walks::{
-    bare_int_rooted, generic_named, propagates_annotation, qualified_method_ref, sequence_element,
-    tail_exprs, takes_numeric_hint, unparen,
-};
+use super::walks::qualified_method_ref;
 
+use super::infer::Ty;
 use super::{
     Compiler, FloatTy, NameLoc, NumericTy, bin_kind, expr_kind, int_literal, is_assign_op,
-    numeric_annotation,
 };
+
+/// The operand type a typed op carries.
+pub(super) enum Typed {
+    Int(IntWidth),
+    Float(bool),
+}
 
 impl Compiler<'_> {
     /// A plain local returns its own register with no copy.
@@ -28,7 +31,6 @@ impl Compiler<'_> {
         {
             let name = p.path.segments[0].ident.to_string();
             if let NameLoc::Local(reg) = self.resolve(&name) {
-                self.numeric_hints.remove(&std::ptr::from_ref(expr));
                 return Ok(reg);
             }
         }
@@ -39,13 +41,11 @@ impl Compiler<'_> {
 
     pub(super) fn compile_into(&mut self, dst: Reg, expr: &Expr) -> Result<()> {
         self.set_line(expr.span());
-        if let Some(target) = self.numeric_hints.remove(&std::ptr::from_ref(expr))
-            && self.compile_numeric_annotated(dst, expr, target)?
-        {
-            return Ok(());
-        }
         match expr {
-            Expr::Lit(lit) => self.compile_lit(dst, &lit.lit)?,
+            Expr::Lit(lit) => {
+                let width = self.inferred_width(expr);
+                self.compile_lit(dst, &lit.lit, width)?;
+            }
             Expr::Paren(p) => self.compile_into(dst, &p.expr)?,
             Expr::Group(g) => self.compile_into(dst, &g.expr)?,
             Expr::Reference(r) => self.compile_into(dst, &r.expr)?,
@@ -98,6 +98,8 @@ impl Compiler<'_> {
             Expr::Index(idx) => {
                 let base = self.compile_expr(&idx.expr)?;
                 let key = self.compile_expr(&idx.index)?;
+                // `rustc` names the opening bracket of an indexing panic
+                self.set_line(idx.bracket_token.span.open());
                 self.emit(Op::Index { dst, base, key });
             }
             Expr::Field(f) => {
@@ -129,11 +131,90 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    pub(super) fn compile_lit(&mut self, dst: Reg, lit: &Lit) -> Result<()> {
+    /// A binary op, typed when both operands are known scalars of one kind.
+    pub(super) fn emit_bin(&mut self, dst: Reg, a: Reg, b: Reg, op: BinKind, typed: Option<Typed>) {
+        match typed {
+            Some(Typed::Int(w)) => self.emit(Op::BinInt { dst, a, b, op, w }),
+            Some(Typed::Float(f32)) => self.emit(Op::BinFloat { dst, a, b, op, f32 }),
+            None => self.emit(Op::Bin { dst, a, b, op }),
+        }
+    }
+
+    pub(super) fn emit_bin_imm(
+        &mut self,
+        dst: Reg,
+        a: Reg,
+        imm: i64,
+        op: BinKind,
+        typed: Option<Typed>,
+    ) {
+        match typed {
+            Some(Typed::Int(w)) => self.emit(Op::BinIntImm { dst, a, imm, op, w }),
+            _ => self.emit(Op::BinImm { dst, a, imm, op }),
+        }
+    }
+
+    /// `typed_operands` for arithmetic alone. A comparison as a value stays generic, the typed
+    /// compare is a jump.
+    pub(super) fn typed_arith(&self, left: &Expr, right: &Expr, op: BinKind) -> Option<Typed> {
+        match op {
+            BinKind::Add | BinKind::Sub | BinKind::Mul | BinKind::Div | BinKind::Rem => {
+                self.typed_operands(left, right, op)
+            }
+            _ => None,
+        }
+    }
+
+    /// The shared scalar type of both operands when the pass typed them, for the typed ops.
+    /// Shifts, bit ops, float comparisons and `Str + &str` stay on the generic op.
+    pub(super) fn typed_operands(&self, left: &Expr, right: &Expr, op: BinKind) -> Option<Typed> {
+        let compares = matches!(
+            op,
+            BinKind::Eq | BinKind::Ne | BinKind::Lt | BinKind::Le | BinKind::Gt | BinKind::Ge
+        );
+        let arithmetic = matches!(
+            op,
+            BinKind::Add | BinKind::Sub | BinKind::Mul | BinKind::Div | BinKind::Rem
+        );
+        if !compares && !arithmetic {
+            return None;
+        }
+        match (self.types.of(left), self.types.of(right)) {
+            (Ty::Int(a), Ty::Int(b)) if a == b && !a.is_big() => Some(Typed::Int(a)),
+            (Ty::F64, Ty::F64) if arithmetic => Some(Typed::Float(false)),
+            (Ty::F32, Ty::F32) if arithmetic => Some(Typed::Float(true)),
+            _ => None,
+        }
+    }
+
+    /// The width the inference pass gave a numeric expression, `None` when it has none.
+    pub(super) fn inferred_width(&self, expr: &Expr) -> Option<NumericTy> {
+        match self.types.of(expr) {
+            super::infer::Ty::Int(w) => Some(NumericTy::Int(w)),
+            super::infer::Ty::F32 => Some(NumericTy::Float(FloatTy::F32)),
+            super::infer::Ty::F64 => Some(NumericTy::Float(FloatTy::F64)),
+            _ => None,
+        }
+    }
+
+    pub(super) fn compile_lit(
+        &mut self,
+        dst: Reg,
+        lit: &Lit,
+        width: Option<NumericTy>,
+    ) -> Result<()> {
+        let int_width = match width {
+            Some(NumericTy::Int(w)) => Some(w),
+            _ => None,
+        };
+        let float_width = match width {
+            Some(NumericTy::Float(f)) => Some(f),
+            _ => None,
+        };
         match lit {
-            Lit::Int(i) => self.compile_int_lit(dst, i, false, None)?,
+            Lit::Int(i) => self.compile_int_lit(dst, i, false, int_width)?,
             Lit::Bool(b) => self.emit(Op::LoadBool { dst, v: b.value }),
-            Lit::Float(f) => self.compile_float_lit(dst, f, false, None)?,
+            Lit::Float(f) => self.compile_float_lit(dst, f, false, float_width)?,
             Lit::Str(s) => {
                 let k = self.add_const(Const::Str(Arc::from(s.value().as_str())));
                 self.emit(Op::LoadConst { dst, k });
@@ -260,156 +341,6 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    /// False means the init needs a runtime cast after normal compilation.
-    pub(super) fn compile_numeric_annotated(
-        &mut self,
-        dst: Reg,
-        expr: &Expr,
-        target: NumericTy,
-    ) -> Result<bool> {
-        match expr {
-            Expr::Paren(p) => self.compile_numeric_annotated(dst, &p.expr, target),
-            Expr::Group(g) => self.compile_numeric_annotated(dst, &g.expr, target),
-            // any other negated operand adopts the width first, so `-(if c { i32::MIN } ..)`
-            // overflows at i32
-            Expr::Unary(u) if matches!(u.op, UnOp::Neg(_)) => {
-                if self.compile_numeric_lit(dst, &u.expr, true, target)? {
-                    return Ok(true);
-                }
-                let a = self.alloc();
-                self.compile_numeric_operand(a, &u.expr, target)?;
-                self.emit(Op::Un {
-                    dst,
-                    a,
-                    op: UnKind::Neg,
-                });
-                Ok(true)
-            }
-            // every tail adopts the annotation when its turn comes
-            Expr::If(_) | Expr::Block(_) | Expr::Match(_) => {
-                let mut tails = Vec::new();
-                tail_exprs(expr, &mut tails);
-                for tail in tails.into_iter().filter(|tail| takes_numeric_hint(tail)) {
-                    self.numeric_hints.insert(std::ptr::from_ref(tail), target);
-                }
-                self.compile_into(dst, expr)?;
-                Ok(true)
-            }
-            // `let b: u128 = 1 << 100` computes at 128 bits
-            Expr::Binary(b)
-                if matches!(target, NumericTy::Int(_))
-                    && !is_assign_op(&b.op)
-                    && bin_kind(&b.op).is_some_and(propagates_annotation) =>
-            {
-                let op = bin_kind(&b.op).expect("operator kind just matched");
-                let a = self.alloc();
-                self.compile_numeric_operand(a, &b.left, target)?;
-                let rhs = self.alloc();
-                // a shift amount never adopts the annotated width
-                if matches!(op, BinKind::Shl | BinKind::Shr) {
-                    self.compile_into(rhs, &b.right)?;
-                } else {
-                    self.compile_numeric_operand(rhs, &b.right, target)?;
-                }
-                self.emit(Op::Bin { dst, a, b: rhs, op });
-                Ok(true)
-            }
-            other => self.compile_numeric_lit(dst, other, false, target),
-        }
-    }
-
-    /// Literal hints for the non numeric parts of an init, `vec![..]` elements, tuple items and
-    /// `Some(..)` payloads.
-    pub(super) fn offer_literal_hints(&mut self, ty: &syn::Type, expr: &Expr) {
-        let expr = unparen(expr);
-        if let Some(target) = numeric_annotation(ty) {
-            if takes_numeric_hint(expr) {
-                self.numeric_hints.insert(std::ptr::from_ref(expr), target);
-            }
-            return;
-        }
-        match (ty, expr) {
-            (syn::Type::Paren(p), _) => self.offer_literal_hints(&p.elem, expr),
-            (syn::Type::Group(g), _) => self.offer_literal_hints(&g.elem, expr),
-            (syn::Type::Reference(r), Expr::Reference(e)) => {
-                self.offer_literal_hints(&r.elem, &e.expr);
-            }
-            (syn::Type::Tuple(t), Expr::Tuple(e)) => {
-                for (item_ty, item) in t.elems.iter().zip(e.elems.iter()) {
-                    self.offer_literal_hints(item_ty, item);
-                }
-            }
-            (
-                syn::Type::Array(syn::TypeArray { elem, .. })
-                | syn::Type::Slice(syn::TypeSlice { elem, .. }),
-                Expr::Array(e),
-            ) => {
-                for item in &e.elems {
-                    self.offer_literal_hints(elem, item);
-                }
-            }
-            (
-                syn::Type::Array(syn::TypeArray { elem, .. })
-                | syn::Type::Slice(syn::TypeSlice { elem, .. }),
-                Expr::Repeat(e),
-            ) => {
-                self.offer_literal_hints(elem, &e.expr);
-            }
-            (syn::Type::Path(p), Expr::Macro(mac)) if mac.mac.path.is_ident("vec") => {
-                if let Some(elem) = sequence_element(p) {
-                    self.vec_hints
-                        .insert(std::ptr::from_ref(&mac.mac), elem.clone());
-                }
-            }
-            (syn::Type::Path(p), Expr::Call(call)) => {
-                if let Expr::Path(func) = &*call.func
-                    && func.path.is_ident("Some")
-                    && let Some(payload) = generic_named(p, "Option")
-                    && let Some(arg) = call.args.first()
-                {
-                    self.offer_literal_hints(payload, arg);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// A literal adopts the width, nested arithmetic propagates it.
-    pub(super) fn compile_numeric_operand(
-        &mut self,
-        dst: Reg,
-        expr: &Expr,
-        target: NumericTy,
-    ) -> Result<()> {
-        if !self.compile_numeric_annotated(dst, expr, target)? {
-            self.compile_into(dst, expr)?;
-        }
-        Ok(())
-    }
-
-    pub(super) fn compile_numeric_lit(
-        &mut self,
-        dst: Reg,
-        expr: &Expr,
-        negated: bool,
-        target: NumericTy,
-    ) -> Result<bool> {
-        let Expr::Lit(l) = expr else {
-            return Ok(false);
-        };
-        match (&l.lit, target) {
-            (Lit::Int(i), NumericTy::Int(width)) => {
-                self.compile_int_lit(dst, i, negated, Some(width))?;
-                Ok(true)
-            }
-            (Lit::Float(f), NumericTy::Float(ty)) => {
-                self.compile_float_lit(dst, f, negated, Some(ty))?;
-                Ok(true)
-            }
-            _ => Ok(false),
-        }
-    }
-
     /// With `Drop` impls the early return runs the scope drops it would skip.
     pub(super) fn compile_try(&mut self, dst: Reg, t: &syn::ExprTry) -> Result<()> {
         let src = self.compile_expr(&t.expr)?;
@@ -458,21 +389,18 @@ impl Compiler<'_> {
         if matches!(u.op, UnOp::Neg(_))
             && let Expr::Lit(l) = &*u.expr
         {
-            match &l.lit {
-                Lit::Int(i) => return self.compile_int_lit(dst, i, true, None),
-                Lit::Float(f) => return self.compile_float_lit(dst, f, true, None),
+            let width = self.inferred_width(&u.expr);
+            match (&l.lit, width) {
+                (Lit::Int(i), Some(NumericTy::Int(w))) => {
+                    return self.compile_int_lit(dst, i, true, Some(w));
+                }
+                (Lit::Int(i), _) => return self.compile_int_lit(dst, i, true, None),
+                (Lit::Float(f), Some(NumericTy::Float(t))) => {
+                    return self.compile_float_lit(dst, f, true, Some(t));
+                }
+                (Lit::Float(f), _) => return self.compile_float_lit(dst, f, true, None),
                 _ => {}
             }
-        }
-        // bare literals are `i32`, without the hint `-(i32::MIN)` gives 2147483648 instead of panicking
-        if matches!(u.op, UnOp::Neg(_))
-            && !self
-                .numeric_hints
-                .contains_key(&std::ptr::from_ref(&*u.expr))
-            && bare_int_rooted(&u.expr)
-        {
-            self.numeric_hints
-                .insert(std::ptr::from_ref(&*u.expr), NumericTy::Int(IntWidth::I32));
         }
         let a = self.compile_expr(&u.expr)?;
         let op = match u.op {
@@ -514,13 +442,17 @@ impl Compiler<'_> {
         }
         let op = bin_kind(&b.op).ok_or_else(|| anyhow!("unsupported operator {:?}", b.op))?;
         let a = self.compile_expr(&b.left)?;
+        // a comparison as a value stays generic, the typed compare is a jump
+        let typed = self.typed_arith(&b.left, &b.right, op);
         // a literal immediate adopts the width of the left side like a bare literal
         if let Some(imm) = int_literal(&b.right) {
-            self.emit(Op::BinImm { dst, a, imm, op });
+            self.set_line(b.left.span());
+            self.emit_bin_imm(dst, a, imm, op, typed);
             return Ok(());
         }
         let c = self.compile_expr(&b.right)?;
-        self.emit(Op::Bin { dst, a, b: c, op });
+        self.set_line(b.left.span());
+        self.emit_bin(dst, a, c, op, typed);
         Ok(())
     }
 
@@ -537,14 +469,33 @@ impl Compiler<'_> {
             )
         {
             let a = self.compile_expr(&b.left)?;
+            let typed = self.typed_operands(&b.left, &b.right, op);
             if let Some(imm) = int_literal(&b.right) {
                 let at = self.here();
-                self.emit(Op::CmpJumpImm { a, imm, op, to: 0 });
+                match typed {
+                    Some(Typed::Int(w)) => self.emit(Op::CmpJumpIntImm {
+                        a,
+                        imm,
+                        op,
+                        w,
+                        to: 0,
+                    }),
+                    _ => self.emit(Op::CmpJumpImm { a, imm, op, to: 0 }),
+                }
                 return Ok(at);
             }
             let c = self.compile_expr(&b.right)?;
             let at = self.here();
-            self.emit(Op::CmpJump { a, b: c, op, to: 0 });
+            match typed {
+                Some(Typed::Int(w)) => self.emit(Op::CmpJumpInt {
+                    a,
+                    b: c,
+                    op,
+                    w,
+                    to: 0,
+                }),
+                _ => self.emit(Op::CmpJump { a, b: c, op, to: 0 }),
+            }
             return Ok(at);
         }
         let c = self.compile_expr(cond)?;

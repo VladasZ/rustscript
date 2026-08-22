@@ -10,7 +10,6 @@ use super::{
 };
 use crate::interpreter::bytecode::{BuiltinId, MethodName};
 use crate::interpreter::native::Native;
-use crate::interpreter::scalar_chain::{ChainReduce, try_reduce};
 use crate::interpreter::shared::usize_i64;
 use crate::interpreter::value::{ClosureData, MapKind, Value};
 use crate::interpreter::vm::Vm;
@@ -32,6 +31,25 @@ impl Vm {
         self.impls
             .of_value(value)
             .is_some_and(|methods| methods.next.is_some())
+    }
+
+    /// The iterator of a `for` loop. An owned vec hands its items over, nothing else holds them.
+    pub(in crate::interpreter) fn loop_iterator(
+        self: &Arc<Self>,
+        value: Value,
+        owned: bool,
+    ) -> Result<Value> {
+        if owned
+            && let Value::Vec(values) = &value
+            && !self.has_user_next(&value)
+        {
+            let items = std::mem::take(&mut *values.lock());
+            return Ok(wrap(IteratorState::Owned {
+                values: items,
+                index: 0,
+            }));
+        }
+        self.iterator_value(value)
     }
 
     pub(in crate::interpreter) fn iterator_value(self: &Arc<Self>, value: Value) -> Result<Value> {
@@ -72,6 +90,20 @@ impl Vm {
                 inclusive,
             }),
             Value::Str(source) => chars(source),
+            // `Option` yields its payload once, `Result` yields an `Ok` once
+            ref wrapped @ Value::Enum { ref def, .. }
+                if matches!(
+                    def.kind,
+                    crate::interpreter::enum_def::EnumKind::Option
+                        | crate::interpreter::enum_def::EnumKind::Result
+                ) =>
+            {
+                let yields = wrapped.success_payload().into_iter().collect();
+                wrap(IteratorState::Owned {
+                    values: yields,
+                    index: 0,
+                })
+            }
             other => bail!("{} is not iterable", other.type_name()),
         })
     }
@@ -173,6 +205,7 @@ impl Vm {
                 self.chain_next(iterator, &left, &right, left_done)
             }
             Step::Take(source) => self.iterator_next(&source),
+            Step::Cloned(source) => Ok(self.iterator_next(&source)?.map(|v| v.deep_clone())),
             Step::Stride(source, count) | Step::Skip(source, count) => {
                 self.skip_then_next(&source, count)
             }
@@ -263,9 +296,6 @@ impl Vm {
     }
 
     pub(super) fn iterator_count(self: &Arc<Self>, iterator: &Handle) -> Result<Value> {
-        if let Some(v) = try_reduce(self, iterator, &ChainReduce::Count)? {
-            return Ok(v);
-        }
         let mut count: usize = 0;
         while self.iterator_next(iterator)?.is_some() {
             count += 1;
@@ -345,10 +375,11 @@ impl Vm {
                 source: iterator.clone(),
                 buffered: None,
             }),
+            BuiltinId::Cloned | BuiltinId::Copied => wrap(IteratorState::Cloned {
+                source: iterator.clone(),
+            }),
             // iterators are shared handles, so handing the same one back is the `by_ref` borrow
-            BuiltinId::Cloned | BuiltinId::Copied | BuiltinId::ByRef => {
-                Value::Native(iterator.clone())
-            }
+            BuiltinId::ByRef => Value::Native(iterator.clone()),
             BuiltinId::Next => self
                 .iterator_next(iterator)?
                 .map_or_else(Value::none, Value::some),
@@ -370,10 +401,7 @@ impl Vm {
             BuiltinId::Count => self.iterator_count(iterator)?,
             // every iterator is driven forwards, so `last` drains to the end
             BuiltinId::Last | BuiltinId::NextBack => self.iterator_last(iterator)?,
-            BuiltinId::Sum => match try_reduce(self, iterator, &ChainReduce::Sum(scalar))? {
-                Some(v) => v,
-                None => self.iterator_sum(iterator, scalar)?,
-            },
+            BuiltinId::Sum => self.iterator_sum(iterator, scalar)?,
             BuiltinId::Product => self.iterator_product(iterator, scalar)?,
             BuiltinId::Max | BuiltinId::Min => self.iterator_extreme(iterator, method.id)?,
             BuiltinId::Collect | BuiltinId::ToVec => Value::vec(self.drain_iterator(iterator)?),

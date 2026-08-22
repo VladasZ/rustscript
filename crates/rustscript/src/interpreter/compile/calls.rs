@@ -9,7 +9,6 @@ use crate::interpreter::bytecode::{Const, DefaultIr, EnumVariant, Op, PathId, Pa
 use crate::interpreter::numeric::IntWidth;
 use crate::interpreter::typeir::CastIr;
 
-use super::place;
 use super::{Compiler, NameLoc, Res, TypeIr, first_generic_type, idx16};
 
 impl Compiler<'_> {
@@ -21,30 +20,9 @@ impl Compiler<'_> {
             self.alloc();
         }
         for (i, a) in list.iter().enumerate() {
-            self.compile_into(base + idx16(i), a)?;
-            self.emit_arg_move_out(a);
+            self.compile_owned_into(base + idx16(i), a)?;
         }
         Ok(base)
-    }
-
-    /// A by value argument is a move. With `Drop` impls the binding register clears after the
-    /// copy, so the guard drops where the move sent it.
-    pub(super) fn emit_arg_move_out(&mut self, arg: &Expr) {
-        if !self.ctx.has_drop {
-            return;
-        }
-        let Some(name) = place::single_path_name(arg) else {
-            return;
-        };
-        if self.cur().aliases.contains_key(&name) {
-            return;
-        }
-        if let NameLoc::Local(reg) = self.resolve(&name)
-            // a borrow parameter forwards a reference, so the caller keeps its handle
-            && !self.cur().borrow_params.contains(&reg)
-        {
-            self.emit(Op::MoveOut { src: reg });
-        }
     }
 
     /// The `AppList` in `get_json::<AppList>(..)`. An index into `call_type_args`, or `u32::MAX`
@@ -89,7 +67,7 @@ impl Compiler<'_> {
         if self.ctx.async_mode && is_tokio_spawn(path) {
             match c.args.first() {
                 Some(Expr::Async(block)) if c.args.len() == 1 => {
-                    return self.compile_spawn(dst, &block.block);
+                    return self.compile_spawn(dst, &block.block, block.capture.is_some());
                 }
                 _ => bail!("tokio::spawn needs an async block in this interpreter"),
             }
@@ -139,7 +117,8 @@ impl Compiler<'_> {
             return None;
         }
         if segs[..segs.len() - 1] == ["Default"] {
-            return self.default_calls.remove(&std::ptr::from_ref(c));
+            let ty = self.types.of_node(c);
+            return self.default_ir_of(&ty);
         }
         // a user `impl Default` or inherent `fn default` wins over the derive
         let owner = segs[segs.len() - 2].clone();
@@ -249,6 +228,20 @@ impl Compiler<'_> {
                     });
                     return Ok(());
                 }
+                // `T::from(x)` picks the impl for the type of `x` here, not by the value
+                if rest.as_slice() == ["from"] && c.args.len() == 1 {
+                    let source = self.types.of(&c.args[0]);
+                    let path = PathRef::user(self.impl_path_for_from(&canon, &source), coerce);
+                    let p = self.add_path(path);
+                    let base = self.compile_args(c.args.iter())?;
+                    self.emit(Op::CallPath {
+                        dst,
+                        path: p,
+                        base,
+                        argc,
+                    });
+                    return Ok(());
+                }
                 let mut segs = vec![canon.to_string()];
                 segs.extend(rest);
                 PathRef::user(segs, coerce)
@@ -275,23 +268,8 @@ impl Compiler<'_> {
                 }
             }
         };
-        // `drop(x)` moves `x` out, so its register clears and the callee sees the last holder
-        let cleared = if path.id == PathId::Drop && c.args.len() == 1 {
-            place::single_path_name(&c.args[0]).and_then(|n| {
-                let n = self.unalias(&n);
-                match self.resolve(&n) {
-                    NameLoc::Local(reg) => Some(reg),
-                    _ => None,
-                }
-            })
-        } else {
-            None
-        };
         let p = self.add_path(path);
         let base = self.compile_args(c.args.iter())?;
-        if let Some(reg) = cleared {
-            self.emit(Op::LoadUnit { dst: reg });
-        }
         self.emit(Op::CallPath {
             dst,
             path: p,
@@ -312,7 +290,7 @@ impl Compiler<'_> {
         // Only `Box::new` is a pass through, a box is pure ownership. `Rc`, `Arc`, `RefCell`,
         // `Cell` and `Mutex` build real shared cells.
         if path.id == PathId::BoxNew && c.args.len() == 1 {
-            self.compile_into(dst, &c.args[0])?;
+            self.compile_owned_into(dst, &c.args[0])?;
             return Ok(None);
         }
         // the mem place functions move values between places, only the compiler can express that
@@ -338,25 +316,23 @@ impl Compiler<'_> {
         Ok(Some(path))
     }
 
-    /// Its own turbofish, a pending `let` annotation, or the enclosing signature. See
-    /// `Compiler::json_let` and `Compiler::json_tails`.
+    /// The type a parse lands in, from its own turbofish or the inferred result of the call.
     pub(super) fn call_coerce(&mut self, c: &syn::ExprCall, path: &syn::Path) -> Option<TypeIr> {
-        let coerce = path
-            .segments
-            .last()
-            .and_then(first_generic_type)
-            .map(|t| self.lower_ir(t));
-        match coerce {
-            Some(ty) => Some(ty),
-            None => match &self.json_let {
-                Some((ptr, ty)) if std::ptr::eq(*ptr, c) => {
-                    let ty = ty.clone();
-                    self.json_let = None;
-                    Some(ty)
-                }
-                _ => self.json_tails.get(&std::ptr::from_ref(c)).cloned(),
-            },
+        if let Some(ty) = path.segments.last().and_then(first_generic_type) {
+            return Some(self.lower_ir(ty));
         }
+        let parses = path.segments.last().is_some_and(|s| {
+            matches!(
+                s.ident.to_string().as_str(),
+                "from_str" | "from_value" | "from_slice" | "from_reader"
+            )
+        });
+        if !parses {
+            return None;
+        }
+        let target = self.types.of_node(c).payload();
+        let ir = Self::type_ir_of(&target);
+        ir.is_active().then_some(ir)
     }
 
     /// True when the call was emitted here.

@@ -22,7 +22,7 @@ pub(super) fn vec_method(v: &List, method: &MethodName, args: &mut [Value]) -> R
     Ok(match method.id {
         BuiltinId::Len | BuiltinId::Count => super::shared::usize_value(v.lock().len()),
         BuiltinId::IsEmpty => Value::Bool(v.lock().is_empty()),
-        BuiltinId::Clone => Value::vec(v.lock().clone()),
+        BuiltinId::Clone => Value::Vec(v.clone()).deep_clone(),
         BuiltinId::Iter | BuiltinId::IntoIter => iterator::value_iter(v.clone()),
         BuiltinId::IterMut => iterator::value_iter_mut(v.clone()),
         BuiltinId::Push => {
@@ -214,7 +214,7 @@ fn vec_join(v: &List, args: &[Value]) -> Value {
 fn vec_method_by_name(v: &List, method: &MethodName, args: &mut [Value]) -> Result<Value> {
     Ok(match method.id {
         BuiltinId::ToVec | BuiltinId::Collect | BuiltinId::Cloned | BuiltinId::Copied => {
-            Value::vec(v.lock().clone())
+            Value::Vec(v.clone()).deep_clone()
         }
         // `by_ref` is a draining view over the same vector, so whatever it hands on is gone from
         // this one too
@@ -400,7 +400,7 @@ pub(super) fn map_method(
     Ok(match method.id {
         BuiltinId::Len | BuiltinId::Count => super::shared::usize_value(m.lock().len()),
         BuiltinId::IsEmpty => Value::Bool(m.lock().is_empty()),
-        BuiltinId::Clone => Value::Map(Arc::new(Mutex::new(m.lock().clone())), kind),
+        BuiltinId::Clone => Value::Map(m.clone(), kind).deep_clone(),
         BuiltinId::Insert => {
             let k = take(&mut args[0])
                 .into_key()

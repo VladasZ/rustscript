@@ -80,20 +80,14 @@ impl Vm {
         Ok(Some(out))
     }
 
-    /// Runs `Drop::drop` only when this is the last holder, another holder means moved or shared.
-    /// Containers hand their contents on. A shared cycle never gets down to 1 holder, so it leaks
-    /// like a real `Rc` cycle.
+    /// Drops a value the current frame owns. A moved binding was cleared by its `Take`, so a
+    /// value that is still here is owned here. Containers hand their contents on. `Rc` and `Arc`
+    /// are real shared handles, the last one drops the content, so a cycle leaks like in real
+    /// Rust.
     pub(super) fn run_user_drop(self: &Arc<Self>, value: Value) -> Result<()> {
         match value {
             Value::Struct(s) => {
-                if Arc::strong_count(&s) != 1 {
-                    return Ok(());
-                }
                 self.run_drop_impl(Value::Struct(s.clone()))?;
-                // the impl could have stored a clone of self somewhere
-                if Arc::strong_count(&s) != 1 {
-                    return Ok(());
-                }
                 // fields drop after `Drop::drop` in declaration order
                 let fields = take(&mut *s.values.lock());
                 for field in fields {
@@ -102,17 +96,11 @@ impl Vm {
                 Ok(())
             }
             Value::Enum { def, variant, data } => {
-                if Arc::strong_count(&data) != 1 {
-                    return Ok(());
-                }
                 self.run_drop_impl(Value::Enum {
                     def,
                     variant,
                     data: data.clone(),
                 })?;
-                if Arc::strong_count(&data) != 1 {
-                    return Ok(());
-                }
                 let payload = take(&mut *data.lock());
                 for field in payload {
                     self.run_user_drop(field)?;
@@ -120,9 +108,6 @@ impl Vm {
                 Ok(())
             }
             Value::Vec(list) | Value::Tuple(list) => {
-                if Arc::strong_count(&list) != 1 {
-                    return Ok(());
-                }
                 let items = take(&mut *list.lock());
                 for item in items {
                     self.run_user_drop(item)?;
@@ -130,21 +115,28 @@ impl Vm {
                 Ok(())
             }
             Value::Map(map, _) => {
-                if Arc::strong_count(&map) != 1 {
-                    return Ok(());
-                }
                 let entries = take(&mut *map.lock());
                 for (_, entry) in entries {
                     self.run_user_drop(entry)?;
                 }
                 Ok(())
             }
-            Value::Cell(_, slot) => {
-                if Arc::strong_count(&slot) != 1 {
+            Value::Cell(kind, slot) => {
+                if kind.is_shared_pointer() && Arc::strong_count(&slot) != 1 {
                     return Ok(());
                 }
                 let inner = take(&mut *slot.lock());
                 self.run_user_drop(inner)
+            }
+            Value::Native(handle) => {
+                let leftover = match &mut *handle.lock() {
+                    Native::Iterator(state) => state.take_remaining(),
+                    _ => Vec::new(),
+                };
+                for item in leftover {
+                    self.run_user_drop(item)?;
+                }
+                Ok(())
             }
             _ => Ok(()),
         }
@@ -236,8 +228,17 @@ impl Vm {
     pub(super) fn dispatch_call(
         self: &Arc<Self>,
         path: &PathRef,
-        args: Vec<Value>,
+        mut args: Vec<Value>,
     ) -> Result<Value> {
+        if path.id == PathId::Other {
+            return self.dispatch_user_call(path, args);
+        }
+        // the bridge paths read plain `i64` and `f64`, a width tagged literal arrives widened
+        for arg in &mut args {
+            if let Some(image) = arg.bridge_image() {
+                *arg = image;
+            }
+        }
         match path.id {
             PathId::Other => return self.dispatch_user_call(path, args),
             PathId::Some => return Ok(Value::some(one(args)?)),
@@ -702,12 +703,7 @@ fn deref_receiver(
     name: &MethodName,
     args: &[Value],
 ) -> Result<RefRead> {
-    let read = if name.id.mutates() {
-        reference.get_unique()
-    } else {
-        reference.get()
-    };
-    let Some(value) = read else {
+    let Some(value) = reference.get() else {
         bail!("method call through a dangling reference");
     };
     if let Value::Str(s) = &value
@@ -753,11 +749,12 @@ fn deref_receiver(
 
 mod path_calls;
 mod scalar_dispatch;
+pub(in crate::interpreter) use scalar_dispatch::int_method;
 mod template;
 
 use path_calls::{
     bridge_call, datetime_method, duration_method, exitstatus_method, numeric_limit, output_method,
     range_builtin,
 };
-use scalar_dispatch::{f32_method, int_method, scalar_method};
+use scalar_dispatch::{f32_method, scalar_method};
 use template::render_template;

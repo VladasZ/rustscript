@@ -39,10 +39,12 @@ Values are `Arc` with a `parking_lot` mutex, so they are `Send + Sync`. The VM
 runs on a multi thread `tokio` runtime, so `tokio::spawn` and `.await` behave
 like compiled Rust.
 
-Composite values are copy on write. `clone` is a refcount bump and every
-mutable access splits the value from sharing first. `Rc`, `Arc`, `RefCell`,
-`Cell` and `Mutex` are real shared cells. `*guard += n` is one fused op that
-holds the lock across the read-modify-write.
+Values move like compiled Rust. A move clears the source register, `clone`
+is a deep copy, and a `Copy` type copies. The compiler decides which one with
+a backward liveness pass over the bytecode, so a value whose last use is a
+move is never copied. A `&mut` borrow works on the place itself. `Rc`, `Arc`,
+`RefCell`, `Cell` and `Mutex` are real shared cells. `*guard += n` is one
+fused op that holds the lock across the read-modify-write.
 
 Strings are `Arc<String>` read lock free. `push` grows in place when the
 buffer is not shared, so a build up loop stays linear.
@@ -50,34 +52,19 @@ buffer is not shared, so a build up loop stays linear.
 Iterators are lazy native resources, so `by_ref`, `peekable` and open ranges
 keep their real semantics.
 
-Hot loops specialize into plans that run unboxed inside one dispatch. The
-plan translates the body once and falls back to the generic path on any
-surprise, with the registers restored to the start of the failing iteration,
-so the output and the panic line never change.
+Arithmetic and comparisons on operands the inference pass typed compile to
+typed ops that skip the generic dispatch. There is no hot loop tier any more,
+the old one guessed types at runtime and fell back on a miss. A typed tier on
+top of the inference table is planned.
 
-- `sort_by` with an int only closure sorts on flat `i64` registers in
-  `interpreter/scalar.rs`.
-- Scalar `for` loops over ranges, `bytes()` or scalar vecs run in
-  `interpreter/scalar_for.rs`. Vec pushes, map probes and inserts, string
-  span keys from `split_whitespace` and `find_iter`, and json item reads run
-  inside them. Writes go into a journal that is undone on failure.
-- `sum`, `count`, `any` and `all` over `map` and `filter` stages run in
-  `interpreter/scalar_chain.rs`. Stages are pure, so a failed run re-runs from
-  the untouched source.
-- `while` and `loop` regions run in `interpreter/scalar_while.rs`, with
-  `v[i]` reads and writes and struct fields of vec elements.
-- Self recursive scalar functions run whole in `interpreter/scalar_fn.rs`, on
-  a flat frame stack. Recursive enums like a binary tree live in a run local
-  table there.
+## One inference pass
 
-A loop or function that does not qualify records it in one atomic flag, so
-it pays one load and nothing else.
-
-## No second type system
-
-The interpreter does not type check. `rustc` does that in `rust check`. There
-will never be a second Rust type system here. Lifetimes and generics mean
-nothing at runtime.
+The compiler runs one type inference pass per function body before lowering
+it. The result is one table, the type of every expression, read by literal
+widths, typed ops, `collect` targets, `Default` and `From` resolution. The
+pass rejects nothing, `rustc` did that in `rust check`. An expression it
+cannot type is `Unknown` and the runtime goes by what the value says.
+Lifetimes mean nothing at runtime.
 
 ## Numerics match debug Rust
 

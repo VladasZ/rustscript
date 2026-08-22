@@ -2,9 +2,6 @@
 
 use std::sync::Arc;
 
-use syn::{Block, Expr};
-
-use super::walks::returned_exprs;
 use super::{Compiler, derives_default, idx16};
 use crate::interpreter::bytecode::{DefaultIr, EnumVariant, NO_CONV, Op, Reg, StructShape};
 use crate::interpreter::numeric::IntWidth;
@@ -145,46 +142,18 @@ impl Compiler<'_> {
         built
     }
 
-    pub(super) fn default_ir_for_struct(&mut self, canon: &Arc<str>) -> Option<DefaultIr> {
-        self.default_ir_struct(canon, 0)
-    }
-
     pub(super) fn default_ir_path_pub(&mut self, path: &syn::Path) -> Option<DefaultIr> {
         self.default_ir_path(path, 0)
     }
 
-    /// The error type a `?` converts into, and the type of a bare `Default::default()` handed back.
-    pub(super) fn install_return_hints(&mut self, output: &syn::ReturnType, block: &Block) {
+    /// The error type a `?` converts into.
+    pub(super) fn install_return_error(&mut self, output: &syn::ReturnType) {
         let syn::ReturnType::Type(_, ty) = output else {
             return;
         };
         if let Some(canon) = self.result_error_type(ty) {
             self.cur().ret_error = Some(canon);
         }
-        let calls: Vec<*const syn::ExprCall> = returned_exprs(block)
-            .into_iter()
-            .filter_map(|e| super::struct_lit::bare_default_call(e).map(std::ptr::from_ref))
-            .collect();
-        if !calls.is_empty()
-            && let Some(ir) = self.default_ir(ty)
-        {
-            for call in calls {
-                self.default_calls.insert(call, ir.clone());
-            }
-        }
-        let reductions = returned_exprs(block).into_iter().filter_map(|e| match e {
-            Expr::MethodCall(m)
-                if m.turbofish.is_none()
-                    && matches!(
-                        m.method.to_string().as_str(),
-                        "sum" | "product" | "unwrap_or_default"
-                    ) =>
-            {
-                Some((std::ptr::from_ref(m), (**ty).clone()))
-            }
-            _ => None,
-        });
-        self.return_tails.extend(reductions);
     }
 
     /// The `E` of a written `Result<T, E>` when it is a script type.
@@ -214,14 +183,6 @@ impl Compiler<'_> {
             .iter()
             .map(|s| s.ident.to_string())
             .collect();
-        match self.resolve_path_res(&segs).ok()? {
-            Res::Struct(canon) | Res::Enum(canon) => Some(canon),
-            _ => None,
-        }
-    }
-
-    pub(super) fn user_type_key(&self, path: &syn::Path) -> Option<Arc<str>> {
-        let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
         match self.resolve_path_res(&segs).ok()? {
             Res::Struct(canon) | Res::Enum(canon) => Some(canon),
             _ => None,

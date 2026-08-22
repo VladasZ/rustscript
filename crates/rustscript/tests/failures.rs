@@ -158,21 +158,24 @@ fn divide_by_zero_panics_alike() {
     );
 }
 
-/// Newer `rustc` adds a thread id to the header, so the shared needle stays loose and the
-/// interpreter's own header is pinned exactly on top.
+/// The whole stderr of a panic is the same as the compiled one, line, column and note included.
+/// Only the thread id in the header differs, it is the id of a different process.
 #[test]
 fn both_print_the_panic_header() {
     let src = "fn main() {\n    let v = vec![1];\n    let i = 5;\n    println!(\"{}\", v[i]);\n}\n";
     assert_parity(src, 101, "panicked at");
 
     let path = temp_script(src);
+    let compiled = run_compiled(&path);
     let interpreted = run_interpreted(&path);
     std::fs::remove_file(&path).unwrap();
-    let stderr = String::from_utf8_lossy(&interpreted.stderr);
-    assert!(
-        stderr.starts_with("thread 'main' panicked at "),
-        "interpreter header was: {stderr}"
-    );
+    let mask = |bytes: &[u8]| {
+        let text = String::from_utf8_lossy(bytes).into_owned();
+        let open = text.find(" (").expect("a thread id in the header");
+        let close = text[open..].find(") ").expect("a thread id in the header") + open;
+        format!("{}(tid{}", &text[..=open], &text[close..])
+    };
+    assert_eq!(mask(&compiled.stderr), mask(&interpreted.stderr));
 }
 
 /// `keep` is not `const`, so the compiler can't fold the overflow and reject it.
@@ -203,17 +206,16 @@ fn integer_overflow_panics_like_rust() {
     );
 }
 
-/// The while plan runs unboxed until the overflow, then the generic re-run must panic with the
-/// exact message.
+/// An overflow inside a `while` body panics with the exact message.
 #[test]
-fn while_plan_overflow_panics_like_rust() {
+fn while_overflow_panics_like_rust() {
     let src = "fn main() {\n    let mut n: i64 = 3;\n    let mut rounds: i64 = 0;\n    while n != 0 {\n        n *= 3;\n        rounds += 1;\n    }\n    println!(\"{rounds}\");\n}\n";
     assert_parity(src, 101, "attempt to multiply with overflow");
 }
 
-/// An out of bounds store fails the while plan over and the generic path must panic on the exact write.
+/// An out of bounds store inside a `while` body panics on the exact write.
 #[test]
-fn while_plan_vec_write_oob_panics_like_rust() {
+fn while_vec_write_oob_panics_like_rust() {
     let src = "fn main() {\n    let mut v = vec![1i64, 2, 3];\n    let mut i: usize = 0;\n    while i < 5 {\n        v[i] = 0;\n        i += 1;\n    }\n    println!(\"{}\", v[0]);\n}\n";
     assert_parity(
         src,
@@ -222,16 +224,16 @@ fn while_plan_vec_write_oob_panics_like_rust() {
     );
 }
 
-/// The undo must remove the journaled insert before the generic re-run.
+/// An overflow after a map insert panics with the insert already done.
 #[test]
-fn map_plan_overflow_after_insert_panics_like_rust() {
+fn map_overflow_after_insert_panics_like_rust() {
     let src = "use std::collections::HashMap;\nfn main() {\n    let mut m: HashMap<i64, i64> = HashMap::new();\n    let mut acc: i64 = i64::MAX - 5;\n    for k in 0..10 {\n        m.insert(k, k);\n        acc += 1;\n    }\n    println!(\"{} {acc}\", m.len());\n}\n";
     assert_parity(src, 101, "attempt to add with overflow");
 }
 
 /// The read twin of the store test above.
 #[test]
-fn while_plan_vec_read_oob_panics_like_rust() {
+fn while_vec_read_oob_panics_like_rust() {
     let src = "fn main() {\n    let v = vec![5i64, 6];\n    let mut sum: i64 = 0;\n    let mut i: usize = 0;\n    while i < 4 {\n        sum += v[i];\n        i += 1;\n    }\n    println!(\"{sum}\");\n}\n";
     assert_parity(
         src,
@@ -240,16 +242,16 @@ fn while_plan_vec_read_oob_panics_like_rust() {
     );
 }
 
-/// The function plan discards the run on overflow and the generic path runs the whole call again.
+/// An overflow deep in a recursion panics with the exact message.
 #[test]
-fn fn_plan_overflow_panics_like_rust() {
+fn recursion_overflow_panics_like_rust() {
     let src = "fn grow(n: i64) -> i64 {\n    if n <= 0 { 1 } else { grow(n - 1) * 3 }\n}\nfn main() {\n    println!(\"{}\", grow(45));\n}\n";
     assert_parity(src, 101, "attempt to multiply with overflow");
 }
 
 /// The u64 twin, underflow mid tree.
 #[test]
-fn fn_plan_underflow_panics_like_rust() {
+fn recursion_underflow_panics_like_rust() {
     let src = "fn down(n: u64) -> u64 {\n    if n == 0 { 0 } else { down(n - 2) }\n}\nfn main() {\n    println!(\"{}\", down(5));\n}\n";
     assert_parity(src, 101, "attempt to subtract with overflow");
 }

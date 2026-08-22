@@ -36,7 +36,8 @@ pub struct Program {
     pub tokio_main: bool,
 }
 
-pub fn load(script_path: &Path, root_source: &str) -> Result<Program> {
+/// `label` is the script the way the user named it, the name a panic prints like `rustc FILE`.
+pub fn load(script_path: &Path, root_source: &str, label: &str) -> Result<Program> {
     let ast = syn::parse_file(root_source).map_err(|e| anyhow!("parse error: {e}"))?;
     let dir = script_path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let mut modules: Vec<ModuleSrc> = Vec::new();
@@ -49,7 +50,7 @@ pub fn load(script_path: &Path, root_source: &str) -> Result<Program> {
         &dir,
         &dir,
         Vec::new(),
-        Arc::from(root_file.as_str()),
+        Arc::from(label),
         ast.items,
     )?;
     root.crate_root = true;

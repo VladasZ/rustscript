@@ -1,13 +1,14 @@
-//! Place aware lowering for mutable access. The chain of `Unique*` ops splits each level of the place
-//! from sharing, then the mutation runs in place. See `Value::make_unique`.
+//! Place aware lowering for mutable access. A place is read into a register that shares the
+//! storage of the place, the mutation runs in place, and the writeback stores scalars and
+//! strings back, because those are values and not shared storage.
 
 use anyhow::Result;
 use syn::Expr;
 
-use super::super::bytecode::{Op, PathId, Reg};
+use super::super::bytecode::{NO_ROOT, Op, PathId, Reg};
 use super::{Compiler, NameLoc};
 
-/// Composite storage is shared with the place, so the store is a refcount move. A string splits inside
+/// Composite storage is shared with the place, so the store is a handle move. A string splits inside
 /// its methods and only the store brings the new buffer home.
 pub(super) enum PlaceBack {
     /// nothing to store
@@ -28,7 +29,7 @@ pub(super) enum PlaceBack {
     },
 }
 
-/// A register sharing the now unique storage of the place, plus how to store back.
+/// A register sharing the storage of the place, plus how to store back.
 pub(super) struct Place {
     pub reg: Reg,
     pub back: PlaceBack,
@@ -71,7 +72,7 @@ impl Compiler<'_> {
                 let (base, parent) = self.compile_base_with_back(&f.base)?;
                 let member = self.member_of(&f.member);
                 let dst = self.alloc();
-                self.emit(Op::UniqueField { dst, base, member });
+                self.emit(Op::GetField { dst, base, member });
                 Ok(Some(Place {
                     reg: dst,
                     back: PlaceBack::Field {
@@ -85,7 +86,8 @@ impl Compiler<'_> {
                 let (base, parent) = self.compile_base_with_back(&ix.expr)?;
                 let key = self.compile_expr(&ix.index)?;
                 let dst = self.alloc();
-                self.emit(Op::UniqueIndex { dst, base, key });
+                self.set_line(ix.bracket_token.span.open());
+                self.emit(Op::Index { dst, base, key });
                 Ok(Some(Place {
                     reg: dst,
                     back: PlaceBack::Index {
@@ -101,19 +103,13 @@ impl Compiler<'_> {
 
     fn compile_name_place(&mut self, name: &str) -> Option<Place> {
         match self.resolve_for_write(name) {
-            NameLoc::Local(reg) => {
-                // the caller split a borrow parameter before the call
-                if !self.cur().borrow_params.contains(&reg) {
-                    self.emit(Op::UniqueReg { reg });
-                }
-                Some(Place {
-                    reg,
-                    back: PlaceBack::None,
-                })
-            }
+            NameLoc::Local(reg) => Some(Place {
+                reg,
+                back: PlaceBack::None,
+            }),
             NameLoc::Cell(cell) => {
                 let dst = self.alloc();
-                self.emit(Op::UniqueCell { dst, cell });
+                self.emit(Op::LoadCell { dst, cell });
                 Some(Place {
                     reg: dst,
                     back: PlaceBack::Cell(cell),
@@ -121,7 +117,7 @@ impl Compiler<'_> {
             }
             NameLoc::Upvalue(idx) => {
                 let dst = self.alloc();
-                self.emit(Op::UniqueUpvalue { dst, idx });
+                self.emit(Op::LoadUpvalue { dst, idx });
                 Some(Place {
                     reg: dst,
                     back: PlaceBack::Upvalue(idx),
@@ -131,7 +127,7 @@ impl Compiler<'_> {
         }
     }
 
-    /// A temporary base may still share storage with what produced it, so it is split too.
+    /// The register of the place's base, a temporary when the base is not a place.
     pub(super) fn compile_place_base(&mut self, expr: &Expr) -> Result<Reg> {
         Ok(self.compile_base_with_back(expr)?.0)
     }
@@ -142,8 +138,29 @@ impl Compiler<'_> {
             return Ok((place.reg, place.back));
         }
         let reg = self.compile_expr(expr)?;
-        self.emit(Op::UniqueReg { reg });
         Ok((reg, PlaceBack::None))
+    }
+
+    /// The local a place chain bottoms out in, for the move or copy decision of a read out of
+    /// it. `None` when the chain starts at a temporary, a reference or a borrow parameter.
+    pub(super) fn place_root(&mut self, expr: &Expr) -> Option<Reg> {
+        match expr {
+            Expr::Paren(p) => self.place_root(&p.expr),
+            Expr::Group(g) => self.place_root(&g.expr),
+            Expr::Field(f) => self.place_root(&f.base),
+            Expr::Index(ix) => self.place_root(&ix.expr),
+            Expr::Path(p) if p.path.segments.len() == 1 && p.qself.is_none() => {
+                let name = p.path.segments[0].ident.to_string();
+                if self.cur().aliases.contains_key(&name) {
+                    return None;
+                }
+                match self.resolve(&name) {
+                    NameLoc::Local(reg) if !self.cur().shares_only(reg) => Some(reg),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 
     pub(super) fn emit_place_writeback(&mut self, place: &Place) {
@@ -246,14 +263,17 @@ impl Compiler<'_> {
             _ => anyhow::bail!("projection borrow without a projection place"),
         }
         self.define(&name, reg);
+        self.cur().ref_locals.insert(reg);
+        self.cur().drop_exempt.insert(reg);
         if is_last {
             self.emit(Op::LoadUnit { dst });
         }
         Ok(true)
     }
 
-    /// A `&mut place` scrutinee wraps the place as a borrow, so bindings write through.
-    pub(super) fn compile_scrutinee(&mut self, expr: &Expr) -> Result<Reg> {
+    /// A `&mut place` scrutinee wraps the place as a borrow, so bindings write through. A
+    /// scrutinee whose pattern binds by value is moved out of, or copied when it stays live.
+    pub(super) fn compile_scrutinee(&mut self, expr: &Expr, binds_by_value: bool) -> Result<Reg> {
         if let Expr::Reference(r) = expr
             && r.mutability.is_some()
         {
@@ -265,20 +285,124 @@ impl Compiler<'_> {
             });
             return Ok(dst);
         }
+        if binds_by_value {
+            return self.compile_owned_expr(expr);
+        }
         self.compile_expr(expr)
     }
 
-    /// The place, or the plain expression split from sharing.
+    /// The place, or the plain expression.
     pub(super) fn compile_mut_receiver(&mut self, expr: &Expr) -> Result<Place> {
         if let Some(place) = self.compile_place(expr)? {
             return Ok(place);
         }
         let reg = self.compile_expr(expr)?;
-        self.emit(Op::UniqueReg { reg });
         Ok(Place {
             reg,
             back: PlaceBack::None,
         })
+    }
+
+    /// A value landing in an owned position, a `let`, an argument, a field, a return. A local
+    /// becomes an `Own` the liveness pass turns into a move or a copy. A read out of a place
+    /// copies unless the root local is dead, then the root is cleared. A deref or a constant
+    /// always copies. Everything else is a fresh value already.
+    pub(super) fn compile_owned_into(&mut self, dst: Reg, expr: &Expr) -> Result<()> {
+        match expr {
+            Expr::Paren(p) => return self.compile_owned_into(dst, &p.expr),
+            Expr::Group(g) => return self.compile_owned_into(dst, &g.expr),
+            Expr::Path(p) if p.path.segments.len() == 1 && p.qself.is_none() => {
+                let name = p.path.segments[0].ident.to_string();
+                if self.cur().aliases.contains_key(&name) {
+                    return self.compile_into(dst, expr);
+                }
+                match self.resolve(&name) {
+                    NameLoc::Local(reg) => {
+                        if self.cur().shares_only(reg) {
+                            return self.compile_into(dst, expr);
+                        }
+                        self.emit(Op::Own {
+                            dst,
+                            src: reg,
+                            root: reg,
+                        });
+                        return Ok(());
+                    }
+                    NameLoc::Cell(cell) => {
+                        self.emit(Op::LoadCell { dst, cell });
+                        self.emit(Op::Own {
+                            dst,
+                            src: dst,
+                            root: cell,
+                        });
+                        return Ok(());
+                    }
+                    NameLoc::Upvalue(_) => {
+                        self.compile_into(dst, expr)?;
+                        self.emit(Op::Own {
+                            dst,
+                            src: dst,
+                            root: NO_ROOT,
+                        });
+                        return Ok(());
+                    }
+                    NameLoc::None => {}
+                }
+            }
+            Expr::Field(_) | Expr::Index(_) => {
+                self.compile_into(dst, expr)?;
+                let root = self.place_root(expr).unwrap_or(NO_ROOT);
+                self.emit(Op::Own {
+                    dst,
+                    src: dst,
+                    root,
+                });
+                return Ok(());
+            }
+            Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => {
+                self.compile_into(dst, expr)?;
+                self.emit(Op::Own {
+                    dst,
+                    src: dst,
+                    root: NO_ROOT,
+                });
+                return Ok(());
+            }
+            _ => {}
+        }
+        self.compile_into(dst, expr)?;
+        if self.is_const_path(expr) {
+            self.emit(Op::Own {
+                dst,
+                src: dst,
+                root: NO_ROOT,
+            });
+        }
+        Ok(())
+    }
+
+    pub(super) fn compile_owned_expr(&mut self, expr: &Expr) -> Result<Reg> {
+        let dst = self.alloc();
+        self.compile_owned_into(dst, expr)?;
+        Ok(dst)
+    }
+
+    /// A `const` or `static` item, shared by every reader, so an owned read copies it.
+    fn is_const_path(&self, expr: &Expr) -> bool {
+        let Expr::Path(p) = expr else { return false };
+        if p.qself.is_some() {
+            return false;
+        }
+        let segs: Vec<String> = p
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect();
+        matches!(
+            self.resolve_path_res(&segs),
+            Ok(crate::interpreter::resolver::Res::Const(_))
+        )
     }
 }
 
@@ -349,7 +473,7 @@ impl Compiler<'_> {
                 let Some(pa) = self.compile_place(&a)? else {
                     return Ok(false);
                 };
-                let new = self.compile_expr(&c.args[1])?;
+                let new = self.compile_owned_expr(&c.args[1])?;
                 let old = self.alloc();
                 self.emit(Op::Move {
                     dst: old,

@@ -8,7 +8,6 @@ use syn::{Expr, Pat};
 use crate::interpreter::bytecode::{CapSource, Op, Reg};
 
 use super::place;
-use super::walks::annotation_scalar;
 use super::{Compiler, FnState, NameLoc, idx16, numeric_annotation};
 
 impl Compiler<'_> {
@@ -72,8 +71,13 @@ impl Compiler<'_> {
         }
     }
 
-    /// Captures work like in a closure.
-    pub(super) fn compile_spawn(&mut self, dst: Reg, block: &syn::Block) -> Result<()> {
+    /// Captures work like in a closure, `async move` like a `move` closure.
+    pub(super) fn compile_spawn(
+        &mut self,
+        dst: Reg,
+        block: &syn::Block,
+        moves: bool,
+    ) -> Result<()> {
         self.frames.push(FnState::new("<task>".to_string()));
         self.cur().num_params = 0;
         let ret = self.alloc();
@@ -83,6 +87,7 @@ impl Compiler<'_> {
         let caps: Vec<CapSource> = child.upvalues.iter().map(|(_, s)| *s).collect();
         let mut chunk = child.into_chunk(self.ctx.file.clone())?;
         chunk.module = idx16(self.ctx.module);
+        chunk.moves = moves;
         let parent = self.cur();
         let child_idx = idx16(parent.children.len());
         parent.children.push(Arc::new(chunk));
@@ -100,13 +105,6 @@ impl Compiler<'_> {
         self.cur().num_params = params.len();
         for p in &params {
             let reg = self.alloc();
-            // recorded like an annotated let, so a default built from the param knows its type
-            if let Pat::Type(t) = p
-                && let Pat::Ident(id) = &*t.pat
-                && let Some(declared) = annotation_scalar(&t.ty)
-            {
-                self.typed_locals.insert(id.ident.to_string(), declared);
-            }
             // a reference param shares the caller's storage, so it never splits
             if let Pat::Type(t) = p
                 && matches!(&*t.ty, syn::Type::Reference(_))
@@ -116,6 +114,18 @@ impl Compiler<'_> {
             match p {
                 Pat::Ident(id) if id.subpat.is_none() => self.define(&id.ident.to_string(), reg),
                 _ => self.bind_pattern_irrefutable(p, reg)?,
+            }
+            // a `mut` parameter owns a copy unless its type rules `Copy` out, see `compile_fn`
+            let (binding, annotation) = match p {
+                Pat::Type(t) => (&*t.pat, Some(&*t.ty)),
+                other => (*other, None),
+            };
+            if let Pat::Ident(id) = binding
+                && id.mutability.is_some()
+                && !matches!(annotation, Some(syn::Type::Reference(_)))
+                && !self.is_non_copy_annotation(annotation)
+            {
+                self.emit(Op::Copy { dst: reg, src: reg });
             }
             // a numeric annotation retags the value like a fn param
             if let Pat::Type(t) = p

@@ -56,15 +56,13 @@ impl Compiler<'_> {
             let dstf = base + idx16(i);
             match written.iter().find(|(k, _)| k == fname) {
                 Some((_, e)) => {
-                    self.field_default_hint(e, def.as_deref(), fname);
-                    self.compile_into(dstf, e)?;
+                    self.compile_owned_into(dstf, e)?;
                 }
                 None => self.emit(Op::LoadUnit { dst: dstf }),
             }
         }
         if let Some(rest) = &s.rest {
-            self.rest_default_hint(rest, self_type, &s.path);
-            self.compile_into(base + idx16(order.len()), rest)?;
+            self.compile_owned_into(base + idx16(order.len()), rest)?;
         }
         let filled: Vec<bool> = order
             .iter()
@@ -99,45 +97,6 @@ impl Compiler<'_> {
     // patterns
 }
 
-impl Compiler<'_> {
-    /// `field: Default::default()` takes the type from the struct definition
-    pub(super) fn field_default_hint(
-        &mut self,
-        e: &Expr,
-        def: Option<&syn::ItemStruct>,
-        fname: &str,
-    ) {
-        if let Some(call) = bare_default_call(e)
-            && let Some(field_ty) = def.and_then(|def| {
-                def.fields
-                    .iter()
-                    .find(|f| f.ident.as_ref().is_some_and(|i| i == fname))
-                    .map(|f| f.ty.clone())
-            })
-            && let Some(ir) = self.default_ir(&field_ty)
-        {
-            self.default_calls.insert(std::ptr::from_ref(call), ir);
-        }
-    }
-
-    pub(super) fn rest_default_hint(
-        &mut self,
-        rest: &Expr,
-        self_type: Option<&str>,
-        path: &syn::Path,
-    ) {
-        if let Some(call) = bare_default_call(rest)
-            && let Some(canon) = self_type
-                .map(Arc::<str>::from)
-                .or_else(|| self.ctx.resolver.resolve_struct_key(self.ctx.module, path))
-            && let Some(ir) = self.default_ir_for_struct(&canon)
-        {
-            self.default_calls.insert(std::ptr::from_ref(call), ir);
-        }
-    }
-}
-
-/// Declaration order when the struct is known, with the serde rename of each field. With a
 /// `..rest` every declared field is listed.
 pub(super) fn literal_field_order(
     def: Option<&syn::ItemStruct>,
@@ -171,24 +130,5 @@ pub(super) fn literal_field_order(
             (ordered, renames)
         }
         None => (written.iter().map(|(k, _)| k.clone()).collect(), Vec::new()),
-    }
-}
-
-/// Parentheses stripped.
-pub(super) fn bare_default_call(e: &Expr) -> Option<&syn::ExprCall> {
-    match e {
-        Expr::Paren(p) => bare_default_call(&p.expr),
-        Expr::Group(g) => bare_default_call(&g.expr),
-        Expr::Call(c) if c.args.is_empty() => {
-            let Expr::Path(p) = &*c.func else { return None };
-            let segs: Vec<String> = p
-                .path
-                .segments
-                .iter()
-                .map(|s| s.ident.to_string())
-                .collect();
-            (p.qself.is_none() && segs == ["Default", "default"]).then_some(c)
-        }
-        _ => None,
     }
 }

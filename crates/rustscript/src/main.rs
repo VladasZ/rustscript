@@ -52,12 +52,7 @@ fn main() {
     if let Err(e) = real_main() {
         // Exit like a compiled panic or a compiled anyhow main would, same `$?` and same stderr.
         if let Some(p) = e.downcast_ref::<interpreter::ScriptPanic>() {
-            if p.file.is_empty() {
-                eprintln!("thread 'main' panicked:");
-            } else {
-                eprintln!("thread 'main' panicked at {}:{}:", p.file, p.line);
-            }
-            eprintln!("{}", p.rendered);
+            eprint!("{}", p.header("main"));
             exit(101);
         }
         if let Some(r) = e.downcast_ref::<interpreter::ErrReturn>() {
@@ -85,7 +80,7 @@ fn real_main() -> Result<()> {
         "check" => {
             let file = all.get(1).ok_or_else(err_usage)?;
             let source = fs::read_to_string(file)?;
-            let program = loader::load(Path::new(file), &source)?;
+            let program = loader::load(Path::new(file), &source, file)?;
             // gate 1, valid Rust
             checker::check(Path::new(file), &program.files, &program.crate_deps)?;
             // gate 2, the interpreter has everything the script calls
@@ -150,7 +145,7 @@ fn run(file: &str, script_args: &[String]) -> Result<()> {
         .unwrap_or_else(|_| Path::new(file).to_path_buf());
     let source = fs::read_to_string(&path).map_err(|e| anyhow!("cannot read {file}: {e}"))?;
 
-    let program = loader::load(&path, &source)?;
+    let program = loader::load(&path, &source, file)?;
 
     // a real binary sees its own path as argv[0]
     let mut args = vec![file.to_string()];
@@ -173,7 +168,7 @@ fn eval(code: &str, script_args: &[String]) -> Result<()> {
     };
     // no file, so lookups use the working directory
     let dir = env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
-    let program = loader::load(&dir.join("-e.rs"), &source)?;
+    let program = loader::load(&dir.join("-e.rs"), &source, "-e.rs")?;
 
     let mut args = vec!["-e".to_string()];
     args.extend(script_args.iter().cloned());
@@ -198,7 +193,7 @@ fn build_run(file: &str, script_args: &[String]) -> Result<()> {
         .canonicalize()
         .unwrap_or_else(|_| Path::new(file).to_path_buf());
     let source = fs::read_to_string(&path).map_err(|e| anyhow!("cannot read {file}: {e}"))?;
-    let program = loader::load(&path, &source)?;
+    let program = loader::load(&path, &source, file)?;
 
     let bin = checker::build(&path, &program.files, &program.crate_deps)?;
     let status = Command::new(&bin)

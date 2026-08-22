@@ -1,10 +1,6 @@
 //! The `Op` set, the `Chunk` a function compiles to and the struct shapes it builds.
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU8;
-
-use parking_lot::Mutex;
 
 use super::{
     BinKind, CapSource, Const, DefaultIr, EnumVariant, FmtSpec, MacroKind, Member, MethodName,
@@ -85,14 +81,33 @@ pub enum Op {
         a: Reg,
         op: UnKind,
     },
+    /// `Bin` where the inference pass typed both sides as the same integer width. Runs the
+    /// width natively, falls back to `Bin` when a value is not what the pass said.
+    BinInt {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+        op: BinKind,
+        w: IntWidth,
+    },
+    BinIntImm {
+        dst: Reg,
+        a: Reg,
+        imm: i64,
+        op: BinKind,
+        w: IntWidth,
+    },
+    /// `Bin` on 2 floats of the same precision
+    BinFloat {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+        op: BinKind,
+        f32: bool,
+    },
 
     Jump {
         to: u32,
-    },
-    /// Carries the backward jump of the loop, so the while plan can take over at loop entry
-    /// instead of after the first generic iteration.
-    LoopHead {
-        jump: u32,
     },
     JumpIfFalse {
         cond: Reg,
@@ -114,6 +129,21 @@ pub enum Op {
         a: Reg,
         imm: i64,
         op: BinKind,
+        to: u32,
+    },
+    /// `CmpJump` on 2 integers of the same width
+    CmpJumpInt {
+        a: Reg,
+        b: Reg,
+        op: BinKind,
+        w: IntWidth,
+        to: u32,
+    },
+    CmpJumpIntImm {
+        a: Reg,
+        imm: i64,
+        op: BinKind,
+        w: IntWidth,
         to: u32,
     },
 
@@ -188,9 +218,12 @@ pub enum Op {
         end: Reg,
         inclusive: bool,
     },
+    /// `owned` means the loop consumed its source, so the iterator takes the items and drops
+    /// what a `break` leaves behind.
     IterInit {
         dst: Reg,
         src: Reg,
+        owned: bool,
     },
     /// jumps to `to` when exhausted
     ForNext {
@@ -261,32 +294,24 @@ pub enum Op {
         val: Reg,
     },
 
-    /// split from sharing before a mutation, see `Value::make_unique`
-    UniqueReg {
-        reg: Reg,
-    },
-    /// Load the field into `dst` still sharing the storage of `base`, so a mutation lands in the
-    /// field. `base` must already be unique.
-    UniqueField {
+    /// A value flowing into an owned position, a `let`, a by value argument, a constructor field,
+    /// a return. Compile time only. The liveness pass turns it into `Take` when `root` is dead
+    /// after this op, which is a move, and into `Copy` when `root` is still read, which `rustc`
+    /// only accepts for a `Copy` type. `root` is `NO_ROOT` for a read with no local behind it.
+    Own {
         dst: Reg,
-        base: Reg,
-        member: u16,
+        src: Reg,
+        root: Reg,
     },
-    /// `UniqueField` for an element
-    UniqueIndex {
+    /// a move, `src` is cleared
+    Take {
         dst: Reg,
-        base: Reg,
-        key: Reg,
+        src: Reg,
     },
-    /// `UniqueField` for the cell of a promoted local
-    UniqueCell {
+    /// a deep copy of a composite, see `Value::deep_clone`
+    Copy {
         dst: Reg,
-        cell: Reg,
-    },
-    /// `UniqueCell` for a captured variable
-    UniqueUpvalue {
-        dst: Reg,
-        idx: u16,
+        src: Reg,
     },
     /// `&mut base[key]` as a real reference value
     RefIndex {
@@ -318,11 +343,6 @@ pub enum Op {
     /// `list` indexes `drop_lists`. Only emitted when the program has a `Drop` impl.
     DropScope {
         list: u16,
-    },
-    /// After a by value argument copy, so the guard drops where the move sent it. `Drop` types are
-    /// never `Copy`, so the checker rules out a later use.
-    MoveOut {
-        src: Reg,
     },
 
     /// `conv` indexes `try_targets` with the error type of the function, `NO_CONV` when the error
@@ -391,6 +411,8 @@ pub struct Chunk {
     pub code: Vec<Op>,
     /// parallel to `code`, zero means unknown
     pub lines: Vec<u32>,
+    /// parallel to `code`, 1 based like `rustc`, zero means unknown
+    pub cols: Vec<u32>,
     /// shown in error traces
     pub file: Arc<str>,
     pub num_regs: usize,
@@ -418,22 +440,18 @@ pub struct Chunk {
     pub names: Vec<MethodName>,
     pub children: Vec<Arc<Chunk>>,
     pub child_caps: Vec<Vec<CapSource>>,
+    /// Parallel to `child_caps`. True where a `move` closure takes the local, because the local
+    /// is dead after the closure is built. False shares the handle, or copies for a `move`.
+    pub child_moves: Vec<Arc<[bool]>>,
     /// to bind the turbofish type args of a caller
     pub generics: Vec<Arc<str>>,
     pub drop_lists: Vec<Arc<[Reg]>>,
+    /// Every register a `DropScope` can drop, highest first. Unwinding drops these and nothing
+    /// else, a temporary may hold a borrowed handle.
+    pub droppable: Arc<[Reg]>,
     pub call_type_args: Vec<Arc<[TypeIr]>>,
     /// A forwarder's arity is a guess, a call with a different count rebuilds it.
     pub path_forwarder: bool,
-    /// Keyed by `ForNext` op index, built on first entry. `None` means the loop doesn't qualify.
-    pub loop_plans: Mutex<HashMap<usize, Option<Arc<crate::interpreter::scalar_loop::LoopPlan>>>>,
-    /// keyed by the closing `Jump` op index
-    pub while_plans: Mutex<HashMap<usize, Arc<crate::interpreter::scalar_while::WhilePlan>>>,
-    /// The backward jump of a rejected loop runs every iteration, so this must be an atomic load
-    /// and not a mutex probe.
-    pub while_rejected: Vec<AtomicU8>,
-    pub fn_plan: Mutex<Option<Arc<crate::interpreter::scalar_fn::FnPlan>>>,
-    /// same reason as `while_rejected`
-    pub fn_rejected: AtomicU8,
 }
 
 impl Chunk {
@@ -441,6 +459,7 @@ impl Chunk {
         Chunk {
             code: Vec::new(),
             lines: Vec::new(),
+            cols: Vec::new(),
             file: Arc::from(""),
             num_regs: 0,
             num_params: 0,
@@ -462,15 +481,12 @@ impl Chunk {
             names: Vec::new(),
             children: Vec::new(),
             child_caps: Vec::new(),
+            child_moves: Vec::new(),
             generics: Vec::new(),
             drop_lists: Vec::new(),
+            droppable: Arc::from(Vec::new()),
             call_type_args: Vec::new(),
             path_forwarder: false,
-            loop_plans: Mutex::new(HashMap::new()),
-            while_plans: Mutex::new(HashMap::new()),
-            while_rejected: Vec::new(),
-            fn_plan: Mutex::new(None),
-            fn_rejected: AtomicU8::new(0),
         }
     }
 }

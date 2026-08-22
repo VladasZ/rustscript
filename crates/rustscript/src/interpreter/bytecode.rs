@@ -30,6 +30,9 @@ pub const NO_CONV: u16 = u16::MAX;
 
 pub const DISCARD: Reg = Reg::MAX;
 
+/// An `Own` whose value has no local behind it, a deref or a constant. Always copied.
+pub const NO_ROOT: Reg = Reg::MAX;
+
 /// Separate from `syn` so the hot loop carries no parse tree types.
 #[derive(Clone, Copy, Debug)]
 pub enum BinKind {
@@ -284,14 +287,6 @@ impl ScalarTy {
             })
             .nth(n)
             .and_then(Self::lower)
-    }
-
-    /// What one more unwrap gives.
-    pub fn payload(&self) -> Option<&ScalarTy> {
-        match self {
-            Self::Opt(inner) | Self::List(inner) => Some(inner),
-            _ => None,
-        }
     }
 }
 

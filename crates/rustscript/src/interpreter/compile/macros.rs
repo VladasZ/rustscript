@@ -8,11 +8,10 @@ use syn::{Expr, Lit};
 
 use crate::interpreter::bytecode::{BinKind, Const, FmtSpec, MacroKind, Op, PathRef, Reg};
 
-use super::walks::{takes_numeric_hint, unconstrained_int};
-use super::{
-    Compiler, NumericTy, inline_holes, numeric_target, parse_exprs, parse_matches, parse_vec_repeat,
-};
-use crate::interpreter::numeric::IntWidth;
+use std::rc::Rc;
+
+use super::infer::MacroBody;
+use super::{Compiler, inline_holes, parse_exprs, parse_matches, parse_vec_repeat};
 
 impl Compiler<'_> {
     pub(super) fn compile_macro(&mut self, mac: &syn::Macro, dst: Reg) -> Result<()> {
@@ -160,10 +159,18 @@ impl Compiler<'_> {
     }
 
     fn compile_matches_macro(&mut self, dst: Reg, mac: &syn::Macro) -> Result<()> {
-        let (expr, pat, guard) = parse_matches(mac)?;
-        let scrut = self.compile_expr(&expr)?;
+        let body = if let Some(body) = self.types.macro_body(mac) {
+            body
+        } else {
+            Rc::new(MacroBody::Matches(Box::new(parse_matches(mac)?)))
+        };
+        let MacroBody::Matches(parts) = &*body else {
+            bail!("matches! body is not a match");
+        };
+        let (expr, pat, guard) = &**parts;
+        let scrut = self.compile_expr(expr)?;
         self.push_scope();
-        let pidx = self.pattern_info(&pat)?;
+        let pidx = self.pattern_info(pat)?;
         self.emit(Op::TestBind {
             val: scrut,
             pat: pidx,
@@ -172,7 +179,7 @@ impl Compiler<'_> {
         if let Some(g) = guard {
             let skip = self.here();
             self.emit(Op::JumpIfFalse { cond: dst, to: 0 });
-            self.compile_into(dst, &g)?;
+            self.compile_into(dst, g)?;
             let end = self.mark()?;
             self.patch_jump(skip, end);
         }
@@ -238,23 +245,31 @@ impl Compiler<'_> {
         Ok(())
     }
 
+    /// The body the inference pass parsed, so the nodes it typed are the nodes lowered here.
+    pub(super) fn macro_exprs(&self, mac: &syn::Macro) -> Result<Rc<MacroBody>> {
+        if let Some(body) = self.types.macro_body(mac) {
+            return Ok(body);
+        }
+        if let Ok(pair) = mac.parse_body_with(parse_vec_repeat)
+            && mac.path.is_ident("vec")
+        {
+            return Ok(Rc::new(MacroBody::Repeat(Box::new(pair))));
+        }
+        Ok(Rc::new(MacroBody::Exprs(parse_exprs(mac)?)))
+    }
+
     pub(super) fn compile_vec_macro(&mut self, dst: Reg, mac: &syn::Macro) -> Result<()> {
-        let elem_ty = self.vec_hints.remove(&std::ptr::from_ref(mac));
-        if let Ok(rep) = mac.parse_body_with(parse_vec_repeat) {
-            if let Some(ty) = &elem_ty {
-                self.offer_literal_hints(ty, &rep.0);
+        let body = self.macro_exprs(mac)?;
+        let exprs = match &*body {
+            MacroBody::Repeat(pair) => {
+                let val = self.compile_expr(&pair.0)?;
+                let count = self.compile_expr(&pair.1)?;
+                self.emit(Op::MakeArrayRepeat { dst, val, count });
+                return Ok(());
             }
-            let val = self.compile_expr(&rep.0)?;
-            let count = self.compile_expr(&rep.1)?;
-            self.emit(Op::MakeArrayRepeat { dst, val, count });
-            return Ok(());
-        }
-        let exprs = parse_exprs(mac)?;
-        if let Some(ty) = &elem_ty {
-            for expr in &exprs {
-                self.offer_literal_hints(ty, expr);
-            }
-        }
+            MacroBody::Exprs(exprs) => exprs,
+            MacroBody::Matches(..) => bail!("vec! body is not a list"),
+        };
         let base = self.compile_args(exprs.iter())?;
         self.emit(Op::MakeVec {
             dst,
@@ -276,7 +291,10 @@ impl Compiler<'_> {
     }
 
     pub(super) fn build_fmt_spec(&mut self, mac: &syn::Macro) -> Result<u16> {
-        let args = mac.parse_body_with(Punctuated::<Expr, syn::Token![,]>::parse_terminated)?;
+        let body = self.macro_exprs(mac)?;
+        let MacroBody::Exprs(args) = &*body else {
+            bail!("format arguments are not a list");
+        };
         self.build_fmt_spec_from(args.iter(), false)
     }
 
@@ -306,17 +324,6 @@ impl Compiler<'_> {
                 }
                 other => other,
             };
-            // a bare literal argument is `i32`, so `{:x}` of a negative one shows 8 digits
-            let target = if unconstrained_int(value) {
-                Some(NumericTy::Int(IntWidth::I32))
-            } else {
-                self.stated_ty(value).as_ref().and_then(numeric_target)
-            };
-            if let Some(target) = target
-                && takes_numeric_hint(value)
-            {
-                self.numeric_hints.insert(std::ptr::from_ref(value), target);
-            }
             let r = self.compile_expr(value)?;
             if let Expr::Assign(a) = arg
                 && let Expr::Path(p) = &*a.left

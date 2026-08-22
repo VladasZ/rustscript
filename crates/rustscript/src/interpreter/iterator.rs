@@ -98,6 +98,10 @@ pub enum IteratorState {
         source: Handle,
         remaining: usize,
     },
+    /// `cloned` and `copied`, each item is a deep copy
+    Cloned {
+        source: Handle,
+    },
     Skip {
         source: Handle,
         remaining: usize,
@@ -136,6 +140,7 @@ enum Step {
     /// the bool remembers that the left side returned `None`, so it is never asked again
     Chain(Handle, Handle, bool),
     Take(Handle),
+    Cloned(Handle),
     Skip(Handle, usize),
     Stride(Handle, usize),
     TakeWhile(Handle, Arc<ClosureData>),
@@ -267,6 +272,14 @@ pub(super) enum FastNext {
 impl IteratorState {
     /// Produced in place for the simple sources, so a tight loop skips the full `iterator_next`
     /// machinery.
+    /// The items an owning iterator still holds, for its drop. A borrowing iterator holds nothing.
+    pub(super) fn take_remaining(&mut self) -> Vec<Value> {
+        match self {
+            IteratorState::Owned { values, index } => values.drain(*index..).collect(),
+            _ => Vec::new(),
+        }
+    }
+
     pub(super) fn fast_next(&mut self) -> FastNext {
         FastNext::Ready(match self {
             IteratorState::Range {
@@ -384,6 +397,7 @@ impl IteratorState {
                 right,
                 left_done,
             } => Step::Chain(left.clone(), right.clone(), *left_done),
+            IteratorState::Cloned { source } => Step::Cloned(source.clone()),
             IteratorState::Take { source, remaining } => {
                 if *remaining == 0 {
                     Step::Ready(None)

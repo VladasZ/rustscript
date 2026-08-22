@@ -30,15 +30,6 @@ mod ratatui_render;
 mod regex_bridge;
 mod resolver;
 mod rs_str;
-mod scalar;
-mod scalar_chain;
-mod scalar_fn;
-mod scalar_fold;
-mod scalar_for;
-mod scalar_loop;
-mod scalar_reads;
-mod scalar_val;
-mod scalar_while;
 mod serde_attrs;
 mod service_bridge;
 mod shared;
@@ -231,51 +222,6 @@ fn collect_fn_signatures(
         .filter_map(|(name, sig)| sig.map(|sig| (name, sig)))
         .collect()
 }
-
-fn collect_fn_return_types(pending_fns: &[(usize, Rc<syn::ItemFn>)]) -> HashMap<String, syn::Type> {
-    let mut seen: HashMap<String, Option<syn::Type>> = HashMap::default();
-    for (_, f) in pending_fns {
-        let ty = match &f.sig.output {
-            syn::ReturnType::Type(_, ty) => Some((**ty).clone()),
-            syn::ReturnType::Default => None,
-        };
-        seen.entry(f.sig.ident.to_string())
-            .and_modify(|known| {
-                if *known != ty {
-                    *known = None;
-                }
-            })
-            .or_insert(ty);
-    }
-    seen.into_iter()
-        .filter_map(|(name, ty)| ty.map(|t| (name, t)))
-        .collect()
-}
-
-fn collect_fn_returns(
-    pending_fns: &[(usize, Rc<syn::ItemFn>)],
-) -> HashMap<String, bytecode::ScalarTy> {
-    let mut seen_returns: HashMap<String, Option<bytecode::ScalarTy>> = HashMap::default();
-    for (_, f) in pending_fns {
-        let lowered = match &f.sig.output {
-            syn::ReturnType::Type(_, ty) => bytecode::ScalarTy::lower(ty),
-            syn::ReturnType::Default => None,
-        };
-        seen_returns
-            .entry(f.sig.ident.to_string())
-            .and_modify(|known| {
-                if *known != lowered {
-                    *known = None;
-                }
-            })
-            .or_insert(lowered);
-    }
-    seen_returns
-        .into_iter()
-        .filter_map(|(name, scalar)| scalar.map(|s| (name, s)))
-        .collect()
-}
-
 fn build_fn_index(resolver: &Resolver) -> HashMap<String, u32> {
     let mut fn_index = HashMap::default();
     for syms in &resolver.modules {
@@ -312,12 +258,15 @@ impl Interp {
         let pending_methods =
             collect_impl_items(&mut resolver, &pending_impls, &traits, &mut pending_consts)?;
 
-        let fn_returns = collect_fn_returns(&pending_fns);
-        let fn_return_types = collect_fn_return_types(&pending_fns);
         let fn_signatures = collect_fn_signatures(&pending_fns);
 
         let (has_drop, mut_methods) = collect_mut_methods(&pending_methods);
         let (impl_methods, method_atoms) = impl_name_tables(&pending_methods);
+        let impl_sigs: HashMap<(String, String), syn::Signature> = pending_methods
+            .iter()
+            .map(|(ty, name, _, f)| ((ty.clone(), name.clone()), f.sig.clone()))
+            .collect();
+        let const_types = collect_const_types(modules, &resolver);
 
         let mut functions = Vec::with_capacity(pending_fns.len());
         for (m, f) in &pending_fns {
@@ -327,12 +276,12 @@ impl Interp {
                 file: modules[*m].file.clone(),
                 async_mode,
                 impl_type: None,
-                fn_returns: &fn_returns,
-                fn_return_types: &fn_return_types,
                 fn_signatures: &fn_signatures,
                 mut_methods: &mut_methods,
                 impl_methods: &impl_methods,
                 method_atoms: &method_atoms,
+                impl_sigs: &impl_sigs,
+                const_types: &const_types,
                 has_drop,
             };
             let mut c = Compiler::new(&ctx);
@@ -346,12 +295,12 @@ impl Interp {
                 file: modules[*m].file.clone(),
                 async_mode,
                 impl_type: Some(ty),
-                fn_returns: &fn_returns,
-                fn_return_types: &fn_return_types,
                 fn_signatures: &fn_signatures,
                 mut_methods: &mut_methods,
                 impl_methods: &impl_methods,
                 method_atoms: &method_atoms,
+                impl_sigs: &impl_sigs,
+                const_types: &const_types,
                 has_drop,
             };
             let mut c = Compiler::new(&ctx);
@@ -370,12 +319,12 @@ impl Interp {
                 file: modules[*m].file.clone(),
                 async_mode,
                 impl_type: None,
-                fn_returns: &fn_returns,
-                fn_return_types: &fn_return_types,
                 fn_signatures: &fn_signatures,
                 mut_methods: &mut_methods,
                 impl_methods: &impl_methods,
                 method_atoms: &method_atoms,
+                impl_sigs: &impl_sigs,
+                const_types: &const_types,
                 has_drop,
             };
             let mut c = Compiler::new(&ctx);
@@ -828,6 +777,38 @@ fn collect_impl_items(
         }
     }
     Ok(pending_methods)
+}
+
+/// The declared type of every `const` and `static`, by name, and `Type::NAME` for an impl const.
+fn collect_const_types(modules: &[ModuleSrc], resolver: &Resolver) -> HashMap<String, syn::Type> {
+    let mut out = HashMap::new();
+    for (m, src) in modules.iter().enumerate() {
+        for item in &src.items {
+            match item {
+                Item::Const(c) => {
+                    out.insert(c.ident.to_string(), (*c.ty).clone());
+                }
+                Item::Static(s) => {
+                    out.insert(s.ident.to_string(), (*s.ty).clone());
+                }
+                Item::Impl(imp) => {
+                    let Some(ty) = impl_target(resolver, m, &imp.self_ty) else {
+                        continue;
+                    };
+                    for it in &imp.items {
+                        if let syn::ImplItem::Const(c) = it {
+                            out.insert(
+                                format!("{}::{}", resolver::bare(&ty), c.ident),
+                                c.ty.clone(),
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
 }
 
 fn impl_target(resolver: &Resolver, m: usize, ty: &syn::Type) -> Option<String> {
