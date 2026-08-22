@@ -1,11 +1,5 @@
-//! The async reqwest bridge. It presents the same
-//! script surface for both flavors, `reqwest::get`,
-//! `Client`, request builders, and responses, but the network calls return
-//! futures so `.send().await` and `.text().await` drive on the tokio runtime.
-//!
-//! The request and response are modeled as plain structs. Only `.send()`,
-//! `.text()`, and `.json()` yield futures, because those are the awaited
-//! points in async code.
+//! The reqwest bridge, blocking and async. Only `.send()`, `.text()` and
+//! `.json()` yield futures.
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -21,8 +15,7 @@ use super::native::Native;
 use super::std_bridge::duration_from_value;
 use super::value::{StructData, Value};
 
-/// A shared async client for the `reqwest::get` free function, so a script that
-/// fires many one-off gets reuses one connection pool.
+/// So many one off gets reuse one connection pool.
 fn default_client() -> Client {
     static C: OnceLock<Client> = OnceLock::new();
     C.get_or_init(Client::new).clone()
@@ -54,9 +47,8 @@ fn build_blocking_client(
         .map_err(|e| anyhow!("http client build failed: {e}"))
 }
 
-/// A shared client for the `reqwest::blocking::get` free function, so a script
-/// that fires many one-off gets does not spin up a runtime thread per call.
-/// Safe because script code always runs on blocking threads.
+/// So many one off gets do not spin up a runtime thread per call. Safe
+/// because script code always runs on blocking threads.
 fn default_blocking_client() -> Result<reqwest::blocking::Client> {
     static C: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     if let Some(c) = C.get() {
@@ -78,13 +70,10 @@ fn blocking_client_value(c: reqwest::blocking::Client) -> Value {
 
 // -- dispatch of `reqwest::..` path calls ----------------------------------
 
-/// The `reqwest` path calls. Both APIs live here: the blocking one for plain
-/// scripts and the async one whose futures drive on the runtime under
-/// `.await`.
+/// Both the blocking and the async API.
 pub(super) fn reqwest_call(id: PathId, args: &[Value]) -> Result<Value> {
     Ok(match id {
-        // A redirect policy marker, built by `reqwest::redirect::Policy::none()`
-        // or `::limited(n)`.
+        // A redirect policy marker.
         PathId::RedirectPolicyNone => {
             Value::struct_of("RedirectPolicy", [("kind".into(), Value::str("none"))])
         }
@@ -101,7 +90,6 @@ pub(super) fn reqwest_call(id: PathId, args: &[Value]) -> Result<Value> {
         PathId::ReqwestClientNew => client_value(Client::new()),
         PathId::ReqwestBlockingClientBuilder => blocking_builder_value(),
         PathId::ReqwestClientBuilder => builder_value(),
-        // The only free function either API exposes is `get`.
         PathId::ReqwestBlockingGet => {
             let url = args.first().map(Value::display).unwrap_or_default();
             run_blocking(&request_struct("GET", &url, Value::Unit))
@@ -161,8 +149,7 @@ fn blocking_builder_value() -> Value {
     )
 }
 
-// Read the redirect policy a builder stashed via `.redirect(..)`. The policy
-// marker is built by the `reqwest::redirect::Policy::..` path calls above.
+// The redirect policy a builder stashed via `.redirect(..)`.
 fn redirect_policy(s: &StructData) -> Option<reqwest::redirect::Policy> {
     let Some(Value::Struct(rp)) = s.get("redirect") else {
         return None;
@@ -185,8 +172,7 @@ fn redirect_policy(s: &StructData) -> Option<reqwest::redirect::Policy> {
 
 // -- method dispatch -------------------------------------------------------
 
-/// Route a method on one of the http struct types. Returns `None` when the
-/// receiver is not an http type, so the caller can try other dispatch.
+/// `None` when the receiver is not an http type.
 pub(super) fn http_method(
     recv: &Value,
     method: &MethodName,
@@ -347,8 +333,7 @@ fn request_method(s: &Arc<StructData>, method: &MethodName, args: &[Value]) -> R
             s.set("timeout", arg(args, 0)?);
             Ok(this())
         }
-        // A request built from a blocking client runs at once; one built from
-        // an async client hands back a future for `.await`.
+        // A blocking client runs at once, an async one hands back a future.
         BuiltinId::Send => {
             let blocking = matches!(
                 s.get("client"),
@@ -407,15 +392,15 @@ fn execute_blocking(s: &StructData) -> Result<Value> {
         .iter()
         .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
         .collect();
-    // Taken before the body is read, because reading it consumes the response.
+    // Taken before the body is read, which consumes the response.
     let length = resp.content_length();
     let text = resp.text()?;
     Ok(Value::struct_of(
         "ReqwestResponse",
         [
             ("status".into(), Value::Int(i64::from(status))),
-            // A blocking body is already decoded text, so `text` and `json`
-            // answer directly instead of handing back a future.
+            // A blocking body is already decoded, so `text` and `json` answer
+            // directly.
             ("body".into(), Value::str(text)),
             ("headers".into(), header_pairs(headers)),
             (
@@ -438,7 +423,7 @@ fn add_header(s: &StructData, k: &str, v: &str) {
 
 // -- execution -------------------------------------------------------------
 
-/// The owned request plan handed to the send future, free of any `!Send` value.
+/// Free of any `!Send` value.
 struct Plan {
     method: Method,
     url: String,
@@ -506,12 +491,11 @@ async fn run_plan(plan: Plan) -> Result<Value> {
         .iter()
         .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
         .collect();
-    // Taken before the body is read, because reading it consumes the response.
-    // A speed test counts these instead of the decoded text, whose length is
-    // not the number of bytes that crossed the wire.
+    // Taken before the body is read, which consumes the response. A speed
+    // test counts these, not the decoded text.
     let length = resp.content_length();
-    // Kept in wire form. Decoding happens in `text` and `json`, so a script
-    // that only reads `content_length` never pays for a UTF-8 conversion.
+    // Kept in wire form, so `content_length` never pays for a UTF-8
+    // conversion.
     let raw = resp.bytes().await?.to_vec();
     Ok(Value::struct_of(
         "ReqwestResponse",
@@ -556,7 +540,6 @@ fn header_pairs(pairs: Vec<(String, String)>) -> Value {
     )
 }
 
-/// A Duration field or a `Some(Duration)` wrapper as the real std value.
 fn duration_field(s: &StructData, field: &str) -> Option<Duration> {
     let v = s.get(field)?;
     if let Value::Enum { data, .. } = &v {
@@ -570,9 +553,7 @@ fn duration_field(s: &StructData, field: &str) -> Option<Duration> {
 fn response_method(s: &Arc<StructData>, method: &MethodName) -> Result<Value> {
     let this = || Value::Struct(s.clone());
     let body = || body_bytes(s);
-    // A blocking response holds its body as decoded text, so `text` and
-    // `json` answer directly. An async response holds wire bytes and hands
-    // back futures for `.await`.
+    // A blocking response holds decoded text, an async one wire bytes.
     let is_blocking = matches!(s.get("body"), Some(Value::Str(_)));
     Ok(match method.id {
         BuiltinId::Status => Value::struct_of(
@@ -614,7 +595,6 @@ fn response_method(s: &Arc<StructData>, method: &MethodName) -> Result<Value> {
     })
 }
 
-/// The undecoded body of a response value.
 fn body_bytes(s: &StructData) -> Vec<u8> {
     match s.get("body") {
         Some(Value::Native(n)) => match &*n.lock() {
@@ -695,10 +675,8 @@ fn status_method(s: &StructData, method: &MethodName) -> Value {
 mod tests {
     use super::*;
 
-    /// A json null from a response body has to be the same None the two json
-    /// parsers make. This one answered Unit, and a `Value::Null` pattern only
-    /// matches None, so the same null matched or did not depending on whether
-    /// it came from `from_str` or from `resp.json()`.
+    /// A json null from a response once answered Unit, so `Value::Null`
+    /// matched or not depending on where the null came from.
     #[test]
     fn a_response_null_is_the_none_the_parsers_make() {
         assert!(json_to_pvalue(serde_json::Value::Null).is_none_value());

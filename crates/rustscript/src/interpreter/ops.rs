@@ -1,4 +1,4 @@
-//! Operators for the VM. Pattern tests and bindings live in `pattern.rs`.
+//! Operators for the VM.
 
 use num_traits::AsPrimitive;
 use std::cmp::Ordering;
@@ -66,14 +66,11 @@ pub(super) fn cmp_test_imm(op: BinKind, l: &Value, imm: i64) -> Result<bool> {
 }
 
 fn arith(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
-    // Same-type numbers first, they dominate hot loops. The remaining
-    // patterns are disjoint from these two, so the order change is safe.
+    // Same type numbers first, they dominate hot loops.
     if let (Value::Int(a), Value::Int(b)) = (l, r) {
         return Ok(Value::Int(i64_arith(op, *a, *b)?));
     }
-    // A 64-bit unsigned pair, or one with a bare literal beside it, computes
-    // natively instead of through the i128 pipeline. Counting and checksum
-    // loops on `u64` and `usize` live here.
+    // A 64 bit unsigned pair computes natively instead of through i128.
     if let Value::IntW(a, wa @ (IntWidth::U64 | IntWidth::USize)) = l {
         let rhs = match r {
             Value::IntW(b, wb) if wa == wb => Some(b.cast_unsigned()),
@@ -95,8 +92,7 @@ fn arith(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
         out.push_str(b);
         return Ok(Value::str(out));
     }
-    // Only a struct can be a Duration, so the discriminant check keeps the
-    // probe off every numeric op.
+    // The discriminant check keeps the Duration probe off every numeric op.
     if matches!(l, Value::Struct(_))
         && let (Some(a), Some(b)) = (duration_from_value(l), duration_from_value(r))
     {
@@ -119,8 +115,8 @@ fn arith(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
     }
 }
 
-/// An untagged f64 next to an f32 is a bare
-/// literal that is f32 in the source types.
+/// An untagged f64 next to an f32 is a bare literal that is f32 in the
+/// source.
 enum FloatPair {
     F64(f64, f64),
     F32(f32, f32),
@@ -166,8 +162,7 @@ fn bit_i64(op: BinKind) -> fn(i64, i64) -> i64 {
     }
 }
 
-/// `<<` and `>>`, the amount only supplies the count and the result keeps
-/// the shifted side's width.
+/// The result keeps the shifted side's width.
 fn shift_bin(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
     if let Value::Big(a, w) = l {
         let Some((amount, _)) = r.int_parts() else {
@@ -185,9 +180,8 @@ pub(super) fn compare_values(l: &Value, r: &Value) -> Result<Ordering> {
     partial_compare(l, r)?.ok_or_else(|| anyhow!("cannot order NaN"))
 }
 
-/// `PartialOrd` semantics: a NaN operand makes every ordered
-/// comparison false, exactly like compiled Rust. Contexts that need a total
-/// order, sorting for example, go through `compare_values` and reject NaN.
+/// `PartialOrd` semantics, NaN makes every comparison false. Sorting goes
+/// through `compare_values` and rejects NaN.
 fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
     Ok(match (l, r) {
         (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
@@ -199,8 +193,7 @@ fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
         (Value::Big(..), Value::Int(_)) | (Value::Int(_), Value::Big(..)) => {
             match (l.int_parts(), r.int_parts()) {
                 (Some((a, _)), Some((b, _))) => Some(a.cmp(&b)),
-                // The big side is a u128 past the i128 range, larger than
-                // any i64 the other side can hold.
+                // A u128 past the i128 range is larger than any i64.
                 (None, _) => Some(Ordering::Greater),
                 (_, None) => Some(Ordering::Less),
             }
@@ -219,13 +212,10 @@ fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
         (Value::Str(a), Value::Str(b)) => Some(a.as_ref().cmp(b.as_ref())),
         (Value::Char(a), Value::Char(b)) => Some(a.cmp(b)),
         (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
-        // Sequences order lexicographically, the first differing element
-        // deciding and a prefix ordering before what extends it. Tuples order
-        // the same way, field by field.
+        // Sequences and tuples order lexicographically.
         (Value::Vec(a), Value::Vec(b)) | (Value::Tuple(a), Value::Tuple(b)) => {
-            // Two separate statements on purpose. In one statement both lock
-            // guards live to the end of it, so ordering a value against its
-            // own clone locks the same mutex twice and deadlocks.
+            // 2 statements on purpose, in one both guards live to the end and
+            // a value against its own clone deadlocks.
             let a = a.lock().clone();
             let b = b.lock().clone();
             let mut order = None;
@@ -243,9 +233,7 @@ fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
                 None => Some(a.len().cmp(&b.len())),
             }
         }
-        // `Option` and `Result` derive their order from the variant order in
-        // the declaration, so `None` sorts before any `Some` and `Ok` before
-        // any `Err`, and two of the same variant compare by payload.
+        // `None` sorts before `Some` and `Ok` before `Err`.
         (
             Value::Enum {
                 def: left_def,
@@ -260,8 +248,8 @@ fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
         ) if EnumDef::same(left_def, right_def) => {
             match left_variant.cmp(right_variant) {
                 Ordering::Equal => {
-                    // Snapshots, not held guards: comparing a value with its
-                    // own clone sees the same storage on both sides.
+                    // Snapshots, a value against its own clone sees the same
+                    // storage on both sides.
                     let left_data = left_data.lock().clone();
                     let right_data = right_data.lock().clone();
                     let mut order = None;
@@ -282,8 +270,7 @@ fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
                 decided => Some(decided),
             }
         }
-        // A derived `Ord` compares the fields in declaration order, which is
-        // the order a literal's values keep, see `compile_struct_literal`.
+        // Declaration order, see `compile_struct_literal`.
         (Value::Struct(a), Value::Struct(b)) if a.name() == b.name() => {
             let a = a.values.lock().clone();
             let b = b.values.lock().clone();
@@ -309,8 +296,7 @@ fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
 fn to_float(v: &Value) -> Result<f64> {
     match v {
         Value::Int(i) => Ok(AsPrimitive::<f64>::as_(*i)),
-        // A width carrying integer is still a number. Leaving these out made
-        // a plain `u8` or `i16` operand abort with a type error.
+        // Leaving the tagged widths out once made a `u8` operand abort.
         Value::IntW(i, width) => Ok(AsPrimitive::<f64>::as_(width.decode(*i))),
         Value::Big(i, width) => Ok(if *width == super::numeric::IntWidth::U128 {
             AsPrimitive::<f64>::as_(i.cast_unsigned())
@@ -341,7 +327,6 @@ pub(super) fn apply_un(op: UnKind, v: &Value) -> Result<Value> {
     })
 }
 
-/// An integer operand, for range bounds and sequence indexes.
 pub(super) fn int_of(v: &Value) -> Result<i64> {
     match v {
         Value::Int(i) => Ok(*i),
@@ -356,9 +341,8 @@ pub(super) fn int_of(v: &Value) -> Result<i64> {
     }
 }
 
-/// A sequence index as the unsigned value the source typed it as. A `u64`
-/// past `i64::MAX` is a valid index in real Rust and reports out of bounds
-/// with its full value, not a conversion failure.
+/// A `u64` past `i64::MAX` reports out of bounds with its full value, not a
+/// conversion failure.
 fn index_of(key: &Value) -> Result<u128> {
     if let Value::Big(bits, super::numeric::IntWidth::U128) = key {
         return Ok(bits.cast_unsigned());
@@ -369,7 +353,6 @@ fn index_of(key: &Value) -> Result<u128> {
     u128::try_from(n).map_err(|_| anyhow!("negative index"))
 }
 
-/// The shared 128-bit width of two operands when either is a `Value::Big`.
 /// The untagged side is a bare literal adopting the big side's width.
 fn big_operands(l: &Value, r: &Value) -> Option<super::numeric::IntWidth> {
     match (l, r) {
@@ -380,8 +363,6 @@ fn big_operands(l: &Value, r: &Value) -> Option<super::numeric::IntWidth> {
     }
 }
 
-/// An operand's raw 128-bit image for the big paths: a `Big` as stored, an
-/// untagged literal widened.
 fn big_bits(v: &Value) -> i128 {
     match v {
         Value::Big(bits, _) => *bits,
@@ -437,15 +418,13 @@ pub(super) fn index(recv: &Value, key: &Value) -> Result<Value> {
                     )
                 })
         }
-        // `caps[1]` and `caps["name"]` on a capture set.
         Value::Native(h) => super::regex_bridge::capture_index(h, key),
         _ => bail!("cannot index {}", recv.type_name()),
     }
 }
 
-/// A range key resolved against a length. The messages are the exact texts
-/// debug Rust panics with, checked in declaration order: inverted range
-/// here, out of bounds and a string's char boundary at the use site.
+/// The messages are the exact debug Rust texts. Inverted range here, out of
+/// bounds and char boundary at the use site.
 fn range_bounds(len: usize, start: i64, end: i64, inclusive: bool) -> Result<(usize, usize)> {
     if start < 0 {
         bail!("negative slice start {start}");
@@ -463,7 +442,6 @@ fn range_bounds(len: usize, start: i64, end: i64, inclusive: bool) -> Result<(us
     Ok((usize::try_from(start)?, usize::try_from(end)?))
 }
 
-/// The debug Rust panic text for a byte range off a char boundary.
 fn char_boundary_error(s: &str, a: usize, b: usize) -> anyhow::Error {
     let (side, bad) = if s.is_char_boundary(a) {
         ("end", b)
@@ -511,9 +489,8 @@ fn slice_value(base: &Value, start: i64, end: i64, inclusive: bool) -> Result<Va
     }
 }
 
-/// The writeback of a mutating method called on a string slice, like
-/// `s[2..].make_ascii_uppercase()`. The slice arrived as a copied temporary,
-/// so the mutated bytes are spliced back into the base string here.
+/// The writeback of `s[2..].make_ascii_uppercase()`, the mutated bytes are
+/// spliced back into the base.
 pub(super) fn splice_str(
     s: &str,
     start: i64,
@@ -563,16 +540,13 @@ pub(super) fn set_index(recv: &Value, key: &Value, v: Value) -> Result<()> {
     Ok(())
 }
 
-/// What a `?` does with the value: `Ok` continues with the payload, `Err` is
-/// the early return.
 pub(super) fn eval_try(v: Value) -> Result<Result<Value, Value>> {
     match v {
         Value::Enum { def, variant, data } => match (def.kind, variant) {
             (EnumKind::Result, OK) | (EnumKind::Option, SOME) => Ok(Ok(Value::payload(&data)?)),
             (EnumKind::Result, ERR) => Ok(Err(Value::err(Value::payload(&data)?))),
             (EnumKind::Option, NONE) => Ok(Err(Value::none())),
-            // Any other value acts as its own Some, matching eval_try in
-            // eval.rs, see the comment there.
+            // Any other value acts as its own Some.
             _ => Ok(Ok(Value::Enum { def, variant, data })),
         },
         other => Ok(Ok(other)),

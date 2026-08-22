@@ -1,9 +1,7 @@
 #!/usr/bin/env rust
 
-//! Integer byte conversions. `to_le_bytes` and its siblings write the
-//! receiver's real width, `from_le_bytes` and its siblings read it back, and
-//! every line here is chosen so a wrong byte order or a lost sign prints a
-//! different answer instead of passing quietly.
+//! Every line is chosen so a wrong byte order or a lost sign prints a
+//! different answer.
 
 fn hex(bytes: &[u8]) -> String {
     bytes
@@ -14,8 +12,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn main() {
-    // The same number in both orders. These two lines are reverses of each
-    // other, so swapping the implementations shows up immediately.
+    // These 2 lines are reverses of each other.
     let word: u32 = 0x1234_5678;
     println!("u32 le: {}", hex(&word.to_le_bytes()));
     println!("u32 be: {}", hex(&word.to_be_bytes()));
@@ -26,28 +23,25 @@ fn main() {
     println!("u8  le: {}", hex(&200u8.to_le_bytes()));
     println!("usize: {}", 1usize.to_le_bytes().len());
 
-    // Native order is one of the two above, so it must equal exactly one of
-    // them. Printing which one it matches keeps the line stable on any host.
+    // Printing which order native matches keeps the line stable on any host.
     let native = word.to_ne_bytes();
     println!("u32 ne is le: {}", native == word.to_le_bytes());
     println!("u32 ne is be: {}", native == word.to_be_bytes());
 
-    // A signed value writes two's complement, so the sign lives in the byte
-    // the order puts first.
+    // The sign lives in the byte the order puts first.
     println!("i16 -2 be: {}", hex(&(-2i16).to_be_bytes()));
     println!("i16 -2 le: {}", hex(&(-2i16).to_le_bytes()));
     println!("i32 -1 le: {}", hex(&(-1i32).to_le_bytes()));
     println!("i8 min be: {}", hex(&i8::MIN.to_be_bytes()));
 
-    // Reading the same four bytes back. The order changes the number and the
-    // signedness changes it again, so all four answers differ.
+    // All 4 answers differ.
     let raw = [0x78u8, 0x56, 0x34, 0x12];
     println!("u32 from le: {}", u32::from_le_bytes(raw));
     println!("u32 from be: {}", u32::from_be_bytes(raw));
     println!("i32 from le: {}", i32::from_le_bytes(raw));
     println!("i32 from be: {}", i32::from_be_bytes(raw));
 
-    // The top bit set is where signed and unsigned part ways.
+    // The top bit set.
     let high = [0xffu8, 0xff, 0xff, 0xff];
     println!("u32 all ones: {}", u32::from_le_bytes(high));
     println!("i32 all ones: {}", i32::from_le_bytes(high));
@@ -66,22 +60,20 @@ fn main() {
     );
     println!("isize from be: {}", isize::from_be_bytes([0xff; 8]));
 
-    // A round trip has to land on the value it started from, in either order.
+    // Round trips.
     for value in [0i32, 1i32, -1i32, i32::MIN, i32::MAX, -123_456i32] {
         let there = value.to_be_bytes();
         let back = i32::from_be_bytes(there);
         println!("round {value} -> {} -> {back}", hex(&there));
     }
 
-    // The result keeps the width it was read as, so it still overflows and
-    // wraps where a real value of that type does.
+    // The result keeps the width it was read as.
     let small = u8::from_be_bytes([250]);
     println!("u8 saturating: {}", small.saturating_add(10));
     println!("u8 wrapping: {}", small.wrapping_add(10));
     println!("u8 checked: {:?}", small.checked_add(10));
 
-    // Reading a header out of a byte buffer, the shape the conversions exist
-    // for. The offsets and the widths are what a real BMP header uses.
+    // A real BMP header.
     let header: Vec<u8> = vec![
         0x42, 0x4d, 0x36, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x36, 0x00, 0x00, 0x00, 0x28,
         0x00, 0x00, 0x00, 0x80, 0x02, 0x00, 0x00, 0x9c, 0xff, 0xff, 0xff, 0x01, 0x00, 0x18, 0x00,

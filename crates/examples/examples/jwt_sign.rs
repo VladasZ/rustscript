@@ -1,9 +1,7 @@
 #!/usr/bin/env rust
 
-// Sign an ES256 JWT the way the App Store Connect API wants one. The key is
-// a throwaway P-256 key generated only for this example. The signature part
-// is random per run, so only its length is printed, which keeps the output
-// deterministic for the equivalence test.
+// An ES256 JWT for the App Store Connect API with a throwaway key. The
+// signature is random per run, so only its length is printed.
 
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::Serialize;

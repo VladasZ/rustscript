@@ -1,6 +1,5 @@
-// `Self::Variant(x)` inside an impl, a `?` that converts through the
-// function's own `From` impls, `into()` under an annotation, and a
-// `From` picked by the argument's type when a type has several.
+// `Self::Variant(x)`, `?` through `From`, and a `From` picked by the
+// argument's type.
 #[derive(Debug)]
 enum Inner {
     Bad(String),

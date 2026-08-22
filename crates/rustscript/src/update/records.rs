@@ -8,16 +8,15 @@ use toml::{Table, Value as Toml};
 
 use super::release::{PACKAGE, REPOSITORY};
 
-/// The `name version (source)` key cargo tracks an install under. A downloaded
-/// asset is built from the same tag a source install would clone, so it is
-/// recorded as that git source and `cargo install-update` stays accurate.
+/// The `name version (source)` key cargo tracks an install under. A download
+/// is recorded as the git source of its tag so `cargo install-update` stays
+/// accurate.
 pub fn install_key(tag: &str, commit: &str) -> String {
     let version = tag.strip_prefix('v').unwrap_or(tag);
     format!("{PACKAGE} {version} (git+{REPOSITORY}?tag={tag}#{commit})")
 }
 
-/// Cargo writes both of these when it installs, so a download that skips them
-/// leaves cargo believing the old version is still installed.
+/// Without these cargo believes the old version is still installed.
 pub fn record(cargo_home: &Path, key: &str, fallback_target: &str) -> Result<()> {
     let info = rustc_info();
     let (rustc, target) = match &info {
@@ -115,9 +114,8 @@ fn stale_keys<'a>(keys: impl Iterator<Item = &'a str>) -> Vec<String> {
         .collect()
 }
 
-/// The toolchain that built the asset is unknowable, so the local one is
-/// recorded instead. Its host triple is also the honest value for `target`,
-/// unlike the `universal-apple-darwin` asset name.
+/// The building toolchain is unknowable, so the local one is recorded. Its
+/// host triple is the honest `target` too.
 fn rustc_info() -> Option<(String, String)> {
     let output = Command::new("rustc").arg("-vV").output().ok()?;
     if !output.status.success() {

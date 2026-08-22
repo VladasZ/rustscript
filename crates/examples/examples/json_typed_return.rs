@@ -1,8 +1,7 @@
 #!/usr/bin/env rust
 
-// A typed json parse handed straight back as the function's value. Nothing
-// annotates it, so the target can only come from the signature, and without
-// that the parse falls back to a plain map and the renamed fields vanish.
+// The parse target comes from the signature only. Without it the renamed
+// fields vanish.
 
 use serde::Deserialize;
 
@@ -23,13 +22,12 @@ const TEXT: &str = r#"{"limits": [
     {"kind": "weekly", "usedPercent": 64.5}
 ]}"#;
 
-// The tail rewrites only the error, so the payload of the return type is still
-// what the parse must build.
+// A `map_err` on the tail keeps the return type's payload.
 fn parse(text: &str) -> Result<Report, String> {
     serde_json::from_str(text).map_err(|e| format!("bad report, {e}"))
 }
 
-// A `return` in the middle of the body names the same target.
+// An early `return`.
 fn parse_early(text: &str) -> Result<Report, String> {
     if !text.is_empty() {
         return serde_json::from_str(text).map_err(|e| e.to_string());

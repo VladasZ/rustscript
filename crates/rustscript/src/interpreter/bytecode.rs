@@ -1,7 +1,5 @@
-//! The compiled form a script runs as. The compiler lowers the `syn` AST into a
-//! `Chunk` of register based instructions once, then the VM executes it without
-//! ever touching the parse tree again. Registers are numbered slots in a flat
-//! frame, so variable access is an array read, not a name lookup.
+//! The compiled form a script runs as. Registers are numbered slots in a flat
+//! frame, so variable access is an array read.
 
 use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
@@ -16,34 +14,28 @@ use super::typeir::{CastIr, TypeIr};
 
 pub type Reg = u16;
 
-/// A literal constant baked into a chunk, materialized into a value when a
-/// `LoadConst` runs.
-/// Only literals that need a side table land here. Integers, booleans, and unit
-/// are emitted as their own inline load ops, so they are not `Const` variants.
+/// Only literals that need a side table. Integers, booleans and unit have
+/// inline load ops.
 #[derive(Clone)]
 pub enum Const {
-    /// A 128-bit integer literal, i128 exact or u128 as reinterpreted bits.
+    /// i128 exact or u128 as reinterpreted bits.
     Big(i128, IntWidth),
     Float(f64),
-    /// An f32 literal, parsed from its digits at f32 precision so the value
-    /// never takes a detour through f64 rounding.
+    /// Parsed at f32 precision so the value never detours through f64.
     F32(f32),
     Char(char),
     Str(Arc<str>),
-    /// A byte string literal `b"..."`, materialized into a vec of integers.
+    /// `b"..."`, built into a vec of integers.
     Bytes(Arc<[u8]>),
 }
 
-/// Sentinel destination for a method call whose result a statement discards.
-/// The VM skips building and writing the return value, which lets hot ops
-/// like map insert avoid allocating a `Some(old)` nobody reads.
-/// A `?` whose error leaves unconverted.
+/// Sentinel destination for a discarded result, so a map insert skips the
+/// `Some(old)` nobody reads.
 pub const NO_CONV: u16 = u16::MAX;
 
 pub const DISCARD: Reg = Reg::MAX;
 
-/// Binary operators, kept separate from `syn` so the hot loop carries no parse
-/// tree types.
+/// Separate from `syn` so the hot loop carries no parse tree types.
 #[derive(Clone, Copy, Debug)]
 pub enum BinKind {
     Add,
@@ -64,7 +56,7 @@ pub enum BinKind {
     Shr,
 }
 
-/// The verb real Rust uses in the overflow panic for each arithmetic op.
+/// The verb in the real overflow panic.
 pub fn overflow_message(op: BinKind) -> &'static str {
     match op {
         BinKind::Add => "attempt to add with overflow",
@@ -82,18 +74,14 @@ pub enum UnKind {
     Not,
 }
 
-/// A field being read or written, named for structs, positional for tuples.
 #[derive(Clone)]
 pub enum Member {
     Named(FieldName),
     Indexed(usize),
 }
 
-/// A struct field named at a single access site, with the slot the last
-/// access found. The next access checks that the remembered slot still
-/// holds the name and only scans the shape again when the receiver turned
-/// out to be a different struct, so a site that always sees the same type
-/// pays one compare per access.
+/// Caches the slot the last access found. A site that always sees the same
+/// type pays one compare per access.
 pub struct FieldName {
     pub name: Arc<str>,
     slot: AtomicU16,
@@ -137,16 +125,11 @@ impl Display for FieldName {
     }
 }
 
-/// Where a closure upvalue is copied from when the closure is built.
 #[derive(Clone, Copy)]
 pub enum CapSource {
-    /// A local register in the enclosing function.
     Local(Reg),
-    /// An upvalue of the enclosing closure.
     Upvalue(u16),
-    /// A local register shared through a mutable capture cell.
     MutableLocal(Reg),
-    /// A mutable capture cell from the enclosing closure.
     MutableUpvalue(u16),
 }
 
@@ -156,16 +139,13 @@ impl CapSource {
     }
 }
 
-/// A struct literal, fields already ordered to match the declaration so
-/// serialization matches the compiler. The shape is built once at compile
-/// time and shared by every instance the literal creates.
+/// Fields already in declaration order so serialization matches the
+/// compiler. Built once and shared by every instance.
 pub struct StructLit {
-    /// One flag per shape field, true when the literal wrote it. The rest
-    /// fills the others by name.
+    /// True when the literal wrote the field, the rest fills the others.
     pub filled: Arc<[bool]>,
-    /// Field names in the register order `base..base+fields.len()`.
     pub shape: Arc<StructShape>,
-    /// Whether a trailing `..rest` value sits in the register after the fields.
+    /// A `..rest` value sits in the register after the fields.
     pub has_rest: bool,
 }
 
@@ -175,10 +155,8 @@ pub struct EnumVariant {
     pub variant: u16,
 }
 
-/// The value a `Default::default()` builds, lowered from the written type at
-/// compile time. The runtime has no types to ask, so the type the source
-/// stated, a turbofish, a qualified path, a `let` annotation, or a struct
-/// field, is the only place the answer can come from.
+/// Lowered from the written type at compile time, the runtime has no types
+/// to ask.
 #[derive(Clone)]
 pub enum DefaultIr {
     Int(IntWidth),
@@ -193,51 +171,38 @@ pub enum DefaultIr {
     Set,
     Opt,
     Tuple(Vec<DefaultIr>),
-    /// A struct with a derived `Default`, every field defaulted in turn.
+    /// A derived `Default`.
     Struct {
         shape: Arc<StructShape>,
         fields: Vec<DefaultIr>,
     },
-    /// The `#[default]` variant of an enum with a derived `Default`.
+    /// The `#[default]` variant.
     Enum(EnumVariant),
 }
 
-/// A method name with its builtin id resolved once at compile time, so hot
-/// dispatch matches an enum instead of comparing strings.
-/// The `type_id` of a value no script type declares, a bridge struct or a
-/// builtin enum.
+/// The `type_id` of a value no script type declares.
 pub const NO_TYPE: u16 = u16::MAX;
-/// The atom of a method name no script impl declares.
 pub const NO_ATOM: u32 = u32::MAX;
 
 #[derive(Clone)]
 pub struct MethodName {
     pub text: String,
     pub id: BuiltinId,
-    /// The interned name when a script impl declares a method of this name
-    /// that no bridge knows, see `impls::method_atoms`. `NO_ATOM` otherwise.
+    /// See `impls::method_atoms`. `NO_ATOM` otherwise.
     pub atom: u32,
-    /// The scalar type of an explicit turbofish, `s.parse::<u8>()` for one.
-    /// Names are allocated per call site, so this rides along without an
-    /// extra operand. Without it `parse` had to guess its target from the
-    /// text, which made `"300".parse::<u8>()` an `Ok(300)`.
+    /// The turbofish scalar, `s.parse::<u8>()`. Without it `parse` guessed
+    /// and `"300".parse::<u8>()` was `Ok(300)`.
     pub scalar: Option<ScalarTy>,
-    /// The written type behind an `unwrap_or_default`, when the source
-    /// states it anywhere the compiler can read: a `let` annotation, a
-    /// turbofish on the receiver's constructor, an annotated local, or a
-    /// helper's return type. Covers what `ScalarTy` cannot, tuples and user
-    /// types among them.
+    /// The written type behind an `unwrap_or_default`. Covers what
+    /// `ScalarTy` cannot, tuples and user types.
     pub default: Option<Arc<DefaultIr>>,
-    /// Whether the receiver is a place the call can write, a local, a
-    /// field, or an element. A name with both a mutating form and a value
-    /// form, `String::clear` against the colored `clear`, takes the mutating
-    /// one only on a place, the way an inherent `&mut self` method wins.
+    /// Whether the receiver is a writable place. `String::clear` against the
+    /// colored `clear` takes the mutating one only on a place.
     pub place: bool,
 }
 
 impl MethodName {
-    /// A name the interpreter calls itself, for an internal call that reuses
-    /// a bridge method.
+    /// For an internal call that reuses a bridge method.
     pub fn builtin(id: BuiltinId) -> MethodName {
         MethodName {
             text: id.name().to_string(),
@@ -256,10 +221,8 @@ impl Display for MethodName {
     }
 }
 
-/// A concrete type a turbofish can name, for the methods whose result type is
-/// chosen by the caller rather than by the receiver. The containers nest so a
-/// payload stays readable through more than one layer, which is what
-/// `Some(None::<f64>).unwrap_or_default().unwrap_or_default()` needs.
+/// A type a turbofish can name. Containers nest so
+/// `Some(None::<f64>).unwrap_or_default().unwrap_or_default()` works.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ScalarTy {
     Int(IntWidth),
@@ -268,26 +231,19 @@ pub enum ScalarTy {
     Bool,
     Char,
     Str,
-    /// `Option<T>`. Its own `Default` is `None`, and `T` is what one more
-    /// unwrap answers with.
+    /// `Option<T>`.
     Opt(Box<ScalarTy>),
-    /// `Vec<T>`, whose `Default` is the empty vec.
+    /// `Vec<T>`.
     List(Box<ScalarTy>),
-    /// `HashMap<K, V>` or `BTreeMap<K, V>`, whose `Default` is the empty map.
-    /// The payload is the value type `V`, which is what `map.get(k)` answers
-    /// an `Option` of.
+    /// `HashMap<K, V>` or `BTreeMap<K, V>`. The payload is `V`.
     Map(Box<ScalarTy>),
-    /// `HashSet<T>` or `BTreeSet<T>` with its element type, whose `Default`
-    /// is the empty set.
+    /// `HashSet<T>` or `BTreeSet<T>`.
     Set(Box<ScalarTy>),
-    /// A type the source named but this model does not describe, a user
-    /// struct for one. Only its presence matters, never its identity.
+    /// A type this model does not describe, only its presence matters.
     Other,
 }
 
 impl ScalarTy {
-    /// Lower a turbofish type argument, or `None` for anything that is not one
-    /// of these scalars.
     pub fn lower(ty: &syn::Type) -> Option<Self> {
         let syn::Type::Path(path) = ty else {
             return None;
@@ -295,17 +251,15 @@ impl ScalarTy {
         Self::lower_segment(path.path.segments.last()?)
     }
 
-    /// Lower one path segment, so a `HashMap::<K, V>::new()` call path can be
-    /// read without rebuilding a `syn::Type` around its container segment.
+    /// So `HashMap::<K, V>::new()` reads without rebuilding a `syn::Type`.
     pub fn lower_segment(segment: &syn::PathSegment) -> Option<Self> {
         if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-            // A container knows its own `Default` whatever it holds, and the
-            // element type is still carried so one more unwrap can read it.
+            // The element type is carried so one more unwrap can read it.
             let inner = || Box::new(Self::first_arg(args).unwrap_or(Self::Other));
             return match segment.ident.to_string().as_str() {
                 "Option" => Some(Self::Opt(inner())),
                 "Vec" | "VecDeque" => Some(Self::List(inner())),
-                // A map's payload is its value type, the second argument.
+                // A map's payload is its value type.
                 "HashMap" | "BTreeMap" => Some(Self::Map(Box::new(
                     Self::nth_arg(args, 1).unwrap_or(Self::Other),
                 ))),
@@ -323,12 +277,10 @@ impl ScalarTy {
         })
     }
 
-    /// The first type argument of a generic path segment.
     fn first_arg(args: &syn::AngleBracketedGenericArguments) -> Option<Self> {
         Self::nth_arg(args, 0)
     }
 
-    /// The n-th type argument of a generic path segment, lowered.
     fn nth_arg(args: &syn::AngleBracketedGenericArguments, n: usize) -> Option<Self> {
         args.args
             .iter()
@@ -340,8 +292,7 @@ impl ScalarTy {
             .and_then(Self::lower)
     }
 
-    /// What one more unwrap of this type answers with, for a chain like
-    /// `Some(None::<f64>).unwrap_or_default().unwrap_or_default()`.
+    /// What one more unwrap answers with.
     pub fn payload(&self) -> Option<&ScalarTy> {
         match self {
             Self::Opt(inner) | Self::List(inner) => Some(inner),
@@ -353,14 +304,11 @@ impl ScalarTy {
 include!(concat!(env!("OUT_DIR"), "/builtin_id.rs"));
 include!(concat!(env!("OUT_DIR"), "/path_id.rs"));
 
-/// A path call or path value site. `id` is resolved once at compile time,
-/// `Other` for a user item the VM looks up by `segs`, which also name the
-/// path in errors and rebuild a forwarder closure.
+/// `id` is `Other` for a user item the VM looks up by `segs`.
 #[derive(Clone)]
 pub struct PathRef {
     pub id: PathId,
     pub segs: Vec<String>,
-    /// The turbofish or `let` annotation a call's result coerces to.
     pub coerce: Option<TypeIr>,
 }
 
@@ -373,7 +321,7 @@ impl PathRef {
         }
     }
 
-    /// A user item path: a type member or a tuple struct, never the table.
+    /// A user item path, never the table.
     pub fn user(segs: Vec<String>, coerce: Option<TypeIr>) -> Self {
         PathRef {
             id: PathId::Other,
@@ -388,12 +336,9 @@ impl PathRef {
 }
 
 impl BuiltinId {
-    /// The checker-visible receivers this id-dispatched method works on:
-    /// the types the coverage walk can infer, `Str`, `Vec`, `Map`, and
-    /// `Option`, or `*` for every receiver. Names the interpreter answers
-    /// only on iterators, results, entries, or scalars list nothing here,
-    /// because the walk never infers those types and checks them by name.
-    /// This is what stops a `Vec`-only name from vouching for a `String`.
+    /// The receivers the coverage walk can infer, `Str`, `Vec`, `Map`,
+    /// `Option`, or `*`. This stops a `Vec` only name from vouching for a
+    /// `String`.
     pub fn receivers(self) -> &'static [&'static str] {
         use BuiltinId::{
             AndThen, Chars, Clone, CloneFrom, Concat, Contains, ContainsKey, Copied, EndsWith,
@@ -419,9 +364,8 @@ impl BuiltinId {
         }
     }
 
-    /// Whether the call runs through the higher order dispatch first. The
-    /// plain builtins listed here never take a closure, so they skip it,
-    /// and everything else tries it, including a name no table lists.
+    /// The plain builtins listed here never take a closure, so they skip the
+    /// higher order dispatch.
     pub fn is_higher_order(self) -> bool {
         use BuiltinId::{
             Chars, Clone, CloneFrom, Cloned, Concat, Contains, ContainsKey, Copied, Count,
@@ -485,28 +429,21 @@ impl BuiltinId {
     }
 }
 
-/// A precompiled format template plus where each argument lives.
 #[derive(Clone)]
 pub struct FmtSpec {
     pub template: String,
-    /// Positional argument registers, in order.
     pub positional: Vec<Reg>,
-    /// Named and inline `{name}` arguments.
     pub named: Vec<(String, Reg)>,
 }
 
-/// A pattern plus the register each name it binds writes into.
 pub struct PatInfo {
     pub pat: PPat,
     pub binds: Vec<(String, Reg)>,
 }
 
-/// The variant a tuple struct or path pattern names. `variant` is set when
-/// the compiler resolved the path to a definition, and the test is then a
-/// definition and index compare. `name` is the last path segment, kept for
-/// the shapes that match by name alone: a tuple struct pattern on a struct,
-/// the `serde_json::Value` variants held as plain values, and an unresolved
-/// path.
+/// `variant` is set when the path resolved to a definition. `name` is kept
+/// for the shapes that match by name alone, a tuple struct, the
+/// `serde_json::Value` variants held as plain values, an unresolved path.
 #[derive(Clone)]
 pub struct PTag {
     pub name: Option<Arc<str>>,
@@ -514,7 +451,6 @@ pub struct PTag {
 }
 
 impl PTag {
-    /// Whether an enum value's variant is the one this pattern names.
     pub fn matches(&self, def: &Arc<EnumDef>, variant: u16) -> bool {
         match &self.variant {
             Some((want, index)) => EnumDef::same(want, def) && *index == variant,
@@ -529,8 +465,7 @@ impl PTag {
 
 #[derive(Clone)]
 pub enum PLit {
-    /// Wide enough for any literal a pattern can name, `u64::MAX` and the
-    /// 128-bit widths included.
+    /// Wide enough for `u64::MAX` and the 128 bit widths.
     Int(i128),
     Float(f64),
     Bool(bool),
@@ -561,8 +496,7 @@ pub enum PPat {
     },
     Or(Vec<PPat>),
     Slice(Vec<PPat>),
-    /// A literal range like `b'a'..=b'z'`, `'0'..='9'`, or `1..5`. A missing
-    /// endpoint leaves that side unbounded.
+    /// A missing endpoint leaves that side unbounded.
     Range {
         lo: Option<PLit>,
         hi: Option<PLit>,
@@ -592,9 +526,8 @@ pub enum Op {
         dst: Reg,
         v: i64,
     },
-    /// A width-tagged integer literal: a suffixed one, an annotated one, or a
-    /// bare literal past `i64::MAX`, which real Rust can only type as u64 or
-    /// usize. `v` is the storage form of `super::numeric::IntWidth`.
+    /// A width tagged integer literal. `v` is the storage form of
+    /// `super::numeric::IntWidth`.
     LoadIntW {
         dst: Reg,
         v: i64,
@@ -619,10 +552,8 @@ pub enum Op {
         cell: Reg,
         src: Reg,
     },
-    /// Forget the capture cell of a mutably captured local, so the next use
-    /// builds a fresh one from the register. Sits at every binding site of
-    /// such a local, which is what makes a `let` inside a loop bind a new
-    /// variable each iteration instead of writing on the last one's cell.
+    /// Forget the capture cell at a binding site, so a `let` inside a loop
+    /// binds a new variable each iteration.
     DropCell {
         cell: Reg,
     },
@@ -630,7 +561,7 @@ pub enum Op {
         idx: u16,
         src: Reg,
     },
-    /// Read a module level const or static, evaluated lazily on first use.
+    /// Evaluated lazily on first use.
     LoadGlobal {
         dst: Reg,
         idx: u32,
@@ -646,7 +577,7 @@ pub enum Op {
         b: Reg,
         op: BinKind,
     },
-    /// Binary op with an integer literal right operand, `n - 1`, `i < len`.
+    /// `n - 1`, `i < len`.
     BinImm {
         dst: Reg,
         a: Reg,
@@ -662,10 +593,8 @@ pub enum Op {
     Jump {
         to: u32,
     },
-    /// Sits right before a `while` or `loop` head, carrying the position of
-    /// the loop's own backward jump, so the scalar while plan can take over
-    /// at loop entry instead of after the first generic iteration. Falls
-    /// through into the head when the loop has no plan.
+    /// Carries the loop's backward jump, so the while plan can take over at
+    /// loop entry instead of after the first generic iteration.
     LoopHead {
         jump: u32,
     },
@@ -677,14 +606,14 @@ pub enum Op {
         cond: Reg,
         to: u32,
     },
-    /// Fused compare and branch: jump to `to` when `a op b` is false.
+    /// Jump to `to` when `a op b` is false.
     CmpJump {
         a: Reg,
         b: Reg,
         op: BinKind,
         to: u32,
     },
-    /// Fused compare and branch against an integer literal.
+    /// Against an integer literal.
     CmpJumpImm {
         a: Reg,
         imm: i64,
@@ -692,9 +621,7 @@ pub enum Op {
         to: u32,
     },
 
-    /// Direct call of a known top level function, by global index.
-    /// `targ` indexes the caller chunk's `call_type_args`, or `u32::MAX` when
-    /// the call had no turbofish type arguments.
+    /// `targ` indexes `call_type_args`, or `u32::MAX` without a turbofish.
     CallFn {
         dst: Reg,
         func: u32,
@@ -702,26 +629,24 @@ pub enum Op {
         argc: u16,
         targ: u32,
     },
-    /// Call a closure value held in a register.
     CallValue {
         dst: Reg,
         callee: Reg,
         base: Reg,
         argc: u16,
     },
-    /// Any other call, `Type::assoc`, a bridge, a constructor, resolved by path.
+    /// Any other call, resolved by path.
     CallPath {
         dst: Reg,
         path: u16,
         base: Reg,
         argc: u16,
     },
-    /// A path used as a value, `None`, a unit enum variant, `consts::OS`.
+    /// `None`, a unit variant, `consts::OS`.
     PathValue {
         dst: Reg,
         path: u16,
     },
-    /// `recv.method(args)`.
     Method {
         dst: Reg,
         recv: Reg,
@@ -729,9 +654,8 @@ pub enum Op {
         base: Reg,
         argc: u16,
     },
-    /// Fused `recv.get(key).copied().unwrap_or(default)`. One probe, no
-    /// intermediate Option built. Falls back to the three real methods for
-    /// receivers that are not a map or a vector.
+    /// Fused `recv.get(key).copied().unwrap_or(default)`, one probe. Falls
+    /// back to the 3 real methods off a map or vec.
     GetOrDefault {
         dst: Reg,
         recv: Reg,
@@ -747,8 +671,7 @@ pub enum Op {
         base: Reg,
         count: u16,
     },
-    /// An empty `HashMap` or `HashSet`, the `new` and `with_capacity`
-    /// constructors lowered in place.
+    /// `new` and `with_capacity` lowered in place.
     MakeMap {
         dst: Reg,
         set: bool,
@@ -769,12 +692,10 @@ pub enum Op {
         end: Reg,
         inclusive: bool,
     },
-    /// Materialize any iterable in `src` into an iterator held in `dst`.
     IterInit {
         dst: Reg,
         src: Reg,
     },
-    /// Read the next item of the iterator in `iter` into `val`, advancing `idx`.
     /// Jumps to `to` when exhausted.
     ForNext {
         iter: Reg,
@@ -820,20 +741,15 @@ pub enum Op {
         target: Reg,
         val: Reg,
     },
-    /// A compound assignment through a dereference, `*r op= v`. Fused into
-    /// one op so a scalar read-modify-write can hold the referent's lock
-    /// once, which keeps concurrent compound assignments through a shared
-    /// cell from losing updates, see `deref_bin_assign`.
+    /// `*r op= v`, fused so the read-modify-write holds the lock once and
+    /// concurrent tasks cannot lose updates.
     DerefBinAssign {
         target: Reg,
         val: Reg,
         op: BinKind,
     },
-    /// `*param = v` where `param` is a `&mut` function parameter. Sets
-    /// through a real reference when the register holds one, otherwise
-    /// writes the register itself, which the caller's `&mut` arg writeback
-    /// hands back on return. Scalars arrive as plain copies rather than
-    /// references, so the strict op has nothing to assign through.
+    /// `*param = v` on a `&mut` parameter. Scalars arrive as copies, so this
+    /// writes the register and the `&mut` writeback hands it back.
     SetDerefParam {
         target: Reg,
         val: Reg,
@@ -849,96 +765,83 @@ pub enum Op {
         val: Reg,
     },
 
-    /// Split the composite in `reg` from any sharing before an in-place
-    /// mutation, see `Value::make_unique`. Emitted at every mutable access
-    /// so a value clone is a cheap refcount bump until someone writes.
+    /// Split from sharing before a mutation, see `Value::make_unique`.
     UniqueReg {
         reg: Reg,
     },
-    /// Make the field's current value unique inside `base`'s storage and
-    /// load it into `dst` still sharing that storage, so a mutation through
-    /// `dst` lands in the field. `base` must already be unique.
+    /// Load the field into `dst` still sharing `base`'s storage, so a
+    /// mutation lands in the field. `base` must already be unique.
     UniqueField {
         dst: Reg,
         base: Reg,
         member: u16,
     },
-    /// The indexed-element version of `UniqueField`.
+    /// `UniqueField` for an element.
     UniqueIndex {
         dst: Reg,
         base: Reg,
         key: Reg,
     },
-    /// Make the value inside a promoted local's cell unique and load it
-    /// into `dst` still sharing the cell's storage.
+    /// `UniqueField` for a promoted local's cell.
     UniqueCell {
         dst: Reg,
         cell: Reg,
     },
-    /// The captured-variable version of `UniqueCell`.
+    /// `UniqueCell` for a captured variable.
     UniqueUpvalue {
         dst: Reg,
         idx: u16,
     },
-    /// Materialize `&mut base[key]` as a real reference value, so writes
-    /// through the borrow land in the element.
+    /// `&mut base[key]` as a real reference value.
     RefIndex {
         dst: Reg,
         base: Reg,
         key: Reg,
     },
-    /// Materialize `&mut base.field` as a real reference value.
+    /// `&mut base.field` as a real reference value.
     RefField {
         dst: Reg,
         base: Reg,
         member: u16,
     },
-    /// Wrap a place-loaded value as a mutable borrow of its own storage,
-    /// for a `&mut place` match scrutinee. Pattern bindings through it
-    /// borrow instead of copying, see `test_bind`.
+    /// For a `&mut place` match scrutinee, so bindings borrow instead of
+    /// copying, see `test_bind`.
     MakeBorrow {
         dst: Reg,
         src: Reg,
     },
-    /// A fresh value of the same shape as `src`, for `mem::take` and
-    /// `RefCell::take`, whose `T::default()` has no type to read at runtime.
+    /// For `mem::take` and `RefCell::take`, whose `T::default()` has no type
+    /// at runtime.
     DefaultOf {
         dst: Reg,
         src: Reg,
     },
-    /// `Default::default()` of a written type, `ir` indexing `defaults`.
+    /// `ir` indexes `defaults`.
     BuildDefault {
         dst: Reg,
         ir: u16,
     },
-    /// Run user `Drop` impls for a scope's bindings, in reverse declaration
-    /// order, at the point the scope ends. `list` indexes the chunk's
-    /// `drop_lists`. Emitted only when the program has a `Drop` impl at all.
+    /// `list` indexes `drop_lists`. Emitted only when the program has a
+    /// `Drop` impl.
     DropScope {
         list: u16,
     },
-    /// Clear `src` when the value it holds has a user `Drop` impl. Emitted
-    /// after a by-value argument copy, so the new holder is the last one
-    /// and the guard drops where the move sent it, not at the caller's
-    /// scope end. `Drop` types are never `Copy`, so a later use of the
-    /// moved name cannot exist in a script that passed the real checker.
+    /// After a by value argument copy, so the guard drops where the move
+    /// sent it. `Drop` types are never `Copy`, so the checker rules out a
+    /// later use.
     MoveOut {
         src: Reg,
     },
 
-    /// The `?` operator. Unwraps Ok/Some into `dst`, or returns early on
-    /// Err/None. `conv` indexes `try_targets` with the function's own error
-    /// type, whose `From` impl converts the error on the way out, `NO_CONV`
-    /// when the error leaves as it is.
+    /// `conv` indexes `try_targets` with the function's error type, or
+    /// `NO_CONV` when the error leaves as it is.
     Try {
         dst: Reg,
         src: Reg,
         conv: u16,
     },
-    /// The `?` operator in a program with `Drop` impls. Ok/Some jumps to
-    /// `to` with the unwrapped payload in `dst`. Err/None falls through
-    /// with the early-return value in `dst`, into the scope drops and the
-    /// `Ret` the compiler emits at the site, so `?` cannot skip drops.
+    /// `?` with `Drop` impls. Err falls through into the scope drops and the
+    /// `Ret` at the site, so `?` cannot skip drops.
     TryJump {
         dst: Reg,
         src: Reg,
@@ -950,14 +853,13 @@ pub enum Op {
         src: Reg,
         ty: u16,
     },
-    /// Coerce a dynamic value into an annotated type, `let c: Config = ..`.
+    /// `let c: Config = ..`.
     Coerce {
         dst: Reg,
         src: Reg,
         ty: u16,
     },
 
-    /// Test `val` against a pattern, binding its names into their registers.
     /// `dst` receives a bool.
     TestBind {
         val: Reg,
@@ -965,59 +867,49 @@ pub enum Op {
         dst: Reg,
     },
 
-    /// Render a format template into `dst`.
     Fmt {
         dst: Reg,
         spec: u16,
     },
-    /// A statement macro that renders a template then acts on it.
     MacroCall {
         kind: MacroKind,
         dst: Reg,
         spec: u16,
     },
-    /// `dbg!` takes plain registers, not a template.
+    /// `dbg!` takes plain registers.
     Dbg {
         dst: Reg,
         base: Reg,
         argc: u16,
     },
 
-    /// Spawn child closure `child` as a tokio task, writing a `JoinHandle` into
-    /// `dst`. Emitted only for `#[tokio::main]` scripts.
+    /// `#[tokio::main]` only.
     Spawn {
         dst: Reg,
         child: u16,
     },
-    /// Await the future or `JoinHandle` in `src`, writing its result into `dst`.
-    /// Emitted only for `#[tokio::main]` scripts.
+    /// `#[tokio::main]` only.
     Await {
         dst: Reg,
         src: Reg,
     },
 }
 
-/// One compiled function, method, or closure body.
 pub struct Chunk {
     pub code: Vec<Op>,
-    /// Source line of each op, parallel to `code`. Zero means unknown, so a
-    /// synthesized chunk with no lines still traces by function name alone.
+    /// Parallel to `code`. Zero means unknown.
     pub lines: Vec<u32>,
-    /// Source file this body was written in, shown in runtime error traces.
+    /// Shown in error traces.
     pub file: Arc<str>,
     pub num_regs: usize,
     pub num_params: usize,
-    /// The written type of each parameter, last path segment only, for example
-    /// `Value` for a `&serde_json::Value`. None where the parameter is `self`
-    /// or its type is not a plain path. The coverage check reads these, so a
-    /// method called on a parameter is checked against the type the author
-    /// wrote rather than falling back to a name-only answer.
+    /// Last path segment only, `Value` for a `&serde_json::Value`. The
+    /// coverage check reads these.
     pub param_types: Vec<Option<String>>,
     pub name: String,
-    /// Module this body was written in, for runtime type resolution.
+    /// For runtime type resolution.
     pub module: u16,
-    /// A `move` closure owns copies of what it captures, so a mutable
-    /// capture gets its own cell instead of sharing the outer binding's.
+    /// A `move` closure gives a mutable capture its own cell.
     pub moves: bool,
 
     // Side tables referenced by instruction operands.
@@ -1028,51 +920,31 @@ pub struct Chunk {
     pub struct_lits: Vec<StructLit>,
     pub enum_variants: Vec<EnumVariant>,
     pub casts: Vec<CastIr>,
-    /// Written types behind `BuildDefault`.
     pub defaults: Vec<DefaultIr>,
-    /// The error types `?` converts into, by canonical name.
     pub try_targets: Vec<Arc<str>>,
-    /// Annotated `let` coercion targets, referenced by `Coerce`.
     pub coerces: Vec<TypeIr>,
-    /// Path calls and path values.
     pub paths: Vec<PathRef>,
     pub names: Vec<MethodName>,
-    /// Nested closure bodies, referenced by `MakeClosure`.
     pub children: Vec<Arc<Chunk>>,
-    /// For each child, where to copy its upvalues from.
     pub child_caps: Vec<Vec<CapSource>>,
-    /// Generic parameter names of this function, in order, e.g. `["T"]`. Used
-    /// to bind a caller's turbofish type args when the body resolves them.
+    /// To bind a caller's turbofish type args.
     pub generics: Vec<Arc<str>>,
-    /// Register lists for `DropScope`, one per scope that has bindings.
     pub drop_lists: Vec<Arc<[Reg]>>,
-    /// Turbofish type args recorded at `CallFn` sites, referenced by `targ`.
     pub call_type_args: Vec<Arc<[TypeIr]>>,
-    /// True for the synthesized body behind a path used as a function value.
-    /// Its arity is a guess, a builtin reference like `u8::saturating_add`
-    /// has no known parameter count, so a call with a different count rebuilds
-    /// the body for the count actually passed instead of failing.
+    /// A forwarder's arity is a guess, a call with a different count rebuilds
+    /// it.
     pub path_forwarder: bool,
-    /// Scalar plans for the `for` loops in this chunk, keyed by the index of
-    /// each `ForNext` op and built lazily on the loop's first entry. `None`
-    /// records a loop that was analyzed and does not qualify, so the attempt
-    /// happens once per loop.
+    /// Keyed by `ForNext` op index, built on first entry. `None` records a
+    /// loop that does not qualify.
     pub loop_plans: Mutex<HashMap<usize, Option<Arc<super::scalar_loop::LoopPlan>>>>,
-    /// Scalar plans for the backward-jump loops in this chunk, `while` and
-    /// `loop`, keyed by the index of each closing `Jump` op and built lazily
-    /// on the jump's first execution.
+    /// Keyed by closing `Jump` op index.
     pub while_plans: Mutex<HashMap<usize, Arc<super::scalar_while::WhilePlan>>>,
-    /// One flag per op, nonzero when the while plan keyed by that op index
-    /// was analyzed and does not qualify. A rejected loop's backward jump
-    /// runs per iteration, so the answer has to cost an atomic load, not
-    /// the mutex probe of the plan map.
+    /// A rejected loop's backward jump runs per iteration, so the answer must
+    /// cost an atomic load and not the mutex probe.
     pub while_rejected: Vec<AtomicU8>,
-    /// Scalar plan for this whole function body, built lazily on its first
-    /// direct call, see `scalar_fn`.
+    /// See `scalar_fn`.
     pub fn_plan: Mutex<Option<Arc<super::scalar_fn::FnPlan>>>,
-    /// Nonzero when the function plan was analyzed and does not qualify, or
-    /// failed too often. A rejected function's direct calls pay one atomic
-    /// load each, not the mutex probe.
+    /// Same reason as `while_rejected`.
     pub fn_rejected: AtomicU8,
 }
 
@@ -1115,19 +987,15 @@ impl Chunk {
     }
 }
 
-/// Field layout of a struct, shared by every instance built from the same
-/// site. Instances then carry a plain `Vec<Value>` in this order, so a field
-/// read is a short name scan plus an index, not a hash probe, and building an
-/// instance allocates no map.
+/// Shared by every instance, so a field read is a short scan plus an index
+/// and building an instance allocates no map.
 pub struct StructShape {
     pub name: Arc<str>,
-    /// The script type this is an instance of, the index into the impl
-    /// table. `NO_TYPE` for a struct a bridge builds.
+    /// Index into the impl table. `NO_TYPE` for a bridge struct.
     pub type_id: u16,
     pub fields: Vec<Arc<str>>,
-    /// One entry per field, its `#[serde(rename = "..")]` name if any. Empty
-    /// when the struct has no renamed fields. Read when serializing to json so
-    /// the output key matches serde, the same names deserialize already honors.
+    /// `#[serde(rename = "..")]` per field, empty when none. Read when
+    /// serializing.
     pub renames: Vec<Option<Arc<str>>>,
 }
 
@@ -1141,7 +1009,6 @@ impl StructShape {
         })
     }
 
-    /// The shape of a script struct, tagged with its type id.
     pub fn typed(
         name: impl Into<Arc<str>>,
         type_id: u16,
@@ -1156,19 +1023,14 @@ impl StructShape {
         })
     }
 
-    /// Slot index of a field. Structs have a handful of fields, so a linear
-    /// scan beats hashing.
+    /// A linear scan beats hashing on a handful of fields.
     pub fn slot(&self, field: &str) -> Option<usize> {
         self.fields.iter().position(|f| &**f == field)
     }
 }
 
-/// The chunk behind a path used as a function value. It forwards its
-/// `num_params` arguments to the path call. `num_params` is 0 for a
-/// constructor like `Vec::new` and 1 for a method reference or one-arg
-/// constructor. A builtin method reference has no known parameter count, so
-/// `num_params` is only a default, a call with a different count rebuilds the
-/// forwarder for the count actually passed.
+/// The chunk behind a path used as a function value. A builtin reference
+/// has no known parameter count, so `num_params` is only a default.
 pub fn path_call_chunk(path: PathRef, num_params: usize) -> Arc<Chunk> {
     let count = u16::try_from(num_params).expect("parameter count fits u16");
     let dst = count * 2;
@@ -1177,10 +1039,8 @@ pub fn path_call_chunk(path: PathRef, num_params: usize) -> Arc<Chunk> {
     chunk.num_params = num_params;
     chunk.num_regs = num_params * 2 + 1;
     chunk.paths.push(path);
-    // Arguments land in registers 0..count. The path call consumes its
-    // window, and the frame loop hands the parameter registers back to the
-    // caller on return, so the call runs on copies in count..2*count and
-    // the result goes just past them.
+    // The frame loop hands the parameter registers back on return, so the
+    // call runs on copies in count..2*count.
     for i in 0..count {
         chunk.code.push(Op::Move {
             dst: count + i,

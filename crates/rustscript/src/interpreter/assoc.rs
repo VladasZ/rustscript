@@ -1,5 +1,4 @@
-//! Associated functions like `String::from`, `Vec::new`, `File::open`,
-//! `Duration::from_secs`.
+//! Associated functions like `String::from` and `File::open`.
 
 use num_traits::AsPrimitive;
 use std::sync::Arc;
@@ -19,13 +18,11 @@ use super::std_bridge::{
 };
 use super::value::{CellKind, Value};
 
-/// Associated functions like `String::from`, `File::open`, `Regex::new`.
 pub(super) fn assoc_fn(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     if let Some(v) = jwt_assoc(id, args)? {
         return Ok(Some(v));
     }
-    // The groups answer disjoint ids, so the first helper that recognizes
-    // the id answers.
+    // The groups answer disjoint ids.
     if let Some(v) = conversion_assoc(id, args)? {
         return Ok(Some(v));
     }
@@ -41,14 +38,12 @@ pub(super) fn assoc_fn(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     misc_assoc(id, args)
 }
 
-/// String, char, and numeric constructors and conversions.
 fn conversion_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     Ok(Some(match id {
         PathId::StringNew | PathId::StringWithCapacity => Value::str(""),
         PathId::StringFrom => Value::str(args.first().map(Value::display).unwrap_or_default()),
         PathId::StringFromUtf8Lossy => Value::str(bytes_to_string(args.first())),
-        // `char::from` only converts a u8 in real Rust, so the byte range is
-        // enforced even though every integer is an i64 here.
+        // `char::from` only converts a u8.
         PathId::CharFrom => match args.first() {
             Some(Value::Char(c)) => Value::Char(*c),
             Some(Value::Int(n)) => match u8::try_from(*n) {
@@ -80,13 +75,10 @@ fn conversion_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     }))
 }
 
-/// The integer constructors and conversions, `from_str_radix`, `from`,
-/// `try_from`, and the byte order readers, plus the float `from`.
 fn int_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     let ty = id.namespace();
     Ok(Some(match id {
-        // Every 64-bit-and-under type parses the same way here, values are
-        // untyped ints. The 128-bit types parse in their real width below.
+        // The 128 bit types parse in their real width below.
         PathId::I8FromStrRadix
         | PathId::I16FromStrRadix
         | PathId::I32FromStrRadix
@@ -118,9 +110,8 @@ fn int_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
                 Err(e) => Value::err(Value::str(e.to_string())),
             }
         }
-        // Numeric `T::from(x)`. Every integer is an i64 here, so a widening
-        // conversion just carries the value. `from` on a bool gives 0 or 1,
-        // the same as `usize::from(cond)` and the like.
+        // A widening `T::from(x)` carries the value, `from` on a bool gives 0
+        // or 1.
         PathId::U128From | PathId::I128From => {
             let width = IntWidth::parse(ty).expect("128-bit width parses");
             Value::int_of_width(i128::from(int_from_arg(ty, args.first())?), width)
@@ -141,9 +132,8 @@ fn int_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
             Some(Value::Bool(b)) => Value::Float(if *b { 1.0 } else { 0.0 }),
             _ => bail!("`{ty}::from` needs a number"),
         },
-        // Fallible `T::try_from(x)`. The value fits when it lands inside the
-        // target range, so a narrowing conversion reports overflow with the
-        // same message as the real `TryFromIntError`.
+        // `T::try_from(x)` reports overflow with the real `TryFromIntError`
+        // message.
         PathId::I8TryFrom
         | PathId::I16TryFrom
         | PathId::I32TryFrom
@@ -169,11 +159,10 @@ fn int_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     }))
 }
 
-/// Containers, wrappers, paths, and regex.
 fn container_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     Ok(Some(match id {
-        // The shape carries every field a later builder call can set, since a
-        // shape cannot grow after the instance exists.
+        // A shape cannot grow after the instance exists, so it carries every
+        // field a builder call can set.
         PathId::CommandNew => command_new(args.first().cloned().unwrap_or_else(|| Value::str(""))),
         PathId::VecNew | PathId::VecWithCapacity => Value::vec(vec![]),
         PathId::VecFrom => match args.first() {
@@ -183,13 +172,9 @@ fn container_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
         },
         PathId::HashMapNew | PathId::BTreeMapNew | PathId::HashMapWithCapacity => Value::map(),
         PathId::HashSetNew | PathId::BTreeSetNew | PathId::HashSetWithCapacity => Value::set(),
-        // `Rc::clone(&x)` is `x.clone()` spelled as the docs recommend,
-        // and a cell's clone shares its slot, so handing the value through
-        // is exactly right for both.
+        // `Rc::clone(&x)` is `x.clone()`, and a cell's clone shares its slot.
         PathId::BoxNew | PathId::RcClone | PathId::ArcClone => arg(args, 0)?,
-        // Real shared cells: cloning shares the slot and writes through one
-        // handle show through every handle. `Box` above stays transparent,
-        // ownership is what the value model already gives every value.
+        // Real shared cells. `Box` above stays transparent.
         PathId::RcNew => cell::make_cell(CellKind::Rc, arg(args, 0)?),
         PathId::ArcNew => cell::make_cell(CellKind::Arc, arg(args, 0)?),
         PathId::RefCellNew => cell::make_cell(CellKind::RefCell, arg(args, 0)?),
@@ -199,15 +184,11 @@ fn container_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
             let Some(Value::Cell(_, slot)) = args.first() else {
                 bail!("strong_count needs an Rc or Arc argument");
             };
-            // Two in-flight copies exist during this call, the taken arg
-            // window value and the bridge's imaging clone of it, which real
-            // Rust's borrowed `&Rc` does not have. A borrow passed through
-            // further function hops is modeled as a clone per hop, so a
-            // count read deep in a call chain can still run high.
+            // 2 in flight copies exist during this call that a real `&Rc`
+            // does not have. A borrow through more hops is a clone per hop.
             super::shared::usize_value(Arc::strong_count(slot) - 2)
         }
-        // Our file and pipe readers are already buffered, so wrapping is a
-        // pass-through; a raw socket is turned into a buffered reader.
+        // File and pipe readers are already buffered, a raw socket gets one.
         PathId::BufReaderNew
         | PathId::BufReaderWithCapacity
         | PathId::BufWriterNew
@@ -246,12 +227,10 @@ fn container_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     }))
 }
 
-/// `T::from_le_bytes` and its be and ne siblings for every integer width.
 fn int_bytes_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     Ok(Some(match id {
-        // `T::from_le_bytes` and its be and ne siblings. The result carries
-        // the named width, so a `u32` read stays a u32 and an `i32` read of
-        // the same four bytes is negative where the top bit is set.
+        // The result carries the named width, so an `i32` read of the same
+        // bytes is negative where the top bit is set.
         PathId::I8FromLeBytes
         | PathId::I8FromBeBytes
         | PathId::I8FromNeBytes
@@ -292,7 +271,6 @@ fn int_bytes_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     }))
 }
 
-/// The `Command` builder shape shared by `Command::new` wherever it is spelled.
 pub(super) fn command_new(program: Value) -> Value {
     Value::struct_of(
         "Command",
@@ -308,7 +286,6 @@ pub(super) fn command_new(program: Value) -> Value {
     )
 }
 
-/// Files, permissions, and process stream markers.
 fn fs_process_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     Ok(Some(match id {
         PathId::PermissionsFromMode => {
@@ -344,9 +321,8 @@ fn fs_process_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
         PathId::StdioPiped | PathId::StdioInherit | PathId::StdioNull => {
             Value::struct_of("Stdio", [("kind".into(), Value::str(id.name()))])
         }
-        // `Stdio::from(file)` sends a child's stream straight to an open file.
-        // The marker carries the file, and the handle is cloned when the
-        // command is built so the script keeps its own copy.
+        // `Stdio::from(file)`, the handle is cloned when the command is built
+        // so the script keeps its own copy.
         PathId::StdioFrom => {
             let Some(file @ Value::Native(_)) = args.first() else {
                 bail!(
@@ -366,7 +342,6 @@ fn fs_process_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     }))
 }
 
-/// Time, net, pdf, xml, and the seek positions.
 fn misc_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     Ok(Some(match id {
         // -- time ------------------------------------------------------
@@ -404,8 +379,7 @@ fn misc_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
         PathId::DocumentLoad => super::pdf_bridge::load(&arg_str(args, 0)),
         PathId::ElementParse => super::xmltree_bridge::parse(args),
         PathId::ElementNew => super::xmltree_bridge::new_element(&arg_str(args, 0)),
-        // The real xmltree node enum, constructed like `SeekFrom` below since
-        // no user declaration exists for it.
+        // The real xmltree node enum, constructed like `SeekFrom` below.
         PathId::XMLNodeElement
         | PathId::XMLNodeText
         | PathId::XMLNodeComment
@@ -424,8 +398,6 @@ fn misc_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     }))
 }
 
-/// Pull an integer out of a `from`/`try_from` argument. Ints carry through,
-/// a bool becomes 0 or 1, and a char becomes its scalar value.
 /// The `u32` radix argument of `from_str_radix`, 10 when unreadable.
 fn radix_arg(args: &[Value]) -> u32 {
     args.get(1)
@@ -439,8 +411,7 @@ fn int_from_arg(ty: &str, v: Option<&Value>) -> Result<i64> {
         Some(Value::Int(n)) => Ok(*n),
         Some(Value::Bool(b)) => Ok(i64::from(*b)),
         Some(Value::Char(c)) => Ok(*c as i64),
-        // A width-tagged or 128-bit value converts when it fits an i64. The
-        // callers check the target's own range on top of this.
+        // The callers check the target's own range on top of this.
         Some(tagged @ (Value::IntW(..) | Value::Big(..))) => match tagged.int_parts() {
             Some((n, _)) => i64::try_from(n).map_err(|_| anyhow!("`{ty}` conversion out of range")),
             None => bail!("`{ty}` conversion out of range"),
@@ -449,8 +420,7 @@ fn int_from_arg(ty: &str, v: Option<&Value>) -> Result<i64> {
     }
 }
 
-/// `T::from_le_bytes([..])` and its be and ne siblings, over the same shared
-/// core the `to_*_bytes` methods use.
+/// Over the same shared core the `to_*_bytes` methods use.
 fn int_from_bytes(id: PathId, args: &[Value]) -> Result<Value> {
     let (Some(width), Some(order)) = (IntWidth::parse(id.namespace()), from_bytes_order(id.name()))
     else {
@@ -463,8 +433,8 @@ fn int_from_bytes(id: PathId, args: &[Value]) -> Result<Value> {
     ))
 }
 
-/// The `[u8; N]` argument of a byte conversion. An array literal is a vec at
-/// runtime, so the shape real Rust guarantees in its type is read back here.
+/// An array literal is a vec at runtime, so the `[u8; N]` shape is read back
+/// here.
 fn byte_array(id: PathId, arg: Option<&Value>) -> Result<Vec<i128>> {
     let Some(Value::Vec(items)) = arg else {
         bail!("`{id}` needs a byte array");
@@ -480,7 +450,6 @@ fn byte_array(id: PathId, arg: Option<&Value>) -> Result<Vec<i128>> {
     Ok(out)
 }
 
-/// Whether `n` lands inside the target integer type range.
 fn int_fits(ty: &str, n: i64) -> bool {
     match ty {
         "i8" => i8::try_from(n).is_ok(),

@@ -1,9 +1,7 @@
 #!/usr/bin/env rust
 
-//! Conformance program for multifile scripts. Compiled by cargo and run by
-//! the rustscript interpreter, the test asserts both print identical output.
-//! It exercises a nested module tree, every import style, re-export chains,
-//! and cross module structs, enums, consts, statics, and type aliases.
+//! Conformance program for multifile scripts. The test compiles it with cargo,
+//! runs it through the interpreter and asserts identical output.
 
 mod data;
 mod geometry;

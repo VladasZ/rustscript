@@ -1,5 +1,3 @@
-//! Pattern tests and bindings for the VM's `TestBind` op.
-
 use num_traits::AsPrimitive;
 use std::cmp::Ordering;
 use std::slice::from_ref;
@@ -10,8 +8,8 @@ use super::enum_def::{EnumKind, NONE};
 use super::resolver::bare;
 use super::value::{List, StructData, Value, ValueRef};
 
-/// Whether a `serde_json::Value` variant pattern like `Value::String(s)`
-/// matches the shape of the value, since decoded json is held as plain values.
+/// Decoded json is held as plain values, so `Value::String(s)` matches by
+/// shape.
 fn json_variant_kind_matches(name: Option<&str>, val: &Value) -> bool {
     matches!(
         (name, val),
@@ -53,9 +51,8 @@ pub(super) fn try_bind(pat: &PPat, val: &Value, define: &mut dyn FnMut(&str, Val
                 let vals: Vec<Value> = st.values.lock().clone();
                 bind_seq(elems, &vals, define)
             }
-            // A pre-unwrapped Option holds its payload as a plain value, so
-            // `Some(x)` still matches one. A `Value::Unit` payload never
-            // does, that shape is a real unit value, not an Option.
+            // `Some(x)` still matches a pre unwrapped payload. A `Value::Unit`
+            // never does, that is a real unit value.
             Value::Unit => false,
             other => {
                 if json_variant_kind_matches(tag.name.as_deref(), other) {
@@ -68,7 +65,7 @@ pub(super) fn try_bind(pat: &PPat, val: &Value, define: &mut dyn FnMut(&str, Val
         PPat::Path { tag } => match val {
             Value::Enum { def, variant, .. } => {
                 tag.matches(def, *variant)
-                    // A json null is Option::None here, so `Value::Null` matches it.
+                    // A json null is `Option::None`.
                     || (tag.is_named("Null") && def.kind == EnumKind::Option && *variant == NONE)
             }
             _ => false,
@@ -108,8 +105,7 @@ pub(super) fn try_bind(pat: &PPat, val: &Value, define: &mut dyn FnMut(&str, Val
     }
 }
 
-/// Order a range endpoint against a value of the same type. `None` for a type
-/// mismatch, which makes the range not match.
+/// `None` for a type mismatch, which makes the range not match.
 fn endpoint_cmp(literal: &PLit, value: &Value) -> Option<Ordering> {
     match (literal, value) {
         (PLit::Int(a), Value::Int(_) | Value::IntW(..) | Value::Big(..)) => {
@@ -123,8 +119,6 @@ fn endpoint_cmp(literal: &PLit, value: &Value) -> Option<Ordering> {
     }
 }
 
-/// Whether a `lo..hi` pattern contains the scrutinee, given a comparator
-/// against each bound.
 fn range_matches<L>(
     lo: Option<&L>,
     hi: Option<&L>,
@@ -147,8 +141,7 @@ fn range_matches<L>(
     true
 }
 
-/// The `..` slot of a sequence pattern: what a pattern must consume before
-/// it, the name a `rest @ ..` binds, and what it must consume after it.
+/// The `..` slot of a sequence pattern.
 fn split_rest(pats: &[PPat]) -> Option<(&[PPat], Option<&str>, &[PPat])> {
     let pos = pats.iter().position(is_rest)?;
     let name = match &pats[pos] {
@@ -204,20 +197,17 @@ fn plit_eq(l: &PLit, val: &Value) -> bool {
     }
 }
 
-/// Where a value being bound by reference lives, so the binding can anchor
-/// to that storage. A slotless value binds as a plain borrow wrapper when
-/// it is a composite, or as a copy when it is a scalar.
+/// A slotless value binds as a borrow wrapper when composite, as a copy
+/// when scalar.
 enum BindSlot {
     None,
     Elem(List, usize),
     Field(Arc<StructData>, usize),
 }
 
-/// Define bindings for a pattern that already matched a `&mut` scrutinee.
-/// Every binding anchors to the matched value's own storage where one
-/// exists, so `*x += 1` and `v.push(..)` through the binding land in the
-/// borrowed place. Runs after `try_bind` said the pattern matches, and must
-/// walk the same shapes.
+/// Every binding anchors to the matched storage, so `*x += 1` through it
+/// lands in the place. Runs after `try_bind` matched and must walk the same
+/// shapes.
 fn bind_refs(pat: &PPat, val: &Value, slot: BindSlot, define: &mut dyn FnMut(&str, Value)) {
     match pat {
         PPat::Ident { name, sub } => {
@@ -255,7 +245,6 @@ fn bind_refs(pat: &PPat, val: &Value, slot: BindSlot, define: &mut dyn FnMut(&st
                     bind_refs(p, v, BindSlot::Field(st.clone(), i), define);
                 }
             }
-            // The pre-unwrapped Some shapes bind the value itself.
             other => {
                 if let Some(p) = elems.first() {
                     bind_refs(p, other, BindSlot::None, define);
@@ -273,8 +262,7 @@ fn bind_refs(pat: &PPat, val: &Value, slot: BindSlot, define: &mut dyn FnMut(&st
             }
         }
         PPat::Or(alts) => {
-            // The first alternative that matches is the one whose bindings
-            // are live, the same choice `try_bind` made.
+            // The first matching alternative, the same choice `try_bind` made.
             for alt in alts {
                 if try_bind(alt, val, &mut |_, _| {}) {
                     bind_refs(alt, val, slot, define);
@@ -296,10 +284,8 @@ fn bind_refs(pat: &PPat, val: &Value, slot: BindSlot, define: &mut dyn FnMut(&st
     }
 }
 
-/// The element half of `bind_refs`: anchor each pattern to its element slot,
-/// with the same split around a `..` that `bind_seq` uses. A named rest
-/// binds a copy of the middle elements, not a view, so writing through the
-/// rest binding does not reach the scrutinee. Element bindings still do.
+/// The element half of `bind_refs`. A named rest binds a copy, so writing
+/// through it does not reach the scrutinee. Element bindings still do.
 fn bind_refs_seq(pats: &[PPat], list: &List, define: &mut dyn FnMut(&str, Value)) {
     let vals: Vec<Value> = list.lock().clone();
     if let Some((head, rest_name, tail)) = split_rest(pats) {
@@ -328,7 +314,6 @@ fn bind_refs_seq(pats: &[PPat], list: &List, define: &mut dyn FnMut(&str, Value)
     }
 }
 
-/// Entry for the VM: bindings for a matched `&mut` scrutinee.
 pub(super) fn bind_pattern_refs(pat: &PPat, val: &Value, define: &mut dyn FnMut(&str, Value)) {
     bind_refs(pat, val, BindSlot::None, define);
 }

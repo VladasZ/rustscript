@@ -1,7 +1,4 @@
-//! Format specifications. Every observation prints through one, so width,
-//! fill, alignment, sign, zero padding, precision, the alternate flag, and the
-//! hex, octal, binary and exponent traits are all exercised, on every type
-//! they apply to, including user `Display` impls.
+//! Format specs. Every observation prints through one.
 
 use serde::{Deserialize, Serialize};
 
@@ -104,8 +101,7 @@ impl FmtSpec {
         Self { fmt, ..Self::DEBUG }
     }
 
-    /// The text after the colon: fill, align, sign, `#`, `0`, width,
-    /// precision, trait. Empty for a bare `{}`.
+    /// The text after the colon. Empty for a bare `{}`.
     pub fn body(&self) -> String {
         let mut out = String::new();
         if let Some(fill) = self.fill {
@@ -149,15 +145,13 @@ impl FmtSpec {
         }
     }
 
-    /// Whether the spec compiles and prints deterministically for `ty`.
     pub fn applies_to(&self, ty: &Ty) -> bool {
         if !self.fmt.applies_to(ty) {
             return false;
         }
         if self.precision.is_some() {
             let ok = match self.fmt {
-                // Precision truncates a string and rounds a float. On an
-                // integer it is ignored, which is legal but observes nothing.
+                // Precision on an integer is legal but observes nothing.
                 FmtTrait::Display => matches!(ty, Ty::Float(_) | Ty::Str),
                 FmtTrait::Debug | FmtTrait::LowerExp | FmtTrait::UpperExp => {
                     matches!(ty, Ty::Float(_))

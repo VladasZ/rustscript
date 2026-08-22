@@ -1,6 +1,5 @@
 #!/usr/bin/env rust
 
-// A user `Iterator` impl drives for loops and adaptor chains.
 
 struct Counter {
     n: u32,

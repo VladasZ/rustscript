@@ -1,5 +1,4 @@
-//! Bridges for the extra crates a script may use: base64, chrono, rand, sha2,
-//! hex, toml, yaml, glob, dirs, tempfile and friends.
+//! Bridges for the extra crates a script may use.
 
 use num_traits::AsPrimitive;
 use std::sync::Arc;
@@ -25,7 +24,6 @@ pub(super) fn bytes_to_vec(b: &[u8]) -> Value {
     Value::vec(b.iter().map(|x| Value::Int(i64::from(*x))).collect())
 }
 
-/// `module::func` call that is not a plain std bridge.
 pub(super) fn crate_bridge(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     let s0 = || args.first().map(Value::display).unwrap_or_default();
     Ok(Some(match id {
@@ -100,7 +98,7 @@ pub(super) fn crate_bridge(id: PathId, args: &[Value]) -> Result<Option<Value>> 
         // rand -------------------------------------------------------------
         PathId::RandRng | PathId::RandThreadRng => Value::struct_of("Rng", []),
         PathId::RandRandom => Value::Float(rand::random::<f64>()),
-        // chrono is answered in `dispatch_call`, Utc/Local/DateTime.
+        // chrono is answered in `dispatch_call`.
         // jsonwebtoken -----------------------------------------------------
         PathId::JsonwebtokenEncode => super::jwt_bridge::jwt_encode(args)?,
         // tempfile ---------------------------------------------------------
@@ -131,8 +129,8 @@ pub(super) fn crate_bridge(id: PathId, args: &[Value]) -> Result<Option<Value>> 
     }))
 }
 
-/// `crossterm::terminal::size`. The pair is columns then rows, the order the
-/// real call returns, which is the opposite of how a `Rect` is written.
+/// The pair is columns then rows like the real call, the opposite of a
+/// `Rect`.
 fn terminal_size() -> Value {
     match crossterm::terminal::size() {
         Ok((cols, rows)) => Value::ok(Value::tuple(vec![
@@ -143,9 +141,8 @@ fn terminal_size() -> Value {
     }
 }
 
-/// `terminal_light::luma`, the background brightness from 0 for black to 1 for
-/// white. The crate asks the terminal over an escape sequence and falls back to
-/// `$COLORFGBG`, so an error means neither source answered.
+/// Background brightness from 0 to 1. An error means neither the terminal
+/// nor `$COLORFGBG` answered.
 fn terminal_luma() -> Value {
     match terminal_light::luma() {
         Ok(luma) => Value::ok(Value::F32(luma)),
@@ -153,8 +150,7 @@ fn terminal_luma() -> Value {
     }
 }
 
-/// Recognize a base64 engine constant name and build a marker value carrying
-/// which alphabet it uses, so `.encode`/`.decode` can pick the right engine.
+/// A marker carrying the alphabet, so `.encode` picks the right engine.
 pub(super) fn base64_engine(id: PathId) -> Option<Value> {
     let kind = match id {
         PathId::Standard | PathId::Base64Standard => "standard",
@@ -237,11 +233,7 @@ pub(super) fn rng_method(name: &MethodName, args: &[Value]) -> Result<Value> {
     })
 }
 
-/// Methods on an in-progress `Sha256` hasher handle. `update` feeds bytes and
-/// returns unit like the real `Digest::update`, `chain_update` feeds then hands
-/// the same hasher back for chaining, and `finalize` reads the digest as a byte
-/// vec. `finalize` clones the hasher rather than consuming it, so the byte vec
-/// pairs with `hex::encode` exactly as the compiled crate does.
+/// `finalize` clones the hasher rather than consuming it.
 pub(super) fn sha256_method(
     handle: &Arc<Mutex<Native>>,
     method: &MethodName,

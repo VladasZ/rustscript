@@ -1,30 +1,15 @@
-//! Iterator pipelines: a source, a chain of adapters, and a terminal.
+//! Iterator pipelines, a source, adapters and a terminal.
 //!
-//! This is the shape where the collect-target inference in the interpreter
-//! lives. The terminal's `collect`, `sum`, and `product` state their target
-//! at one of the real annotation sites: a turbofish on the call, the
-//! annotation of the `let` that binds the result, or the return type of a
-//! generated helper function.
+//! Determinism rule. A map or set source iterates in an order real Rust
+//! randomizes, so such a pipe passes a `Sorted` stage before anything order
+//! sensitive, float items and fallible closures included.
 //!
-//! Determinism rule: a map or set source iterates in an order real Rust
-//! randomizes per process. Such a pipeline either passes through a `Sorted`
-//! stage before anything order-sensitive, or ends in a terminal whose result
-//! cannot depend on order. Float items are the same problem one level down,
-//! float addition is not associative, so float-typed items are only allowed
-//! on ordered pipelines. A closure that can panic is order-sensitive too,
-//! the first item to panic decides the message, so a fallible closure body
-//! only runs after order is defined.
+//! Panic reach rule. std collects a `Vec` into a `Vec` in place and touches
+//! no item when a `Skip` emptied it, so a panicking body before a `Skip`
+//! never runs there while a lazy engine runs it. A `Sorted` stage runs every
+//! body before it, so it clears the flag.
 //!
-//! Panic reach rule: a `Skip` that empties the pipeline can drop every
-//! closure call before it. Collecting a `Vec` source into a `Vec` takes the
-//! in-place path in std, which reads the length first and touches no item
-//! when that length is zero, so a panicking body earlier in the chain never
-//! runs. That is a std specialization, not something a lazy iterator engine
-//! reproduces, so a fallible body never sits before a `Skip`. A `Sorted`
-//! stage collects the chain so far, which runs every body before it, so it
-//! clears the flag.
-//!
-//! `is_valid` re-checks both rules on every generated and every shrunk pipe.
+//! `is_valid` re-checks both rules on every generated and shrunk pipe.
 
 use std::collections::BTreeSet;
 
@@ -33,7 +18,6 @@ use serde::{Deserialize, Serialize};
 use crate::lang::expr::{Expr, Helper};
 use crate::lang::ty::Ty;
 
-/// The type of one item flowing between stages.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Item {
     Scalar(Ty),
@@ -63,7 +47,6 @@ impl Item {
     }
 }
 
-/// How a collection expression becomes an iterator.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Access {
     /// `vec.into_iter()`, ordered scalar items.
@@ -143,8 +126,7 @@ impl Source {
     }
 }
 
-/// A closure binding, one name for scalar items, two for pair items. The
-/// names carry a per-pipe id so nesting never shadows.
+/// The names carry a per pipe id so nesting never shadows.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Bind {
     One(String),
@@ -152,7 +134,7 @@ pub enum Bind {
 }
 
 impl Bind {
-    /// The owned-pattern form: `x` or `(k, v)`.
+    /// `x` or `(k, v)`.
     fn pattern(&self) -> String {
         match self {
             Self::One(name) => name.clone(),
@@ -161,8 +143,8 @@ impl Bind {
     }
 }
 
-/// Whether a closure parameter carries its type. An untyped parameter is
-/// the site where the interpreter has to learn the item type from the chain.
+/// An untyped parameter is where the interpreter must learn the item type
+/// from the chain.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ParamAnn {
     Typed,
@@ -197,14 +179,12 @@ pub enum Stage {
     /// `.enumerate()` with the index widened to i64, `Scalar(t)` to
     /// `Pair(i64, t)`. Order sensitive.
     Enumerate,
-    /// Materialize, sort, re-iterate. Makes an unordered pipeline ordered,
-    /// which is the only door from a map or set source to an order-sensitive
-    /// stage or terminal.
+    /// Collect, sort, re-iterate. The only door from a map or set source to
+    /// an order sensitive stage.
     Sorted,
 }
 
 impl Stage {
-    /// The item type after this stage, given the one before it.
     fn out(&self, item: &Item) -> Item {
         match self {
             Self::Map { body, .. } => Item::Scalar(body.ty()),
@@ -225,7 +205,6 @@ impl Stage {
         }
     }
 
-    /// Whether the stage's own result depends on the order items arrive in.
     fn order_sensitive(&self) -> bool {
         matches!(
             self,
@@ -233,14 +212,13 @@ impl Stage {
         )
     }
 
-    /// Whether the stage carries a closure whose body can panic. On an
-    /// unordered stretch such a body observes arrival order, because the
-    /// first item to panic decides which message reaches stderr.
+    /// A panicking body observes arrival order, the first item to panic
+    /// decides the message.
     fn fallible(&self) -> bool {
         match self {
             Self::Map { body, .. } | Self::PairWith { body, .. } => body.has_fallible_op(),
             Self::Filter { pred, .. } => pred.has_fallible_op(),
-            // A zero step panics at the call, before any item flows.
+            // A zero step panics before any item flows.
             Self::StepBy(step) => *step == 0,
             Self::Rev | Self::Take(_) | Self::Skip(_) | Self::Enumerate | Self::Sorted => false,
         }
@@ -293,9 +271,7 @@ impl Stage {
     }
 }
 
-/// Whether a panic is still pending after this stage. A `Sorted` renders as
-/// a collect of the chain so far, which runs every body before it, so it
-/// clears the flag.
+/// A `Sorted` runs every body before it, so it clears the flag.
 fn carries_panic(pending: bool, stage: &Stage) -> bool {
     match stage {
         Stage::Sorted => false,
@@ -303,21 +279,16 @@ fn carries_panic(pending: bool, stage: &Stage) -> bool {
     }
 }
 
-/// Whether a closure body among these stages can still panic without a later
-/// `Sorted` having forced it to run. A `Skip` appended here would hide that
-/// panic, see the panic reach rule in the module docs.
+/// A `Skip` appended here would hide the panic, see the panic reach rule.
 pub fn fallible_pending(stages: &[Stage]) -> bool {
     stages.iter().fold(false, carries_panic)
 }
 
-/// Where a `collect`, `sum`, or `product` states its target type.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Site {
     /// `::<T>()` on the call itself.
     Turbofish,
-    /// A bare call, the type stated by the context: the annotation of the
-    /// `let` that binds the pipe, or the return type of the helper function
-    /// whose body the pipe is.
+    /// A bare call typed by the `let` annotation or the helper return type.
     Bare,
 }
 
@@ -327,9 +298,8 @@ pub enum Term {
         target: Ty,
         site: Site,
     },
-    /// `.sum()` into the item type, so a u8 sum panics at the u8 bound
-    /// exactly like debug Rust. With a bare site the target comes from the
-    /// binding, which is where a sum was once seen to wrap instead.
+    /// `.sum()` into the item type, so a u8 sum panics at the u8 bound. A
+    /// bare sum was once seen to wrap.
     Sum {
         out: Ty,
         site: Site,
@@ -364,8 +334,7 @@ pub enum Term {
 }
 
 impl Term {
-    /// Whether the terminal leaves its type to the context, which only a
-    /// `let` annotation or a helper's return type can supply.
+    /// Whether the terminal leaves its type to the context.
     pub fn is_bare(&self) -> bool {
         matches!(
             self,
@@ -384,13 +353,11 @@ impl Term {
 
     fn order_sensitive(&self, item: &Item) -> bool {
         match self {
-            // Collecting into a map or set forgets arrival order, a vec keeps it.
+            // A map or set forgets arrival order, a vec keeps it.
             Self::Collect { target, .. } => matches!(target, Ty::Vec(_)),
-            // A float sum rounds per order. A signed sum panics on an
-            // order-dependent prefix when positive and negative values
-            // cancel, an unsigned prefix only grows, so its overflow does
-            // not depend on order. A product meets a zero at some position,
-            // and whether an overflow happens before it depends on order.
+            // A float sum rounds per order, a signed sum panics on an order
+            // dependent prefix, a product meets its zero in some order. An
+            // unsigned sum only grows.
             Self::Sum { out, .. } => {
                 item.is_float() || matches!(out, Ty::Int(width) if width.is_signed())
             }
@@ -403,8 +370,7 @@ impl Term {
         }
     }
 
-    /// Whether the terminal carries a closure whose body can panic, the same
-    /// arrival-order leak as `Stage::fallible`.
+    /// The same arrival order leak as `Stage::fallible`.
     fn fallible(&self) -> bool {
         match self {
             Self::Any { pred, .. } | Self::All { pred, .. } | Self::Position { pred, .. } => {
@@ -491,7 +457,6 @@ pub struct Pipe {
 }
 
 impl Pipe {
-    /// The item type arriving at the terminal.
     pub fn final_item(&self) -> Item {
         let mut item = self.source.item();
         for stage in &self.stages {
@@ -516,8 +481,7 @@ impl Pipe {
         }
     }
 
-    /// Whether the terminal states its own type. A bare `collect`, `sum`,
-    /// or `product` needs the binding or the return type to state it.
+    /// A bare `collect`, `sum` or `product` needs the context to state it.
     pub fn states_type(&self) -> bool {
         !matches!(
             self.term,
@@ -534,16 +498,13 @@ impl Pipe {
         )
     }
 
-    /// Both generator rules at once, the gate every built and shrunk pipe
-    /// passes. Generation upholds them by construction, shrinking re-checks
-    /// them, and a pipe that fails one is a harness bug, never a case worth
-    /// keeping. See the module docs.
+    /// Both rules from the module docs. A pipe that fails one is a harness
+    /// bug.
     pub fn is_valid(&self) -> bool {
         self.is_deterministic() && self.panics_reach_output()
     }
 
-    /// Whether every panic a closure body can raise actually reaches the
-    /// output, see the panic reach rule in the module docs.
+    /// The panic reach rule.
     pub fn panics_reach_output(&self) -> bool {
         let mut pending = false;
         for stage in &self.stages {
@@ -555,7 +516,7 @@ impl Pipe {
         true
     }
 
-    /// True when every order-sensitive point is preceded by defined order.
+    /// The determinism rule.
     pub fn is_deterministic(&self) -> bool {
         let mut ordered = self.source.ordered();
         let mut item = self.source.item();
@@ -570,8 +531,7 @@ impl Pipe {
                 return false;
             }
             if matches!(stage, Stage::Map { .. }) {
-                // A fresh mapped value forgets nothing about order, the items
-                // themselves may now be floats only if order is defined.
+                // Mapped items may be floats only if order is defined.
                 item = stage.out(&item);
                 if !ordered && item.is_float() {
                     return false;
@@ -604,7 +564,7 @@ impl Pipe {
         format!("({out})")
     }
 
-    /// Every expression the pipe embeds: the source and the closure bodies.
+    /// The source and the closure bodies.
     pub fn exprs(&self) -> Vec<&Expr> {
         let mut out = Vec::new();
         if let Source::Coll { expr, .. } = &self.source {
@@ -724,13 +684,11 @@ impl Pipe {
         }
     }
 
-    /// Simpler pipes with the same result type and the invariant intact.
     pub fn shrinks(&self) -> Vec<Pipe> {
         let mut out = Vec::new();
         for index in 0..self.stages.len() {
-            // Only type-preserving stages can vanish without retyping the
-            // rest. `Sorted` stays, dropping it could legalize nothing and
-            // break determinism.
+            // Only type preserving stages can vanish. `Sorted` stays, dropping
+            // it could break determinism.
             if matches!(
                 self.stages[index],
                 Stage::Filter { .. }

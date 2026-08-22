@@ -1,8 +1,6 @@
-//! A loop body that copies a non-scalar variable ran on the scalar plan,
-//! where such a value loads as an unreadable poison. The copy stored the
-//! poison, and a poisoned slot skips writeback, so the assigned variable
-//! kept its value from before the loop. The campaign found a `char` copy
-//! this way, from seed 20685011353.
+//! A non scalar copy in a loop body once loaded as poison on the scalar plan
+//! and skipped writeback, so the variable kept its old value. From seed
+//! 20685011353.
 
 fn main() {
     let source: char = ' ';

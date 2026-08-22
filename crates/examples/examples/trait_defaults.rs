@@ -1,7 +1,5 @@
 #!/usr/bin/env rust
 
-// Trait default method bodies run for impls that do not override them, and
-// dynamic dispatch picks the override where one exists.
 
 trait Shape {
     fn area(&self) -> f64;

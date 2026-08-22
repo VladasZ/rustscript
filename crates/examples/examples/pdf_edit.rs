@@ -1,6 +1,5 @@
-//! Build a tiny PDF by hand, then use lopdf to load it, read a page's content
-//! stream, rewrite it, save, and read the result back. The xref offsets are
-//! computed while the file is assembled, so the fixture needs no data file.
+//! The PDF is built by hand with computed xref offsets, so no data file is
+//! needed.
 
 use lopdf::Document;
 

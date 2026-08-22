@@ -1,5 +1,4 @@
-//! `match` generation over options, results, user enums and structs,
-//! integers with ranges and guards, booleans, tuples, and slices.
+//! `match` generation.
 
 use rand::RngExt;
 
@@ -10,7 +9,6 @@ use crate::lang::ty::{IntWidth, Ty};
 use crate::lang::user::UserShape;
 
 impl Generator<'_> {
-    /// A match whose every arm produces `want`.
     pub(super) fn match_expr(&mut self, want: &Ty, depth: usize) -> Option<Expr> {
         let scrutinee_ty = match self.rng.random_range(0..8) {
             0 => Ty::opt_of(self.elem_ty()),
@@ -42,7 +40,6 @@ impl Generator<'_> {
         })
     }
 
-    /// An arm with `binds` in scope for the guard and the body.
     fn arm(&mut self, pat: Pat, guard: bool, want: &Ty, depth: usize) -> Arm {
         let mut binds = Vec::new();
         pat.bindings(&mut binds);
@@ -121,7 +118,6 @@ impl Generator<'_> {
         arms
     }
 
-    /// One irrefutable struct pattern binding a subset of the fields.
     fn struct_arms(&mut self, shape: &UserShape, want: &Ty, depth: usize) -> Vec<Arm> {
         let mut fields: Vec<(usize, Pat)> = Vec::new();
         for (index, field) in shape.fields().iter().enumerate() {
@@ -150,7 +146,7 @@ impl Generator<'_> {
                     let a = self.int_value(width);
                     let b = self.int_value(width);
                     let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-                    // An empty half-open range is a compile error.
+                    // An empty half open range is a compile error.
                     let inclusive = lo == hi || self.chance(0.5);
                     Pat::IntRange {
                         width,
@@ -244,8 +240,7 @@ impl Generator<'_> {
                     suffix: Vec::new(),
                 },
             };
-            // Slice bindings are references until the arm body clones
-            // them, so a guard would see `&T`.
+            // A guard would see `&T`, the arm body clones later.
             arms.push(self.arm(pat, false, want, depth));
         }
         arms.push(self.wild_arm(want, depth));

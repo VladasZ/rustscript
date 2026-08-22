@@ -1,6 +1,5 @@
-//! The typed expression tree. Every node carries its own result type, so the
-//! generator, the renderer and the shrinker all agree on what a subtree means
-//! without re-running inference.
+//! Every node carries its result type, so the generator, renderer and
+//! shrinker agree without re-running inference.
 
 use serde::{Deserialize, Serialize};
 
@@ -57,10 +56,8 @@ impl BinOp {
         }
     }
 
-    /// Whether the operator can abort at runtime, by overflow, by a division
-    /// by zero, or by an oversized shift. These are the vein the harness
-    /// hunts, and the reason integer literals are laundered before they reach
-    /// one, so the abort stays a runtime event instead of a compile error.
+    /// Whether the operator can abort at runtime. Literals are laundered
+    /// before they reach one, so the abort stays a runtime event.
     pub fn is_fallible(self) -> bool {
         matches!(
             self,
@@ -75,7 +72,6 @@ impl BinOp {
         )
     }
 
-    /// The operators `a op= b` exists for.
     pub fn has_compound(self) -> bool {
         !self.is_comparison() && !matches!(self, Self::And | Self::Or)
     }
@@ -114,7 +110,6 @@ impl UnOp {
     }
 }
 
-/// One `match` arm.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Arm {
     pub pat: Pat,
@@ -124,38 +119,32 @@ pub struct Arm {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Expr {
-    /// A suffixed integer literal. `opaque` routes it through a helper so the
-    /// compiler cannot fold it, which is what keeps an overflowing program a
-    /// runtime panic instead of a rejected compile.
+    /// `opaque` routes it through a helper so the compiler cannot fold it.
     IntLit {
         width: IntWidth,
         value: i128,
         opaque: bool,
     },
-    /// An integer literal with no suffix, which rustc types `i32` unless
-    /// something around it says otherwise. The whole point is that nothing
-    /// does. `opaque` wraps it in the `if diff_opaque_true()` shield, which
-    /// hides the value from the overflow lint without naming a type.
+    /// Unsuffixed, so `i32` by default. `opaque` wraps it in the
+    /// `if diff_opaque_true()` shield, which hides it from the overflow lint
+    /// without naming a type.
     BareInt {
         value: i128,
         opaque: bool,
     },
-    /// A float literal. It needs laundering for the same reason an integer
-    /// does, even though float arithmetic never aborts: `f32::NEG_INFINITY as
-    /// u16` is an integer constant, and the integer lints then fold the `% 0`
-    /// or the oversized shift built on top of it into a compile error.
+    /// Laundered too, `f32::NEG_INFINITY as u16` is an integer constant the
+    /// lints fold.
     FloatLit {
         width: FloatWidth,
         token: String,
         opaque: bool,
     },
-    /// A float literal with no suffix, `f64` by rustc's default.
+    /// Unsuffixed, `f64` by default.
     BareFloat {
         token: String,
         opaque: bool,
     },
-    /// `opaque` renders through a helper call, so rustc cannot fold the
-    /// value and reject a shift by `'7' as u32` at compile time.
+    /// `opaque` keeps `rustc` from folding a shift by `'7' as u32`.
     BoolLit {
         value: bool,
         opaque: bool,
@@ -173,8 +162,7 @@ pub enum Expr {
         elem: Ty,
         value: Option<Box<Expr>>,
     },
-    /// A map built entry by entry through `insert`, the form real scripts
-    /// write. Empty renders as a turbofished `new`.
+    /// Built through `insert`. Empty renders as a turbofished `new`.
     MapLit {
         key: Ty,
         value: Ty,
@@ -191,7 +179,7 @@ pub enum Expr {
         err: Ty,
         value: Result<Box<Expr>, Box<Expr>>,
     },
-    /// A std error value, made by a parse that fails.
+    /// Made by a parse that fails.
     StdErrLit(StdErr),
     /// `Name { a: .., b: .. }`, or with `update` the first `fields.len()`
     /// fields written and `..Default::default()` for the rest.
@@ -207,10 +195,9 @@ pub enum Expr {
     },
     /// `<T>::default()`.
     DefaultOf(Ty),
-    /// An iterator pipeline, the collect-target shapes among it.
+    /// An iterator pipeline.
     Pipe(Box<Pipe>),
-    /// A call of a generated helper function. `by_ref` marks the arguments
-    /// the function takes by `&`.
+    /// `by_ref` marks the arguments the function takes by `&`.
     FnCall {
         name: String,
         args: Vec<Expr>,
@@ -218,7 +205,6 @@ pub enum Expr {
         by_ref: Vec<bool>,
         ty: Ty,
     },
-    /// A call of a closure bound by a `let`.
     ClosureCall {
         name: String,
         args: Vec<Expr>,
@@ -228,8 +214,7 @@ pub enum Expr {
         name: String,
         ty: Ty,
     },
-    /// A read of a program const. `opaque` shields it from the overflow
-    /// lint the same way a bare literal is shielded.
+    /// `opaque` shields it from the overflow lint like a bare literal.
     ConstRef {
         name: String,
         ty: Ty,
@@ -250,9 +235,7 @@ pub enum Expr {
         value: Box<Expr>,
         to: Ty,
     },
-    /// A call resolved from the catalog. `method` is the catalog key, and the
-    /// rendering template comes from the catalog so the table stays the single
-    /// source of truth for how a call is written.
+    /// `method` is the catalog key, the template comes from the catalog.
     Call {
         method: String,
         recv: Box<Expr>,
@@ -266,7 +249,6 @@ pub enum Expr {
         else_expr: Box<Expr>,
         ty: Ty,
     },
-    /// A struct field by position in the shape.
     Field {
         base: Box<Expr>,
         index: usize,
@@ -277,14 +259,13 @@ pub enum Expr {
         index: usize,
         ty: Ty,
     },
-    /// `v[i]`, which panics out of bounds exactly like debug Rust.
+    /// `v[i]`, panics out of bounds.
     Index {
         base: Box<Expr>,
         index: Box<Expr>,
         ty: Ty,
     },
-    /// A user method, `base.name(args)`, or with `Assoc` kind
-    /// `Type::name(args)` and no base.
+    /// `base.name(args)`, or `Type::name(args)` with `Assoc` kind.
     Method {
         owner: Box<UserShape>,
         name: String,
@@ -304,14 +285,12 @@ pub enum Expr {
         arg: Box<Expr>,
         ty: Ty,
     },
-    /// `value?` inside a function whose error type converts from the
-    /// value's error type.
+    /// `value?`.
     Try {
         value: Box<Expr>,
         ty: Ty,
     },
-    /// `To::from(value)`, or `value.into()` when `bare` and the target is
-    /// stated by the `let` the expression initializes.
+    /// `To::from(value)`, or `value.into()` when `bare`.
     Into {
         value: Box<Expr>,
         to: Ty,
@@ -319,13 +298,13 @@ pub enum Expr {
     },
     Match {
         scrutinee: Box<Expr>,
-        /// The scrutinee is a slice view, so bindings arrive as references
-        /// and each arm clones them into owned values first.
+        /// A slice view, so bindings arrive as references and each arm
+        /// clones them.
         by_ref: bool,
         arms: Vec<Arm>,
         ty: Ty,
     },
-    /// `{ stmts; tail }`, a function body or a closure body.
+    /// `{ stmts; tail }`.
     Block {
         stmts: Vec<Stmt>,
         tail: Box<Expr>,
@@ -373,8 +352,7 @@ impl Expr {
         }
     }
 
-    /// The expression as a place to read a field from or index into: a
-    /// binding by name, anything else parenthesized as a temporary.
+    /// A binding by name, anything else parenthesized as a temporary.
     fn render_place(&self) -> String {
         match self {
             Self::Var { name, .. } => name.clone(),
@@ -408,9 +386,8 @@ impl Expr {
                 let rendered: Vec<String> = args.iter().map(Expr::render).collect();
                 format!("{name}({})", rendered.join(", "))
             }
-            // A non-copy binding is always read through a clone, which is what
-            // keeps generated programs free of move and borrow errors without
-            // the generator having to track liveness.
+            // A non copy binding is read through a clone, so the generator
+            // never has to track liveness.
             Self::Var { name, ty } if !ty.is_copy() => format!("{name}.clone()"),
             Self::Var { name, .. } => name.clone(),
             Self::ConstRef {
@@ -430,10 +407,9 @@ impl Expr {
                 fish,
                 ..
             } => render_call(method, recv, args, fish.as_ref()),
-            // Always parenthesized. Bare `if a { x } else { y }.len()` parses
-            // as `if a { x } else { y.len() }`, so the source would stop
-            // matching the tree and a shrink of the receiver would rewrite a
-            // different expression than the one it aimed at.
+            // Bare `if a { x } else { y }.len()` parses as
+            // `if a { x } else { y.len() }`, so the source would stop matching
+            // the tree.
             Self::If {
                 condition,
                 then_expr,
@@ -459,7 +435,6 @@ impl Expr {
         }
     }
 
-    /// Accesses into values, user calls, conversions, matches, and blocks.
     fn render_access(&self) -> String {
         match self {
             Self::Field { base, index, ty } => {
@@ -523,7 +498,6 @@ impl Expr {
         }
     }
 
-    /// The literal forms, `None` for every other node.
     fn render_literal(&self) -> Option<String> {
         Some(match self {
             Self::IntLit {
@@ -571,7 +545,6 @@ impl Expr {
         })
     }
 
-    /// Collections, tuples, results, and user values.
     fn render_collection_literal(&self) -> Option<String> {
         Some(match self {
             Self::VecLit { elem, items } if items.is_empty() => {
@@ -670,7 +643,6 @@ impl Expr {
     }
 }
 
-/// A read of a place, cloned when its type does not copy.
 fn owned(place: String, ty: &Ty) -> String {
     if ty.is_copy() {
         place
@@ -679,9 +651,8 @@ fn owned(place: String, ty: &Ty) -> String {
     }
 }
 
-/// The `if diff_opaque_true()` shield, a branch the overflow lint cannot
-/// fold that states no type of its own, so rustc infers the value's type
-/// from the literal alone.
+/// A branch the overflow lint cannot fold and that states no type, so
+/// `rustc` infers the type from the literal alone.
 fn shield(text: &str, other: &str, opaque: bool) -> String {
     if opaque {
         format!("(if diff_opaque_true() {{ {text} }} else {{ {other} }})")
@@ -691,10 +662,8 @@ fn shield(text: &str, other: &str, opaque: bool) -> String {
 }
 
 fn render_match(scrutinee: &Expr, by_ref: bool, arms: &[Arm]) -> String {
-    // A slice match views the vec through `as_slice`, the temporary lives
-    // for the whole match.
-    // The scrutinee is parenthesized because a struct literal is not
-    // allowed bare in that position.
+    // The scrutinee is parenthesized because a struct literal is not allowed
+    // bare there.
     let view = if by_ref { ".as_slice()" } else { "" };
     let mut out = format!("(match ({}){view} {{ ", scrutinee.render());
     for arm in arms {
@@ -708,8 +677,8 @@ fn render_match(scrutinee: &Expr, by_ref: bool, arms: &[Arm]) -> String {
         if by_ref && !binds.is_empty() {
             out.push_str("{ ");
             for (name, ty) in &binds {
-                // A slice rest binds `&[T]`, an element binds `&T`. Both
-                // become the owned value the body is typed against.
+                // Slice binds are references, the body is typed against owned
+                // values.
                 let make = if matches!(ty, Ty::Vec(_)) && is_rest(&arm.pat, name) {
                     format!("{name}.to_vec()")
                 } else {
@@ -728,7 +697,6 @@ fn render_match(scrutinee: &Expr, by_ref: bool, arms: &[Arm]) -> String {
     out
 }
 
-/// Whether `name` is the `rest @ ..` binding of a slice pattern.
 fn is_rest(pat: &Pat, name: &str) -> bool {
     match pat {
         Pat::Slice { rest, .. } => matches!(rest, Some(Some(rest)) if rest == name),
@@ -736,7 +704,7 @@ fn is_rest(pat: &Pat, name: &str) -> bool {
     }
 }
 
-/// The opaque helper functions a program needs, emitted only when used.
+/// Emitted only when used.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub enum Helper {
     I64,
@@ -802,8 +770,8 @@ fn render_call(method: &str, recv: &Expr, args: &[Expr], fish: Option<&Ty>) -> S
     )
 }
 
-/// Expand a catalog template. `{{` and `}}` escape a literal brace, the same
-/// way `format!` does, so a template can carry a block expression.
+/// `{{` and `}}` escape a literal brace like `format!`, so a template can
+/// carry a block.
 fn fill(
     template: &str,
     recv: &str,
@@ -854,11 +822,8 @@ fn fill(
     out
 }
 
-/// A bare literal with its suffix restored. A method call on `{integer}`
-/// is ambiguous to rustc, so a bare literal never sits in receiver position.
-/// Un-bare every literal in the tree, not just the node itself. A receiver
-/// like `(if c { 0 } else { 0 })` is as ambiguous as a bare `0`, so the whole
-/// expression has to state its type before a method can be called on it.
+/// Un-bare every literal in the tree. A receiver like
+/// `(if c { 0 } else { 0 })` is as ambiguous as a bare `0`.
 pub fn unbare_deep(mut expr: Expr) -> Expr {
     expr = unbare(expr);
     for child in expr.children_mut() {
@@ -896,7 +861,7 @@ pub fn unbare(expr: Expr) -> Expr {
     }
 }
 
-/// The simplest expression of a type, the target every shrink step aims at.
+/// The target every shrink step aims at.
 pub fn minimal(ty: &Ty) -> Expr {
     match ty {
         Ty::Int(width) => Expr::IntLit {

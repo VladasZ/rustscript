@@ -1,7 +1,5 @@
 #!/usr/bin/env rust
 
-//! `collect` into a `HashMap` or `HashSet`, the map entry API writing through
-//! `or_insert`, and the consuming `into_keys` / `into_values` accessors.
 
 use std::collections::{HashMap, HashSet};
 
@@ -13,10 +11,10 @@ fn scores() -> HashMap<String, i64> {
 }
 
 fn main() {
-    // Collect into a map through the function's return type.
+    // Through the return type.
     let mut tally = scores();
 
-    // The entry API answers a mutable slot, so `+=` lands in the map.
+    // `+=` through the entry API lands in the map.
     *tally.entry(String::from("ada")).or_insert(0) += 10;
     *tally.entry(String::from("eve")).or_insert(7) += 1;
     *tally.entry(String::from("bob")).or_insert_with(|| 100) -= 2;
@@ -28,7 +26,7 @@ fn main() {
     lines.sort();
     println!("{}", lines.join(","));
 
-    // The consuming accessors, sorted so the print order is deterministic.
+    // Sorted so the print order is deterministic.
     let mut names: Vec<String> = scores().into_keys().collect();
     names.sort();
     println!("{names:?}");
@@ -36,7 +34,7 @@ fn main() {
     points.sort_unstable();
     println!("{points:?}");
 
-    // Collect into a map through a `let` annotation and a turbofish.
+    // Through a `let` annotation and a turbofish.
     let squares: HashMap<i64, i64> = vec![1i64, 2, 3].into_iter().map(|n| (n, n * n)).collect();
     println!("{:?}", squares.get(&3));
     let doubled = vec![4i64, 5]
@@ -45,7 +43,6 @@ fn main() {
         .collect::<HashMap<i64, i64>>();
     println!("{:?}", doubled.get(&5));
 
-    // Collect into a set, duplicates fold away.
     let unique: HashSet<i64> = vec![1i64, 2, 2, 3, 3, 3].into_iter().collect();
     println!("{}", unique.len());
     let evens = vec![2i64, 4, 4, 6].into_iter().collect::<HashSet<i64>>();

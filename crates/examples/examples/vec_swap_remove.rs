@@ -1,7 +1,5 @@
 #!/usr/bin/env rust
 
-// `swap_remove` hands back the removed element and moves the last one into
-// its slot, the order change that makes it constant time.
 
 fn main() {
     let mut items = vec![

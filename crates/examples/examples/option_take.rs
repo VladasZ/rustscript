@@ -1,9 +1,7 @@
 #!/usr/bin/env rust
 
-// `Option::take` must empty the place it is called on. It used to answer a
-// clone and leave the source untouched, so `while let Some(x) = opt.take()`
-// never ended and a taken child stdin stayed Some. Every arm here prints the
-// source after the take to lock the emptying in.
+// `Option::take` once answered a clone and left the source untouched, so
+// `while let Some(x) = opt.take()` never ended.
 
 struct Slot {
     value: Option<String>,
@@ -26,7 +24,7 @@ fn main() {
     let second = cells[1].take();
     println!("index: taken={second:?} left={cells:?}");
 
-    // A computed index is still a place, and its parts must evaluate once.
+    // A computed index is a place and its parts must evaluate once.
     let mut offset = 0;
     let mut bump = || {
         offset += 1;

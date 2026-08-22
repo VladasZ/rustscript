@@ -1,9 +1,5 @@
-//! The ratatui bridge, value side. Every ratatui type a script touches is a
-//! plain data struct or enum here, holding exactly the fields the real type
-//! holds, so a script builds widgets with the real crate's API and stays valid
-//! Rust that passes `rust check`. Nothing renders here. `ratatui_render` turns
-//! these values into real ratatui widgets and lets the crate itself draw them,
-//! so interpreted output matches compiled output cell for cell.
+//! The ratatui bridge, value side. Every type is a plain data struct with
+//! the real fields, nothing renders here, see `ratatui_render`.
 
 use num_traits::AsPrimitive;
 use ratatui::layout::Constraint;
@@ -21,7 +17,7 @@ use super::enum_def::{BORDER_TYPE, COLOR, CONSTRAINT, EnumKind};
 use super::value::Value;
 
 /// `Modifier::BOLD` and friends. The colour and border constants are enum
-/// variants, loaded in place by the compiler.
+/// variants.
 pub(super) fn ratatui_const(id: PathId) -> Option<Value> {
     modifier_const(id).map(modifier_value)
 }
@@ -355,8 +351,8 @@ pub(super) fn value_padding(v: &Value) -> Padding {
     Padding::new(field("left"), field("right"), field("top"), field("bottom"))
 }
 
-/// The integer behind an `Int`, an `IntW`, or a bool, so a script may pass a
-/// `u16` field or a plain literal to the same bridge helper.
+/// So a script may pass a `u16` field or a plain literal to the same
+/// helper.
 pub(super) fn int_of(v: &Value) -> i64 {
     match v {
         Value::Int(i) | Value::IntW(i, _) => *i,
@@ -375,7 +371,6 @@ pub(super) fn text_of(v: &Value) -> String {
     }
 }
 
-/// The elements of a `Vec` value, empty for anything else.
 pub(super) fn items(v: &Value) -> Vec<Value> {
     match v {
         Value::Vec(items) | Value::Tuple(items) => items.lock().clone(),
@@ -383,8 +378,6 @@ pub(super) fn items(v: &Value) -> Vec<Value> {
     }
 }
 
-/// The payload of a `Some`, or None for a `None` and for anything that is not
-/// an Option at all.
 pub(super) fn option_inner(v: Option<&Value>) -> Option<Value> {
     let v = v?;
     if v.is_enum_kind(EnumKind::Option) {

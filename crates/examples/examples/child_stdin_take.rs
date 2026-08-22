@@ -1,9 +1,7 @@
 #!/usr/bin/env rust
 
-// A taken child stdin really leaves the field, and the pipe still closes
-// when the child is waited on, so the child sees EOF. Guards the hidden
-// stdin alias in `spawn_command`, without it this example deadlocks in
-// `wait_with_output` with `cat` waiting for more input forever.
+// Guards the hidden stdin alias in `spawn_command`. Without it this
+// deadlocks in `wait_with_output` with `cat` waiting for input forever.
 
 use std::io::Write;
 use std::process::{Command, Stdio};

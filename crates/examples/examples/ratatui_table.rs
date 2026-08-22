@@ -1,5 +1,4 @@
-//! Draw a bordered ratatui table into a buffer and print the buffer as text.
-//! Nothing here touches a terminal, so the same code runs in a pipe and in CI.
+//! Nothing here touches a terminal, so it runs in a pipe and in CI.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint;

@@ -1,4 +1,4 @@
-//! Integer and float widths, the axis the first generator could not name.
+//! Integer and float widths.
 
 use serde::{Deserialize, Serialize};
 
@@ -43,7 +43,7 @@ impl IntWidth {
         }
     }
 
-    /// The harness only runs on 64-bit targets, so usize takes u64's range.
+    /// The harness only runs on 64 bit targets.
     pub fn min(self) -> i128 {
         if self.is_signed() {
             -(1i128 << (self.bits() - 1))

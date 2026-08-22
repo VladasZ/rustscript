@@ -1,8 +1,7 @@
 #!/usr/bin/env rust
 
-// A hand rolled percent encoder, the shape that exposed two interpreter bugs.
-// Byte literal ranges in match patterns never matched, and a `&mut String`
-// passed to a user function lost its mutations on return.
+// The shape that exposed 2 bugs. Byte literal ranges in match patterns never
+// matched, and a `&mut String` passed to a user function lost its mutations.
 
 const HEX: &[u8; 16] = b"0123456789ABCDEF";
 
@@ -58,7 +57,7 @@ fn main() {
     );
     println!("{} {} {} {}", bucket(-5), bucket(0), bucket(7), bucket(10));
 
-    // A closure taking &mut must write back the same way a function does.
+    // A closure taking `&mut` must write back like a function.
     let double = |s: &mut String| {
         let copy = s.clone();
         s.push_str(&copy);

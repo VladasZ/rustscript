@@ -1,13 +1,6 @@
-//! The std method surface the generator could cover, read from the Rust
-//! source the toolchain ships, against the catalog rows and the
-//! interpreter's own bridged surface.
-//!
-//! The catalog is hand written, so on its own it lists what someone thought
-//! of. This module makes the gap measurable: `std_surface.txt` is the list
-//! of stable methods on the generator's receiver types, harvested from
-//! `rust-src`, and the `surface` command reports which of those names the
-//! catalog never generates and which the interpreter does not implement. A
-//! name missing from both is a blind spot, not a design decision.
+//! The std method surface harvested from `rust-src` into `std_surface.txt`,
+//! against the catalog rows and the interpreter's bridged surface. The
+//! catalog is hand written, so this makes its gaps measurable.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -17,11 +10,9 @@ use anyhow::{Context, Result, bail};
 
 use crate::lang::catalog::{METHODS, RecvClass};
 
-/// Where the harvested list lives, relative to the workspace root.
 pub const SURFACE_FILE: &str = "crates/differential/std_surface.txt";
 
-/// The receiver groups of the harvest, by the std source files that hold
-/// their inherent methods.
+/// Receiver groups by the std source files that hold their inherent methods.
 const SOURCES: &[(&str, &[&str])] = &[
     (
         "Int",
@@ -54,9 +45,7 @@ const SOURCES: &[(&str, &[&str])] = &[
     ("Iter", &["core/src/iter/traits/iterator.rs"]),
 ];
 
-/// Methods every template may call that the harvested files do not declare:
-/// the `Clone`, `ToOwned`, `ToString`, and `Into` traits and the collect
-/// family, all std.
+/// Std trait methods the harvested files do not declare.
 pub const TRAIT_METHODS: &[&str] = &[
     "clone",
     "cloned",
@@ -123,7 +112,6 @@ pub const TRAIT_METHODS: &[&str] = &[
     "from",
 ];
 
-/// The harvested surface: receiver group to method names.
 pub type Surface = BTreeMap<String, BTreeSet<String>>;
 
 pub fn load(root: &Path) -> Result<Surface> {
@@ -149,7 +137,6 @@ pub fn parse(text: &str) -> Surface {
     out
 }
 
-/// Harvest the surface from the toolchain's `rust-src` and write the file.
 pub fn refresh(root: &Path) -> Result<String> {
     let library = rust_src_library()?;
     let mut lines = vec![
@@ -190,11 +177,9 @@ fn rust_src_library() -> Result<PathBuf> {
     Ok(library)
 }
 
-/// The names of the stable, documented, safe `fn`s that take `self` in one
-/// source file, inherent impls only. Attributes are read line by line above
-/// each signature, which is how the std sources are laid out, and a trait
-/// impl block is skipped by brace depth so `fmt`, `eq`, and `deref` do not
-/// count as methods of the type.
+/// Stable, documented, safe `fn`s taking `self` in one source file, inherent
+/// impls only. Trait impl blocks are skipped by brace depth so `fmt` and
+/// `eq` do not count.
 fn stable_self_methods(text: &str) -> BTreeSet<String> {
     let lines: Vec<&str> = text.lines().collect();
     let mut out = BTreeSet::new();
@@ -227,7 +212,7 @@ fn stable_self_methods(text: &str) -> BTreeSet<String> {
         if name.starts_with('_') || name.starts_with("spec_") || trimmed.contains("unsafe fn ") {
             continue;
         }
-        // The receiver may sit on the next line of a long signature.
+        // The receiver may sit on the next line.
         let head: String = lines[index..(index + 4).min(lines.len())].join(" ");
         let after_paren = head.split_once('(').map_or("", |(_, rest)| rest);
         if !after_paren.trim_start().starts_with("self")
@@ -266,7 +251,6 @@ fn fn_name(line: &str) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-/// The attribute and doc lines directly above a signature.
 fn attributes_above<'a>(lines: &[&'a str], index: usize) -> Vec<&'a str> {
     let mut out = Vec::new();
     let mut at = index;
@@ -286,8 +270,6 @@ fn attributes_above<'a>(lines: &[&'a str], index: usize) -> Vec<&'a str> {
     out
 }
 
-/// The catalog rows by harvest group, with the std method each template
-/// calls on its receiver.
 fn catalog_by_group() -> BTreeMap<&'static str, BTreeSet<String>> {
     let mut out: BTreeMap<&'static str, BTreeSet<String>> = BTreeMap::new();
     for method in METHODS {
@@ -310,7 +292,6 @@ fn catalog_by_group() -> BTreeMap<&'static str, BTreeSet<String>> {
     out
 }
 
-/// Every `.name(` a template calls.
 pub fn template_methods(template: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = template;
@@ -328,8 +309,8 @@ pub fn template_methods(template: &str) -> Vec<String> {
     out
 }
 
-/// The names the interpreter's `rust supported` listing carries per
-/// receiver, the universal rows copied into every receiver.
+/// The `rust supported` listing per receiver, universal rows copied into
+/// every receiver.
 pub fn interpreter_surface(listing: &str) -> BTreeMap<String, BTreeSet<String>> {
     let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut universal = BTreeSet::new();
@@ -354,14 +335,14 @@ pub fn interpreter_surface(listing: &str) -> BTreeMap<String, BTreeSet<String>> 
     for names in out.values_mut() {
         names.extend(universal.iter().cloned());
     }
-    // Integer and float methods dispatch by id with no table of their own,
-    // so the universal rows are the whole number surface.
+    // Number methods have no table of their own, so the universal rows are
+    // the whole number surface.
     out.insert("number".to_string(), universal);
     out
 }
 
-/// The listing by receiver with the universal rows kept apart under
-/// `any value`, for a count that does not multiply them per receiver.
+/// Universal rows kept apart under `any value`, so the count does not
+/// multiply them per receiver.
 pub fn interpreter_surface_raw(listing: &str) -> BTreeMap<String, BTreeSet<String>> {
     let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut current: Option<String> = None;
@@ -385,7 +366,6 @@ pub fn interpreter_surface_raw(listing: &str) -> BTreeMap<String, BTreeSet<Strin
     out
 }
 
-/// The interpreter listing label a harvest group maps to.
 fn interpreter_label(group: &str) -> &'static str {
     match group {
         "Int" | "Float" | "Bool" => "number",
@@ -400,11 +380,11 @@ fn interpreter_label(group: &str) -> &'static str {
 }
 
 pub struct Report {
-    /// Per group: std names the catalog never generates.
+    /// Std names the catalog never generates.
     pub uncovered_by_catalog: BTreeMap<String, Vec<String>>,
-    /// Per group: std names the interpreter does not implement.
+    /// Std names the interpreter does not implement.
     pub missing_in_interpreter: BTreeMap<String, Vec<String>>,
-    /// Catalog template calls that are not std on any receiver.
+    /// Template calls that are not std on any receiver.
     pub catalog_not_std: Vec<String>,
     pub std_total: usize,
 }

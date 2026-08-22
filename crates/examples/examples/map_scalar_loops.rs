@@ -1,16 +1,12 @@
 #!/usr/bin/env rust
 
-// Map probes and inserts inside scalar `for` plans: the fused
-// `get(k).copied().unwrap_or(d)`, `insert` with a discarded and with a kept
-// old value, `contains_key`, and `if let Some(x) = m.get(&k)`. The float
-// valued map makes its `get` fail the iteration over to the generic path
-// mid-loop, after a journaled insert, so the undo and the generic re-run
-// must agree with plain Rust exactly.
+// Map probes and inserts inside scalar `for` plans, with a mid loop failover
+// after a journaled insert.
 
 use std::collections::HashMap;
 
 fn counting(n: i64) -> (usize, i64) {
-    // The hashmap_int shape: a counting loop over an integer-keyed map.
+    // The hashmap_int shape.
     let mut counts: HashMap<i64, i64> = HashMap::new();
     let mut x: i64 = 12345;
     for _ in 0..n {
@@ -29,8 +25,7 @@ fn counting(n: i64) -> (usize, i64) {
 }
 
 fn kept_old_values() -> i64 {
-    // `insert` answering the old value, `Some` for a rewrite of an existing
-    // key, `None` for a fresh one.
+    // `insert` answering the old value.
     let mut m: HashMap<i64, i64> = HashMap::new();
     let mut reclaimed = 0;
     for k in 0..30 {
@@ -56,10 +51,8 @@ fn membership() -> i64 {
 }
 
 fn failing_over() -> (usize, f64) {
-    // The float valued `weights` map has no scalar slot form for its hits,
-    // so every iteration inserts into `counts`, then fails over and re-runs
-    // generically. A missed undo would answer `Some` for the re-run's
-    // fresh insert and skew the sum.
+    // The float valued `weights` map fails every iteration over after the
+    // insert into `counts`. A missed undo would skew the sum.
     let mut weights: HashMap<i64, f64> = HashMap::new();
     for k in 0..20 {
         weights.insert(k, f64::from(u32::try_from(k).unwrap()) * 0.5);
@@ -79,7 +72,7 @@ fn failing_over() -> (usize, f64) {
 }
 
 fn width_tagged_keys() -> i64 {
-    // u32 keys hash by their storage form on both paths.
+    // u32 keys.
     let mut m: HashMap<u32, i64> = HashMap::new();
     for k in 0u32..50 {
         let key = k % 7;

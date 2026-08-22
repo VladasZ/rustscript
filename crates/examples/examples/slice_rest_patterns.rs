@@ -1,6 +1,3 @@
-//! Slice patterns with a `..` rest: bare and named, at the front, middle,
-//! and back, on slices, arrays, and `&mut` scrutinees.
-
 fn classify(v: &[i32]) -> String {
     match v {
         [] => "empty".to_string(),
@@ -10,8 +7,7 @@ fn classify(v: &[i32]) -> String {
     }
 }
 
-/// A rest arm still needs its written elements present, so one element
-/// falls past the two-ended arm.
+/// One element falls past the 2 ended arm.
 fn ends(v: &[i32]) -> String {
     match v {
         [x, .., y] => format!("pair {x} {y}"),
@@ -31,7 +27,7 @@ fn main() {
     println!("{}", ends(&[3, 4]));
     println!("{}", ends(&[3, 5, 8, 4]));
 
-    // A tail after the rest binds the last elements in written order.
+    // A tail after the rest.
     let arr = [10, 20, 30, 40, 50];
     let [a, .., y, z] = arr;
     println!("{a} {y} {z}");
@@ -40,7 +36,7 @@ fn main() {
     let [first, mid @ .., end] = arr;
     println!("{first} {mid:?} {end}");
 
-    // A vec dereferences to a slice at the call, same as compiled Rust.
+    // A vec derefs to a slice at the call.
     let grown: Vec<i32> = (1..=6).collect();
     println!("{}", classify(&grown));
     println!("{}", ends(&grown));

@@ -1,18 +1,7 @@
-//! Windows services, backed by the windows-service crate.
-//!
-//! The script side mirrors the real crate. `ServiceManager::local_computer`
-//! opens the manager, `open_service` opens one service, and the service answers
-//! `query_status`, `query_config`, `change_config`, `start` and `stop`. An
-//! earlier version of this bridge invented a `WindowsService` type that no crate
-//! exports, which meant a script using it could never pass the `cargo check`
-//! gate. Bridges expose the real API.
-//!
-//! Neither handle is kept alive. The manager value carries the access mask it
-//! was opened with and the service value carries its name and mask, and the real
-//! handles are reopened per call. That is how the registry bridge works too, and
-//! it keeps the `Native` enum free of cfg.
-//!
-//! On a non-Windows host every call returns a plain error saying so.
+//! `Windows` services, mirroring the windows-service crate. An earlier
+//! version invented a `WindowsService` type that could never pass `cargo
+//! check`. Handles are reopened per call, so the `Native` enum stays free
+//! of cfg. Off `Windows` every call returns an error.
 
 use anyhow::Result;
 
@@ -20,12 +9,10 @@ use super::bytecode::{MethodName, PathId};
 use super::std_bridge::as_i64;
 use super::value::{StructData, Value};
 
-/// The access mask constants, as plain ints. `ServiceAccess` and
-/// `ServiceManagerAccess` are bitflags in the crate, so `|` on the script side
-/// works on these directly.
+/// As plain ints, so `|` on the script side works.
 pub(super) fn service_const(id: PathId) -> Option<Value> {
     let n: i64 = match id {
-        // ServiceManagerAccess and ServiceAccess share the low bit values.
+        // `ServiceManagerAccess` and `ServiceAccess` share the low bits.
         PathId::Connect | PathId::QueryConfig => 0x0001,
         PathId::CreateService | PathId::ChangeConfig => 0x0002,
         PathId::EnumerateService | PathId::QueryStatus => 0x0004,
@@ -37,9 +24,8 @@ pub(super) fn service_const(id: PathId) -> Option<Value> {
     Some(Value::Int(n))
 }
 
-/// `ServiceManager::local_computer(database, access)`. The database argument is
-/// accepted and ignored, matching the crate where `None` is the only value the
-/// setup scripts ever pass.
+/// The database argument is accepted and ignored, `None` is the only value
+/// scripts pass.
 pub(super) fn local_computer(args: &[Value]) -> Value {
     let access = args.get(1).and_then(as_i64).unwrap_or(0x0001);
     Value::ok(Value::struct_of(
@@ -72,9 +58,7 @@ mod imp {
     use super::super::std_bridge::as_i64;
     use super::super::value::{StructData, Value};
 
-    /// A `ServiceState` or `ServiceStartType` variant, mirrored as an enum
-    /// value so `{:?}` prints the bare variant name the way the compiled
-    /// crate does.
+    /// An enum value so `{:?}` prints the bare variant name like the crate.
     fn service_variant(def: &Arc<EnumDef>, name: &str) -> Option<Value> {
         Value::enum_named(def, name, Vec::new())
     }
@@ -87,20 +71,18 @@ mod imp {
         s.get(name).as_ref().and_then(as_i64).unwrap_or_default()
     }
 
-    /// An access mask or a type flag set, always a non negative value that
-    /// fits the real u32, since it comes from the bridge constants.
+    /// Always fits the real u32, it comes from the bridge constants.
     fn mask(n: i64) -> Result<u32> {
         u32::try_from(n).map_err(|_| anyhow!("`{n}` is not a valid flag set"))
     }
 
-    /// Open the manager with the mask the script asked `local_computer` for.
     fn manager(access: i64) -> Result<ServiceManager> {
         let mask = ServiceManagerAccess::from_bits_truncate(mask(access)?);
         Ok(ServiceManager::local_computer(None::<&str>, mask)?)
     }
 
-    /// Reopen a service from the name and masks its value carries. The manager
-    /// mask travels with the service so a reopen matches the original request.
+    /// The manager mask travels with the service so a reopen matches the
+    /// original request.
     fn open(s: &StructData) -> Result<Service> {
         let access = ServiceAccess::from_bits_truncate(mask(field_i64(s, "access"))?);
         Ok(manager(field_i64(s, "manager_access"))?.open_service(field_str(s, "name"), access)?)
@@ -169,8 +151,7 @@ mod imp {
     }
 
     fn dependency_from(name: &str) -> ServiceDependency {
-        // Windows marks a load order group with a leading plus, and the crate
-        // splits that into its own variant, so the prefix decides which one.
+        // A leading plus marks a load order group, the crate's own variant.
         match name.strip_prefix('+') {
             Some(group) => ServiceDependency::Group(group.into()),
             None => ServiceDependency::Service(name.into()),
@@ -184,8 +165,7 @@ mod imp {
         }
     }
 
-    /// Rebuild the real `ServiceInfo` from the value a script passed in. Every
-    /// field is read, so nothing the script set is dropped on the way through.
+    /// Every field is read, so nothing the script set is dropped.
     fn service_info_from(info: &StructData) -> Result<ServiceInfo> {
         let Some(start) = info.get("start_type") else {
             bail!("a ServiceInfo needs a start_type");
@@ -242,8 +222,8 @@ mod imp {
                         ("manager_access".into(), Value::Int(field_i64(s, "access"))),
                     ],
                 );
-                // Open it once now so a missing service reports here, the way
-                // the real call does, instead of on the first query.
+                // Open it once now so a missing service reports here like the
+                // real call.
                 let Value::Struct(probe) = &value else {
                     bail!("could not build the service value");
                 };
@@ -273,12 +253,9 @@ mod imp {
                 )),
                 Err(e) => Value::err(Value::str(e.to_string())),
             },
-            // Every field comes back, not just the ones a script usually
-            // reads. change_config needs a complete ServiceInfo, so anything
-            // missing here would have to be invented there, behind the script's
-            // back. service_type and error_control are handed over as their raw
-            // values so they round trip exactly without the bridge having to
-            // model every variant.
+            // Every field comes back, `change_config` needs a complete
+            // `ServiceInfo`. Raw values round trip without modeling every
+            // variant.
             BuiltinId::QueryConfig => match open(s).and_then(|svc| Ok(svc.query_config()?)) {
                 Ok(cfg) => Value::ok(Value::struct_of(
                     "ServiceConfig",
@@ -326,11 +303,8 @@ mod imp {
                 )),
                 Err(e) => Value::err(Value::str(e.to_string())),
             },
-            // ChangeServiceConfigW rewrites the whole service record, so the
-            // script hands over a complete ServiceInfo and every field of it is
-            // used. Nothing is silently substituted from the current config,
-            // because a script that set executable_path and had it quietly
-            // dropped would be the worst kind of bug to find later.
+            // `ChangeServiceConfigW` rewrites the whole record, so every field
+            // is used and nothing is silently substituted.
             BuiltinId::ChangeConfig => {
                 let Some(Value::Struct(info)) = args.first() else {
                     bail!("change_config takes a ServiceInfo");

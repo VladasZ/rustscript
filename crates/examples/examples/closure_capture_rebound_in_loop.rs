@@ -1,9 +1,7 @@
 #!/usr/bin/env rust
 
-// A closure that mutably captures a local shares it through a cell. A
-// binding inside a loop makes a new variable every iteration, so it starts
-// a new cell too, while a variable bound outside the loop keeps the one
-// cell and accumulates across every iteration.
+// A binding inside a loop starts a new capture cell every iteration, one
+// bound outside keeps the one cell.
 
 fn main() {
     for step in 0..3i64 {
@@ -37,7 +35,7 @@ fn main() {
         }
     }
 
-    // Bound outside the loop, so every iteration shares the one cell.
+    // Bound outside the loop.
     let mut running = 0i64;
     for step in 1..4i64 {
         let mut add = || running += step;
@@ -45,8 +43,8 @@ fn main() {
     }
     println!("running {running}");
 
-    // A closure made in one iteration and read in the next reaches the
-    // variable it captured, not the binding that replaced it.
+    // A closure from one iteration read in the next reaches the variable it
+    // captured.
     let mut carried: Vec<i64> = Vec::new();
     for step in 1..4i64 {
         let mut kept = step;

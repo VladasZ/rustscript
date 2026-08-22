@@ -1,9 +1,7 @@
 #!/usr/bin/env rust
 
-// Panic unwinding runs user drops for every live local, innermost frame
-// first, like real Rust. The panic happens inside a spawned task so the
-// program itself still exits cleanly and compiled and interpreted stdout
-// can be compared byte for byte.
+// Unwinding runs drops innermost frame first. The panic is inside a spawned
+// task so the program still exits cleanly.
 
 struct Guard {
     name: String,

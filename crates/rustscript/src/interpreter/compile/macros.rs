@@ -1,4 +1,4 @@
-//! Macro lowering and format specs. Split from the compiler.
+//! Macro lowering and format specs.
 
 use std::sync::Arc;
 
@@ -25,8 +25,7 @@ impl Compiler<'_> {
         match name.as_str() {
             "println" | "print" | "eprintln" | "eprint" | "panic" | "anyhow" | "bail"
             | "unreachable" | "todo" | "unimplemented" => {
-                // These three abort like panic; give a default message when the
-                // macro is called with no arguments, matching real Rust.
+                // A default message with no arguments, like real Rust.
                 let spec = match name.as_str() {
                     "unreachable" | "todo" | "unimplemented" if mac.tokens.is_empty() => {
                         let msg = match name.as_str() {
@@ -53,10 +52,8 @@ impl Compiler<'_> {
                 let spec = self.build_fmt_spec(mac)?;
                 self.emit(Op::Fmt { dst, spec });
             }
-            // `write!(dest, ..)` formats then writes, so it lowers to the two things it means: build the
-            // string, then call the writer's own `write_all` with it. That keeps every destination the
-            // writer bridge already supports, a File, a TcpStream, a child's stdin, and returns the
-            // io::Result those give back, so `?` and `expect` behave as they do in real Rust.
+            // `write!` lowers to build the string then `write_all`, so every
+            // writer the bridge supports works and the `io::Result` is real.
             "write" | "writeln" => {
                 let args =
                     mac.parse_body_with(Punctuated::<Expr, syn::Token![,]>::parse_terminated)?;
@@ -83,8 +80,7 @@ impl Compiler<'_> {
             "matches" => self.compile_matches_macro(dst, mac)?,
             "ensure" => self.compile_ensure_macro(dst, mac)?,
             "cfg" => {
-                // A compile time predicate in real Rust. The interpreter runs on
-                // the host it was built for, so it folds to a constant here too.
+                // Folds to a constant for the host, like real Rust.
                 let meta = mac.parse_body::<syn::Meta>()?;
                 self.emit(Op::LoadBool {
                     dst,
@@ -192,7 +188,6 @@ impl Compiler<'_> {
         let c = self.compile_expr(cond)?;
         let ok = self.here();
         self.emit(Op::JumpIfTrue { cond: c, to: 0 });
-        // Build the error message and return it.
         let msg = self.alloc();
         if let Some(m) = args.get(1) {
             self.compile_into(msg, m)?;
@@ -214,14 +209,13 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    /// `join!` under tokio: spawn everything, then await in order.
+    /// Spawn everything, then await in order.
     fn compile_join_macro(&mut self, dst: Reg, mac: &syn::Macro) -> Result<()> {
         if !self.ctx.async_mode {
             bail!("`join!` is only available under #[tokio::main]");
         }
         let args = parse_exprs(mac)?;
-        // Evaluate every argument first, so all spawned tasks are running
-        // before we await any of them, which is what makes join overlap.
+        // All tasks must be running before any await, or nothing overlaps.
         let handles: Vec<Reg> = args
             .iter()
             .map(|a| self.compile_expr(a))
@@ -270,10 +264,8 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    /// Parse a format macro body and compile its arguments, resolving inline
-    /// `{name}` holes to variables in scope.
-    /// A format spec that is a fixed string with no interpolation, for the
-    /// no-argument forms of `unreachable!`, `todo!`, and `unimplemented!`.
+    /// For the no argument forms of `unreachable!`, `todo!` and
+    /// `unimplemented!`.
     pub(super) fn literal_fmt_spec(&mut self, text: &str) -> Result<u16> {
         let f = self.cur();
         f.fmts.push(FmtSpec {
@@ -289,9 +281,8 @@ impl Compiler<'_> {
         self.build_fmt_spec_from(args.iter(), false)
     }
 
-    /// The same spec builder over an argument iterator, so `write!` can hand it everything after the
-    /// destination. `newline` extends the template rather than the formatted value, which is what lets
-    /// `writeln!` share this code and keeps a bare `writeln!(f)` a lone newline.
+    /// `newline` extends the template, not the value, so a bare `writeln!(f)`
+    /// is a lone newline.
     pub(super) fn build_fmt_spec_from<'a>(
         &mut self,
         mut iter: impl Iterator<Item = &'a Expr>,
@@ -317,10 +308,8 @@ impl Compiler<'_> {
                 }
                 other => other,
             };
-            // A format argument made only of bare literals has no other
-            // use to type it, so it is the `i32` rustc falls back to, and
-            // `{:x}` of a negative one shows eight digits, not sixteen. One
-            // that states its type in a branch types its bare literals too.
+            // A bare literal argument is `i32`, so `{:x}` of a negative one
+            // shows 8 digits.
             let target = if unconstrained_int(value) {
                 Some(NumericTy::Int(IntWidth::I32))
             } else {
@@ -341,7 +330,7 @@ impl Compiler<'_> {
             }
             positional.push(r);
         }
-        // Inline identifiers referenced in the template but not given explicitly.
+        // Inline identifiers not given explicitly.
         for hole in inline_holes(&template) {
             if named.iter().all(|(n, _)| n != &hole) {
                 let r = self.alloc();
@@ -361,9 +350,8 @@ impl Compiler<'_> {
     // -- jump patching -----------------------------------------------------
 }
 
-/// Evaluate a `cfg!` predicate against the host the interpreter runs on. Only
-/// the forms a script realistically uses are handled, and anything else is an
-/// error rather than a silent false, which would pick the wrong branch.
+/// Anything unhandled is an error, a silent false would pick the wrong
+/// branch.
 fn eval_cfg(meta: &syn::Meta) -> Result<bool> {
     match meta {
         syn::Meta::Path(path) => {
@@ -374,7 +362,6 @@ fn eval_cfg(meta: &syn::Meta) -> Result<bool> {
             match name.as_str() {
                 "windows" => Ok(cfg!(windows)),
                 "unix" => Ok(cfg!(unix)),
-                // A script is interpreted, never compiled with these on.
                 "test" | "debug_assertions" | "doc" | "miri" => Ok(false),
                 other => bail!("unsupported cfg predicate `{other}`"),
             }

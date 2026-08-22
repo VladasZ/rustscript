@@ -1,6 +1,4 @@
-// Chrono datetimes under `#[tokio::main]`, backed by the same shared
-// core as everywhere else. Only stable properties
-// are printed, so compiled and interpreted output stay identical.
+// Chrono under `#[tokio::main]`. Only stable properties are printed.
 
 use chrono::{Datelike, Utc};
 

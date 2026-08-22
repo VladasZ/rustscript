@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-// Set, read, enumerate, and remove environment variables. A missing
-// variable answers the structured `VarError::NotPresent`.
+// A missing variable answers `VarError::NotPresent`.
 
 use std::env;
 use std::env::VarError;

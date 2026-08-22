@@ -1,9 +1,5 @@
-// Float formatting and comparison semantics. Display prints the shortest
-// round-trip decimal with no exponent, Debug keeps a `.0` on whole numbers
-// and switches to exponent form outside 1e-4..1e16, and NaN makes every
-// ordered comparison false. The values cover negative zero, bankers rounding
-// bait, the first integer f64 cannot represent, extremes, subnormals, and
-// the special constants.
+// Float formatting and comparison. The values cover negative zero, rounding
+// bait, extremes, subnormals, NaN and the special constants.
 
 fn main() {
     let values: [f64; 16] = [

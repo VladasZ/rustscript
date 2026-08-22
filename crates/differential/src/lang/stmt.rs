@@ -1,8 +1,5 @@
-//! Statements. A generated block is a real `fn main` body: bindings with and
-//! without annotations, consts, closures, reassignment, compound assignment,
-//! nested control flow with `break` and `continue`, in place mutation, and a
-//! labeled print per observation so a mismatch names the line that produced
-//! it.
+//! Statements. Every observation is a labeled print, so a mismatch names the
+//! line that produced it.
 
 use std::collections::BTreeSet;
 
@@ -12,15 +9,14 @@ use crate::lang::expr::{BinOp, Expr, Helper};
 use crate::lang::fmt::FmtSpec;
 use crate::lang::ty::Ty;
 
-/// Whether a `let` states its type. An inferred binding is the site where
-/// the interpreter has to learn a type from the initializer alone.
+/// An inferred binding is where the interpreter must learn a type from the
+/// initializer alone.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Ann {
     Typed,
     Inferred,
 }
 
-/// How an observation is spelled inside `println!`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum PrintForm {
     /// `{spec}`.
@@ -47,7 +43,6 @@ impl PrintForm {
     }
 }
 
-/// Where a closure binding comes from.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ClosureSource {
     /// `|params| -> ret { body }`, `move` when `capture_move`.
@@ -56,8 +51,7 @@ pub enum ClosureSource {
         ret: Ty,
         body: Expr,
         capture_move: bool,
-        /// The body writes a captured binding, so the closure is `FnMut` and
-        /// its own binding is `mut`.
+        /// The body writes a captured binding, so the closure is `FnMut`.
         mutates: bool,
     },
     /// `diff_factory(arg)`, a helper returning `impl Fn(T) -> T`.
@@ -78,14 +72,12 @@ pub enum Stmt {
         expr: Expr,
         ann: Ann,
     },
-    /// A closure bound by `let`, followed immediately by its calls when it
-    /// borrows a binding mutably, so the borrow ends before anything else
-    /// reads that binding.
+    /// A closure bound by `let`. Its calls follow at once when it borrows
+    /// mutably, so the borrow ends before anything else reads the binding.
     LetClosure {
         name: String,
         source: ClosureSource,
-        /// The calls printed right after the binding, each a `ClosureCall`
-        /// or an `ApplyCall` through the generic helper.
+        /// The calls printed right after the binding.
         calls: Vec<Expr>,
     },
     Assign {
@@ -114,14 +106,12 @@ pub enum Stmt {
         count: usize,
         body: Vec<Stmt>,
     },
-    /// A counted `while`, the counter incremented first so a `continue` in
-    /// the body cannot loop forever.
+    /// The counter is incremented first so a `continue` cannot loop forever.
     While {
         counter: String,
         limit: u8,
         body: Vec<Stmt>,
     },
-    /// A counted `loop` that breaks past the limit.
     Loop {
         counter: String,
         limit: u8,
@@ -140,14 +130,12 @@ pub enum Stmt {
         condition: Expr,
         value: Expr,
     },
-    /// An in-place mutation of a collection binding.
     Mutate {
         name: String,
         op: MutOp,
     },
-    /// `for var in source { accum-mutation on target }`, the loop-accumulation
-    /// shape scripts build maps and vecs with. The source must iterate in a
-    /// defined order, so generation only feeds it vecs.
+    /// `for var in source { accumulate into target }`. The source must have
+    /// a defined order, so it is always a vec.
     ForAccum {
         var: String,
         source: Expr,
@@ -169,7 +157,6 @@ pub enum Stmt {
     },
 }
 
-/// One in-place operation on a collection binding.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum MutOp {
     VecPush(Expr),
@@ -180,7 +167,7 @@ pub enum MutOp {
     VecClear,
     VecTruncate(u8),
     VecSwap(u8, u8),
-    /// `name[i] = value;`, which panics out of bounds exactly like debug Rust.
+    /// `name[i] = value;`, panics out of bounds.
     VecSetIndex {
         index: u8,
         value: Expr,
@@ -314,8 +301,7 @@ impl MutOp {
         }
     }
 
-    /// `+=` on an entry can overflow, an index write can miss, a swap and a
-    /// retain body can abort, everything else only moves values.
+    /// Only entry `+=`, index writes, swap and retain bodies can abort.
     pub fn has_fallible_op(&self) -> bool {
         matches!(
             self,
@@ -351,7 +337,6 @@ impl MutOp {
 }
 
 impl Stmt {
-    /// Nested statement lists, for walks that descend into bodies.
     pub fn bodies(&self) -> Vec<&Vec<Stmt>> {
         match self {
             Self::If {
@@ -380,8 +365,7 @@ impl Stmt {
         }
     }
 
-    /// Every expression the statement holds, nested bodies included, in a
-    /// fixed order shared with `exprs_mut`.
+    /// Every expression, in a fixed order shared with `exprs_mut`.
     pub fn exprs(&self) -> Vec<&Expr> {
         let mut out = Vec::new();
         match self {
@@ -467,8 +451,8 @@ impl Stmt {
         out
     }
 
-    /// Names this statement writes to, including inside nested blocks and
-    /// closure bodies, so the renderer knows which bindings need `mut`.
+    /// Names this statement writes to, so the renderer knows which bindings
+    /// need `mut`.
     pub fn assigned(&self, out: &mut BTreeSet<String>) {
         match self {
             Self::Assign { name, .. }
@@ -509,8 +493,7 @@ impl Stmt {
         }
     }
 
-    /// The binding a compound assignment writes, for callers that must keep
-    /// it out of reach while a closure holds it.
+    /// The binding a compound assignment writes.
     pub fn declared_targets(&self) -> Vec<String> {
         match self {
             Self::Compound { name, .. } | Self::Assign { name, .. } => vec![name.clone()],
@@ -518,7 +501,6 @@ impl Stmt {
         }
     }
 
-    /// Names this statement binds at its own level.
     pub fn declared(&self) -> Vec<String> {
         match self {
             Self::Let { name, .. } | Self::LetClosure { name, .. } => vec![name.clone()],
@@ -538,8 +520,8 @@ impl Stmt {
         direct || self.exprs().iter().any(|expr| expr.uses_any(names))
     }
 
-    /// Whether this statement assigns to a name it does not own, which makes
-    /// it invalid once that binding is dropped by the reducer.
+    /// Whether this statement assigns to a name it does not own, so the
+    /// reducer cannot drop that binding.
     pub fn writes_any(&self, names: &BTreeSet<String>) -> bool {
         let mut written = BTreeSet::new();
         self.assigned(&mut written);
@@ -548,7 +530,6 @@ impl Stmt {
 
     pub fn has_fallible_op(&self) -> bool {
         let own = match self {
-            // A compound assignment is an arithmetic op on the binding.
             Self::Compound { op, .. } => op.is_fallible(),
             Self::Mutate { op, .. } | Self::ForAccum { op, .. } => op.has_fallible_op(),
             _ => false,
@@ -776,7 +757,6 @@ impl Stmt {
         }
     }
 
-    /// The counted loops, each body indented one level.
     fn render_loop(&self, mutable: &BTreeSet<String>, indent: usize, pad: &str) -> String {
         match self {
             Self::ForRange { var, count, body } => {
@@ -817,8 +797,6 @@ impl Stmt {
         }
     }
 
-    /// `let` and `let (a, b)`, `mut` where the block writes the binding,
-    /// annotated or inferred.
     fn render_binding(&self, mutable: &BTreeSet<String>, pad: &str) -> String {
         match self {
             Self::Let {
@@ -867,7 +845,6 @@ impl Stmt {
 
     pub fn shrinks(&self) -> Vec<Self> {
         let mut candidates = Vec::new();
-        // Drop one statement from a nested body.
         for (body_index, body) in self.bodies().iter().enumerate() {
             for index in 0..body.len() {
                 let mut candidate = self.clone();
@@ -909,7 +886,6 @@ impl Stmt {
     }
 }
 
-/// A closure binding and the calls printed right after it.
 fn render_closure(
     pad: &str,
     name: &str,
@@ -958,9 +934,8 @@ fn render_closure(
     out
 }
 
-/// A map or set prints through a sorted vec, never raw: real Rust randomizes
-/// its iteration order per process, so a raw print would flag a fake
-/// divergence on nearly every run.
+/// A map or set prints through a sorted vec, real Rust randomizes its order
+/// per process.
 fn observed(expr: &Expr) -> String {
     match expr.ty() {
         Ty::Map(key, value) => format!(
@@ -1012,8 +987,8 @@ fn render_print(pad: &str, label: &str, expr: &Expr, spec: &FmtSpec, form: Print
     }
 }
 
-/// Insert a width reference into a spec body rendered without a width: it
-/// goes after the flags, before any precision and the trait letter.
+/// The width goes after the flags and before any precision and the trait
+/// letter.
 fn with_width(body: &str, width: &str) -> String {
     let split = body
         .find(['.', '?', 'x', 'X', 'o', 'b', 'e', 'E'])

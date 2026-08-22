@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-// `Rc::strong_count` answers the true handle count, including when the
-// borrow is read through one or more function calls.
+// `Rc::strong_count` must be right even through function calls.
 
 use std::rc::Rc;
 

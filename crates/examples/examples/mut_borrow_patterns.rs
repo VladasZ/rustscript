@@ -1,8 +1,7 @@
 #!/usr/bin/env rust
 
-// Mutation through `&mut` borrows in every binding shape: pattern payloads,
-// mutable iteration, and the `mem` place functions. Writes through a borrow
-// must land in the borrowed place.
+// Writes through `&mut` borrows in every binding shape must land in the
+// borrowed place.
 
 use std::mem::take;
 

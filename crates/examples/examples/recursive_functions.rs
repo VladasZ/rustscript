@@ -1,9 +1,7 @@
 #!/usr/bin/env rust
 
-//! Self-recursive scalar functions run as function plans, see
-//! `interpreter/scalar_fn.rs`: the whole call tree runs unboxed inside one
-//! `CallFn` dispatch. Every shape here must print exactly what the compiled
-//! build prints, planned and fallback alike.
+//! Self recursive scalar functions run as function plans, see
+//! `interpreter/scalar_fn.rs`.
 
 fn fib(n: u64) -> u64 {
     if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
@@ -13,12 +11,12 @@ fn gcd(a: u64, b: u64) -> u64 {
     if b == 0 { a } else { gcd(b, a % b) }
 }
 
-// Deep tail recursion, so the plan's frame stack grows far past one window.
+// Deep recursion, so the plan's frame stack grows past one window.
 fn sum_to(n: i64, acc: i64) -> i64 {
     if n == 0 { acc } else { sum_to(n - 1, acc + n) }
 }
 
-// A whitelisted numeric method and a three-way branch inside the plan.
+// A numeric method and a 3 way branch inside the plan.
 fn collatz_len(n: u64, steps: u64) -> u64 {
     if n == 1 {
         steps
@@ -29,8 +27,7 @@ fn collatz_len(n: u64, steps: u64) -> u64 {
     }
 }
 
-// Mutual recursion targets another function, so these two stay on the
-// generic path and must answer the same there.
+// Mutual recursion stays on the generic path.
 fn is_even(n: u64) -> bool {
     if n == 0 { true } else { is_odd(n - 1) }
 }

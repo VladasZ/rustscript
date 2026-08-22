@@ -1,23 +1,14 @@
-//! WMI queries, backed by the wmi crate.
-//!
-//! A connection is stored as its namespace path and reopened per call, the same
-//! shape the registry and service bridges use, so nothing lands in the `Native`
-//! enum.
-//!
-//! A query returns a vec of maps, one per instance, with the property values
-//! converted to plain script values. That is what `Get-CimInstance` gives a
-//! PowerShell script and it is what the setup scripts read.
-//!
-//! On a non-Windows host every call returns a plain error saying so.
+//! WMI queries. A connection is stored as its namespace path and reopened
+//! per call, so nothing lands in the `Native` enum. A query returns a vec of
+//! maps like `Get-CimInstance`. Off `Windows` every call returns an error.
 
 use anyhow::Result;
 
 use super::bytecode::MethodName;
 use super::value::{StructData, Value};
 
-/// `WMIConnection::new()` defaults to root\cimv2, the namespace almost every
-/// query uses. `with_namespace_path` names a different one. Neither takes a
-/// `COMLibrary`, the crate initializes COM per thread itself.
+/// `WMIConnection::new()` defaults to `root\cimv2`. Neither takes a
+/// `COMLibrary`, the crate initializes COM per thread.
 pub(super) fn connection(args: &[Value], default_namespace: bool) -> Value {
     let ns = if default_namespace {
         r"root\cimv2".to_string()
@@ -44,8 +35,7 @@ mod imp {
     use super::super::numeric::IntWidth;
     use super::super::value::{MapKey, StructData, Value};
 
-    /// Nothing to check up front. A namespace that does not exist, or a COM
-    /// that will not start, reports itself when the connection is opened.
+    /// A bad namespace reports itself when the connection is opened.
     pub(super) fn connection(namespace: String) -> Value {
         Value::ok(Value::struct_of(
             "WmiConnection",
@@ -57,12 +47,8 @@ mod imp {
         Ok(WMIConnection::with_namespace_path(namespace)?)
     }
 
-    /// Map a WMI variant onto the script value with the same shape.
-    ///
-    /// Values are returned bare, not wrapped in Some. The map lookup already
-    /// hands back an Option, so wrapping here too would make every read a
-    /// double Some. A property that is present but null reads as None inside
-    /// that outer Some, which still separates "null" from "not there".
+    /// Values are returned bare, the map lookup already hands back an
+    /// Option. A present null reads as None inside that outer Some.
     fn from_variant(v: &Variant) -> Value {
         match v {
             Variant::Empty | Variant::Null => Value::none(),
@@ -85,7 +71,7 @@ mod imp {
 
     fn row_to_value(row: &HashMap<String, Variant>) -> Value {
         let mut names: Vec<&String> = row.keys().collect();
-        // HashMap order is arbitrary, so sort for a stable script side result.
+        // Sorted for a stable result.
         names.sort();
         let mut map = IndexMap::default();
         for name in names {

@@ -1,10 +1,6 @@
-//! Equality and ordering on values that share storage inside the interpreter.
-//! A script clone of a container or struct shares its mutex, so every
-//! comparison here once relocked a mutex it already held and deadlocked.
-//! Compiled Rust deep copies instead, so the outputs must still match byte
-//! for byte. The struct arm also held both sides locked while reading fields,
-//! which hung every comparison of two `PathBuf`s, the exact shape of the
-//! `cwd == home()` check that froze real scripts.
+//! Equality on values that share storage. A clone shares its mutex, so every
+//! comparison here once relocked a held mutex and deadlocked. The struct arm
+//! froze every `PathBuf` comparison like `cwd == home()`.
 
 use std::env;
 use std::path::PathBuf;
@@ -37,8 +33,7 @@ fn main() {
         path == path.clone()
     );
 
-    // The shape that froze cm, cb, cl, and ll-isolate: a Result adapter whose
-    // closure compares two paths.
+    // The shape that froze `cm`, `cb`, `cl` and `ll-isolate`.
     let nowhere = PathBuf::from("/nowhere");
     let at_root = env::current_dir().is_ok_and(|cwd| cwd == nowhere);
     println!("cwd: {at_root}");
@@ -51,7 +46,7 @@ fn main() {
         numbers < numbers.clone()
     );
 
-    // NaN makes equality false even against the value's own clone.
+    // NaN is not equal to its own clone.
     let nan = vec![f64::NAN];
     println!("nan: {}", nan == nan.clone());
 
@@ -61,8 +56,7 @@ fn main() {
     let nested = vec![vec![1, 2], vec![3]];
     println!("nested: {}", nested == nested.clone());
 
-    // dedup and contains compare elements that share storage with each other
-    // and with the needle.
+    // `dedup` and `contains` compare elements that share storage.
     let mut paths = vec![path.clone(), path.clone(), PathBuf::from("/z")];
     paths.dedup();
     println!("dedup: {} {}", paths.len(), paths.contains(&path));

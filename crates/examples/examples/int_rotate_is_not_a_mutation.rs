@@ -1,7 +1,7 @@
 #!/usr/bin/env rust
 
-//! `rotate_left` and `rotate_right` return a value on an integer instead of
-//! mutating it, so the result can be assigned back over the receiver.
+//! `rotate_left` and `rotate_right` on an integer return a value, they do not
+//! mutate.
 
 fn opaque_i16(v: i16) -> i16 {
     v
@@ -16,8 +16,7 @@ fn main() {
     println!("rotated: {} {}", n.rotate_left(1), n.rotate_right(1));
     println!("unchanged: {n}");
 
-    // The receiver keeps its value even when the result is assigned back
-    // over it through a closure that captured it.
+    // The receiver keeps its value through a capturing closure too.
     let mut folded: i16 = opaque_i16(32_766);
     folded = Vec::<u8>::new()
         .into_iter()

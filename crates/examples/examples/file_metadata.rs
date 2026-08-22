@@ -1,7 +1,5 @@
 #!/usr/bin/env rust
 
-// Read a file's metadata: size and kind. The size is fixed by what we write, so
-// it is stable across runs.
 
 use std::fs;
 

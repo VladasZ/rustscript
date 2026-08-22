@@ -1,7 +1,6 @@
-//! A script that lives in a cargo crate can use a local `path` dependency
-//! crate. The interpreter grafts that crate in from source so `use shared::..`
-//! resolves at runtime, and the checker adds it as a real path dependency so
-//! `cargo check` also passes, including a bare `shared::` from a deep module.
+//! A script inside a cargo crate can use a local `path` dependency. The
+//! interpreter grafts it in from source and the checker adds it as a real
+//! path dependency.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -11,8 +10,7 @@ use pretty_assertions::assert_eq;
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-/// Lay out a crate `app` with a bin that uses a sibling `shared` path crate,
-/// and return the bin path. `shared` has no external deps so the check is fast.
+/// `shared` has no external deps so the check is fast.
 fn fixture() -> (PathBuf, PathBuf) {
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
     let root = std::env::temp_dir().join(format!("rustscript_crate_{}_{}", std::process::id(), id));
@@ -38,11 +36,8 @@ edition = "2024"
         &root.join("shared/src/util.rs"),
         "pub fn who() -> String { \"world\".to_string() }\n",
     );
-    // A sibling module reaches another with `super::`, which must stay
-    // relative so it resolves both as a real crate and as a grafted module.
-    // `crate::` inside the grafted crate must pin to the grafted root, not the
-    // script root. Both the inline path and the `use crate::..` import form
-    // once fell through to bridge dispatch and died at runtime.
+    // `super::` must stay relative and `crate::` must pin to the grafted root,
+    // not the script root. Both once fell through to bridge dispatch.
     write(
         &root.join("shared/src/greet.rs"),
         "use crate::util::who;\npub fn hi() -> String { format!(\"hi {}\", super::util::who()) }\npub fn yo() -> String { format!(\"yo {} {}\", who(), crate::util::who()) }\n",
@@ -59,8 +54,7 @@ shared = { path = "../shared" }
 [workspace]
 "#,
     );
-    // The bin uses `shared::` at the root, and a deep module `deep` uses a bare
-    // `shared::` too, which only a real extern crate allows.
+    // A bare `shared::` from a deep module only works for a real extern crate.
     let bin = root.join("app/src/bin/foo.rs");
     write(
         &bin,
@@ -106,9 +100,8 @@ fn grafts_local_crate_at_runtime() {
 
 #[test]
 fn grafts_hyphenated_local_crate() {
-    // A hyphenated package name like `my-shared` is `my_shared` in Rust code.
-    // Cargo maps the hyphen to an underscore for the crate identifier, so the
-    // grafted module has to be named `my_shared`, not the raw dependency key.
+    // Cargo maps the hyphen to an underscore, so the grafted module must be
+    // `my_shared`.
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
     let root =
         std::env::temp_dir().join(format!("rustscript_hyphen_{}_{}", std::process::id(), id));
@@ -146,11 +139,9 @@ fn grafts_hyphenated_local_crate() {
 #[test]
 fn checks_local_crate_as_path_dep() {
     let (bin, root) = fixture();
-    // The `check` command, not `run`. Only `check` builds a cargo project and
-    // resolves `shared` as a real path dependency, so `run` never exercised
-    // this. A manifest bug once appended the graft as a bare key after the
-    // `[target."cfg(windows)".dependencies]` table, which made it Windows only,
-    // so `cargo check` dropped it and `use shared::..` failed off Windows.
+    // Only `check` resolves `shared` as a real path dependency. A manifest bug
+    // once appended the graft after the `[target."cfg(windows)".dependencies]`
+    // table, which made it `Windows` only.
     let out = Command::new(env!("CARGO_BIN_EXE_rust"))
         .arg("check")
         .arg(&bin)

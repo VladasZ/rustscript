@@ -14,15 +14,13 @@ use std::process::{Command, exit};
 use anyhow::{Error, Result, anyhow, bail};
 use mimalloc::MiMalloc;
 
-/// Value churn makes the interpreter allocation bound, and mimalloc handles
-/// that pattern far better than the system allocator.
+/// The interpreter is allocation bound and mimalloc handles that far better
+/// than the system allocator.
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-/// Watch for lock cycles in the value model and abort with the backtrace of
-/// every thread involved. A deadlock is an interpreter bug, never a script
-/// bug, and without this it shows up as a silent hang that only a harness
-/// timeout can catch, with nothing to say which locks are held where.
+/// A deadlock is always an interpreter bug. Without this it is a silent hang
+/// with nothing to say which locks are held where.
 #[cfg(feature = "deadlock-detection")]
 fn spawn_deadlock_watchdog() {
     use std::process::abort;
@@ -54,10 +52,8 @@ fn main() {
     #[cfg(feature = "deadlock-detection")]
     spawn_deadlock_watchdog();
     if let Err(e) = real_main() {
-        // A script runtime abort reports and exits like a compiled panic,
-        // and a `Result::Err` out of main like a compiled anyhow main, so
-        // callers checking `$?` or grepping stderr see the same behavior
-        // either way the script runs.
+        // Exit like a compiled panic or a compiled anyhow main, so `$?` and
+        // stderr look the same either way.
         if let Some(p) = e.downcast_ref::<interpreter::ScriptPanic>() {
             if p.file.is_empty() {
                 eprintln!("thread 'main' panicked:");
@@ -71,11 +67,8 @@ fn main() {
             eprintln!("Error: {}", r.0);
             exit(1);
         }
-        // A missing-feature error gets a stable machine-readable prefix so
-        // tooling like the differential harness can separate interpreter
-        // gaps from real failures without guessing. The wording check lives
-        // here, next to the messages it matches, and both ship in one
-        // binary, so the contract cannot drift.
+        // A stable prefix so the differential harness can tell gaps from real
+        // failures. The wording check lives next to the messages it matches.
         let rendered = format!("{e:#}");
         if rendered.contains("unsupported")
             || rendered.contains("not supported")
@@ -97,10 +90,9 @@ fn real_main() -> Result<()> {
             let file = all.get(1).ok_or_else(err_usage)?;
             let source = fs::read_to_string(file)?;
             let program = loader::load(Path::new(file), &source)?;
-            // Gate one: is it valid Rust. `cargo check` is the authority.
+            // Gate 1, valid Rust.
             checker::check(Path::new(file), &program.files, &program.crate_deps)?;
-            // Gate two: does this interpreter implement everything it calls.
-            // Compiling is enough to reach it, nothing is executed.
+            // Gate 2, the interpreter implements everything it calls.
             check_coverage(&program)?;
             println!("ok");
             Ok(())
@@ -112,7 +104,6 @@ fn real_main() -> Result<()> {
         "clean" => checker::clean(),
         "update" => update::update(&all[1..]),
         "supported" => {
-            // `rust supported md` prints the docs page for regeneration.
             if all.get(1).map(String::as_str) == Some("md") {
                 print!("{}", supported::markdown());
             } else {
@@ -134,9 +125,8 @@ fn real_main() -> Result<()> {
             print_usage();
             Ok(())
         }
-        // `rust file.rs` and the shebang form both land here. Everything after
-        // the filename is passed through to the script. An extensionless path
-        // still runs when it is a real file, e.g. a launcher symlink.
+        // An extensionless path still runs when it is a real file, for
+        // example a launcher symlink.
         path if Path::new(path).extension() == Some(OsStr::new("rs"))
             || Path::new(path).is_file() =>
         {
@@ -146,27 +136,21 @@ fn real_main() -> Result<()> {
     }
 }
 
-/// Compile the program and report anything the interpreter cannot run.
-///
-/// Compiling alone already rejects unsupported macros and expressions, so this
-/// reaches those too. The coverage walk then adds every method call the VM
-/// could make, on every branch, without executing a line.
+/// Compiling rejects unsupported macros and expressions, the coverage walk
+/// adds every method call on every branch.
 fn check_coverage(program: &loader::Program) -> Result<()> {
     let interp = interpreter::Interp::load(&program.modules, program.tokio_main)?;
     interp.coverage_gate()
 }
 
 fn run(file: &str, script_args: &[String]) -> Result<()> {
-    // `NAME cmp ...` runs the script compiled instead of interpreted. Launchers
-    // pass the caller's words straight through, so a plain `gh-clone cmp` lands
-    // here with `cmp` as the first script argument. That word is reserved, a
-    // script must not treat its own first positional argument as `cmp`.
+    // `NAME cmp ...` runs the script compiled. The word is reserved as a
+    // script's first argument.
     if script_args.first().is_some_and(|a| a == "cmp") {
         return build_run(file, &script_args[1..]);
     }
 
-    // A launcher symlink must resolve to the real script so module files are
-    // found next to the source, not next to the link.
+    // Module files are found next to the real script, not the symlink.
     let path = Path::new(file)
         .canonicalize()
         .unwrap_or_else(|_| Path::new(file).to_path_buf());
@@ -174,7 +158,7 @@ fn run(file: &str, script_args: &[String]) -> Result<()> {
 
     let program = loader::load(&path, &source)?;
 
-    // A real binary sees its own path as argv[0], then the caller's arguments.
+    // A real binary sees its own path as argv[0].
     let mut args = vec![file.to_string()];
     args.extend(script_args.iter().cloned());
     interpreter::set_script_args(args);
@@ -182,23 +166,18 @@ fn run(file: &str, script_args: &[String]) -> Result<()> {
     interpreter::run(&program.modules, program.tokio_main)
 }
 
-/// Run a command line snippet, `rust -e 'println!("hi")'`. A snippet that is
-/// already a complete program with its own `fn main` runs as written, so
-/// `#[tokio::main]` still enables the async surface. Anything else becomes
-/// the body of a plain `fn main`. `?` still works there: the interpreter
-/// propagates an `Err` out of `main` regardless of the signature, ending the
-/// run the same way an `anyhow::Result` main does.
+/// `rust -e 'println!("hi")'`. A complete program runs as written, anything
+/// else becomes the body of `fn main`. `?` still works there because an
+/// `Err` out of `main` propagates regardless of the signature.
 fn eval(code: &str, script_args: &[String]) -> Result<()> {
     let source = if is_program(code) {
         code.to_string()
     } else {
-        // The wrapper shares the snippet's first line, so line numbers in
-        // error traces match the snippet as typed. The newline before `}`
-        // keeps a snippet ending in a comment intact.
+        // The wrapper shares the snippet's first line so trace line numbers
+        // match. The newline before `}` survives a trailing comment.
         format!("fn main() {{ {code}\n}}\n")
     };
-    // The snippet has no file, so module and local crate lookups anchor to the
-    // working directory, the same places a script saved there would see.
+    // No file, so lookups anchor to the working directory.
     let dir = env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
     let program = loader::load(&dir.join("-e.rs"), &source)?;
 
@@ -209,10 +188,8 @@ fn eval(code: &str, script_args: &[String]) -> Result<()> {
     interpreter::run(&program.modules, program.tokio_main)
 }
 
-/// Whether the snippet is a complete program: it parses as a file and has a
-/// top level `fn main`. A statement list is not, `println!("hi");` alone
-/// parses as a file of one macro item, so the main requirement is what keeps
-/// plain statements on the wrapped path.
+/// `println!("hi");` alone parses as a file of one macro item, so the
+/// `fn main` requirement is what keeps plain statements on the wrapped path.
 fn is_program(code: &str) -> bool {
     let Ok(ast) = syn::parse_file(code) else {
         return false;
@@ -222,9 +199,7 @@ fn is_program(code: &str) -> bool {
         .any(|item| matches!(item, syn::Item::Fn(f) if f.sig.ident == "main"))
 }
 
-/// Compile the script to a native binary, cached by source hash, then run it
-/// with the caller's arguments and exit with its status. Unlike `run`, this
-/// path never touches the interpreter.
+/// Never touches the interpreter.
 fn build_run(file: &str, script_args: &[String]) -> Result<()> {
     let path = Path::new(file)
         .canonicalize()

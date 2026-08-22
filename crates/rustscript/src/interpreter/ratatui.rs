@@ -1,14 +1,12 @@
-//! Router for the ratatui bridge: names the bridge owns, path constants,
-//! associated functions, and per-struct method dispatch. The value side lives
-//! in `ratatui_bridge`, the widget side in `ratatui_render`.
+//! Router for the ratatui bridge. The value side lives in `ratatui_bridge`,
+//! the widget side in `ratatui_render`.
 
 use anyhow::Result;
 
 use super::bytecode::{MethodName, PathId};
 use super::value::{StructData, Value};
 
-/// Names the bridge owns. Checked before dispatch so an unrelated struct
-/// never routes here.
+/// Checked before dispatch so an unrelated struct never routes here.
 pub(super) fn is_ratatui_struct(name: &str) -> bool {
     matches!(
         name,

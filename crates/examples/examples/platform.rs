@@ -1,6 +1,5 @@
 #!/usr/bin/env rust
 
-// Detect the operating system and find standard directories.
 
 use std::env::consts;
 

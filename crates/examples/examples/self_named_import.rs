@@ -1,9 +1,6 @@
 #!/usr/bin/env rust
 
-// An import that repeats its crate name, `use which::which`. The bare call
-// must resolve to the crate function and not to the import again, and the
-// written out `which::which` after the import still starts at the crate.
-// This also holds inside a module with its own copy of the import.
+// `use which::which` must not resolve the bare call to the import again.
 
 use glob::glob;
 use which::which;

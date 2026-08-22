@@ -1,6 +1,5 @@
-// Parse errors are real error values with the std `Debug` and `Display`
-// forms, a bare `sum` or `product` runs in the element width and keeps a
-// `u64` past i64::MAX, and an annotated `let` sum overflows at its width.
+// Parse errors have the std `Debug` and `Display` forms, and a bare `sum`
+// runs in the element width.
 fn main() {
     let e = "x".parse::<i32>().unwrap_err();
     let f = "".parse::<f64>().unwrap_err();

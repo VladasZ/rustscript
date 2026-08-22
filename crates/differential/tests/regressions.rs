@@ -1,7 +1,6 @@
-//! Replays every case under `regressions/` through the compiler and the
-//! interpreter and requires full agreement, panic payloads included. This is
-//! the permanent guard for panic-vein findings, which the equivalence suite
-//! cannot hold because it requires examples to exit cleanly.
+//! Replays every case under `regressions/` compiled and interpreted and
+//! requires full agreement, panic payloads included. The equivalence suite
+//! cannot hold panicking cases.
 
 use rustscript_differential::runner::{Classification, Runner};
 use rustscript_differential::workspace_root;

@@ -1,6 +1,4 @@
-//! The `Regex`, `Match` and `Captures` bridge on the `Send + Sync` value
-//! model, so a `#[tokio::main]` script can compile a pattern once and match
-//! from concurrent tasks.
+//! The `Regex`, `Match` and `Captures` bridge.
 
 use std::sync::Arc;
 
@@ -62,8 +60,7 @@ pub(super) fn match_value(source: RsStr, start: usize, end: usize) -> Value {
     Native::RegexMatch(MatchValue { source, start, end }).wrap()
 }
 
-/// Dispatch a method on a regex-family handle. `Ok(None)` when the handle is
-/// not one of these, so the caller can keep looking.
+/// `Ok(None)` when the handle is not a regex one.
 pub(super) fn regex_native_method(
     handle: &Arc<Mutex<Native>>,
     method: &MethodName,
@@ -90,8 +87,7 @@ enum Kind {
 
 fn regex_method(regex: &RegexValue, method: &MethodName, args: &[Value]) -> Result<Value> {
     let source = text_arg(args, 0);
-    // The iterator forms are lazy walks over the source, so they stay out of
-    // the shared core.
+    // The iterator forms are lazy, so they stay out of the shared core.
     match method.id {
         BuiltinId::FindIter => return Ok(super::iterator::regex_find(regex.clone(), source)),
         BuiltinId::CapturesIter => {
@@ -150,7 +146,7 @@ fn group_by_name(captures: &CapturesValue, name: &str) -> Option<usize> {
         .find_map(|(candidate, index)| (candidate.as_ref() == name).then_some(*index))
 }
 
-/// `caps[1]` and `caps["name"]`, which panic in real Rust on a missing group.
+/// `caps[1]` and `caps["name"]`, which panic on a missing group.
 pub(super) fn capture_index(handle: &Arc<Mutex<Native>>, key: &Value) -> Result<Value> {
     let captures = {
         let native = handle.lock();

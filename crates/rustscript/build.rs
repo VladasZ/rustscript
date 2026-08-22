@@ -37,8 +37,8 @@ fn git_commit() -> String {
 }
 
 fn main() {
-    // Harvest the interpreter's supported method names from the bridge sources
-    // so `rust check` can tell a script when it uses one that does not exist.
+    // Harvested from the bridge sources so `rust check` can report a method
+    // the interpreter lacks.
     let interpreter = std::path::Path::new("src/interpreter");
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let rows = builtin_id_build::read_table(&interpreter.join("method_names.txt"));

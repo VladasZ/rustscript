@@ -1,25 +1,8 @@
-//! Scalar function plans: a self-recursive function whose whole body
-//! compiles to integer, float, bool, and user-enum bytecode runs unboxed
-//! inside one `CallFn` dispatch. The generic path pays a frame push, boxed
-//! `Value` registers, and one dispatch per op for every call, which is the
-//! whole cost of a call tree like `fib`, or of building and folding a
-//! recursive enum like the binary-trees shape. The plan runs the tree on a
-//! flat stack of unboxed values, and the enum values it builds or matches
-//! live in one run-local boxed table the `Boxed` slots index.
-//!
-//! The subset makes such a body pure: no globals, no cells, no upvalues,
-//! no vec or field access, and the only calls are recursion into the same
-//! plan and the whitelisted numeric methods. Enum ops keep that purity, a
-//! `NewEnum` builds a fresh value the way the generic `make_enum` does and
-//! a `TestVariant` only reads, so failure recovery needs no journal and no
-//! replay. Any runtime surprise, an overflow, an unsupported width, an
-//! argument the slots cannot hold, discards the run and the generic path
-//! runs the whole call from scratch with identical semantics, panic op and
-//! line included.
-//!
-//! The plan IR, its translation, and the op evaluator live in
-//! `scalar_loop`, the runner here holds the frame stack the `CallSelf` and
-//! `Ret` ops need and the boxed table the enum ops need.
+//! A self recursive scalar function runs its whole call tree unboxed inside
+//! one `CallFn` dispatch, on a flat stack. Enum values live in a run local
+//! boxed table. The body is pure, so failure recovery needs no journal, the
+//! generic path runs the whole call from scratch. The plan IR lives in
+//! `scalar_loop`.
 
 use std::mem::take;
 use std::sync::Arc;
@@ -39,32 +22,26 @@ use super::value::Value;
 use super::vm::{MAX_CALL_DEPTH, Vm};
 use super::vm_step::StepCtx;
 
-/// Calls and backward jumps between Ctrl-C polls, matching the while plan's
-/// cadence. The plan holds no locks, so it polls mid-run.
+/// Calls and backward jumps between Ctrl-C polls.
 const FN_POLL: u32 = 65_536;
 
-/// Consecutive failed runs before the function is rejected for good, so a
-/// function whose arguments never read as scalars stops paying the attempt
-/// per call.
+/// Consecutive failed runs before the function is rejected for good.
 const MAX_FAILS: u32 = 32;
 
-/// A plan for one function body. Slots `0..num_params` are the parameters,
-/// in order, and every frame of the run is one `num_slots` window on the
-/// flat stack.
+/// Slots `0..num_params` are the parameters, every frame is one `num_slots`
+/// window on the flat stack.
 pub struct FnPlan {
     ops: Vec<LOp>,
     num_slots: usize,
     num_params: usize,
-    /// Whether the body has enum ops, the gate for boxing an enum argument
-    /// instead of failing the call over.
+    /// The gate for boxing an enum argument instead of failing over.
     uses_boxed: bool,
-    /// Consecutive failed runs, cleared by a success, see `MAX_FAILS`.
+    /// Cleared by a success, see `MAX_FAILS`.
     fails: AtomicU32,
 }
 
-/// The `Op::MakeEnum` and `Op::LoadEnum` arms of `build`: the variant's
-/// names and the payload slots into a `NewEnum`, or one prebuilt value
-/// into a `UnitEnum` for a payload-free variant.
+/// A `NewEnum`, or a `UnitEnum` with one prebuilt value for a payload free
+/// variant.
 fn new_enum(
     chunk: &Chunk,
     regs: &mut Vec<u16>,
@@ -100,8 +77,7 @@ fn new_enum(
     })
 }
 
-/// The `Op::CallPath` arm of `build` for `Box::new(x)`, whose bridge is the
-/// identity, so the plan op is a move.
+/// `Box::new(x)` is the identity, so the plan op is a move.
 fn box_new(
     chunk: &Chunk,
     regs: &mut Vec<u16>,
@@ -123,17 +99,14 @@ fn box_new(
     })
 }
 
-/// The enum fallback of the `Op::TestBind` arm of `build`: a unit variant
-/// path pattern, or a tuple variant pattern whose elements are all plain
-/// bindings, into a `TestVariant`. Empty binds mean the path pattern, which
-/// tests the variant name alone, and non-empty binds carry the tuple
-/// pattern's arity, which the payload must match, both mirroring the enum
-/// arms of the generic `try_bind`.
+/// A unit variant or a plain tuple variant pattern into a `TestVariant`.
+/// Empty binds test the name alone, non empty carry the arity, mirroring
+/// the enum arms of `try_bind`.
 fn test_variant(chunk: &Chunk, regs: &mut Vec<u16>, val: u16, pat: u16, dst: u16) -> Option<LOp> {
     let info = &chunk.pats[pat as usize];
     let (tag, binds) = match &info.pat {
-        // The `Null` name also matches an `Option::None` value on the
-        // generic path, a json rule the plan does not mirror.
+        // `Null` also matches `Option::None` on the generic path, a json rule
+        // the plan does not mirror.
         PPat::Path { tag } if tag.name.is_some() && !tag.is_named("Null") => (tag, Vec::new()),
         PPat::TupleStruct { tag, elems } if tag.name.is_some() && !elems.is_empty() => {
             let mut binds = Vec::with_capacity(elems.len());
@@ -160,10 +133,9 @@ fn test_variant(chunk: &Chunk, regs: &mut Vec<u16>, val: u16, pat: u16, dst: u16
     })
 }
 
-/// Translate the whole body of `chunk`, or answer None when the function
-/// does not qualify. Only a function whose recursion targets itself plans:
-/// for a leaf the generic frame is cheap enough, and calls into other
-/// functions would need a plan registry the self shape does not.
+/// Only a function whose recursion targets itself plans. A leaf is cheap
+/// enough generically, and calls into other functions would need a plan
+/// registry.
 fn build(vm: &Vm, chunk: &Arc<Chunk>) -> Option<FnPlan> {
     if chunk.path_forwarder
         || !chunk.generics.is_empty()
@@ -173,9 +145,8 @@ fn build(vm: &Vm, chunk: &Arc<Chunk>) -> Option<FnPlan> {
         return None;
     }
     let mut regs: Vec<u16> = (0..u16::try_from(chunk.num_params).ok()?).collect();
-    // No op maps to `head`, a function body has no loop to re-enter, and a
-    // jump to `exit` falls off the end, which returns unit like the generic
-    // frame loop does.
+    // A function body has no loop to re-enter, and falling off the end
+    // returns unit like the generic frame loop.
     let region = Region {
         head: usize::MAX,
         body: 0,
@@ -259,20 +230,16 @@ fn build(vm: &Vm, chunk: &Arc<Chunk>) -> Option<FnPlan> {
     })
 }
 
-/// One suspended caller: where to resume and which slot takes the return
-/// value. Every frame runs the same plan, so the frame carries no chunk.
+/// Every frame runs the same plan, so the frame carries no chunk.
 struct Frame {
     base: usize,
     ret_ip: usize,
     dst: u16,
 }
 
-/// A slot's boxed value for an enum payload: the boxed table entry it
-/// names, taken out, or the value of a scalar slot. `None` fails the run
-/// over. Taking is safe because a payload argument is moved in real Rust,
-/// so a program that passed the checker never reads the consumed slot
-/// again, the same single-use invariant the register allocator's
-/// no-reuse rule rests on.
+/// The boxed table entry taken out, or a scalar slot's value. Taking is
+/// safe because a payload argument is moved in real Rust, so the checker
+/// rules out a later read.
 fn payload_value(v: SVal, boxed: &mut [Value]) -> Option<Value> {
     match v {
         SVal::Boxed(i) => Some(take(&mut boxed[i as usize])),
@@ -280,9 +247,7 @@ fn payload_value(v: SVal, boxed: &mut [Value]) -> Option<Value> {
     }
 }
 
-/// The enum arms of the runner's loop: build a value into the boxed table,
-/// or test one against a variant pattern. `None` fails the run over to the
-/// generic path.
+/// `None` fails the run over.
 fn enum_op(op: &LOp, regs: &mut [SVal], boxed: &mut Vec<Value>) -> Option<()> {
     match op {
         LOp::UnitEnum { dst, value } => {
@@ -318,17 +283,14 @@ fn enum_op(op: &LOp, regs: &mut [SVal], boxed: &mut Vec<Value>) -> Option<()> {
             let SVal::Boxed(i) = regs[usize::from(*val)] else {
                 return None;
             };
-            // Anything but an enum keeps its own generic rules, the
-            // pre-unwrapped Some and the json shape matches, so it fails
-            // the run over.
+            // Anything but an enum keeps its own generic rules.
             let (mut matched, payload) = {
                 let Value::Enum { def, variant, data } = &boxed[i as usize] else {
                     return None;
                 };
                 let matched = tag.matches(def, *variant);
-                // The list handle alone, so the elements bind straight out
-                // of the locked storage with no payload copy, the clone
-                // the generic bind pays.
+                // The elements bind straight out of the locked storage with
+                // no payload copy.
                 let payload = (matched && !binds.is_empty()).then(|| data.clone());
                 (matched, payload)
             };
@@ -346,8 +308,7 @@ fn enum_op(op: &LOp, regs: &mut [SVal], boxed: &mut Vec<Value>) -> Option<()> {
                         };
                     }
                 } else {
-                    // A payload the pattern's arity cannot bind answers
-                    // false with nothing bound, mirroring `bind_seq`.
+                    // Mirrors `bind_seq`.
                     matched = false;
                 }
             }
@@ -358,16 +319,11 @@ fn enum_op(op: &LOp, regs: &mut [SVal], boxed: &mut Vec<Value>) -> Option<()> {
     Some(())
 }
 
-/// Run one call tree, `None` when an op fails and the generic path should
-/// run the whole call instead. `depth_budget` is the frame count left under
-/// the generic `MAX_CALL_DEPTH`, so the plan fails over exactly where the
-/// generic path would report call depth exceeded. `boxed` arrives holding
-/// the call's enum arguments and grows with every value the run builds or
-/// binds.
+/// `depth_budget` is the frame count left under `MAX_CALL_DEPTH`, so the
+/// plan fails over exactly where the generic path would.
 ///
-/// Kept out of line on purpose. Inlined through `try_call` into `step` it
-/// drags the plan loop into the dispatch frame of every op, which cost
-/// `binary_trees` 14 percent.
+/// Kept out of line on purpose. Inlined into `step` it cost `binary_trees`
+/// 14 percent.
 #[inline(never)]
 fn run(
     vm: &Arc<Vm>,
@@ -388,7 +344,6 @@ fn run(
             vm.run_pending_ctrlc()?;
             work = 0;
         }
-        // Falling off the end returns unit, like the generic frame loop.
         let returned = match plan.ops.get(ip) {
             None => Some(SVal::Unit),
             Some(LOp::Ret { src }) => Some(stack[base + usize::from(*src)]),
@@ -397,10 +352,8 @@ fn run(
                     return Ok(None);
                 }
                 let callee = base + slots;
-                // Frames reuse the high-water stack, stale slots included:
-                // the compiler writes every register before its first
-                // read, so a leftover value below the mark is never
-                // observable.
+                // Frames reuse the stack, stale slots included. The compiler
+                // writes every register before its first read.
                 if stack.len() < callee + slots {
                     stack.resize(callee + slots, SVal::Unit);
                 }
@@ -433,9 +386,8 @@ fn run(
                 OpOut::Jump(LTo::Exit) => Some(SVal::Unit),
                 OpOut::Jump(LTo::Op(t)) => {
                     let t = t as usize;
-                    // Only backward jumps accrue poll work, the one way an
-                    // iteration inside a body runs long; calls are counted
-                    // at the push above.
+                    // Only backward jumps count here, calls are counted at the
+                    // push above.
                     if t <= ip {
                         work += 1;
                     }
@@ -458,23 +410,21 @@ fn run(
     }
 }
 
-/// Count one failed run, and past the budget reject the function for good.
 fn note_fail(plan: &FnPlan, chunk: &Chunk) {
     if plan.fails.fetch_add(1, Ordering::Relaxed) + 1 >= MAX_FAILS {
         chunk.fn_rejected.store(1, Ordering::Relaxed);
     }
 }
 
-/// Try to run the direct call of `callee` as a function plan, with the
-/// arguments in the caller's arg window at `abase`. `Ok(None)` means the
-/// generic path should run the call, with the caller's frame untouched.
+/// `Ok(None)` means the generic path should run the call, with the
+/// caller's frame untouched.
 pub(super) fn try_call(
     ctx: &StepCtx,
     callee: &Arc<Chunk>,
     abase: u16,
     argc: u16,
 ) -> Result<Option<Value>> {
-    // The check of a rejected function is one atomic load, never the mutex.
+    // A rejected function costs one atomic load, never the mutex.
     if callee.fn_rejected.load(Ordering::Relaxed) != 0 {
         return Ok(None);
     }
@@ -509,9 +459,8 @@ pub(super) fn try_call(
             *val = SVal::Boxed(idx);
         }
     }
-    // The intercepted call itself would be one generic frame, and each plan
-    // frame one more, so the budget maps plan depth onto the exact frame
-    // count the generic loop caps.
+    // The budget maps plan depth onto the exact frame count the generic loop
+    // caps.
     let budget = MAX_CALL_DEPTH - ctx.depth - 1;
     if let Some(v) = run(ctx.vm, &plan, &vals[..usize::from(argc)], budget, boxed)? {
         plan.fails.store(0, Ordering::Relaxed);

@@ -1,5 +1,5 @@
-//! Seeded program generation. Every fourth seed is a structured mutation of
-//! its predecessor, see `mutator`.
+//! Every 4th seed is a structured mutation of its predecessor, see
+//! `mutator`.
 
 use rand::RngExt;
 use rand::SeedableRng;

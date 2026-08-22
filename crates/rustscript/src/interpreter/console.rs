@@ -1,16 +1,8 @@
-//! Decoding the bytes a child process wrote.
-//!
-//! Everywhere except Windows this is UTF-8 and there is nothing to do. Windows
-//! console tools write in the console output code page instead, cp437 or cp866
-//! or whatever the machine is set to, so `from_utf8_lossy` turns every non
-//! ASCII byte into a replacement character. A path with an accent in it, or a
-//! localized message, comes back mangled and any parse of it then fails.
-//!
-//! UTF-8 is still tried first, because a growing number of tools emit it
-//! regardless of the code page, and it is the right answer when it parses.
+//! Decoding child process output. `Windows` console tools write in the
+//! console code page, so `from_utf8_lossy` mangled every non ASCII byte.
+//! UTF-8 is tried first, it is the right answer when it parses.
 
-/// Decode child process output, falling back to the console code page when the
-/// bytes are not valid UTF-8.
+/// Falls back to the console code page when the bytes are not UTF-8.
 pub(super) fn decode(bytes: &[u8]) -> String {
     match std::str::from_utf8(bytes) {
         Ok(text) => text.to_string(),
@@ -22,11 +14,9 @@ pub(super) fn decode(bytes: &[u8]) -> String {
 fn decode_native(bytes: &[u8]) -> String {
     use windows_sys::Win32::System::Console::GetConsoleOutputCP;
 
-    // A detached process, a scheduled task or an ssh session, has no console
-    // and GetConsoleOutputCP returns 0. A console set to UTF-8 returns 65001,
-    // but these bytes already failed to parse as UTF-8, so asking for UTF-8 a
-    // second time only yields replacement characters. cp1252 is the sane
-    // default for both.
+    // A detached process has no console and `GetConsoleOutputCP` returns 0.
+    // 65001 is UTF-8, which already failed. cp1252 is the sane default for
+    // both.
     let cp = match unsafe { GetConsoleOutputCP() } {
         0 | 65001 => 1252,
         n => n,
@@ -42,9 +32,7 @@ fn decode_native(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// Map the code pages a Windows console actually gets set to onto the labels
-/// `encoding_rs` knows. Anything else falls back to lossy UTF-8, which is no
-/// worse than the behavior this replaced.
+/// Anything unknown falls back to lossy UTF-8, no worse than before.
 #[cfg(windows)]
 fn codepage_encoding(cp: u32) -> Option<&'static encoding_rs::Encoding> {
     let label: &str = match cp {
@@ -79,8 +67,7 @@ mod tests {
         assert_eq!(decode("naïve".as_bytes()), "naïve");
     }
 
-    /// The byte 0xE9 is not valid UTF-8. It must not become a replacement
-    /// character, which is what the old lossy decode produced.
+    /// 0xE9 is not valid UTF-8 and must not become a replacement character.
     #[cfg(windows)]
     #[test]
     fn non_utf8_falls_back_to_the_code_page() {

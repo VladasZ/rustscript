@@ -61,8 +61,7 @@ pub fn update(args: &[String]) -> Result<()> {
         None => newest(&tags).context("the RustScript repository has no released version yet")?,
     };
 
-    // An asked for version always installs, so a downgrade or a repair of a
-    // broken binary both work.
+    // An asked for version always installs, so a downgrade or repair works.
     if request.version.is_none()
         && let (Some(installed), Some(latest)) = (installed_version(), release.version)
         && installed >= latest
@@ -76,10 +75,8 @@ pub fn update(args: &[String]) -> Result<()> {
 
     let asset = asset_for(&release, request.from_source);
 
-    // The release workflow pushes the version tag minutes before the built
-    // binaries, so the newest tag can exist while its assets are still
-    // uploading. Not an update target yet, the next update gets it once
-    // publishing ends. An asked for version skips this and fails loudly.
+    // The tag lands minutes before the assets, so the newest tag may still
+    // be uploading. An asked for version skips this and fails loudly.
     if let Some(asset) = &asset
         && request.version.is_none()
         && !asset_exists(&download_url(&release.tag, &asset.name))?
@@ -115,14 +112,14 @@ fn asset_for(release: &Release, from_source: bool) -> Option<Asset> {
     asset
 }
 
-/// Download, prove the binary works, and only then touch the installed one.
+/// Prove the binary works before touching the installed one.
 fn install_asset(release: &Release, asset: &Asset, home: &Path, target: &Path) -> Result<()> {
     println!("downloading {}", asset.name);
     let archive = download(&download_url(&release.tag, &asset.name))?;
     let sums = fetch_text(&download_url(&release.tag, "SHA256SUMS"))?;
     verify_checksum(&sums, &asset.name, &archive)?;
 
-    // Staged next to the target so the swap is a rename inside one filesystem.
+    // Staged next to the target so the swap is a rename.
     let staged = target.with_file_name(if cfg!(windows) {
         "rust.new.exe"
     } else {
@@ -149,8 +146,8 @@ fn install_asset(release: &Release, asset: &Asset, home: &Path, target: &Path) -
 }
 
 fn install_from_source(tag: &str, target: &Path) -> Result<()> {
-    // Windows cannot overwrite the running binary, so cargo needs it out of
-    // the way. Cargo writes its own install records on this path.
+    // `Windows` cannot overwrite the running binary. Cargo writes its own
+    // install records on this path.
     let moved = if cfg!(windows) && target.exists() {
         Some(move_aside(target)?)
     } else {

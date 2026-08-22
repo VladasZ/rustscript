@@ -1,9 +1,4 @@
-//! Loops the scalar while plan specializes: int-only `while` and `loop`
-//! regions closed by a backward jump, condition included. Each block also
-//! exercises one edge the plan must keep identical to the generic path:
-//! width-tagged registers, integer methods in the body, break and continue,
-//! nested while loops, a mid-loop fallback on a string read, and shapes that
-//! stay generic, a call in the body and a `while let` head.
+//! Loops the scalar while plan specializes, one edge per block.
 
 fn steps(start: u64) -> u64 {
     let mut n = start;
@@ -37,7 +32,7 @@ fn main() {
 
     println!("gcd {}", gcd(1_071_000_000, 462_000_123));
 
-    // Nested while loops in one region, both scalar.
+    // Nested while loops in one region.
     let mut pairs: u64 = 0;
     let mut i: u64 = 0;
     while i < 40 {
@@ -52,8 +47,8 @@ fn main() {
     }
     println!("pairs {pairs}");
 
-    // A continue jumps back to the head from inside the body, its own
-    // backward jump must not become a plan for half the loop.
+    // A continue's own backward jump must not become a plan for half the
+    // loop.
     let mut n: i64 = 0;
     let mut skipped: i64 = 0;
     let mut seen: i64 = 0;
@@ -67,7 +62,7 @@ fn main() {
     }
     println!("skipped {skipped} seen {seen}");
 
-    // A `loop` with a break is the same backward-jump region.
+    // A `loop` with a break is the same region.
     let mut doubling: u32 = 1;
     let mut rounds: u32 = 0;
     loop {
@@ -79,7 +74,7 @@ fn main() {
     }
     println!("doubling {doubling} rounds {rounds}");
 
-    // Integer methods in the body, width-tagged and plain.
+    // Integer methods in the body.
     let mut clamped_sum: u64 = 0;
     let mut edges: u64 = 0;
     let mut bits: u32 = 0;
@@ -92,9 +87,7 @@ fn main() {
     }
     println!("clamped {clamped_sum} edges {edges} bits {bits}");
 
-    // The plan runs until the branch compares two string registers it
-    // cannot read, then the generic path must resume with every register
-    // exactly where the plan left them.
+    // A mid loop fallback on a string read.
     let low = String::from("aa");
     let high = String::from("zz");
     let mut caught: i64 = 0;
@@ -107,7 +100,7 @@ fn main() {
     }
     println!("ticks {ticks} caught {caught}");
 
-    // A call in the body keeps the loop on the generic path.
+    // A call in the body stays generic.
     let mut called: u64 = 0;
     let mut m: u64 = 1;
     while m < 20 {
@@ -116,7 +109,7 @@ fn main() {
     }
     println!("called {called}");
 
-    // A `while let` head tests and binds, which stays generic.
+    // A `while let` head stays generic.
     let mut stack = vec![3, 9, 27, 81];
     let mut drained: i64 = 0;
     while let Some(top) = stack.pop() {
@@ -124,7 +117,7 @@ fn main() {
     }
     println!("drained {drained}");
 
-    // An unsigned width crossing the i64 midpoint keeps its real value.
+    // An unsigned value past the i64 midpoint.
     let mut big: u64 = u64::MAX - 5000;
     let mut wraps: u64 = 0;
     while big != u64::MAX {

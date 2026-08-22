@@ -1,6 +1,5 @@
-//! Walks over the expression tree: free variables, laundering, helpers,
-//! coverage features, and shrinking. Every walk goes through `children`, so
-//! a new node kind is handled in one place.
+//! Walks over the expression tree. Every walk goes through `children`, so a
+//! new node kind is handled in one place.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -8,14 +7,13 @@ use crate::lang::expr::{Arm, BinOp, Expr, Helper, UnOp, lookup, minimal};
 use crate::lang::stmt::Stmt;
 use crate::lang::ty::FloatWidth;
 
-/// How many shrinks of one child are tried in the parent's candidate list.
-/// The reducer takes the first improvement, so a short list keeps each
-/// round cheap without losing the deep ones, which the next round reaches.
+/// The reducer takes the first improvement, so a short list keeps each round
+/// cheap. The next round reaches the deep ones.
 const CHILD_SHRINKS: usize = 3;
 
 impl Expr {
-    /// Direct children in a fixed order, the same order `children_mut`
-    /// walks, so a shrink can rewrite the child it inspected.
+    /// Same order as `children_mut`, so a shrink can rewrite the child it
+    /// inspected.
     pub fn children(&self) -> Vec<&Expr> {
         match self {
             Self::Bin { left, right, .. } => vec![left, right],
@@ -160,7 +158,7 @@ impl Expr {
         }
     }
 
-    /// Every node in the tree, this one first, in a stable pre-order.
+    /// Stable pre-order.
     pub fn nodes(&self) -> Vec<&Expr> {
         let mut out = vec![self];
         for child in self.children() {
@@ -169,7 +167,6 @@ impl Expr {
         out
     }
 
-    /// The `index`th node of `nodes`, mutably.
     pub fn nth_node_mut(&mut self, index: usize) -> Option<&mut Expr> {
         let mut remaining = index;
         self.nth_node_inner(&mut remaining)
@@ -202,15 +199,12 @@ impl Expr {
         }
     }
 
-    /// Whether the subtree contains an operator that can abort at runtime.
     /// Drives the decision to launder integer literals.
     pub fn has_fallible_op(&self) -> bool {
         match self {
             Self::Bin { op, .. } if op.is_fallible() => true,
-            // Every call reaches code the const propagator can look through,
-            // `pow` and `sum` among them, so a call counts as fallible. A
-            // pipe carries `sum` and `fold`, a helper body is out of sight,
-            // an index can miss, all count the same way.
+            // The const propagator can look through calls like `pow`, so any
+            // call, pipe, helper body or index counts as fallible.
             Self::Unary { op: UnOp::Neg, .. }
             | Self::Call { .. }
             | Self::Pipe(_)
@@ -226,7 +220,6 @@ impl Expr {
         }
     }
 
-    /// Mark every literal in the subtree as needing the opaque helper.
     pub fn make_opaque(&mut self) {
         match self {
             Self::IntLit { opaque, .. }
@@ -250,7 +243,6 @@ impl Expr {
         }
     }
 
-    /// Which opaque helper functions this subtree needs emitted.
     pub fn helpers(&self, out: &mut BTreeSet<Helper>) {
         match self {
             Self::IntLit {
@@ -362,11 +354,9 @@ impl Expr {
         }
     }
 
-    /// Un-bare the receiver of every catalog call in the tree. A receiver has
-    /// to state its own type before a method can be called on it, and a bare
-    /// literal states nothing, so `(if c { 0 } else { 0 }).abs()` is rejected
-    /// as an ambiguous `{integer}`. Run over the finished program so a
-    /// receiver rebuilt after its own call was generated is covered too.
+    /// A receiver must state its type, `(if c { 0 } else { 0 }).abs()` is an
+    /// ambiguous `{integer}`. Runs over the finished program so a rebuilt
+    /// receiver is covered too.
     pub fn fix_call_receivers(&mut self) {
         if let Self::Call { recv, .. } = self {
             let taken = std::mem::replace(
@@ -383,11 +373,9 @@ impl Expr {
         }
     }
 
-    /// `helper(&mut cl, arg)` holds the closure mutably while the argument
-    /// runs, so any second use of that closure in the same expression is a
-    /// borrow conflict the real compiler rejects. The direct call means the
-    /// same thing and holds the borrow for less time, so the apply form is
-    /// the one that gives way.
+    /// `helper(&mut cl, arg)` holds the closure while the argument runs, so a
+    /// second use in the same expression is a borrow conflict. The direct
+    /// call means the same thing, so the apply form gives way.
     pub fn repair_apply_borrows(&mut self) {
         let mut uses: BTreeMap<String, usize> = BTreeMap::new();
         for node in self.nodes() {
@@ -419,10 +407,8 @@ impl Expr {
         }
     }
 
-    /// Whether the rendered expression pins a concrete numeric type for the
-    /// real compiler. A bare literal leaves `{integer}` or `{float}`, and a
-    /// local bound to one with no annotation stays ambiguous, so an inherent
-    /// numeric method on it is rejected with E0689.
+    /// A bare literal or a local bound to one stays `{integer}`, so a numeric
+    /// method on it is rejected with E0689.
     pub fn states_concrete_ty(&self) -> bool {
         match self {
             Self::BareInt { .. } | Self::BareFloat { .. } => false,
@@ -435,14 +421,13 @@ impl Expr {
             } => then_expr.states_concrete_ty() && else_expr.states_concrete_ty(),
             Self::Match { arms, .. } => arms.iter().all(|arm| arm.body.states_concrete_ty()),
             Self::Block { tail, .. } => tail.states_concrete_ty(),
-            // A shift takes its type from the left operand alone, so a typed
-            // count on the right does not rescue a bare value on the left.
+            // A shift takes its type from the left operand alone.
             Self::Bin {
                 op: BinOp::Shl | BinOp::Shr,
                 left,
                 ..
             } => left.states_concrete_ty(),
-            // Either operand of the other operators types the whole thing.
+            // Either operand types the other operators.
             Self::Bin { left, right, .. } => {
                 left.states_concrete_ty() || right.states_concrete_ty()
             }
@@ -451,8 +436,6 @@ impl Expr {
         }
     }
 
-    /// Whether the tree contains a call of the helper function or closure
-    /// `name`.
     pub fn calls_fn(&self, name: &str) -> bool {
         match self {
             Self::FnCall { name: called, .. }
@@ -466,7 +449,7 @@ impl Expr {
         }
     }
 
-    /// Simpler expressions of the same type, tried in order by the reducer.
+    /// Simpler expressions of the same type, in reducer order.
     pub fn shrinks(&self) -> Vec<Self> {
         let ty = self.ty();
         let mut candidates = Vec::new();
@@ -508,7 +491,6 @@ impl Expr {
         candidates
     }
 
-    /// A literal collection one item shorter.
     fn pop_item(&self) -> Option<Self> {
         let mut shorter = self.clone();
         match &mut shorter {
@@ -524,8 +506,7 @@ impl Expr {
     }
 }
 
-/// A match with one arm dropped, when what remains still covers every
-/// value: only arms before an irrefutable final arm can go.
+/// Only arms before an irrefutable final arm can be dropped.
 fn shrink_arms(whole: &Expr, arms: &[Arm]) -> Vec<Expr> {
     let mut out = Vec::new();
     let last_covers = arms

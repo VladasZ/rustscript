@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-// A lazy `reader.lines()` item that fails answers the structured
-// `std::io::Error`, so its kind and debug shape match compiled Rust.
+// A failing `lines()` item answers a structured `std::io::Error`.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, ErrorKind, Write};

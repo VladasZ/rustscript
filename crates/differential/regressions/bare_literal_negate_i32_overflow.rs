@@ -1,7 +1,5 @@
-//! An unsuffixed integer literal that nothing else constrains is `i32`, so
-//! arithmetic over nothing but bare literals overflows at `i32`. The campaign
-//! found `-(i32::MIN)` widening into an i64 and printing 2147483648 where the
-//! real binary panics. From seed 255775.
+//! Bare literals are `i32`. `-(i32::MIN)` once widened to i64 and printed
+//! 2147483648 instead of panicking. From seed 255775.
 
 fn diff_opaque_true() -> bool {
     true

@@ -1,6 +1,5 @@
-// Numeric limit constants under `#[tokio::main]`. The width tagged ones like `u16::MAX` used to fall through the
-// bridge as an unsupported constant, so this pins every integer width and
-// both float precisions there.
+// Constants like `u16::MAX` once fell through the bridge under
+// `#[tokio::main]` as unsupported.
 
 #[tokio::main]
 async fn main() {

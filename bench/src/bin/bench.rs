@@ -258,8 +258,7 @@ fn main() -> Result<()> {
     let results_dir = root.join("bench/results");
     fs::create_dir_all(&results_dir)?;
     let output = results_dir.join("results.json");
-    // A filtered run replaces only its cases in the existing report, so the
-    // other cases and the recorded provenance stay from the full run.
+    // A filtered run replaces only its cases, the rest stays from the full run.
     let report = if case_filter.is_some() {
         let mut report: Report = serde_json::from_str(&fs::read_to_string(&output)?)?;
         for fresh in results {

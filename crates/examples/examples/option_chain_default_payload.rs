@@ -1,8 +1,6 @@
 #!/usr/bin/env rust
 
 //! `unwrap_or_default()` finds its payload type through an `Option` chain.
-//! `and` answers its argument's payload, not the receiver's, and `or` and
-//! `xor` keep the payload both sides share.
 
 fn opaque_u8(v: u8) -> u8 {
     v
@@ -24,7 +22,7 @@ fn main() {
         .unwrap_or_default();
     println!("through_and: {through_and:?}");
 
-    // `and` takes the argument's type, which need not match the receiver's.
+    // `and` takes the argument's type.
     let widened = opaque_u8(1)
         .checked_add(opaque_u8(1))
         .and(None::<i64>)

@@ -1,8 +1,5 @@
-//! The lopdf bridge. Exposes the real `lopdf::Document` API subset instead of
-//! an invented type, so a script using it is valid Rust that compiles with the
-//! actual crate and passes `rust check`: `Document::load`, `get_pages`,
-//! `get_page_content`, `change_page_content`, and `save`. An `ObjectId` is the
-//! `(u32, u16)` tuple lopdf defines, carried here as a plain tuple value.
+//! The lopdf bridge, the real `Document` API subset. An `ObjectId` is the
+//! `(u32, u16)` tuple lopdf defines.
 
 use anyhow::{Result, bail};
 use indexmap::IndexMap;
@@ -19,14 +16,13 @@ pub(super) fn load(path: &str) -> Value {
     }
 }
 
-/// Methods on a loaded `Document`, mirroring lopdf's names and shapes.
 pub(super) fn document_method(
     doc: &mut Document,
     name: &MethodName,
     args: &[Value],
 ) -> Result<Option<Value>> {
     Ok(Some(match name.id {
-        // BTreeMap of page number to page ObjectId, as a map of int to tuple.
+        // Page number to `ObjectId`, as a map of int to tuple.
         BuiltinId::GetPages => {
             let mut map = IndexMap::default();
             for (num, id) in doc.get_pages() {
@@ -55,7 +51,7 @@ pub(super) fn document_method(
                 Err(e) => Value::err(Value::str(e.to_string())),
             }
         }
-        // The real save returns the created File; scripts drop it, so Unit.
+        // The real save returns the File, scripts drop it.
         BuiltinId::Save => {
             let path = args.first().map(Value::display).unwrap_or_default();
             match doc.save(&path) {
@@ -74,7 +70,6 @@ fn object_id_value(id: ObjectId) -> Value {
     ])
 }
 
-/// An `ObjectId` argument, the `(u32, u16)` tuple `get_pages` handed out.
 fn object_id_arg(args: &[Value], i: usize) -> Result<ObjectId> {
     if let Some(Value::Tuple(items)) = args.get(i) {
         let items = items.lock();
@@ -85,7 +80,6 @@ fn object_id_arg(args: &[Value], i: usize) -> Result<ObjectId> {
     bail!("expected a page ObjectId tuple like the ones get_pages returns");
 }
 
-/// A `Vec<u8>` argument, a list of byte-sized ints.
 fn bytes_arg(args: &[Value], i: usize) -> Vec<u8> {
     let Some(Value::Vec(items)) = args.get(i) else {
         return Vec::new();

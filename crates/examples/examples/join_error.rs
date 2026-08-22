@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-// A panicked task's `handle.await` answers a real `JoinError`: the tokio
-// debug and display shapes, and the panic and cancel accessors.
+// A panicked task's `handle.await` answers a real `JoinError`.
 
 fn doomed() {
     panic!("boom");

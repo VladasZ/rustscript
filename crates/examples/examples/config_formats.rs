@@ -1,6 +1,5 @@
 #!/usr/bin/env rust
 
-// Parse the same config from TOML and YAML into a typed struct.
 
 use serde::Deserialize;
 use serde_yaml::from_str as from_yaml_str;

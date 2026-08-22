@@ -1,8 +1,4 @@
-//! Loops the scalar loop plan specializes: int-only bodies over string
-//! bytes and integer ranges. Each block also exercises one edge the plan
-//! must keep identical to the generic path: width-tagged accumulators,
-//! break and continue, inner while loops, unused loop values, and bodies
-//! that fall back mid-loop because a register is not an integer.
+//! Loops the scalar for plan specializes, one edge per block.
 
 fn main() {
     let text = String::from("the quick brown fox jumps over the lazy dog");
@@ -72,8 +68,7 @@ fn main() {
     }
     println!("empty {empty_iterations}");
 
-    // A float in the body keeps the loop on the generic path, the plan
-    // falls back on its first read and the result must not change.
+    // A float in the body falls back on the first read.
     let mut mixed = 0.0f64;
     let mut shifted: i64 = 0;
     for n in 0..50 {
@@ -89,9 +84,8 @@ fn main() {
     }
     println!("last {last}");
 
-    // The plan runs the first ninety items, then the branch compares two
-    // float registers it cannot read, and the generic path must resume with
-    // the accumulator and the iterator exactly where the plan left them.
+    // A mid loop fallback. The generic path must resume exactly where the
+    // plan left off.
     let fraction = 2.5f64;
     let threshold = 2.0f64;
     let mut caught: i64 = 0;

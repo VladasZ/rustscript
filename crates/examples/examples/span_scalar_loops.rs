@@ -1,19 +1,14 @@
 #!/usr/bin/env rust
 
-// Span-keyed map work and item probes inside scalar `for` plans: word
-// counting over `split_whitespace`, token counting over `find_iter` with
-// `as_str`, json field sums through `it["key"]`, and checked integer
-// unwraps. The map pre-seeded before its loop proves the plan's borrowed
-// string probes hash exactly like generically built keys, and the json
-// items with a string field make iterations fail over mid-loop, so the
-// generic re-run must agree with plain Rust exactly.
+// Span keyed map work inside scalar `for` plans. The map seeded before its
+// loop proves the plan's borrowed probes hash like generic keys.
 
 use std::collections::HashMap;
 
 fn word_counts() -> Vec<(String, i64)> {
     let text = "pear plum pear apple plum pear fig apple apple pear";
     let mut counts: HashMap<String, i64> = HashMap::new();
-    // Seeded outside any plan, then found by the loop's span probes.
+    // Seeded outside any plan.
     counts.insert("pear".to_string(), 100);
     for w in text.split_whitespace() {
         let n = counts.get(w).copied().unwrap_or(0) + 1;
@@ -59,8 +54,7 @@ fn json_sums() -> (i64, i64) {
 }
 
 fn json_mixed() -> (i64, i64) {
-    // The string values make `as_i64` answer None and their items fail the
-    // plan iteration over to the generic path mid-loop.
+    // The string values fail the plan iteration over mid loop.
     let text = r#"[{"v":1},{"v":"two"},{"v":3},{"v":"four"},{"v":5}]"#;
     let items: Vec<serde_json::Value> = serde_json::from_str(text).unwrap();
     let mut sum = 0;

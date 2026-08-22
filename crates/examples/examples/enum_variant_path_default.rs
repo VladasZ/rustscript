@@ -1,7 +1,7 @@
 #!/usr/bin/env rust
 
-//! `Enum::Variant` states which enum it belongs to, so a chain ending in
-//! `unwrap_or_default()` can build that enum's own default.
+//! `Enum::Variant` states the enum, so `unwrap_or_default()` can build its
+//! default.
 
 #[derive(Debug, Clone, PartialEq, Default)]
 enum Mode {

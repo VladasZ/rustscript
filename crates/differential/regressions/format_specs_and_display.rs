@@ -1,7 +1,5 @@
-// Format specs reach every leaf of a `Debug` value, `str` and `char` never
-// pad, the zero flag beats a fill, `.*` takes its precision from an
-// argument, a named width may follow a zero flag, and a user `Display` pads
-// only through `f.pad`.
+// Format spec edges, including a user `Display` that pads only through
+// `f.pad`.
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;

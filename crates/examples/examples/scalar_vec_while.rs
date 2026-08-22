@@ -1,12 +1,6 @@
-//! While loops the scalar plan runs with vec indexing: reads, journaled
-//! writes, and the fallbacks that must stay identical to the generic path.
-//! Each block exercises one edge: multiple vecs with a read-only source,
-//! the sieve shape, the entry split against a pre-loop clone, a journal
-//! undo across a mid-loop failover, non-scalar elements, a break landing
-//! its iteration's writes, width-tagged elements, and a continue clearing
-//! the journal at the iteration boundary.
+//! While loops the scalar plan runs with vec indexing, one edge per block.
 
-/// Two vecs in one loop, the source read-only after its fill loop.
+/// 2 vecs in one loop.
 fn sum_and_double(len: usize) -> (i64, Vec<i64>) {
     let mut source = vec![0i64; len];
     let mut fill: usize = 0;
@@ -27,7 +21,7 @@ fn sum_and_double(len: usize) -> (i64, Vec<i64>) {
     (sum, doubled)
 }
 
-/// The sieve shape: nested whiles, a read deciding a write loop.
+/// The sieve shape.
 fn count_primes(limit: usize) -> u64 {
     let mut is_prime = vec![true; limit + 1];
     is_prime[0] = false;
@@ -54,8 +48,7 @@ fn count_primes(limit: usize) -> u64 {
     count
 }
 
-/// A clone taken before the write loop must not see its writes: the plan
-/// splits the vec from sharing at entry the way `UniqueReg` would.
+/// A clone taken before the loop must not see its writes.
 fn split_from_clone(len: usize) -> (Vec<i64>, Vec<i64>) {
     let mut cells = vec![0i64; len];
     let mut fill: usize = 0;
@@ -74,11 +67,8 @@ fn split_from_clone(len: usize) -> (Vec<i64>, Vec<i64>) {
     (cells, before)
 }
 
-/// Read-after-write inside one iteration, then a mid-loop failover: the
-/// branch compares two float registers on a late iteration, the plan
-/// cannot read them and fails that iteration over after its write already
-/// landed. The journal must undo it, or the generic re-run of the
-/// iteration doubles the increment.
+/// A failover after a write already landed. The journal must undo it, or the
+/// generic re-run doubles the increment.
 fn journaled_failover(rounds: i64, slots: usize, lo: f64, hi: f64) -> (i64, i64) {
     let mut acc = vec![0i64; slots];
     acc[0] = 100;
@@ -95,8 +85,7 @@ fn journaled_failover(rounds: i64, slots: usize, lo: f64, hi: f64) -> (i64, i64)
     (acc[0], fired)
 }
 
-/// String elements keep the loop generic at runtime: the plan builds, the
-/// first element read is no scalar, and the failover leaves everything
+/// String elements fail over on the first read and leave everything
 /// untouched.
 fn count_matches(text: &str) -> i64 {
     let mut words: Vec<String> = Vec::new();
@@ -115,8 +104,7 @@ fn count_matches(text: &str) -> i64 {
     matches
 }
 
-/// A break right after a write: the exiting iteration's writes land, only
-/// a failing iteration's are undone.
+/// A break right after a write. Only a failing iteration's writes are undone.
 fn toggle_until(len: usize, stop: usize) -> Vec<bool> {
     let mut flags = vec![false; len];
     let mut idx: usize = 0;
@@ -133,7 +121,7 @@ fn toggle_until(len: usize, stop: usize) -> Vec<bool> {
     flags
 }
 
-/// Width-tagged elements: u64 stores and loads keep their width.
+/// u64 elements keep their width.
 fn sum_widths(len: usize) -> (u64, Vec<u64>) {
     let mut totals = vec![0u64; len];
     let mut idx: usize = 0;
@@ -150,8 +138,7 @@ fn sum_widths(len: usize) -> (u64, Vec<u64>) {
     (grand, totals)
 }
 
-/// A continue after a write: the journal clears at the iteration boundary
-/// the continue jumps to.
+/// The journal clears at the boundary a continue jumps to.
 fn journal_across_continue(len: usize) -> i64 {
     let mut marks = vec![0i64; len];
     let mut idx: usize = 0;

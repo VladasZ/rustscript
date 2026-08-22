@@ -1,11 +1,8 @@
-//! The move-folding cleanup pass shared by every scalar plan, see
-//! `scalar_loop.rs` for the plan IR it rewrites.
+//! The move folding pass shared by every scalar plan, see `scalar_loop.rs`.
 
 use super::scalar_loop::{LOp, LTo, MAX_SLOTS, NO_SLOT};
 
-/// The one slot an op writes, for the move-folding pass and the try-mask in
-/// `translate`. Jumps write none, and neither does a method whose result
-/// the compiler discarded.
+/// Jumps and discarded method results write none.
 pub(super) fn op_write(op: &LOp) -> Option<u16> {
     match op {
         LOp::LoadUnit { dst }
@@ -46,9 +43,8 @@ pub(super) fn op_write(op: &LOp) -> Option<u16> {
     }
 }
 
-/// The extra slots an op writes besides `op_write`'s, the conditional
-/// payload bindings of a `TestSome` or `TestVariant`, so the fold's write
-/// counting stays honest about them.
+/// The conditional payload bindings of a `TestSome` or `TestVariant`, so
+/// the write counting stays honest.
 pub(super) fn op_write_extras(op: &LOp, mut write: impl FnMut(u16)) {
     match op {
         LOp::TestSome { bind, .. } => write(*bind),
@@ -61,7 +57,6 @@ pub(super) fn op_write_extras(op: &LOp, mut write: impl FnMut(u16)) {
     }
 }
 
-/// Every slot an op reads, for the move-folding pass.
 fn op_reads(op: &LOp, mut read: impl FnMut(u16)) {
     match op {
         LOp::Move { src, .. }
@@ -131,7 +126,6 @@ fn op_reads(op: &LOp, mut read: impl FnMut(u16)) {
     }
 }
 
-/// Retarget an op's write, for the move-folding pass.
 fn set_write(op: &mut LOp, to: u16) {
     match op {
         LOp::LoadUnit { dst }
@@ -168,13 +162,10 @@ fn set_write(op: &mut LOp, to: u16) {
     }
 }
 
-/// Fold `op -> Move` pairs where the op's destination is an expression
-/// temporary: written only by that op and read only by that move. The
-/// compiler never reuses a register, so such a temporary is dead once the
-/// move consumed it, and the producing op can write the move's destination
-/// directly. Also drops constant loads into registers nothing in the whole
-/// chunk reads, the per-statement unit results. Runs to a fixpoint so a
-/// chain of moves collapses.
+/// Fold `op -> Move` pairs through a temporary written once and read once.
+/// The compiler never reuses a register, so the op can write the move's
+/// destination directly. Also drops constant loads nothing reads. Runs to a
+/// fixpoint.
 pub(super) fn fold_moves(
     ops: &mut Vec<LOp>,
     val_slot: u16,
@@ -223,10 +214,8 @@ pub(super) fn fold_moves(
             remove_op(ops, at + 1);
             continue;
         }
-        // A constant load into a register nothing in the plan and nothing in
-        // the whole chunk reads is a dead store, the per-statement unit
-        // results. Jumps that targeted it run its successor, which is what
-        // executing a dead store followed by the successor did.
+        // A constant load nothing reads is a dead store. Jumps that targeted
+        // it run its successor.
         let dead = |i: &usize| {
             let op = &ops[*i];
             let constant = matches!(
@@ -253,7 +242,6 @@ pub(super) fn fold_moves(
     }
 }
 
-/// Remove one op, sliding every jump target past it down one.
 fn remove_op(ops: &mut Vec<LOp>, at: usize) {
     ops.remove(at);
     for op in ops.iter_mut() {

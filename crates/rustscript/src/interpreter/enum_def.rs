@@ -1,16 +1,11 @@
-//! Enum definitions shared by the compiler, the VM, and the bridges. An enum
-//! value points at its definition and carries a variant index, so a variant
-//! test is a pointer compare and an int compare. The names live in the
-//! definition and are read only for printing and for the dynamic paths that
-//! still arrive with a name.
+//! An enum value points at its definition and carries a variant index, so a
+//! variant test is a pointer compare and an int compare.
 
 use std::sync::{Arc, LazyLock};
 
 use super::bytecode::NO_TYPE;
 
-/// The enums the interpreter itself gives meaning to. Everything else, user
-/// enums and bridge enums alike, is `Other` and is inspected only through its
-/// definition.
+/// The enums the interpreter gives meaning to, everything else is `Other`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EnumKind {
     Option,
@@ -27,14 +22,11 @@ pub struct VariantDef {
 
 pub struct EnumDef {
     pub kind: EnumKind,
-    /// Declared by the script, as opposed to a builtin the interpreter
-    /// or a bridge provides.
+    /// Declared by the script.
     pub user: bool,
-    /// The canonical name, `crate::Shape` for a user enum and the bare type
-    /// name for a builtin.
+    /// `crate::Shape` for a user enum, the bare name for a builtin.
     pub name: Arc<str>,
-    /// The index into the impl table for a user enum, `NO_TYPE` for a
-    /// builtin.
+    /// `NO_TYPE` for a builtin.
     pub type_id: u16,
     pub variants: Vec<VariantDef>,
 }
@@ -103,8 +95,7 @@ impl EnumDef {
         self.variants[usize::from(index)].unit
     }
 
-    /// Whether two values share a definition. Definitions are created once
-    /// per enum, so identity is the test.
+    /// Definitions are created once per enum, so identity is the test.
     pub fn same(a: &Arc<EnumDef>, b: &Arc<EnumDef>) -> bool {
         Arc::ptr_eq(a, b)
     }
@@ -121,7 +112,7 @@ pub const NOT_PRESENT: u16 = 0;
 pub const NOT_UNICODE: u16 = 1;
 
 // Variant order follows the std declaration, so the derived `PartialOrd`
-// of real Rust falls out of the index compare.
+// falls out of the index compare.
 pub static OPTION: LazyLock<Arc<EnumDef>> = LazyLock::new(|| {
     EnumDef::tuples(
         EnumKind::Option,
@@ -149,8 +140,8 @@ pub static VAR_ERROR: LazyLock<Arc<EnumDef>> = LazyLock::new(|| {
     )
 });
 
-/// Every name `{:?}` of a `std::io::ErrorKind` can print, stable and
-/// unstable, since `io_error_value` formats the real kind.
+/// Every name `{:?}` of an `ErrorKind` can print, `io_error_value` formats
+/// the real kind.
 pub static ERROR_KIND: LazyLock<Arc<EnumDef>> = LazyLock::new(|| {
     EnumDef::units(
         EnumKind::Other,
@@ -347,8 +338,7 @@ pub static REG_DISPOSITION: LazyLock<Arc<EnumDef>> = LazyLock::new(|| {
     )
 });
 
-/// A builtin enum by its bare type name, for `Ordering::Less` style paths
-/// and patterns that no user declaration covers.
+/// For `Ordering::Less` style paths no user declaration covers.
 pub fn builtin_enum(name: &str) -> Option<&'static Arc<EnumDef>> {
     Some(match name {
         "RegDisposition" => &REG_DISPOSITION,
@@ -370,7 +360,7 @@ pub fn builtin_enum(name: &str) -> Option<&'static Arc<EnumDef>> {
     })
 }
 
-/// The variants the prelude brings in bare, `Some` without `Option::`.
+/// `Some` without `Option::`.
 pub fn prelude_variant(name: &str) -> Option<(&'static Arc<EnumDef>, u16)> {
     Some(match name {
         "None" => (&OPTION, NONE),

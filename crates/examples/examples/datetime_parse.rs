@@ -1,7 +1,5 @@
 #!/usr/bin/env rust
 
-// Parsing RFC 3339 timestamps with chrono. Every input is fixed text, so the
-// output is stable and compiled and interpreted runs match byte for byte.
 
 use chrono::{DateTime, Datelike, Timelike};
 
@@ -12,9 +10,7 @@ fn main() {
     println!("utc formatted: {}", utc.format("%Y-%m-%d %H:%M:%S"));
     println!("utc rfc3339: {}", utc.to_rfc3339());
 
-    // The same instant written in a zone two hours east. The calendar fields
-    // must read in that zone, not in UTC, which is what carrying the offset
-    // through the parse buys.
+    // The calendar fields must read in the parsed zone, not UTC.
     let east = DateTime::parse_from_rfc3339("2026-07-29T23:20:00+02:00").unwrap();
     println!("east timestamp: {}", east.timestamp());
     println!("east year: {}", east.year());

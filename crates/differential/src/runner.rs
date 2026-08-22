@@ -11,39 +11,31 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Classification {
     Match,
-    /// Both ran to completion but printed different output.
+    /// Both ran to completion with different output.
     SemanticMismatch,
-    /// Both panicked, but with different panic messages. A message the
-    /// interpreter formats unlike the real compiler lands here.
+    /// Both panicked with different messages.
     PanicMessageMismatch,
-    /// The real binary panicked where the interpreter ran on. This is the
-    /// overflow and narrowing-cast vein: the interpreter wraps or keeps an
-    /// i64 where compiled Rust aborts.
+    /// The real binary panicked where the interpreter ran on, the overflow
+    /// and narrowing cast vein.
     InterpreterMissingPanic,
     /// The interpreter panicked where the real binary finished cleanly.
     InterpreterSpuriousPanic,
-    /// The interpreter reported a feature it does not implement. A gap to
-    /// close in the interpreter, not a semantic bug.
+    /// A declared gap in the interpreter, not a semantic bug.
     InterpreterUnsupported,
-    /// The interpreter errored for a reason that is not a panic and not a
-    /// declared gap.
+    /// Neither a panic nor a declared gap.
     InterpreterCrash,
     InterpreterTimeout,
     NativeCrash,
     NativeTimeout,
-    /// Two runs of the same native binary disagreed with each other, so the
-    /// case has no stable reference to compare against. A grammar hole let
-    /// nondeterminism through; the case is discarded and counted, never
-    /// reported as an interpreter bug.
+    /// 2 runs of the native binary disagreed, so a grammar hole let
+    /// nondeterminism through. Counted, never reported as a bug.
     NativeNondeterministic,
     RustcRejected,
     RustcTimeout,
 }
 
 impl Classification {
-    /// A real divergence worth saving and fixing. `Match` is agreement,
-    /// `InterpreterUnsupported` is a known gap, and a nondeterministic case
-    /// indicts the generator rather than the interpreter, so none is hard.
+    /// A real divergence. A gap or a nondeterministic case is not one.
     pub fn is_hard_failure(&self) -> bool {
         !matches!(
             self,
@@ -52,18 +44,12 @@ impl Classification {
     }
 }
 
-/// A process that exits 101 is a panic, the code both the compiled binary and
-/// the interpreter use for a runtime abort.
+/// Exit 101 is a panic on both sides.
 const PANIC_STATUS: i32 = 101;
 
-/// How the native binary is compiled: the same way the default `cargo run`,
-/// `build`, and `test` profiles do, with no optimization and overflow checks
-/// on. That is the behavior a script author gets by default, so it is the
-/// semantics `RustScript` targets, which means integer overflow must panic, not
-/// wrap. It is also the only setting that lets the harness see an overflow
-/// divergence at all, because with the checks off both sides wrap and agree.
-/// Skipping optimization keeps each of the many compiles fast. Do not drop the
-/// overflow flag.
+/// Debug profile, no optimization and overflow checks on. That is what
+/// `RustScript` targets, and with the checks off both sides wrap and agree. Do
+/// not drop the overflow flag.
 const RUSTC_COMPILE_ARGS: [&str; 5] = ["--edition", "2024", "-C", "overflow-checks=yes", "-o"];
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -83,11 +69,9 @@ pub struct RunResult {
 }
 
 impl RunResult {
-    /// A short stable description of the concrete failure, so two different
-    /// bugs with the same classification land in different buckets and the
-    /// minimizer cannot drift from one bug to another. Digits are normalized
-    /// because the same bug shows up with different values across seeds and
-    /// across shrink steps.
+    /// A short stable description of the concrete failure, so 2 bugs with
+    /// the same classification land in different buckets. Digits are
+    /// normalized because values change across seeds and shrink steps.
     pub fn signature(&self) -> String {
         let raw = match &self.classification {
             Classification::PanicMessageMismatch => format!(
@@ -98,9 +82,8 @@ impl RunResult {
             Classification::InterpreterMissingPanic => panic_payload(&self.native.stderr),
             Classification::InterpreterSpuriousPanic => panic_payload(&self.interpreted.stderr),
             Classification::SemanticMismatch => diff_site(&self.native, &self.interpreted),
-            // The reason, not the location header, so each missing feature
-            // lands in its own bucket instead of all gaps collapsing into one
-            // "panicked at case_N.rs:N" line.
+            // The reason, not the location header, so gaps do not all collapse
+            // into one bucket.
             Classification::InterpreterCrash | Classification::InterpreterUnsupported => {
                 gap_reason(&self.interpreted.stderr)
             }
@@ -111,16 +94,14 @@ impl RunResult {
         signature
     }
 
-    /// The same bug for bucketing and reduction: classification and signature
-    /// both agree.
+    /// The same bug for bucketing and reduction.
     pub fn same_failure(&self, other: &Self) -> bool {
         self.classification == other.classification && self.signature() == other.signature()
     }
 }
 
-/// The label of the first output line that differs, which names the generated
-/// case section that produced it. The values inside the line change with every
-/// seed and every shrink step, so only the part before the first `:` is kept.
+/// The label of the first differing line. The values change with every seed
+/// and shrink step, so only the part before the first `:` is kept.
 fn diff_site(native: &ProcessOutput, interpreted: &ProcessOutput) -> String {
     let streams = [
         (&native.stdout, &interpreted.stdout),
@@ -144,8 +125,6 @@ fn diff_site(native: &ProcessOutput, interpreted: &ProcessOutput) -> String {
     String::new()
 }
 
-/// The first line of an error that carries information, used to group gaps and
-/// crashes by the missing feature rather than by the exact values around it.
 /// The reason of a gap or crash. An interpreter panic carries it on the line
 /// after the `panicked at` header, a plain `rust error:` on the first line.
 pub fn gap_reason(stderr: &str) -> String {
@@ -189,18 +168,15 @@ fn normalize_digits(text: &str) -> String {
 pub struct Runner {
     interpreter: PathBuf,
     native_timeout: Duration,
-    /// The interpreter gets four times the native budget. It is expected to be
-    /// slower, and a shared budget would report near-boundary programs as
-    /// spurious `InterpreterTimeout` findings. The compiler shares this larger
-    /// budget because a cold rustc run is slow too.
+    /// The interpreter gets 4 times the native budget, or near boundary
+    /// programs report spurious timeouts. A cold `rustc` shares it.
     interpreted_timeout: Duration,
 }
 
 const INTERPRETED_TIMEOUT_FACTOR: u32 = 4;
 
 impl Runner {
-    /// The interpreter's `rust supported` listing, its bridged surface by
-    /// receiver.
+    /// The `rust supported` listing.
     pub fn supported_listing(&self) -> Result<String> {
         let output = Command::new(&self.interpreter).arg("supported").output()?;
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -210,9 +186,8 @@ impl Runner {
         let interpreter = if let Some(path) = std::env::var_os("RUSTSCRIPT_INTERPRETER") {
             PathBuf::from(path)
         } else {
-            // A release interpreter runs campaigns several times faster
-            // than the debug default. Point RUSTSCRIPT_INTERPRETER at a
-            // debug build when its assertions are wanted.
+            // A release interpreter is several times faster. Point
+            // `RUSTSCRIPT_INTERPRETER` at a debug build for its assertions.
             let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
             let status = Command::new(cargo)
                 .args(["build", "--release", "-p", "run-rs"])
@@ -266,9 +241,8 @@ impl Runner {
             Command::new(&binary_path).current_dir(directory.path()),
             self.native_timeout,
         )?;
-        // The reference runs twice. If real Rust disagrees with itself, some
-        // nondeterminism slipped past the grammar and the case proves nothing
-        // about the interpreter.
+        // The reference runs twice. If it disagrees with itself, the case
+        // proves nothing about the interpreter.
         let rerun = run_command(
             Command::new(&binary_path).current_dir(directory.path()),
             self.native_timeout,
@@ -454,16 +428,14 @@ fn classify(native: &ProcessOutput, interpreted: &ProcessOutput) -> Classificati
     let native_panicked = native.status == Some(PANIC_STATUS);
     let interpreted_panicked = interpreted.status == Some(PANIC_STATUS);
 
-    // A native exit that is neither success nor a panic is not something the
-    // generator produces, so surface it rather than compare against it.
+    // The generator never produces a native exit that is neither success nor
+    // a panic, so report it instead of comparing.
     if native.status != Some(0) && !native_panicked {
         return Classification::NativeCrash;
     }
 
-    // A `rust error:` line with nothing printed means the interpreter
-    // rejected the program at load and never ran it. Comparing that against
-    // the native run would scatter one load bug across unrelated buckets, so
-    // it is classified by the load failure itself.
+    // A `rust error:` with nothing printed is a load rejection. Classify by
+    // that, or one load bug scatters across unrelated buckets.
     if interpreted.status == Some(1)
         && interpreted.stdout.is_empty()
         && interpreted
@@ -483,11 +455,8 @@ fn classify(native: &ProcessOutput, interpreted: &ProcessOutput) -> Classificati
         return classify_native_panic(native, interpreted, interpreted_panicked);
     }
 
-    // The real binary finished cleanly from here on.
     if interpreted_panicked {
-        // A runtime-discovered gap aborts like a panic but names the missing
-        // feature, `unknown method` or `unsupported constant`. That is a gap
-        // to close, not a spurious panic.
+        // A runtime gap aborts like a panic but names the missing feature.
         return if is_unsupported(&interpreted.stderr) {
             Classification::InterpreterUnsupported
         } else {
@@ -514,25 +483,21 @@ fn classify_native_panic(
     interpreted_panicked: bool,
 ) -> Classification {
     if !interpreted_panicked {
-        // The interpreter ran past a point the compiled binary aborts at, the
-        // overflow and narrowing-cast vein. An unsupported error is still a
-        // gap even when it hides a missing panic.
+        // An unsupported error is still a gap even when it hides a missing
+        // panic.
         return if interpreted.status != Some(0) && is_unsupported(&interpreted.stderr) {
             Classification::InterpreterUnsupported
         } else {
             Classification::InterpreterMissingPanic
         };
     }
-    // Both aborted. A gap is checked first: hitting a missing feature stops
-    // the interpreter wherever it stops, usually earlier than the panic the
-    // native run aborts at, so the output printed up to that point is shorter
-    // for a reason that is not a semantic bug. Comparing stdout first reported
-    // those as `SemanticMismatch`, which is a false finding.
+    // Both aborted. A gap is checked first, it stops the interpreter earlier
+    // than the native panic, and comparing stdout first reported that as a
+    // false `SemanticMismatch`.
     if is_unsupported(&interpreted.stderr) {
         return Classification::InterpreterUnsupported;
     }
-    // Output printed before the abort must agree, and the panic message the
-    // interpreter renders must match the real compiler.
+    // Output before the abort and the panic message must both agree.
     if native.stdout != interpreted.stdout {
         return Classification::SemanticMismatch;
     }
@@ -543,10 +508,8 @@ fn classify_native_panic(
     }
 }
 
-/// The interpreter marks missing-feature errors with a stable first-line
-/// prefix. The loose substring check stays as a fallback for interpreter
-/// binaries from before the prefix existed, reached via
-/// `RUSTSCRIPT_INTERPRETER`.
+/// The loose substring check is a fallback for interpreter binaries from
+/// before the prefix existed.
 fn is_unsupported(stderr: &str) -> bool {
     if stderr
         .lines()
@@ -558,20 +521,14 @@ fn is_unsupported(stderr: &str) -> bool {
     error.contains("unsupported")
         || error.contains("not supported")
         || error.contains("not implemented by the interpreter")
-        // Runtime bridge gaps abort mid-run with these wordings. Any program
-        // that reaches the interpreter already passed rustc, so an unknown
-        // name here is a missing bridge, not a generator bug.
+        // The program already passed `rustc`, so an unknown name is a missing
+        // bridge, not a generator bug.
         || error.contains("unknown method")
         || error.contains("unknown function")
 }
 
-/// The message a panic carries, without the location line or the backtrace
-/// note. The compiled binary prints `panicked at FILE:LINE:COL:` and a
-/// `note: run with RUST_BACKTRACE` line the interpreter never emits, so those
-/// are dropped before the payloads are compared.
-/// Whether two runs of the same native binary count as the same outcome. The
-/// panic header carries the thread id, which changes per process, so stderr
-/// is compared through `panic_payload` rather than byte for byte.
+/// The panic header carries the thread id, which changes per process, so
+/// stderr is compared through `panic_payload`.
 fn same_native_run(first: &ProcessOutput, second: &ProcessOutput) -> bool {
     first.status == second.status
         && first.timed_out == second.timed_out
@@ -595,10 +552,9 @@ fn panic_payload(stderr: &str) -> String {
         .to_string()
 }
 
-/// A line that belongs to a backtrace or the backtrace hint, not the panic
-/// message. The compiled binary prints `note: run with RUST_BACKTRACE`; the
-/// interpreter prints its own script frames as `at <function> (<file>:<line>)`
-/// with a `... N more frames` tail. Neither is part of the message compared.
+/// The compiled binary prints `note: run with RUST_BACKTRACE`, the
+/// interpreter prints `at <function> (<file>:<line>)` frames. Neither is
+/// part of the compared message.
 fn is_backtrace_line(line: &str) -> bool {
     line.starts_with("note:")
         || line.starts_with("at ")
@@ -676,9 +632,8 @@ mod tests {
         );
     }
 
-    /// Two different missing features must land in two different buckets. The
-    /// reason sits after the `panicked at` header, so keying on the first
-    /// stderr line collapsed every gap into one.
+    /// Keying on the first stderr line once collapsed every gap into one
+    /// bucket.
     #[test]
     fn gaps_bucket_by_reason_not_location() {
         let one = "thread 'main' panicked at case_3.rs:12:\nunknown method `ilog2` on a number\n  at main (case_3.rs:12)\n";
@@ -731,8 +686,7 @@ mod tests {
 
     #[test]
     fn interpreter_script_backtrace_is_not_part_of_the_message() {
-        // The interpreter appends `at <frame>` lines the compiled binary never
-        // prints; the same overflow must still read as agreement.
+        // The interpreter's `at <frame>` lines must not break agreement.
         let native = panic("attempt to multiply with overflow");
         let interpreted = ProcessOutput {
             status: Some(PANIC_STATUS),

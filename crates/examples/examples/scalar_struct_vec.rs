@@ -1,9 +1,5 @@
-//! Struct elements in vecs, read and written through the scalar while
-//! plan's element handles: field reads via indexing, compound field writes
-//! through the place chain, floats and ints side by side, nested loops over
-//! index pairs, and the sharing edges that must match the generic path
-//! exactly, a clone taken before the loop stays untouched, and two vec
-//! slots holding one shared element split apart on their first writes.
+//! Struct elements in vecs through the while plan's element handles, sharing
+//! edges included.
 
 struct Body {
     x: f64,
@@ -23,8 +19,7 @@ struct Tagged {
 }
 
 fn main() {
-    // An nbody style pair interaction: nested index loops, float field
-    // reads of both elements, compound float field writes, sqrt included.
+    // An nbody style pair interaction.
     let mut bodies = vec![
         Body {
             x: 1.5,
@@ -74,8 +69,7 @@ fn main() {
     }
     println!("checksum {} hits {total_hits}", checksum.round());
 
-    // A clone taken before the loop keeps its values while the loop
-    // mutates the vec element, the same split the generic unique ops make.
+    // A clone taken before the loop keeps its values.
     let mut points = [Point { x: 1, y: 10 }, Point { x: 2, y: 20 }];
     let kept = points[0].clone();
     let mut rounds = 0;
@@ -89,8 +83,7 @@ fn main() {
         kept.x, kept.y, points[0].x, points[0].y
     );
 
-    // Two slots holding one shared element split apart on their first
-    // writes, so each slot grows alone.
+    // 2 slots holding one shared element split on their first writes.
     let seed = Point { x: 100, y: 0 };
     let mut pair = [seed.clone(), seed];
     let mut turns = 0;
@@ -101,9 +94,8 @@ fn main() {
     }
     println!("pair {} {}", pair[0].x, pair[1].x);
 
-    // A string field read mid loop fails the iteration over to the generic
-    // path, with the already-applied id write undone and re-applied there,
-    // so the increment lands exactly once.
+    // A string field read fails the iteration over. The id write is undone and
+    // re-applied, so the increment lands once.
     let mut tags = [
         Tagged {
             id: 1,

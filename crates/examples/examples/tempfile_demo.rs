@@ -1,7 +1,5 @@
 #!/usr/bin/env rust
 
-// Create a temporary directory, write into it, read it back. The directory is
-// cleaned up when the handle is dropped.
 
 use std::fs;
 

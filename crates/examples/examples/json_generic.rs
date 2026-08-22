@@ -1,8 +1,6 @@
 #!/usr/bin/env rust
 
-// Typed json through a generic helper, with `#[serde(rename)]` and optional
-// fields. The generic `fetch::<T>` resolves its concrete type from the
-// turbofish at the call site, the same way a real deserialize helper reads.
+// The generic `fetch::<T>` resolves its type from the call site turbofish.
 
 use anyhow::Result;
 use serde::Deserialize;
@@ -39,7 +37,6 @@ fn main() -> Result<()> {
         println!("{} {} v={version}", row.id, row.bundle_id);
     }
 
-    // The same helper at a different concrete type.
     let ids = parse::<Vec<String>>(r#"["x","y","z"]"#)?;
     println!("ids {} first {}", ids.len(), ids[0]);
     Ok(())

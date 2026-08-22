@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-// The `#[tokio::main]` copy of terminal_query, so the async path reports the
-// terminal the same way.
+// The `#[tokio::main]` copy of `terminal_query`.
 
 use crossterm::terminal::size;
 use terminal_light::luma;

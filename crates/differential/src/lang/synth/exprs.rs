@@ -1,6 +1,4 @@
-//! Expression generation: leaves, literals, operators, casts, branches,
-//! catalog calls, accesses into containers and user values, user methods,
-//! conversions, and `?`.
+//! Expression generation.
 
 use rand::RngExt;
 
@@ -145,9 +143,7 @@ impl Generator<'_> {
         }
     }
 
-    /// Boundary values first. A width bug shows at the edge of the range, not
-    /// in the middle of it, so `max`, `max - 1`, `min` and zero are far more
-    /// valuable than a uniform draw.
+    /// Boundary values first, a width bug shows at the edge of the range.
     pub(super) fn int_value(&mut self, width: IntWidth) -> i128 {
         let (min, max) = (width.min(), width.max());
         match self.rng.random_range(0..12) {
@@ -185,8 +181,7 @@ impl Generator<'_> {
             10 => format!("0.5{suffix}"),
             _ => {
                 let value = f64::from(self.rng.random_range(0..2_000_000)) / 1000.0 - 1000.0;
-                // A bare negative literal would bind looser than a method call
-                // on it, so it is parenthesized at the source.
+                // A bare negative literal binds looser than a method call.
                 if value < 0.0 {
                     format!("({value:?}{suffix})")
                 } else {
@@ -196,7 +191,6 @@ impl Generator<'_> {
         }
     }
 
-    /// A float token with no suffix, for `f64` by inference.
     pub(super) fn bare_float_token(&mut self) -> String {
         match self.rng.random_range(0..6) {
             0 => "0.0".to_string(),
@@ -222,9 +216,8 @@ impl Generator<'_> {
         *self.pick(POOL)
     }
 
-    /// The string pool is deliberately full of things that look parseable.
-    /// `parse` is where the target type has to be honored, so a pool of plain
-    /// words would never ask the question.
+    /// Full of things that look parseable on purpose, a pool of plain words
+    /// would never exercise `parse`.
     pub(super) fn string_value(&mut self) -> String {
         const POOL: &[&str] = &[
             "",
@@ -263,10 +256,8 @@ impl Generator<'_> {
 
     // -- catalog calls --------------------------------------------------------
 
-    /// A catalog method whose result type unifies with the wanted type.
     pub(super) fn call(&mut self, want: &Ty, depth: usize) -> Option<Expr> {
-        // Solving touches no generator state, so it runs first and the random
-        // choices that follow borrow `self` on their own.
+        // Solving touches no generator state, so it runs first.
         let solved: Vec<(&'static Method, Solved)> = METHODS
             .iter()
             .filter_map(|method| Some((method, solve(method, want)?)))
@@ -325,9 +316,8 @@ impl Generator<'_> {
         fish: Option<&Ty>,
         depth: usize,
     ) -> Option<Expr> {
-        // A count argument stays a small literal. A general expression there
-        // would let `repeat` or `pow` build something the harness spends its
-        // whole timeout on instead of finding a bug.
+        // A count stays a small literal, or `repeat` and `pow` eat the whole
+        // timeout.
         let small = match pattern {
             TyPat::SmallU32 => Some((IntWidth::U32, i128::from(self.rng.random_range(0..=9)))),
             TyPat::SmallI32 => Some((IntWidth::I32, i128::from(self.rng.random_range(-3..=5)))),
@@ -345,8 +335,8 @@ impl Generator<'_> {
         Some(self.expr(&ty, depth - 1))
     }
 
-    /// A receiver type for a method whose result did not pin one. A map or
-    /// result may have pinned only one half; the sample completes the pair.
+    /// A receiver type for a method whose result did not pin one. The sample
+    /// completes a half pinned pair.
     fn sample_recv(&mut self, method: &Method, key: Option<&Ty>, val: Option<&Ty>) -> Option<Ty> {
         let ty = match method.recv {
             RecvClass::Int => Ty::Int(self.int_width()),
@@ -491,7 +481,6 @@ impl Generator<'_> {
         })
     }
 
-    /// `==` on any type, `<` and friends on anything with an order.
     fn comparison(&mut self, depth: usize) -> Expr {
         let operand = if self.chance(0.6) {
             self.scalar_ty()
@@ -534,7 +523,7 @@ impl Generator<'_> {
             Ty::Char => Ty::Int(IntWidth::U8),
             _ => return None,
         };
-        // `char as f64` does not exist, only integer targets take a char.
+        // `char as f64` does not exist.
         if matches!(source, Ty::Char) && !want.is_int() {
             return None;
         }
@@ -578,7 +567,7 @@ impl Generator<'_> {
         }
     }
 
-    /// A bare literal, `i32` or `f64` by rustc's default, or a const read.
+    /// A bare literal or a const read.
     pub(super) fn bare_or_const(&mut self, want: &Ty) -> Option<Expr> {
         let consts: Vec<String> = self
             .scope
@@ -611,8 +600,6 @@ impl Generator<'_> {
 
     // -- accesses -------------------------------------------------------------
 
-    /// A field of a struct binding, a tuple slot, or an index into a vec,
-    /// whose type is the wanted one.
     pub(super) fn access(&mut self, want: &Ty, depth: usize) -> Option<Expr> {
         let mut options: Vec<Expr> = Vec::new();
         let locals: Vec<(String, Ty)> = self
@@ -668,7 +655,7 @@ impl Generator<'_> {
                 _ => {}
             }
         }
-        // A field read off a fresh struct value, not only off a binding.
+        // A field read off a fresh struct value.
         if options.is_empty() || self.chance(0.2) {
             let shapes: Vec<UserShape> = self
                 .types
@@ -695,8 +682,6 @@ impl Generator<'_> {
 
     // -- user types -----------------------------------------------------------
 
-    /// A struct or enum literal, a `Default`, a user method or associated
-    /// function, or a `From` conversion.
     pub(super) fn user_expr(&mut self, want: &Ty, depth: usize) -> Option<Expr> {
         let method = self.method_call(want, depth);
         if method.is_some() && self.chance(0.5) {
@@ -725,7 +710,6 @@ impl Generator<'_> {
         }
     }
 
-    /// A literal of a user type with generated field or payload values.
     pub(super) fn user_literal(&mut self, shape: &UserShape, depth: usize) -> Expr {
         if shape.is_enum() {
             let variant = self.rng.random_range(0..shape.variants().len());
@@ -758,7 +742,6 @@ impl Generator<'_> {
         }
     }
 
-    /// `Type::new(..)` style associated functions returning the type.
     fn assoc_call(&mut self, shape: &UserShape, depth: usize) -> Option<Expr> {
         let assoc: Vec<_> = shape
             .methods
@@ -781,8 +764,6 @@ impl Generator<'_> {
         })
     }
 
-    /// A user method whose return type is the wanted one, on a binding of
-    /// that user type or a fresh value of it.
     fn method_call(&mut self, want: &Ty, depth: usize) -> Option<Expr> {
         let mut options: Vec<(UserShape, crate::lang::user::MethodSig)> = Vec::new();
         for def in &self.types {
@@ -812,8 +793,6 @@ impl Generator<'_> {
 
     // -- named calls ----------------------------------------------------------
 
-    /// A helper function, a closure in scope, the generic pick, an apply
-    /// through a closure, or the describe trait.
     pub(super) fn call_named(&mut self, want: &Ty, depth: usize) -> Option<Expr> {
         let mut options: Vec<Expr> = Vec::new();
         if let Some(expr) = self.closure_call(want, depth) {
@@ -860,12 +839,12 @@ impl Generator<'_> {
             return None;
         }
         let (name, params) = self.pick(&closures).clone();
-        // A one parameter closure over its own return type can also go
-        // through the generic apply helper.
+        // A closure over its own return type can also go through the apply
+        // helper.
         if params.len() == 1 && params[0] == *want && self.chance(0.3) {
             let helper = self.apply_fn(want);
-            // The helper holds the closure by `&mut` while the argument is
-            // evaluated, so the argument must not call the same closure.
+            // The helper holds the closure by `&mut`, so the argument must not
+            // call it.
             let arg = self.without_binding(&name, |inner| inner.expr(want, depth - 1));
             return Some(Expr::ApplyCall {
                 helper,
@@ -874,8 +853,8 @@ impl Generator<'_> {
                 ty: want.clone(),
             });
         }
-        // Calling a closure borrows it, and a `FnMut` borrow is exclusive, so
-        // the arguments must not reach the same closure again.
+        // A `FnMut` borrow is exclusive, so the arguments must not reach the
+        // same closure.
         let args = self.without_binding(&name, |inner| {
             params
                 .iter()
@@ -901,8 +880,7 @@ impl Generator<'_> {
             })
             .collect();
         let (name, params) = if plain.is_empty() || self.chance(0.3) {
-            // A new helper whose return type is the wanted one, so the
-            // wanted type gets a body of its own somewhere out of sight.
+            // A new helper, so the wanted type gets a body out of sight.
             if depth < MAX_EXPR_DEPTH {
                 return None;
             }
@@ -913,7 +891,6 @@ impl Generator<'_> {
         Some(self.fn_call(name, &params, want, depth - 1))
     }
 
-    /// A call of a helper, arguments generated per parameter.
     pub(super) fn fn_call(
         &mut self,
         name: String,
@@ -954,9 +931,7 @@ impl Generator<'_> {
         })
     }
 
-    /// `value?` inside a function whose return type accepts it: an `Option`
-    /// body unwraps an `Option`, a `Result` body unwraps a `Result` whose
-    /// error type is the function's own or converts into it through `From`.
+    /// `value?` where the return type accepts it, through `From` if needed.
     pub(super) fn try_expr(&mut self, want: &Ty, depth: usize) -> Option<Expr> {
         let ret = self.fn_ret.clone()?;
         let inner = match &ret {

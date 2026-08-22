@@ -1,6 +1,4 @@
-// `split(..).next()` under `#[tokio::main]`.
-// Iterators are eager lists there, so `next` answers the first element. st.rs
-// peels a worktree's canonical repo out of a git dir path exactly this way.
+// `split(..).next()` under `#[tokio::main]`, the shape `st.rs` uses.
 
 #[tokio::main]
 async fn main() {

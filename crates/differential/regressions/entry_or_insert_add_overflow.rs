@@ -1,7 +1,5 @@
-//! `*map.entry(k).or_insert(v) += x` writes through the entry reference, and
-//! the add panics at i64's bound exactly like the compiled program. The
-//! campaign found the interpreter answering `or_insert` with a detached clone
-//! and dying on "assignment through a non-reference value" instead.
+//! `or_insert` once answered a detached clone and `+=` died with
+//! "assignment through a non-reference value".
 
 use std::collections::HashMap;
 

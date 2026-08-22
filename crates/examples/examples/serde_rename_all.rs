@@ -39,8 +39,7 @@ fn main() {
     let t: Theme = serde_json::from_str(r#"{"accent-color":"teal"}"#).unwrap();
     println!("{}", t.accent_color);
 
-    // A required field absent from the json must fail the parse, not bind a
-    // hole that only explodes later.
+    // A missing required field must fail the parse, not bind a hole.
     let missing = serde_json::from_str::<Person>(r#"{"displayName":"NoId"}"#);
     println!("{}", missing.is_err());
 }

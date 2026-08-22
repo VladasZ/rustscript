@@ -1,6 +1,5 @@
-//! The closure taking methods on Vec, `HashMap` entries, Option, Result, and
-//! lazy iterators, from the
-//! `higher_order.rs`. Same semantics, `Arc` model.
+//! The closure taking methods on Vec, map entries, Option, Result and lazy
+//! iterators.
 
 use std::slice::from_ref;
 use std::sync::Arc;
@@ -20,8 +19,7 @@ use super::vecmap::{SortKey, sort_key};
 use super::vm::Vm;
 
 impl Vm {
-    /// Methods that take a closure, on Vec, Option, and Result. Returns None
-    /// when the method is not one of these, so plain dispatch can handle it.
+    /// None when the method is not one of these.
     pub(super) fn higher_order(
         self: &Arc<Self>,
         recv: &Value,
@@ -29,8 +27,7 @@ impl Vm {
         args: &[Value],
     ) -> Result<Option<Value>> {
         match recv {
-            // `then` takes a closure, unlike `then_some` which takes a value,
-            // so it is only reachable from the higher order path.
+            // `then` takes a closure, unlike `then_some`.
             Value::Bool(b) if name == BuiltinId::Then => {
                 if !*b {
                     return Ok(Some(Value::none()));
@@ -38,7 +35,6 @@ impl Vm {
                 let f = as_closure(args.first())?;
                 Ok(Some(Value::some(self.call_closure_data(&f, &[])?)))
             }
-            // `Ordering::then_with` calls its closure only on Equal.
             Value::Enum { def, variant, .. }
                 if def.kind == EnumKind::Ordering && name == BuiltinId::ThenWith =>
             {
@@ -66,9 +62,8 @@ impl Vm {
                 };
                 self.entry_higher_order(recv, &map, &key, name, args)
             }
-            // A JSON string is a plain String, but Value::as_str hands it back
-            // as an already unwrapped Some, so its Option closure methods route
-            // here as Some. Unknown names fall through to plain dispatch.
+            // `Value::as_str` hands a json string back pre unwrapped, so its
+            // Option closure methods route here as Some.
             Value::Str(s) => {
                 let data: super::value::List =
                     Arc::new(parking_lot::Mutex::new(vec![Value::Str(s.clone())]));
@@ -78,9 +73,7 @@ impl Vm {
         }
     }
 
-    /// The closure forms of `HashMap::entry`: `or_insert_with`,
-    /// `or_insert_with_key`, and `and_modify`. Non-closure forms fall through
-    /// to `entry_method`.
+    /// Non closure forms fall through to `entry_method`.
     pub(super) fn entry_higher_order(
         self: &Arc<Self>,
         entry: &Value,
@@ -102,8 +95,7 @@ impl Vm {
                     let v = self.call_closure_data(&clo, &call_args)?;
                     map.lock().insert(key.clone(), v);
                 }
-                // Real Rust answers `&mut V`, so writes through the result
-                // must reach the map.
+                // `&mut V`, so writes must reach the map.
                 Ok(Some(Value::Ref(Arc::new(ValueRef::map_entry(
                     map.clone(),
                     key.clone(),
@@ -114,13 +106,12 @@ impl Vm {
                 if let Some(current) = current {
                     let clo = as_closure(args.first())?;
                     let updated = self.call_closure_data(&clo, &[current])?;
-                    // A closure that returns unit means it mutated in place via
-                    // a shared container; otherwise take its return value.
+                    // A unit return means it mutated in place.
                     if !matches!(updated, Value::Unit) {
                         map.lock().insert(key.clone(), updated);
                     }
                 }
-                // Return the Entry so further chaining (or_insert) still works.
+                // The Entry, so `or_insert` still chains.
                 Ok(Some(entry.clone()))
             }
             _ => Ok(None),
@@ -142,7 +133,6 @@ impl Vm {
         self.vec_order_ho(items, name, args)
     }
 
-    /// Closure adapters that build a new list or walk it for effect.
     fn vec_transform_ho(
         self: &Arc<Self>,
         items: &List,
@@ -237,7 +227,6 @@ impl Vm {
         Ok(Some(out))
     }
 
-    /// Closure reductions down to one value.
     fn vec_reduce_ho(
         self: &Arc<Self>,
         items: &List,
@@ -330,7 +319,6 @@ impl Vm {
         Ok(Some(out))
     }
 
-    /// Closure forms that reorder or rewrite the list in place.
     fn vec_order_ho(
         self: &Arc<Self>,
         items: &List,
@@ -364,8 +352,7 @@ impl Vm {
             }
             BuiltinId::SortBy => {
                 let f = clo(0)?;
-                // An all-int list with an int-only comparator sorts unboxed,
-                // skipping the closure call machinery per comparison.
+                // An int only comparator sorts unboxed.
                 if let Some(sorted) = scalar_sort_by(self, &list, &f) {
                     *items.lock() = sorted;
                     return Ok(Some(Value::Unit));
@@ -566,8 +553,7 @@ impl Vm {
                     default
                 }
             }
-            // Unlike the Option form, the fallback here is handed the error,
-            // which is what real `Result::map_or_else` does.
+            // The fallback is handed the error, unlike the Option form.
             BuiltinId::MapOrElse => {
                 if is_ok {
                     self.call_closure_data(&clo(1)?, &[inner()?])?

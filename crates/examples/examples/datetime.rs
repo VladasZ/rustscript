@@ -1,6 +1,6 @@
 #!/usr/bin/env rust
 
-// Current date and time with chrono. Only stable properties are printed.
+// Only stable properties are printed.
 
 use chrono::{Datelike, Utc};
 

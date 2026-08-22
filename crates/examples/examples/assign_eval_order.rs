@@ -1,8 +1,7 @@
 #!/usr/bin/env rust
 
-//! An assignment evaluates its right operand before the place expression, in
-//! plain and compound form alike. The prints make the order observable, so
-//! the interpreted run must match compiled Rust line for line.
+//! An assignment evaluates its right operand before the place, in plain and
+//! compound form.
 
 use std::collections::HashMap;
 

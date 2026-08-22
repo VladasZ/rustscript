@@ -1,10 +1,7 @@
 #!/usr/bin/env rust
 
-// `collect` is type driven, and the interpreter can only see the target in a
-// turbofish or in the annotation of the surrounding `let`. The annotated let
-// shape comes from a real script that split a line into head and rest, where
-// the chars collected into a char list instead of a String and the next call
-// on the result failed.
+// A `let` annotation names the `collect` target. A real script once got a
+// char list instead of a String here.
 
 fn split_whitespace_once(s: &str) -> Vec<String> {
     let trimmed = s.trim_start();
@@ -50,7 +47,6 @@ fn main() {
         .collect();
     println!("initials [{initials}] len {}", initials.len());
 
-    // A plain collect into a vec keeps working next to the string ones.
     let back: Vec<char> = taken.chars().collect();
     println!("back {} {}", back.len(), back[0]);
 }

@@ -1,9 +1,7 @@
 #!/usr/bin/env rust
 
-// A `&mut` borrow of a local must write through to the borrowed place.
-// `*r += 10` on a borrowed scalar once panicked with "assignment through
-// a non-reference value", and mutating a vec through a local `&mut`
-// borrow must stay visible in the original binding.
+// `*r += 10` on a borrowed scalar once panicked with "assignment through a
+// non-reference value".
 
 fn main() {
     let mut a = 1;

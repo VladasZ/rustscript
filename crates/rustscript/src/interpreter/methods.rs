@@ -1,6 +1,5 @@
-//! Builtin methods on strings, Option, Result, entries, and the generic
-//! any-receiver names, from the
-//! `methods.rs`. Same semantics, `Arc` model.
+//! Builtin methods on strings, Option, Result, entries and the any receiver
+//! names.
 
 use std::sync::Arc;
 
@@ -15,10 +14,9 @@ use super::ops::compare_values;
 use super::shared::{self, CharOut, JsonKind, Parsed, StrOut, usize_i64};
 use super::value::{Map, MapKey, RsStr, Value, ValueRef};
 
-/// `std::cmp::Ordering` as the enum value scripts match on. A comparator
-/// sort builds one per comparison, so the three values are built once and
-/// cloned. A unit variant's payload list stays empty forever, which makes
-/// the shared storage safe.
+/// A comparator sort builds one per comparison, so the 3 values are built
+/// once and cloned. A unit variant's payload stays empty, so sharing is
+/// safe.
 pub(super) fn make_ordering(o: std::cmp::Ordering) -> Value {
     use std::sync::LazyLock;
     static ORD_LESS: LazyLock<Value> =
@@ -47,11 +45,8 @@ pub(super) fn ordering_from_value(v: &Value) -> Option<std::cmp::Ordering> {
     }
 }
 
-/// `map.entry(k).or_insert_with(Vec::new).push(x)` accumulates in place.
-///
-/// The insert forms answer a reference into the map, because in real Rust
-/// they answer `&mut V` and `*map.entry(k).or_insert(0) += x` writes through
-/// it. A plain clone would drop that write.
+/// The insert forms answer a reference into the map, because
+/// `*map.entry(k).or_insert(0) += x` writes through it.
 pub(super) fn entry_method(
     m: &Map,
     key: &MapKey,
@@ -75,14 +70,12 @@ pub(super) fn entry_method(
     })
 }
 
-/// The `serde_json` `is_*` family, answered from the shared table.
 pub(super) fn json_type_test(recv: &Value, method: &MethodName) -> Option<Value> {
     shared::json_type_test(json_kind(recv), method.id).map(Value::Bool)
 }
 
-/// The `serde_json` methods that apply to a whole `Value` whatever shape it
-/// turned out to be, so they are answered before the per type dispatch. See
-/// each arm for what it answers and why.
+/// The `serde_json` methods that apply to any shape, answered before the
+/// per type dispatch.
 pub(super) fn json_value_method(
     recv: &Value,
     method: &MethodName,
@@ -123,15 +116,14 @@ pub(super) fn json_value_method(
             None => return Some(Value::none()),
         }
     }
-    // `pointer_mut` answers a borrow into the tree, so a mutation through it
-    // must reach the tree and the mutation split never applies.
+    // `pointer_mut` answers a borrow into the tree, so the mutation split
+    // never applies.
     if method.id == BuiltinId::PointerMut {
         return Some(Value::some(Value::Ref(Arc::new(ValueRef::borrowed(here)))));
     }
     Some(Value::some(here))
 }
 
-/// The json shape of a runtime value.
 pub(super) fn json_kind(recv: &Value) -> shared::JsonKind {
     match recv {
         Value::Map(..) => JsonKind::Object,
@@ -143,8 +135,7 @@ pub(super) fn json_kind(recv: &Value) -> shared::JsonKind {
             None => JsonKind::Other,
         },
         Value::Float(_) | Value::F32(_) => JsonKind::Float,
-        // The parser maps a json null to None, so that is what is_null has to
-        // answer for. Unit counts too, it is the interpreter's own empty value.
+        // The parser maps a json null to None. Unit counts too.
         Value::Unit => JsonKind::Null,
         _ if recv.is_none_value() => JsonKind::Null,
         _ => JsonKind::Other,
@@ -153,10 +144,9 @@ pub(super) fn json_kind(recv: &Value) -> shared::JsonKind {
 
 pub(super) fn generic_method(recv: &Value, method: &MethodName, args: &[Value]) -> Result<Value> {
     match (recv, method.id) {
-        // Values are structurally typed here, so a conversion that only changes
-        // the static type is a no-op. A receiver with a real conversion, an
-        // OsString into a PathBuf for example, handles `into` in its own
-        // bridge before this.
+        // A conversion that only changes the static type is a no-op. A real
+        // conversion like `OsString` to `PathBuf` handles `into` in its own
+        // bridge first.
         (_, BuiltinId::Clone | BuiltinId::Into) => Ok(recv.clone()),
         (_, BuiltinId::ToString) => Ok(Value::str(recv.display())),
         (Value::Char(ch), id) if let Some(out) = shared::char_method(*ch, id, &VArgs(args)) => {
@@ -173,25 +163,21 @@ pub(super) fn generic_method(recv: &Value, method: &MethodName, args: &[Value]) 
             })
         }
         (Value::Bool(b), BuiltinId::AsBool) => Ok(Value::some(Value::Bool(*b))),
-        // `then_some(v)` yields that value, not a placeholder.
         (Value::Bool(b), BuiltinId::ThenSome) => Ok(if *b {
             Value::some(arg(args, 0)?)
         } else {
             Value::none()
         }),
         (Value::Vec(v), BuiltinId::AsArray) => Ok(Value::some(Value::vec(v.lock().clone()))),
-        // `_mut` accessors answer a borrow of the receiver's own storage,
-        // so the mutation split never applies to what they hand back.
+        // `_mut` accessors answer a borrow, so the mutation split never
+        // applies.
         (Value::Vec(v), BuiltinId::AsArrayMut) => Ok(Value::some(Value::Ref(Arc::new(
             ValueRef::borrowed(Value::Vec(v.clone())),
         )))),
-        // Serde accessors on a value that is not the matching type, for example
-        // as_str on Null, are None rather than an error.
+        // A wrong type serde accessor is None, not an error.
         (_, id) if shared::json_accessor(id) => Ok(Value::none()),
-        // `Ord` is derived for every type built out of ordered parts, so these
-        // work on an Option or a tuple as much as on a number. This is the
-        // last resort dispatch, so a receiver with its own `max` or `min`,
-        // a Vec or an integer, never reaches here.
+        // `Ord` on any type built from ordered parts. Last resort, a Vec or
+        // an integer has its own `max` and never reaches here.
         (_, BuiltinId::Max | BuiltinId::Min | BuiltinId::Cmp) if args.len() == 1 => {
             let other = &args[0];
             let ordering = compare_values(recv, other)?;
@@ -202,16 +188,14 @@ pub(super) fn generic_method(recv: &Value, method: &MethodName, args: &[Value]) 
                 _ => other.clone(),
             })
         }
-        // `std::cmp::Ordering` chaining and tests. `then_with` takes a
-        // closure and answers from the higher order path instead.
+        // `then_with` takes a closure and answers from the higher order path.
         (Value::Enum { def, .. }, _)
             if def.kind == EnumKind::Ordering && ordering_from_value(recv).is_some() =>
         {
             let ordering = ordering_from_value(recv).expect("checked by the guard");
             ordering_method(ordering, method, args)
         }
-        // An enum names itself, so an unknown method on an Option says Option
-        // and not the bare word enum. A struct names itself the same way.
+        // An unknown method on an Option says Option, not the bare word enum.
         (Value::Enum { def, .. }, _) => {
             bail!("unknown method `{}` on {}", method.text, def.name)
         }
@@ -222,7 +206,6 @@ pub(super) fn generic_method(recv: &Value, method: &MethodName, args: &[Value]) 
     }
 }
 
-/// The value-taking `std::cmp::Ordering` methods.
 fn ordering_method(o: std::cmp::Ordering, method: &MethodName, args: &[Value]) -> Result<Value> {
     let chained = || args.first().cloned().unwrap_or_else(|| make_ordering(o));
     Ok(match method.id {
@@ -244,8 +227,7 @@ fn ordering_method(o: std::cmp::Ordering, method: &MethodName, args: &[Value]) -
     })
 }
 
-/// A `str::get(range)` slice, None when the bounds are out of range or land
-/// inside a character, exactly what the real method answers.
+/// None out of range or inside a character, like the real method.
 fn str_slice(s: &str, start: i64, end: i64) -> Option<&str> {
     let start = usize::try_from(start).ok()?;
     let end = usize::try_from(end).ok()?;
@@ -259,12 +241,10 @@ pub(super) fn str_method(s: &RsStr, method: &MethodName, args: &[Value]) -> Resu
         BuiltinId::IsEmpty => Value::Bool(s.is_empty()),
         BuiltinId::Clone | BuiltinId::ToString => Value::Str(s.clone()),
         BuiltinId::Trim => Value::str(s.trim().to_string()),
-        // Handled by the vm on the register slot, see Op::Method. Reaching
-        // here means the receiver is not addressable, so the edit would be
-        // silently lost.
+        // Handled by the vm on the register slot. Reaching here means the
+        // receiver is not addressable and the edit would be lost.
         BuiltinId::Push | BuiltinId::PushStr => {
-            // A wrong argument is the error to report. With a right one the
-            // receiver is a value the op has no place to write back to.
+            // A wrong argument is the error to report first.
             let mut scratch = s.clone();
             str_grow(&mut scratch, method.id, &arg(args, 0)?)?;
             bail!("cannot mutate a string through this receiver")
@@ -272,16 +252,14 @@ pub(super) fn str_method(s: &RsStr, method: &MethodName, args: &[Value]) -> Resu
         BuiltinId::Contains => Value::Bool(s.contains(&arg_str(0))),
         BuiltinId::StartsWith => Value::Bool(s.starts_with(&arg_str(0))),
         BuiltinId::EndsWith => Value::Bool(s.ends_with(&arg_str(0))),
-        // `str::get(range)`, the real slice method. A json `get` on a string
-        // is answered before the per type dispatch and never reaches here.
+        // `str::get(range)`. A json `get` on a string is answered earlier.
         BuiltinId::Get => match args.first() {
             Some(Value::Range {
                 start,
                 end,
                 inclusive,
             }) => {
-                // An i64::MAX end is the open-end sentinel compile_range emits
-                // for `s.get(3..)`, read as len like the slicing op does.
+                // An `i64::MAX` end is the open end sentinel for `s.get(3..)`.
                 let end = if *end == i64::MAX {
                     usize_i64(s.len())
                 } else if *inclusive {
@@ -306,12 +284,8 @@ pub(super) fn str_method(s: &RsStr, method: &MethodName, args: &[Value]) -> Resu
     })
 }
 
-/// `Default::default()` for the payload type of an `Option` or `Result`.
-///
-/// The type is only known when the call site wrote it down, as `None::<u64>`
-/// does. Without it there is no runtime type to build a default from, so this
-/// keeps the empty string the bridge has always answered with, which is what
-/// the common `env::var(..).unwrap_or_default()` shape wants.
+/// The payload type is only known when the call site wrote it. Without it
+/// the empty string stays, which `env::var(..).unwrap_or_default()` wants.
 fn default_of(target: Option<&ScalarTy>) -> Value {
     match target {
         Some(ScalarTy::Int(width)) => Value::int_of_width(0, *width),
@@ -323,14 +297,12 @@ fn default_of(target: Option<&ScalarTy>) -> Value {
         Some(ScalarTy::List(_)) => Value::vec(Vec::new()),
         Some(ScalarTy::Map(_)) => Value::map(),
         Some(ScalarTy::Set(_)) => Value::set(),
-        // `Other` is a type this model does not describe, so it is no better
-        // informed than no type at all and keeps the same fallback.
+        // `Other` is no better informed than no type at all.
         Some(ScalarTy::Str | ScalarTy::Other) | None => Value::str(String::new()),
     }
 }
 
-/// The payload default an `unwrap_or_default` call site wrote down, the
-/// full written type first and the scalar hint after it.
+/// The full written type first, the scalar hint after it.
 fn payload_default(method: &MethodName) -> Value {
     match &method.default {
         Some(ir) => super::vm_step::build_default(ir),
@@ -338,7 +310,6 @@ fn payload_default(method: &MethodName) -> Value {
     }
 }
 
-/// Materialize the neutral parse answer as a runtime value.
 pub(super) fn parse_value(text: &str, target: Option<&ScalarTy>) -> Value {
     match shared::parse_core(text, target) {
         Parsed::Int(value, width) => Value::ok(Value::int_of_width(value, width)),
@@ -351,9 +322,8 @@ pub(super) fn parse_value(text: &str, target: Option<&ScalarTy>) -> Value {
     }
 }
 
-/// The std error value behind a parse failure message, so `{:?}` shows
-/// `ParseIntError { kind: InvalidDigit }` and `{}` the message, exactly as
-/// the real types print. A message no std type produces stays a string.
+/// So `{:?}` shows `ParseIntError { kind: InvalidDigit }` like the real
+/// type. A message no std type produces stays a string.
 fn parse_error(message: String) -> Value {
     let debug = match message.as_str() {
         "cannot parse integer from empty string" => "ParseIntError { kind: Empty }",
@@ -383,14 +353,12 @@ pub(super) fn str_method_slow(s: &RsStr, method: &MethodName, args: &[Value]) ->
         return Ok(Value::str(text));
     }
     match method.id {
-        // The lazy iterator form of the byte walk.
         BuiltinId::Bytes => Ok(iterator::bytes(s.clone())),
         _ => generic_method(&Value::Str(s.clone()), method, args),
     }
 }
 
-/// Turn a neutral string core answer into a runtime value. `Keep`
-/// clones the `Arc`, so handing the receiver back stays a refcount bump.
+/// `Keep` clones the `Arc`, a refcount bump.
 fn str_out(s: &RsStr, out: StrOut) -> Value {
     match out {
         StrOut::Bool(b) => Value::Bool(b),
@@ -422,8 +390,8 @@ fn str_out(s: &RsStr, out: StrOut) -> Value {
 }
 
 pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> Result<Value> {
-    // The hot accessors dispatch on the id before the variant is even looked
-    // at, and the payload is cloned only on the paths that hand it out.
+    // The hot accessors dispatch on the id first, the payload is cloned only
+    // where it is handed out.
     if let BuiltinId::Clone | BuiltinId::Copied | BuiltinId::Cloned = method.id {
         return Ok(recv.clone());
     }
@@ -448,15 +416,14 @@ pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
         BuiltinId::IsNone => Value::Bool(!is_some),
         BuiltinId::Expect => inner
             .ok_or_else(|| anyhow!("{}", args.first().map(Value::display).unwrap_or_default()))?,
-        // There is no runtime type here, so the payload type's Default cannot
-        // be built beyond what the call site wrote down.
+        // No runtime type, so only what the call site wrote can build the
+        // default.
         BuiltinId::UnwrapOrDefault => inner.unwrap_or_else(|| payload_default(method)),
         BuiltinId::AsRef | BuiltinId::AsDeref | BuiltinId::Take | BuiltinId::AsMut => recv.clone(),
-        // Iterating an Option yields its payload or nothing, as a vec so the
-        // chain's `collect`, `rev`, and friends compose on it.
+        // As a vec so `collect`, `rev` and friends compose on it.
         BuiltinId::IntoIter | BuiltinId::Iter => Value::vec(inner.into_iter().collect()),
-        // A json null parses to None here, so a serde lookup into a value that
-        // turned out to be null is None rather than an unknown method error.
+        // A json null is None, so a serde lookup on it is None and not an
+        // unknown method error.
         BuiltinId::Get => Value::none(),
         BuiltinId::OkOr | BuiltinId::Context => match inner {
             Some(v) => Value::ok(v),
@@ -488,7 +455,7 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
                 arg(args, 0)?
             }
         }
-        // The interpreter holds no references, so a reference view is the value.
+        // A reference view is the value.
         BuiltinId::Clone
         | BuiltinId::AsRef
         | BuiltinId::AsMut
@@ -527,8 +494,7 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
                 arg(args, 0)?
             }
         }
-        // The Ok payload type, from wherever the call site stated it, exactly
-        // as Option::unwrap_or_default above.
+        // Same as `Option::unwrap_or_default` above.
         BuiltinId::UnwrapOrDefault => {
             if is_ok {
                 inner
@@ -550,7 +516,6 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
                 Value::some(inner)
             }
         }
-        // Iterating a Result yields the payload or nothing, like Option.
         BuiltinId::IntoIter | BuiltinId::Iter => {
             if is_ok {
                 Value::vec(vec![inner])
@@ -571,8 +536,8 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
     })
 }
 
-/// Grow a string in place through `push` or `push_str`. A `&String` argument
-/// arrives as a reference or a shared cell and reads through.
+/// A `&String` argument arrives as a reference or a shared cell and reads
+/// through.
 pub(super) fn str_grow(text: &mut RsStr, id: BuiltinId, arg: &Value) -> Result<()> {
     match (id, arg) {
         (BuiltinId::Push, Value::Char(c)) => text.push(*c),
@@ -584,9 +549,7 @@ pub(super) fn str_grow(text: &mut RsStr, id: BuiltinId, arg: &Value) -> Result<(
     Ok(())
 }
 
-/// `str::split` with either a string pattern or a set of chars. A char array
-/// like `['-', '_']` splits on any of them, which a plain string pattern would
-/// otherwise match only as the literal sequence.
+/// A char array like `['-', '_']` splits on any of them.
 pub(super) fn split_value(s: &RsStr, pattern: Option<&Value>) -> Value {
     if let Some(Value::Vec(items)) = pattern {
         let chars: Vec<char> = items

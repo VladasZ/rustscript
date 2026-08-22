@@ -1,30 +1,11 @@
-//! Scalar loop specialization for `for` bodies and backward-jump loops.
+//! Scalar loop plans. A body that only moves plain scalars is translated
+//! once into a plan over unboxed registers and runs inside one dispatch. A
+//! value the plan cannot read is poison that aborts on first read, and any
+//! failure rebuilds the registers to the start of the iteration and hands it
+//! to the generic loop, so the panic lands on the exact op and line.
 //!
-//! A `for` loop over a string's bytes or an integer range pays the full VM
-//! machinery per item: the iterator lock, a boxed `Value` per element, and
-//! one dispatch per body op. A body that only moves plain integers, floats,
-//! and booleans does not need any of that. This module translates such a body
-//! once per loop into a small plan over unboxed scalar registers and runs
-//! the whole loop inside one `ForNext` dispatch.
-//!
-//! A `while` or `loop` loop is the same story without an item source. Its
-//! backward jump closes a region whose only ways out are the jump back to
-//! the head and the jumps to the op after it, so the whole region runs as a
-//! plan inside one `Jump` dispatch, condition included.
-//!
-//! The subset is strict on purpose, and every runtime surprise falls back to
-//! the generic path with identical semantics. Register values are loaded at
-//! loop entry, a value the plan cannot read is poison that aborts on first
-//! read, and arithmetic runs through the same width-checked cores the
-//! generic ops use. On any failure the registers are rebuilt to the state at
-//! the start of the failing iteration, the source is left with that item
-//! unconsumed, and the generic loop re-runs it, so an overflow panics on the
-//! exact op and line the generic path panics on.
-//!
-//! This module holds the shared machinery: the plan IR, its translation
-//! from bytecode, and the op evaluator. The move-folding cleanup lives in
-//! `scalar_fold`, and the runners in `scalar_for`, `scalar_while`, and
-//! `scalar_fn`.
+//! This module holds the plan IR, its translation and the op evaluator. The
+//! runners are `scalar_for`, `scalar_while` and `scalar_fn`.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
@@ -44,22 +25,20 @@ use super::value::Value;
 use super::vm::Vm;
 use super::vm_step::StepCtx;
 
-/// Register cap per plan, bounding the entry load and writeback cost.
+/// Bounds the entry load and writeback cost.
 pub(super) const MAX_SLOTS: usize = 64;
 
-/// Argument slots a plan's self call carries, see `scalar_fn`.
+/// See `scalar_fn`.
 pub(super) const MAX_CALL_ARGS: usize = 4;
 
-/// Payload slots a plan's `NewEnum` carries, see `scalar_fn`.
+/// See `scalar_fn`.
 pub(super) const MAX_ENUM_ARGS: usize = 4;
 
-/// The plan slot sentinel for a discarded result, and the `val_slot` of a
-/// while plan, which has no item register. No real slot reaches it, the
-/// slot cap is far lower.
+/// A discarded result, and the `val_slot` of a while plan. No real slot
+/// reaches it.
 pub(super) const NO_SLOT: u16 = u16::MAX;
 
-/// A jump target inside the plan. `Next` is the loop head, one finished
-/// iteration, and `Exit` is the op after the loop, a `break` or exhaustion.
+/// `Next` is the loop head, `Exit` the op after the loop.
 #[derive(Clone, Copy)]
 pub(super) enum LTo {
     Op(u32),
@@ -67,7 +46,7 @@ pub(super) enum LTo {
     Exit,
 }
 
-/// One plan op. Registers are dense plan slots, not frame registers.
+/// Registers are dense plan slots, not frame registers.
 pub(super) enum LOp {
     LoadUnit {
         dst: u16,
@@ -81,7 +60,6 @@ pub(super) enum LOp {
         v: i64,
         w: IntWidth,
     },
-    /// An f64 literal, from a `LoadConst` whose constant is a `Const::Float`.
     LoadFloat {
         dst: u16,
         v: f64,
@@ -139,50 +117,43 @@ pub(super) enum LOp {
         src: u16,
         w: IntWidth,
     },
-    /// An `as f64` cast.
     CastF64 {
         dst: u16,
         src: u16,
     },
-    /// An unshadowed `f64::from(x)` call, whose saturating image conversion
-    /// differs from the exact `as` cast, see `s_f64_from`.
+    /// `f64::from(x)`, whose conversion differs from the `as` cast, see
+    /// `s_f64_from`.
     F64From {
         dst: u16,
         src: u16,
     },
-    /// `m.start()` or `m.end()` on a `Span` slot, a regex match item of a
-    /// `find_iter` chunk. Any other receiver fails the iteration over to
-    /// the generic path, whose own dispatch answers it.
+    /// `m.start()` or `m.end()` on a `Span` slot. Any other receiver fails
+    /// over.
     MatchGet {
         dst: u16,
         recv: u16,
         end: bool,
     },
-    /// `s.as_str()`, `s.to_string()`, or `s.to_owned()` on a span slot,
-    /// answering the same slice as a `StrSpan`, see `s_as_str`. Any other
-    /// receiver fails the iteration over to the generic path.
+    /// `as_str`, `to_string` or `to_owned` on a span slot, see `s_as_str`.
+    /// Any other receiver fails over.
     AsStr {
         dst: u16,
         src: u16,
     },
-    /// An unshadowed integer `T::try_from(x)` call whose fitting value
-    /// answers an `OkInt` slot, see `s_try_from`.
+    /// Integer `T::try_from(x)`, see `s_try_from`.
     IntTryFrom {
         dst: u16,
         src: u16,
         fits: TryFits,
     },
-    /// `.unwrap()` on an `OkInt` slot, the dst of an earlier `IntTryFrom`.
-    /// Any other receiver fails the iteration over to the generic path.
+    /// `.unwrap()` on an `OkInt` slot. Any other receiver fails over.
     UnwrapOk {
         dst: u16,
         src: u16,
     },
-    /// A whitelisted numeric method, `n.is_multiple_of(2)` or `f.sqrt()`.
-    /// The receiver decides the table at run time, integers answer from
-    /// `s_int_method` and floats from `s_float_method`, the same split the
-    /// generic dispatch makes. `dst` is `NO_SLOT` when the compiler
-    /// discarded the result.
+    /// A numeric method. The receiver picks `s_int_method` or
+    /// `s_float_method` at run time. `dst` is `NO_SLOT` for a discarded
+    /// result.
     NumMethod {
         dst: u16,
         recv: u16,
@@ -190,123 +161,105 @@ pub(super) enum LOp {
         argc: u8,
         id: BuiltinId,
     },
-    /// `dst = vec[idx]` on one of the plan's locked vecs. `vec` indexes the
-    /// plan's vec table, not a slot. A non-scalar element or a bad index
-    /// fails the iteration over to the generic path.
+    /// `dst = vec[idx]`. `vec` indexes the vec table, not a slot. A non
+    /// scalar element or a bad index fails over.
     VecGet {
         dst: u16,
         vec: u16,
         idx: u16,
     },
-    /// `vec[idx] = val`, journaled so a failing iteration can undo it.
+    /// `vec[idx] = val`, journaled.
     VecSet {
         vec: u16,
         idx: u16,
         val: u16,
     },
-    /// The element `Arc` of `vec[idx]` into the run's handle table, split
-    /// from sharing first when the generic op was a `UniqueIndex`. A
-    /// non-struct element or a bad index fails the iteration over to the
-    /// generic path.
+    /// The element `Arc` of `vec[idx]` into the handle table, split from
+    /// sharing first for a `UniqueIndex`. A non struct element fails over.
     ElemRef {
         handle: u16,
         vec: u16,
         idx: u16,
         unique: bool,
     },
-    /// `dst = handle.member`, a scalar field of a held element.
+    /// `dst = handle.member`.
     FieldGet {
         dst: u16,
         handle: u16,
         member: Member,
     },
-    /// `handle.member = val`, journaled so a failing iteration can undo it.
+    /// `handle.member = val`, journaled.
     FieldSet {
         handle: u16,
         member: Member,
         val: u16,
     },
-    /// The `SetIndex` writeback of a place chain: store the held element
-    /// back into its vec slot, journaled like a vec write.
+    /// The `SetIndex` writeback of a place chain, journaled.
     ElemBack {
         vec: u16,
         idx: u16,
         handle: u16,
     },
-    /// `vec.push(val)` on one of a for plan's locked vecs. `vec` indexes the
-    /// plan's vec table. Undo for a failing iteration is a truncate back to
-    /// the iteration's entry length, pushes only append.
+    /// `vec.push(val)`. Undo is a truncate to the entry length.
     VecPush {
         vec: u16,
         val: u16,
     },
-    /// The fused `map.get(k).copied().unwrap_or(d)` on one of a for plan's
-    /// locked maps. `map` indexes the plan's map table. A non-scalar hit
-    /// fails the iteration over to the generic path.
+    /// `map.get(k).copied().unwrap_or(d)`. A non scalar hit fails over.
     MapGetOr {
         dst: u16,
         map: u16,
         key: u16,
         default: u16,
     },
-    /// `map.get(&k)` on a locked map, answering a `SomeInt` or `NoneOpt`
-    /// slot. A hit whose value is not a plain int fails the iteration over.
+    /// `map.get(&k)` into a `SomeInt` or `NoneOpt` slot. A non int hit fails
+    /// over.
     MapGetOpt {
         dst: u16,
         map: u16,
         key: u16,
     },
-    /// `map.contains_key(&k)` on a locked map.
+    /// `map.contains_key(&k)`.
     MapHas {
         dst: u16,
         map: u16,
         key: u16,
     },
-    /// `map.insert(k, v)` on a locked map, journaled so a failing iteration
-    /// can undo it. `dst` is `NO_SLOT` when the compiler discarded the old
-    /// value, and a kept old value that is not a plain int fails over.
+    /// `map.insert(k, v)`, journaled. A kept old value that is not an int
+    /// fails over.
     MapInsert {
         dst: u16,
         map: u16,
         key: u16,
         val: u16,
     },
-    /// A `TestBind` against the pattern `Some(x)` on a `SomeInt` or
-    /// `NoneOpt` slot: `dst` gets the match flag, and `bind` gets the
-    /// payload on a match, untouched otherwise like the generic bind. Any
-    /// other tested slot fails the iteration over to the generic path.
+    /// `Some(x)` against a `SomeInt` or `NoneOpt` slot. `bind` is untouched
+    /// on a miss like the generic bind. Any other slot fails over.
     TestSome {
         dst: u16,
         val: u16,
         bind: u16,
     },
-    /// A string literal into a `StrConst` slot naming the plan's string
-    /// table entry, an `it["key"]` key for one.
+    /// A string literal into a `StrConst` slot, an `it["key"]` key.
     LoadStr {
         dst: u16,
         id: u16,
     },
-    /// `dst = item[key]` where `item` is an `Item` slot of the effects
-    /// runner's source walk, a parsed json object for one. The runner
-    /// probes the boxed map item; a non-map item, a missing key, or a
-    /// non-scalar hit fails the iteration over to the generic path.
+    /// `dst = item[key]` on an `Item` slot of the effects runner. A non map
+    /// item, a missing key or a non scalar hit fails over.
     ItemIndex {
         dst: u16,
         item: u16,
         key: u16,
     },
-    /// A `UniqueReg` on a vec base. The plan split the vec from sharing
-    /// once at entry, so per-write splits inside the loop have nothing to
-    /// do, but the op keeps its position for jump targets.
+    /// A `UniqueReg` on a vec base. The vec split once at entry, so this
+    /// only keeps its position for jump targets.
     Nop,
-    /// The compiler-internal `::unreachable_match` call after a match's
-    /// arms. Reached only when no arm matched, and fails the run over so
-    /// the generic path reproduces its exact panic.
+    /// The `::unreachable_match` call after a match. Fails over so the
+    /// generic path reproduces the panic.
     FailOver,
-    /// A user enum value into the function runner's boxed table, built the
-    /// way the generic `make_enum` builds one: fresh list storage holding
-    /// the payload slots' values. Only in function plans, whose runner
-    /// holds the table, see `scalar_fn`.
+    /// A user enum into the boxed table, built like `make_enum`. Function
+    /// plans only, see `scalar_fn`.
     NewEnum {
         dst: u16,
         def: Arc<EnumDef>,
@@ -314,34 +267,29 @@ pub(super) enum LOp {
         args: [u16; MAX_ENUM_ARGS],
         argc: u8,
     },
-    /// A unit variant value into the boxed table, a clone of one prebuilt
-    /// value per op. The clone shares the empty payload storage, which
-    /// mutation would split from anyway, so it is indistinguishable from
-    /// the fresh value `load_enum` builds. Only in function plans.
+    /// A unit variant into the boxed table, a clone of one prebuilt value.
+    /// The shared empty payload splits on mutation anyway. Function plans
+    /// only.
     UnitEnum {
         dst: u16,
         value: Value,
     },
-    /// A `TestBind` against a unit variant pattern or a tuple variant whose
-    /// elements are all plain bindings, on a `Boxed` enum slot: `dst` gets
-    /// the match flag, and the payload lands in `binds` in order on a
-    /// match, untouched otherwise, mirroring the enum arms of the generic
-    /// `try_bind`. Any other tested slot fails the run over to the generic
-    /// path. Only in function plans, see `scalar_fn`.
+    /// A unit or plain tuple variant pattern on a `Boxed` slot, mirroring
+    /// the enum arms of `try_bind`. Any other slot fails over. Function
+    /// plans only.
     TestVariant {
         dst: u16,
         val: u16,
         tag: PTag,
         binds: Box<[u16]>,
     },
-    /// A recursive call back into the same function plan, run by the
-    /// `scalar_fn` runner on its own frame stack.
+    /// A recursive call into the same plan, see `scalar_fn`.
     CallSelf {
         dst: u16,
         args: [u16; MAX_CALL_ARGS],
         argc: u8,
     },
-    /// A function body's `Ret`, only in function plans, see `scalar_fn`.
+    /// Function plans only.
     Ret {
         src: u16,
     },
@@ -349,32 +297,23 @@ pub(super) enum LOp {
 
 pub struct LoopPlan {
     pub(super) ops: Vec<LOp>,
-    /// The frame register behind each plan slot.
     pub(super) regs: Vec<u16>,
-    /// The frame register behind each vec table entry, the bases the body
-    /// pushes into. Non-empty plans run through the effects runner, which
-    /// locks each base's storage for the chunk.
+    /// The bases the body pushes into. Non empty plans run through the
+    /// effects runner.
     pub(super) vecs: Vec<u16>,
-    /// The frame register behind each map table entry, the maps the body
-    /// probes or inserts into, plus whether the body inserts, which decides
-    /// the entry split. Non-empty plans run through the effects runner.
+    /// The maps the body probes, plus whether it inserts, which decides the
+    /// entry split.
     pub(super) maps: Vec<u16>,
     pub(super) maps_written: Vec<bool>,
-    /// The plan's string constants, the table `StrConst` slots index.
     pub(super) strs: Vec<Box<str>>,
-    /// Whether the body probes loop items in place through `ItemIndex`,
-    /// which only the effects runner can serve.
+    /// `ItemIndex` probes, which only the effects runner can serve.
     pub(super) needs_items: bool,
-    /// Effects-runner runs that failed before finishing one iteration. Past
-    /// the budget the plan is dropped from the cache, so a loop whose entry
-    /// state never runs as an effects plan stops paying the setup per
-    /// iteration.
+    /// Runs that failed before one iteration. Past the budget the plan is
+    /// dropped, so the loop stops paying the setup.
     pub(super) fails: AtomicU32,
-    /// The slot of the `ForNext` value register, written per item.
     pub(super) val_slot: u16,
-    /// True when the body is one basic block: no jump ops except the final
-    /// `Jump` back to the head. Such a body runs as a plain slice walk with
-    /// no instruction pointer.
+    /// One basic block, which runs as a plain slice walk with no
+    /// instruction pointer.
     pub(super) straight: bool,
 }
 
@@ -389,17 +328,14 @@ pub(super) fn slot(regs: &mut Vec<u16>, r: u16) -> Option<u16> {
     u16::try_from(regs.len() - 1).ok()
 }
 
-/// The chunk region one plan translates: the loop head, the first
-/// translated op, and the exit one past the region. The `for` plan's body
-/// starts one past its `ForNext` head, the while plan's at the head itself.
+/// The `for` plan's body starts one past its `ForNext` head, the while
+/// plan's at the head itself.
 pub(super) struct Region {
     pub(super) head: usize,
     pub(super) body: usize,
     pub(super) exit: usize,
 }
 
-/// Map a chunk jump target into the plan whose translated ops start at
-/// `region.body`.
 fn target(region: &Region, t: u32) -> Option<LTo> {
     let t = t as usize;
     if t == region.head {
@@ -413,20 +349,15 @@ fn target(region: &Region, t: u32) -> Option<LTo> {
     }
 }
 
-/// The vec context of a while plan: the region's vec base registers, and
-/// the handle registers, each the `dst` of an index into a base whose value
-/// the region reads or writes fields through.
+/// The vec bases and the handle registers of a while plan.
 pub(super) struct PlanVecs<'a> {
     pub(super) bases: &'a [u16],
     pub(super) handles: &'a [u16],
 }
 
-/// Translate one bytecode op, or answer None when it falls outside the
-/// subset, which rejects the whole loop. `vecs` is the region's vec context
-/// when the plan supports vec indexing, the while plan does, and `None` for
-/// the `for` plan, which rejects vec ops. `try_mask` carries one bit per
-/// slot statically known to hold an `IntTryFrom` result at this point of
-/// the linear op walk, the gate for translating `.unwrap()`.
+/// None rejects the whole loop. `vecs` is `None` for the `for` plan, which
+/// rejects vec ops. `try_mask` has one bit per slot known to hold an
+/// `IntTryFrom` result, the gate for `.unwrap()`.
 pub(super) fn translate(
     vm: &Vm,
     chunk: &Chunk,
@@ -441,10 +372,8 @@ pub(super) fn translate(
     Some(lop)
 }
 
-/// Track which slots hold an `IntTryFrom` result through the linear op
-/// walk: set by the conversion, carried by a move, cleared by any other
-/// write. The mask only gates plan building, the `UnwrapOk` op checks the
-/// live slot at run time either way.
+/// Set by the conversion, carried by a move, cleared by any other write.
+/// Only gates plan building, `UnwrapOk` checks the live slot anyway.
 fn update_try_mask(try_mask: &mut u64, lop: &LOp) {
     let bit = |slot: u16| 1u64.checked_shl(u32::from(slot)).unwrap_or(0);
     match lop {
@@ -513,10 +442,8 @@ fn translate_op(
             dst: slot(regs, *dst)?,
             v: *v,
         },
-        // `*r` on a plain value copies it, the way the generic `deref`
-        // answers a non-reference, so a deref is a move. A real reference
-        // or cell loads as `Opaque`, and moving one fails the iteration
-        // over to the generic path, which derefs for real.
+        // A deref of a plain value is a move. A real reference loads as
+        // `Opaque` and moving one fails over.
         Op::Move { dst, src } | Op::Deref { dst, src } => LOp::Move {
             dst: slot(regs, *dst)?,
             src: slot(regs, *src)?,
@@ -576,18 +503,14 @@ fn translate_op(
         Op::Method { .. } => return translate_method(vm, chunk, regs, try_mask, op),
         Op::CallPath { .. } => return translate_call(chunk, regs, op),
         Op::TestBind { val, pat, dst } => return translate_test(chunk, regs, *val, *pat, *dst),
-        // A nested loop's entry hook has nothing to do inside a plan, which
-        // already runs the nested loop unboxed, but keeps its position.
+        // A nested loop's entry hook only keeps its position.
         Op::LoopHead { .. } => LOp::Nop,
         _ => return None,
     })
 }
 
-/// The `Op::TestBind` arm of `translate`: only the pattern `Some(x)` with a
-/// single plain binding maps, onto a `TestSome` whose run-time check keeps
-/// any other tested value on the generic path. The plan op mirrors the
-/// generic `try_bind` on an Option exactly: flag plus payload on a match,
-/// flag alone otherwise.
+/// Only `Some(x)` with a single plain binding maps, onto a `TestSome` that
+/// mirrors `try_bind` on an Option.
 fn translate_test(chunk: &Chunk, regs: &mut Vec<u16>, val: u16, pat: u16, dst: u16) -> Option<LOp> {
     let info = &chunk.pats[pat as usize];
     let PPat::TupleStruct { tag, elems } = &info.pat else {
@@ -616,9 +539,8 @@ fn translate_test(chunk: &Chunk, regs: &mut Vec<u16>, val: u16, pat: u16, dst: u
     })
 }
 
-/// The `Op::CallPath` arm of `translate`: only a plain `f64::from(x)` or an
-/// integer `T::try_from(x)` call maps. A coercion on the call site has no
-/// plan equivalent, so it rejects the loop.
+/// Only `f64::from(x)` or an integer `T::try_from(x)` maps. A coercion on
+/// the call site rejects the loop.
 fn translate_call(chunk: &Chunk, regs: &mut Vec<u16>, op: &Op) -> Option<LOp> {
     let Op::CallPath {
         dst,
@@ -652,9 +574,8 @@ fn translate_call(chunk: &Chunk, regs: &mut Vec<u16>, op: &Op) -> Option<LOp> {
     None
 }
 
-/// The `Op::Method` arm of `translate`: a whitelisted numeric method whose
-/// receiver and arguments read as slots, a match span accessor, or an
-/// `unwrap` of an `IntTryFrom` result.
+/// A numeric method, a match span accessor, or an `unwrap` of an
+/// `IntTryFrom` result.
 fn translate_method(
     vm: &Vm,
     chunk: &Chunk,
@@ -682,9 +603,7 @@ fn translate_method(
             }
         };
         match method.id {
-            // Only a span receiver answers at run time, so a same-named
-            // method on any other receiver fails its iteration over to the
-            // generic path, whose own dispatch resolves it.
+            // Only a span receiver answers at run time, any other fails over.
             BuiltinId::AsStr | BuiltinId::ToString | BuiltinId::ToOwned => {
                 let recv = slot(regs, *recv)?;
                 return Some(LOp::AsStr {
@@ -702,10 +621,8 @@ fn translate_method(
                 });
             }
             // Only when the receiver statically holds an unwrappable plan
-            // result, an `IntTryFrom`, a checked numeric method, or a map
-            // probe, so an `unwrap` on anything else keeps rejecting the
-            // loop, and only while no user method on `Result` or `Option`
-            // shadows the builtin. The live slot decides at run time.
+            // result and no user method shadows the builtin. The live slot
+            // decides at run time.
             BuiltinId::Unwrap => {
                 let recv = slot(regs, *recv)?;
                 if try_mask & 1u64.checked_shl(u32::from(recv)).unwrap_or(0) == 0
@@ -743,9 +660,8 @@ fn translate_method(
     })
 }
 
-/// The vec-op and field-op arms of `translate`. They map only when the plan
-/// carries a vec context, the while plan does, and the base register is one
-/// of its vec bases, or, for a field op, one of its handle registers.
+/// Map only with a vec context and a base or handle register the plan
+/// knows.
 fn translate_vec(
     chunk: &Chunk,
     regs: &mut Vec<u16>,
@@ -776,9 +692,8 @@ fn translate_vec(
                     idx: slot(regs, *key)?,
                     unique,
                 },
-                // The generic `UniqueIndex` also splits the element, which
-                // is a no-op for the scalar elements `VecGet` can read, and
-                // a non-scalar element fails the iteration over anyway.
+                // The element split of `UniqueIndex` is a no-op for scalars,
+                // and a non scalar element fails over anyway.
                 None => LOp::VecGet {
                     dst: slot(regs, *dst)?,
                     vec,
@@ -787,8 +702,7 @@ fn translate_vec(
             }
         }
         Op::GetField { dst, base, member } | Op::UniqueField { dst, base, member } => {
-            // The generic `UniqueField` also splits the field's storage,
-            // which is a no-op for the scalar fields `FieldGet` can read.
+            // The field split of `UniqueField` is a no-op for scalars.
             LOp::FieldGet {
                 dst: slot(regs, *dst)?,
                 handle: handle_of(*base)?,
@@ -823,14 +737,11 @@ fn translate_vec(
     })
 }
 
-/// Vec table cap for a for plan's push bases, bounding the entry split and
-/// lock cost.
+/// Bounds the entry split and lock cost.
 pub(super) const MAX_PUSH_VECS: usize = 4;
 
-/// The body's push receivers in first-appearance order, the vec table the
-/// plan's `VecPush` ops index. A push shape the plan cannot run, an extra
-/// argument, a kept result, or a user method shadowing the builtin, rejects
-/// the whole loop.
+/// The push receivers in first appearance order. An extra argument, a kept
+/// result or a user method shadowing the builtin rejects the loop.
 fn push_bases(vm: &Vm, chunk: &Chunk, body: usize, exit: usize) -> Option<Vec<u16>> {
     let mut bases: Vec<u16> = Vec::new();
     for op in &chunk.code[body..exit] {
@@ -864,15 +775,12 @@ fn push_bases(vm: &Vm, chunk: &Chunk, body: usize, exit: usize) -> Option<Vec<u1
     Some(bases)
 }
 
-/// Map table cap for a for plan's probed maps, bounding the entry split and
-/// lock cost.
+/// Bounds the entry split and lock cost.
 pub(super) const MAX_MAPS: usize = 4;
 
-/// The body's map receivers in first-appearance order, the map table the
-/// plan's map ops index, plus whether the body inserts into each. Every
-/// `GetOrDefault`, `get`, `contains_key`, and two-argument `insert` receiver
-/// counts: whether it really is a map only the runner's entry check knows,
-/// and a base that is not one fails the run over before any iteration.
+/// The map receivers in first appearance order, plus whether the body
+/// inserts into each. Whether it really is a map only the runner's entry
+/// check knows.
 fn map_bases(chunk: &Chunk, body: usize, exit: usize) -> Option<(Vec<u16>, Vec<bool>)> {
     let mut bases: Vec<u16> = Vec::new();
     let mut written: Vec<bool> = Vec::new();
@@ -913,8 +821,6 @@ fn map_bases(chunk: &Chunk, body: usize, exit: usize) -> Option<(Vec<u16>, Vec<b
     Some((bases, written))
 }
 
-/// Translate one map op of the `build` closure below, whose receiver the
-/// base scan already put in the map table.
 fn translate_map(chunk: &Chunk, regs: &mut Vec<u16>, maps: &[u16], op: &Op) -> Option<LOp> {
     let map_of = |r: u16| {
         maps.iter()
@@ -966,9 +872,8 @@ fn translate_map(chunk: &Chunk, regs: &mut Vec<u16>, maps: &[u16], op: &Op) -> O
                     map,
                     key: slot(regs, *base)?,
                 }),
-                // Any other method on a map base, a `len` or an `iter`, has
-                // no plan op, and slotting the base as a scalar would only
-                // fail every iteration, so the loop stays generic.
+                // Any other method on a map base would fail every iteration,
+                // so the loop stays generic.
                 _ => None,
             }
         }
@@ -976,8 +881,7 @@ fn translate_map(chunk: &Chunk, regs: &mut Vec<u16>, maps: &[u16], op: &Op) -> O
     }
 }
 
-/// The mutable state the for-plan translation threads through its linear
-/// op walk, see `build`.
+/// See `build`.
 struct ForBuild<'a> {
     vm: &'a Vm,
     chunk: &'a Chunk,
@@ -991,11 +895,9 @@ struct ForBuild<'a> {
 }
 
 impl ForBuild<'_> {
-    /// Translate one body op. The push shape was checked by the base scan,
-    /// and the generic `UniqueReg` before a push or an insert is the entry
-    /// split the effects runner performs once. Any other method on a base
-    /// falls to `translate_op`, which slots the receiver, and the role
-    /// check in `build` rejects the plan.
+    /// The `UniqueReg` before a push or insert is the entry split the runner
+    /// does once. Any other method on a base falls to `translate_op` and the
+    /// role check in `build` rejects the plan.
     fn translate(&mut self, op: &Op) -> Option<LOp> {
         let lop = match op {
             Op::Method {
@@ -1014,9 +916,7 @@ impl ForBuild<'_> {
             Op::GetOrDefault { recv, .. } | Op::Method { recv, .. } if self.maps.contains(recv) => {
                 translate_map(self.chunk, &mut self.regs, self.maps, op)
             }
-            // A string literal, an `it["key"]` key for one, into the plan's
-            // string table. Only the runner's probe ops read the slot,
-            // anything else fails its iteration over.
+            // Only the runner's probe ops read a `StrConst` slot.
             Op::LoadConst { dst, k }
                 if matches!(&self.chunk.consts[*k as usize], Const::Str(_)) =>
             {
@@ -1030,9 +930,7 @@ impl ForBuild<'_> {
                     id,
                 })
             }
-            // Indexing the loop item itself, the json shape of `it["key"]`.
-            // The item slot holds the source position the effects runner
-            // probes the boxed item through.
+            // `it["key"]`, the item slot holds the source position.
             Op::Index { dst, base, key } if *base == self.val => Some(LOp::ItemIndex {
                 dst: slot(&mut self.regs, *dst)?,
                 item: slot(&mut self.regs, *base)?,
@@ -1053,8 +951,7 @@ impl ForBuild<'_> {
     }
 }
 
-/// Translate the body of the `for` loop whose `ForNext` sits at `head`, or
-/// answer None when any op falls outside the subset.
+/// None when any op falls outside the subset.
 pub(super) fn build(vm: &Vm, chunk: &Chunk, head: usize) -> Option<LoopPlan> {
     let Some(Op::ForNext { val, to, .. }) = chunk.code.get(head) else {
         return None;
@@ -1089,9 +986,8 @@ pub(super) fn build(vm: &Vm, chunk: &Chunk, head: usize) -> Option<LoopPlan> {
         .map(|op| build.translate(op))
         .collect::<Option<Vec<_>>>()?;
     let (regs, strs) = (build.regs, build.strs);
-    // A register cannot serve two tables at once: a locked pushed vec, a
-    // locked map, and a scalar slot are disjoint roles, and a body that
-    // also moves a base around stays generic.
+    // A register cannot serve 2 tables at once, and a body that moves a
+    // base around stays generic.
     if regs
         .iter()
         .any(|reg| bases.contains(reg) || maps.contains(reg))
@@ -1108,7 +1004,6 @@ pub(super) fn build(vm: &Vm, chunk: &Chunk, head: usize) -> Option<LoopPlan> {
         | LOp::CmpJumpImm { .. } => false,
         _ => true,
     });
-    // A straight body's trailing back jump is implicit in the slice walk.
     if straight && matches!(ops.last(), Some(LOp::Jump { to: LTo::Next })) {
         ops.pop();
     }
@@ -1127,17 +1022,14 @@ pub(super) fn build(vm: &Vm, chunk: &Chunk, head: usize) -> Option<LoopPlan> {
     })
 }
 
-/// What one op did: fall through, take a jump, or fail the iteration.
 pub(super) enum OpOut {
     Fall,
     Jump(LTo),
     Fail,
 }
 
-/// The `NumMethod` arm of `eval_op`. Unused arg entries are slot zero,
-/// which exists whenever a method op does, the receiver holds a slot
-/// itself. The receiver picks the table, the same split the generic
-/// dispatch makes between `int_methods` and `num_core`.
+/// Unused arg entries are slot zero, which always exists. The receiver
+/// picks `int_methods` or `num_core`.
 fn eval_num_method(
     regs: &[SVal],
     recv: u16,
@@ -1153,9 +1045,7 @@ fn eval_num_method(
     }
 }
 
-/// Land a method or conversion result: `None` fails the iteration over to
-/// the generic path, and a `NO_SLOT` dst discards the value the way the
-/// compiler discarded the generic result.
+/// `None` fails over, a `NO_SLOT` dst discards the value.
 #[inline]
 fn land(regs: &mut [SVal], dst: u16, v: Option<SVal>) -> OpOut {
     match v {
@@ -1169,10 +1059,8 @@ fn land(regs: &mut [SVal], dst: u16, v: Option<SVal>) -> OpOut {
     }
 }
 
-/// The `Move` arm of `eval_op`. Copying an `Opaque` would poison the
-/// destination, and a poisoned slot skips writeback, so its frame register
-/// would keep the value it held before the loop instead of the copy. Fail
-/// over the way any other read of an `Opaque` does.
+/// Copying an `Opaque` would poison the destination and skip its
+/// writeback, so it fails over like any other read of one.
 #[inline]
 fn eval_move(regs: &mut [SVal], dst: u16, src: u16) -> OpOut {
     let v = regs[usize::from(src)];
@@ -1183,9 +1071,7 @@ fn eval_move(regs: &mut [SVal], dst: u16, src: u16) -> OpOut {
     OpOut::Fall
 }
 
-/// The conditional-jump arms of `eval_op`: jump when the condition's truth
-/// matches `want`, and fail over on an `Opaque` condition the way any other
-/// read of one does.
+/// Jump when the condition matches `want`, fail over on an `Opaque`.
 #[inline]
 fn eval_cond_jump(regs: &[SVal], cond: u16, to: LTo, want: bool) -> OpOut {
     if matches!(regs[usize::from(cond)], SVal::Opaque) {
@@ -1199,8 +1085,8 @@ fn eval_cond_jump(regs: &[SVal], cond: u16, to: LTo, want: bool) -> OpOut {
 }
 
 // Forced, not hinted. Left to the inliner it gets split out of
-// `scalar_fn::try_call` whenever the surrounding code changes size, which
-// costs `binary_trees` about 7 percent and `collatz` about 12.
+// `scalar_fn::try_call`, which costs `binary_trees` about 7 percent and
+// `collatz` about 12.
 #[inline(always)]
 pub(super) fn eval_op(op: &LOp, regs: &mut [SVal]) -> OpOut {
     match op {
@@ -1279,13 +1165,9 @@ pub(super) fn eval_op(op: &LOp, regs: &mut [SVal]) -> OpOut {
         LOp::Nop => {}
         LOp::TestSome { dst, val, bind } => return eval_test_some(regs, *dst, *val, *bind),
         LOp::LoadStr { dst, id } => regs[usize::from(*dst)] = SVal::StrConst(*id),
-        // Vec and field ops need the locked vec table and the handle table,
-        // which only the journaled while runner holds, see
-        // `scalar_while::run_vec_span`. Map ops need the locked map table
-        // only the effects runner holds, see `scalar_for::run_effects`.
-        // Enum, call, and return ops need the boxed table and the frame
-        // stack only the `scalar_fn` runner holds. None of them can appear
-        // in the plans the other runners execute.
+        // Vec and field ops belong to `scalar_while::run_vec_span`, map ops
+        // to `scalar_for::run_effects`, enum and call ops to `scalar_fn`.
+        // None can appear in the plans the other runners execute.
         LOp::VecGet { .. }
         | LOp::VecSet { .. }
         | LOp::VecPush { .. }
@@ -1308,10 +1190,8 @@ pub(super) fn eval_op(op: &LOp, regs: &mut [SVal]) -> OpOut {
     OpOut::Fall
 }
 
-/// The `TestSome` arm of `eval_op`: the pattern `Some(x)` against a scalar
-/// map probe's answer, mirroring the generic `try_bind` on an Option
-/// exactly. The binding lands only on a match, and any other tested value
-/// fails the iteration over to the generic path.
+/// `Some(x)` against a map probe's answer, mirroring `try_bind`. Any other
+/// value fails over.
 #[inline]
 fn eval_test_some(regs: &mut [SVal], dst: u16, val: u16, bind: u16) -> OpOut {
     match regs[usize::from(val)] {
@@ -1325,8 +1205,7 @@ fn eval_test_some(regs: &mut [SVal], dst: u16, val: u16, bind: u16) -> OpOut {
     OpOut::Fall
 }
 
-/// Land the slots back in their frame registers. An `Opaque` slot was never
-/// read or written, its register keeps the frame value it had.
+/// An `Opaque` slot was never touched, its register keeps its value.
 pub(super) fn write_regs(ctx: &mut StepCtx, plan_regs: &[u16], regs: &[SVal]) {
     for (slot, &reg) in plan_regs.iter().enumerate() {
         if let Some(v) = s_value(regs[slot]) {

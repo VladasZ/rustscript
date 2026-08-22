@@ -1,6 +1,5 @@
 #!/usr/bin/env rust
 
-// Associated consts on impl blocks resolve as `Type::NAME` values.
 
 struct Limits;
 

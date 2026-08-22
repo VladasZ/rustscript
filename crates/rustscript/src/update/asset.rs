@@ -36,8 +36,7 @@ pub struct Asset {
     pub name: String,
 }
 
-/// The prebuilt asset for the host, or `None` on a platform the release
-/// workflow does not build.
+/// `None` on a platform the release workflow does not build.
 pub fn for_host(tag: &str) -> Option<Asset> {
     let (target, format) = match (OS, ARCH) {
         ("linux", "x86_64") => ("x86_64-unknown-linux-musl", Format::TarGz),
@@ -62,9 +61,7 @@ pub fn download_url(tag: &str, file: &str) -> String {
     format!("{REPOSITORY}/releases/download/{tag}/{file}")
 }
 
-/// Whether the release has this file attached yet. The release workflow
-/// pushes the version tag minutes before the built binaries, so the newest
-/// tag can exist while its assets are still uploading.
+/// The tag lands minutes before the assets, so they may still be uploading.
 pub fn asset_exists(url: &str) -> Result<bool> {
     let response = client()?
         .head(url)
@@ -121,15 +118,14 @@ pub fn download(url: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// A tampered or truncated download must fail here, not surface later as a
-/// confusing interpreter crash.
+/// A bad download must fail here, not later as a confusing crash.
 pub fn verify_checksum(sums: &str, asset: &str, bytes: &[u8]) -> Result<()> {
     let expected = sums
         .lines()
         .find_map(|line| {
             let mut parts = line.split_whitespace();
             let hash = parts.next()?;
-            // sha256sum marks a binary read with a star before the name.
+            // `sha256sum` marks a binary read with a star.
             let name = parts.next()?.trim_start_matches('*');
             (name == asset).then(|| hash.to_ascii_lowercase())
         })
@@ -142,7 +138,6 @@ pub fn verify_checksum(sums: &str, asset: &str, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Pull the `rust` binary out of the archive and write it to `dest`.
 pub fn extract(bytes: &[u8], format: Format, dest: &Path) -> Result<()> {
     match format {
         Format::TarGz => extract_tar_gz(bytes, dest),

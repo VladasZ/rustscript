@@ -1,6 +1,5 @@
 #!/usr/bin/env rust
 
-// Create a symlink and read back where it points.
 
 use std::fs;
 

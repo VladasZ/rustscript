@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-// HTTP with query parameters and a cookie-persisting client. Needs network, so
-// it is not part of the automated run.
+// Needs network, so it is not part of the automated run.
 
 use std::time::Duration;
 
@@ -11,7 +10,6 @@ fn main() -> anyhow::Result<()> {
         .timeout(Duration::from_secs(10))
         .build()?;
 
-    // The client keeps cookies between calls.
     let first = client
         .get("https://httpbin.org/cookies/set")
         .query(&[("session", "abc123")])

@@ -1,21 +1,10 @@
-//! The typed method catalog.
-//!
-//! Every method is one row: a receiver class, argument type patterns, a result
-//! type pattern, and a render template. The generator asks "what can produce a
-//! `u8`" and the solver answers with every row whose result unifies, plus the
-//! receiver type each one needs. So a new method is a single row and it
-//! immediately composes with everything else, at any depth, inside any
-//! expression.
-//!
-//! The rows name real std methods. `crates/differential/std_surface.txt`
-//! lists the std surface the generator could cover, and the `surface`
-//! command reports which of those names neither the catalog nor the
-//! interpreter knows, so a missing row is a measured gap and not a blind
-//! spot.
+//! The typed method catalog. Every method is one row, a receiver class,
+//! argument patterns, a result pattern and a template. A new row composes
+//! at any depth at once. The `surface` command measures the gap against
+//! `std_surface.txt`.
 
 use crate::lang::ty::{FloatWidth, IntWidth, Ty};
 
-/// Which receiver types a method applies to.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecvClass {
     Int,
@@ -53,9 +42,9 @@ impl RecvClass {
         }
     }
 
-    /// Whether this class wraps an element type, so an `Elem` result can name
-    /// the receiver as a container over the wanted type. `Map` and `Res` are
-    /// excluded, their receivers need two types and are completed in `solve`.
+    /// Whether an `Elem` result can name the receiver as a container over
+    /// the wanted type. `Map` and `Res` need 2 types and are completed in
+    /// `solve`.
     pub fn is_container(self) -> bool {
         matches!(self, Self::Vec | Self::VecOfVec | Self::Opt | Self::Set)
     }
@@ -71,37 +60,29 @@ impl RecvClass {
     }
 }
 
-/// A type in a method signature, written relative to the receiver.
+/// A type in a signature, relative to the receiver.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TyPat {
-    /// The receiver's own type.
     Same,
-    /// The element type of a `Vec<E>`, `Option<E>`, or `HashSet<E>`
-    /// receiver, or the inner element of a `Vec<Vec<E>>`.
+    /// The element type, or the inner element of a `Vec<Vec<E>>`.
     Elem,
-    /// The key type of a `HashMap<K, V>` receiver.
     Key,
-    /// The value type of a `HashMap<K, V>` receiver.
     Val,
-    /// The ok type of a `Result<T, E>` receiver.
     OkT,
-    /// The error type of a `Result<T, E>` receiver.
     ErrT,
-    /// A fixed scalar type that carries no type variable.
     Exact(Fixed),
     Vec(&'static TyPat),
     Opt(&'static TyPat),
     Tuple2(&'static TyPat, &'static TyPat),
     Res(&'static TyPat, &'static TyPat),
-    /// A turbofish type the generator picks, as in `parse::<u8>()`.
+    /// A turbofish type the generator picks.
     Fish,
-    /// A small literal count, so `repeat` and `pow` cannot blow up runtime.
+    /// A small literal, so `repeat` and `pow` cannot blow up runtime.
     SmallU32,
     SmallI32,
     SmallUsize,
 }
 
-/// Scalar types nameable in a signature without a type variable.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Fixed {
     Bool,
@@ -127,12 +108,11 @@ impl Fixed {
     }
 }
 
-/// A constraint the element type of a container receiver must satisfy, so the
-/// generated call actually compiles.
+/// A constraint on the element type, so the call compiles.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ElemReq {
     Any,
-    /// `Ord`, which every generated type has except the floats.
+    /// `Ord`, every generated type except the floats.
     Ord,
     /// An integer or a float, for `sum` and `product`.
     Num,
@@ -160,11 +140,10 @@ impl ElemReq {
     }
 }
 
-/// What a turbofish may be instantiated to.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FishReq {
     None,
-    /// Any type `FromStr` covers here: integers, floats, bool and char.
+    /// Any `FromStr` type.
     ParseTarget,
     /// Any scalar, for `then_some`.
     Scalar,
@@ -781,8 +760,8 @@ pub const METHODS: &[Method] = &[
         "{r}.eq_ignore_ascii_case({0}.as_str())",
     ),
     m("is_ascii_str", Str, &[], Exact(FBool), "{r}.is_ascii()"),
-    // The parse family is why the turbofish exists. It is the one method whose
-    // result type is chosen by the caller, and the interpreter has to honor it.
+    // The parse family is why the turbofish exists, the caller chooses the
+    // result type.
     with_fish(
         m(
             "parse",
@@ -1243,8 +1222,8 @@ pub const METHODS: &[Method] = &[
     m("res_and", Res, &[Same], Same, "{r}.and({0})"),
     m("res_or", Res, &[Same], Same, "{r}.or({0})"),
     // -- HashMap ------------------------------------------------------------
-    // Only order-neutral observations. Anything that iterates goes through a
-    // sort inside the template, per the determinism rule in `pipe`.
+    // Anything that iterates sorts inside the template, see the determinism
+    // rule in `pipe`.
     m("map_len", RecvClass::Map, &[], Exact(FUSize), "{r}.len()"),
     m(
         "map_is_empty",
@@ -1397,22 +1376,17 @@ pub const METHODS: &[Method] = &[
     ),
 ];
 
-/// What solving a result pattern against a wanted type told us about the call.
 #[derive(Clone, Debug)]
 pub struct Solved {
-    /// The receiver type, when the wanted type pinned it. `None` means any
-    /// type in the method's receiver class works and the generator picks,
-    /// guided by `key` or `val` when the result pinned half of a map or a
-    /// result.
+    /// `None` means any type in the receiver class works and the generator
+    /// picks, guided by `key` or `val` when half a pair is pinned.
     pub recv: Option<Ty>,
     pub fish: Option<Ty>,
     pub key: Option<Ty>,
     pub val: Option<Ty>,
 }
 
-/// Solve a method's result pattern against the type the generator wants.
-/// Returns the receiver the call must have, or `None` when this method can
-/// never produce that type.
+/// `None` when this method can never produce the wanted type.
 pub fn solve(method: &Method, want: &Ty) -> Option<Solved> {
     let mut found = Found::default();
     unify(&method.ret, want, &mut found)?;
@@ -1462,7 +1436,7 @@ pub fn solve(method: &Method, want: &Ty) -> Option<Solved> {
     })
 }
 
-/// The element `ElemReq` constrains: the inner element for `Vec<Vec<E>>`.
+/// The inner element for `Vec<Vec<E>>`.
 fn inner_elem(recv: RecvClass, ty: &Ty) -> Option<&Ty> {
     match recv {
         RecvClass::VecOfVec => ty.elem()?.elem(),
@@ -1470,10 +1444,8 @@ fn inner_elem(recv: RecvClass, ty: &Ty) -> Option<&Ty> {
     }
 }
 
-/// Complete a map or result method against what the result pinned. A fully
-/// pinned pair becomes the receiver, half pinned pairs guide the generator's
-/// sample. A map key must hash and a map value must sort, per the
-/// observation rule.
+/// A fully pinned pair becomes the receiver, a half pinned one guides the
+/// sample. A map key must hash and a map value must sort.
 fn solve_pair(method: &Method, found: Found) -> Option<Solved> {
     if found.same.is_some() || found.elem.is_some() || found.fish.is_some() {
         return None;
@@ -1504,7 +1476,6 @@ fn solve_pair(method: &Method, found: Found) -> Option<Solved> {
     })
 }
 
-/// A map value sorts in the observation and defaults in `get_or_default`.
 pub fn is_map_val(ty: &Ty) -> bool {
     ty.is_ord() && ty.has_default()
 }
@@ -1522,9 +1493,7 @@ struct Found {
     same: Option<Ty>,
     elem: Option<Ty>,
     fish: Option<Ty>,
-    /// The key of a map or the ok type of a result.
     key: Option<Ty>,
-    /// The value of a map or the error type of a result.
     val: Option<Ty>,
 }
 
@@ -1579,15 +1548,12 @@ fn unify(pat: &TyPat, want: &Ty, found: &mut Found) -> Option<()> {
             }
             _ => None,
         },
-        // Count patterns describe an argument, never a result.
         SmallU32 | SmallI32 | SmallUsize => None,
     }
 }
 
-/// The concrete type an argument pattern takes for a solved call. `Elem` is
-/// the element the method's receiver class names, the inner one only for a
-/// `VecOfVec` method, so `vec_contains` on a `Vec<Vec<u64>>` still takes a
-/// `Vec<u64>`.
+/// `Elem` is the inner element only for a `VecOfVec` method, so
+/// `vec_contains` on a `Vec<Vec<u64>>` still takes a `Vec<u64>`.
 pub fn arg_ty(pat: &TyPat, class: RecvClass, recv: &Ty, fish: Option<&Ty>) -> Option<Ty> {
     Some(match pat {
         Same => recv.clone(),

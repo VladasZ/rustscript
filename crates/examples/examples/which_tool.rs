@@ -1,6 +1,5 @@
 #!/usr/bin/env rust
 
-// Look up an executable on PATH.
 
 use which::which;
 

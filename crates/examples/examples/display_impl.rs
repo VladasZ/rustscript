@@ -1,7 +1,5 @@
 #!/usr/bin/env rust
 
-// User `Display` and `Debug` impls drive `{}`, `{:?}`, `to_string`, and
-// `format!`, instead of the built-in rendering.
 
 use std::fmt;
 

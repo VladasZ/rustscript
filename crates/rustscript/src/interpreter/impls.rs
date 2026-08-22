@@ -1,8 +1,5 @@
-//! The script's own `impl` methods, found by type id and method id instead
-//! of by name. Every user struct and enum gets a `type_id` at load, carried
-//! on its shape or enum definition, and every method name is either a
-//! `BuiltinId` or an atom interned at compile time, so a method call on a
-//! user value is two integer lookups with no string built.
+//! The script's own `impl` methods, found by type id and method id, so a
+//! call on a user value is 2 integer lookups with no string built.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -11,21 +8,19 @@ use super::bytecode::{BinKind, BuiltinId, Chunk, MethodName, NO_ATOM, NO_TYPE, S
 use super::numeric::IntWidth;
 use super::value::Value;
 
-/// The methods one user type declares.
 #[derive(Default)]
 pub struct TypeMethods {
-    /// Methods whose name is a bridge method name too, `len`, `next`,
-    /// `clone`, sorted by id for a binary search.
+    /// Names a bridge knows too, sorted by id for a binary search.
     by_builtin: Vec<(BuiltinId, Arc<Chunk>)>,
-    /// Methods with a script only name, sorted by atom.
+    /// Script only names, sorted by atom.
     by_atom: Vec<(u32, Arc<Chunk>)>,
     pub display: Option<Arc<Chunk>>,
     pub debug: Option<Arc<Chunk>>,
     pub drop: Option<Arc<Chunk>>,
     pub next: Option<Arc<Chunk>>,
-    /// The operator trait impls, `Add::add` and friends, by `bin_slot`.
+    /// `Add::add` and friends, by `bin_slot`.
     bin: [Option<Arc<Chunk>>; BIN_SLOTS],
-    /// The assigning forms, `AddAssign::add_assign`, by `bin_slot`.
+    /// `AddAssign::add_assign` and friends, by `bin_slot`.
     bin_assign: [Option<Arc<Chunk>>; BIN_SLOTS],
     pub neg: Option<Arc<Chunk>>,
     pub not: Option<Arc<Chunk>>,
@@ -33,12 +28,12 @@ pub struct TypeMethods {
 
 const BIN_SLOTS: usize = 10;
 
-/// The operator trait method names, in `bin_slot` order.
+/// In `bin_slot` order.
 const BIN_NAMES: [&str; BIN_SLOTS] = [
     "add", "sub", "mul", "div", "rem", "bitand", "bitor", "bitxor", "shl", "shr",
 ];
 
-/// The assigning operator names, same order as `BIN_NAMES`.
+/// Same order as `BIN_NAMES`.
 const BIN_ASSIGN_NAMES: [&str; BIN_SLOTS] = [
     "add_assign",
     "sub_assign",
@@ -52,8 +47,7 @@ const BIN_ASSIGN_NAMES: [&str; BIN_SLOTS] = [
     "shr_assign",
 ];
 
-/// The slot of an operator with a trait impl, None for the comparisons,
-/// which answer through the derived semantics.
+/// None for the comparisons, which answer through the derived semantics.
 fn bin_slot(op: BinKind) -> Option<usize> {
     Some(match op {
         BinKind::Add => 0,
@@ -73,7 +67,6 @@ fn bin_slot(op: BinKind) -> Option<usize> {
 }
 
 impl TypeMethods {
-    /// The method a call site names, by builtin id or by atom.
     pub fn get(&self, name: &MethodName) -> Option<&Arc<Chunk>> {
         if name.id == BuiltinId::Other {
             if name.atom == NO_ATOM {
@@ -107,8 +100,7 @@ impl TypeMethods {
     }
 }
 
-/// The atoms of the method names no bridge knows, fixed before compiling so
-/// every call site can carry its atom.
+/// Fixed before compiling so every call site can carry its atom.
 pub fn method_atoms<'a>(names: impl IntoIterator<Item = &'a str>) -> HashMap<String, u32> {
     let mut atoms: HashMap<String, u32> = HashMap::new();
     for name in names {
@@ -120,26 +112,20 @@ pub fn method_atoms<'a>(names: impl IntoIterator<Item = &'a str>) -> HashMap<Str
     atoms
 }
 
-/// Every impl method of the program, by type id.
 pub struct ImplTable {
     types: Vec<TypeMethods>,
-    /// Type name to id, for the cold lookups that start from a name: a path
-    /// call on a user type, a tuple struct built at runtime, and a user impl
-    /// on a bridge type name, whose values carry no id.
+    /// For the cold lookups that start from a name.
     type_ids: HashMap<Arc<str>, u16>,
     atoms: HashMap<String, u32>,
-    /// Whether some impl targets a type the script did not declare, `impl
-    /// MyTrait for PathBuf`. Only then does a bridge value look up its
-    /// methods by name.
+    /// Some impl targets a type the script did not declare, like
+    /// `impl MyTrait for PathBuf`. Only then does a bridge value look up its
+    /// methods.
     foreign: bool,
-    /// Every `(type, method)` pair, for the coverage report.
+    /// For the coverage report.
     names: Vec<(String, String)>,
 }
 
 impl ImplTable {
-    /// `methods` are the compiled impl methods, `type_ids` the ids the
-    /// resolver handed out, and `declared` the names of the script's own
-    /// structs and enums.
     pub fn build(
         methods: Vec<(String, String, Arc<Chunk>)>,
         type_ids: HashMap<Arc<str>, u16>,
@@ -192,8 +178,7 @@ impl ImplTable {
         }
     }
 
-    /// True when the script declares no impl at all, which lets the hot
-    /// paths skip every user lookup.
+    /// Lets the hot paths skip every user lookup.
     pub fn is_empty(&self) -> bool {
         self.names.is_empty()
     }
@@ -202,21 +187,18 @@ impl ImplTable {
         self.names.iter().cloned()
     }
 
-    /// The methods of the value's type, None for a value of no user type.
     pub fn of_value(&self, value: &Value) -> Option<&TypeMethods> {
         self.of_receiver(value, None)
     }
 
-    /// `of_value` for a method call receiver, with the type the call site
-    /// wrote down when it did. An empty vec has no element to name its
-    /// type, so the written `Vec<u8>` is what picks its impl.
+    /// An empty vec has no element to name its type, so the written
+    /// `Vec<u8>` picks its impl.
     pub fn of_receiver(&self, value: &Value, written: Option<&ScalarTy>) -> Option<&TypeMethods> {
         let (type_id, name) = match value {
             Value::Struct(s) => (s.shape.type_id, &s.shape.name),
             Value::Enum { def, .. } => (def.type_id, &def.name),
-            // A builtin value answers to an impl on its own type, `impl
-            // Describe for Vec<String>`, which only exists when some impl
-            // targets a type the script did not declare.
+            // `impl Describe for Vec<String>` only exists when some impl
+            // targets an undeclared type.
             other => {
                 return self
                     .foreign
@@ -233,11 +215,9 @@ impl ImplTable {
         self.of_name(name)
     }
 
-    /// The impl a builtin value's type has, keyed the way `impl_target`
-    /// wrote it down. A vec names its element type from its first element,
-    /// so an empty vec, or one whose impl is generic over the element, falls
-    /// back to the one `Vec<..>` impl when there is exactly one. An untagged
-    /// integer is an i64, or the one integer impl when there is exactly one.
+    /// Keyed the way `impl_target` wrote it. An empty vec falls back to the
+    /// one `Vec<..>` impl when there is exactly one, an untagged integer to
+    /// the one integer impl.
     fn of_builtin(&self, value: &Value, written: Option<&ScalarTy>) -> Option<&TypeMethods> {
         match value {
             Value::Vec(items) => {
@@ -261,8 +241,7 @@ impl ImplTable {
         }
     }
 
-    /// The methods of the one type matching `pick`, None when none or
-    /// several do.
+    /// None when none or several match.
     fn of_unique(&self, pick: impl Fn(&str) -> bool) -> Option<&TypeMethods> {
         let mut found = self.type_ids.iter().filter(|(name, _)| pick(name));
         let (_, id) = found.next()?;
@@ -272,25 +251,21 @@ impl ImplTable {
         self.types.get(usize::from(*id))
     }
 
-    /// The methods of a type named at runtime, a path call's namespace.
     pub fn of_name(&self, ty: &str) -> Option<&TypeMethods> {
         let id = *self.type_ids.get(ty)?;
         self.types.get(usize::from(id))
     }
 
-    /// The id of a type named at runtime, to tag a value built by name.
     pub fn type_id(&self, ty: &str) -> u16 {
         self.type_ids.get(ty).copied().unwrap_or(NO_TYPE)
     }
 
-    /// A method named at runtime, `Type::method` in a path call.
     pub fn by_name(&self, ty: &str, method: &str) -> Option<Arc<Chunk>> {
         let methods = self.of_name(ty)?;
         let name = self.method_name(method);
         methods.get(&name).cloned()
     }
 
-    /// A call site name built at runtime, with its atom filled in.
     pub fn method_name(&self, method: &str) -> MethodName {
         MethodName {
             id: BuiltinId::resolve(method),
@@ -303,7 +278,6 @@ impl ImplTable {
     }
 }
 
-/// The type name a scalar value is written as, for the impl key.
 fn scalar_key(value: &Value) -> Option<&'static str> {
     Some(match value {
         Value::Bool(_) => "bool",
@@ -317,7 +291,6 @@ fn scalar_key(value: &Value) -> Option<&'static str> {
     })
 }
 
-/// The impl key of a value nested inside a container, `u8` or `Vec<u8>`.
 fn builtin_key(value: &Value) -> Option<String> {
     if let Some(key) = scalar_key(value) {
         return Some(key.to_string());
@@ -329,8 +302,7 @@ fn builtin_key(value: &Value) -> Option<String> {
     Some(format!("Vec<{elem}>"))
 }
 
-/// The impl key of a type a call site wrote down, the same form
-/// `builtin_key` rebuilds from a value.
+/// The same form `builtin_key` rebuilds from a value.
 fn written_key(ty: &ScalarTy) -> Option<String> {
     Some(match ty {
         ScalarTy::Int(width) => width.name().to_string(),

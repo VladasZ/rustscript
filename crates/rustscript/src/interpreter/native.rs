@@ -1,7 +1,4 @@
-//! `Send + Sync` host resources. The interpreter
-//! grows its native surface as scripts need it. Beyond tasks and futures it now
-//! carries the subprocess family, so a `#[tokio::main]` script can spawn a child
-//! and stream its pipes from concurrent tasks.
+//! `Send + Sync` host resources.
 
 use std::fs::File;
 use std::future::Future;
@@ -16,101 +13,78 @@ use parking_lot::Mutex;
 
 use super::value::{Map, MapKey, Value};
 
-/// A boxed future that yields a script value. `Send` so it can be driven on any
-/// worker thread.
+/// `Send` so it can be driven on any worker thread.
 pub type BoxFut = Pin<Box<dyn Future<Output = Value> + Send>>;
 
-/// A line iterator over a pipe. `Send` so a lane reading a child can live on a
-/// worker thread.
+/// `Send` so a lane reading a child can live on a worker thread.
 pub type LineIter = Box<dyn Iterator<Item = std::io::Result<String>> + Send>;
 
 pub enum Native {
-    /// A `HashMap::entry` handle, the map plus the key it points at.
-    Entry { map: Map, key: MapKey },
-    /// A spawned task, joined when awaited.
+    /// A `HashMap::entry` handle.
+    Entry {
+        map: Map,
+        key: MapKey,
+    },
     Task(tokio::task::JoinHandle<Value>),
-    /// A pending future, for example `tokio::time::sleep` or an async request.
     Future(BoxFut),
-    /// An async reqwest client, cheap to clone and shared across tasks.
     HttpClient(reqwest::Client),
-    /// The blocking reqwest client. Safe here because script code always runs
-    /// on blocking threads, never on a runtime worker.
+    /// Safe because script code always runs on blocking threads, never on a
+    /// runtime worker.
     BlockingHttpClient(reqwest::blocking::Client),
-    /// A monotonic clock reading used by timed async scripts.
     Instant(Instant),
-    /// A system clock reading, `SystemTime::now` or a file timestamp.
     SystemTime(SystemTime),
-    /// A spawned child process, waited on through its `Child` value.
     Child(Child),
-    /// The writable end of a child's piped stdin.
     ChildStdin(ChildStdin),
-    /// An open file, buffered, which can also write and seek.
     File(BufReader<File>),
-    /// A buffered reader over a child's piped stdout or stderr.
     Reader(BufReader<Box<dyn Read + Send>>),
-    /// A writer: stdout, stderr, or another byte sink.
     Writer(Box<dyn Write + Send>),
-    /// A bound TCP listener.
     Listener(TcpListener),
-    /// A connected TCP stream.
     Stream(TcpStream),
-    /// A bound UDP socket.
     Udp(UdpSocket),
-    /// A loaded PDF document, the real lopdf value.
+    /// The real lopdf value.
     Pdf(Box<lopdf::Document>),
-    /// A temporary directory, deleted when the value drops or on `close`.
+    /// Deleted when the value drops or on `close`.
     TempDir(tempfile::TempDir),
-    /// A named temporary file.
     NamedTempFile(tempfile::NamedTempFile),
-    /// An in-progress SHA-256 hasher, fed by `update` and read by `finalize`.
     Sha256(sha2::Sha256),
-    /// A lazy line iterator, so `for line in reader.lines()` streams a pipe
-    /// instead of buffering all of it first.
+    /// Lazy, so `for line in reader.lines()` streams a pipe.
     Lines(LineIter),
-    /// A response body still in its wire form. Kept undecoded so a script that
-    /// only wants the byte count never pays for a UTF-8 conversion, which on a
-    /// binary payload both costs time and inflates the result.
+    /// Kept undecoded so a script that only wants the byte count never pays
+    /// for a UTF-8 conversion.
     Body(Vec<u8>),
-    /// A compiled pattern, shared across tasks so it compiles once.
+    /// Shared across tasks so it compiles once.
     Regex(super::regex_bridge::RegexValue),
-    /// A single match, holding its source and byte range.
     RegexMatch(super::regex_bridge::MatchValue),
-    /// A capture set, indexable by group number or name.
     RegexCaptures(super::regex_bridge::CapturesValue),
-    /// A lazy iterator, shared like every other handle so `by_ref` and
-    /// `peekable` keep their real semantics.
+    /// Shared like every other handle so `by_ref` and `peekable` keep their
+    /// real semantics.
     Iterator(super::iterator::IteratorState),
-    /// An `std::io::Error` as scripts observe it: real `Display` and
-    /// `Debug` text captured at conversion, plus the kind and code its
-    /// accessor methods answer.
+    /// Real `Display` and `Debug` text captured at conversion, plus the kind
+    /// and code.
     IoErr {
         display: String,
         debug: String,
         kind: String,
         code: Option<i32>,
     },
-    /// A `ParseIntError`, `ParseFloatError`, `ParseBoolError`, or
-    /// `ParseCharError` as scripts observe it: the real `Display` and
-    /// `Debug` texts.
-    ParseErr { display: String, debug: String },
-    /// A tokio `JoinError` as scripts observe it: real `Display` and
-    /// `Debug` text captured at conversion, plus what its accessors answer.
+    /// A parse error with its real `Display` and `Debug` texts.
+    ParseErr {
+        display: String,
+        debug: String,
+    },
+    /// A `JoinError` with its real `Display` and `Debug` texts.
     JoinErr {
         display: String,
         debug: String,
         is_panic: bool,
     },
     /// The buffer behind a `fmt::Formatter` handed to a user `fmt` impl.
-    /// `write!` into it appends here, and the formatter reads it back as the
-    /// rendered text.
     Fmt {
         text: String,
-        /// The impl went through `f.pad`, which honors the caller's width,
-        /// where `write!` ignores it.
+        /// The impl went through `f.pad`, which honors the caller's width.
         padded: bool,
     },
-    /// A consumed handle, left behind after a task or future is taken to await,
-    /// or after a stdin pipe is closed so the child sees EOF.
+    /// Left behind after a task is taken to await or a stdin pipe is closed.
     Taken,
 }
 
@@ -149,7 +123,6 @@ impl Native {
         }
     }
 
-    /// The readable side of a handle, for the shared reader methods.
     pub fn as_read(&mut self) -> Option<&mut dyn Read> {
         match self {
             Native::File(r) => Some(r),
@@ -158,10 +131,8 @@ impl Native {
         }
     }
 
-    /// The buffered side of a handle, for the reader methods that need a
-    /// delimiter. The File and Reader variants already own a `BufReader`, so this
-    /// hands out that buffer instead of wrapping a second one around it, which
-    /// would eat bytes the next call expects to still be there.
+    /// Hands out the existing `BufReader` instead of wrapping a second one,
+    /// which would eat bytes the next call expects.
     pub fn as_buf_read(&mut self) -> Option<&mut dyn BufRead> {
         match self {
             Native::File(r) => Some(r),
@@ -175,9 +146,8 @@ impl Native {
     }
 }
 
-/// An io error as the structured value scripts observe. Both format forms
-/// are captured from the real error, so `{:?}` prints the exact
-/// `Os { code: 2, kind: NotFound, .. }` shape compiled Rust prints.
+/// Both format forms are captured from the real error, so `{:?}` prints
+/// the exact `Os { code: 2, kind: NotFound, .. }` shape.
 pub(super) fn io_error_value(e: &std::io::Error) -> Value {
     Native::IoErr {
         display: e.to_string(),

@@ -1,11 +1,7 @@
 #!/usr/bin/env rust
 
-// Reads and writes the Windows registry through the winreg bridge. Everything
-// happens under a throwaway key in HKCU that the script deletes on the way out,
-// so running this never touches real settings.
-//
-// Windows only. The examples suite skips it elsewhere, and on another platform
-// every call returns a plain error saying the registry does not exist there.
+// Everything happens under a throwaway HKCU key that is deleted at the end.
+// `Windows` only, elsewhere every call returns an error.
 
 use winreg::RegKey;
 use winreg::RegValue;
@@ -20,12 +16,11 @@ fn main() {
     let (key, disposition) = hkcu.create_subkey(PATH).expect("create the demo key");
     println!("created {PATH} ({disposition:?})");
 
-    // An int writes a DWORD and a string writes REG_SZ.
     key.set_value("Count", &7u32).expect("set Count");
     key.set_value("Label", &"hello").expect("set Label");
 
-    // Binary has no typed form, so it goes through the untyped pair. This is
-    // the shape the CapsLock scancode map needs.
+    // Binary goes through the untyped pair, the shape the CapsLock scancode
+    // map needs.
     let blob = RegValue {
         bytes: vec![0, 1, 2, 253, 254, 255].into(),
         vtype: RegType::REG_BINARY,
@@ -61,7 +56,7 @@ fn main() {
     }
     assert_eq!(left, 2);
 
-    // A missing value reads back as an error, not a panic or a silent default.
+    // A missing value is an error, not a panic.
     assert!(key.get_raw_value("Nope").is_err());
 
     hkcu.delete_subkey_all(PATH).expect("remove the demo key");

@@ -1,10 +1,6 @@
-//! The xmltree bridge. `xmltree::Element` is a plain data struct with public
-//! fields, so it maps onto an interpreter struct one to one: a script reads
-//! and edits `name`, `prefix`, `attributes`, and `children` exactly as it
-//! would with the real crate, and stays valid Rust that compiles and passes
-//! `rust check`. `Element::parse` builds the value tree, `write` rebuilds a
-//! real `Element` and lets xmltree serialize it, so output bytes match the
-//! compiled crate byte for byte. Namespace state is carried through untouched.
+//! `xmltree::Element` is a plain data struct, so it maps onto an interpreter
+//! struct one to one. `write` rebuilds a real `Element` and lets xmltree
+//! serialize it, so output bytes match the compiled crate.
 
 use anyhow::{Result, bail};
 use xmltree::{Element, Namespace, XMLNode};
@@ -15,7 +11,7 @@ use super::bytecode::{BuiltinId, MethodName};
 use super::enum_def::XML_NODE;
 use super::value::{StructData, Value};
 
-/// `Element::parse(bytes_or_str)` as the real associated function.
+/// `Element::parse(bytes_or_str)`.
 pub(super) fn parse(args: &[Value]) -> Value {
     let bytes = arg_bytes(args.first());
     match Element::parse(bytes.as_slice()) {
@@ -24,20 +20,19 @@ pub(super) fn parse(args: &[Value]) -> Value {
     }
 }
 
-/// `Element::new(name)`, an empty element exactly as the real crate builds it.
+/// `Element::new(name)`.
 pub(super) fn new_element(name: &str) -> Value {
     element_to_value(&Element::new(name))
 }
 
-/// Methods on an `Element` struct value, mirroring the real crate.
 pub(super) fn element_method(
     recv: &StructData,
     name: &MethodName,
     args: &[Value],
 ) -> Result<Value> {
     match name.id {
-        // The real write takes any writer; scripts hand in a `Vec<u8>`, which
-        // is shared, so the serialized bytes land in the caller's vec.
+        // Scripts hand in a shared `Vec<u8>`, so the bytes land in the
+        // caller's vec.
         BuiltinId::Write => {
             let el = value_to_element(recv)?;
             let mut out: Vec<u8> = Vec::new();
@@ -52,7 +47,7 @@ pub(super) fn element_method(
                 Err(e) => Ok(Value::err(Value::str(e.to_string()))),
             }
         }
-        // Option<Cow<str>> of the direct text and cdata children.
+        // `Option<Cow<str>>` of the direct text and cdata children.
         BuiltinId::GetText => {
             let el = value_to_element(recv)?;
             Ok(match el.get_text() {
@@ -181,7 +176,6 @@ fn field_opt_str(s: &StructData, field: &str) -> Option<String> {
         .map(|v| v.display())
 }
 
-/// The payload of a `Some`, or None for `None` and anything else.
 fn option_value(v: &Value) -> Option<Value> {
     v.some_payload()
 }
@@ -196,7 +190,6 @@ fn map_value(pairs: impl IntoIterator<Item = (Value, Value)>) -> Value {
     Value::map_of(map)
 }
 
-/// Bytes from either a `Vec<u8>` of ints or a string argument.
 fn arg_bytes(v: Option<&Value>) -> Vec<u8> {
     match v {
         Some(Value::Vec(items)) => items

@@ -1,7 +1,6 @@
-//! The `for` side of the scalar loop specialization: run the whole loop at
-//! a `ForNext` as a plan over unboxed registers, in chunks so the iterator
-//! lock drops and a pending Ctrl-C handler runs between them. The plan IR,
-//! its translation, and the op evaluator live in `scalar_loop`.
+//! The `for` side of the scalar plans, in chunks so the iterator lock drops
+//! and a pending Ctrl-C handler runs between them. The plan IR lives in
+//! `scalar_loop`.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -22,13 +21,12 @@ use super::vm_step::{Flow, StepCtx};
 
 type Handle = Arc<Mutex<Native>>;
 
-/// Items processed per iterator lock hold. Between chunks the lock drops,
-/// the registers write back, and the pending Ctrl-C handler runs, so a long
-/// loop cannot starve either.
+/// Items per iterator lock hold. Between chunks the lock drops and the
+/// Ctrl-C handler runs.
 const CHUNK: usize = 4096;
 
-/// Op budget for one iteration, so an inner loop that runs long falls back
-/// to the generic path, which polls Ctrl-C on every backward jump.
+/// So an inner loop that runs long falls back to the generic path, which
+/// polls Ctrl-C.
 const MAX_BODY_STEPS: u32 = 65_536;
 
 enum BodyOut {
@@ -37,14 +35,13 @@ enum BodyOut {
     Fail,
 }
 
-/// Run the body once for one item. `Fail` leaves the registers mid-body,
-/// the caller restores them by replaying the chunk snapshot.
+/// `Fail` leaves the registers mid body, the caller replays the chunk
+/// snapshot.
 #[inline]
 fn run_body(plan: &LoopPlan, regs: &mut [SVal], item: SVal) -> BodyOut {
     regs[usize::from(plan.val_slot)] = item;
     if plan.straight {
-        // One basic block with the back jump trimmed: walk the slice with no
-        // instruction pointer, the end of the slice is the next iteration.
+        // One basic block, the end of the slice is the next iteration.
         for op in &plan.ops {
             match eval_op(op, regs) {
                 OpOut::Fall => {}
@@ -66,8 +63,7 @@ fn run_body(plan: &LoopPlan, regs: &mut [SVal], item: SVal) -> BodyOut {
             OpOut::Jump(LTo::Exit) => return BodyOut::Exit,
             OpOut::Jump(LTo::Op(t)) => {
                 let t = t as usize;
-                // The budget counts backward jumps, the one way an iteration
-                // can run long, so straight runs pay no counter.
+                // Only backward jumps count, so straight runs pay no counter.
                 if t <= ip {
                     steps += 1;
                     if steps > MAX_BODY_STEPS {
@@ -80,8 +76,7 @@ fn run_body(plan: &LoopPlan, regs: &mut [SVal], item: SVal) -> BodyOut {
     }
 }
 
-/// Rebuild the registers to the state at the start of the failing item:
-/// restore the chunk snapshot, then re-run the items that succeeded. The
+/// Restore the chunk snapshot, then re-run the items that succeeded. The
 /// body only touches registers, so the replay is deterministic.
 fn replay(
     plan: &LoopPlan,
@@ -96,23 +91,17 @@ fn replay(
     }
 }
 
-/// What one locked chunk of items did, plus how many items it consumed.
 struct ChunkOut {
     advanced: i64,
     state: ChunkState,
 }
 
 enum ChunkState {
-    /// The source is exhausted.
     Done,
-    /// The body hit a `break`.
     Exited,
-    /// An iteration failed, its item is unconsumed and the registers hold
-    /// its entry state.
+    /// The item is unconsumed and the registers hold its entry state.
     Failed,
-    /// The chunk filled up, more items remain.
     More,
-    /// The iterator is not a supported simple source.
     NotSimple,
 }
 
@@ -179,8 +168,8 @@ fn range_chunk(
         let item = *next;
         match run_body(plan, regs, SVal::Int(item)) {
             BodyOut::Next => {
-                // Wrapping mirrors the release-built generic `range_step`,
-                // whose bare `+= 1` wraps at the inclusive i64::MAX end.
+                // Wrapping mirrors the generic `range_step` at the inclusive
+                // `i64::MAX` end.
                 *next = next.wrapping_add(1);
                 advanced += 1;
             }
@@ -205,9 +194,7 @@ fn range_chunk(
     out(advanced, ChunkState::More)
 }
 
-/// A chunk over a vec's elements, `Values` locked in the caller or `Owned`
-/// held by the iterator itself. A non-scalar element fails its iteration
-/// over unconsumed, so the generic loop binds and runs it.
+/// A non scalar element fails its iteration over unconsumed.
 fn values_chunk(
     plan: &LoopPlan,
     regs: &mut [SVal],
@@ -254,10 +241,8 @@ fn values_chunk(
     out(advanced, ChunkState::More)
 }
 
-/// A chunk over `split_whitespace` words, each item a `StrSpan` over the
-/// locked source. A failing iteration rewinds the offset to before its
-/// word, so the generic `ForNext` re-pulls the same word through the same
-/// shared span walk.
+/// A failing iteration rewinds the offset so the generic `ForNext` re-pulls
+/// the same word.
 fn words_chunk(
     plan: &LoopPlan,
     regs: &mut [SVal],
@@ -279,8 +264,7 @@ fn words_chunk(
         let Some((start, end)) = next_word_span(source, offset) else {
             return out(advanced, ChunkState::Done);
         };
-        // A word past the u32 range has no slot form, so its iteration
-        // fails over unconsumed and the generic loop binds the real slice.
+        // A word past the u32 range has no slot form.
         let (Ok(start), Ok(end)) = (u32::try_from(start), u32::try_from(end)) else {
             *offset = before;
             return fail(regs, &items, advanced);
@@ -304,10 +288,8 @@ fn words_chunk(
     out(advanced, ChunkState::More)
 }
 
-/// A chunk over `find_iter` matches, each item a `Span` over the locked
-/// source. A failing iteration rewinds the offset to before its match, so
-/// the generic `ForNext` re-pulls the same match through the same shared
-/// span walk.
+/// A failing iteration rewinds the offset so the generic `ForNext` re-pulls
+/// the same match.
 fn regex_chunk(
     plan: &LoopPlan,
     regs: &mut [SVal],
@@ -330,8 +312,7 @@ fn regex_chunk(
         let Some((start, end)) = regex_find_span(regex, source, offset) else {
             return out(advanced, ChunkState::Done);
         };
-        // A span past the u32 range has no slot form, so its iteration
-        // fails over unconsumed and the generic loop binds the real match.
+        // A span past the u32 range has no slot form.
         let (Ok(start), Ok(end)) = (u32::try_from(start), u32::try_from(end)) else {
             *offset = before;
             return fail(regs, &items, advanced);
@@ -355,10 +336,8 @@ fn regex_chunk(
     out(advanced, ChunkState::More)
 }
 
-/// If the iterator is a `skip` over a simple vec source, fold the pending
-/// skip into the inner index once and answer the inner handle, so the
-/// chunks run on the source directly. The generic path sees exactly the
-/// state its own pulls would leave: the skip spent, the inner advanced.
+/// Fold a pending `skip` into the inner index once. The generic path sees
+/// the skip spent and the inner advanced, as its own pulls would leave it.
 fn resolve_skip(handle: &Handle) -> Handle {
     let mut native = handle.lock();
     let Native::Iterator(IteratorState::Skip { source, remaining }) = &mut *native else {
@@ -399,10 +378,8 @@ fn write_back(
     consumed: i64,
     span_source: Option<&RsStr>,
 ) {
-    // A span slot has no boxed form of its own, `s_value` skips it, so its
-    // register gets the real value here, a match with its source for a
-    // `Span` and the owned slice for a `StrSpan`, exactly what the generic
-    // `ForNext` and the generic method would have bound.
+    // A span slot has no boxed form, so its register gets the real value
+    // here, exactly what the generic `ForNext` would have bound.
     if let Some(source) = span_source {
         for (slot, sval) in regs.iter().enumerate() {
             match *sval {
@@ -420,8 +397,7 @@ fn write_back(
             }
         }
     }
-    // A string constant slot has no boxed form either, so its register gets
-    // the string the generic `LoadConst` would have put there.
+    // Same for a string constant slot.
     for (slot, sval) in regs.iter().enumerate() {
         if let SVal::StrConst(id) = *sval {
             let text: &str = &plan.strs[usize::from(id)];
@@ -432,9 +408,8 @@ fn write_back(
     ctx.put(idx, Value::Int(consumed));
 }
 
-/// Try to run the whole loop at the `ForNext` under `ctx.ip` as a scalar
-/// plan. `None` means the generic path should run, with the frame and the
-/// iterator left exactly where a generic execution would have them.
+/// `None` means the generic path should run, with the frame and iterator
+/// left exactly where it would have them.
 pub(super) fn try_run(ctx: &mut StepCtx, iter: u16, idx: u16, to: u32) -> Result<Option<Flow>> {
     let head = ctx.ip;
     let plan = {
@@ -519,38 +494,33 @@ pub(super) fn try_run(ctx: &mut StepCtx, iter: u16, idx: u16, to: u32) -> Result
     }
 }
 
-/// One journaled map insert of the current iteration, undone newest first
-/// on failure so a doubly-written key ends on its original value.
+/// Undone newest first so a doubly written key ends on its original value.
 struct MapUndo {
     map: u16,
     key: MapKey,
     old: Option<Value>,
 }
 
-/// The locked effect state of one chunk: the vec and map storage guards,
-/// the current iteration's map journal, and the span source of the loop's
-/// items, which resolves span slots into the string keys they stand for.
+/// The locked effect state of one chunk.
 struct Effects<'g, 'v> {
     vecs: &'g mut [MutexGuard<'v, Vec<Value>>],
     maps: &'g mut [MutexGuard<'v, MapStore>],
-    /// The arcs behind `maps`, for the `ItemIndex` alias check: probing an
-    /// item that IS a locked store would self-deadlock, so it fails over.
+    /// For the `ItemIndex` alias check, probing an item that is a locked
+    /// store would self deadlock.
     stores: &'g [Map],
     journal: &'g mut Vec<MapUndo>,
     source: Option<&'g RsStr>,
     strs: &'g [Box<str>],
 }
 
-/// A map probe's key: an owned scalar key, or the borrowed slice a span
-/// slot names in the loop's source. `None` sends the access to the generic
-/// path, which reproduces the exact error for a value that cannot be a key.
+/// An owned scalar or the borrowed slice of a span slot. `None` sends the
+/// access to the generic path, which reproduces the exact error.
 enum ProbeKey<'a> {
     Owned(MapKey),
     Slice(&'a str),
 }
 
-/// Resolve a key slot against the span source and the plan's string table,
-/// see `ProbeKey`.
+/// See `ProbeKey`.
 fn probe_key<'a>(v: SVal, source: Option<&'a RsStr>, strs: &'a [Box<str>]) -> Option<ProbeKey<'a>> {
     match v {
         SVal::Span { start, end } | SVal::StrSpan { start, end } => {
@@ -564,9 +534,8 @@ fn probe_key<'a>(v: SVal, source: Option<&'a RsStr>, strs: &'a [Box<str>]) -> Op
     }
 }
 
-/// The `MapGetOr` arm of `run_body_effects`, the fused
 /// `map.get(k).copied().unwrap_or(d)`. A missing key answers the default
-/// slot, whose `Opaque` fails over the same way an unreadable hit does.
+/// slot.
 #[inline]
 fn map_get_or(
     regs: &mut [SVal],
@@ -595,9 +564,8 @@ fn map_get_or(
     true
 }
 
-/// The `MapGetOpt` arm of `run_body_effects`: `map.get(&k)` as a `SomeInt`
-/// or `NoneOpt` slot. A hit whose value is not a plain int fails over, the
-/// slot has no form for it.
+/// `map.get(&k)` as a `SomeInt` or `NoneOpt` slot. A non int hit fails
+/// over.
 #[inline]
 fn map_get_opt(regs: &mut [SVal], fx: &mut Effects<'_, '_>, dst: u16, map: u16, key: u16) -> bool {
     let Some(k) = probe_key(regs[usize::from(key)], fx.source, fx.strs) else {
@@ -616,7 +584,6 @@ fn map_get_opt(regs: &mut [SVal], fx: &mut Effects<'_, '_>, dst: u16, map: u16, 
     true
 }
 
-/// The `MapHas` arm of `run_body_effects`.
 #[inline]
 fn map_has(regs: &mut [SVal], fx: &mut Effects<'_, '_>, dst: u16, map: u16, key: u16) -> bool {
     let Some(k) = probe_key(regs[usize::from(key)], fx.source, fx.strs) else {
@@ -631,9 +598,8 @@ fn map_has(regs: &mut [SVal], fx: &mut Effects<'_, '_>, dst: u16, map: u16, key:
     true
 }
 
-/// The `MapInsert` arm of `run_body_effects`, journaled so a failing
-/// iteration can undo it. A kept old value that is not a plain int fails
-/// over after the journal entry lands, so the undo still restores it.
+/// Journaled. A kept old value that is not an int fails over after the
+/// journal entry lands, so the undo still restores it.
 #[inline]
 fn map_insert(
     regs: &mut [SVal],
@@ -649,8 +615,8 @@ fn map_insert(
     ) else {
         return false;
     };
-    // The owned key an insert needs: a span key materializes here, the
-    // same one string copy the generic `to_string` made.
+    // A span key builds its owned string here, the one copy the generic
+    // `to_string` made.
     let k = match k {
         ProbeKey::Owned(k) => k,
         ProbeKey::Slice(text) => MapKey::Str(RsStr::from(text)),
@@ -671,10 +637,8 @@ fn map_insert(
     true
 }
 
-/// The `ItemIndex` arm of `run_body_effects`: probe the boxed source item
-/// an `Item` slot points at, the json shape of `it["key"]`. The item map's
-/// own lock is taken per probe. A non-map item, a missing key, whose
-/// generic twin is an error, or a non-scalar hit fails the iteration over.
+/// `it["key"]` on the boxed source item. A non map item, a missing key or
+/// a non scalar hit fails over.
 #[inline]
 fn item_index(
     regs: &mut [SVal],
@@ -718,9 +682,8 @@ fn item_index(
     true
 }
 
-/// Restore this iteration's map writes newest first. A fresh insert
-/// appended at its map's end and every later append was already undone, so
-/// its undo pops the tail; a replacement re-inserts in place.
+/// A fresh insert appended at the tail and every later append was already
+/// undone, so its undo pops the tail. A replacement re-inserts in place.
 fn unwind_maps(fx: &mut Effects<'_, '_>) {
     while let Some(MapUndo { map, key, old }) = fx.journal.pop() {
         let store = &mut fx.maps[usize::from(map)];
@@ -735,9 +698,8 @@ fn unwind_maps(fx: &mut Effects<'_, '_>) {
     }
 }
 
-/// One iteration of an effects plan. Failure recovery is the caller's: it
-/// restores the register snapshot, truncates each vec to its entry length,
-/// and unwinds the map journal, so it needs no replay.
+/// Failure recovery is the caller's, snapshot, truncate and journal, so no
+/// replay is needed.
 #[inline]
 fn run_body_effects(
     plan: &LoopPlan,
@@ -751,8 +713,7 @@ fn run_body_effects(
     let mut steps = 0u32;
     loop {
         let Some(op) = plan.ops.get(ip) else {
-            // A straight body's trailing back jump was trimmed at build, so
-            // the end of the slice is the next iteration.
+            // The end of the slice is the next iteration.
             return if plan.straight {
                 BodyOut::Next
             } else {
@@ -804,10 +765,8 @@ fn run_body_effects(
     }
 }
 
-/// One iteration of an effects chunk: snapshot the registers, record each
-/// vec's entry length, clear the map journal, run the body, and on failure
-/// restore all three, so the failing item stays unconsumed for the generic
-/// loop with its exact entry state.
+/// Snapshot, run, and on failure restore registers, vec lengths and the map
+/// journal, so the failing item stays unconsumed with its entry state.
 fn effect_iteration(
     plan: &LoopPlan,
     regs: &mut [SVal],
@@ -834,8 +793,6 @@ fn effect_iteration(
     body
 }
 
-/// A chunk of range items through an effects plan, each iteration journaled
-/// by `effect_iteration`.
 fn range_effects_chunk(
     plan: &LoopPlan,
     regs: &mut [SVal],
@@ -855,8 +812,8 @@ fn range_effects_chunk(
         let item = *next;
         match effect_iteration(plan, regs, snapshot, fx, SVal::Int(item), None) {
             BodyOut::Next => {
-                // Wrapping mirrors the release-built generic `range_step`,
-                // whose bare `+= 1` wraps at the inclusive i64::MAX end.
+                // Wrapping mirrors the generic `range_step` at the inclusive
+                // `i64::MAX` end.
                 *next = next.wrapping_add(1);
                 advanced += 1;
             }
@@ -871,9 +828,8 @@ fn range_effects_chunk(
     out(advanced, ChunkState::More)
 }
 
-/// A chunk of `split_whitespace` words through an effects plan. A failing
-/// iteration rewinds the offset to before its word, so the generic loop
-/// re-pulls it through the same shared span walk.
+/// A failing iteration rewinds the offset so the generic loop re-pulls the
+/// word.
 fn words_effects_chunk(
     plan: &LoopPlan,
     regs: &mut [SVal],
@@ -909,8 +865,7 @@ fn words_effects_chunk(
     out(advanced, ChunkState::More)
 }
 
-/// A chunk of `find_iter` matches through an effects plan, the same rewind
-/// contract as `words_effects_chunk`.
+/// The same rewind contract as `words_effects_chunk`.
 fn regex_effects_chunk(
     plan: &LoopPlan,
     regs: &mut [SVal],
@@ -947,9 +902,7 @@ fn regex_effects_chunk(
     out(advanced, ChunkState::More)
 }
 
-/// A chunk over a vec's elements through an effects plan, each item probed
-/// in place through its `Item` slot, the json shape. A failing iteration
-/// leaves the index on its item, so the generic loop re-binds it.
+/// The json shape. A failing iteration leaves the index on its item.
 fn items_effects_chunk(
     plan: &LoopPlan,
     regs: &mut [SVal],
@@ -983,28 +936,20 @@ fn items_effects_chunk(
     out(advanced, ChunkState::More)
 }
 
-/// Zero-progress effects-runner failures before the plan is dropped from
-/// the cache, so a loop whose entry state never runs as an effects plan
-/// stops paying the setup per iteration.
+/// Zero progress failures before the plan is dropped, so the loop stops
+/// paying the setup.
 const MAX_ZERO_FAILS: u32 = 32;
 
-/// Count one zero-progress failure, and past the budget drop the plan from
-/// the cache for good.
 fn note_effects_fail(ctx: &StepCtx, plan: &LoopPlan, head: usize) {
     if plan.fails.fetch_add(1, Ordering::Relaxed) + 1 >= MAX_ZERO_FAILS {
         ctx.cur.loop_plans.lock().insert(head, None);
     }
 }
 
-/// Resolve the effects runner's tables against the frame: check the source
-/// is one the chunks can walk, split each written base from sharing, the
-/// split the generic path's per-iteration `UniqueReg` amounts to, and take
-/// the storage handles. `None` fails the run over to the generic path: an
-/// unsupported source, a base of the wrong shape, or two bases sharing one
-/// storage, whose lock the chunk cannot take twice. The source check comes
-/// first, so an unsupported source costs no setup. A span source's string
-/// is immutable shared storage, so the snapshot taken here is the same
-/// string every chunk walks.
+/// Split each written base from sharing and take the storage handles.
+/// `None` for an unsupported source, a wrong shape base or 2 bases sharing
+/// one storage, whose lock cannot be taken twice. The source check comes
+/// first so an unsupported source costs no setup.
 fn effects_setup(
     ctx: &mut StepCtx,
     plan: &LoopPlan,
@@ -1047,11 +992,8 @@ fn effects_setup(
     Some((lists, stores, span_source))
 }
 
-/// Run a plan whose body pushes into vecs or probes maps, over a range,
-/// `split_whitespace`, or `find_iter` source. Each pushed base and each
-/// inserted map splits from sharing once at entry, the split the generic
-/// path's per-iteration `UniqueReg` amounts to, and their storage stays
-/// locked for the chunk. The locks drop around every Ctrl-C poll.
+/// Each pushed base and inserted map splits from sharing once at entry and
+/// stays locked for the chunk. The locks drop around every Ctrl-C poll.
 fn run_effects(
     ctx: &mut StepCtx,
     plan: &LoopPlan,
@@ -1115,8 +1057,6 @@ fn run_effects(
     }
 }
 
-/// One locked chunk of the effects runner: dispatch on the source and walk
-/// it through the matching chunk function.
 fn effects_chunk(
     plan: &LoopPlan,
     regs: &mut [SVal],
@@ -1147,8 +1087,7 @@ fn effects_chunk(
             let items: &[Value] = values;
             items_effects_chunk(plan, regs, snapshot, fx, items, index)
         }
-        // A source list aliasing a pushed base would deadlock the second
-        // lock, and the generic path handles that fine.
+        // A source aliasing a pushed base would deadlock the second lock.
         Native::Iterator(IteratorState::Values { values, index }) => {
             if lists.iter().any(|l| Arc::ptr_eq(l, values)) {
                 ChunkOut {
@@ -1168,10 +1107,8 @@ fn effects_chunk(
     }
 }
 
-/// Land every `Item` slot's boxed value in its frame register, the item
-/// materialization twin of `write_back`'s span arm: `s_value` skips the
-/// slot, so the register gets the exact value the generic `ForNext` would
-/// have bound, read back from the source by position.
+/// `s_value` skips an `Item` slot, so its register gets the value the
+/// generic `ForNext` would have bound, read from the source by position.
 fn put_items(ctx: &mut StepCtx, plan: &LoopPlan, regs: &[SVal], handle: &Handle) {
     for (slot, sval) in regs.iter().enumerate() {
         let SVal::Item(idx) = *sval else {

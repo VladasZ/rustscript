@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-// Read all of stdin and report a summary. With no input the counts are zero, so
-// it finishes cleanly whether or not anything is piped in.
+// With no input the counts are zero, so it finishes cleanly either way.
 
 use std::io::{self, Read};
 

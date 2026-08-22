@@ -1,7 +1,5 @@
 #!/usr/bin/env rust
 
-// Slice shaped views of a vec: `as_slice` patterns, `windows`, `chunks`,
-// `repeat`, `swap`, and `nth` on a lazy iterator.
 
 fn describe(values: &[i32]) -> String {
     match values {

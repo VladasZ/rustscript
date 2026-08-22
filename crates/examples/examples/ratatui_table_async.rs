@@ -1,5 +1,4 @@
-//! The same ratatui table as `ratatui_table`, drawn from a `#[tokio::main]`
-//! script so the async path renders through the same code.
+//! The `#[tokio::main]` twin of `ratatui_table`.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint;

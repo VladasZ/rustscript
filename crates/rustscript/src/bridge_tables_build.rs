@@ -1,16 +1,6 @@
-//! Harvest the interpreter's supported method names straight from the bridge
-//! source, at build time.
-//!
-//! A bridge dispatches on a method name with a `match` whose arms are string
-//! literals. That set is the interpreter's real surface, but it lived only
-//! inside those match arms, so nothing could read it and `rust check` had no
-//! way to tell a script it calls a method the interpreter does not implement.
-//!
-//! This parses the bridge files with `syn`, which is exact rather than a
-//! guess, and writes the names out as tables the coverage checker reads. There
-//! is no second hand written list, so nothing can drift: adding an arm adds it
-//! to the table on the next build, and renaming a harvested function is a hard
-//! build failure rather than a silently emptied table.
+//! Harvests the supported method names from the bridge source at build time
+//! with `syn`, so the coverage checker has a table that cannot drift. Renaming
+//! a harvested function is a hard build failure.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -20,13 +10,10 @@ use syn::visit::Visit;
 
 use crate::builtin_id_build::{MethodRow, camel};
 
-/// Variant name to method name, so a `BuiltinId::SplitFirst` arm harvests as
-/// `split_first`.
+/// `BuiltinId::SplitFirst` harvests as `split_first`.
 type Variants = BTreeMap<String, String>;
 
-/// A function whose dispatch arms are harvested, and the receiver those methods
-/// belong to. `recv` is the type name the checker infers for a value, or "*"
-/// when the arms apply to any receiver.
+/// `recv` is the type name the checker infers, or "*" for any receiver.
 pub struct Bridge {
     pub file: &'static str,
     pub func: &'static str,
@@ -49,8 +36,7 @@ pub const BRIDGES: &[Bridge] = &[
     b("shared.rs", "exit_status_core", "ExitStatus"),
     b("shared.rs", "json_type_test", "*"),
     b("int_methods.rs", "int_method", "*"),
-    // `int_method` only routes, and the two halves route again into the
-    // families below, so every family must be listed for its names to count.
+    // `int_method` only routes, so every family must be listed.
     b("int_methods.rs", "int_arith_method", "*"),
     b("int_methods.rs", "int_checked_family", "*"),
     b("int_methods.rs", "int_wrapping_family", "*"),
@@ -122,7 +108,7 @@ pub const BRIDGES: &[Bridge] = &[
     // -- processes, regex, http ---------------------------------------------
     b("process.rs", "command_method", "Command"),
     b("process.rs", "child_method", "Child"),
-    // The lazy find_iter and captures_iter arms; the rest comes from the
+    // The lazy `find_iter` and `captures_iter` arms, the rest comes from the
     // shared regex cores.
     b("regex_bridge.rs", "regex_method", "Regex"),
     b("http.rs", "request_method", "Request"),
@@ -157,17 +143,9 @@ const fn b(file: &'static str, func: &'static str, recv: &'static str) -> Bridge
     Bridge { file, func, recv }
 }
 
-/// Collects every string literal inside one bridge function.
-///
-/// Bridges do not all dispatch the same way. Most use a `match` on the method
-/// name, but some use `if name == "x"` or `matches!(name, "a" | "b")`, and a
-/// collector that only understood match arms reported those as unimplemented
-/// when they work fine.
-///
-/// So this takes every string literal in the function rather than trying to
-/// recognise each dispatch style. The trade is deliberate and one directional:
-/// a stray literal only makes the check accept a name it should not, while
-/// missing one makes it reject working code, which is far worse.
+/// Collects every string literal in one bridge function instead of
+/// recognising each dispatch style. A stray literal only makes the check
+/// accept a name it should not, missing one rejects working code.
 struct LitCollector<'a> {
     names: BTreeSet<String>,
     variants: &'a Variants,
@@ -181,7 +159,6 @@ impl<'a> LitCollector<'a> {
         }
     }
 
-    /// A `BuiltinId::Name` arm names the method by its id.
     fn take_variant(&mut self, ident: &str) {
         if let Some(name) = self.variants.get(ident) {
             self.names.insert(name.clone());
@@ -189,7 +166,7 @@ impl<'a> LitCollector<'a> {
     }
 
     fn take(&mut self, value: String) {
-        // Method names only: no paths, spaces, or format templates.
+        // Method names only.
         if !value.is_empty()
             && value
                 .chars()
@@ -200,7 +177,7 @@ impl<'a> LitCollector<'a> {
     }
 
     /// A macro body is an unparsed token stream, so `matches!(name, "lock")`
-    /// is invisible to the ast visitor. Walk the raw tokens for literals too.
+    /// is invisible to the ast visitor.
     fn take_tokens(&mut self, tokens: proc_macro2::TokenStream) {
         use proc_macro2::TokenTree;
         let trees: Vec<TokenTree> = tokens.into_iter().collect();
@@ -213,7 +190,7 @@ impl<'a> LitCollector<'a> {
                     }
                 }
                 TokenTree::Group(group) => self.take_tokens(group.stream()),
-                // `BuiltinId::Name` inside a macro body, `matches!(id, BuiltinId::Len | BuiltinId::IsEmpty)`.
+                // `BuiltinId::Name` inside a macro body.
                 TokenTree::Ident(ident) if i >= 3 && is_id_prefix(&trees[i - 3]) => {
                     if let (TokenTree::Punct(a), TokenTree::Punct(b)) =
                         (&trees[i - 2], &trees[i - 1])
@@ -251,14 +228,8 @@ impl<'ast> Visit<'ast> for LitCollector<'_> {
     }
 }
 
-/// Find a function by name anywhere in the file, including inside `impl`
-/// blocks and inside `mod` blocks, and harvest its arms.
-///
-/// Names are unioned across every match rather than replaced. A bridge split
-/// by `#[cfg]` declares the same function twice, once real and once as a stub
-/// that bails, and replacing would let whichever copy comes last win. The stub
-/// has no arms, so that emptied the table and `rust check` then rejected every
-/// method the real one implements.
+/// Names are unioned across every match. A bridge split by `#[cfg]` declares
+/// the function twice, and the stub copy once emptied the table.
 struct FnFinder<'a> {
     want: &'a str,
     variants: &'a Variants,
@@ -285,7 +256,6 @@ impl<'ast> Visit<'ast> for FnFinder<'_> {
     }
 }
 
-/// Harvest one function's dispatch names, or `None` when it is missing.
 fn harvest(dir: &Path, file: &str, func: &str, variants: &Variants) -> Option<BTreeSet<String>> {
     let text = std::fs::read_to_string(dir.join(file)).ok()?;
     let ast = syn::parse_file(&text).ok()?;
@@ -298,8 +268,7 @@ fn harvest(dir: &Path, file: &str, func: &str, variants: &Variants) -> Option<BT
     finder.found
 }
 
-/// Harvest every dispatch name in a whole file, for the VM's own id
-/// dispatch, which is spread over its functions rather than held in one.
+/// For the VM's own id dispatch, which is spread over its functions.
 fn harvest_file(dir: &Path, file: &str, variants: &Variants) -> BTreeSet<String> {
     let text = std::fs::read_to_string(dir.join(file))
         .unwrap_or_else(|e| panic!("cannot read {file}: {e}"));
@@ -344,8 +313,7 @@ pub fn generate(interpreter_dir: &Path, rows: &[MethodRow]) -> String {
         rows.join("\n")
     );
 
-    // The VM answers some methods itself by id before any bridge is reached,
-    // and that dispatch is spread over `vm_method.rs`.
+    // The VM answers some methods itself, spread over `vm_method.rs`.
     let builtin = harvest_file(interpreter_dir, "vm_method.rs", &variants);
     let list: Vec<String> = builtin.iter().map(|n| format!("{n:?}")).collect();
     let _ = writeln!(

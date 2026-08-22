@@ -13,7 +13,6 @@ fn main() -> Result<()> {
     let count = re.find_iter(text).count();
     println!("entries: {count}");
 
-    // The iterator terminal `last` drains to the final item.
     let last_start = re.find_iter(text).last().map_or(0, |m| m.start());
     println!("last entry starts at: {last_start}");
     let last_level = re
@@ -39,7 +38,6 @@ fn main() -> Result<()> {
     let redacted = errors.replace_all(text, "WARN");
     println!("redacted: {redacted}");
 
-    // regex::escape turns metacharacters into literals.
     println!("escaped: {}", escape("a.b*c?"));
     Ok(())
 }

@@ -1,4 +1,4 @@
-//! Expressions and control flow. Split from the compiler.
+//! Expressions and control flow.
 
 use anyhow::{Result, anyhow, bail};
 use syn::spanned::Spanned;
@@ -17,8 +17,8 @@ use super::{
     numeric_target,
 };
 
-/// Operators whose operands share the annotated integer type in real Rust.
-/// Comparisons answer bool and never sit under a numeric annotation.
+/// Operators whose operands share the annotated integer type. Comparisons
+/// answer bool.
 fn propagates_annotation(op: BinKind) -> bool {
     matches!(
         op,
@@ -35,9 +35,7 @@ fn propagates_annotation(op: BinKind) -> bool {
     )
 }
 
-/// Flatten a left-nested `&&` chain into its terms, in source order. A cond
-/// that is not an `&&` is returned as a single term. Used to compile let-chains
-/// in `if let A = x && cond && let B = y`.
+/// For let chains like `if let A = x && cond && let B = y`.
 fn flatten_and(cond: &Expr) -> Vec<&Expr> {
     fn walk<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
         if let Expr::Binary(b) = e
@@ -54,22 +52,20 @@ fn flatten_and(cond: &Expr) -> Vec<&Expr> {
     out
 }
 
-/// The `from_str` call at the root of a `let` init chain, looking through
-/// `?`, `unwrap`, and `expect`. Only a call without its own turbofish counts.
+/// Looks through `?`, `unwrap` and `expect`. A call with its own turbofish
+/// does not count.
 fn from_str_root(e: &Expr) -> Option<&syn::ExprCall> {
     from_str_chain(e, false)
 }
 
-/// Methods that rewrite only the error of a Result and hand the parsed value
-/// through untouched, so the annotation still names what the parse must build.
+/// Rewrite only the error, so the annotation still names the parse target.
 fn maps_only_the_error(method: &syn::Ident) -> bool {
     method == "map_err" || method == "context" || method == "with_context"
 }
 
-/// `unwrapped` says whether a `?`, `unwrap` or `expect` sits above this point
-/// in the chain. The error mapping methods are only followed under one, because
-/// without it the annotation names a `Result` rather than the parsed payload,
-/// and handing that to the planner would parse into the wrong shape.
+/// The error mapping methods are only followed under a `?`, `unwrap` or
+/// `expect`, without one the annotation names a `Result` and not the
+/// payload.
 fn from_str_chain(e: &Expr, unwrapped: bool) -> Option<&syn::ExprCall> {
     match e {
         Expr::Call(c) => {
@@ -93,8 +89,7 @@ fn from_str_chain(e: &Expr, unwrapped: bool) -> Option<&syn::ExprCall> {
     }
 }
 
-/// The `collect` call at the root of a `let` init chain. Only a call without
-/// its own turbofish counts, a turbofish already names the target itself.
+/// A call with its own turbofish does not count.
 fn collect_root(e: &Expr) -> Option<&syn::ExprMethodCall> {
     match e {
         Expr::MethodCall(m) if m.method == "collect" && m.turbofish.is_none() => Some(m),
@@ -104,8 +99,7 @@ fn collect_root(e: &Expr) -> Option<&syn::ExprMethodCall> {
     }
 }
 
-/// The collect target a signature's return type names, so the return type
-/// types a `collect` whose value the function hands back.
+/// The collect target a return type names.
 pub(super) fn collect_return_target(output: &syn::ReturnType) -> Option<CollectTarget> {
     match output {
         syn::ReturnType::Type(_, ty) => CollectTarget::of_type(ty),
@@ -113,9 +107,8 @@ pub(super) fn collect_return_target(output: &syn::ReturnType) -> Option<CollectT
     }
 }
 
-/// The payload a signature hands back, looking inside a `Result`. That is the
-/// type a `from_str` in tail position has to parse into, the fourth place the
-/// target is knowable after a turbofish, an annotated `let`, and a `-> String`.
+/// The payload a signature hands back, inside a `Result`, which a tail
+/// `from_str` must parse into.
 pub(super) fn returned_json_type(output: &syn::ReturnType) -> Option<&syn::Type> {
     let syn::ReturnType::Type(_, ty) = output else {
         return None;
@@ -123,7 +116,6 @@ pub(super) fn returned_json_type(output: &syn::ReturnType) -> Option<&syn::Type>
     Some(result_ok_type(ty).unwrap_or(ty))
 }
 
-/// The `T` of a `Result<T, E>` annotation.
 fn result_ok_type(ty: &syn::Type) -> Option<&syn::Type> {
     let syn::Type::Path(p) = ty else { return None };
     let seg = p.path.segments.last()?;
@@ -133,10 +125,8 @@ fn result_ok_type(ty: &syn::Type) -> Option<&syn::Type> {
     first_generic_type(seg)
 }
 
-/// Expressions in tail position, so the value the expression produces is the
-/// value of one of them. Walks only the shapes whose own value is a
-/// sub-expression's value: parens, a block's trailing expression, both branches
-/// of an `if`, and every arm of a `match`.
+/// Parens, a block's tail, both branches of an `if` and every arm of a
+/// `match`.
 pub(super) fn tail_exprs<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
     match e {
         Expr::Paren(p) => tail_exprs(&p.expr, out),
@@ -157,9 +147,7 @@ pub(super) fn tail_exprs<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
     }
 }
 
-/// Whether an expression is built only from unsuffixed integer literals,
-/// through negation, arithmetic, branches, blocks, and arms. Nothing else
-/// in the program can type such a value, so rustc falls back to `i32`.
+/// Only unsuffixed integer literals, so `rustc` falls back to `i32`.
 pub(super) fn unconstrained_int(expr: &Expr) -> bool {
     match expr {
         Expr::Lit(l) => matches!(&l.lit, Lit::Int(int) if int.suffix().is_empty()),
@@ -186,13 +174,8 @@ pub(super) fn unconstrained_int(expr: &Expr) -> bool {
     }
 }
 
-/// Whether a numeric hint on this node can ever be consumed: the shapes
-/// `compile_numeric_annotated` handles, which always compile through
-/// `compile_into`. A hint on anything else would stay behind, keyed by an
-/// address a later parse of a macro body can reuse for an unrelated node.
-/// Whether the expression computes something rather than just naming a
-/// literal. Only a computation can overflow, and a plain `let x = 0` must
-/// stay open so a later `x += v.len()` can still make it a `usize`.
+/// Only a computation can overflow, and a plain `let x = 0` must stay open
+/// so a later `x += v.len()` can make it a `usize`.
 fn bare_int_arithmetic(expr: &Expr) -> bool {
     match expr {
         Expr::Unary(un) => matches!(un.op, UnOp::Neg(_)),
@@ -213,9 +196,8 @@ fn bare_int_arithmetic(expr: &Expr) -> bool {
     }
 }
 
-/// Whether every numeric leaf the expression can produce is an unsuffixed
-/// integer literal. Rust types such an expression `i32` when nothing else
-/// constrains it, so its arithmetic has to overflow at `i32`.
+/// Every numeric leaf is an unsuffixed literal, so arithmetic overflows at
+/// `i32`.
 pub(super) fn bare_int_rooted(expr: &Expr) -> bool {
     match expr {
         Expr::Lit(lit) => match &lit.lit {
@@ -256,7 +238,6 @@ pub(super) fn takes_numeric_hint(expr: &Expr) -> bool {
     }
 }
 
-/// An expression without the parens and groups around it.
 pub(super) fn unparen(expr: &Expr) -> &Expr {
     match expr {
         Expr::Paren(p) => unparen(&p.expr),
@@ -265,17 +246,14 @@ pub(super) fn unparen(expr: &Expr) -> &Expr {
     }
 }
 
-/// The trailing expression of a block, which is the block's own value.
 fn tail_block_exprs<'a>(block: &'a Block, out: &mut Vec<&'a Expr>) {
     if let Some(Stmt::Expr(e, None)) = block.stmts.last() {
         tail_exprs(e, out);
     }
 }
 
-/// Every expression whose value this function body hands back, from its
-/// trailing expression and from a `return`. A closure body is skipped, because
-/// its `return` leaves the closure rather than this function, so the function's
-/// return type says nothing about it.
+/// The tail and every `return`. A closure body is skipped, its `return`
+/// leaves the closure.
 pub(super) fn returned_exprs(block: &Block) -> Vec<&Expr> {
     let mut found = Vec::new();
     tail_block_exprs(block, &mut found);
@@ -283,7 +261,6 @@ pub(super) fn returned_exprs(block: &Block) -> Vec<&Expr> {
     found
 }
 
-/// Every bare `collect` whose value this function body hands back.
 pub(super) fn returned_collects(block: &Block) -> Vec<*const syn::ExprMethodCall> {
     returned_exprs(block)
         .into_iter()
@@ -296,10 +273,8 @@ pub(super) fn returned_collects(block: &Block) -> Vec<*const syn::ExprMethodCall
         .collect()
 }
 
-/// Every `from_str` whose parsed value this function body hands back. The
-/// chain is walked as already unwrapped, because the signature's payload type
-/// is read from inside its `Result`, so a plain `.map_err(..)` tail names the
-/// parse target just as much as a `?` does.
+/// Walked as already unwrapped, because the payload is read from inside the
+/// signature's `Result`.
 pub(super) fn returned_from_strs(block: &Block) -> Vec<*const syn::ExprCall> {
     returned_exprs(block)
         .into_iter()
@@ -307,8 +282,7 @@ pub(super) fn returned_from_strs(block: &Block) -> Vec<*const syn::ExprCall> {
         .collect()
 }
 
-/// `<[T]>::len` as the two segment path `Vec::len`, the owner read off the
-/// qualified self type.
+/// `<[T]>::len` as `Vec::len`.
 fn qualified_method_ref(p: &syn::ExprPath) -> Vec<String> {
     let owner = match p.qself.as_ref().map(|q| &*q.ty) {
         Some(syn::Type::Path(tp)) => tp
@@ -322,13 +296,11 @@ fn qualified_method_ref(p: &syn::ExprPath) -> Vec<String> {
     vec![owner, p.path.segments[0].ident.to_string()]
 }
 
-/// Statement level `return`s, following the constructs that carry a block.
 fn walk_returns<'a>(block: &'a Block, out: &mut Vec<&'a Expr>) {
     for stmt in &block.stmts {
         match stmt {
             Stmt::Expr(e, _) => walk_returns_expr(e, out),
-            // The only expression a `let` carries that is not part of its value
-            // is the `else` block of a let-else, which commonly returns.
+            // The `else` block of a let else commonly returns.
             Stmt::Local(local) => {
                 if let Some(init) = &local.init
                     && let Some(diverge) = &init.diverge
@@ -371,15 +343,15 @@ fn walk_returns_expr<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
 impl Compiler<'_> {
     pub(super) fn compile_block(&mut self, block: &Block, dst: Reg) -> Result<()> {
         self.push_scope();
-        // The written types of the block's own locals end with it, so a
-        // later block reusing a name cannot be read under the wrong type.
+        // The block's written locals end with it, so a later block reusing a
+        // name cannot read the wrong type.
         let typed_locals = self.typed_locals.clone();
         let typed_local_types = self.typed_local_types.clone();
         let res = self.compile_block_inner(block, dst);
         self.typed_locals = typed_locals;
         self.typed_local_types = typed_local_types;
-        // The block value already moved into `dst` before the scope ends, so
-        // a returned binding reads as still-shared and is not dropped here.
+        // The block value already moved into `dst`, so a returned binding
+        // reads as shared and is not dropped here.
         if res.is_ok() {
             self.emit_scope_drops(1);
         }
@@ -392,10 +364,8 @@ impl Compiler<'_> {
             self.emit(Op::LoadUnit { dst });
             return Ok(());
         }
-        // Block-level consts and statics bind up front, so a use earlier in
-        // the block still resolves, the way item hoisting works in real Rust.
-        // Their init expressions are const-evaluable, so evaluation order
-        // against the other statements is unobservable.
+        // Block consts and statics bind up front like item hoisting. Their
+        // inits are const, so the order is unobservable.
         for stmt in &block.stmts {
             let Stmt::Item(item) = stmt else { continue };
             match item {
@@ -438,8 +408,7 @@ impl Compiler<'_> {
                     if is_last && semi.is_none() {
                         self.compile_into(dst, expr)?;
                     } else {
-                        // A statement position method call discards its result,
-                        // so the VM can skip building it.
+                        // A statement position call discards its result.
                         if let Expr::MethodCall(m) = expr {
                             self.compile_method(DISCARD, m)?;
                         } else {
@@ -471,9 +440,7 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    /// `let PAT = EXPR else { .. }`. Test the refutable pattern, and run the
-    /// diverging else block when it does not match. Bindings land in the
-    /// current scope, visible afterwards.
+    /// `let PAT = EXPR else { .. }`. Bindings land in the current scope.
     fn compile_let_else(&mut self, local: &syn::Local, dst: Reg, is_last: bool) -> Result<()> {
         let init = local.init.as_ref().unwrap();
         let else_expr = &init.diverge.as_ref().unwrap().1;
@@ -501,25 +468,18 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    /// A plain `let`, with the annotation-driven typing hints the comments
-    /// inside explain.
     fn compile_let(&mut self, local: &syn::Local, dst: Reg, is_last: bool) -> Result<()> {
-        // `let r = &mut PLACE` binds a real borrow. A plain variable borrow
-        // becomes a name alias, so access through `r` is access to the
-        // variable. A projection borrow materializes a reference value into
-        // the element or field, split from value sharing first.
+        // `let r = &mut v` becomes a name alias. A projection borrow builds a
+        // reference value into the element or field.
         if self.compile_let_borrow(local, dst, is_last)? {
             return Ok(());
         }
         let val = self.alloc();
-        // An annotated `let` whose init chain roots in a
-        // `from_str` call hands its type to that call, so the
-        // parse is typed at the source and no coerce op is
-        // needed afterwards.
+        // An annotated `let` rooted in `from_str` hands its type to the call,
+        // so no coerce op is needed.
         let mut offered = false;
-        // A let nested in the init chain, say in a closure body,
-        // runs this code again before the outer collect consumes
-        // its hint, so the outer hint is restored, not cleared.
+        // A nested let runs this again before the outer collect consumes its
+        // hint, so the outer hint is restored.
         let outer_collect_let = self.collect_let.take();
         if let Pat::Type(t) = &local.pat
             && let Some(init) = &local.init
@@ -528,7 +488,7 @@ impl Compiler<'_> {
                 self.json_let = Some((std::ptr::from_ref(call), self.lower_ir(&t.ty)));
                 offered = true;
             } else if let Some(call) = super::calls::bare_default_call(&init.expr) {
-                // `let x: T = Default::default()` names the type only here.
+                // `let x: T = Default::default()`.
                 if let Some(ir) = self.default_ir(&t.ty) {
                     self.default_calls.insert(std::ptr::from_ref(call), ir);
                 }
@@ -537,9 +497,7 @@ impl Compiler<'_> {
             {
                 self.collect_let = Some((std::ptr::from_ref(mc), target));
             }
-            // `let x: T = ...unwrap_or_default()` is the only place
-            // that names the payload the default is built from,
-            // since the method takes no turbofish of its own.
+            // `let x: T = ...unwrap_or_default()`.
             if let Expr::MethodCall(mc) = unparen(&init.expr)
                 && mc.method == "unwrap_or_default"
             {
@@ -548,8 +506,7 @@ impl Compiler<'_> {
                 }
                 self.default_let_ty = Some((std::ptr::from_ref(mc), (*t.ty).clone()));
             }
-            // `let x: T = ...sum()` names the width a bare `sum` or
-            // `product` adds up in, the same way a turbofish would.
+            // `let x: T = ...sum()` names the width like a turbofish.
             if let Expr::MethodCall(mc) = unparen(&init.expr)
                 && (mc.method == "sum" || mc.method == "product")
                 && mc.turbofish.is_none()
@@ -557,7 +514,7 @@ impl Compiler<'_> {
             {
                 self.reduce_let = Some((std::ptr::from_ref(mc), ty));
             }
-            // `let x: T = v.into()` names the `From` impl `into` goes through.
+            // `let x: T = v.into()`.
             if let Expr::MethodCall(mc) = unparen(&init.expr)
                 && mc.method == "into"
                 && mc.args.is_empty()
@@ -567,10 +524,8 @@ impl Compiler<'_> {
                 self.into_let = Some((std::ptr::from_ref(mc), canon));
             }
         }
-        // `let opt: Option<T> = ..` and `let v: Vec<T> = ..`
-        // record the declared type, so a later
-        // `opt.unwrap_or_default()` or `v.get(i).cloned()
-        // .unwrap_or_default()` builds the right default from it.
+        // `let opt: Option<T>` and `let v: Vec<T>` record the type for a later
+        // `unwrap_or_default()`.
         if let Pat::Type(t) = &local.pat
             && let Pat::Ident(ident) = &*t.pat
         {
@@ -580,9 +535,7 @@ impl Compiler<'_> {
                 self.typed_locals.insert(ident.ident.to_string(), declared);
             }
         }
-        // A numeric annotation types a bare literal init at
-        // compile time, so the value never exists at the wrong
-        // width.
+        // A numeric annotation types a bare literal at compile time.
         let mut typed_literal = false;
         if let Pat::Type(t) = &local.pat
             && let Some(init) = &local.init
@@ -600,11 +553,8 @@ impl Compiler<'_> {
                 None => self.emit(Op::LoadUnit { dst: val }),
             }
         }
-        // An unannotated `let sorted = vec!['a', 'b']` states its type
-        // through the init, so a default built from `sorted` later still
-        // has an element type to read. Read after the init compiles, so
-        // annotated locals inside its blocks are already recorded and a
-        // block-tail element can answer through them.
+        // `let sorted = vec!['a', 'b']` states its type through the init.
+        // Read after the init compiles so its block locals are recorded.
         if !matches!(&local.pat, Pat::Type(_))
             && let Pat::Ident(ident) = &local.pat
             && let Some(init) = &local.init
@@ -620,7 +570,6 @@ impl Compiler<'_> {
         let consumed = offered && self.json_let.is_none();
         self.json_let = None;
         self.collect_let = outer_collect_let;
-        // A type annotation coerces a dynamic value into that type.
         if let Pat::Type(t) = &local.pat {
             if !consumed && !typed_literal {
                 self.emit_annotation(val, &t.ty);
@@ -635,13 +584,8 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    /// Without an annotation, a suffixed literal or a typed local in one
-    /// branch of the init types the bare literals in the others.
-    /// Record a type for each name of a `let` with a tuple pattern. Without
-    /// this the names carry no type at all and a later `unwrap_or_default()`
-    /// on one of them falls back to a string. The annotation wins where there
-    /// is one, otherwise each name answers through its own initializer
-    /// element.
+    /// A type for each name of a tuple pattern `let`. The annotation wins,
+    /// otherwise each name answers through its own init element.
     fn record_tuple_pattern_types(&mut self, local: &syn::Local) {
         if let Some(init) = &local.init {
             let bare = match &local.pat {
@@ -689,10 +633,8 @@ impl Compiler<'_> {
             && let Some(init) = &local.init
             && takes_numeric_hint(&init.expr)
         {
-            // An unsuffixed integer literal that nothing else constrains is
-            // `i32` in real Rust, so arithmetic over nothing but bare
-            // literals overflows at `i32`. Without this `-(i32::MIN)` kept
-            // widening into an i64 and never panicked.
+            // Bare literals are `i32`. Without this `-(i32::MIN)` widened to
+            // i64 and never panicked.
             let target = match self.stated_ty(&init.expr).as_ref().and_then(numeric_target) {
                 Some(stated) => Some(stated),
                 None => (bare_int_rooted(&init.expr) && bare_int_arithmetic(&init.expr))
@@ -705,10 +647,8 @@ impl Compiler<'_> {
         }
     }
 
-    /// Apply a `let` annotation to an already-computed init value. A numeric
-    /// primitive retags through a cast, which only ever acts on a bare
-    /// literal's value, an init typed by the real checker already has the
-    /// annotated type. Everything else goes through the struct coercion.
+    /// A numeric primitive retags through a cast, which only ever acts on a
+    /// bare literal. Everything else goes through the struct coercion.
     fn emit_annotation(&mut self, reg: Reg, ty: &syn::Type) {
         if numeric_annotation(ty).is_some() {
             let idx = self.add_cast(ty);
@@ -722,10 +662,8 @@ impl Compiler<'_> {
         self.emit_coerce(reg, ty);
     }
 
-    /// Emit a coercion of `reg` into the annotated type when it names a struct,
-    /// `Vec<T>`, or `Option<T>`. A type coercion can never change, `f64` or
-    /// `HashMap<K, V>`, emits nothing, so annotated lets in hot loops carry no
-    /// runtime work at all.
+    /// A type a coercion can never change emits nothing, so annotated lets in
+    /// hot loops carry no runtime work.
     pub(super) fn emit_coerce(&mut self, reg: Reg, ty: &syn::Type) {
         let ir = self.lower_ir(ty);
         if !ir.is_active() {
@@ -741,8 +679,7 @@ impl Compiler<'_> {
 
     // -- expressions -------------------------------------------------------
 
-    /// Compile `expr`, returning the register holding its value. A plain local
-    /// returns its own register with no copy.
+    /// A plain local returns its own register with no copy.
     pub(super) fn compile_expr(&mut self, expr: &Expr) -> Result<Reg> {
         if let Expr::Path(p) = expr
             && p.path.segments.len() == 1
@@ -773,8 +710,7 @@ impl Compiler<'_> {
             Expr::Reference(r) => self.compile_into(dst, &r.expr)?,
             Expr::Unsafe(u) => self.compile_block(&u.block, dst)?,
             Expr::Block(b) => self.compile_block(&b.block, dst)?,
-            // `<[T]>::len` or `<str>::trim` used as a value is a method
-            // reference, the type is only there to pick the method.
+            // `<[T]>::len` as a value is a method reference.
             Expr::Path(p) if p.qself.is_some() && p.path.segments.len() == 1 => {
                 let segs = qualified_method_ref(p);
                 self.compile_resolved_value(dst, &segs)?;
@@ -878,12 +814,9 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    /// An integer literal with its real width: from its suffix first, else
-    /// from an annotation the caller saw, else untyped. Parses through u128
-    /// so a bare literal past `i64::MAX`, which real Rust types as u64 or
-    /// usize, still loads with its full value. The sign of an enclosing
-    /// negation comes in as `negated` so `-128i8` and `-9223372036854775808`
-    /// type before they could overflow.
+    /// Parses through u128 so a bare literal past `i64::MAX` keeps its value.
+    /// `negated` lets `-128i8` and `-9223372036854775808` type before they
+    /// could overflow.
     fn compile_int_lit(
         &mut self,
         dst: Reg,
@@ -892,8 +825,7 @@ impl Compiler<'_> {
         annotation: Option<IntWidth>,
     ) -> Result<()> {
         let raw: u128 = lit.base10_parse()?;
-        // A literal past u64 can only be 128 bits wide in a valid program,
-        // so it survives as its raw bits with the width the source states.
+        // A literal past u64 can only be 128 bits wide.
         if raw > u128::from(u64::MAX) {
             let stated = match lit.suffix() {
                 "" => annotation.unwrap_or(if negated {
@@ -908,7 +840,7 @@ impl Compiler<'_> {
                 if stated != IntWidth::I128 || raw > 1u128 << 127 {
                     bail!("integer literal does not fit any supported width");
                 }
-                // `wrapping_neg` turns 2^127 into i128::MIN exactly.
+                // `wrapping_neg` turns 2^127 into `i128::MIN` exactly.
                 raw.cast_signed().wrapping_neg()
             } else {
                 if !stated.is_big() || (stated == IntWidth::I128 && raw > i128::MAX.cast_unsigned())
@@ -933,8 +865,7 @@ impl Compiler<'_> {
             ),
         };
         let width = width.unwrap_or({
-            // Untyped and past i64::MAX can only be u64 or usize in a valid
-            // program, and those two share one runtime semantic.
+            // Untyped and past `i64::MAX` can only be u64 or usize.
             if value > i128::from(i64::MAX) {
                 IntWidth::U64
             } else {
@@ -959,8 +890,7 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    /// A float literal at its real width. An f32 parses from its own digits,
-    /// never through f64 rounding.
+    /// An f32 parses from its own digits, never through f64 rounding.
     fn compile_float_lit(
         &mut self,
         dst: Reg,
@@ -990,9 +920,7 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    /// Compile an annotated numeric init directly at the annotated type when
-    /// it is a plain literal, possibly negated or parenthesized. False means
-    /// the init needs a runtime cast after normal compilation.
+    /// False means the init needs a runtime cast after normal compilation.
     pub(super) fn compile_numeric_annotated(
         &mut self,
         dst: Reg,
@@ -1002,9 +930,8 @@ impl Compiler<'_> {
         match expr {
             Expr::Paren(p) => self.compile_numeric_annotated(dst, &p.expr, target),
             Expr::Group(g) => self.compile_numeric_annotated(dst, &g.expr, target),
-            // A negated literal types as one token. Any other negated
-            // operand adopts the width first, so `-(if c { i32::MIN } ..)`
-            // overflows at i32 the way the annotation says.
+            // Any other negated operand adopts the width first, so
+            // `-(if c { i32::MIN } ..)` overflows at i32.
             Expr::Unary(u) if matches!(u.op, UnOp::Neg(_)) => {
                 if self.compile_numeric_lit(dst, &u.expr, true, target)? {
                     return Ok(true);
@@ -1018,8 +945,7 @@ impl Compiler<'_> {
                 });
                 Ok(true)
             }
-            // A branch, block, or arm hands its value up from its tail, so
-            // every tail adopts the annotation when its own turn comes.
+            // Every tail adopts the annotation when its turn comes.
             Expr::If(_) | Expr::Block(_) | Expr::Match(_) => {
                 let mut tails = Vec::new();
                 tail_exprs(expr, &mut tails);
@@ -1029,9 +955,7 @@ impl Compiler<'_> {
                 self.compile_into(dst, expr)?;
                 Ok(true)
             }
-            // An integer annotation reaches into the init's arithmetic, so
-            // `let b: u128 = 1 << 100` computes at 128 bits instead of
-            // overflowing an untagged i64 shift.
+            // `let b: u128 = 1 << 100` computes at 128 bits.
             Expr::Binary(b)
                 if matches!(target, NumericTy::Int(_))
                     && !is_assign_op(&b.op)
@@ -1041,8 +965,7 @@ impl Compiler<'_> {
                 let a = self.alloc();
                 self.compile_numeric_operand(a, &b.left, target)?;
                 let rhs = self.alloc();
-                // A shift amount is its own type in real Rust and never
-                // adopts the annotated width.
+                // A shift amount never adopts the annotated width.
                 if matches!(op, BinKind::Shl | BinKind::Shr) {
                     self.compile_into(rhs, &b.right)?;
                 } else {
@@ -1055,10 +978,8 @@ impl Compiler<'_> {
         }
     }
 
-    /// Seed the literal hints an annotation states for the parts of an init
-    /// that are not numeric themselves: the elements of a `vec![..]` or an
-    /// array under a `Vec<T>` or `[T; N]` annotation, the items of a tuple,
-    /// and the payload of a `Some(..)`, each down to the numeric leaves.
+    /// Literal hints for the non numeric parts of an init, `vec![..]`
+    /// elements, tuple items and `Some(..)` payloads.
     pub(super) fn offer_literal_hints(&mut self, ty: &syn::Type, expr: &Expr) {
         let expr = unparen(expr);
         if let Some(target) = numeric_annotation(ty) {
@@ -1113,9 +1034,7 @@ impl Compiler<'_> {
         }
     }
 
-    /// One operand under a numeric annotation: a literal adopts the width, a
-    /// nested arithmetic expression propagates it further, anything else
-    /// compiles as itself.
+    /// A literal adopts the width, nested arithmetic propagates it.
     fn compile_numeric_operand(&mut self, dst: Reg, expr: &Expr, target: NumericTy) -> Result<()> {
         if !self.compile_numeric_annotated(dst, expr, target)? {
             self.compile_into(dst, expr)?;
@@ -1146,15 +1065,11 @@ impl Compiler<'_> {
         }
     }
 
-    /// `expr?`: unwrap into `dst` or return early, the error converted
-    /// through the frame's `From` impl. With `Drop` impls in the program the
-    /// early return runs the scope drops it would otherwise skip.
+    /// With `Drop` impls the early return runs the scope drops it would skip.
     fn compile_try(&mut self, dst: Reg, t: &syn::ExprTry) -> Result<()> {
         let src = self.compile_expr(&t.expr)?;
         let conv = self.try_conv();
         if self.ctx.has_drop {
-            // The early return runs the scope drops it would
-            // otherwise skip by leaving the frame from inside the VM.
             let site = self.here();
             self.emit(Op::TryJump {
                 dst,
@@ -1178,7 +1093,6 @@ impl Compiler<'_> {
             let name = path.segments[0].ident.to_string();
             return self.load_name(&name, dst);
         }
-        // A multi segment path used as a value, resolved against the module.
         // `Self::Unit` inside an impl names the impl's own type.
         let mut segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
         if segs[0] == "Self"
@@ -1195,9 +1109,7 @@ impl Compiler<'_> {
             self.emit(Op::Deref { dst, src });
             return Ok(());
         }
-        // A negated literal types as one token, so `-128i8` and the i64
-        // minimum load directly instead of negating an unrepresentable
-        // positive value.
+        // A negated literal types as one token, so `-128i8` loads directly.
         if matches!(u.op, UnOp::Neg(_))
             && let Expr::Lit(l) = &*u.expr
         {
@@ -1207,10 +1119,8 @@ impl Compiler<'_> {
                 _ => {}
             }
         }
-        // Negating an expression built from nothing but unsuffixed integer
-        // literals overflows at `i32`, the type Rust gives a literal that
-        // nothing else constrains. Without the hint the operand widened to
-        // i64 and `-(i32::MIN)` produced 2147483648 instead of panicking.
+        // Bare literals are `i32`. Without the hint `-(i32::MIN)` produced
+        // 2147483648 instead of panicking.
         if matches!(u.op, UnOp::Neg(_))
             && !self
                 .numeric_hints
@@ -1231,14 +1141,12 @@ impl Compiler<'_> {
     }
 
     pub(super) fn compile_binary(&mut self, dst: Reg, b: &syn::ExprBinary) -> Result<()> {
-        // Compound assignment, `a += b`, mutates in place and yields unit.
         if is_assign_op(&b.op) {
             let op = bin_kind(&b.op).ok_or_else(|| anyhow!("unsupported operator {:?}", b.op))?;
             self.compile_compound_assign(&b.left, op, &b.right)?;
             self.emit(Op::LoadUnit { dst });
             return Ok(());
         }
-        // Short circuiting logical operators.
         match b.op {
             BinOp::And(_) => {
                 self.compile_into(dst, &b.left)?;
@@ -1262,8 +1170,8 @@ impl Compiler<'_> {
         }
         let op = bin_kind(&b.op).ok_or_else(|| anyhow!("unsupported operator {:?}", b.op))?;
         let a = self.compile_expr(&b.left)?;
-        // A literal immediate is width-safe: when the left side carries a
-        // width the general path adopts it, exactly like a bare literal.
+        // A literal immediate adopts the left side's width like a bare
+        // literal.
         if let Some(imm) = int_literal(&b.right) {
             self.emit(Op::BinImm { dst, a, imm, op });
             return Ok(());
@@ -1275,9 +1183,8 @@ impl Compiler<'_> {
 
     // -- statements ----------------------------------------------------------
 
-    /// Compile a branch condition and emit the jump taken when it is false,
-    /// returning the jump's index for patching. A plain comparison becomes a
-    /// fused compare-and-branch instead of a Bin plus `JumpIfFalse` pair.
+    /// Returns the jump's index for patching. A plain comparison becomes a
+    /// fused compare and branch.
     pub(super) fn emit_cond_jump(&mut self, cond: &Expr) -> Result<usize> {
         if let Expr::Binary(b) = cond
             && let Some(op) = bin_kind(&b.op)
@@ -1304,9 +1211,8 @@ impl Compiler<'_> {
         Ok(at)
     }
 
-    /// An open end becomes an `i64::MAX` sentinel that every range consumer,
-    /// the slicing op and `str::get`, reads as "to the end". One shape for
-    /// every position, so `s.get(3..)` works the same as `s[3..]`.
+    /// An open end is an `i64::MAX` sentinel every consumer reads as "to the
+    /// end", so `s.get(3..)` works like `s[3..]`.
     pub(super) fn compile_range(&mut self, dst: Reg, r: &syn::ExprRange) -> Result<()> {
         let start = if let Some(e) = &r.start {
             self.compile_expr(e)?
@@ -1337,11 +1243,8 @@ impl Compiler<'_> {
 
     // -- control flow ------------------------------------------------------
 
-    /// An early `return`. A declared numeric return type retags the value
-    /// the same way it retags the tail, into a fresh register since the
-    /// source may be a named local's own slot. Every open scope ends here,
-    /// so its `Drop` impls run before the return, with the returned value
-    /// moved to a fresh register first so it stays shared past the drops.
+    /// The value moves to a fresh register first, so the retag does not
+    /// touch a local's own slot and the value stays shared past the drops.
     fn compile_return(&mut self, r: &syn::ExprReturn) -> Result<()> {
         let mut src = if let Some(e) = &r.expr {
             self.compile_expr(e)?
@@ -1371,11 +1274,8 @@ impl Compiler<'_> {
     }
 
     pub(super) fn compile_if(&mut self, dst: Reg, if_expr: &syn::ExprIf) -> Result<()> {
-        // `if let PAT = EXPR { .. }` and let-chains like
-        // `if let Some(x) = a && x > 0 && let Ok(y) = b { .. }`. The chain is a
-        // left-nested `&&` whose terms may each be a `let` binding or a plain
-        // condition. All terms must pass, and earlier bindings are in scope for
-        // later terms and the body.
+        // `if let` and let chains. Earlier bindings are in scope for later
+        // terms and the body.
         let terms = flatten_and(&if_expr.cond);
         if terms.iter().any(|t| matches!(t, Expr::Let(_))) {
             self.push_scope();
@@ -1434,8 +1334,8 @@ impl Compiler<'_> {
     }
 
     pub(super) fn compile_while(&mut self, dst: Reg, w: &syn::ExprWhile) -> Result<()> {
-        // A `while let` head tests and binds, which the scalar while plan
-        // never runs, so only the plain form gets a `LoopHead`.
+        // Only the plain form gets a `LoopHead`, the while plan never runs a
+        // `while let` head.
         let entry = if matches!(&*w.cond, Expr::Let(_)) {
             None
         } else {
@@ -1444,7 +1344,6 @@ impl Compiler<'_> {
             Some(at)
         };
         let head = self.here();
-        // `while let PAT = EXPR` support.
         if let Expr::Let(let_expr) = &*w.cond {
             let scrut = self.compile_scrutinee(&let_expr.expr)?;
             let while_let_depth = self.cur().scope_order.len();
@@ -1536,9 +1435,8 @@ impl Compiler<'_> {
     }
 
     pub(super) fn compile_for(&mut self, dst: Reg, f: &syn::ExprForLoop) -> Result<()> {
-        // `for x in &mut place` iterates the place's own storage and yields
-        // references, real Rust's `IntoIterator for &mut Vec<T>`, so `*x`
-        // writes land in the elements. Lowered as `place.iter_mut()`.
+        // `for x in &mut place` lowers to `place.iter_mut()`, so `*x` writes
+        // land in the elements.
         let src = match &*f.expr {
             Expr::Reference(r) if r.mutability.is_some() => {
                 let place = self.compile_mut_receiver(&r.expr)?;
@@ -1579,7 +1477,6 @@ impl Compiler<'_> {
         });
         let body = self.alloc();
         self.compile_block_inner(&f.body, body)?;
-        // Body bindings drop at the end of every iteration.
         self.emit_scope_drops(1);
         self.pop_scope();
         self.emit(Op::Jump {
@@ -1623,8 +1520,7 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    /// The scopes a `break` or `continue` jumps out of end at the jump, so
-    /// their `Drop` impls run first.
+    /// The scopes a `break` or `continue` leaves drop first.
     fn emit_loop_exit_drops(&mut self) {
         if !self.ctx.has_drop {
             return;
@@ -1642,7 +1538,7 @@ impl Compiler<'_> {
         for arm in &m.arms {
             self.push_scope();
             let matched = self.alloc();
-            // syn 3 parses `pat if cond` as Pat::Guard wrapping the pattern.
+            // syn 3 parses `pat if cond` as `Pat::Guard`.
             let (arm_pat, arm_guard) = match &arm.pat {
                 Pat::Guard(g) => (&*g.pat, Some(&*g.guard)),
                 p => (p, None),
@@ -1658,7 +1554,6 @@ impl Compiler<'_> {
                 cond: matched,
                 to: 0,
             });
-            // Guard.
             let mut guard_skip = None;
             if let Some(guard) = arm_guard {
                 let g = self.compile_expr(guard)?;
@@ -1678,7 +1573,7 @@ impl Compiler<'_> {
                 self.patch_jump(gs, next);
             }
         }
-        // No arm matched, a runtime error mirroring the old behavior.
+        // No arm matched.
         let p = self.add_path(PathRef::new(vec!["::unreachable_match".to_string()], None));
         self.emit(Op::CallPath {
             dst,
@@ -1696,12 +1591,10 @@ impl Compiler<'_> {
     // -- calls -------------------------------------------------------------
 }
 
-/// The declared type of a `let` annotation as a scalar, for building a
-/// `Default` when a value turns out to be absent further down the chain.
+/// For building a `Default` further down the chain.
 pub(super) fn annotation_scalar(ty: &syn::Type) -> Option<ScalarTy> {
-    // A `Result<T, E>` answers its defaults through the same `Opt` shape,
-    // since only the payload side ever builds one. Everything else, scalars
-    // and the containers alike, lowers directly.
+    // A `Result<T, E>` answers through the `Opt` shape, only the payload side
+    // ever builds a default.
     if let syn::Type::Path(path) = ty
         && let Some(segment) = path.path.segments.last()
         && segment.ident == "Result"
@@ -1716,12 +1609,10 @@ pub(super) fn annotation_scalar(ty: &syn::Type) -> Option<ScalarTy> {
     ScalarTy::lower(ty)
 }
 
-/// The element type of a `Vec<T>` or `VecDeque<T>` annotation.
 fn sequence_element(p: &syn::TypePath) -> Option<&syn::Type> {
     generic_named(p, "Vec").or_else(|| generic_named(p, "VecDeque"))
 }
 
-/// The single type argument of an annotation whose last segment is `name`.
 fn generic_named<'t>(p: &'t syn::TypePath, name: &str) -> Option<&'t syn::Type> {
     let seg = p.path.segments.last()?;
     if seg.ident != name {

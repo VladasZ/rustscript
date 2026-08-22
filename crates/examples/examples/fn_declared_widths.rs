@@ -1,11 +1,8 @@
 #!/usr/bin/env rust
 
-//! A function's declared numeric types are real widths at runtime. The
-//! parameter retags what the caller passed, the return type retags what the
-//! body produced, and closures with annotations follow the same rule. Before
-//! this, a helper declared `-> u8` answered an untagged wide value, so a
-//! checked multiply that must overflow at the u8 bound quietly computed wide
-//! and answered Some.
+//! Declared numeric types are real widths at runtime. A helper declared
+//! `-> u8` once answered a wide value, so a checked multiply answered Some
+//! past the u8 bound.
 
 fn opaque(value: u8) -> u8 {
     value
@@ -23,25 +20,24 @@ fn early(v: u8) -> u8 {
 }
 
 fn main() {
-    // 254 * 209 overflows u8, so the checked product is None and its
-    // default is a u8 zero.
+    // 254 * 209 overflows u8.
     println!("checked product: {:?}", opaque(254).checked_mul(209));
     println!(
         "overflow default: {:?}",
         opaque(254).checked_mul(209).unwrap_or_default()
     );
 
-    // The parameter width holds inside the body.
+    // The parameter width inside the body.
     println!("wrapped in body: {}", add_ten(250));
 
-    // An early return is retagged the same as the tail.
+    // An early return.
     println!("early return: {:?}", early(200).checked_add(100));
     println!("tail return: {:?}", early(50).checked_add(100));
 
-    // A closure with annotations follows the same rule.
+    // An annotated closure.
     let keep = |x: u8| -> u8 { x };
     println!("closure width: {:?}", keep(250).checked_add(50));
 
-    // Wrapping arithmetic on two returned values stays in u8.
+    // Wrapping arithmetic on 2 returned values.
     println!("wrapping sum: {}", opaque(200).wrapping_add(opaque(100)));
 }

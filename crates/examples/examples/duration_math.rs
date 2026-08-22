@@ -1,7 +1,5 @@
 #!/usr/bin/env rust
 
-// Duration addition and subtraction land on the checked std ops, so an
-// accumulator built with `+=` matches compiled Rust in every accessor.
 
 use std::time::Duration;
 

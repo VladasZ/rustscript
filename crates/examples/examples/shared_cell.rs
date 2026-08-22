@@ -1,8 +1,6 @@
 #!/usr/bin/env rust
 
-// Rc, RefCell, and Arc<Mutex> are the types real Rust uses when sharing
-// is the point, so their sharing must stay observable while plain values
-// copy. `borrow_mut` through one handle must show through every handle.
+// `Rc`, `RefCell` and `Arc<Mutex>` must stay shared while plain values copy.
 
 use std::cell::RefCell;
 use std::rc::Rc;

@@ -1,8 +1,6 @@
 #!/usr/bin/env rust
 
-// The 128-bit method surface runs natively at 128 bits: checked, wrapping,
-// and saturating arithmetic, bit counts, byte views, radix parsing, radix
-// format specs, and an annotation that reaches into the init's arithmetic.
+// The 128 bit method surface.
 
 fn main() {
     let max: u128 = u128::MAX;

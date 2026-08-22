@@ -1,7 +1,5 @@
-//! Lower the `syn` AST into register bytecode. Runs once per program at load.
-//! Every variable is resolved to a register slot here, so the VM never does a
-//! name lookup. Control flow becomes jumps, patterns become test-and-bind ops,
-//! and the common macros are lowered inline.
+//! Lowers the `syn` AST into register bytecode once per program. The VM
+//! never does a name lookup.
 
 use std::collections::{HashMap, HashSet};
 use std::mem::take;
@@ -25,47 +23,36 @@ use expr::{
     returned_from_strs, returned_json_type,
 };
 
-/// Program level facts the compiler needs, filled before any body is compiled.
+/// Filled before any body is compiled.
 pub struct Ctx<'r> {
     pub resolver: &'r Resolver,
-    /// The module whose source is being compiled. Paths resolve against it.
+    /// Paths resolve against it.
     pub module: usize,
-    /// The file the module was read from, carried into every chunk it
-    /// produces so runtime error traces can name it.
+    /// Carried into every chunk for error traces.
     pub file: std::sync::Arc<str>,
-    /// True when compiling a `#[tokio::main]` program, which lets `.await`,
-    /// `tokio::spawn`, and `join!` compile instead of being rejected.
+    /// Lets `.await`, `tokio::spawn` and `join!` compile.
     pub async_mode: bool,
-    /// Concrete target of the `impl` whose method is being compiled.
     pub impl_type: Option<&'r str>,
-    /// Stated return scalars of the script's own functions, one more place a
-    /// `Default` payload is written down: `f()` is an f32 when `fn f() -> f32`
-    /// says so. A name defined more than once with differing returns is
-    /// absent, since the call site cannot tell which one it reaches.
+    /// `f()` is an f32 when `fn f() -> f32` says so. A name defined twice
+    /// with differing returns is absent.
     pub fn_returns: &'r HashMap<String, ScalarTy>,
-    /// The full written return type of each uniquely named function, the
-    /// source `written_type` reads a helper call's type from.
+    /// What `written_type` reads a helper call's type from.
     pub fn_return_types: &'r HashMap<String, syn::Type>,
-    /// The whole signature of each uniquely named function, for a generic
-    /// helper whose return type is a parameter its arguments state.
+    /// For a generic helper whose return type its arguments state.
     pub fn_signatures: &'r HashMap<String, syn::Signature>,
-    /// Names of user methods any impl declares with a `&mut self` receiver.
-    /// A call to one of these compiles its receiver as a place, split from
-    /// value sharing first, so the mutation stays private to the receiver.
+    /// `&mut self` method names. A call compiles its receiver as a place
+    /// split from sharing.
     pub mut_methods: &'r HashSet<String>,
-    /// Every `(type, method)` an impl block declares, including impls on
-    /// bridge type names like `impl From<Point> for String`. A path call on
-    /// one of these is a user call even when the bridge knows the name.
+    /// Includes impls on bridge types like `impl From<Point> for String`, a
+    /// path call on one is a user call even when the bridge knows the name.
     pub impl_methods: &'r HashSet<(String, String)>,
-    /// The atoms of the impl method names no bridge knows, so a call site
-    /// carries the id its receiver's type is looked up by.
+    /// Atoms of the impl method names no bridge knows.
     pub method_atoms: &'r HashMap<String, u32>,
-    /// Whether any type in the program has a `Drop` impl. False skips all
-    /// scope-drop bookkeeping, the common case pays nothing.
+    /// False skips all scope drop bookkeeping.
     pub has_drop: bool,
 }
 
-/// Per function compilation state. A stack of these supports nested closures.
+/// A stack of these supports nested closures.
 struct FnState {
     code: Vec<Op>,
     lines: Vec<u32>,
@@ -78,8 +65,7 @@ struct FnState {
     casts: Vec<CastIr>,
     defaults: Vec<DefaultIr>,
     try_targets: Vec<Arc<str>>,
-    /// The user error type of this function's `Result` return, the target
-    /// a `?` converts into through `From`.
+    /// The target a `?` converts into through `From`.
     ret_error: Option<Arc<str>>,
     coerces: Vec<TypeIr>,
     paths: Vec<PathRef>,
@@ -88,21 +74,16 @@ struct FnState {
     child_caps: Vec<Vec<CapSource>>,
     upvalues: Vec<(String, CapSource)>,
     mutable_locals: HashSet<Reg>,
-    /// Every binding site in the frame, as the code position the binding
-    /// takes effect at and the register it binds. Whether a register needs
-    /// a capture cell is only known once the whole frame is compiled, so the
-    /// sites are collected here and `into_chunk` turns the ones that do into
-    /// `DropCell` ops.
+    /// Whether a register needs a capture cell is only known once the frame
+    /// is compiled, so `into_chunk` turns these into `DropCell` ops later.
     binding_sites: Vec<(usize, Reg)>,
-    /// Parameters that arrived as `&T` or `&mut T`. A mutable access through
-    /// one must not split its storage, the caller's place shares it and the
-    /// caller made it unique before the call.
+    /// A mutable access through a `&T` or `&mut T` parameter must not split,
+    /// the caller made it unique.
     borrow_params: HashSet<Reg>,
-    /// `let r = &mut v` bindings, name to borrowed name. Access through the
-    /// alias compiles as access to the borrowed variable itself.
+    /// `let r = &mut v` aliases, access compiles as access to `v` itself.
     aliases: HashMap<String, String>,
     scopes: Vec<HashMap<String, Reg>>,
-    /// Bindings per scope in declaration order, for scope-end `Drop` runs.
+    /// For scope end `Drop` runs.
     scope_order: Vec<Vec<Reg>>,
     drop_lists: Vec<std::sync::Arc<[Reg]>>,
     reg_top: Reg,
@@ -112,9 +93,8 @@ struct FnState {
     name: String,
     generics: Vec<Arc<str>>,
     call_type_args: Vec<Arc<[TypeIr]>>,
-    /// The cast every return value of this frame passes through, when the
-    /// signature declares a numeric scalar. Retagging on the way out keeps
-    /// the declared width without a cast at every call site.
+    /// Retagging on the way out keeps the declared width without a cast at
+    /// every call site.
     ret_cast: Option<u16>,
 }
 
@@ -165,13 +145,9 @@ impl FnState {
         self.upvalues.iter().position(|(n, _)| n == name).map(idx16)
     }
 
-    /// Put a `DropCell` in front of every binding of a mutably captured
-    /// local. The op is inserted rather than reserved up front, because the
-    /// binding compiles long before the closure that makes the capture
-    /// mutable, so every jump target past an insertion shifts with it. A
-    /// jump keeps pointing at the op it always pointed at, never at an
-    /// inserted `DropCell`, so only the fall through from the binding above
-    /// it reaches one.
+    /// Inserted rather than reserved, because the binding compiles long
+    /// before the closure that makes the capture mutable. Jump targets past
+    /// an insertion shift with it and never point at the inserted op.
     fn insert_cell_drops(&mut self) -> Result<()> {
         let mut sites: Vec<(usize, Reg)> = self
             .binding_sites
@@ -185,8 +161,7 @@ impl FnState {
         sites.sort_unstable();
         let mut code = Vec::with_capacity(self.code.len() + sites.len());
         let mut lines = Vec::with_capacity(self.lines.len() + sites.len());
-        // Position each old op lands at, one entry longer than the code so a
-        // jump to the end of the frame remaps too.
+        // One entry longer than the code so a jump to the end remaps too.
         let mut moved = Vec::with_capacity(self.code.len() + 1);
         let mut next = 0;
         for (at, op) in take(&mut self.code).into_iter().enumerate() {
@@ -264,23 +239,18 @@ impl FnState {
     }
 }
 
-/// A loop target for `break` and `continue`.
 struct LoopCtx {
-    /// Jump indices that break out, patched to the end.
+    /// Patched to the end.
     breaks: Vec<usize>,
-    /// Instruction index a `continue` jumps to.
     continue_to: usize,
-    /// Register holding the loop value, for `loop { break v }`.
+    /// For `loop { break v }`.
     result: Reg,
-    /// Open scope count at loop entry. A `break` or `continue` ends every
-    /// scope deeper than this, so their `Drop` impls run first.
+    /// A `break` or `continue` ends every scope deeper than this first.
     scope_depth: usize,
 }
 
-/// The collect targets the compiler can name at the call site. `collect` is
-/// type driven in real Rust and the interpreter has no types, so where the
-/// source states the target, the call is renamed to a target-specific method
-/// the runtime answers directly.
+/// Where the source states a `collect` target, the call is renamed to a
+/// target specific method.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum CollectTarget {
     Str,
@@ -289,7 +259,6 @@ pub(super) enum CollectTarget {
 }
 
 impl CollectTarget {
-    /// The runtime method name a targeted `collect` is renamed to.
     pub(super) fn method_name(self) -> &'static str {
         match self {
             Self::Str => "collect_string",
@@ -298,7 +267,6 @@ impl CollectTarget {
         }
     }
 
-    /// The target a type names, when it is one collect must build specially.
     pub(super) fn of_type(ty: &syn::Type) -> Option<Self> {
         let syn::Type::Path(p) = ty else { return None };
         match p.path.segments.last()?.ident.to_string().as_str() {
@@ -314,89 +282,58 @@ pub struct Compiler<'a> {
     ctx: &'a Ctx<'a>,
     frames: Vec<FnState>,
     loops: Vec<LoopCtx>,
-    /// Source line of the expression being lowered, stamped onto every emitted
-    /// op so runtime errors can point at the failing line.
+    /// Stamped onto every emitted op.
     cur_line: u32,
-    /// A `let x: T = from_str(..)...` annotation waiting to attach to that
-    /// exact `from_str` call, keyed by the call's address so a nested call
-    /// inside its arguments cannot steal it. Lets the typed json path run
-    /// without a turbofish.
+    /// A `let x: T = from_str(..)` annotation keyed by the call's address, so
+    /// a nested call cannot steal it.
     pub(super) json_let: Option<(*const syn::ExprCall, TypeIr)>,
-    /// A `let s: String = ...collect()` (or HashMap/HashSet) annotation
-    /// waiting to attach to that exact `collect` call, keyed by the call's
-    /// address like `json_let`. Lets an annotated let collect into a String,
-    /// a map, or a set without a turbofish.
+    /// A `let s: String = ...collect()` annotation, keyed like `json_let`.
     pub(super) collect_let: Option<(*const syn::ExprMethodCall, CollectTarget)>,
-    /// Every `collect` in the current function whose value the function hands
-    /// back, when that function is declared `-> String`, a map, or a set. A
-    /// map rather than one slot because an `if` or a `match` in tail position
-    /// returns from several call sites. Keyed by address like the hints
-    /// above, so only those exact calls collect into the named target.
+    /// Every `collect` the function hands back under a `-> String`, map or
+    /// set signature. A map because a tail `if` returns from several sites.
     pub(super) collect_tails: HashMap<*const syn::ExprMethodCall, CollectTarget>,
-    /// Every `from_str` in the current function whose parsed value the function
-    /// hands back, mapped to the payload type its signature names. The same
-    /// idea as `collect_tails`, for the typed json path rather than `collect`.
+    /// `collect_tails` for `from_str`.
     pub(super) json_tails: HashMap<*const syn::ExprCall, TypeIr>,
-    /// An `unwrap_or_default` call whose result is unwrapped again, so it
-    /// produced an `Option` and its own default is `None`. Keyed by address
-    /// like the two above.
+    /// An `unwrap_or_default` unwrapped again, so its default is `None`.
     pub(super) option_result: Option<*const syn::ExprMethodCall>,
-    /// A `let x: T = ...unwrap_or_default()` annotation waiting to attach to
-    /// that exact call, naming the payload the default is built from.
+    /// A `let x: T = ...unwrap_or_default()` annotation.
     pub(super) default_let: Option<(*const syn::ExprMethodCall, ScalarTy)>,
-    /// A bare `Default::default()` call and the type its context states: a
-    /// `let` annotation, a struct field, or the struct a `..Default::default()`
-    /// completes. Keyed by address like the hints above.
+    /// A bare `Default::default()` and the type its context states.
     pub(super) default_calls: HashMap<*const syn::ExprCall, DefaultIr>,
-    /// Declared types of locals annotated `Option<T>`, `Result<T, _>`, or
-    /// `Vec<T>`, as `Opt(T)` or `List(T)`, so `opt.unwrap_or_default()` and
-    /// `v.get(i).cloned().unwrap_or_default()` can build the right default
-    /// from the type the binding was declared with. Only ever read to pick a
-    /// `Default`.
+    /// Locals annotated `Option<T>`, `Result<T, _>` or `Vec<T>`. Only ever
+    /// read to pick a `Default`.
     pub(super) typed_locals: HashMap<String, ScalarTy>,
-    /// The full annotation of every annotated local, for `written_type`.
+    /// For `written_type`.
     pub(super) typed_local_types: HashMap<String, syn::Type>,
-    /// Closure parameters bound to the element type of the sequence being
-    /// walked, so a `map` body that reads its parameter still states a type.
-    /// Interior mutability keeps the whole `written_type` walk on `&self`.
+    /// Closure parameters bound to the element type. Interior mutability
+    /// keeps the `written_type` walk on `&self`.
     pub(super) closure_param_types: std::cell::RefCell<HashMap<String, syn::Type>>,
-    /// A `let x: T = ...unwrap_or_default()` annotation as written, waiting
-    /// to attach to that exact call.
+    /// The same as written.
     pub(super) default_let_ty: Option<(*const syn::ExprMethodCall, syn::Type)>,
-    /// A `let x: T = ...sum()` or `...product()` annotation waiting to attach
-    /// to that exact call, the width the reduction runs in.
+    /// A `let x: T = ...sum()` annotation, the width the reduction runs in.
     pub(super) reduce_let: Option<(*const syn::ExprMethodCall, ScalarTy)>,
-    /// A `let x: T = v.into()` annotation naming the user type whose `From`
-    /// impl the call goes through.
+    /// A `let x: T = v.into()` annotation.
     pub(super) into_let: Option<(*const syn::ExprMethodCall, Arc<str>)>,
-    /// Every bare `sum`, `product`, or `unwrap_or_default` whose value the
-    /// current function hands back, mapped to the declared return type. The
-    /// signature is the third place that type is knowable, after a turbofish
-    /// and an annotated `let`.
+    /// Every bare `sum`, `product` or `unwrap_or_default` handed back, mapped
+    /// to the return type.
     pub(super) return_tails: HashMap<*const syn::ExprMethodCall, syn::Type>,
-    /// Expressions an annotation types ahead of their compilation, keyed by
-    /// address: the tails of the branches, blocks, and arms an annotated
-    /// `let` init is made of, and the elements of a `vec![..]` under a
-    /// `Vec<u8>` annotation. A bare literal there adopts the width instead
-    /// of existing as an i64 first.
+    /// Tails and elements an annotation types ahead of compilation, so a bare
+    /// literal adopts the width instead of existing as an i64 first.
     pub(super) numeric_hints: HashMap<*const Expr, NumericTy>,
-    /// A `vec![..]` whose element type an annotation states. Its body is
-    /// parsed only when it compiles, so the hint waits on the macro itself
-    /// and is handed to the elements then.
+    /// A `vec![..]` body is parsed only when it compiles, so the hint waits on
+    /// the macro.
     pub(super) vec_hints: HashMap<*const syn::Macro, syn::Type>,
-    /// One shape per distinct literal layout in this compiler, so every
-    /// instance of the same struct shares one arc and shape identity means
-    /// layout identity, which the scalar plan's member slot cache keys on.
+    /// One shape per layout, so shape identity means layout identity. The
+    /// scalar plan's member slot cache keys on it.
     pub(super) shapes: Vec<std::sync::Arc<crate::interpreter::bytecode::StructShape>>,
 }
 
-/// Where a referenced name lives.
 #[derive(Clone, Copy)]
 enum NameLoc {
     Local(Reg),
     Cell(Reg),
     Upvalue(u16),
-    /// Not a variable, so a function, enum variant, or other path value.
+    /// Not a variable.
     None,
 }
 
@@ -427,34 +364,29 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    /// Remember the line an AST node starts on, for the ops it lowers to.
     pub(super) fn set_line(&mut self, span: proc_macro2::Span) {
         self.cur_line = u32::try_from(span.start().line).unwrap_or(u32::MAX);
     }
 
-    /// Resolve a path against the module being compiled.
     pub(super) fn resolve_path_res(&self, segs: &[String]) -> Result<Res> {
         self.ctx.resolver.resolve(self.ctx.module, segs)
     }
 
-    /// Compile a top level function or a method body into a chunk.
     pub fn compile_fn(&mut self, sig: &syn::Signature, block: &Block) -> Result<Chunk> {
         self.frames.push(FnState::new(sig.ident.to_string()));
-        // Record generic parameter names so a caller's turbofish type args can
-        // be bound to them when the body resolves a type, e.g. `from_str::<T>`.
+        // So a caller's turbofish type args can be bound, `from_str::<T>`.
         let generics: Vec<Arc<str>> = sig
             .generics
             .type_params()
             .map(|p| Arc::from(p.ident.to_string().as_str()))
             .collect();
         self.cur().generics = generics;
-        // Parameters occupy the first registers, self first if present.
+        // Parameters occupy the first registers.
         let mut params: Vec<Option<&Pat>> = Vec::new();
         let mut types: Vec<Option<String>> = Vec::new();
         let mut annotations: Vec<Option<&syn::Type>> = Vec::new();
-        // Whether each parameter arrived by reference. A mutable access
-        // through a borrow must reach the caller's storage, so it is never
-        // split from sharing inside the callee.
+        // A mutable access through a borrow must reach the caller's storage,
+        // so it never splits.
         let mut borrows: Vec<bool> = Vec::new();
         for input in &sig.inputs {
             match input {
@@ -465,9 +397,8 @@ impl<'a> Compiler<'a> {
                     borrows.push(matches!(r.kind, syn::ReceiverKind::Reference(..)));
                 }
                 FnArg::Typed(t) => {
-                    // A param annotation is a type the program wrote down,
-                    // recorded like an annotated let, so a default built from
-                    // the param in the body reads the right type.
+                    // Recorded like an annotated let for defaults built from
+                    // the param.
                     if let Pat::Ident(id) = &*t.pat
                         && let Some(declared) = annotation_scalar(&t.ty)
                     {
@@ -495,9 +426,8 @@ impl<'a> Compiler<'a> {
                 }
                 Some(pat) => self.bind_pattern_irrefutable(pat, reg)?,
             }
-            // A numeric param annotation retags the incoming value, so u8
-            // arithmetic in the body panics at the u8 bound exactly like
-            // debug Rust even when the caller passed a bare literal.
+            // A numeric param retags the value, so u8 arithmetic in the body
+            // panics at the u8 bound.
             if let Some(ty) = annotations[i]
                 && numeric_annotation(ty).is_some()
             {
@@ -509,19 +439,14 @@ impl<'a> Compiler<'a> {
                 });
             }
         }
-        // The declared numeric return type retags every value on the way
-        // out, the tail and each early `return` alike.
+        // The return type retags the tail and every early `return`.
         if let syn::ReturnType::Type(_, ty) = &sig.output
             && numeric_annotation(ty).is_some()
         {
             let idx = self.add_cast(ty);
             self.cur().ret_cast = Some(idx);
         }
-        // A `-> String` (or map or set) signature names the target of every
-        // `collect` this body returns, which is the third place that target is
-        // knowable after a turbofish and an annotated `let`. Saved and
-        // restored so a nested item fn or a method compiled inside this one
-        // cannot inherit the hints.
+        // Saved and restored so a nested item fn cannot inherit the hints.
         let outer_collect_tails = std::mem::take(&mut self.collect_tails);
         if let Some(target) = collect_return_target(&sig.output) {
             self.collect_tails = returned_collects(block)
@@ -531,8 +456,7 @@ impl<'a> Compiler<'a> {
         }
         let outer_return_tails = take(&mut self.return_tails);
         self.install_return_hints(&sig.output, block);
-        // The same for a `from_str` the body hands back, whose target is the
-        // payload of the return type rather than a `let` annotation.
+        // The same for a `from_str` the body hands back.
         let outer_json_tails = std::mem::take(&mut self.json_tails);
         if let Some(ty) = returned_json_type(&sig.output) {
             let ir = self.lower_ir(ty);
@@ -554,14 +478,12 @@ impl<'a> Compiler<'a> {
                 ty: idx,
             });
         }
-        // By-value parameters die with the function, so their `Drop` impls
-        // run before the frame returns.
+        // By value parameters drop before the frame returns.
         self.emit_scope_drops(1);
         self.emit(Op::Ret { src: ret });
         self.finish_chunk()
     }
 
-    /// Compile a const or static initializer expression into a chunk.
     pub fn compile_const(&mut self, expr: &Expr) -> Result<Chunk> {
         self.frames.push(FnState::new("<const>".to_string()));
         let ret = self.alloc();
@@ -597,8 +519,7 @@ impl<'a> Compiler<'a> {
         self.cur().code.len()
     }
 
-    /// The current position as a jump target. Errors when a function grows
-    /// past the op count the bytecode's u32 targets can address.
+    /// Errors when a function grows past what u32 targets can address.
     fn mark(&mut self) -> Result<u32> {
         Ok(u32::try_from(self.here())?)
     }
@@ -627,17 +548,14 @@ impl<'a> Compiler<'a> {
 
     fn define(&mut self, name: &str, reg: Reg) {
         let f = self.cur();
-        // A fresh binding shadows any `&mut` alias of the same name.
         f.aliases.remove(name);
         f.scopes.last_mut().unwrap().insert(name.to_string(), reg);
         f.scope_order.last_mut().unwrap().push(reg);
         f.binding_sites.push((f.code.len(), reg));
     }
 
-    /// Emit the `Drop` run for the innermost `depth` open scopes, innermost
-    /// first, without popping them. `depth` 1 is the current scope alone;
-    /// a `return` uses every open scope. Emits nothing when the program has
-    /// no `Drop` impl.
+    /// `depth` 1 is the current scope alone, a `return` uses every open
+    /// scope. Scopes are not popped.
     fn emit_scope_drops(&mut self, depth: usize) {
         if !self.ctx.has_drop {
             return;
@@ -684,10 +602,7 @@ impl<'a> Compiler<'a> {
         idx16(f.casts.len() - 1)
     }
 
-    /// Lower an annotated or turbofish type against the module being compiled
-    /// and the generics of the function being compiled. A closure body has no
-    /// generics of its own, matching the empty type environment its frame
-    /// runs under.
+    /// A closure body has no generics of its own.
     pub(super) fn lower_ir(&self, ty: &syn::Type) -> TypeIr {
         let generics = &self.frames.last().unwrap().generics;
         lower_type(ty, self.ctx.resolver, self.ctx.module, generics)
@@ -729,9 +644,7 @@ impl<'a> Compiler<'a> {
         idx16(f.names.len() - 1)
     }
 
-    /// A path outside the script's own items. The bridge table names it,
-    /// unless a user impl on that type name declares the method, `String::from`
-    /// after `impl From<Point> for String`, which stays a user call.
+    /// `String::from` after `impl From<Point> for String` stays a user call.
     pub(super) fn external_path(&self, segs: Vec<String>, coerce: Option<TypeIr>) -> PathRef {
         if let [.., ty, name] = segs.as_slice()
             && self.ctx.impl_methods.contains(&(ty.clone(), name.clone()))
@@ -798,9 +711,7 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    /// The `&mut` alias target of `name` in an enclosing frame, for a
-    /// closure dereferencing an alias it captured. A frame that defines
-    /// `name` as its own local or upvalue shadows any outer alias.
+    /// A frame that defines `name` itself shadows any outer alias.
     pub(super) fn enclosing_alias_target(&self, name: &str) -> Option<String> {
         for frame in self.frames.iter().rev().skip(1) {
             let mut seen = name;
@@ -817,8 +728,7 @@ impl<'a> Compiler<'a> {
         None
     }
 
-    /// Follow a parent frame's `&mut` aliases to the borrowed variable, so a
-    /// closure capturing `r` from `let r = &mut v` captures `v` itself.
+    /// A closure capturing `r` from `let r = &mut v` captures `v` itself.
     fn parent_alias_target(&self, parent: usize, name: &str) -> Option<String> {
         let aliases = &self.frames[parent].aliases;
         let mut seen = aliases.get(name)?;
@@ -828,14 +738,13 @@ impl<'a> Compiler<'a> {
         Some(seen.clone())
     }
 
-    /// Capture `name` into frame `depth` as an upvalue, pulling it up the chain.
     fn capture(&mut self, depth: usize, name: &str) -> Option<u16> {
         if depth == 0 {
             return None;
         }
         let parent = depth - 1;
-        // Writes through a `&mut` alias must reach the borrowed variable
-        // across the frame boundary, so the capture is mutable.
+        // Writes through the alias must cross the frame boundary, so the
+        // capture is mutable.
         if let Some(target) = self.parent_alias_target(parent, name) {
             return self.capture_mutable_as(depth, &target, name);
         }
@@ -888,8 +797,7 @@ impl<'a> Compiler<'a> {
         self.capture_mutable_as(depth, name, name)
     }
 
-    /// Like `capture_mutable`, registering the upvalue under `register_as`.
-    /// The two names differ when an alias captures its borrowed variable.
+    /// The 2 names differ when an alias captures its borrowed variable.
     fn capture_mutable_as(&mut self, depth: usize, name: &str, register_as: &str) -> Option<u16> {
         if depth == 0 {
             return None;
@@ -934,7 +842,6 @@ impl<'a> Compiler<'a> {
         idx16(self.frames[depth].upvalues.len() - 1)
     }
 
-    /// Load a variable reference into a register, reading upvalues as needed.
     fn load_name(&mut self, name: &str, dst: Reg) -> Result<()> {
         match self.resolve(name) {
             NameLoc::Local(reg) => {
@@ -955,8 +862,8 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    /// A path used as a value. Resolves consts, imported variants, and unit
-    /// structs at compile time, and leaves the rest for the VM.
+    /// Consts, imported variants and unit structs resolve here, the rest is
+    /// left for the VM.
     pub(super) fn compile_resolved_value(&mut self, dst: Reg, segs: &[String]) -> Result<()> {
         let resolved = self.resolve_path_res(segs)?;
         let path = match resolved {
@@ -973,9 +880,8 @@ impl<'a> Compiler<'a> {
                     self.emit(Op::LoadEnum { dst, info });
                     return Ok(());
                 }
-                // An associated const, `S::LIMIT`, registered at load as a
-                // `Type::NAME` global. The consts table that holds it is the
-                // impl's module, which may not be the module using it.
+                // `S::LIMIT` lives in the impl's module, which may not be the
+                // module using it.
                 if rest.len() == 1 {
                     let key = format!("{}::{}", crate::interpreter::resolver::bare(&c), rest[0]);
                     let found = self
@@ -1005,8 +911,7 @@ impl<'a> Compiler<'a> {
             }
             Res::Module => bail!("`{}` is a module, not a value", segs.join("::")),
             Res::External(canon) => {
-                // `None`, `Ordering::Less`, and the other builtin unit
-                // variants load their value in place, like a user variant.
+                // Builtin unit variants load in place like a user variant.
                 if let Some((def, index)) = self.resolve_variant(segs)
                     && def.is_unit(index)
                 {
@@ -1092,23 +997,20 @@ fn bin_kind(op: &BinOp) -> Option<BinKind> {
     })
 }
 
-/// The two float widths, used when a `let` annotation types a bare literal.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum FloatTy {
     F32,
     F64,
 }
 
-/// A numeric primitive named by a `let` annotation. The annotation is the
-/// only place a bare literal's width can come from, and a non-literal init
-/// retags through a runtime cast, which is a no-op on an already-typed value.
+/// A non literal init retags through a runtime cast, a no-op on an already
+/// typed value.
 #[derive(Clone, Copy)]
 pub(super) enum NumericTy {
     Int(IntWidth),
     Float(FloatTy),
 }
 
-/// The numeric type behind a stated scalar, for the literal hints.
 pub(super) fn numeric_target(scalar: &ScalarTy) -> Option<NumericTy> {
     match scalar {
         ScalarTy::Int(width) => Some(NumericTy::Int(*width)),
@@ -1134,8 +1036,7 @@ fn numeric_annotation(ty: &syn::Type) -> Option<NumericTy> {
     }
 }
 
-/// A plain integer literal usable as an instruction immediate, including a
-/// negated one, seen through parens.
+/// Including a negated one, seen through parens.
 fn int_literal(e: &Expr) -> Option<i64> {
     match e {
         Expr::Lit(l) => match &l.lit {
@@ -1156,7 +1057,6 @@ fn int_literal(e: &Expr) -> Option<i64> {
     }
 }
 
-/// The first concrete generic type argument of a path segment.
 pub fn first_generic_type(seg: &syn::PathSegment) -> Option<&syn::Type> {
     if let syn::PathArguments::AngleBracketed(ab) = &seg.arguments {
         for a in &ab.args {
@@ -1188,7 +1088,7 @@ fn collect_pattern_names(pat: &Pat, out: &mut Vec<String>) {
         Pat::Paren(p) => collect_pattern_names(&p.pat, out),
         Pat::Type(t) => collect_pattern_names(&t.pat, out),
         Pat::Or(o) => {
-            // Every alternative binds the same names, walk the first.
+            // Every alternative binds the same names.
             if let Some(first) = o.cases.first() {
                 collect_pattern_names(first, out);
             }
@@ -1197,8 +1097,6 @@ fn collect_pattern_names(pat: &Pat, out: &mut Vec<String>) {
     }
 }
 
-/// Identifiers used as inline `{name}` holes in a format template.
-/// Whether a format hole names an identifier rather than a position.
 fn is_name(arg: &str) -> bool {
     !arg.is_empty()
         && arg.parse::<usize>().is_err()
@@ -1225,9 +1123,7 @@ fn inline_holes(template: &str) -> Vec<String> {
                 }
                 inner.push(ic);
             }
-            // A spec can name a variable for the width or precision, as in
-            // `{:w$}`. That name is a hole too, even though it sits after the
-            // colon, so the value is in scope when the template renders.
+            // `{:w$}` names a variable after the colon, that is a hole too.
             if let Some((_, spec)) = inner.split_once(':') {
                 let mut token = String::new();
                 for c in spec.chars() {
@@ -1292,10 +1188,8 @@ fn parse_matches(mac: &syn::Macro) -> Result<(Expr, syn::Pat, Option<Expr>)> {
     Ok(mac.parse_body_with(inner)?)
 }
 
-/// The head name of a written type, references and slices peeled off, so
-/// `&serde_json::Value` is `Value` and `&[String]` is `Vec`. Only the head
-/// matters to the coverage check, which asks what the receiver is, not what it
-/// holds. None for anything that is not a plain path.
+/// `&serde_json::Value` is `Value` and `&[String]` is `Vec`. The coverage
+/// check only asks what the receiver is.
 fn type_head(ty: &syn::Type) -> Option<String> {
     match ty {
         syn::Type::Reference(r) => type_head(&r.elem),
@@ -1326,14 +1220,11 @@ mod place;
 mod written;
 mod written_type;
 
-/// A table index as the u16 the bytecode stores. Every compiler table is
-/// interned under that limit, so blowing past it is a compiler bug and an
-/// immediate abort beats silently wrapped indices.
+/// Past u16 is a compiler bug, an abort beats a wrapped index.
 pub(super) fn idx16(i: usize) -> u16 {
     u16::try_from(i).expect("bytecode table exceeds u16 indices")
 }
 
-/// Whether a `#[derive(..)]` list names `Default`.
 pub(super) fn derives_default(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attr| {
         if !attr.path().is_ident("derive") {
@@ -1350,14 +1241,11 @@ pub(super) fn derives_default(attrs: &[syn::Attribute]) -> bool {
     })
 }
 
-/// How deep a defaulted type may nest before lowering gives up, so a struct
-/// holding a `Vec` of itself still terminates.
+/// So a struct holding a `Vec` of itself still terminates.
 const DEFAULT_DEPTH: usize = 8;
 
 impl Compiler<'_> {
-    /// The default value of a written type, or `None` when the type has no
-    /// `Default` this interpreter can build: a user type without the derive,
-    /// a reference, a type this model does not describe.
+    /// `None` when the type has no `Default` this interpreter can build.
     pub(super) fn default_ir(&mut self, ty: &syn::Type) -> Option<DefaultIr> {
         self.default_ir_at(ty, 0)
     }
@@ -1404,7 +1292,6 @@ impl Compiler<'_> {
             return builtin;
         }
         let mut segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
-        // `Self` inside an impl names the impl's own type.
         if segs.len() == 1
             && segs[0] == "Self"
             && let Some(ty) = self.ctx.impl_type
@@ -1425,8 +1312,7 @@ impl Compiler<'_> {
         }
     }
 
-    /// A derived `Default` struct: one default per field, in declaration
-    /// order, under the full shape of the type.
+    /// One default per field in declaration order.
     fn default_ir_struct(&mut self, canon: &Arc<str>, depth: usize) -> Option<DefaultIr> {
         let def = self.ctx.resolver.structs.get(canon)?;
         if !derives_default(&def.ast.attrs) {
@@ -1446,7 +1332,6 @@ impl Compiler<'_> {
         Some(DefaultIr::Struct { shape, fields })
     }
 
-    /// The `#[default]` unit variant of a derived `Default` enum.
     fn default_ir_enum(&mut self, canon: &Arc<str>) -> Option<DefaultIr> {
         let ast = self.ctx.resolver.enums.get(canon)?.clone();
         if !derives_default(&ast.attrs) {
@@ -1466,8 +1351,7 @@ impl Compiler<'_> {
         }))
     }
 
-    /// The shape of a script struct over the given fields, shared with any
-    /// literal of the same layout so shape identity stays layout identity.
+    /// Shared with any literal of the same layout.
     pub(super) fn shape_for(
         &mut self,
         name: &Arc<str>,
@@ -1487,19 +1371,16 @@ impl Compiler<'_> {
         built
     }
 
-    /// The derived default of a struct named by its canonical key.
     pub(super) fn default_ir_for_struct(&mut self, canon: &Arc<str>) -> Option<DefaultIr> {
         self.default_ir_struct(canon, 0)
     }
 
-    /// `default_ir_path` for a call site that already split the path.
     pub(super) fn default_ir_path_pub(&mut self, path: &syn::Path) -> Option<DefaultIr> {
         self.default_ir_path(path, 0)
     }
 
-    /// The two hints a return type gives the body: the user error type a `?`
-    /// converts into, and the type of a bare `Default::default()` the body
-    /// hands back.
+    /// The error type a `?` converts into, and the type of a bare
+    /// `Default::default()` handed back.
     fn install_return_hints(&mut self, output: &syn::ReturnType, block: &Block) {
         let syn::ReturnType::Type(_, ty) = output else {
             return;
@@ -1533,8 +1414,7 @@ impl Compiler<'_> {
         self.return_tails.extend(reductions);
     }
 
-    /// The user type `E` of a written `Result<T, E>`, when `E` is a struct
-    /// or enum of the script.
+    /// The `E` of a written `Result<T, E>` when it is a script type.
     fn result_error_type(&self, ty: &syn::Type) -> Option<Arc<str>> {
         let syn::Type::Path(p) = ty else { return None };
         let last = p.path.segments.last()?;
@@ -1567,7 +1447,6 @@ impl Compiler<'_> {
         }
     }
 
-    /// The canonical key of a user struct or enum named by a type path.
     pub(super) fn user_type_key(&self, path: &syn::Path) -> Option<Arc<str>> {
         let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
         match self.resolve_path_res(&segs).ok()? {
@@ -1576,8 +1455,7 @@ impl Compiler<'_> {
         }
     }
 
-    /// The `conv` operand of a `?`: the frame's error type, interned in
-    /// `try_targets`, or `NO_CONV` when the frame returns no user error.
+    /// The `conv` operand of a `?`, `NO_CONV` without a user error type.
     pub(super) fn try_conv(&mut self) -> u16 {
         let Some(target) = self.cur().ret_error.clone() else {
             return NO_CONV;
@@ -1590,7 +1468,6 @@ impl Compiler<'_> {
         idx16(table.len() - 1)
     }
 
-    /// Emit a `BuildDefault` for the lowered type.
     pub(super) fn emit_default(&mut self, dst: Reg, ir: DefaultIr) {
         let table = &mut self.cur().defaults;
         table.push(ir);

@@ -1,5 +1,5 @@
-//! Runtime error traces. A failing script must name the failing line and the
-//! script call chain, with deep recursion capped.
+//! A failing script must name the failing line and the call chain, with deep
+//! recursion capped.
 
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -14,7 +14,6 @@ fn temp_script(src: &str) -> std::path::PathBuf {
     path
 }
 
-/// Run a script that is expected to fail and return its stderr.
 fn run_fail(src: &str) -> String {
     let path = temp_script(src);
     let out = Command::new(env!("CARGO_BIN_EXE_rust"))
@@ -100,8 +99,8 @@ fn main() {
 }
 "#,
     );
-    // The coverage gate refuses the script before it runs, and its report
-    // names the receiver type.
+    // The coverage gate refuses the script before it runs and names the
+    // receiver type.
     assert!(
         err.contains("`fly` on Dog is not implemented by the interpreter"),
         "stderr was: {err}"

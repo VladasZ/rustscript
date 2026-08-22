@@ -1,7 +1,5 @@
-//! Lazy, stateful iterators.
-//! The states live inside a `Native::Iterator`, so an
-//! iterator is a shared handle exactly like every other native resource, and
-//! `by_ref`, `peekable`, and open-ended ranges keep their real semantics.
+//! Lazy, stateful iterators. An iterator is a shared native handle, so
+//! `by_ref`, `peekable` and open ended ranges keep their real semantics.
 
 use num_traits::AsPrimitive;
 use std::slice::from_ref;
@@ -31,15 +29,13 @@ pub enum IteratorState {
         values: List,
         index: usize,
     },
-    /// A user struct or enum with its own `Iterator` impl. Each pull calls
-    /// its `next` method, which mutates the held value in place through its
-    /// `&mut self`.
+    /// A user type with its own `Iterator` impl. Each pull calls its `next`.
     UserNext {
         value: Value,
     },
-    /// A borrow of an eager vector taken with `by_ref`. It takes from the front
-    /// of the shared vector rather than walking an index of its own, so
-    /// whatever it hands out is gone from the borrowed iterator too.
+    /// A `by_ref` borrow of an eager vector. It takes from the front of the
+    /// shared vector, so whatever it hands out is gone from the borrowed one
+    /// too.
     DrainingValues {
         values: List,
     },
@@ -78,12 +74,12 @@ pub enum IteratorState {
         source: RsStr,
         offset: usize,
     },
-    /// `a.zip(b)`, pairs until either side ends.
+    /// `a.zip(b)`.
     Zip {
         left: Handle,
         right: Handle,
     },
-    /// `a.chain(b)`, the right side once the left is spent.
+    /// `a.chain(b)`.
     Chain {
         left: Handle,
         right: Handle,
@@ -113,7 +109,7 @@ pub enum IteratorState {
         source: Handle,
         remaining: usize,
     },
-    /// `step_by`: the first item, then every `step`th one.
+    /// `step_by`.
     StepBy {
         source: Handle,
         step: usize,
@@ -129,8 +125,7 @@ pub enum IteratorState {
         closure: Arc<ClosureData>,
         skipping: bool,
     },
-    /// `peekable`. Holds at most one item pulled early by `peek`, which the
-    /// next `next` hands back before touching the source again.
+    /// `peekable`, holds at most one item pulled early by `peek`.
     Peekable {
         source: Handle,
         buffered: Option<Value>,
@@ -139,15 +134,14 @@ pub enum IteratorState {
 
 enum Step {
     Ready(Option<Value>),
-    /// Pull the next item by calling the user type's own `next` method.
     User(Value),
     Map(Handle, Arc<ClosureData>),
     Filter(Handle, Arc<ClosureData>),
     FilterMap(Handle, Arc<ClosureData>),
     Enumerate(Handle, usize),
     Zip(Handle, Handle),
-    /// The right side is pulled only once the left answered `None`, which
-    /// the state remembers so the left is never asked again.
+    /// The state remembers when the left answered `None`, so it is never
+    /// asked again.
     Chain(Handle, Handle, bool),
     Take(Handle),
     Skip(Handle, usize),
@@ -178,9 +172,8 @@ pub(super) fn draining_iter(items: List) -> Value {
     wrap(IteratorState::DrainingValues { values: items })
 }
 
-/// `peekable` on an eager vector iterator, a `split` result for example. The
-/// peek buffer sits over a draining view of the shared vector, so `peek` and
-/// a later `next` agree with what `by_ref` on the same vector would hand out.
+/// `peekable` on an eager vector. The buffer sits over a draining view, so
+/// `peek` agrees with what `by_ref` on the same vector would hand out.
 pub(super) fn peekable_draining(items: List) -> Value {
     let source = Arc::new(Mutex::new(Native::Iterator(
         IteratorState::DrainingValues { values: items },
@@ -250,9 +243,8 @@ fn next_line(source: &str, offset: &mut usize) -> Option<Value> {
     Some(Value::str(line))
 }
 
-/// The next `split_whitespace` word span at `offset`, advancing past it.
-/// Shared by the generic step and the scalar for plan's chunks, so both
-/// walk the source identically.
+/// Shared by the generic step and the scalar for plan, so both walk the
+/// source identically.
 pub(super) fn next_word_span(source: &str, offset: &mut usize) -> Option<(usize, usize)> {
     let rest = &source[*offset..];
     let word = rest.split_whitespace().next()?;
@@ -276,16 +268,13 @@ fn next_regex_offset(source: &str, start: usize, end: usize) -> usize {
     end + source[end..].chars().next().map_or(1, char::len_utf8)
 }
 
-/// What `fast_next` answered: an item or exhaustion produced in place, or
-/// a state that needs the full `iterator_next` machinery.
 pub(super) enum FastNext {
     Ready(Option<Value>),
     NotSimple,
 }
 
 impl IteratorState {
-    /// The items a `for` loop produces in place for the simple sources, so a
-    /// tight loop skips the handle clone and the `Step` indirection of the
+    /// Produced in place for the simple sources, so a tight loop skips the
     /// full `iterator_next` machinery.
     pub(super) fn fast_next(&mut self) -> FastNext {
         FastNext::Ready(match self {
@@ -300,8 +289,7 @@ impl IteratorState {
         })
     }
 
-    /// The adaptors with their own state: a stride, a predicate that ends
-    /// or starts the stream, and a peek buffer.
+    /// The adaptors with their own state.
     fn step_adaptor(&mut self) -> Step {
         match self {
             IteratorState::StepBy {
@@ -423,14 +411,12 @@ impl IteratorState {
     }
 }
 
-/// One step over a string's bytes.
 fn bytes_step(source: &str, index: &mut usize) -> Option<Value> {
     let value = source.as_bytes().get(*index).copied();
     *index += usize::from(value.is_some());
     value.map(|byte| Value::Int(i64::from(byte)))
 }
 
-/// One step over a string's chars, advancing by the char's own width.
 fn chars_step(source: &str, offset: &mut usize) -> Option<Value> {
     let value = source[*offset..].chars().next();
     if let Some(ch) = value {
@@ -439,7 +425,6 @@ fn chars_step(source: &str, offset: &mut usize) -> Option<Value> {
     value.map(Value::Char)
 }
 
-/// One step of an integer range, exclusive or inclusive.
 fn range_step(next: &mut i64, end: i64, inclusive: bool) -> Option<Value> {
     let done = if inclusive { *next > end } else { *next >= end };
     if done {
@@ -451,9 +436,8 @@ fn range_step(next: &mut i64, end: i64, inclusive: bool) -> Option<Value> {
     }
 }
 
-/// The next `find_iter` span at `offset`, advancing past the match or an
-/// empty match's char. Shared by the generic step and the scalar for plan's
-/// regex chunks, so both walk the source identically.
+/// Shared by the generic step and the scalar for plan, so both walk the
+/// source identically.
 pub(super) fn regex_find_span(
     regex: &RegexValue,
     source: &str,
@@ -467,7 +451,6 @@ pub(super) fn regex_find_span(
     Some((found.start(), found.end()))
 }
 
-/// One `find_iter` step over the shared span walk.
 fn regex_find_step(regex: &RegexValue, source: &RsStr, offset: &mut usize) -> Step {
     let Some((start, end)) = regex_find_span(regex, source, offset) else {
         return Step::Ready(None);
@@ -482,7 +465,6 @@ fn regex_find_step(regex: &RegexValue, source: &RsStr, offset: &mut usize) -> St
     ))
 }
 
-/// One `captures_iter` step, the groups as spans over the same source.
 fn regex_captures_step(regex: &RegexValue, source: &RsStr, offset: &mut usize) -> Step {
     if *offset > source.len() {
         return Step::Ready(None);
@@ -507,8 +489,7 @@ fn regex_captures_step(regex: &RegexValue, source: &RsStr, offset: &mut usize) -
     ))
 }
 
-/// The next item of a live line iterator, errors wrapped exactly as the
-/// `ForNext` op wraps them.
+/// Errors wrapped exactly as the `ForNext` op wraps them.
 fn lines_next(handle: &Handle) -> Option<Value> {
     let mut native = handle.lock();
     let Native::Lines(lines) = &mut *native else {
@@ -522,7 +503,6 @@ fn lines_next(handle: &Handle) -> Option<Value> {
 }
 
 impl Vm {
-    /// Call the user `next` impl of an iterator value held by `UserNext`.
     /// The receiver mutates in place through its `&mut self`.
     fn call_user_next(self: &Arc<Self>, value: &Value) -> Result<Value> {
         let Some(chunk) = self
@@ -535,8 +515,6 @@ impl Vm {
         self.run_chunk(&chunk, from_ref(value), &[])
     }
 
-    /// Whether the value's user type has its own `Iterator::next`, so a for
-    /// loop or an adaptor chain can drive it.
     pub(super) fn has_user_next(&self, value: &Value) -> bool {
         self.impls
             .of_value(value)
@@ -556,7 +534,6 @@ impl Vm {
             Value::Vec(values) | Value::Tuple(values) => value_iter(values),
             Value::Map(map, kind) => {
                 let map = map.lock();
-                // A set iterates its elements, a map its (key, value) pairs.
                 let owned = match kind {
                     MapKind::Map => map
                         .iter()
@@ -583,8 +560,6 @@ impl Vm {
         })
     }
 
-    /// Drop `count` items, then answer the next one, `None` as soon as the
-    /// source runs dry.
     fn skip_then_next(self: &Arc<Self>, source: &Handle, count: usize) -> Result<Option<Value>> {
         for _ in 0..count {
             if self.iterator_next(source)?.is_none() {
@@ -594,7 +569,6 @@ impl Vm {
         self.iterator_next(source)
     }
 
-    /// One pair from a `zip`, `None` once either side is spent.
     fn zip_next(self: &Arc<Self>, left: &Handle, right: &Handle) -> Result<Option<Value>> {
         let Some(first) = self.iterator_next(left)? else {
             return Ok(None);
@@ -605,8 +579,6 @@ impl Vm {
         Ok(Some(Value::tuple(vec![first, second])))
     }
 
-    /// The next item of a `chain`: the left side until it answers `None`,
-    /// which the state remembers, then the right.
     fn chain_next(
         self: &Arc<Self>,
         iterator: &Handle,
@@ -720,7 +692,6 @@ impl Vm {
         }
     }
 
-    /// Invoke a closure held by an iterator state directly.
     pub(super) fn call_closure_data(
         self: &Arc<Self>,
         clo: &Arc<ClosureData>,
@@ -729,7 +700,6 @@ impl Vm {
         self.run_chunk(&clo.chunk, args, &clo.captured)
     }
 
-    /// Drain any iterable, lazy iterators included, into a plain vec.
     pub(super) fn drain_items(self: &Arc<Self>, value: Value) -> Result<Vec<Value>> {
         let Value::Native(iterator) = self.iterator_value(value)? else {
             unreachable!();
@@ -741,8 +711,7 @@ impl Vm {
         Ok(items)
     }
 
-    /// `peek` pulls one item early and keeps it, so the value is still there
-    /// for the next `next`. `None` when the handle is not a peekable.
+    /// `None` when the handle is not a peekable.
     fn peek(self: &Arc<Self>, iterator: &Handle) -> Result<Option<Value>> {
         let (buffered, source) = match &*iterator.lock() {
             Native::Iterator(IteratorState::Peekable { buffered, source }) => {
@@ -782,10 +751,7 @@ impl Vm {
         Ok(last.map_or_else(Value::none, Value::some))
     }
 
-    /// The builtin methods of a lazy iterator value: the adaptors that wrap
-    /// it and the reducers that drain it. `None` for a name that is not one
-    /// of them.
-    /// `a.zip(b)` or `a.chain(b)`, `b` any value that iterates.
+    /// `b` is any value that iterates.
     fn zip_or_chain(
         self: &Arc<Self>,
         iterator: &Handle,
@@ -849,9 +815,8 @@ impl Vm {
                 source: iterator.clone(),
                 buffered: None,
             }),
-            // `by_ref` borrows the iterator so the caller keeps it after
-            // the adaptor is done with it. Iterators are shared handles
-            // here, so handing the same one back is that borrow.
+            // Iterators are shared handles, so handing the same one back is
+            // the `by_ref` borrow.
             BuiltinId::Cloned | BuiltinId::Copied | BuiltinId::ByRef => {
                 Value::Native(iterator.clone())
             }
@@ -874,8 +839,7 @@ impl Vm {
                 None => return Ok(None),
             },
             BuiltinId::Count => self.iterator_count(iterator)?,
-            // Every iterator here is driven forwards, so taking from the
-            // back means draining to the final item.
+            // Every iterator is driven forwards, so `last` drains to the end.
             BuiltinId::Last | BuiltinId::NextBack => self.iterator_last(iterator)?,
             BuiltinId::Sum => match try_reduce(self, iterator, &ChainReduce::Sum(scalar))? {
                 Some(v) => v,
@@ -897,9 +861,8 @@ impl Vm {
                 items.reverse();
                 Value::vec(items)
             }
-            // `Chars::as_str` gives the not yet consumed tail, which is what
-            // makes the `chars.next()` then `chars.as_str()` capitalize idiom
-            // work. Only a char iterator still knows its source text.
+            // `Chars::as_str` is the unconsumed tail, the capitalize idiom.
+            // Only a char iterator still knows its source.
             BuiltinId::AsStr => match &*iterator.lock() {
                 Native::Iterator(IteratorState::Chars { source, offset }) => {
                     Value::str(source[*offset..].to_string())
@@ -983,7 +946,6 @@ impl Vm {
         Ok(Some(value))
     }
 
-    /// The closure reductions that drain the iterator down to one value.
     fn iterator_reduce_ho(
         self: &Arc<Self>,
         iterator: &Handle,
@@ -1090,9 +1052,8 @@ impl Vm {
         iterator: &Handle,
         target: Option<&ScalarTy>,
     ) -> Result<Value> {
-        // The accumulator is an i128 for the same reason as `sum_values`,
-        // and a `product::<u16>()` overflows at the target width, not at
-        // `i64::MAX`, so the turbofish says where the panic belongs.
+        // i128 for the same reason as `sum_values`. A `product::<u16>()`
+        // overflows at the target width.
         let mut integers = 1i128;
         let mut floats = 1f64;
         let mut has_float = false;
@@ -1105,8 +1066,7 @@ impl Vm {
         let mut seen_width = None;
         while let Some(value) = self.iterator_next(iterator)? {
             if let Some((value, width)) = value.int_parts() {
-                // The elements say the width when the call wrote none, see
-                // `sum_values`.
+                // See `sum_values`.
                 if !bounded {
                     (low, high) = (width.min(), width.max());
                     bounded = true;
@@ -1129,9 +1089,8 @@ impl Vm {
                 other => bail!("product needs numbers, got {}", other.type_name()),
             }
         }
-        // An empty sequence carries no element to tell an integer product
-        // from a float one, so a `product::<f64>()` turbofish is the only
-        // thing that can.
+        // Only a `product::<f64>()` turbofish tells an empty float product
+        // from an integer one.
         let float_target = matches!(target, Some(ScalarTy::F32 | ScalarTy::F64));
         Ok(if has_float || (float_target && !has_int) {
             let total = floats * AsPrimitive::<f64>::as_(integers);
@@ -1141,9 +1100,8 @@ impl Vm {
                 Value::Float(total)
             }
         } else if let Some(ScalarTy::Int(width)) = target {
-            // The product carries the target width, so a later `checked_*`
-            // on it computes at that width. An untagged result made
-            // `product::<u16>().checked_mul(..)` miss its overflow.
+            // An untagged result once made `product::<u16>().checked_mul(..)`
+            // miss its overflow.
             Value::int_of_width(integers, *width)
         } else if let Some(width) = seen_width {
             Value::int_of_width(integers, width)
@@ -1180,9 +1138,8 @@ impl Vm {
         closure: &Arc<ClosureData>,
     ) -> Result<Value> {
         let mut index = 0;
-        // rposition is the only one here that cannot answer early. std walks it
-        // from the back, this walks to the end and keeps the last match, which
-        // gives the same index and needs no reversible iterator.
+        // `rposition` walks to the end and keeps the last match, the same
+        // index without a reversible iterator.
         let mut last_match = None;
         while let Some(value) = self.iterator_next(iterator)? {
             let matches = self
@@ -1217,20 +1174,14 @@ fn int_arg(args: &[Value]) -> Result<i64> {
     }
 }
 
-/// `sum` over already-drained elements, shared by the lazy iterator path and
-/// the eager vec path so both agree on every width.
+/// Shared by the lazy and the eager path so both agree on every width.
 pub(super) fn sum_values(items: Vec<Value>, target: Option<&ScalarTy>) -> Result<Value> {
-    // The accumulator is an i128 so a `u64` element past `i64::MAX` keeps
-    // its value. Reading elements through `bridge_image` clamped them to
-    // `i64::MAX` before they were even added.
+    // i128 so a `u64` element past `i64::MAX` keeps its value.
     let mut integers = 0i128;
-    // `Sum` for floats starts at -0.0, not 0.0, so that summing negative
-    // zeros keeps the sign.
+    // `Sum` for floats starts at -0.0, so negative zeros keep the sign.
     let mut floats = -0.0f64;
     let mut has_float = false;
-    // Without a target the elements say the width: real Rust only sums a
-    // `u8` iterator into a `u8`, so the first tagged element's width is the
-    // sum's, and an untagged i64 element keeps the i64 bounds.
+    // Without a target the first tagged element's width is the sum's.
     let (mut low, mut high) = match target {
         Some(ScalarTy::Int(width)) => (width.min(), width.max()),
         _ => (i128::from(i64::MIN), i128::from(i64::MAX)),
@@ -1247,8 +1198,7 @@ pub(super) fn sum_values(items: Vec<Value>, target: Option<&ScalarTy>) -> Result
             integers = integers
                 .checked_add(value)
                 .ok_or_else(|| anyhow!("attempt to add with overflow"))?;
-            // A `sum::<u8>()` overflows at 255, not at `i64::MAX`, so the
-            // target width is what says where the panic belongs.
+            // A `sum::<u8>()` overflows at 255.
             if integers < low || integers > high {
                 bail!("attempt to add with overflow");
             }
@@ -1262,12 +1212,12 @@ pub(super) fn sum_values(items: Vec<Value>, target: Option<&ScalarTy>) -> Result
             other => bail!("sum needs numbers, got {}", other.type_name()),
         }
     }
-    // An empty sequence carries no element to tell an integer sum from a
-    // float one, so a `sum::<f64>()` turbofish is the only thing that can.
+    // Only a `sum::<f64>()` turbofish tells an empty float sum from an
+    // integer one.
     let float_target = matches!(target, Some(ScalarTy::F32 | ScalarTy::F64));
     Ok(if has_float || (float_target && integers == 0) {
-        // The integer side only joins when it carries a value, so it
-        // cannot cancel the -0.0 identity with a +0.0.
+        // The integer side only joins with a value, so it cannot cancel the
+        // -0.0 identity.
         let total = if integers == 0 {
             floats
         } else {
@@ -1279,8 +1229,7 @@ pub(super) fn sum_values(items: Vec<Value>, target: Option<&ScalarTy>) -> Result
             Value::Float(total)
         }
     } else if let Some(ScalarTy::Int(width)) = target {
-        // The sum carries the element width, so a later `!` or shift on it
-        // computes at that width. An untagged zero made `!0u16` answer -1.
+        // An untagged zero once made `!0u16` answer -1.
         Value::int_of_width(integers, *width)
     } else if let Some(width) = seen_width {
         Value::int_of_width(integers, width)

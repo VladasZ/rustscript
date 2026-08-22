@@ -1,7 +1,5 @@
 #!/usr/bin/env rust
 
-// Operator trait impls drive the operators: `Add`, `AddAssign`, `Neg`, and
-// mixed-type `Mul`.
 
 use std::ops::{Add, AddAssign, Mul, Neg};
 

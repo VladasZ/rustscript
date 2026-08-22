@@ -1,5 +1,4 @@
-//! Top level item generation: user structs and enums with their impls,
-//! consts, describe impls on builtin types, and helper functions.
+//! Top level item generation.
 
 use rand::RngExt;
 
@@ -29,8 +28,8 @@ impl Generator<'_> {
         }
     }
 
-    /// A field or payload type: mostly scalars, sometimes a container, a
-    /// tuple, a std error, or an earlier user type.
+    /// Mostly scalars, sometimes a container, a tuple, a std error or an
+    /// earlier user type.
     fn member_ty(&mut self, error: bool) -> Ty {
         if error && self.chance(0.4) {
             return Ty::StdErr(if self.chance(0.7) {
@@ -57,8 +56,7 @@ impl Generator<'_> {
         self.scalar_ty()
     }
 
-    /// The derives the member types allow, each dropped now and then so a
-    /// type without `Hash` or without `Default` exists too.
+    /// Each derive is dropped now and then so a type without it exists too.
     fn derives_for(&mut self, members: &[Ty]) -> Derives {
         let eq = members.iter().all(Ty::is_eq) && self.chance(0.9);
         let ord = eq && members.iter().all(Ty::is_ord) && self.chance(0.85);
@@ -146,12 +144,10 @@ impl Generator<'_> {
         }
     }
 
-    /// Inherent methods over the fields and one associated constructor.
     fn struct_methods(&mut self, shape: &mut UserShape, fields: &[Field]) -> Vec<UserMethod> {
         let owner = Ty::user(shape.clone());
         let mut methods = Vec::new();
-        // `self.f0` reads as a local named `self.f0`, which renders exactly
-        // like a field read off the receiver.
+        // A local named `self.f0` renders exactly like a field read.
         let self_locals: Vec<(String, Ty)> = fields
             .iter()
             .map(|field| (format!("self.{}", field.name), field.ty.clone()))
@@ -231,8 +227,8 @@ impl Generator<'_> {
         methods
     }
 
-    /// An enum, or with `error` an error enum whose payloads include std
-    /// parse errors and which converts from them through `From`.
+    /// With `error`, the payloads include std parse errors and `From` impls
+    /// convert them.
     fn enum_def(&mut self, index: usize, error: bool) -> UserDef {
         let name = format!(
             "Diff{}{}_{index}",
@@ -242,8 +238,8 @@ impl Generator<'_> {
         let count = self.rng.random_range(2..=4);
         let mut variants = Vec::new();
         for slot in 0..count {
-            // The first variant is a unit so a derived `Default` has a
-            // variant to mark.
+            // The first variant is a unit so a derived `Default` has one to
+            // mark.
             let payload_count = if slot == 0 {
                 0
             } else {
@@ -282,8 +278,8 @@ impl Generator<'_> {
             depth,
             has_float,
         };
-        // From<payload> for every single payload variant whose type is not
-        // already a source, so `?` has conversions to go through.
+        // `From<payload>` for every single payload variant, so `?` has
+        // conversions to go through.
         let mut froms = Vec::new();
         for (slot, variant) in variants.iter().enumerate() {
             if let [payload] = variant.payload.as_slice()
@@ -329,7 +325,7 @@ impl Generator<'_> {
         }
     }
 
-    /// `fn diff_code(&self) -> i64`, a match over every variant.
+    /// `fn diff_code(&self) -> i64`.
     fn enum_methods(&mut self, shape: &mut UserShape, variants: &[Variant]) -> Vec<UserMethod> {
         if !self.chance(0.6) {
             return Vec::new();
@@ -430,12 +426,10 @@ impl Generator<'_> {
 
     // -- helper functions -----------------------------------------------------
 
-    /// A helper returning `ret`, with parameters and a body of its own that
-    /// may use `?` and an early `return`. Answers the name and the parameter
-    /// types for the call.
+    /// A helper returning `ret`. Answers the name and parameter types.
     pub(super) fn helper_fn(&mut self, ret: &Ty) -> Option<(String, Vec<Param>)> {
         if self.fn_ret.is_some() {
-            // No helper from inside a helper, the nesting would never end.
+            // No helper inside a helper, or the nesting never ends.
             return None;
         }
         let name = self.fresh("diff_fn");
@@ -474,8 +468,8 @@ impl Generator<'_> {
         Some((name, params))
     }
 
-    /// Statements then a tail: a couple of lets, maybe an early return, and
-    /// a tail that may be a bare pipe the return type states.
+    /// A couple of lets, maybe an early return, and a tail that may be a
+    /// bare pipe.
     fn fn_body(&mut self, ret: &Ty) -> Expr {
         let mut stmts = Vec::new();
         let lets = self.rng.random_range(0..=2);
@@ -518,8 +512,7 @@ impl Generator<'_> {
         }
     }
 
-    /// A function writing a new value through `&mut T`, computed from the
-    /// old value and the extra parameters.
+    /// Writes through `&mut T` from the old value and the extra parameters.
     pub(super) fn writer_fn(&mut self, target: &Ty) -> (String, Vec<Ty>) {
         let name = self.fresh("diff_write");
         let count = self.rng.random_range(0..=1);
@@ -548,7 +541,6 @@ impl Generator<'_> {
         (name, params.into_iter().map(|param| param.ty).collect())
     }
 
-    /// The one generic pick helper of the block.
     pub(super) fn generic_pick_fn(&mut self) -> String {
         if let Some(def) = self
             .fns
@@ -565,7 +557,7 @@ impl Generator<'_> {
         name
     }
 
-    /// The apply helper for closures over `ty`, one per type per block.
+    /// One per type per block.
     pub(super) fn apply_fn(&mut self, ty: &Ty) -> String {
         if let Some(def) = self
             .fns
@@ -582,7 +574,6 @@ impl Generator<'_> {
         name
     }
 
-    /// A closure factory over an integer type.
     pub(super) fn factory_fn(&mut self, ty: &Ty) -> String {
         let name = self.fresh("diff_factory");
         let op = *self.pick(&[

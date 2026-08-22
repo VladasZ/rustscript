@@ -1,9 +1,7 @@
 #!/usr/bin/env rust
 
-//! A script trait implemented for builtin types. The impl is keyed by the
-//! type as written, generics included, so `Vec<u8>` and `Vec<String>` each
-//! get their own body, and a value finds its impl from its own runtime
-//! shape. The differential campaign reported every such call as a gap.
+//! A script trait on builtin types is keyed by the written type, so `Vec<u8>`
+//! and `Vec<String>` get their own bodies.
 
 trait Describe {
     fn describe(&self) -> String;
@@ -68,8 +66,7 @@ impl Describe for Vec<String> {
     }
 }
 
-/// The trait method also works through a generic bound, which is plain
-/// dispatch on the value that arrives.
+/// Through a generic bound.
 fn both<T: Describe>(left: &T, right: &T) -> String {
     format!("{} / {}", left.describe(), right.describe())
 }

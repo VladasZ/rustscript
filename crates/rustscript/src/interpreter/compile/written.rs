@@ -1,14 +1,6 @@
-//! The types a program writes down about itself, read straight off the AST.
-//!
-//! This is not type inference. Every arm here reads a type the source stated,
-//! a `let` annotation, a turbofish, a literal suffix, a cast, or a method
-//! whose result type is fixed whatever it is called on. Anything else answers
-//! `None` so the caller keeps its old behavior.
-//!
-//! Only `Default` payloads are ever built from these answers, which is what
-//! `unwrap_or_default` needs: `None` carries no runtime type, so the empty
-//! `Vec::<u8>::new().iter().min().unwrap_or_default()` has nowhere else to
-//! learn it is a `0` and not an empty string.
+//! The types a program writes down about itself. This is not inference,
+//! anything not stated answers `None`. Only `Default` payloads are built
+//! from these answers, `None` carries no runtime type.
 
 use std::collections::HashMap;
 
@@ -17,20 +9,15 @@ use syn::{Expr, Lit};
 use crate::interpreter::bytecode::ScalarTy;
 use crate::interpreter::numeric::IntWidth;
 
-/// The type facts a payload walk can read: the declared types of annotated
-/// locals, the stated return scalars of the script's own functions, and the
-/// closure parameters bound by the chain the walk is currently inside.
 pub(super) struct TyEnv<'a> {
     locals: &'a HashMap<String, ScalarTy>,
     fn_returns: &'a HashMap<String, ScalarTy>,
-    /// The parameter of the closure being walked, with the type the chain
-    /// hands it. `Some` only while inside that closure's body.
+    /// `Some` only while inside the closure's body.
     param: Option<(&'a str, &'a ScalarTy)>,
-    /// The block being read through, whose own `let`s shadow everything
-    /// outside it, even after the compiler has left the block.
+    /// Its own `let`s shadow everything outside, even after the compiler has
+    /// left the block.
     block: Option<&'a syn::Block>,
-    /// The env this one was bound from, so a closure nested in a closure
-    /// still reads the outer parameter.
+    /// So a closure nested in a closure still reads the outer parameter.
     outer: Option<&'a TyEnv<'a>>,
 }
 
@@ -48,7 +35,6 @@ impl<'a> TyEnv<'a> {
         }
     }
 
-    /// This env plus one block, for reading that block's value.
     fn with_block<'b>(&'b self, block: &'b syn::Block) -> TyEnv<'b> {
         TyEnv {
             locals: self.locals,
@@ -59,7 +45,6 @@ impl<'a> TyEnv<'a> {
         }
     }
 
-    /// This env plus one closure parameter, for walking that closure's body.
     fn with_param<'b>(&'b self, name: &'b str, ty: &'b ScalarTy) -> TyEnv<'b> {
         TyEnv {
             locals: self.locals,
@@ -70,10 +55,8 @@ impl<'a> TyEnv<'a> {
         }
     }
 
-    /// The type stated for a bare name: a closure parameter or a block's
-    /// own `let` in scope first, innermost first, and an annotated local
-    /// otherwise. A block's unannotated `let` answers through its init,
-    /// read in the env outside that block.
+    /// Closure parameters and block `let`s innermost first, annotated locals
+    /// otherwise. An unannotated block `let` answers through its init.
     fn lookup(&self, name: &str) -> Option<ScalarTy> {
         let mut env = Some(self);
         while let Some(current) = env {
@@ -98,9 +81,7 @@ impl<'a> TyEnv<'a> {
     }
 }
 
-/// The type a closure's single parameter holds, and the name it holds it
-/// under. An annotation on the parameter states it outright, otherwise the
-/// item type the chain feeds in does.
+/// An annotation states it, otherwise the item type the chain feeds in.
 fn closure_param(closure: &syn::ExprClosure, item: Option<ScalarTy>) -> Option<(String, ScalarTy)> {
     let mut pattern = closure.inputs.first()?;
     let mut stated = None;
@@ -114,9 +95,7 @@ fn closure_param(closure: &syn::ExprClosure, item: Option<ScalarTy>) -> Option<(
     }
 }
 
-/// Walk a closure body with its parameter bound to the item type the chain
-/// feeds in, so `values.iter().map(|v| v + 1)` reads `v` as the element type
-/// rather than giving up on it.
+/// So `values.iter().map(|v| v + 1)` reads `v` as the element type.
 fn in_closure<T>(
     closure: &syn::ExprClosure,
     item: Option<ScalarTy>,
@@ -129,13 +108,6 @@ fn in_closure<T>(
     }
 }
 
-/// The payload type of an expression that syntactically builds an `Option`,
-/// for the cases where the source states it outright. Only a `Default` is ever
-/// built from this, so a container answers with the kind of default it has
-/// rather than with its element type.
-///
-/// This is not type inference. Every arm reads a type the program wrote down,
-/// and anything else answers `None` so the caller keeps its old behavior.
 /// The payload of `<Option<T>>::default()` or `Option::<T>::default()`.
 fn default_call_payload(path: &syn::ExprPath) -> Option<ScalarTy> {
     let option_ty = match &path.qself {
@@ -161,10 +133,8 @@ pub(super) fn option_payload(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
     match expr {
         Expr::Paren(inner) => option_payload(&inner.expr, env),
         Expr::Group(inner) => option_payload(&inner.expr, env),
-        // A block answers through its tail expression.
         Expr::Block(block) => block_value(&block.block, env, option_payload),
-        // An if-else answers through whichever branch states its type,
-        // `if c { Some(x as i16) } else { None::<i16> }` from either side.
+        // Either branch.
         Expr::If(sel) => block_tail(&sel.then_branch)
             .and_then(|e| option_payload(e, env))
             .or_else(|| {
@@ -172,22 +142,21 @@ pub(super) fn option_payload(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                     .as_ref()
                     .and_then(|(_, e)| option_payload(e, env))
             }),
-        // A match answers through whichever arm states its type.
+        // Any arm.
         Expr::Match(m) => m.arms.iter().find_map(|arm| option_payload(&arm.body, env)),
         Expr::Path(path) => {
             let segment = path.path.segments.last()?;
-            // `None::<T>`, the payload is the turbofish.
+            // `None::<T>`.
             if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
                 return turbofish_scalar(Some(args));
             }
-            // A bare name the program declared as `let opt: Option<T>`.
+            // `let opt: Option<T>`.
             match env.lookup(&segment.ident.to_string()) {
                 Some(ScalarTy::Opt(payload)) => Some(*payload),
                 _ => None,
             }
         }
-        // `Some(x)`, the payload is whatever `x` is. `<Option<T>>::default()`
-        // and `Option::<T>::default()` write the payload in the type.
+        // `Some(x)` and `Option::<T>::default()`.
         Expr::Call(call) => {
             let Expr::Path(path) = &*call.func else {
                 return None;
@@ -201,30 +170,25 @@ pub(super) fn option_payload(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                 .flatten()
         }
         Expr::MethodCall(call) => match call.method.to_string().as_str() {
-            // `flag.then_some(x)` is an `Option` of whatever `x` is.
+            // `then_some(x)`.
             "then_some" => call.args.first().and_then(|a| written_ty(a, env)),
-            // `text.parse::<T>()` states its payload in its own turbofish.
+            // `parse::<T>()`.
             "parse" => turbofish_scalar(call.turbofish.as_ref()),
-            // `a.or(b)` keeps the payload both sides share, so either side
-            // that states it answers for both. `xor` pairs the same way.
+            // `or` and `xor` keep the payload both sides share.
             "or" | "xor" => call
                 .args
                 .first()
                 .and_then(|a| option_payload(a, env))
                 .or_else(|| option_payload(&call.receiver, env)),
-            // `a.and(b)` answers `b`'s `Option`, so the argument states the
-            // payload. The receiver answers only when the argument does not,
-            // which is the common case of both sides being the same type.
+            // `a.and(b)` answers `b`'s `Option`, the receiver only when the
+            // argument does not state it.
             "and" => call
                 .args
                 .first()
                 .and_then(|a| option_payload(a, env))
                 .or_else(|| option_payload(&call.receiver, env)),
-            // `opt.map(|v| e)` rewraps whatever `e` states, and
-            // `opt.and_then(|v| e)` keeps the `Option` that `e` already is.
-            // Both names also belong to iterators, where the answer is an
-            // iterator and not an `Option` at all, so both arms only apply
-            // once the receiver has proven itself an `Option`.
+            // `map` and `and_then` also belong to iterators, so both arms only
+            // apply once the receiver has proven itself an `Option`.
             "map" | "and_then" => {
                 let payload = option_payload(&call.receiver, env)?;
                 match call.args.first() {
@@ -237,51 +201,40 @@ pub(super) fn option_payload(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                     _ => None,
                 }
             }
-            // These hand the same payload through untouched. `ok` moves a
-            // `Result` payload into an `Option`, the same layer.
+            // Same payload through, `ok` included.
             "clone" | "cloned" | "copied" | "take" | "as_ref" | "as_mut" | "filter" | "ok" => {
                 option_payload(&call.receiver, env)
             }
-            // `x.unwrap_or_default()`, `unwrap`, and `expect` peel one layer,
-            // so their own payload is one layer further in than the receiver's.
+            // Peel one layer.
             "unwrap_or_default" | "unwrap" | "expect" => {
                 option_payload(&call.receiver, env)?.payload().cloned()
             }
-            // `x.unwrap_or(d)` peels one layer the same way, and the fallback
-            // argument states the same type when the receiver does not.
+            // `unwrap_or(d)` peels one layer, `d` states the type when the
+            // receiver does not.
             "unwrap_or" => option_payload(&call.receiver, env)
                 .and_then(|payload| payload.payload().cloned())
                 .or_else(|| call.args.first().and_then(|a| option_payload(a, env))),
-            // `v.get(i)`, the accessors, and the no-argument iterator
-            // reductions answer an `Option` of the vec's element type.
-            // `map.get(k)` answers an `Option` of the map's value type.
+            // `v.get(i)` and the reductions answer the element, `map.get(k)`
+            // the value.
             "get" => element_ty(&call.receiver, env).or_else(|| map_value_ty(&call.receiver, env)),
-            // `map.remove(k)` answers an `Option` of the map's value type. A
-            // vec's `remove` answers its element outright, not an `Option`,
-            // and a map receiver is the only kind this walk answers for.
+            // A vec's `remove` answers its element outright, so only a map
+            // receiver answers here.
             "remove" => map_value_ty(&call.receiver, env),
-            // `ch.to_digit(radix)` answers an `Option<u32>` whatever the
-            // receiver, the one char method with an `Option` payload.
+            // `to_digit` is `Option<u32>`.
             "to_digit" => Some(ScalarTy::Int(IntWidth::U32)),
-            // `it.position(p)` counts items, so it is an `Option<usize>`
-            // whatever the items are.
+            // `position` is `Option<usize>`.
             "position" | "rposition" => Some(ScalarTy::Int(IntWidth::USize)),
-            // `find` is two methods under one name. On a string it answers a
-            // byte offset, on an iterator it answers an item, and the closure
-            // argument is what tells them apart: only the iterator form takes
-            // one, the string form takes a pattern.
+            // `find` on a string answers a byte offset, on an iterator an
+            // item. Only the iterator form takes a closure.
             "find" | "rfind" => match call.args.first() {
                 Some(Expr::Closure(_)) => element_ty(&call.receiver, env),
                 _ => Some(ScalarTy::Int(IntWidth::USize)),
             },
-            // The accessors and the reductions all answer one item of what
-            // the receiver holds. A keyed reduction's argument only decides
-            // which item, not what type it is.
+            // One item of what the receiver holds.
             "first" | "last" | "next_back" | "pop" | "next" | "nth" | "reduce" | "min_by_key"
             | "max_by_key" => element_ty(&call.receiver, env),
             "min" | "max" if call.args.is_empty() => element_ty(&call.receiver, env),
-            // `x.checked_add(y)` answers an `Option` of the receiver's own
-            // integer width.
+            // `checked_add` answers the receiver's width.
             "checked_add" | "checked_sub" | "checked_mul" | "checked_div" | "checked_rem"
             | "checked_neg" | "checked_abs" | "checked_pow" | "checked_shl" | "checked_shr"
             | "checked_div_euclid" | "checked_rem_euclid" => {
@@ -296,10 +249,8 @@ pub(super) fn option_payload(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
     }
 }
 
-/// The type a block's value states, read with `read`. A tail that names a
-/// local the block itself declared answers through that `let`, its
-/// annotation first and its init otherwise, so two blocks that reuse one
-/// name never read each other's type.
+/// A tail naming a block local answers through that `let`, so 2 blocks
+/// reusing a name never read each other's type.
 fn block_value(
     block: &syn::Block,
     env: &TyEnv,
@@ -310,8 +261,7 @@ fn block_value(
     read(tail, &inner)
 }
 
-/// The `let` of this block that binds the bare name `tail` is, the last one
-/// when the name is declared twice.
+/// The last one when the name is declared twice.
 pub(super) fn block_let<'b>(block: &'b syn::Block, tail: &Expr) -> Option<&'b syn::Local> {
     let Expr::Path(path) = tail else {
         return None;
@@ -319,8 +269,7 @@ pub(super) fn block_let<'b>(block: &'b syn::Block, tail: &Expr) -> Option<&'b sy
     block_let_named(block, &path.path.get_ident()?.to_string())
 }
 
-/// The `let` of this block that binds `name`, the last one when the name
-/// is declared twice.
+/// The last one when the name is declared twice.
 fn block_let_named<'b>(block: &'b syn::Block, name: &str) -> Option<&'b syn::Local> {
     block.stmts.iter().rev().find_map(|stmt| match stmt {
         syn::Stmt::Local(local) => {
@@ -334,7 +283,6 @@ fn block_let_named<'b>(block: &'b syn::Block, name: &str) -> Option<&'b syn::Loc
     })
 }
 
-/// The tail expression of a block, when the block ends in one.
 pub(super) fn block_tail(block: &syn::Block) -> Option<&Expr> {
     match block.stmts.last()? {
         syn::Stmt::Expr(expr, None) => Some(expr),
@@ -342,23 +290,20 @@ pub(super) fn block_tail(block: &syn::Block) -> Option<&Expr> {
     }
 }
 
-/// The element type of an expression that syntactically builds a `Vec`, a
-/// `HashSet`, or an iterator over one, for the same narrow purpose as
-/// `option_payload`, and just as literally: every arm reads a type the program
-/// wrote down.
+/// The element type of a `Vec`, a `HashSet` or an iterator, as literal as
+/// `option_payload`.
 fn element_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
     match expr {
         Expr::Paren(inner) => element_ty(&inner.expr, env),
         Expr::Group(inner) => element_ty(&inner.expr, env),
         Expr::Block(block) => block_value(&block.block, env, element_ty),
-        // `(a..b)` iterates whatever its ends are, so either end that states
-        // its own type answers for the range.
+        // Either end of a range.
         Expr::Range(range) => range
             .start
             .as_ref()
             .and_then(|e| written_ty(e, env))
             .or_else(|| range.end.as_ref().and_then(|e| written_ty(e, env))),
-        // An if-else answers through whichever branch states its element.
+        // Either branch.
         Expr::If(sel) => block_tail(&sel.then_branch)
             .and_then(|e| element_ty(e, env))
             .or_else(|| {
@@ -367,8 +312,7 @@ fn element_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                     .and_then(|(_, e)| element_ty(e, env))
             }),
         Expr::Match(m) => m.arms.iter().find_map(|arm| element_ty(&arm.body, env)),
-        // A bare name the program declared as `let v: Vec<T>` or
-        // `let s: HashSet<T>`, both of which iterate their element type.
+        // `let v: Vec<T>` or `let s: HashSet<T>`.
         Expr::Path(path) => {
             let segment = path.path.segments.last()?;
             match env.lookup(&segment.ident.to_string()) {
@@ -376,40 +320,32 @@ fn element_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                 _ => None,
             }
         }
-        // A `vec![..]` literal states its element type through any element
-        // that states its own.
+        // Any element of a `vec![..]`.
         Expr::Macro(mac) if mac.mac.path.is_ident("vec") => vec_macro_element(&mac.mac, env),
-        // `Vec::<T>::new()` and `HashSet::<T>::new()` state it in the
-        // turbofish.
+        // `Vec::<T>::new()` and `HashSet::<T>::new()`.
         Expr::Call(_) => match written_ty(expr, env) {
             Some(ScalarTy::List(element) | ScalarTy::Set(element)) => Some(*element),
             _ => None,
         },
         Expr::MethodCall(call) => match call.method.to_string().as_str() {
-            // These pass elements through unchanged. The middle stages of a
-            // chain are here too: they drop or reorder items, so whatever
-            // survives is still an item of the same type.
+            // Elements through unchanged, the middle of a chain too.
             "iter" | "into_iter" | "iter_mut" | "cloned" | "copied" | "clone" | "to_vec"
             | "rev" | "filter" | "take" | "skip" | "take_while" | "skip_while" | "peekable"
             | "by_ref" => element_ty(&call.receiver, env),
-            // `concat` flattens one layer away, so what the next stage of
-            // the chain iterates is the element of the concat's own type.
-            // Without this a second `concat` sees no element type and falls
+            // `concat` flattens one layer. Without this a second `concat` fell
             // back to joining strings.
             "concat" => match written_ty(expr, env) {
                 Some(ScalarTy::List(element)) => Some(*element),
                 _ => None,
             },
-            // `it.map(|x| e)` makes whatever `e` states its own type to be
-            // the element type.
+            // `map(|x| e)` makes `e`'s type the element.
             "map" => match call.args.first() {
                 Some(Expr::Closure(closure)) => {
                     in_closure(closure, element_ty(&call.receiver, env), env, written_ty)
                 }
                 _ => None,
             },
-            // `it.filter_map(|x| e)` yields the payload of the `Option` that
-            // `e` builds, one layer in from `map`.
+            // `filter_map` yields the payload of `e`'s `Option`.
             "filter_map" => match call.args.first() {
                 Some(Expr::Closure(closure)) => in_closure(
                     closure,
@@ -419,19 +355,17 @@ fn element_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                 ),
                 _ => None,
             },
-            // `m.values()` iterates the map's value type. Keys are not here
-            // because a `ScalarTy::Map` only carries the value side.
+            // Keys are not here because `ScalarTy::Map` only carries the value
+            // side.
             "values" | "into_values" | "values_mut" => map_value_ty(&call.receiver, env),
-            // A string iterates chars, and its bytes are u8.
             "chars" => Some(ScalarTy::Char),
             "bytes" => Some(ScalarTy::Int(IntWidth::U8)),
-            // `it.collect::<Vec<T>>()` states its element in the turbofish.
+            // `collect::<Vec<T>>()`.
             "collect" => match turbofish_scalar(call.turbofish.as_ref()) {
                 Some(ScalarTy::List(element) | ScalarTy::Set(element)) => Some(*element),
                 _ => None,
             },
-            // The vec an unwrap settles on, from whichever side wrote its
-            // type down.
+            // The vec an unwrap settles on.
             "unwrap" | "unwrap_or" | "unwrap_or_default" => {
                 let from_receiver = match option_payload(&call.receiver, env) {
                     Some(ScalarTy::List(element)) => Some(*element),
@@ -445,14 +379,12 @@ fn element_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
     }
 }
 
-/// The stated element type of a sequence, for the callers outside this
-/// module that only need that one answer.
+/// For callers outside this module.
 pub(super) fn element_of(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
     element_ty(expr, env)
 }
 
-/// The stated element type of a `vec![..]` literal, from the first element
-/// that states one. The repeat form `vec![x; n]` answers through `x`.
+/// The first element that states a type, or `x` in `vec![x; n]`.
 fn vec_macro_element(mac: &syn::Macro, env: &TyEnv) -> Option<ScalarTy> {
     use syn::Token;
     use syn::punctuated::Punctuated;
@@ -465,10 +397,8 @@ fn vec_macro_element(mac: &syn::Macro, env: &TyEnv) -> Option<ScalarTy> {
         .and_then(|e| written_ty(e, env))
 }
 
-/// A method whose answer has its receiver's own type. `clone` hands it
-/// through untouched, the ASCII case methods keep char as char and u8 as u8,
-/// and the arithmetic methods keep their receiver's width, which is how
-/// `(x as u8).saturating_mul(y)` in a map closure states a u8 element.
+/// A method whose answer has its receiver's type, `clone`, the ASCII case
+/// methods and arithmetic.
 fn keeps_receiver_ty(method: &str) -> bool {
     matches!(
         method,
@@ -495,16 +425,13 @@ fn keeps_receiver_ty(method: &str) -> bool {
     )
 }
 
-/// The type an expression states about itself, for the same narrow purpose.
 pub(super) fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
     match expr {
         Expr::Paren(inner) => written_ty(&inner.expr, env),
         Expr::Group(inner) => written_ty(&inner.expr, env),
-        // A block answers through its tail expression, which is how a
-        // `({ let mut m: HashMap<K, V> = ...; m })` vec element states itself.
+        // A block answers through its tail.
         Expr::Block(block) => block_value(&block.block, env, written_ty),
-        // An if-else answers through whichever branch states its type, so
-        // `then_some(if flag { '9' } else { c })` knows it holds a char.
+        // Either branch.
         Expr::If(sel) => block_tail(&sel.then_branch)
             .and_then(|e| written_ty(e, env))
             .or_else(|| {
@@ -513,7 +440,6 @@ pub(super) fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                     .and_then(|(_, e)| written_ty(e, env))
             }),
         Expr::Match(m) => m.arms.iter().find_map(|arm| written_ty(&arm.body, env)),
-        // `value as u8` names the type at the cast.
         Expr::Cast(cast) => ScalarTy::lower(&cast.ty),
         Expr::Binary(bin) => binary_written_ty(bin, env),
         Expr::Unary(un) => match un.op {
@@ -532,29 +458,23 @@ pub(super) fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
             },
             _ => None,
         },
-        // These methods answer in their receiver's own type, so the receiver
-        // states it for the whole call.
+        // The receiver states it for the whole call.
         Expr::MethodCall(call) if keeps_receiver_ty(&call.method.to_string()) => {
             written_ty(&call.receiver, env)
         }
-        // `it.collect::<T>()` states its own type in the turbofish, which is
-        // how a `map(|x| ...collect::<Vec<bool>>()).min()` chain learns what
-        // its default is.
+        // `collect::<T>()`.
         Expr::MethodCall(call)
             if call.method == "collect" && turbofish_scalar(call.turbofish.as_ref()).is_some() =>
         {
             turbofish_scalar(call.turbofish.as_ref())
         }
-        // `it.sum::<T>()` and `it.product::<T>()` state their own type in the
-        // turbofish, the same way `collect` does, so a later `checked_*`
-        // knows its width even when the chain runs through a `map`.
+        // `sum::<T>()` and `product::<T>()`.
         Expr::MethodCall(call)
             if matches!(call.method.to_string().as_str(), "sum" | "product")
                 && turbofish_scalar(call.turbofish.as_ref()).is_some() =>
         {
             turbofish_scalar(call.turbofish.as_ref())
         }
-        // `concat` of nested vecs answers the inner vec, of strings a string.
         Expr::MethodCall(call) if call.method == "concat" => {
             match element_ty(&call.receiver, env) {
                 Some(ScalarTy::List(inner)) => Some(ScalarTy::List(inner)),
@@ -562,14 +482,11 @@ pub(super) fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                 _ => None,
             }
         }
-        // A fold answers in its init's type, which the accumulator keeps
-        // through every step, so `it.fold(0u8, ..).checked_mul(..)` knows
-        // its payload width even when the chain runs through a `map`.
+        // A fold answers in its init's type.
         Expr::MethodCall(call) if call.method == "fold" => {
             call.args.first().and_then(|init| written_ty(init, env))
         }
-        // An unwrap's own value is the receiver's payload, so
-        // `Some('\n').unwrap_or_default()` is a char, not an Option.
+        // An unwrap's value is the receiver's payload.
         Expr::MethodCall(call)
             if matches!(
                 call.method.to_string().as_str(),
@@ -578,8 +495,7 @@ pub(super) fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
         {
             option_payload(&call.receiver, env)
         }
-        // Anything that is itself an `Option` is one layer deeper, keeping
-        // what it wraps so a further unwrap can still read it.
+        // An `Option` is one layer deeper.
         Expr::Call(_) | Expr::Path(_) | Expr::MethodCall(_) => {
             if let Some(payload) = option_payload(expr, env) {
                 Some(ScalarTy::Opt(Box::new(payload)))
@@ -597,8 +513,7 @@ pub(super) fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                 && path.path.segments.len() == 1
                 && let Some(declared) = env.lookup(&path.path.segments[0].ident.to_string())
             {
-                // A bare name the program declared with any scalar
-                // annotation, `let x: u16` included.
+                // Any scalar annotation, `let x: u16` included.
                 Some(declared)
             } else {
                 fn_return_ty(expr, env)
@@ -611,8 +526,8 @@ pub(super) fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
     }
 }
 
-/// Arithmetic keeps its operands' type, so either side that states it
-/// answers, `(x as i8) / (y as i8)` for one. A comparison is a bool.
+/// Either arithmetic side that states its type answers. A comparison is a
+/// bool.
 fn binary_written_ty(bin: &syn::ExprBinary, env: &TyEnv) -> Option<ScalarTy> {
     use syn::BinOp::{
         Add, And, BitAnd, BitOr, BitXor, Div, Eq, Ge, Gt, Le, Lt, Mul, Ne, Or, Rem, Shl, Shr, Sub,
@@ -627,8 +542,7 @@ fn binary_written_ty(bin: &syn::ExprBinary, env: &TyEnv) -> Option<ScalarTy> {
     }
 }
 
-/// The stated return scalar of a call to one of the script's own functions,
-/// `f()` when `fn f() -> f32` says so.
+/// `f()` is f32 when `fn f() -> f32` says so.
 fn fn_return_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
     let Expr::Call(call) = expr else {
         return None;
@@ -640,8 +554,7 @@ fn fn_return_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
     env.fn_returns.get(&segment.ident.to_string()).cloned()
 }
 
-/// A call that builds a `String` outright, `String::from(..)` or
-/// `String::new()`.
+/// `String::from(..)` or `String::new()`.
 fn is_string_call(expr: &Expr) -> bool {
     let Expr::Call(call) = expr else {
         return false;
@@ -656,8 +569,7 @@ fn is_string_call(expr: &Expr) -> bool {
     is_ctor && segments.next().is_some_and(|s| s.ident == "String")
 }
 
-/// The stated element type of a `Vec::<T>::new()` or `VecDeque::<T>::new()`
-/// call, read from the turbofish on the container segment.
+/// `Vec::<T>::new()` or `VecDeque::<T>::new()`.
 fn vec_new_element(expr: &Expr) -> Option<ScalarTy> {
     let Expr::Call(call) = expr else {
         return None;
@@ -680,8 +592,7 @@ fn vec_new_element(expr: &Expr) -> Option<ScalarTy> {
     turbofish_scalar(Some(args))
 }
 
-/// The map or set type a `HashMap::<K, V>::new()` / `HashSet::<T>::new()`
-/// call states in its own turbofish, the map twin of `vec_new_element`.
+/// The map twin of `vec_new_element`.
 fn container_new_ty(expr: &Expr) -> Option<ScalarTy> {
     let Expr::Call(call) = expr else {
         return None;
@@ -705,12 +616,11 @@ fn container_new_ty(expr: &Expr) -> Option<ScalarTy> {
     ScalarTy::lower_segment(container)
 }
 
-/// A constructor that builds an empty or sized container of the named type.
 fn is_ctor(name: &syn::Ident) -> bool {
     name == "new" || name == "default" || name == "with_capacity"
 }
 
-/// `<Vec<Vec<f64>>>::default()`, the type written in the qualified path.
+/// `<Vec<Vec<f64>>>::default()`.
 fn qualified_ctor_ty(expr: &Expr) -> Option<ScalarTy> {
     let Expr::Call(call) = expr else {
         return None;
@@ -725,8 +635,7 @@ fn qualified_ctor_ty(expr: &Expr) -> Option<ScalarTy> {
     ScalarTy::lower(&qself.ty)
 }
 
-/// The value type of an expression that syntactically builds a map, for the
-/// `map.get(k)` payload, read as literally as `element_ty`.
+/// The value type of a map, as literal as `element_ty`.
 fn map_value_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
     match expr {
         Expr::Paren(inner) => map_value_ty(&inner.expr, env),
@@ -740,7 +649,7 @@ fn map_value_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                     .and_then(|(_, e)| map_value_ty(e, env))
             }),
         Expr::Match(m) => m.arms.iter().find_map(|arm| map_value_ty(&arm.body, env)),
-        // A bare name the program declared as `let m: HashMap<K, V>`.
+        // `let m: HashMap<K, V>`.
         Expr::Path(path) => {
             let segment = path.path.segments.last()?;
             match env.lookup(&segment.ident.to_string()) {
@@ -748,14 +657,13 @@ fn map_value_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                 _ => None,
             }
         }
-        // `HashMap::<K, V>::new()` states it in the turbofish.
+        // `HashMap::<K, V>::new()`.
         Expr::Call(_) => match container_new_ty(expr) {
             Some(ScalarTy::Map(value)) => Some(*value),
             _ => None,
         },
         Expr::MethodCall(call) if call.method == "clone" => map_value_ty(&call.receiver, env),
-        // `it.collect::<HashMap<K, V>>()` states its value type in the
-        // turbofish.
+        // `collect::<HashMap<K, V>>()`.
         Expr::MethodCall(call) if call.method == "collect" => {
             match turbofish_scalar(call.turbofish.as_ref()) {
                 Some(ScalarTy::Map(value)) => Some(*value),
@@ -766,13 +674,11 @@ fn map_value_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
     }
 }
 
-/// A bare `None`, with or without a turbofish.
 fn is_none_path(expr: &Expr) -> bool {
     matches!(expr, Expr::Path(path)
         if path.path.segments.last().is_some_and(|s| s.ident == "None"))
 }
 
-/// The first concrete scalar named by a turbofish argument list.
 pub(super) fn turbofish_scalar(
     args: Option<&syn::AngleBracketedGenericArguments>,
 ) -> Option<ScalarTy> {

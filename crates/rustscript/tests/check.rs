@@ -1,6 +1,6 @@
-//! Tests for the `cargo check` validity gate. These invoke a real `cargo check`
-//! on a synthesized project, which is slow, so they are ignored by default.
-//! Run them with `cargo test --test check -- --ignored`.
+//! Tests for the `cargo check` gate. They run a real `cargo check`, which is
+//! slow, so they are ignored by default. Run with
+//! `cargo test --test check -- --ignored`.
 
 use std::process::Command;
 
@@ -39,7 +39,7 @@ fn valid_script_passes_check() {
 #[test]
 #[ignore = "runs real cargo check, slow"]
 fn type_error_fails_check() {
-    // Assigning a string to an i64 is a type error rustc must reject.
+    // A type error `rustc` must reject.
     let out = check(
         "fn main() { let x: i64 = \"nope\"; println!(\"{x}\"); }\n",
         "invalid",
@@ -52,8 +52,8 @@ fn type_error_fails_check() {
 #[test]
 #[ignore = "runs real cargo check, slow"]
 fn diagnostics_name_the_real_script_file() {
-    // The script is mirrored into a cache project under its own name, so the
-    // rustc arrow line must point at that name, not a generic `main.rs`.
+    // The script is mirrored into the cache project under its own name, so
+    // the arrow line must point at that name and not `main.rs`.
     let out = check(
         "fn main() { let x: i64 = \"nope\"; println!(\"{x}\"); }\n",
         "diagname",

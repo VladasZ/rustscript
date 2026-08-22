@@ -1,8 +1,7 @@
 #!/usr/bin/env rust
 
-// Integers carry their real width at runtime and floats exist at both
-// precisions, so arithmetic, casts, shifts, and printing agree with compiled
-// Rust, including the full u64 and usize range past i64::MAX.
+// Integers carry their real width at runtime, including the full u64 and
+// usize range past `i64::MAX`.
 
 fn opaque(x: i64) -> i64 {
     x
@@ -24,7 +23,7 @@ fn main() {
     println!("usize: {big_size}");
     println!("u64 vs literal: {}", big > 9_223_372_036_854_775_807);
 
-    // Narrowing casts truncate, float to int casts saturate, NaN is zero.
+    // Casts.
     let wide = opaque(300);
     println!("as u8: {}", wide as u8);
     println!("as i8: {}", wide as i8);
@@ -33,7 +32,7 @@ fn main() {
     println!("nan as i32: {}", opaque_float(f64::NAN) as i32);
     println!("neg as u16: {}", (-1.5f64) as u16);
 
-    // Shifts discard bits like release Rust and keep the width.
+    // Shifts keep the width.
     let byte = 255u8;
     println!("shl: {}", byte << 4);
     println!("shr: {}", byte >> 4);
@@ -41,7 +40,7 @@ fn main() {
     println!("i8 shr: {}", signed >> 1);
     println!("negate: {}", -(opaque(-127) as i8));
 
-    // f32 computes and prints at f32 precision, f64 at f64 precision.
+    // f32 stays at f32 precision.
     let a: f32 = 0.1;
     let b: f32 = 0.2;
     println!("f32 sum: {}", a + b);
@@ -54,7 +53,7 @@ fn main() {
     println!("f32 as f64: {}", f64::from(0.1f32));
     println!("f32 inf: {} {}", f32::INFINITY, 1e30f32 * 1e30f32);
 
-    // Radix specs print the two's complement image at the value's width.
+    // Radix specs print at the value's width.
     let neg = opaque(-1) as i8;
     println!("i8 hex: {neg:x}");
     println!("u64 hex: {big:x}");

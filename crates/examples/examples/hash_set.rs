@@ -11,8 +11,8 @@ fn main() {
     println!("{}", seen.contains("LL-1"));
     println!("{}", seen.len());
 
-    // Iteration order is unspecified in real Rust, so only order-insensitive
-    // reads compare byte for byte against the compiled run.
+    // Iteration order is unspecified, so only order insensitive reads are
+    // printed.
     let mut total = 0;
     for key in &seen {
         total += key.len();

@@ -1,8 +1,6 @@
-//! An assignment evaluates its right operand before the place expression, so
-//! the right side's panic fires first. The campaign found the interpreter
-//! evaluating the `entry(..).or_insert(..)` place first and dying on its
-//! multiply overflow where compiled Rust reports the sum's add overflow. From
-//! seed 20675014558.
+//! An assignment evaluates its right operand before the place. The
+//! interpreter once evaluated the `entry(..).or_insert(..)` place first and
+//! panicked on the wrong overflow. From seed 20675014558.
 
 use std::collections::HashMap;
 

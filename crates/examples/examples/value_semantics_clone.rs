@@ -1,9 +1,7 @@
 #!/usr/bin/env rust
 
-// `clone` must produce a value that mutates independently at every depth.
-// The interpreter once treated a struct or enum clone as a refcount bump
-// and a container clone as a one-level copy, so mutating the clone leaked
-// into the original.
+// The interpreter once treated a clone as a refcount bump or a one level
+// copy, so mutating the clone leaked into the original.
 
 #[derive(Clone, Debug)]
 struct Basket {

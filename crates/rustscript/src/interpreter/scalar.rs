@@ -1,16 +1,6 @@
-//! Scalar closure specialization for comparator sorts.
-//!
-//! A comparator sort calls its closure once per comparison, and the generic
-//! call path pays a register stack, boxed values, and bridge dispatch every
-//! time. A closure whose body only moves plain integers does not need any of
-//! that. This module translates such a body once per sort into a small plan
-//! over flat `i64` registers and runs the whole sort on unboxed elements.
-//!
-//! The subset is strict on purpose. Any op outside it, any register whose
-//! type cannot be pinned to int, bool, or `Ordering`, any capture that is
-//! not a plain int, or any arithmetic failure at run time makes the caller
-//! fall back to the generic path, so semantics never change, overflow and
-//! division errors included.
+//! Comparator sorts with an int only closure run on flat `i64` registers.
+//! Anything outside the subset or any arithmetic failure falls back to the
+//! generic path.
 
 use std::cmp::Ordering;
 
@@ -20,15 +10,14 @@ use super::numeric::i64_arith;
 use super::value::{ClosureData, Upvalue, Value};
 use super::vm::Vm;
 
-/// One op of the specialized plan. Jump targets are op indices, and the
-/// translation is one plan op per bytecode op, so targets carry over as is.
+/// One plan op per bytecode op, so jump targets carry over as is.
 enum SOp {
-    /// An int constant: a literal, or a captured int snapshotted at build.
+    /// A literal, or a captured int snapshotted at build.
     Load {
         dst: u16,
         v: i64,
     },
-    /// An `Ordering` constant as -1, 0, or 1.
+    /// `Ordering` as -1, 0 or 1.
     LoadOrd {
         dst: u16,
         v: i64,
@@ -72,7 +61,7 @@ enum SOp {
         op: BinKind,
         to: u32,
     },
-    /// `recv.cmp(arg)` as -1, 0, or 1.
+    /// `recv.cmp(arg)` as -1, 0 or 1.
     Cmp {
         dst: u16,
         recv: u16,
@@ -83,9 +72,8 @@ enum SOp {
     },
 }
 
-/// What a register holds, for the build-time type check. The analysis is
-/// flow insensitive: a register used with two different kinds anywhere is
-/// `Mixed` and rejects the plan.
+/// Flow insensitive, a register used with 2 kinds anywhere is `Mixed` and
+/// rejects the plan.
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
     Unset,
@@ -129,8 +117,6 @@ pub(super) struct ScalarPlan {
     num_regs: usize,
 }
 
-/// Translate one bytecode op, or answer None when it falls outside the
-/// subset.
 fn translate_op(clo: &ClosureData, num_regs: usize, op: &Op) -> Option<SOp> {
     let chunk = &clo.chunk;
     let reg = |r: u16| (usize::from(r) < num_regs).then_some(r);
@@ -140,9 +126,8 @@ fn translate_op(clo: &ClosureData, num_regs: usize, op: &Op) -> Option<SOp> {
             v: *v,
         },
         Op::LoadUpvalue { dst, idx } => {
-            // Only an immutable plain int capture is a safe constant. A
-            // mutable cell could be shared with another task, and the
-            // generic path would read it per call.
+            // A mutable cell could change between calls, so only an immutable
+            // int capture is a safe constant.
             let Some(Upvalue::Value(Value::Int(v))) = clo.captured.get(*idx as usize) else {
                 return None;
             };
@@ -195,8 +180,7 @@ fn translate_op(clo: &ClosureData, num_regs: usize, op: &Op) -> Option<SOp> {
             base,
             argc,
         } if chunk.names[*name as usize].id == BuiltinId::Cmp && *argc == 1 => SOp::Cmp {
-            // A discarded destination stays `u16::MAX` and the eval skips
-            // the store, matching `set_opt`.
+            // A discarded destination stays `u16::MAX`, matching `set_opt`.
             dst: if *dst == u16::MAX { *dst } else { reg(*dst)? },
             recv: reg(*recv)?,
             arg: reg(*base)?,
@@ -217,15 +201,13 @@ fn translate_op(clo: &ClosureData, num_regs: usize, op: &Op) -> Option<SOp> {
 }
 
 impl ScalarPlan {
-    /// Translate a two-parameter closure into a comparator plan, or answer
-    /// None when any op, capture, or register type falls outside the subset.
+    /// None when any op, capture or register type falls outside the subset.
     pub(super) fn comparator(vm: &Vm, clo: &ClosureData) -> Option<ScalarPlan> {
         let chunk = &clo.chunk;
         if chunk.num_params != 2 {
             return None;
         }
-        // A script enum named `Ordering` would shadow the builtin constants
-        // this plan folds, so its presence rejects the plan outright.
+        // A script enum named `Ordering` would shadow the builtin constants.
         if vm
             .enums
             .iter()
@@ -244,9 +226,8 @@ impl ScalarPlan {
         Some(plan)
     }
 
-    /// The build-time type check: infer every register's kind to a fixpoint,
-    /// then require every use to match. This is what keeps a bool from
-    /// entering arithmetic and guarantees the returned value is an Ordering.
+    /// Infer every register's kind to a fixpoint, then require every use to
+    /// match, so the returned value is an `Ordering`.
     fn check_kinds(&self, num_params: usize) -> Option<()> {
         let mut kinds = vec![Kind::Unset; self.num_regs];
         kinds[..num_params].fill(Kind::Int);
@@ -309,8 +290,7 @@ impl ScalarPlan {
         Some(())
     }
 
-    /// Run the plan on one pair. None means the pair needs the generic
-    /// path: an arithmetic failure, or control flow ran off the end.
+    /// None means the pair needs the generic path.
     fn eval(&self, regs: &mut [i64], a: i64, b: i64) -> Option<Ordering> {
         regs.fill(0);
         regs[0] = a;
@@ -383,8 +363,8 @@ fn scalar_bin(op: BinKind, x: i64, y: i64) -> Option<i64> {
         BinKind::BitAnd => x & y,
         BinKind::BitOr => x | y,
         BinKind::BitXor => x ^ y,
-        // The checked forms mirror `i64_arith`, so a plan that overflows or
-        // divides by zero falls back and the generic path raises the error.
+        // Mirrors `i64_arith`, so an overflow falls back and the generic
+        // path raises the error.
         _ => i64_arith(op, x, y).ok()?,
     })
 }
@@ -401,9 +381,7 @@ fn compare_i64(op: BinKind, x: i64, y: i64) -> bool {
     }
 }
 
-/// Sort an all-int list through a specialized comparator, or answer None so
-/// the caller runs the generic path. A pair the plan cannot answer aborts
-/// the whole fast sort rather than guessing.
+/// A pair the plan cannot answer aborts the whole fast sort.
 pub(super) fn scalar_sort_by(vm: &Vm, list: &[Value], clo: &ClosureData) -> Option<Vec<Value>> {
     let plan = ScalarPlan::comparator(vm, clo)?;
     let mut ints = Vec::with_capacity(list.len());

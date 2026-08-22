@@ -1,6 +1,4 @@
-//! The `Command`, `Child`, and process output bridge. Children and their
-//! pipes are native handles, so a spawned process can be driven from
-//! concurrent tasks.
+//! The `Command` and `Child` bridge.
 
 use std::sync::Arc;
 
@@ -15,10 +13,8 @@ use super::native_methods;
 use super::std_bridge::path_like;
 use super::value::{StructData, Value};
 
-/// Build a real `Command` from a script `Command` value's fields. Every field
-/// that becomes an OS string goes through `path_like`, so a `Path` or `PathBuf`
-/// value contributes its path, not its struct debug form. `current_dir` was the
-/// sharp edge, a debug string there made every spawn fail with ENOENT.
+/// Every OS string field goes through `path_like`, a `PathBuf` debug string
+/// in `current_dir` once made every spawn fail with ENOENT.
 pub(super) fn build_command(s: &StructData) -> std::process::Command {
     let program = s.get("program").map(|v| path_like(&v)).unwrap_or_default();
     let mut cmd = std::process::Command::new(&program);
@@ -27,7 +23,6 @@ pub(super) fn build_command(s: &StructData) -> std::process::Command {
             cmd.arg(path_like(item));
         }
     }
-    // Unset builder fields hold Unit placeholders, see `Command::new`.
     match s.get("cwd") {
         Some(Value::Unit) | None => {}
         Some(cwd) => {
@@ -47,11 +42,9 @@ pub(super) fn build_command(s: &StructData) -> std::process::Command {
     cmd
 }
 
-/// Run a `Command` value once it has been fully built, returning an `Output`.
 pub(super) fn run_command(s: &StructData) -> Value {
-    // output() pipes by default but explicit stdio settings win, so an
-    // interactive child can keep the terminal while stdout is captured,
-    // matching the real std behavior.
+    // `output()` pipes by default but explicit stdio settings win, like real
+    // std.
     let mut cmd = build_command(s);
     cmd.stdin(stdio_or(s, "stdin", std::process::Stdio::null()));
     cmd.stdout(stdio_or(s, "stdout", std::process::Stdio::piped()));
@@ -62,8 +55,7 @@ pub(super) fn run_command(s: &StructData) -> Value {
     }
 }
 
-/// Run a `Command` value with `.status()`, which inherits the terminal by
-/// default just like real Rust, and return `Ok(ExitStatus)`.
+/// `.status()` inherits the terminal by default.
 pub(super) fn status_command(s: &StructData) -> Value {
     let mut cmd = build_command(s);
     cmd.stdin(stdio_for(s, "stdin"));
@@ -75,8 +67,7 @@ pub(super) fn status_command(s: &StructData) -> Value {
     }
 }
 
-/// Map a stored `Stdio` marker to a real `std::process::Stdio`, defaulting to
-/// inherit so a spawned child shares the terminal like a shell command.
+/// Defaults to inherit so a child shares the terminal.
 fn stdio_for(s: &StructData, key: &str) -> std::process::Stdio {
     stdio_or(s, key, std::process::Stdio::inherit())
 }
@@ -97,8 +88,7 @@ fn stdio_or(s: &StructData, key: &str, default: std::process::Stdio) -> std::pro
     }
 }
 
-/// The real `Stdio` behind an `Stdio::from(file)` marker. The handle is cloned,
-/// so the script's own `File` value stays usable after the child takes its copy.
+/// The handle is cloned, so the script's `File` stays usable.
 fn stdio_from_file(file: Option<Value>) -> Option<std::process::Stdio> {
     let Some(Value::Native(handle)) = file else {
         return None;
@@ -114,8 +104,6 @@ fn stdio_from_file(file: Option<Value>) -> Option<std::process::Stdio> {
         .map(std::process::Stdio::from)
 }
 
-/// Spawn a `Command`, returning a `Child` value whose stdin/stdout/stderr
-/// fields hold the piped ends as native handles.
 pub(super) fn spawn_command(s: &StructData) -> Value {
     let mut cmd = build_command(s);
     cmd.stdin(stdio_for(s, "stdin"));
@@ -144,10 +132,8 @@ pub(super) fn spawn_command(s: &StructData) -> Value {
         "Child",
         [
             ("handle".into(), Native::Child(child).wrap()),
-            // An alias of the stdin handle under a name no script can
-            // reach, `cargo check` rejects the field. `stdin.take()`
-            // empties the visible field for real, and the close on wait
-            // must still find the pipe, see `child_method`.
+            // A hidden alias of the stdin handle, so the close on wait still
+            // finds the pipe after `stdin.take()`, see `child_method`.
             (STDIN_PIPE.into(), stdin.clone()),
             ("stdin".into(), stdin),
             ("stdout".into(), stdout),
@@ -163,7 +149,6 @@ fn reader_value(r: impl std::io::Read + Send + 'static) -> Value {
     .wrap()
 }
 
-/// Build an `ExitStatus` value with `code` and `success`.
 pub(super) fn make_exit_status(status: std::process::ExitStatus) -> Value {
     Value::struct_of(
         "ExitStatus",
@@ -177,7 +162,6 @@ pub(super) fn make_exit_status(status: std::process::ExitStatus) -> Value {
     )
 }
 
-/// Build an `Output` value with `stdout`, `stderr`, and `status`.
 pub(super) fn make_output(out: std::process::Output) -> Value {
     Value::struct_of(
         "Output",
@@ -236,9 +220,7 @@ pub(super) fn command_method(recv: &Value, name: &MethodName, args: &[Value]) ->
             }
             cmd_value()
         }
-        // Rejected rather than stored when it is not an Stdio, because a value
-        // this does not understand used to be kept and then quietly ignored
-        // when the command was built.
+        // A non Stdio value used to be kept and quietly ignored.
         BuiltinId::Stdin | BuiltinId::Stdout | BuiltinId::Stderr => {
             let target = arg(args, 0)?;
             match &target {
@@ -268,13 +250,11 @@ fn command_envs(s: &StructData) -> super::value::Map {
     }
 }
 
-/// The hidden alias of the child's stdin handle, see `spawn_command`. A
-/// constant rather than a literal so the surface harvest, which reads every
-/// string in `child_method`, does not list it as a callable method.
+/// A constant rather than a literal so the surface harvest does not list it
+/// as a method.
 const STDIN_PIPE: &str = "stdin_pipe";
 
-/// Drop the real `ChildStdin` inside a shared handle, closing the pipe. Walks a
-/// `Some(Native)` wrapper from `child.stdin.take()`.
+/// Walks a `Some(Native)` wrapper from `child.stdin.take()`.
 fn close_child_stdin(v: &Value) {
     match v {
         Value::Native(h) => *h.lock() = Native::Taken,
@@ -288,18 +268,13 @@ fn close_child_stdin(v: &Value) {
     }
 }
 
-/// Methods on a spawned `Child`. Lifecycle calls delegate to the real child
-/// handle; `wait_with_output` reads any piped stdout/stderr to the end first.
 pub(super) fn child_method(recv: &Value, name: &MethodName, args: &mut [Value]) -> Result<Value> {
     let Value::Struct(s) = recv else {
         unreachable!()
     };
-    // Waiting on a child that was fed piped stdin must first close that pipe,
-    // or the child blocks forever on EOF. Real Rust closes it when the taken
-    // `ChildStdin` drops. The VM keeps every value alive in a register for the
-    // whole call, so close it through the shared handle instead. The hidden
-    // `stdin_pipe` alias reaches the pipe even after `stdin.take()` emptied
-    // the visible field.
+    // The stdin pipe must close before waiting or the child blocks on EOF.
+    // The VM keeps values alive in registers, so close it through the hidden
+    // alias.
     if matches!(name.id, BuiltinId::Wait | BuiltinId::WaitWithOutput) {
         if let Some(v) = s.get(STDIN_PIPE) {
             close_child_stdin(&v);
@@ -345,7 +320,6 @@ fn child_handle(s: &StructData) -> Result<Arc<Mutex<Native>>> {
     }
 }
 
-/// Read a child's piped stdout/stderr field to the end as a string.
 fn drain_child_pipe(s: &StructData, key: &str) -> String {
     let handle = match s.get(key) {
         Some(Value::Enum { data, .. }) => match data.lock().first().cloned() {

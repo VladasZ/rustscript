@@ -1,7 +1,5 @@
-//! `fold` hands its initial value through to the closure and the result, so
-//! a narrow integer init keeps its width. The campaign found the method
-//! dispatch flattening fold's arguments to plain i64, which made
-//! `leading_zeros` on the folded value count 64 bits instead of 32.
+//! A narrow `fold` init keeps its width. The dispatch once flattened it to
+//! i64, so `leading_zeros` counted 64 bits instead of 32.
 
 fn opaque(v: i64) -> i64 {
     v

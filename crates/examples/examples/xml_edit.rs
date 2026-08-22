@@ -1,5 +1,4 @@
-//! Parse an XML document with xmltree, edit the tree, and serialize it back.
-//! Namespaces, attributes, and node order survive the round trip.
+//! Namespaces, attributes and node order must survive the round trip.
 
 use xmltree::{Element, XMLNode};
 
