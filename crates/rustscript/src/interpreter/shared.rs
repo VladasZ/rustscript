@@ -64,6 +64,7 @@ pub(super) enum NumOut {
     Int(i64),
     Float(f64),
     Bool(bool),
+    Bytes(Vec<u8>),
     SomeInt(i64),
     SomeFloat(f64),
     Nothing,
@@ -175,6 +176,31 @@ pub(super) fn num_core(recv: Num, name: BuiltinId, args: &impl Args) -> Result<O
                 .partial_cmp(&float_arg(args, 0)?)
                 .unwrap_or(Ordering::Equal),
         ),
+        _ => return float_extra(recv, name, args),
+    }))
+}
+
+/// Trig, total ordering and byte conversions on f64. Split out of `num_core` so that
+/// function stays inside the line limit.
+fn float_extra(recv: Num, name: BuiltinId, args: &impl Args) -> Result<Option<NumOut>> {
+    let Num::Float(f) = recv else {
+        return Ok(None);
+    };
+    Ok(Some(match name {
+        BuiltinId::Sin => NumOut::Float(f.sin()),
+        BuiltinId::Cos => NumOut::Float(f.cos()),
+        BuiltinId::Tan => NumOut::Float(f.tan()),
+        BuiltinId::Asin => NumOut::Float(f.asin()),
+        BuiltinId::Acos => NumOut::Float(f.acos()),
+        BuiltinId::Atan => NumOut::Float(f.atan()),
+        BuiltinId::Atan2 => NumOut::Float(f.atan2(float_arg(args, 0)?)),
+        BuiltinId::Sinh => NumOut::Float(f.sinh()),
+        BuiltinId::Cosh => NumOut::Float(f.cosh()),
+        BuiltinId::Tanh => NumOut::Float(f.tanh()),
+        BuiltinId::TotalCmp => NumOut::Ordering(f.total_cmp(&float_arg(args, 0)?)),
+        BuiltinId::ToLeBytes => NumOut::Bytes(f.to_le_bytes().to_vec()),
+        BuiltinId::ToBeBytes => NumOut::Bytes(f.to_be_bytes().to_vec()),
+        BuiltinId::ToNeBytes => NumOut::Bytes(f.to_ne_bytes().to_vec()),
         _ => return Ok(None),
     }))
 }
@@ -182,6 +208,8 @@ pub(super) fn num_core(recv: Num, name: BuiltinId, args: &impl Args) -> Result<O
 pub(super) enum F32Out {
     Val(f32),
     Bool(bool),
+    Bytes(Vec<u8>),
+    Ordering(Ordering),
     SomeOrdering(Ordering),
 }
 
@@ -204,6 +232,20 @@ pub(super) fn f32_core(recv: f32, name: BuiltinId, args: &impl Args) -> Result<O
         BuiltinId::ToRadians => F32Out::Val(recv.to_radians()),
         BuiltinId::RoundTiesEven => F32Out::Val(recv.round_ties_even()),
         BuiltinId::Hypot => F32Out::Val(recv.hypot(arg(0)?)),
+        BuiltinId::Sin => F32Out::Val(recv.sin()),
+        BuiltinId::Cos => F32Out::Val(recv.cos()),
+        BuiltinId::Tan => F32Out::Val(recv.tan()),
+        BuiltinId::Asin => F32Out::Val(recv.asin()),
+        BuiltinId::Acos => F32Out::Val(recv.acos()),
+        BuiltinId::Atan => F32Out::Val(recv.atan()),
+        BuiltinId::Atan2 => F32Out::Val(recv.atan2(arg(0)?)),
+        BuiltinId::Sinh => F32Out::Val(recv.sinh()),
+        BuiltinId::Cosh => F32Out::Val(recv.cosh()),
+        BuiltinId::Tanh => F32Out::Val(recv.tanh()),
+        BuiltinId::TotalCmp => F32Out::Ordering(recv.total_cmp(&arg(0)?)),
+        BuiltinId::ToLeBytes => F32Out::Bytes(recv.to_le_bytes().to_vec()),
+        BuiltinId::ToBeBytes => F32Out::Bytes(recv.to_be_bytes().to_vec()),
+        BuiltinId::ToNeBytes => F32Out::Bytes(recv.to_ne_bytes().to_vec()),
         BuiltinId::Copysign => F32Out::Val(recv.copysign(arg(0)?)),
         BuiltinId::Midpoint => F32Out::Val(recv.midpoint(arg(0)?)),
         BuiltinId::RemEuclid => F32Out::Val(recv.rem_euclid(arg(0)?)),

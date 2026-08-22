@@ -100,6 +100,7 @@ impl Infer<'_, '_> {
             }
             "is_nan" | "is_finite" | "is_infinite" | "is_sign_negative" | "is_sign_positive"
             | "is_normal" => Ty::Bool,
+            "to_be_bytes" | "to_le_bytes" | "to_ne_bytes" => Ty::vec(Ty::Int(IntWidth::U8)),
             "to_bits" => Ty::Int(if matches!(recv, Ty::F32) {
                 IntWidth::U32
             } else {

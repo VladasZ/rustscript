@@ -2,6 +2,8 @@
 //! bodies are in `vm_step`.
 
 use std::collections::HashMap;
+
+use rustc_hash::FxHashMap;
 use std::mem::{replace, take};
 use std::sync::Arc;
 
@@ -15,7 +17,7 @@ use super::impls::ImplTable;
 use super::native::Native;
 use super::typeir::TypeIr;
 use super::value::{ClosureData, StructShape, Upvalue, Value};
-use super::vm_step::{Flow, StepCtx, step};
+use super::vm_step::{CallReq, Flow, StepCtx, step};
 use super::vm_support::{FrameSite, trace_error};
 
 pub(super) const MAX_CALL_DEPTH: usize = 100_000;
@@ -130,6 +132,72 @@ pub(super) fn empty_type_env() -> TypeEnv {
     Arc::from(Vec::new())
 }
 
+/// How a run of ops in one frame ended.
+enum Exit {
+    Ret(Value),
+    Call(CallReq),
+}
+
+/// Where execution is, the frame being run.
+struct Cursor {
+    chunk: Arc<Chunk>,
+    closure: Option<Arc<ClosureData>>,
+    type_env: TypeEnv,
+    base: usize,
+    ip: usize,
+}
+
+/// Sets up the callee's registers and returns the caller's frame to come back to.
+fn enter(at: &mut Cursor, stack: &mut Vec<Value>, req: CallReq) -> Frame {
+    let nbase = at.base + at.chunk.num_regs;
+    let need = nbase + req.chunk.num_regs.max(req.chunk.num_params);
+    if stack.len() < need {
+        stack.resize(need, Value::Unit);
+    }
+    for i in 0..req.argc {
+        stack[nbase + i] = take(&mut stack[at.base + req.abase + i]);
+    }
+    for slot in &mut stack[nbase + req.argc..need] {
+        *slot = Value::Unit;
+    }
+    let frame = Frame {
+        chunk: replace(&mut at.chunk, req.chunk),
+        closure: swap_option(&mut at.closure, req.closure),
+        ip: at.ip + 1,
+        base: at.base,
+        dst: req.dst,
+        abase: u16::try_from(req.abase).expect("register index fits u16"),
+        argc: u16::try_from(req.argc).expect("argument count fits u16"),
+        type_env: replace(&mut at.type_env, req.type_env),
+    };
+    at.base = nbase;
+    at.ip = 0;
+    frame
+}
+
+/// Comes back to `frame` with the callee's result in its destination register.
+fn leave(
+    at: &mut Cursor,
+    local_cells: &mut FxHashMap<usize, Arc<Mutex<Value>>>,
+    stack: &mut [Value],
+    frame: Frame,
+    result: Value,
+) {
+    let callee_base = at.base;
+    let callee_end = callee_base + at.chunk.num_regs;
+    local_cells.retain(|slot, _| *slot < callee_base || *slot >= callee_end);
+    at.chunk = frame.chunk;
+    at.closure = frame.closure;
+    at.type_env = frame.type_env;
+    at.ip = frame.ip;
+    at.base = frame.base;
+    // the `&mut` argument writeback picks these up from the caller's arg window
+    for i in 0..frame.argc as usize {
+        stack[at.base + frame.abase as usize + i] = take(&mut stack[callee_base + i]);
+    }
+    stack[at.base + frame.dst as usize] = result;
+}
+
 struct Frame {
     chunk: Arc<Chunk>,
     closure: Option<Arc<ClosureData>>,
@@ -171,12 +239,21 @@ impl Vm {
         let mut stack = STACK_POOL
             .with(|pool| pool.borrow_mut().pop())
             .unwrap_or_default();
-        stack.resize(chunk.num_regs.max(chunk.num_params), Value::Unit);
-        for (i, a) in args.iter().enumerate() {
-            stack[i] = a.clone();
+        let regs = chunk.num_regs.max(chunk.num_params);
+        // a pooled buffer comes back at its old length with every heap handle released
+        if stack.len() < regs {
+            stack.resize(regs, Value::Unit);
+        }
+        for (slot, a) in stack.iter_mut().zip(args) {
+            *slot = a.clone();
+        }
+        for slot in &mut stack[args.len()..regs] {
+            *slot = Value::Unit;
         }
         let result = self.exec(chunk, &mut stack, upvalues);
-        stack.clear();
+        for slot in &mut stack {
+            slot.release();
+        }
         STACK_POOL.with(|pool| {
             let mut pool = pool.borrow_mut();
             if pool.len() < MAX_POOLED_STACKS {
@@ -193,87 +270,37 @@ impl Vm {
         entry_upvalues: &[Upvalue],
     ) -> Result<Value> {
         let mut frames: Vec<Frame> = Vec::new();
-        let mut local_cells: HashMap<usize, Arc<Mutex<Value>>> = HashMap::new();
-        let mut cur = entry.clone();
-        let mut cur_clo: Option<Arc<ClosureData>> = None;
-        let mut cur_tenv: TypeEnv = empty_type_env();
-        let mut base = 0usize;
-        let mut ip = 0usize;
-
+        let mut local_cells: FxHashMap<usize, Arc<Mutex<Value>>> = FxHashMap::default();
+        let mut at = Cursor {
+            chunk: entry.clone(),
+            closure: None,
+            type_env: empty_type_env(),
+            base: 0,
+            ip: 0,
+        };
         // One immediately called closure, so an error can be annotated with the call chain still in
-        // `frames` and the failing op in `cur` and `ip`.
+        // `frames` and the failing op in `at`.
         let result = (|| -> Result<Value> {
             loop {
-                let flow = match cur.code.get(ip) {
-                    None => Flow::Ret(Value::Unit),
-                    Some(op) => step(
-                        &mut StepCtx {
-                            vm: self,
-                            cur: &cur,
-                            cur_clo: &cur_clo,
-                            cur_tenv: &cur_tenv,
-                            entry_upvalues,
-                            local_cells: &mut local_cells,
-                            stack: &mut *stack,
-                            base,
-                            ip,
-                        },
-                        op,
-                    )?,
-                };
-                match flow {
-                    Flow::Next => ip += 1,
-                    Flow::Jump(to) => ip = to,
-                    Flow::Ret(v) => {
-                        let Some(f) = frames.pop() else { return Ok(v) };
-                        let callee_base = base;
-                        let callee_end = callee_base + cur.num_regs;
-                        local_cells.retain(|slot, _| *slot < callee_base || *slot >= callee_end);
-                        cur = f.chunk;
-                        cur_clo = f.closure;
-                        cur_tenv = f.type_env;
-                        ip = f.ip;
-                        // the `&mut` argument writeback picks these up from the caller's arg window
-                        base = f.base;
-                        for i in 0..f.argc as usize {
-                            stack[base + f.abase as usize + i] = take(&mut stack[callee_base + i]);
-                        }
-                        stack[base + f.dst as usize] = v;
+                match self.run_frame(&mut at, &mut local_cells, stack, entry_upvalues)? {
+                    Exit::Ret(v) => {
+                        let Some(frame) = frames.pop() else {
+                            return Ok(v);
+                        };
+                        leave(&mut at, &mut local_cells, stack, frame, v);
                     }
-                    Flow::Call(req) => {
+                    Exit::Call(req) => {
                         if frames.len() >= MAX_CALL_DEPTH {
                             bail!("stack overflow: call depth exceeded {MAX_CALL_DEPTH}");
                         }
-                        let nbase = base + cur.num_regs;
-                        let need = nbase + req.chunk.num_regs.max(req.chunk.num_params);
-                        if stack.len() < need {
-                            stack.resize(need, Value::Unit);
-                        }
-                        for i in 0..req.argc {
-                            stack[nbase + i] = take(&mut stack[base + req.abase + i]);
-                        }
-                        for slot in &mut stack[nbase + req.argc..need] {
-                            *slot = Value::Unit;
-                        }
-                        frames.push(Frame {
-                            chunk: replace(&mut cur, req.chunk),
-                            closure: swap_option(&mut cur_clo, req.closure),
-                            ip: ip + 1,
-                            base,
-                            dst: req.dst,
-                            abase: u16::try_from(req.abase).expect("register index fits u16"),
-                            argc: u16::try_from(req.argc).expect("argument count fits u16"),
-                            type_env: replace(&mut cur_tenv, req.type_env),
-                        });
-                        base = nbase;
-                        ip = 0;
+                        frames.push(enter(&mut at, stack, req));
                     }
                 }
             }
         })();
         result.map_err(|e| {
-            self.unwind_drops(&cur, base, &frames, stack);
-            let trace = std::iter::once(frame_line(&cur, ip)).chain(
+            self.unwind_drops(&at.chunk, at.base, &frames, stack);
+            let trace = std::iter::once(frame_line(&at.chunk, at.ip)).chain(
                 frames
                     .iter()
                     .rev()
@@ -281,6 +308,48 @@ impl Vm {
             );
             trace_error(e, trace)
         })
+    }
+
+    /// Runs the ops of the current frame until it returns or calls. One context serves the whole
+    /// run, it is rebuilt only when the frame changes.
+    fn run_frame(
+        self: &Arc<Self>,
+        at: &mut Cursor,
+        local_cells: &mut FxHashMap<usize, Arc<Mutex<Value>>>,
+        stack: &mut Vec<Value>,
+        entry_upvalues: &[Upvalue],
+    ) -> Result<Exit> {
+        let mut ctx = StepCtx {
+            vm: self,
+            cur: &at.chunk,
+            cur_clo: &at.closure,
+            cur_tenv: &at.type_env,
+            entry_upvalues,
+            local_cells,
+            stack,
+            base: at.base,
+            ip: at.ip,
+            ret: Value::Unit,
+            call: None,
+        };
+        let exit = loop {
+            let Some(op) = ctx.cur.code.get(ctx.ip) else {
+                break Ok(Exit::Ret(Value::Unit));
+            };
+            match step(&mut ctx, op) {
+                Ok(Flow::Next) => ctx.ip += 1,
+                Ok(Flow::Jump(to)) => ctx.ip = to,
+                Ok(Flow::Ret) => break Ok(Exit::Ret(take(&mut ctx.ret))),
+                Ok(Flow::Call) => {
+                    break Ok(Exit::Call(
+                        ctx.call.take().expect("a call op filled the request"),
+                    ));
+                }
+                Err(e) => break Err(e),
+            }
+        };
+        at.ip = ctx.ip;
+        exit
     }
 
     /// Innermost frame first and highest register first, like real unwinding. A panic inside a drop is

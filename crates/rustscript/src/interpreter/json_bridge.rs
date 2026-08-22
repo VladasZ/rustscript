@@ -14,7 +14,7 @@ use super::bytecode::PathId;
 use super::enum_def::{EnumKind, OK, SOME};
 use super::numeric::IntWidth;
 use super::typeir::{TypeIr, lower_type};
-use super::value::{MapKey, RsStr, StructShape, Value};
+use super::value::{MapKey, MapStore, RsStr, StructShape, Value};
 use super::vm::Vm;
 
 /// precomputed at load
@@ -168,7 +168,7 @@ impl Vm {
         self.coerce_value(value, ty)
     }
 
-    fn struct_from_map(&self, info: &StructInfo, map: &indexmap::IndexMap<MapKey, Value>) -> Value {
+    fn struct_from_map(&self, info: &StructInfo, map: &MapStore) -> Value {
         let mut values = Vec::with_capacity(info.coerce.len());
         for (fname, ty) in info.shape.fields.iter().zip(&info.coerce) {
             let raw = map

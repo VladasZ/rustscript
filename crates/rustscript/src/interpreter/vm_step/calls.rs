@@ -35,11 +35,11 @@ pub(super) fn call_fn(
             .map(|(name, ty)| (name.clone(), ty.clone()))
             .collect()
     };
-    request_call(callee, None, dst, abase, argc, type_env)
+    request_call(ctx, callee, None, dst, abase, argc, type_env)
 }
 
 pub(super) fn call_value(
-    ctx: &StepCtx,
+    ctx: &mut StepCtx,
     dst: u16,
     callee: u16,
     abase: u16,
@@ -50,11 +50,12 @@ pub(super) fn call_value(
         other => bail!("cannot call {}", other.type_name()),
     };
     let chunk = clo.chunk.clone();
-    request_call(chunk, Some(clo), dst, abase, argc, empty_type_env())
+    request_call(ctx, chunk, Some(clo), dst, abase, argc, empty_type_env())
 }
 
 /// The arg count is checked here, where the error can name the callee.
 pub(super) fn request_call(
+    ctx: &mut StepCtx,
     chunk: Arc<Chunk>,
     closure: Option<Arc<ClosureData>>,
     dst: u16,
@@ -77,14 +78,15 @@ pub(super) fn request_call(
             argc
         );
     }
-    Ok(Flow::Call(CallReq {
+    ctx.call = Some(CallReq {
         chunk,
         closure,
         dst,
         abase: abase as usize,
         argc: argc as usize,
         type_env,
-    }))
+    });
+    Ok(Flow::Call)
 }
 
 pub(super) fn call_path(

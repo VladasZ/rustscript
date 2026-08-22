@@ -2,7 +2,7 @@
 //! live in `methods`, `vecmap`, `higher_order` and `iterator`.
 
 use num_traits::AsPrimitive;
-use std::f64::consts::PI;
+use std::f64::consts::{E, PI, TAU};
 use std::mem::take;
 use std::sync::Arc;
 
@@ -15,7 +15,7 @@ use super::enum_def::EnumKind;
 use super::methods::{self};
 use super::native::Native;
 use super::shared::Args;
-use super::value::{ClosureData, Value};
+use super::value::{ClosureData, Map, MapKey, Value};
 use super::vm::Vm;
 
 impl Vm {
@@ -501,13 +501,24 @@ impl Vm {
                 Self::bridge_struct_method(recv, st, name, args)
             }
             Value::Native(native) => {
-                if matches!(&*native.lock(), Native::Iterator(_))
-                    && let Some(v) = self.iterator_method(native, name, args)?
-                {
-                    return Ok(v);
-                }
-                if let Some(res) = super::http::http_method(recv, name, args) {
-                    return res;
+                // one lock to pick the family, the families lock again on their own
+                let family = match &*native.lock() {
+                    Native::Iterator(_) => NativeFamily::Iterator,
+                    Native::HttpClient(_) | Native::BlockingHttpClient(_) => NativeFamily::Http,
+                    _ => NativeFamily::Other,
+                };
+                match family {
+                    NativeFamily::Iterator => {
+                        if let Some(v) = self.iterator_method(native, name, args)? {
+                            return Ok(v);
+                        }
+                    }
+                    NativeFamily::Http => {
+                        if let Some(res) = super::http::http_method(recv, name, args) {
+                            return res;
+                        }
+                    }
+                    NativeFamily::Other | NativeFamily::Entry(..) | NativeFamily::Regex => {}
                 }
                 Self::native_method(native, name, args)
             }
@@ -560,26 +571,47 @@ impl Vm {
         name: &MethodName,
         args: &mut [Value],
     ) -> Result<Value> {
-        let entry = match &*native.lock() {
-            Native::Entry { map, key } => Some((map.clone(), key.clone())),
-            _ => None,
+        // The io family walks a chain of handle locks. A regex match in a loop would pay all of
+        // them for `start`, so the value like handles route on one lock here.
+        let family = match &*native.lock() {
+            Native::Entry { map, key } => NativeFamily::Entry(map.clone(), key.clone()),
+            Native::Instant(instant) if name.id == BuiltinId::Elapsed => {
+                return Ok(super::std_bridge::make_duration(instant.elapsed()));
+            }
+            Native::Regex(_) | Native::RegexMatch(_) | Native::RegexCaptures(_) => {
+                NativeFamily::Regex
+            }
+            _ => NativeFamily::Other,
         };
-        if let Some((map, key)) = entry {
-            return methods::entry_method(&map, &key, name, args);
-        }
-        if let Native::Instant(instant) = &*native.lock()
-            && name.id == BuiltinId::Elapsed
-        {
-            return Ok(super::std_bridge::make_duration(instant.elapsed()));
-        }
-        if let Some(v) = super::native_methods::native_method(native, name, args)? {
-            return Ok(v);
-        }
-        if let Some(v) = super::regex_bridge::regex_native_method(native, name, args)? {
-            return Ok(v);
+        match family {
+            NativeFamily::Entry(map, key) => {
+                return methods::entry_method(&map, &key, name, args);
+            }
+            NativeFamily::Regex => {
+                if let Some(v) = super::regex_bridge::regex_native_method(native, name, args)? {
+                    return Ok(v);
+                }
+            }
+            NativeFamily::Other => {
+                if let Some(v) = super::native_methods::native_method(native, name, args)? {
+                    return Ok(v);
+                }
+            }
+            NativeFamily::Iterator | NativeFamily::Http => {
+                unreachable!("picked in method_by_receiver")
+            }
         }
         methods::generic_method(&Value::Native(native.clone()), name, args)
     }
+}
+
+/// Which handler a `Native` receiver routes to, decided under one lock.
+enum NativeFamily {
+    Iterator,
+    Http,
+    Entry(Map, MapKey),
+    Regex,
+    Other,
 }
 
 // free helpers
@@ -591,6 +623,8 @@ fn path_constant(id: PathId) -> Option<Value> {
         // a json null is None, same mapping as the parser
         PathId::ValueNull => return Some(Value::none()),
         PathId::ConstsPi => return Some(Value::Float(PI)),
+        PathId::ConstsTau => return Some(Value::Float(TAU)),
+        PathId::ConstsE => return Some(Value::Float(E)),
         PathId::ConstsOs => std::env::consts::OS,
         PathId::ConstsArch => std::env::consts::ARCH,
         PathId::ConstsFamily => std::env::consts::FAMILY,

@@ -3,6 +3,7 @@ accept
 access
 accessed
 account_name
+acos
 add_modifier
 all
 ancestors
@@ -41,6 +42,9 @@ as_string
 as_u16
 as_u64
 as_usize
+asin
+atan
+atan2
 basic_auth
 bearer_auth
 bg
@@ -115,6 +119,8 @@ cookie_store
 copied
 copy_from_slice mut
 copysign
+cos
+cosh
 count
 count_ones
 count_zeros
@@ -461,6 +467,8 @@ set_value
 shuffle mut
 shutdown
 signum
+sin
+sinh
 skip
 skip_while
 sort mut
@@ -507,6 +515,8 @@ sync_all
 sync_data
 take mut
 take_while
+tan
+tanh
 text
 then
 then_some
@@ -532,6 +542,7 @@ to_string
 to_string_lossy
 to_uppercase
 to_vec
+total_cmp
 trailing_ones
 trailing_zeros
 trim

@@ -14,7 +14,10 @@ use crate::interpreter::value::Value;
 pub(super) fn try_op(ctx: &mut StepCtx, dst: u16, src: u16, conv: u16) -> Result<Flow> {
     Ok(match ops::eval_try(ctx.get(src).clone())? {
         Ok(v) => ctx.set(dst, v),
-        Err(early) => Flow::Ret(convert_early(ctx, early, conv)?),
+        Err(early) => {
+            ctx.ret = convert_early(ctx, early, conv)?;
+            Flow::Ret
+        }
     })
 }
 
@@ -136,7 +139,10 @@ pub(super) fn macro_call(ctx: &mut StepCtx, kind: MacroKind, dst: u16, spec: u16
         }
         MacroKind::Panic => bail!("{text}"),
         MacroKind::Anyhow => ctx.set(dst, Value::err(Value::str(text))),
-        MacroKind::Bail => Flow::Ret(Value::err(Value::str(text))),
+        MacroKind::Bail => {
+            ctx.ret = Value::err(Value::str(text));
+            Flow::Ret
+        }
     })
 }
 

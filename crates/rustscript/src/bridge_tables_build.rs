@@ -24,6 +24,7 @@ pub const BRIDGES: &[Bridge] = &[
     b("shared.rs", "str_core", "Str"),
     b("shared.rs", "color_core", "Str"),
     b("shared.rs", "num_core", "*"),
+    b("shared.rs", "float_extra", "*"),
     b("shared.rs", "char_method", "Char"),
     b("shared.rs", "regex_core", "Regex"),
     b("shared.rs", "match_core", "Match"),
