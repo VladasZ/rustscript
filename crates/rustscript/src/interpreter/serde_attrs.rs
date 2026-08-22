@@ -1,14 +1,11 @@
-//! Readers for the serde attributes the interpreter honors,
 //! `#[serde(rename = "..")]` and `#[serde(rename_all = "..")]`.
 
-/// Read a field's `#[serde(rename = "..")]` value, if present.
 pub(super) fn serde_rename(field: &syn::Field) -> Option<String> {
     let mut renamed = None;
     for attr in &field.attrs {
         if !attr.path().is_ident("serde") {
             continue;
         }
-        // parse_nested_meta walks the `serde(...)` list, e.g. `rename = "x"`.
         if attr
             .parse_nested_meta(|meta| {
                 if meta.path.is_ident("rename")
@@ -27,7 +24,6 @@ pub(super) fn serde_rename(field: &syn::Field) -> Option<String> {
     renamed
 }
 
-/// A container-level `#[serde(rename_all = "..")]` casing rule.
 #[derive(Clone, Copy)]
 pub(super) enum RenameRule {
     Lower,
@@ -40,7 +36,6 @@ pub(super) enum RenameRule {
     ScreamingKebab,
 }
 
-/// Read a struct's `#[serde(rename_all = "..")]` rule, if present.
 pub(super) fn serde_rename_all(attrs: &[syn::Attribute]) -> Option<RenameRule> {
     let mut rule = None;
     for attr in attrs {
@@ -80,8 +75,7 @@ impl RenameRule {
         })
     }
 
-    /// Apply to a field name, which is `snake_case` in the source, following
-    /// serde's field rules.
+    /// Following serde's field rules.
     pub(super) fn apply(self, field: &str) -> String {
         match self {
             RenameRule::Lower | RenameRule::Snake => field.to_string(),

@@ -1,6 +1,4 @@
-//! Statement generation: bindings in every annotation form, closures, loops
-//! with `break` and `continue`, compound assignment, in place mutation,
-//! borrowing helpers, and the formatted observations.
+//! Statement generation.
 
 use std::collections::BTreeSet;
 
@@ -13,8 +11,7 @@ use crate::lang::stmt::{Ann, ClosureSource, MutOp, PrintForm, Stmt};
 use crate::lang::synth::{BindKind, Binding, Generator, MAX_EXPR_DEPTH};
 use crate::lang::ty::Ty;
 
-/// How a binding states its type, when it is a collection or number fed by
-/// a pipe, or a user type fed by a conversion.
+/// How a binding states its type.
 enum Route {
     Plain,
     BareLet,
@@ -24,7 +21,6 @@ enum Route {
 }
 
 impl Generator<'_> {
-    /// One `let`, in one of the annotation forms.
     pub(super) fn binding_stmt(&mut self) -> Stmt {
         if self.chance(0.12) {
             return self.closure_stmt();
@@ -63,13 +59,13 @@ impl Generator<'_> {
                 let ann = self.ann_for(&expr);
                 (expr, ann)
             }
-            // A bare `collect` or `sum` whose type only the annotation states.
+            // Only the annotation states the type.
             Route::BareLet => (
                 self.pipe_collect(&ty, Site::Bare, MAX_EXPR_DEPTH)
                     .unwrap_or_else(|| self.expr(&ty, MAX_EXPR_DEPTH)),
                 Ann::Typed,
             ),
-            // A call of a helper whose return type states it.
+            // The helper's return type states it.
             Route::Helper => {
                 let expr = if let Some((fn_name, params)) = self.helper_fn(&ty) {
                     self.fn_call(fn_name, &params, &ty, MAX_EXPR_DEPTH - 1)
@@ -105,9 +101,8 @@ impl Generator<'_> {
         }
     }
 
-    /// An unannotated `let` is only legal when the initializer pins its own
-    /// concrete type. A bare literal does not, and the local then stays an
-    /// ambiguous `{integer}` or `{float}` that no inherent method can use.
+    /// An unannotated `let` needs an initializer that pins its type, a bare
+    /// literal leaves an `{integer}` no inherent method can use.
     fn ann_for(&mut self, expr: &Expr) -> Ann {
         let states = expr.states_concrete_ty();
         if states && self.chance(0.4) {
@@ -138,10 +133,8 @@ impl Generator<'_> {
         }
     }
 
-    /// An existing binding of exactly this type, for a clone-initialized
-    /// `let`. Mutations that later hit the original or the clone must stay
-    /// private to the binding they hit, the copy-on-write regression the
-    /// aliasing value model once had.
+    /// For a clone initialized `let`. Later mutations must stay private to
+    /// the binding they hit, the copy on write regression.
     fn clone_source(&mut self, ty: &Ty) -> Option<Expr> {
         let candidates = self.locals_of(ty);
         if candidates.is_empty() {
@@ -155,8 +148,6 @@ impl Generator<'_> {
 
     // -- closures -------------------------------------------------------------
 
-    /// A closure bound by `let`: a literal over its parameters, a mutating
-    /// one over a captured integer, or one made by a factory function.
     fn closure_stmt(&mut self) -> Stmt {
         let name = self.fresh("diff_cl");
         if self.chance(0.25) {
@@ -205,9 +196,8 @@ impl Generator<'_> {
             });
             (ret, body)
         };
-        // A `move` closure takes ownership of every non `Copy` local it names,
-        // so those locals are gone for the rest of the block and must leave
-        // the scope. Reading one afterwards is a use of a moved value.
+        // A `move` closure owns every non `Copy` local it names, so those
+        // leave the scope.
         if capture_move {
             let moved: Vec<String> = self
                 .scope
@@ -219,8 +209,8 @@ impl Generator<'_> {
             self.scope.retain(|binding| !moved.contains(&binding.name));
         }
         let param_tys: Vec<Ty> = params.iter().map(|(_, ty)| ty.clone()).collect();
-        // The calls run while a borrowing closure still holds the counter,
-        // so their arguments must not read it.
+        // The closure still holds the counter, so the arguments must not read
+        // it.
         let hidden = match &body {
             Expr::Block { stmts, .. } => stmts.iter().flat_map(Stmt::declared_targets).collect(),
             _ => Vec::new(),
@@ -237,10 +227,8 @@ impl Generator<'_> {
             .collect();
         let calls = self.closure_calls(&name, &param_tys, &ret);
         self.scope.extend(removed);
-        // A closure that borrows a binding mutably is called right after its
-        // definition and never again, so the borrow ends there. A `move`
-        // closure owns its copy and a pure closure captures nothing, both
-        // stay callable for the rest of the block.
+        // A mutably borrowing closure is called right after its definition
+        // and never again. `move` and pure closures stay callable.
         if capture_move || !mutates {
             self.scope.push(Binding {
                 name: name.clone(),
@@ -264,7 +252,6 @@ impl Generator<'_> {
         }
     }
 
-    /// A closure made by a factory helper over an integer type.
     fn factory_closure(&mut self, name: String) -> Stmt {
         let ty = Ty::Int(self.int_width());
         let fn_name = self.factory_fn(&ty);
@@ -286,9 +273,7 @@ impl Generator<'_> {
     }
 
     /// The calls printed right after a closure binding. A closure over its
-    /// own return type also goes through the generic apply helper, which is
-    /// the one place such a closure is reliably in scope with a matching
-    /// wanted type.
+    /// own return type also goes through the apply helper.
     fn closure_calls(&mut self, name: &str, params: &[Ty], ret: &Ty) -> Vec<Expr> {
         let count = self.rng.random_range(1..=3);
         let applies = params.len() == 1 && params[0] == *ret;
@@ -316,9 +301,6 @@ impl Generator<'_> {
 
     // -- mutations ------------------------------------------------------------
 
-    /// A reassignment, a compound assignment, a branch, a loop, an in-place
-    /// collection mutation, an accumulation loop, an `iter_mut` rewrite, a
-    /// write through a `&mut` helper, or an observation.
     pub(super) fn mutation(&mut self) -> Stmt {
         match self.rng.random_range(0..12) {
             0 => self.assign_stmt(),
@@ -412,8 +394,7 @@ impl Generator<'_> {
     fn for_stmt(&mut self) -> Stmt {
         let count = self.rng.random_range(0..=3);
         let body = self.loop_body();
-        // The counter is never read, so it binds to `_` rather than a
-        // name that would make every generated program warn.
+        // The counter is never read, a name would make every program warn.
         Stmt::ForRange {
             var: "_".to_string(),
             count,
@@ -456,9 +437,8 @@ impl Generator<'_> {
         Stmt::Return { condition, value }
     }
 
-    /// A nested block writes to existing bindings and prints, but declares
-    /// nothing, so every name stays live for the whole program and the reducer
-    /// never has to reason about shadowing.
+    /// A nested block declares nothing, so the reducer never has to reason
+    /// about shadowing.
     pub(super) fn nested_body(&mut self) -> Vec<Stmt> {
         let count = self.rng.random_range(1..=2);
         let mut body = Vec::new();
@@ -485,9 +465,8 @@ impl Generator<'_> {
         body
     }
 
-    /// Generate a mutation-op body with `name` hidden from scope. An
-    /// `entry()` chain holds a mutable borrow of the map while its arguments
-    /// evaluate, so an argument reading the same binding is a borrow error.
+    /// `name` is hidden because an `entry()` chain holds the map while its
+    /// arguments evaluate.
     fn op_without(&mut self, name: &str, build: impl FnOnce(&mut Self) -> MutOp) -> MutOp {
         let index = self.scope.iter().position(|binding| binding.name == name);
         let removed = index.map(|found| self.scope.remove(found));
@@ -498,7 +477,6 @@ impl Generator<'_> {
         op
     }
 
-    /// An in-place mutation of a collection, string, or option binding.
     fn collection_mutation(&mut self) -> Option<Stmt> {
         let (name, ty) = self.pick_mutable()?;
         let op = match &ty {
@@ -519,8 +497,8 @@ impl Generator<'_> {
                     8 => {
                         let bind = self.fresh("diff_r");
                         let locals = [(bind.clone(), elem.clone())];
-                        // `retain` borrows the vec mutably for the whole
-                        // call, so the predicate must not read it.
+                        // `retain` holds the vec, so the predicate must not
+                        // read it.
                         let pred = self.without_binding(&name, |inner| {
                             inner.closure_body(|inner| {
                                 inner.with_locals(&locals, |inner| inner.expr(&Ty::Bool, 1))
@@ -582,9 +560,8 @@ impl Generator<'_> {
         Some(Stmt::Mutate { name, op })
     }
 
-    /// `for item in vec { accumulate into collection }`: the word-count shape
-    /// for maps, plain feeding for vecs and sets. The source is always a vec,
-    /// so iteration order is defined.
+    /// `for item in vec { accumulate into collection }`. The source is a vec,
+    /// so order is defined.
     fn accumulation_loop(&mut self) -> Option<Stmt> {
         let (target, ty) = self.pick_collection()?;
         let var = self.fresh("diff_item");
@@ -663,8 +640,7 @@ impl Generator<'_> {
         }
         let (name, elem) = self.pick(&vecs).clone();
         let var = self.fresh("diff_e");
-        // The vec itself is borrowed for the loop, so its own name is
-        // hidden from the body.
+        // The vec is borrowed for the loop, so its name is hidden.
         let index = self.scope.iter().position(|binding| binding.name == name);
         let removed = index.map(|found| self.scope.remove(found));
         let locals = [(var.clone(), elem.clone())];
@@ -680,12 +656,12 @@ impl Generator<'_> {
         })
     }
 
-    /// `helper(&mut binding, args)` through a generated writer function.
+    /// `helper(&mut binding, args)`.
     fn call_mut_stmt(&mut self) -> Option<Stmt> {
         let (name, ty) = self.pick_local()?;
         let (fn_name, params) = self.writer_fn(&ty);
-        // The target is borrowed mutably for the call, so the arguments
-        // cannot read it.
+        // The target is borrowed for the call, so the arguments cannot read
+        // it.
         let index = self.scope.iter().position(|binding| binding.name == name);
         let removed = index.map(|found| self.scope.remove(found));
         let args = params.iter().map(|param| self.expr(param, 1)).collect();
@@ -759,8 +735,7 @@ impl Generator<'_> {
         }
     }
 
-    /// A format spec that applies to the type, plain `{:?}` a third of the
-    /// time so every observation stays readable.
+    /// Plain `{:?}` a third of the time so observations stay readable.
     pub(super) fn fmt_spec(&mut self, ty: &Ty) -> FmtSpec {
         if self.chance(0.35) {
             return FmtSpec::DEBUG;

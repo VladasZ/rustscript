@@ -1,8 +1,6 @@
-//! A string literal assigned inside a `for` body ran on the scalar plan,
-//! which keeps such a literal as an index into the plan's own string table.
-//! That form has no boxed value, so writeback skipped the slot and the
-//! variable kept what it held before the loop. Found while fixing the same
-//! staleness in a plain copy, see `loop_move_non_scalar.rs`.
+//! A string literal assigned in a `for` body once skipped writeback on the
+//! scalar plan, so the variable kept its old value. See
+//! `loop_move_non_scalar.rs`.
 
 fn main() {
     let mut word: &str = "start";

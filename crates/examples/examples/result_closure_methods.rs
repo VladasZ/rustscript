@@ -1,7 +1,7 @@
 #!/usr/bin/env rust
 
-// The closure taking methods on Result. `map_or_else` is the one that differs
-// from the Option form, its fallback receives the error rather than nothing.
+// `map_or_else` differs from the Option form, its fallback receives the
+// error.
 
 fn parse(text: &str) -> Result<i64, String> {
     text.parse::<i64>()

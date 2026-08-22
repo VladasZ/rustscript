@@ -1,8 +1,6 @@
-//! Structured mutation by subtree splicing: pick a node somewhere in the
-//! parent's expression trees, pick a same-typed subtree from a donor
-//! program, fix the donor's free variables up for the target scope, and drop
-//! it in. This creates nesting shapes the top-down generator never emits
-//! while keeping the program compile-valid by construction.
+//! Structured mutation by subtree splicing. A same typed subtree from a
+//! donor replaces a node, with its free variables fixed up for the target
+//! scope. This creates nesting the top down generator never emits.
 
 use std::collections::BTreeSet;
 
@@ -44,9 +42,8 @@ pub fn mutate(parent: &Program, parent_seed: u64, donor_seed: u64, output_seed: 
             operations.push(MutationOperation::BlockOrder);
         }
     }
-    // A spliced subtree can land in a place its own program never put it, a
-    // receiver most of all, so the whole program is repaired again after the
-    // operations rather than trusting what each side was.
+    // A spliced subtree can land in a receiver position, so the whole program
+    // is repaired again after the operations.
     for block in &mut program.blocks {
         block.fix_apply_borrows();
     }
@@ -59,10 +56,9 @@ pub fn mutate(parent: &Program, parent_seed: u64, donor_seed: u64, output_seed: 
     program
 }
 
-/// Whether a subtree can move between programs: nothing in it names an item
-/// or a type that only its own program declares, nothing needs a function
-/// body around it, and no bare reduction needs the annotation of the `let`
-/// it came from to be typed at all.
+/// Whether a subtree can move between programs. It must name nothing only its
+/// own program declares and need no function body or `let` annotation around
+/// it.
 fn is_portable(expr: &Expr) -> bool {
     expr.nodes().iter().all(|node| {
         let own = !matches!(
@@ -103,8 +99,7 @@ fn mentions_user(ty: &Ty) -> bool {
     }
 }
 
-/// Names bound inside the subtree itself: closure parameters of pipes,
-/// fold accumulators, and match bindings. They travel with the graft.
+/// Names bound inside the subtree itself, they travel with the graft.
 fn binders(expr: &Expr, out: &mut BTreeSet<String>) {
     for node in expr.nodes() {
         match node {
@@ -154,9 +149,8 @@ fn bind_names(bind: &Bind, out: &mut BTreeSet<String>) {
     }
 }
 
-/// Rewire the graft's free variables to bindings the target scope actually
-/// has. A free variable with no same-typed binding in scope becomes the
-/// minimal literal of its type.
+/// A free variable with no same typed binding in scope becomes the minimal
+/// literal of its type.
 fn rebind(
     expr: &mut Expr,
     environment: &[(String, Ty)],
@@ -183,8 +177,7 @@ fn rebind(
     }
 }
 
-/// The top level statements a splice may target, with the plain bindings
-/// each one can see: every `let` before it in the same block.
+/// The statements a splice may target, each with the `let`s before it.
 fn splice(program: &mut Program, donor: &Program, rng: &mut StdRng) -> bool {
     if program.blocks.is_empty() {
         return false;
@@ -251,8 +244,8 @@ fn splice(program: &mut Program, donor: &Program, rng: &mut StdRng) -> bool {
     binders(&graft, &mut bound);
     rebind(&mut graft, &environment, &bound, rng);
     *target = graft;
-    // A graft whose terminal states no type cannot initialize an
-    // unannotated binding.
+    // A graft whose terminal states no type cannot initialize an unannotated
+    // binding.
     if let Stmt::Let { expr, ann, .. } = stmt
         && let Expr::Pipe(pipe) = expr
         && !pipe.states_type()

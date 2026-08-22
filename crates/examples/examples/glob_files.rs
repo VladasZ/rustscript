@@ -1,6 +1,5 @@
 #!/usr/bin/env rust
 
-// Match files with a glob pattern.
 
 use std::fs;
 

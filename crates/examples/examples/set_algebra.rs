@@ -1,7 +1,7 @@
 #!/usr/bin/env rust
 
-// The two set methods of `HashSet`: the relations and the combinations,
-// every combination sorted before printing because the order is unpromised.
+// Every combination is sorted before printing because the order is
+// unpromised.
 
 use std::collections::HashSet;
 

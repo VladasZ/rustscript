@@ -57,8 +57,7 @@ struct CampaignOptions {
     stop_on_first: bool,
 }
 
-/// The std surface against the catalog and the interpreter, see `surface`.
-/// `--refresh` harvests the list from `rust-src` first.
+/// See `surface`. `--refresh` harvests the list from `rust-src` first.
 fn surface_report(args: &[String]) -> Result<()> {
     let root = workspace_root();
     if args.iter().any(|arg| arg == "--refresh") {
@@ -79,7 +78,7 @@ fn surface_report(args: &[String]) -> Result<()> {
 }
 
 fn parse_campaign_options(args: &[String]) -> Result<CampaignOptions> {
-    // A u32 seed leaves room for the per-case offsets added on top.
+    // A u32 seed leaves room for the per case offsets.
     let mut options = CampaignOptions {
         seed: rand::random::<u32>().into(),
         cases: 100,
@@ -108,10 +107,8 @@ fn parse_campaign_options(args: &[String]) -> Result<CampaignOptions> {
     Ok(options)
 }
 
-/// One generated case that came back from a worker, ready for reporting.
 type BatchOutcome = (Vec<Program>, Vec<String>, Result<Vec<RunResult>>);
 
-/// The campaign-wide state a finished case folds into.
 struct CaseContext<'a> {
     report: &'a mut CampaignReport,
     options: &'a CampaignOptions,
@@ -122,8 +119,6 @@ struct CaseContext<'a> {
     last_progress: &'a mut Instant,
 }
 
-/// Fold one finished case into the ctx.report: progress on a match, gap and bug
-/// bucketing with artifact saving, and the stop-on-first reduction path.
 fn record_case(
     ctx: &mut CaseContext,
     program: Program,
@@ -225,9 +220,8 @@ fn run_campaign(args: &[String]) -> Result<ExitCode> {
         }
         drop(sender);
 
-        // Workers finish batches out of order. Buffer and report strictly in
-        // batch order so progress, artifact saving, and stop-on-first behave
-        // the same as a sequential run.
+        // Workers finish out of order. Report in batch order so stop on first
+        // behaves like a sequential run.
         let mut report = CampaignReport::default();
         let mut last_progress = started;
         let mut pending: BTreeMap<usize, BatchOutcome> = BTreeMap::new();
@@ -266,13 +260,13 @@ fn run_campaign(args: &[String]) -> Result<ExitCode> {
         ExitCode::SUCCESS
     } else {
         // Real divergences fail the run so a scheduled campaign can gate on
-        // the exit code. Gaps alone stay green.
+        // the exit code.
         ExitCode::FAILURE
     })
 }
 
-/// Buckets group findings by the concrete failure, not only its kind, so two
-/// different bugs with the same classification are reported separately.
+/// Buckets group by the concrete failure, so 2 bugs with the same
+/// classification are reported apart.
 fn bucket_key(classification: &Classification, result: &RunResult) -> String {
     let signature = result.signature();
     if signature.is_empty() {
@@ -284,7 +278,7 @@ fn bucket_key(classification: &Classification, result: &RunResult) -> String {
 
 const MAX_SEEDS_PER_GROUP: usize = 8;
 const MAX_ARTIFACTS_PER_GROUP: usize = 3;
-/// One saved case per distinct gap reason is enough to reproduce and fix it.
+/// One saved case per gap reason is enough.
 const MAX_ARTIFACTS_PER_GAP: usize = 1;
 
 #[derive(Default)]
@@ -293,12 +287,10 @@ struct CampaignReport {
     matched: usize,
     gaps: BTreeMap<String, BugGroup>,
     bugs: BTreeMap<String, BugGroup>,
-    /// Every method name the generated programs called, so the report can
-    /// list the interpreter surface this campaign never touched. That list
-    /// is the generator's blind spot by definition.
+    /// Every method name called, so the report can list the surface this
+    /// campaign never touched.
     called: std::collections::BTreeSet<String>,
-    /// Cases whose two native runs disagreed. Each one is a generator grammar
-    /// hole, so they are counted with seeds rather than silently dropped.
+    /// Cases whose 2 native runs disagreed, each a grammar hole.
     nondeterministic: BugGroup,
 }
 
@@ -344,7 +336,6 @@ impl CampaignReport {
         }
     }
 
-    /// Every `.name(` the source calls.
     fn note_calls(&mut self, source: &str) {
         let mut rest = source;
         while let Some(dot) = rest.find('.') {
@@ -359,15 +350,13 @@ impl CampaignReport {
         }
     }
 
-    /// The bridged names no generated program called, written next to the
-    /// artifacts and summarized on the console.
+    /// The bridged names no generated program called.
     fn print_unexercised(&self, listing: &str, root: &Path) -> Result<()> {
         let surface = rustscript_differential::surface::interpreter_surface_raw(listing);
         let mut unexercised: Vec<String> = Vec::new();
         let mut total = 0usize;
         for (recv, names) in &surface {
-            // The bridge types of crates no generated program imports stay out,
-            // only the receivers the generator writes count.
+            // Only the receivers the generator writes count.
             if !matches!(
                 recv.as_str(),
                 "Vec"
@@ -607,9 +596,8 @@ fn promote(args: &[String]) -> Result<()> {
             current.classification
         );
     }
-    // A case whose correct behavior is a panic cannot live under examples,
-    // the equivalence suite requires a clean exit there. It goes into the
-    // differential regressions, which compare panicking runs too.
+    // A panicking case cannot live under examples, the equivalence suite
+    // requires a clean exit there.
     let destination = if current.native.status == Some(0) {
         root.join("crates/examples/examples")
             .join(format!("{name}.rs"))

@@ -1,7 +1,7 @@
 #!/usr/bin/env rust
 
-//! A reassigned local keeps the width it was declared with, so `{:b}` of an
-//! `i32` prints 32 digits and not the 64 of a widened image.
+//! A reassigned local keeps its declared width, so `{:b}` of an `i32` prints
+//! 32 digits.
 
 fn opaque_bool(v: bool) -> bool {
     v
@@ -23,7 +23,7 @@ fn main() {
     wide = -2;
     println!("{wide:x} {wide:b}");
 
-    // The width has to survive a branch.
+    // Through a branch.
     let mut picked: i32 = 1;
     println!("{picked:b}");
     picked = if opaque_bool(true) { -2_147_483_647 } else { 0 };

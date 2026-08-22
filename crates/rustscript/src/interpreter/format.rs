@@ -1,24 +1,19 @@
-//! Format spec parsing and rendering shared by the VM's `Fmt` op: the
-//! `{:...}` spec grammar, radix and float forms, and `$` width expansion.
+//! Format spec parsing and rendering for the VM's `Fmt` op.
 
 use anyhow::Result;
 use num_traits::AsPrimitive;
 
-/// The numeric identity of a formatted value. Radix forms need the exact
-/// integer, an f64 would lose the low bits past 2^53, and integers must
-/// ignore precision where floats round by it.
+/// Radix forms need the exact integer, and integers ignore precision where
+/// floats round by it.
 #[derive(Clone, Copy)]
 pub(super) enum SpecNumber {
     Int(i64),
-    /// A width-tagged integer. Radix forms print the two's complement image
-    /// at that width, `{:x}` of `-1i8` is `ff`, not 16 f's.
+    /// Radix forms print the image at that width, `{:x}` of `-1i8` is `ff`.
     Sized {
         value: i128,
         bits: u32,
     },
-    /// A 128-bit integer as its raw storage bits, u128 reinterpreted. Radix
-    /// forms print the full two's complement image either way, only the
-    /// exponent forms need the sign.
+    /// Raw storage bits. Only the exponent forms need the sign.
     Big {
         bits: i128,
         signed: bool,
@@ -28,13 +23,13 @@ pub(super) enum SpecNumber {
 }
 
 impl SpecNumber {
-    /// The bits radix forms print, masked to the value's own width.
+    /// Masked to the value's own width.
     fn radix_bits(value: i128, bits: u32) -> u64 {
         AsPrimitive::<u64>::as_(value) & (u64::MAX >> (64 - bits))
     }
 }
 
-/// One parsed `{:...}` spec: `[[fill]align][+][#][0][width][.precision][type]`.
+/// `[[fill]align][+][#][0][width][.precision][type]`.
 struct ParsedSpec {
     fill: char,
     align: Option<char>,
@@ -47,7 +42,6 @@ struct ParsedSpec {
     ty: Option<char>,
 }
 
-/// Whether the spec asks for the debug rendering, a trailing `?`.
 #[derive(PartialEq)]
 enum Repr {
     Display,
@@ -81,7 +75,7 @@ fn parse_spec(spec: &str) -> ParsedSpec {
         parsed.plus = true;
         index += 1;
     }
-    // `-` is accepted by real Rust and does nothing.
+    // `-` is accepted and does nothing.
     if chars.get(index) == Some(&'-') {
         index += 1;
     }
@@ -120,9 +114,6 @@ fn parse_spec(spec: &str) -> ParsedSpec {
     parsed
 }
 
-/// Apply a spec to a value that has already been rendered. Covers debug,
-/// precision, width, fill, alignment, sign, sign-aware zero padding, radix
-/// and exponent types, and their `#` alternate forms.
 pub(super) fn apply_spec(
     spec: &str,
     display: &str,
@@ -132,15 +123,13 @@ pub(super) fn apply_spec(
 ) -> String {
     let parsed = parse_spec(spec);
     let mut base = render_base(&parsed, display, debug, number);
-    // The `Debug` impls of str, char, and the containers write their text
-    // straight through and never pad, only the numbers and bool route
-    // `Debug` to a padding `Display`.
+    // The `Debug` of str, char and containers never pads, only numbers and
+    // bool route `Debug` to a padding `Display`.
     if parsed.repr == Repr::Debug && !pads_debug {
         return base;
     }
 
-    // NaN ignores the sign flag entirely, `{:+}` of NaN is still `NaN`,
-    // while infinities do take it.
+    // `{:+}` of NaN is still `NaN`, infinities take the sign.
     let is_nan = match number {
         Some(SpecNumber::Float(f)) => f.is_nan(),
         Some(SpecNumber::F32(f)) => f.is_nan(),
@@ -173,9 +162,8 @@ pub(super) fn apply_spec(
         return base;
     }
     let pad = target - current;
-    // The zero flag pads after the sign and radix prefix, `{:+06}` gives
-    // `+00013` and `{:#010x}` gives `0x000000ff`, unlike an explicit fill.
-    // The zero flag wins over an explicit fill and alignment for a number.
+    // The zero flag pads after the sign and prefix, `{:#010x}` gives
+    // `0x000000ff`, and wins over an explicit fill.
     if parsed.zero && number.is_some() {
         let mut cut = usize::from(base.starts_with('+') || base.starts_with('-'));
         if base[cut..].starts_with("0x")
@@ -205,7 +193,7 @@ pub(super) fn apply_spec(
     }
 }
 
-/// The unpadded rendering: type conversion and precision, no width yet.
+/// Type conversion and precision, no width yet.
 fn render_base(
     parsed: &ParsedSpec,
     display: &str,
@@ -279,11 +267,9 @@ fn render_base(
             Some(precision) => format!("{f:.precision$}"),
             None => display.to_string(),
         },
-        // Integer Display ignores precision.
         (_, Some(SpecNumber::Int(_) | SpecNumber::Sized { .. } | SpecNumber::Big { .. })) => {
             display.to_string()
         }
-        // String precision truncates to that many characters.
         (_, None) => match parsed.precision {
             Some(precision) => display.chars().take(precision).collect(),
             None => display.to_string(),
@@ -291,7 +277,7 @@ fn render_base(
     }
 }
 
-/// `{:e}` and `{:E}` of a 128-bit integer, in the value's real sign.
+/// `{:e}` of a 128 bit integer, in the value's real sign.
 fn big_exponent(bits: i128, signed: bool, upper: bool, precision: Option<usize>) -> String {
     match (signed, upper, precision) {
         (true, false, Some(p)) => format!("{bits:.p$e}"),
@@ -305,7 +291,6 @@ fn big_exponent(bits: i128, signed: bool, upper: bool, precision: Option<usize>)
     }
 }
 
-/// Replace `name$` and `0$` width or precision references with their value, so
 /// `{:w$}` pads by whatever `w` holds at render time.
 pub(super) fn expand_widths_with(
     spec: &str,
@@ -322,9 +307,8 @@ pub(super) fn expand_widths_with(
             continue;
         }
         if c == '$' {
-            // `0w$` and `01$` are the zero flag followed by a width
-            // reference. An argument index never has a leading zero, so a
-            // longer token starting with one always carries the flag.
+            // `0w$` is the zero flag plus a width reference, an argument index
+            // never has a leading zero.
             if token.len() > 1 && token.starts_with('0') {
                 out.push('0');
                 token.remove(0);

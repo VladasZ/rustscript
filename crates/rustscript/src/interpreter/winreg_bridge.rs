@@ -1,19 +1,7 @@
-//! The Windows registry, backed by the winreg crate.
-//!
-//! A `RegKey` is stored as plain struct fields, the root HKEY plus the subkey
-//! path and the access flags, and the real key is opened on demand for each
-//! call. That matches how `Regex` and `Command` are handled, and keeps the live
-//! handle out of the `Native` enum, so no other module needs a cfg.
-//!
-//! Registry types map onto script values by shape. A DWORD or QWORD reads back
-//! as an int, a string as a string, binary as a vec of ints, and a multi string
-//! as a vec of strings. Writes pick the type the same way, so an int writes a
-//! DWORD and a vec of ints writes binary. That covers every value the setup
-//! scripts touch, including the binary scancode map and the string valued mouse
-//! and accessibility settings.
-//!
-//! On a non-Windows host every entry point returns a plain error instead of
-//! being absent, so a script that reaches registry code by mistake says why.
+//! The `Windows` registry. A `RegKey` is plain struct fields and the real
+//! key is opened per call, so no `Native` variant needs a cfg. Registry
+//! types map onto script values by shape. Off `Windows` every call returns
+//! an error.
 
 use std::sync::Arc;
 
@@ -28,12 +16,8 @@ fn unit_enum(def: &Arc<EnumDef>, variant: &str) -> Value {
     Value::enum_named(def, variant, Vec::new()).expect("every winreg enum variant is listed")
 }
 
-/// Recognize `HKEY_*` roots, `KEY_*` access flags, and `RegType` variants as
-/// path constants.
 pub(super) fn winreg_const(id: PathId) -> Option<Value> {
-    // The registry value types. `RegType` is a real enum in winreg, so it is
-    // mirrored as an enum value and not an int, and `{:?}` prints the bare
-    // variant name exactly like the compiled crate does.
+    // `RegType` is an enum value so `{:?}` prints the bare variant name.
     if matches!(
         id,
         PathId::RegNone
@@ -66,7 +50,7 @@ pub(super) fn winreg_const(id: PathId) -> Option<Value> {
     Some(Value::Int(i64::from(n)))
 }
 
-/// Build the script side `RegKey` value. `predef` takes one of the HKEY roots.
+/// `predef` takes one of the HKEY roots.
 pub(super) fn predef(args: &[Value]) -> Value {
     let root = args.first().and_then(as_i64).unwrap_or(0);
     key_value(root, "", i64::from(0x000F_003F_u32))
@@ -108,7 +92,7 @@ mod imp {
         s.get(name).as_ref().and_then(as_i64).unwrap_or_default()
     }
 
-    /// Join a parent subkey path with a child, tolerating either side being empty.
+    /// Either side may be empty.
     fn join(parent: &str, child: &str) -> String {
         match (parent.is_empty(), child.is_empty()) {
             (true, _) => child.to_string(),
@@ -117,14 +101,12 @@ mod imp {
         }
     }
 
-    /// A flag set or a root handle number, always non negative and within
-    /// u32, since it comes from the bridge constants.
+    /// Always within u32, it comes from the bridge constants.
     fn mask(n: i64) -> Result<u32> {
         u32::try_from(n).map_err(|_| anyhow!("`{n}` is not a valid registry flag set"))
     }
 
-    /// The predefined roots are handle numbers, `HKEY_LOCAL_MACHINE` is
-    /// `0x8000_0002`, and a root value carries that number as an int.
+    /// The roots are handle numbers, `HKEY_LOCAL_MACHINE` is `0x8000_0002`.
     fn root_key(root: i64) -> Result<RegKey> {
         let raw = usize::try_from(root).map_err(|_| anyhow!("`{root}` is not a registry root"))?;
         Ok(RegKey::predef(with_exposed_provenance_mut(raw)))
@@ -135,17 +117,16 @@ mod imp {
         let flags = mask(field_i64(s, "flags")).map_err(std::io::Error::other)?;
         let root = root_key(field_i64(s, "root")).map_err(std::io::Error::other)?;
         if path.is_empty() {
-            // The predefined root itself, there is nothing to open below it.
+            // The root itself, nothing to open.
             return Ok(root);
         }
         root.open_subkey_with_flags(&path, flags)
     }
 
-    /// Turn a live registry value into the script value that matches its type.
     fn read(v: &winreg::RegValue) -> Value {
         match v.vtype {
-            // A DWORD is four bytes and a QWORD is eight, and each decoder
-            // rejects the other width, so they cannot share an arm.
+            // Each decoder rejects the other width, so they cannot share an
+            // arm.
             RegType::REG_DWORD => {
                 Value::Int(u32::from_reg_value(v).map(i64::from).unwrap_or_default())
             }
@@ -166,11 +147,8 @@ mod imp {
         }
     }
 
-    /// Pick the registry type from the shape of the script value. An int that
-    /// does not fit a DWORD widens to a QWORD rather than silently truncating.
-    ///
-    /// `RegValue` borrows its bytes, and every source here is a local, so the
-    /// result is copied into an owned buffer before it leaves the function.
+    /// An int that does not fit a DWORD widens to a QWORD. `RegValue` borrows
+    /// its bytes, so the result is copied into an owned buffer.
     fn write(v: &Value) -> Result<winreg::RegValue<'static>> {
         match v {
             Value::Int(n) => {
@@ -237,8 +215,7 @@ mod imp {
         }
     }
 
-    /// The script side mirror of `winreg::RegValue`, the untyped form with the
-    /// raw bytes and the value type beside them.
+    /// The untyped form with raw bytes and the value type.
     fn raw_value(v: &winreg::RegValue) -> Value {
         Value::struct_of(
             "RegValue",
@@ -252,7 +229,7 @@ mod imp {
         )
     }
 
-    /// Read a script `RegValue` back into the real one, for `set_raw_value`.
+    /// For `set_raw_value`.
     fn raw_from(v: &Value) -> Result<winreg::RegValue<'static>> {
         let Value::Struct(s) = v else {
             bail!("set_raw_value takes a RegValue");
@@ -307,8 +284,7 @@ mod imp {
             BuiltinId::CreateSubkey => {
                 let full = join(&path, &first_text());
                 match root_key(root)?.create_subkey(&full) {
-                    // winreg hands back the key plus whether it was created or
-                    // opened. Scripts destructure the pair like the real crate.
+                    // The key plus whether it was created, like the real crate.
                     Ok((_, disp)) => Value::ok(Value::tuple(vec![
                         key_value(root, &full, flags),
                         unit_enum(&REG_DISPOSITION, &format!("{disp:?}")),
@@ -327,8 +303,7 @@ mod imp {
                 let raw = write(v)?;
                 io_result(open(s).and_then(|k| k.set_raw_value(first_text(), &raw)))
             }
-            // The untyped pair. Binary has no typed form in winreg, so a script
-            // that writes REG_BINARY goes through these two.
+            // Binary has no typed form, so `REG_BINARY` goes through these 2.
             BuiltinId::GetRawValue => match open(s).and_then(|k| k.get_raw_value(first_text())) {
                 Ok(v) => Value::ok(raw_value(&v)),
                 Err(e) => Value::err(Value::str(e.to_string())),

@@ -1,12 +1,8 @@
-//! Float loops the scalar plans run unboxed: f64 arithmetic and comparisons,
-//! float literals, `f64::from` on the loop counter, negation, float vec
-//! elements, and the NaN and infinity edges that must match the generic path
-//! exactly. The float to int cast, which pedantic clippy bans from compiled
-//! examples, is covered by the semantics test `scalar_float_casts`.
+//! Float loops the scalar plans run unboxed. The float to int cast is in the
+//! semantics test `scalar_float_casts`, pedantic clippy bans it here.
 
 fn main() {
-    // A mandelbrot style escape region: float literals in the condition and
-    // body, an int counter beside them, and `f64::from` feeding the seeds.
+    // A mandelbrot style escape region.
     let mut in_set: u32 = 0;
     let mut py: i32 = 0;
     while py < 40 {
@@ -32,8 +28,7 @@ fn main() {
     }
     println!("in set {in_set}");
 
-    // A `for` range accumulating a float through `f64::from`, and a negation
-    // that stays a float.
+    // A `for` range accumulating a float.
     let mut sum = 0.0;
     for step in 0..100_000i32 {
         sum += f64::from(step) * 0.5;
@@ -41,8 +36,7 @@ fn main() {
     }
     println!("sum {sum}");
 
-    // NaN keeps its partial semantics inside the plan: every ordered
-    // comparison answers false, on both sides of the operator.
+    // NaN comparisons are false on both sides.
     let nan = f64::NAN;
     let mut below: i64 = 0;
     let mut above: i64 = 0;
@@ -62,8 +56,7 @@ fn main() {
     }
     println!("below {below} above {above} ordered {ordered}");
 
-    // Float division by zero makes infinity, never a panic, the remainder
-    // runs in the plan too, and the infinite value survives writeback.
+    // Division by zero is infinity, and it survives writeback.
     let mut harmonic = 0.0;
     let mut denom = 4.0;
     let mut steps: i64 = 0;
@@ -75,8 +68,7 @@ fn main() {
     }
     println!("harmonic {harmonic}");
 
-    // Float elements load and store through the while plan's locked vecs,
-    // and a float item source runs through the `for` plan.
+    // Float vec elements in while and for plans.
     let mut prices = vec![1.0, 2.5, 4.0, 8.5];
     let count = prices.len();
     let mut slot = 0;

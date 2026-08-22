@@ -1,7 +1,5 @@
-//! Untyped parsing next to float classification and slice writes. The
-//! interpreter guesses `"160"` into an int even where the annotation said
-//! f64, so the float methods and `f64::EPSILON` comparisons here prove that
-//! path behaves exactly like the compiled program.
+//! The interpreter once guessed `"160"` into an int where the annotation
+//! said f64, so the float methods here prove that path.
 
 fn fmt_qty(q: f64) -> String {
     if (q - q.trunc()).abs() < f64::EPSILON {

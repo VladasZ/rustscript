@@ -1,8 +1,8 @@
 # Supported interpreter surface
 
-Generated from the bridge dispatch tables. Do not edit by hand; run
-`rust supported md > docs/supported.md` after changing a bridge, and
-the `supported_page_is_current` test enforces it.
+Generated from the bridge tables, do not edit by hand. Run
+`rust supported md > docs/supported.md` after changing a bridge.
+The `supported_page_is_current` test enforces it.
 
 ## any value
 

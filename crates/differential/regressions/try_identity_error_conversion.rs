@@ -1,7 +1,5 @@
-//! `?` on an error the function already returns is identity, not a `From`
-//! conversion. The campaign found the interpreter running an unrelated
-//! `From` impl and wrapping the error in the wrong variant. From seed
-//! 140079.
+//! `?` on an error the function already returns is identity. The interpreter
+//! once ran an unrelated `From` impl. From seed 140079.
 
 #[derive(Debug)]
 enum Failure {

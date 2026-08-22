@@ -1,7 +1,5 @@
-//! Runs every example twice, once as a real compiled cargo example and once
-//! through the rustscript interpreter, and asserts the stdout is byte for byte
-//! identical. This is the strongest check that the interpreter matches the
-//! behavior of the real Rust compiler.
+//! Runs every example compiled and interpreted and asserts byte for byte
+//! identical stdout. This is the strongest check the interpreter has.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -10,11 +8,9 @@ use pretty_assertions::assert_eq;
 
 mod common;
 
-/// Examples that cannot be compared byte for byte. Network ones depend on a
-/// live response, `args_echo` prints its own path as argv[0], which differs
-/// between the compiled binary and the script, `registry_demo` is gated
-/// behind a required-feature so cargo never builds a binary to compare against,
-/// and `parallel` interleaves its task prints in a different order every run.
+/// Network ones depend on a live response, `args_echo` prints its own path,
+/// `registry_demo` is behind a required feature, and `parallel` prints in a
+/// different order every run.
 const SKIP: &[&str] = &[
     "net_get",
     "net_query",
@@ -33,8 +29,7 @@ fn workspace_root() -> PathBuf {
         .expect("workspace root")
 }
 
-/// Directory that cargo drops compiled examples into, found relative to this
-/// test binary so a custom target dir still works.
+/// Found relative to this test binary so a custom target dir still works.
 fn examples_bin_dir() -> PathBuf {
     let exe = std::env::current_exe().expect("current exe");
     // target/<profile>/deps/<testbin> -> target/<profile>/examples
@@ -47,7 +42,6 @@ fn scripts_dir() -> PathBuf {
 
 #[test]
 fn interpreter_matches_compiler() {
-    // Build every example as a real cargo binary first.
     let build = Command::new(env!("CARGO"))
         .args(["build", "--examples", "-p", "rustscript-examples"])
         .current_dir(workspace_root())
@@ -68,9 +62,8 @@ fn interpreter_matches_compiler() {
         if SKIP.contains(&name.as_str()) {
             continue;
         }
-        // Creating a symlink on Windows needs privileges unix grants freely, so
-        // run the comparison only where it is reliable. The build above still
-        // covers that the example compiles cross-platform.
+        // A symlink on `Windows` needs privileges, so compare only where it is
+        // reliable. The build above still proves the example compiles.
         if !cfg!(unix) && name == "symlink_demo" {
             continue;
         }

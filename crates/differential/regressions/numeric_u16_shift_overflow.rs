@@ -1,5 +1,5 @@
-// A shift amount at the width's bit count panics in debug Rust. The amount
-// passes through the opaque helper so the overflow lint cannot fold it.
+// The amount passes through the opaque helper so the overflow lint cannot
+// fold it.
 
 fn diff_opaque(x: i64) -> i64 {
     x

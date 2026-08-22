@@ -1,8 +1,6 @@
-//! A `let x: HashMap<..> = ..collect()` names the collect target through its
-//! annotation. The campaign found that a turbofish collect nested inside the
-//! annotated chain, here in one branch of the `if` the outer collect drains,
-//! consumed the pending hint, so the outer collect built a vec of pairs and
-//! `into_keys` later died on a Vec receiver. From seed 20675319747.
+//! A turbofish collect nested inside an annotated chain once consumed the
+//! outer hint, so the outer collect built a vec of pairs. From seed
+//! 20675319747.
 
 use std::collections::HashMap;
 

@@ -1,7 +1,6 @@
-//! `into()` picks the `From` impl whose source type matches the value. The
-//! campaign found a target with two impls over the same outer type, one for
-//! `Option<usize>` and one for `Option<u16>`, where the interpreter keyed
-//! both on `Option` alone and built the wrong variant. From seed 20686200357.
+//! `into()` picks the `From` impl by the source type. The interpreter once
+//! keyed `From<Option<usize>>` and `From<Option<u16>>` both on `Option`.
+//! From seed 20686200357.
 
 #[derive(Debug)]
 enum Wrapped {
@@ -76,14 +75,14 @@ fn main() {
     let pair: Wrapped = (opaque_u8(7), true).into();
     println!("{pair:?} {}", pair.tag());
 
-    // Two impls over the same outer type stay apart by their element.
+    // Apart by element type.
     let flags: Wrapped = vec![false, true].into();
     println!("{flags:?} {}", flags.tag());
 
     let letters: Wrapped = vec!['x', 'y'].into();
     println!("{letters:?} {}", letters.tag());
 
-    // A payload that names no inner type still reaches an impl.
+    // `None` names no inner type and still reaches an impl.
     let empty: Wrapped = None::<u16>.into();
     println!("{empty:?} {}", empty.tag());
 }

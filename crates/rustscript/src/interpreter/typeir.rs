@@ -1,22 +1,18 @@
-//! Types lowered at compile time into a plain IR, so chunks hold no syn AST.
-//! syn nodes are not `Send`, so this lowering is what lets the same cast,
-//! coercion, and turbofish tables are plain data, and it moves all name
-//! resolution to load time, out of the hot runtime paths.
+//! Types lowered at compile time into a plain IR. syn nodes are not
+//! `Send`, and this moves all name resolution to load time.
 
 use std::sync::Arc;
 
 use super::numeric::IntWidth;
 use super::resolver::{Res, Resolver};
 
-/// Target of an `as` cast, reduced to what the VM acts on.
 #[derive(Clone)]
 pub enum CastIr {
     F64,
     F32,
     Char,
     Int(IntWidth),
-    /// A target with no runtime semantics. Kept so the cast fails only if it
-    /// actually runs, the way it always did, since dead code may hold one.
+    /// Kept so the cast fails only if it runs, dead code may hold one.
     Unsupported(Arc<str>),
 }
 
@@ -34,8 +30,7 @@ pub fn lower_cast(ty: &syn::Type) -> CastIr {
         "f64" => CastIr::F64,
         "f32" => CastIr::F32,
         "char" => CastIr::Char,
-        // u128 and i128 carry no runtime width yet and keep the old
-        // i64-passthrough.
+        // u128 and i128 keep the i64 passthrough.
         _ => match IntWidth::parse(&name) {
             Some(w) => CastIr::Int(w),
             None => CastIr::Unsupported(Arc::from(name.as_str())),
@@ -43,32 +38,24 @@ pub fn lower_cast(ty: &syn::Type) -> CastIr {
     }
 }
 
-/// A type annotation or turbofish, lowered against the module it was written
-/// in. Aliases are followed and struct paths canonicalized here, so runtime
+/// Aliases are followed and struct paths canonicalized here, so runtime
 /// never resolves a name.
 #[derive(Clone)]
 pub enum TypeIr {
-    /// A type coercion cannot change, parsed dynamically by typed json.
+    /// A type coercion cannot change.
     Dynamic,
-    /// `Vec<T>` or `VecDeque<T>`.
     Vec(Arc<TypeIr>),
-    /// The value type of `HashMap<K, V>` or `BTreeMap<K, V>`. Coercion leaves
-    /// maps untouched, typed json uses it for the entry values.
+    /// Coercion leaves maps untouched, typed json uses the value type.
     MapValue(Arc<TypeIr>),
-    /// The element type of `HashSet<T>` or `BTreeSet<T>`. Coercion turns a
-    /// collected Vec into a set, so an annotated `collect()` builds the real
-    /// container and not a Vec wearing the wrong type.
+    /// Coercion turns a collected Vec into a set.
     Set(Arc<TypeIr>),
     Option(Arc<TypeIr>),
-    /// A user struct, by canonical name.
     Struct(Arc<str>),
-    /// A generic parameter of the enclosing function, bound to a concrete
-    /// type by the caller's turbofish through the type environment.
+    /// Bound by the caller's turbofish through the type environment.
     Generic(Arc<str>),
 }
 
 impl TypeIr {
-    /// Whether coercing a value through this type can ever change it.
     pub fn is_active(&self) -> bool {
         match self {
             TypeIr::Dynamic | TypeIr::Generic(_) | TypeIr::MapValue(_) => false,
@@ -78,12 +65,11 @@ impl TypeIr {
     }
 }
 
-/// Bound on alias chains, so a `type A = B; type B = A;` cycle lowers to
-/// `Dynamic` instead of hanging the compiler.
+/// So a `type A = B; type B = A;` cycle lowers to `Dynamic` instead of
+/// hanging.
 const MAX_DEPTH: u32 = 32;
 
-/// `generics` are the type parameter names of the function being compiled. A
-/// bare parameter name shadows any type of the same name, as in real Rust.
+/// A bare generic parameter name shadows any type of the same name.
 pub fn lower_type(
     ty: &syn::Type,
     resolver: &Resolver,
@@ -123,7 +109,6 @@ fn lower(
     match name.as_str() {
         "Vec" | "VecDeque" => arg(0).map_or(TypeIr::Dynamic, TypeIr::Vec),
         "Option" => arg(0).map_or(TypeIr::Dynamic, TypeIr::Option),
-        // Smart pointers are transparent at runtime.
         "Box" | "Rc" | "Arc" => match type_arg(seg, 0) {
             Some(t) => lower(t, resolver, module, generics, depth + 1),
             None => TypeIr::Dynamic,
@@ -141,8 +126,8 @@ fn lower(
                 .map(|s| s.ident.to_string())
                 .collect();
             match resolver.resolve(module, &segs) {
-                // An alias target resolves in the module the alias was
-                // declared in, where no function generics apply.
+                // An alias target resolves in its own module, where no function
+                // generics apply.
                 Ok(Res::Alias(m, target)) => lower(&target, resolver, m, &[], depth + 1),
                 _ => TypeIr::Dynamic,
             }
@@ -150,7 +135,6 @@ fn lower(
     }
 }
 
-/// The `i`-th type argument of a segment, `HashMap<K, V>` at 1 gives `V`.
 fn type_arg(seg: &syn::PathSegment, i: usize) -> Option<&syn::Type> {
     match &seg.arguments {
         syn::PathArguments::AngleBracketed(a) => a

@@ -1,6 +1,4 @@
-// Duration addition and subtraction under `#[tokio::main]`, the same
-// checked std ops as everywhere else. An
-// accumulator built with `+=` used to die here with "expected a number".
+// A Duration `+=` under `#[tokio::main]` once died with "expected a number".
 
 use std::time::Duration;
 

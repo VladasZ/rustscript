@@ -1,8 +1,7 @@
 #!/usr/bin/env rust
 
-// `tokio::sync::Mutex` has its own async lock surface: `lock().await`
-// answers the guard with no `Result` layer, `try_lock` wraps one, and the
-// debug form has no poison field.
+// `tokio::sync::Mutex` has no `Result` layer on `lock().await` and no
+// poison field in debug.
 
 use std::sync::Arc;
 use tokio::sync::Mutex;

@@ -1,6 +1,5 @@
-//! Runs every script in the top level `examples/` directory and asserts it
-//! exits cleanly. The `cargo check` gate is skipped so this stays fast, a
-//! separate suite covers the gate itself.
+//! Runs every script in the top level `examples/` and asserts it exits
+//! cleanly. The `cargo check` gate is skipped to stay fast.
 
 use std::process::Command;
 
@@ -21,8 +20,8 @@ fn every_example_runs() {
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
             continue;
         }
-        // Network examples need connectivity, so they are not run here.
-        // manual_ examples change real machine state and are run by hand.
+        // Network examples need connectivity and `manual_` ones change real
+        // machine state.
         if path
             .file_name()
             .and_then(|n| n.to_str())
@@ -30,12 +29,12 @@ fn every_example_runs() {
         {
             continue;
         }
-        // Creating a symlink on Windows needs privileges unix grants freely.
+        // A symlink on `Windows` needs privileges.
         let stem = path.file_stem().and_then(|n| n.to_str());
         if !cfg!(unix) && stem == Some("symlink_demo") {
             continue;
         }
-        // The registry, services and WMI exist only on Windows.
+        // Registry, services and WMI exist only on `Windows`.
         if !cfg!(windows) && matches!(stem, Some("registry_demo" | "service_demo" | "wmi_demo")) {
             continue;
         }

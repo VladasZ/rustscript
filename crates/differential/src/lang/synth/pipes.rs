@@ -1,5 +1,4 @@
-//! Iterator pipeline generation. Every pipe built here passes `is_valid`,
-//! that is asserted rather than assumed.
+//! Every pipe built here passes `is_valid`, asserted not assumed.
 
 use rand::RngExt;
 
@@ -11,8 +10,7 @@ use crate::lang::synth::Generator;
 use crate::lang::ty::Ty;
 
 impl Generator<'_> {
-    /// A pipe whose result is `want`. `site` is where a `collect`, `sum`, or
-    /// `product` states its target; other terminals ignore it.
+    /// `site` is where a `collect`, `sum` or `product` states its target.
     pub(super) fn pipe_collect(&mut self, want: &Ty, site: Site, depth: usize) -> Option<Expr> {
         if depth == 0 {
             return None;
@@ -43,7 +41,6 @@ impl Generator<'_> {
         }
     }
 
-    /// A source of scalar items, with whether its order is defined.
     fn scalar_source(&mut self, depth: usize) -> (Source, bool) {
         match self.rng.random_range(0..6) {
             0 => {
@@ -90,10 +87,8 @@ impl Generator<'_> {
         self.fresh("diff_x")
     }
 
-    /// Generate `body` with `bind: ty` visible as a variable.
-    /// A map stage body states the item type for every stage after it, so a
-    /// bare literal here would leave a `{float}` that a later closure
-    /// parameter inherits and no method can be called on.
+    /// A map body states the item type for every later stage, so a bare
+    /// literal would leave a `{float}` no method can be called on.
     fn body_with(&mut self, bind: &str, bind_ty: &Ty, want: &Ty, depth: usize) -> Expr {
         let locals = [(bind.to_string(), bind_ty.clone())];
         self.closure_body(|inner| {
@@ -103,7 +98,6 @@ impl Generator<'_> {
         })
     }
 
-    /// Scalar items collected into a vec or set of `elem`.
     fn pipe_to_scalar_collect(
         &mut self,
         elem: &Ty,
@@ -147,8 +141,7 @@ impl Generator<'_> {
                 ann: self.param_ann(),
             });
         }
-        // A vec keeps arrival order, so an unordered source must sort first.
-        // A set forgets it, no sort needed.
+        // A vec keeps arrival order, a set forgets it.
         if matches!(target, Ty::Vec(_)) {
             if !ordered {
                 if !item.is_ord() {
@@ -157,8 +150,7 @@ impl Generator<'_> {
                 stages.push(Stage::Sorted);
             }
             if self.chance(0.3) {
-                // A `Skip` behind a body that can panic would hide the
-                // panic, see the panic reach rule in `pipe`.
+                // See the panic reach rule in `pipe`.
                 let choices = if fallible_pending(&stages) { 3 } else { 4 };
                 stages.push(match self.rng.random_range(0..choices) {
                     0 => Stage::Rev,
@@ -178,9 +170,8 @@ impl Generator<'_> {
         })
     }
 
-    /// Pair items collected into a map. Three roads to a pair: a map source
-    /// iterated whole, a scalar source paired with a computed value, or an
-    /// ordered scalar source enumerated when the key is i64.
+    /// 3 roads to a pair, a map source, a scalar source paired with a
+    /// computed value, or an enumerated ordered source.
     fn pipe_to_map(&mut self, key: &Ty, value: &Ty, site: Site, depth: usize) -> Pipe {
         let target = Ty::map_of(key.clone(), value.clone());
         let choice = self.rng.random_range(0..3);
@@ -199,8 +190,8 @@ impl Generator<'_> {
                 });
                 let mut ordered = false;
                 let pair = Item::Pair(key.clone(), value.clone());
-                // A fallible predicate needs order, and when the pair cannot
-                // sort the filter is dropped rather than the whole pipe.
+                // When the pair cannot sort, the filter is dropped rather than
+                // the whole pipe.
                 if sort_before_fallible(&mut stages, &mut ordered, &pair, &pred) {
                     stages.push(Stage::Filter {
                         bind: Bind::Pair(key_bind, val_bind),
@@ -219,7 +210,7 @@ impl Generator<'_> {
             };
         }
         if choice == 1 && *key == Ty::I64 {
-            // Enumerate is order sensitive, so the source must be a vec.
+            // Enumerate needs order.
             let expr = self.expr(&Ty::vec_of(value.clone()), depth - 1);
             return Pipe {
                 source: Source::Coll {
@@ -246,7 +237,6 @@ impl Generator<'_> {
         }
     }
 
-    /// `sum`, `product`, `count`, or `fold` down to a number.
     fn pipe_to_number(&mut self, want: &Ty, site: Site, depth: usize) -> Option<Pipe> {
         let (source, mut ordered) = self.scalar_source(depth);
         let item = match source.item() {
@@ -289,8 +279,8 @@ impl Generator<'_> {
         if ordered && self.chance(0.3) {
             let acc = self.fresh_bind();
             let bind = self.fresh_bind();
-            // The accumulator's type comes from the init alone, so a bare
-            // literal there leaves a `{float}` no method can be called on.
+            // A bare literal init leaves a `{float}` no method can be called
+            // on.
             let init = self.typed_only(|inner| inner.expr(want, depth - 1));
             let locals = [(acc.clone(), want.clone()), (bind.clone(), item)];
             let body = self.closure_body(|inner| {
@@ -308,9 +298,7 @@ impl Generator<'_> {
             });
         }
         let product = self.chance(0.3);
-        // A signed sum panics on an order-dependent prefix, a float sum
-        // rounds per order, a product meets its zero in some order, so an
-        // unordered source sorts first for all of those.
+        // Signed sums, float sums and products all depend on order.
         let order_matters =
             product || want.contains_float() || matches!(want, Ty::Int(width) if width.is_signed());
         if !ordered && order_matters {
@@ -367,7 +355,6 @@ impl Generator<'_> {
         })
     }
 
-    /// `min`, `max`, `last`, `nth`, or an ordered `position` into an Option.
     fn pipe_to_opt(&mut self, inner: &Ty, depth: usize) -> Option<Pipe> {
         if *inner == Ty::USIZE && self.chance(0.3) {
             let elem = self.elem_ty();
@@ -431,11 +418,8 @@ impl Generator<'_> {
     }
 }
 
-/// Guard for a closure the pipe is about to run on possibly unordered items.
-/// A body that can panic observes arrival order, the first item to panic
-/// decides the message, and real Rust randomizes that order for maps and
-/// sets. When the body is fallible and order is undefined, sort first. When
-/// the items cannot sort, report false so the caller gives the pipe up.
+/// A fallible body on unordered items sorts first. When the items cannot
+/// sort, report false so the caller gives the pipe up.
 fn sort_before_fallible(
     stages: &mut Vec<Stage>,
     ordered: &mut bool,

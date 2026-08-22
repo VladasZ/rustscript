@@ -1,13 +1,6 @@
-//! Width-aware integer methods, one table for the whole dispatch.
-//!
-//! These used to run on the i64 image that `bridge_image` produces, which lost
-//! two things. The width, so `200u8.saturating_add(100)` saturated at
-//! `i64::MAX` and answered 300 where real Rust answers 255. And the range, so
-//! every method on a `u64` past `i64::MAX` saw `i64::MAX` instead of the real
-//! value, which made `big.max(0)` answer `9223372036854775807`.
-//!
-//! So the receiver arrives here as its true value and its true width, and each
-//! method computes in that width and panics exactly where debug Rust panics.
+//! Width aware integer methods. They once ran on the i64 image, so
+//! `200u8.saturating_add(100)` answered 300 and a `u64` past `i64::MAX` was
+//! clamped. The receiver arrives here with its true value and width.
 
 use num_traits::AsPrimitive;
 use std::cmp::Ordering;
@@ -17,31 +10,26 @@ use anyhow::{Result, bail};
 use super::bytecode::BuiltinId;
 use super::numeric::IntWidth;
 
-/// What an integer method produced, materialized into a value by the caller.
 pub enum IntOut {
-    /// A value in the receiver's own width.
     Same(i128),
-    /// A bit count, always `u32` in real Rust.
+    /// A bit count, always `u32`.
     Count(u32),
     Bool(bool),
-    /// `checked_*`, `Some` in the receiver's width or `None` on overflow.
-    /// The serde `as_i64` and `as_u64` answer through this too, they are the
-    /// same shape, a value only when it fits.
+    /// `checked_*`, and the serde `as_i64` and `as_u64`, a value only when it
+    /// fits.
     Checked(Option<i128>),
-    /// `as_f64`, which is always a `Some` in serde.
+    /// `as_f64`, always a `Some` in serde.
     SomeFloat(f64),
     Ordering(Ordering),
-    /// `to_le_bytes` and its siblings, one byte per byte of the width.
+    /// `to_le_bytes` and its siblings.
     Bytes(Vec<u8>),
-    /// `overflowing_*`, the wrapped value and whether it wrapped.
+    /// `overflowing_*`.
     Overflowing(i128, bool),
-    /// `checked_ilog2`, a bit count or `None`.
+    /// `checked_ilog2`.
     CheckedCount(Option<u32>),
 }
 
-/// Byte order of an integer byte conversion. `Ne` is the target's own order,
-/// read from the host the interpreter runs on, so a script answers what
-/// compiled Rust on the same machine answers.
+/// `Ne` is the host's own order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ByteOrder {
     Le,
@@ -67,8 +55,7 @@ impl ByteOrder {
     }
 }
 
-/// The order a `T::from_le_bytes` style associated function names, or `None`
-/// when the name is not one of the three byte conversions.
+/// `None` when the name is not one of the 3 byte conversions.
 pub fn from_bytes_order(name: &str) -> Option<ByteOrder> {
     Some(match name {
         "from_le_bytes" => ByteOrder::Le,
@@ -78,9 +65,8 @@ pub fn from_bytes_order(name: &str) -> Option<ByteOrder> {
     })
 }
 
-/// `T::from_le_bytes` and its siblings. Real Rust takes an exact `[u8; N]`, so
-/// a wrong length or an element outside a byte only reaches here from a script
-/// that never passed the check gate, and it is an error rather than a guess.
+/// Real Rust takes an exact `[u8; N]`, so a wrong length is an error rather
+/// than a guess.
 pub fn from_bytes(width: IntWidth, order: ByteOrder, bytes: &[i128]) -> Result<i128> {
     let count = byte_count(width);
     if bytes.len() != count {
@@ -114,8 +100,8 @@ fn byte_count(width: IntWidth) -> usize {
     (width.bits() / 8) as usize
 }
 
-/// `x.to_le_bytes()` and its siblings, over the receiver's real width, so a
-/// signed value writes its two's complement bytes.
+/// Over the receiver's real width, so a signed value writes two's
+/// complement.
 fn to_bytes(width: IntWidth, value: i128, order: ByteOrder) -> Vec<u8> {
     let count = byte_count(width);
     let bits = raw(width, value);
@@ -128,8 +114,7 @@ fn to_bytes(width: IntWidth, value: i128, order: ByteOrder) -> Vec<u8> {
     out
 }
 
-/// Raw bits of a value in its width, for the bit twiddling methods. A
-/// 128-bit value already stores its raw bits, and its mask would not fit.
+/// A 128 bit value already stores its raw bits.
 fn raw(width: IntWidth, value: i128) -> u128 {
     let bits = width.bits();
     if bits == 128 {
@@ -139,9 +124,8 @@ fn raw(width: IntWidth, value: i128) -> u128 {
     AsPrimitive::<u128>::as_(value) & mask
 }
 
-/// Reinterpret raw bits back as a value of the width, sign extending when the
-/// width is signed. This is what `wrapping_*` and the bit methods return
-/// through.
+/// Sign extends when the width is signed. What `wrapping_*` and the bit
+/// methods return through.
 fn from_raw(width: IntWidth, bits_value: u128) -> i128 {
     let bits = width.bits();
     if bits == 128 {
@@ -164,9 +148,8 @@ fn in_range(width: IntWidth, value: i128) -> Option<i128> {
     (value >= width.min() && value <= width.max()).then_some(value)
 }
 
-/// `pow`, checked step by step so the panic lands where debug Rust's does.
-/// The multiply is checked in i128 too, since a `u64` receiver can carry the
-/// product past what an i128 holds.
+/// Checked step by step so the panic lands where debug Rust's does. The
+/// multiply is checked in i128 too, a `u64` product can pass what it holds.
 fn pow(width: IntWidth, base: i128, exponent: u32) -> Result<i128> {
     let mut result: i128 = 1;
     for _ in 0..exponent {
@@ -188,7 +171,7 @@ fn arg(args: &[i128], index: usize) -> Result<i128> {
     }
 }
 
-/// A shift or rotate amount, which is a `u32` in real Rust.
+/// A shift or rotate amount is a `u32`.
 fn count_arg(args: &[i128], index: usize) -> Result<u32> {
     let value = arg(args, index)?;
     match u32::try_from(value) {
@@ -197,11 +180,8 @@ fn count_arg(args: &[i128], index: usize) -> Result<u32> {
     }
 }
 
-/// Answer an integer method in its real width, or `None` when the name is not
-/// one of these so the caller falls through to its own dispatch.
-/// Methods whose argument is a `u32` amount of its own rather than a value of
-/// the receiver's type, so the dispatch must not unify the receiver's width
-/// with the argument's.
+/// Methods whose argument is a `u32` amount, so the dispatch must not unify
+/// the receiver's width with it.
 pub fn takes_amount_arg(name: BuiltinId) -> bool {
     matches!(
         name,
@@ -228,10 +208,8 @@ pub fn int_method(
     int_arith_method(name, width, recv, args).or_else(|| int_query_method(name, width, recv, args))
 }
 
-/// Stamps the shared native method body for one 128-bit type. `$decode`
-/// turns raw storage bits into the type, `$encode` a result back into bits.
-/// The names here mirror the i128 pipeline above; new names must go into
-/// both, and the coverage harvest reads the pipeline's two halves.
+/// Stamps the native method body for one 128 bit type. New names must go
+/// into both this and the i128 pipeline, the harvest reads the pipeline.
 macro_rules! big_methods {
     ($fn_name:ident, $query_name:ident, $ty:ty, $decode:expr, $encode:expr) => {
         fn $fn_name(name: BuiltinId, recv_bits: i128, args: &[i128]) -> Option<Result<IntOut>> {
@@ -320,7 +298,7 @@ macro_rules! big_methods {
             Some(out)
         }
 
-        /// The comparison, bit, and byte half of the same type's surface.
+        /// The comparison, bit and byte half.
         fn $query_name(name: BuiltinId, recv_bits: i128, args: &[i128]) -> Option<Result<IntOut>> {
             let decode = $decode;
             let encode = $encode;
@@ -341,7 +319,7 @@ macro_rules! big_methods {
                 BuiltinId::IsMultipleOf => val(0).map(|b| {
                     IntOut::Bool(match b {
                         0 => recv == 0,
-                        // The only `None` remainder is MIN % -1, which is 0.
+                        // The only `None` remainder is `MIN % -1`, which is 0.
                         _ => recv.checked_rem(b).is_none_or(|r| r == 0),
                     })
                 }),
@@ -381,12 +359,10 @@ big_methods!(
     |v: i128| v
 );
 
-/// Native method cores for the 128-bit receivers. The i128 pipeline above
-/// cannot host them: a `u128` past `i128::MAX` stores as negative bits and
-/// its bounds do not fit an i128. `recv` and every `Same` or `Checked`
-/// payload are raw storage bits, u128 reinterpreted, exactly what
-/// `Value::Big` carries. The signed-only names live here because the
-/// stamped body must compile for u128 too.
+/// The i128 pipeline cannot host these, a `u128` past `i128::MAX` stores as
+/// negative bits. Payloads are raw bits like `Value::Big` carries. The
+/// signed only names live here because the stamped body must compile for
+/// u128 too.
 pub fn big_int_method(
     name: BuiltinId,
     width: IntWidth,
@@ -453,7 +429,6 @@ pub fn big_int_method(
     }
 }
 
-/// The arithmetic families: saturating, wrapping, checked, pow, abs, signum.
 fn int_arith_method(
     name: BuiltinId,
     width: IntWidth,
@@ -538,8 +513,6 @@ fn int_arith_method(
     Some(out)
 }
 
-/// The `checked_*` arithmetic, `None` wherever the receiver's width would
-/// overflow.
 fn int_checked_family(
     name: BuiltinId,
     width: IntWidth,
@@ -563,8 +536,8 @@ fn int_checked_family(
             })
         }),
         BuiltinId::CheckedRem => arg(args, 0).map(|b| {
-            // MIN % -1 overflows in the receiver's width even though the
-            // i128 remainder is 0, so real Rust answers None for it.
+            // `MIN % -1` overflows in the receiver's width even though the
+            // i128 remainder is 0.
             IntOut::Checked(
                 if b == 0 || (width.is_signed() && b == -1 && recv == width.min()) {
                     None
@@ -573,8 +546,7 @@ fn int_checked_family(
                 },
             )
         }),
-        // A shift is checked on the amount alone, `None` at the width and
-        // beyond, and bits shifted past the width are simply dropped.
+        // A shift is checked on the amount alone.
         BuiltinId::CheckedShl => count_arg(args, 0)
             .map(|n| IntOut::Checked((n < bits).then(|| from_raw(width, raw(width, recv) << n)))),
         BuiltinId::CheckedShr => count_arg(args, 0).map(|n| {
@@ -591,8 +563,6 @@ fn int_checked_family(
     Some(out)
 }
 
-/// The saturating and wrapping powers and shifts, and the overflowing
-/// family, all computed in the receiver's width.
 fn int_wrapping_family(
     name: BuiltinId,
     width: IntWidth,
@@ -604,7 +574,6 @@ fn int_wrapping_family(
         BuiltinId::SaturatingPow => count_arg(args, 0).map(|e| {
             IntOut::Same(match pow(width, recv, e) {
                 Ok(v) => v,
-                // A negative base with an odd exponent overflows downward.
                 Err(_) if recv < 0 && e % 2 == 1 => width.min(),
                 Err(_) => width.max(),
             })
@@ -651,8 +620,7 @@ fn int_wrapping_family(
     Some(out)
 }
 
-/// The logarithms, the sign tests, and the power of two and multiple
-/// families, some of which exist on one signedness only.
+/// Some of these exist on one signedness only.
 fn int_range_family(
     name: BuiltinId,
     width: IntWidth,
@@ -713,7 +681,6 @@ fn int_range_family(
                 if b == 0 {
                     bail!("attempt to divide by zero");
                 }
-                // Both sides are non-negative in an unsigned width.
                 Ok(IntOut::Same((recv + b - 1) / b))
             })
         }
@@ -738,8 +705,7 @@ fn int_range_family(
     Some(out)
 }
 
-/// The bit counts, rotations, and byte views, all over the raw bits of the
-/// receiver's width.
+/// All over the raw bits of the receiver's width.
 fn int_bit_family(
     name: BuiltinId,
     width: IntWidth,
@@ -785,7 +751,6 @@ fn int_bit_family(
     Some(out)
 }
 
-/// Accessors, comparisons, and the euclid forms.
 fn int_query_method(
     name: BuiltinId,
     width: IntWidth,
@@ -799,10 +764,8 @@ fn int_query_method(
     }
     let bits = width.bits();
     let out = match name {
-        // The serde_json integer accessors, answered from the real value
-        // rather than the saturated i64 image. serde answers these by range,
-        // so a negative number is not a u64 and one past `i64::MAX` is not an
-        // i64. The saturated image made both of those answer the wrong thing.
+        // From the real value, not the saturated image. serde answers by
+        // range, so a negative number is not a u64.
         BuiltinId::AsI64 => Ok(IntOut::Checked(i64::try_from(recv).ok().map(i128::from))),
         BuiltinId::AsU64 => Ok(IntOut::Checked(u64::try_from(recv).ok().map(i128::from))),
         BuiltinId::AsF64 => Ok(IntOut::SomeFloat(AsPrimitive::<f64>::as_(recv))),
@@ -817,9 +780,8 @@ fn int_query_method(
         }),
         BuiltinId::Cmp => arg(args, 0).map(|b| IntOut::Ordering(recv.cmp(&b))),
         BuiltinId::IsMultipleOf => arg(args, 0).map(|b| {
-            // Real Rust defines a zero divisor as "only zero is a multiple of
-            // zero" rather than a panic, so the remainder is never taken by
-            // zero here. Taking it crashed the interpreter itself.
+            // Only zero is a multiple of zero, no panic. Taking the remainder
+            // by zero crashed the interpreter itself.
             IntOut::Bool(if b == 0 { recv == 0 } else { recv % b == 0 })
         }),
         BuiltinId::DivEuclid => arg(args, 0).and_then(|b| {
@@ -835,9 +797,8 @@ fn int_query_method(
             if b == 0 {
                 bail!("attempt to calculate the remainder with a divisor of zero");
             }
-            // Real Rust takes `self % rhs` first, and MIN % -1 overflows
-            // there even though the euclidean remainder itself would be 0.
-            // Computing in i128 hides that overflow, so it is checked here.
+            // `MIN % -1` overflows in real Rust even though the euclidean
+            // remainder is 0. i128 hides that, so it is checked here.
             if width.is_signed() && b == -1 && recv == width.min() {
                 bail!("attempt to calculate the remainder with overflow");
             }
@@ -855,8 +816,7 @@ fn int_query_method(
                 Ok(IntOut::Same(isqrt(recv)))
             }
         }
-        // Rounds towards zero, as if computed in a wider signed type, which
-        // the i128 division does.
+        // Rounds towards zero like the i128 division.
         BuiltinId::Midpoint => arg(args, 0).map(|b| IntOut::Same(recv.midpoint(b))),
         BuiltinId::CheckedRemEuclid => arg(args, 0).map(|b| {
             IntOut::Checked(
@@ -935,9 +895,7 @@ mod tests {
         }
     }
 
-    /// The regression the differential generator found: the whole numeric
-    /// surface ran on an i64 image, so a `u64` past `i64::MAX` was clamped
-    /// before the method ever saw it.
+    /// A `u64` past `i64::MAX` was once clamped before the method saw it.
     #[test]
     fn a_u64_past_i64_max_keeps_its_value() {
         let big = i128::from(u64::MAX);
@@ -949,7 +907,7 @@ mod tests {
         );
     }
 
-    /// Saturation happens at the receiver's real bounds, not at i64's.
+    /// Saturation at the receiver's real bounds.
     #[test]
     fn saturating_uses_the_real_width() {
         assert_eq!(
@@ -975,8 +933,7 @@ mod tests {
         assert_eq!(same(BuiltinId::Abs, IntWidth::I8, -127, &[]), 127);
     }
 
-    /// A zero divisor here once took the remainder anyway and crashed the
-    /// interpreter process with its own host panic.
+    /// A zero divisor once crashed the interpreter process.
     #[test]
     fn is_multiple_of_zero_answers_instead_of_crashing() {
         let answer = int_method(BuiltinId::IsMultipleOf, IntWidth::U64, 0, &[0]).expect("known");
@@ -1038,7 +995,7 @@ mod tests {
         }
     }
 
-    /// The two orders must disagree, or an endianness bug reads as correct.
+    /// The 2 orders must disagree, or an endianness bug reads as correct.
     #[test]
     fn byte_conversions_keep_their_order() {
         assert_eq!(
@@ -1060,8 +1017,7 @@ mod tests {
         assert_eq!(be, 0x7856_3412);
     }
 
-    /// A signed width writes and reads two's complement, an unsigned one of the
-    /// same size reads the very same bytes as a positive number.
+    /// An unsigned width reads the same bytes as a positive number.
     #[test]
     fn byte_conversions_respect_the_sign() {
         assert_eq!(bytes(BuiltinId::ToBeBytes, IntWidth::I16, -2), [0xff, 0xfe]);

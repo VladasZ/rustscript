@@ -1,4 +1,4 @@
-//! Parent module in `name.rs` style, with its children in `geometry/`.
+//! Parent module in `name.rs` style.
 
 pub mod ops;
 pub mod shapes;

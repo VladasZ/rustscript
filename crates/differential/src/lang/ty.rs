@@ -1,24 +1,16 @@
-//! The type universe the generator can write programs in.
-//!
-//! A type the generator cannot name is a bug it cannot find. The first model
-//! knew `i64`, `bool` and `String`, so `saturating_add` ran on `i64` for
-//! months while the bug lived on `u8`. The second knew every width but no
-//! tuple, no `Result`, and no user type, so `?` through a `From` impl, a
-//! struct as a map key, and `..Default::default()` were all unreachable. The
-//! universe here covers what the language has, and every capability question
-//! a generator asks, copy, order, hash, default, display, is answered here
-//! from the type itself.
+//! The type universe. A type the generator cannot name is a bug it cannot
+//! find, the first model knew only `i64` while the bug lived on `u8`. Every
+//! capability question is answered here from the type itself.
 
 use serde::{Deserialize, Serialize};
 
 use crate::lang::user::UserShape;
 pub use crate::lang::width::{FLOAT_WIDTHS, FloatWidth, INT_WIDTHS, IntWidth};
 
-/// How deep a generated type may nest, so `Vec<Vec<Vec<..>>>` terminates.
+/// So `Vec<Vec<Vec<..>>>` terminates.
 pub const MAX_TY_DEPTH: usize = 2;
 
-/// The std error types a generated program can hold. `parse` produces them,
-/// and `?` converts them through a user `From` impl.
+/// `parse` produces them and `?` converts them through a user `From`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum StdErr {
     ParseInt,
@@ -43,17 +35,14 @@ pub enum Ty {
     Str,
     Vec(Box<Ty>),
     Opt(Box<Ty>),
-    /// `HashMap<K, V>`. Iteration order is random per process in real Rust,
-    /// so a map value is only ever observed through sorted or order-neutral
-    /// forms, never printed raw.
+    /// Never printed raw, real Rust randomizes the order per process.
     Map(Box<Ty>, Box<Ty>),
-    /// `HashSet<E>`, under the same observation rule as `Map`.
+    /// Same observation rule as `Map`.
     Set(Box<Ty>),
     Tuple(Vec<Ty>),
     Res(Box<Ty>, Box<Ty>),
     StdErr(StdErr),
-    /// A struct or enum the program declares itself. The shape carries
-    /// everything typing needs, the bodies live on the block.
+    /// The shape carries what typing needs, the bodies live on the block.
     User(Box<UserShape>),
 }
 
@@ -82,14 +71,13 @@ impl Ty {
         }
     }
 
-    /// Whether a value of this type can be used twice without a clone. A
-    /// non-copy value read from a binding is rendered with `.clone()`, which is
-    /// what keeps generated programs free of borrow errors.
+    /// A non copy read renders with `.clone()`, which keeps programs free of
+    /// borrow errors.
     pub fn is_copy(&self) -> bool {
         match self {
             Self::Int(_) | Self::Float(_) | Self::Bool | Self::Char => true,
-            // User types never derive Copy, so every read clones, which is
-            // also the read that exercises the value model.
+            // User types never derive Copy, so every read clones and
+            // exercises the value model.
             Self::Str
             | Self::Vec(_)
             | Self::Map(..)
@@ -110,9 +98,7 @@ impl Ty {
         matches!(self, Self::Int(_) | Self::Float(_))
     }
 
-    /// Whether `sort`, `min`, `max`, and `Ord` comparisons compile. Floats
-    /// have no total order, maps and sets implement no order at all, a user
-    /// type only when it derives one.
+    /// Whether `Ord` comparisons compile.
     pub fn is_ord(&self) -> bool {
         match self {
             Self::Float(_) | Self::Map(..) | Self::Set(_) | Self::StdErr(_) => false,
@@ -124,8 +110,7 @@ impl Ty {
         }
     }
 
-    /// Whether `==` compiles with full `Eq`, which a map key and a set
-    /// element need. Floats are `PartialEq` only.
+    /// Full `Eq`, floats are `PartialEq` only.
     pub fn is_eq(&self) -> bool {
         match self {
             Self::Float(_) => false,
@@ -137,7 +122,6 @@ impl Ty {
         }
     }
 
-    /// Whether the type hashes, so it can key a map or sit in a set.
     pub fn is_hash(&self) -> bool {
         match self {
             Self::Float(_) | Self::Map(..) | Self::Set(_) | Self::StdErr(_) => false,
@@ -149,13 +133,11 @@ impl Ty {
         }
     }
 
-    /// A map key or set element: hashable, `Eq`, and ordered, the last one
-    /// because every observation of a map or set sorts it first.
+    /// Hashable, `Eq` and ordered, because every observation sorts first.
     pub fn is_key(&self) -> bool {
         self.is_hash() && self.is_eq() && self.is_ord()
     }
 
-    /// Whether `Default::default()` and `unwrap_or_default` compile.
     pub fn has_default(&self) -> bool {
         match self {
             Self::Res(..) | Self::StdErr(_) => false,
@@ -173,7 +155,7 @@ impl Ty {
         }
     }
 
-    /// Whether `{}` formats the type. Containers and tuples are `Debug` only.
+    /// Containers and tuples are `Debug` only.
     pub fn has_display(&self) -> bool {
         match self {
             Self::Int(_)
@@ -187,7 +169,6 @@ impl Ty {
         }
     }
 
-    /// The element type of a `Vec<E>`, `Option<E>`, or `HashSet<E>`.
     pub fn elem(&self) -> Option<&Ty> {
         match self {
             Self::Vec(inner) | Self::Opt(inner) | Self::Set(inner) => Some(inner),
@@ -195,7 +176,6 @@ impl Ty {
         }
     }
 
-    /// The key and value types of a `HashMap<K, V>`.
     pub fn key_val(&self) -> Option<(&Ty, &Ty)> {
         match self {
             Self::Map(key, value) => Some((key, value)),
@@ -203,7 +183,6 @@ impl Ty {
         }
     }
 
-    /// The ok and error types of a `Result<T, E>`.
     pub fn ok_err(&self) -> Option<(&Ty, &Ty)> {
         match self {
             Self::Res(ok, err) => Some((ok, err)),
@@ -221,8 +200,7 @@ impl Ty {
         }
     }
 
-    /// Whether this type or anything inside it is a float, which has no
-    /// total order and rounds per operation order.
+    /// A float has no total order and rounds per operation order.
     pub fn contains_float(&self) -> bool {
         match self {
             Self::Float(_) => true,
@@ -236,7 +214,7 @@ impl Ty {
         }
     }
 
-    /// A short stable tag used in coverage features and shrink signatures.
+    /// For coverage features and shrink signatures.
     pub fn feature(&self) -> &'static str {
         match self {
             Self::Int(IntWidth::U8) => "lang-ty-u8",
@@ -300,8 +278,7 @@ impl Ty {
     pub const F64: Ty = Ty::Float(FloatWidth::F64);
 }
 
-/// Every scalar type the generator builds bindings from, in a fixed order so
-/// generation stays deterministic for a seed.
+/// Fixed order so generation stays deterministic per seed.
 pub const SCALAR_TYPES: &[Ty] = &[
     Ty::Int(IntWidth::U8),
     Ty::Int(IntWidth::U16),

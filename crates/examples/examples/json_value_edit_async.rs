@@ -1,8 +1,6 @@
 #!/usr/bin/env rust
 
-// The `#[tokio::main]` copy of json_value_edit, so the async path is held to the
-// same serde_json Value behaviour: the mut accessors hand back the real
-// container, and the variant constructors build a value out of its payload.
+// The `#[tokio::main]` copy of `json_value_edit`.
 
 use serde_json::Value;
 

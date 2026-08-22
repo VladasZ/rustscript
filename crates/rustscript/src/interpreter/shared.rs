@@ -1,12 +1,6 @@
-//! Shared method cores for scalar receivers.
-//!
-//! A core works on plain Rust types and answers through a small output
-//! enum, so the dispatch layer only adapts arguments in and values out, and
-//! the coverage harvest reads each core exactly once.
-//!
-//! What stays out of the cores: anything lazy or stateful. The
-//! iterator forms of `chars`, `lines`, `bytes`, and `split_whitespace` cannot
-//! be expressed as a finished value.
+//! Shared method cores for scalar receivers. A core works on plain Rust
+//! types, so the dispatch layer only adapts values and the coverage harvest
+//! reads each core once. Anything lazy or stateful stays out.
 
 use num_traits::AsPrimitive;
 use std::cmp::Ordering;
@@ -17,17 +11,14 @@ use anyhow::{Result, anyhow, bail};
 use super::bytecode::{BinKind, BuiltinId, ScalarTy};
 use super::numeric::IntWidth;
 
-/// View of a method's arguments. The dispatch layer adapts the value slice,
-/// and the cores monomorphize over this, so the view costs nothing.
+/// The cores monomorphize over this, so the view costs nothing.
 pub(super) trait Args {
-    /// The argument rendered as text, what `Display` would print. Missing
-    /// arguments render empty, the behavior scripts always saw.
+    /// What `Display` would print. Missing arguments render empty.
     fn text(&self, i: usize) -> String;
     fn int(&self, i: usize) -> Option<i64>;
-    /// An integer, or an integer view of a float argument.
     fn float(&self, i: usize) -> Option<f64>;
-    /// The chars of a `['-', '_']` style pattern array argument, so a char
-    /// set splits on any of its members rather than the rendered text.
+    /// The chars of a `['-', '_']` pattern, so a char set splits on any
+    /// member.
     fn pattern_chars(&self, i: usize) -> Option<Vec<char>>;
 }
 
@@ -38,24 +29,20 @@ fn int_arg(args: &impl Args, i: usize) -> Result<i64> {
     }
 }
 
-/// An argument the script's own types constrain to usize, so a negative or
-/// oversized value can only come from an interpreter bug or an invalid
-/// program, and errors instead of wrapping.
+/// A negative or oversized value can only come from an interpreter bug, so
+/// it errors instead of wrapping.
 fn usize_arg(args: &impl Args, i: usize) -> Result<usize> {
     let n = int_arg(args, i)?;
     usize::try_from(n).map_err(|_| anyhow!("`{n}` is not a valid count"))
 }
 
-/// A length or byte offset as the integer scripts see. These fit i64 on every
-/// supported platform, the expect documents the impossible case.
+/// Lengths fit i64 on every supported platform.
 pub(super) fn usize_i64(i: usize) -> i64 {
     i64::try_from(i).expect("value exceeds i64")
 }
 
-/// A length as a real `usize` value, width tag included. An untagged length
-/// ran `!` and underflow in i64, so `!v.len()` answered a small negative
-/// where compiled Rust answers a huge unsigned. Found by the differential
-/// campaign at seed 20675317577.
+/// A length with its `usize` tag. An untagged `!v.len()` once answered a
+/// small negative. From seed 20675317577.
 pub(super) fn usize_value(i: usize) -> super::value::Value {
     super::value::Value::int_of_width(i128::from(usize_i64(i)), IntWidth::USize)
 }
@@ -75,7 +62,6 @@ pub(super) enum Num {
     Float(f64),
 }
 
-/// What a numeric method produced, materialized into a value by the caller.
 pub(super) enum NumOut {
     Int(i64),
     Float(f64),
@@ -94,13 +80,11 @@ pub(super) fn num_core(recv: Num, name: BuiltinId, args: &impl Args) -> Result<O
         Float(f) => f,
     };
     Ok(Some(match (recv, name) {
-        // `as_i64`, `as_u64` and `as_f64` on an integer are range checked in
-        // `int_methods`, which sees the real width, and never reach here.
+        // `as_i64`, `as_u64` and `as_f64` on an integer are answered in
+        // `int_methods`.
         (Int(i), BuiltinId::AsI128 | BuiltinId::AsUsize) => NumOut::SomeInt(i),
         (Float(f), BuiltinId::AsF64) => NumOut::SomeFloat(f),
-        // serde_json keeps every json float as f64 and its integer accessors
-        // answer None on it, even for a whole value like 5.0. And a number is
-        // not the other serde types, so those accessors are None too.
+        // serde_json's integer accessors answer None on a float, even 5.0.
         (
             Float(_),
             BuiltinId::AsI64 | BuiltinId::AsU64 | BuiltinId::AsI128 | BuiltinId::AsUsize,
@@ -138,10 +122,8 @@ pub(super) fn num_core(recv: Num, name: BuiltinId, args: &impl Args) -> Result<O
         (Float(f), BuiltinId::IsSubnormal) => NumOut::Bool(f.is_subnormal()),
         (Float(f), BuiltinId::Floor) => NumOut::Float(f.floor()),
         (Float(f), BuiltinId::Trunc) => NumOut::Float(f.trunc()),
-        // Float methods on an int receiver: the untyped `parse` guesses a
-        // whole float like "160" into an int, and the annotation that made it
-        // f64 in real Rust is erased at runtime. Rounding is identity there,
-        // and the rest compute through the float view.
+        // The untyped `parse` guesses "160" into an int, so float methods on
+        // an int compute through the float view.
         (Int(i), BuiltinId::Trunc | BuiltinId::Floor | BuiltinId::Ceil | BuiltinId::Round) => {
             NumOut::Int(i)
         }
@@ -153,10 +135,8 @@ pub(super) fn num_core(recv: Num, name: BuiltinId, args: &impl Args) -> Result<O
         (Float(f), BuiltinId::Round) => NumOut::Float(f.round()),
         (Float(f), BuiltinId::IsSignPositive) => NumOut::Bool(f.is_sign_positive()),
         (Float(f), BuiltinId::Fract) => NumOut::Float(f.fract()),
-        // A whole value parse-guessed into an int has no fraction.
         (Int(_), BuiltinId::Fract) => NumOut::Int(0),
-        // Int signum answers width-aware in `int_methods`, only the float
-        // side lives here.
+        // Int `signum` lives in `int_methods`.
         (Float(f), BuiltinId::Signum) => NumOut::Float(f.signum()),
         (Float(f), BuiltinId::Recip) => NumOut::Float(f.recip()),
         (Int(_), BuiltinId::Recip) => NumOut::Float(as_f().recip()),
@@ -202,18 +182,14 @@ pub(super) fn num_core(recv: Num, name: BuiltinId, args: &impl Args) -> Result<O
     }))
 }
 
-/// What an f32 method produced, materialized into a value by the caller.
 pub(super) enum F32Out {
     Val(f32),
     Bool(bool),
     SomeOrdering(Ordering),
 }
 
-/// The f32 method surface, computed in real f32 so results match a compiled
-/// binary bit for bit. Routing an f32 through the f64 core double rounds
-/// `sqrt` and friends, and the result forgets it was an f32, so `{:?}` printed
-/// the f64 shortest form, `3.4028234663852886e38` instead of `3.4028235e38`
-/// for `f32::MAX`.
+/// Computed in real f32. Through the f64 core `sqrt` double rounds and
+/// `{:?}` printed `3.4028234663852886e38` instead of `3.4028235e38`.
 pub(super) fn f32_core(recv: f32, name: BuiltinId, args: &impl Args) -> Result<Option<F32Out>> {
     let arg = |i: usize| -> Result<f32> { float_arg(args, i).map(AsPrimitive::<f32>::as_) };
     Ok(Some(match name {
@@ -262,7 +238,7 @@ pub(super) fn f32_core(recv: f32, name: BuiltinId, args: &impl Args) -> Result<O
         BuiltinId::IsNan => F32Out::Bool(recv.is_nan()),
         BuiltinId::IsFinite => F32Out::Bool(recv.is_finite()),
         BuiltinId::IsInfinite => F32Out::Bool(recv.is_infinite()),
-        // The same answer the f64 core gives, so both precisions stay in step.
+        // Same as the f64 core.
         BuiltinId::PartialCmp => {
             F32Out::SomeOrdering(recv.partial_cmp(&arg(0)?).unwrap_or(Ordering::Equal))
         }
@@ -272,26 +248,23 @@ pub(super) fn f32_core(recv: f32, name: BuiltinId, args: &impl Args) -> Result<O
 
 // -- json ------------------------------------------------------------------
 
-/// The shape a decoded json value has once it is an interpreter value. A
-/// parsed json is held as plain values, an object as a map and a string as a
-/// string, so the serde type tests are shape tests. The dispatch layer maps a
-/// value onto this and answers from one table.
+/// Parsed json is held as plain values, so the serde type tests are shape
+/// tests.
 #[derive(Clone, Copy)]
 pub(super) enum JsonKind {
     Object,
     Array,
     Str,
     Bool,
-    /// An integer at its real value, so the range tests can answer on it.
+    /// At its real value, so the range tests can answer.
     Int(i128),
     Float,
     Null,
     Other,
 }
 
-/// The `serde_json` `is_*` family. These apply to every receiver, so they are
-/// answered before the per type dispatch, which returns early for the hot
-/// receivers and would otherwise never reach them.
+/// Answered before the per type dispatch, which returns early for the hot
+/// receivers.
 pub(super) fn json_type_test(kind: JsonKind, name: BuiltinId) -> Option<bool> {
     Some(match name {
         BuiltinId::IsObject => matches!(kind, JsonKind::Object),
@@ -299,8 +272,7 @@ pub(super) fn json_type_test(kind: JsonKind, name: BuiltinId) -> Option<bool> {
         BuiltinId::IsString => matches!(kind, JsonKind::Str),
         BuiltinId::IsBoolean => matches!(kind, JsonKind::Bool),
         BuiltinId::IsNumber => matches!(kind, JsonKind::Int(_) | JsonKind::Float),
-        // serde answers these by range, not by "it is an integer". A negative
-        // number is not a u64, and one past `i64::MAX` is not an i64.
+        // serde answers by range, a negative number is not a u64.
         BuiltinId::IsI64 => matches!(kind, JsonKind::Int(v) if i64::try_from(v).is_ok()),
         BuiltinId::IsU64 => matches!(kind, JsonKind::Int(v) if u64::try_from(v).is_ok()),
         BuiltinId::IsF64 => matches!(kind, JsonKind::Float),
@@ -309,9 +281,8 @@ pub(super) fn json_type_test(kind: JsonKind, name: BuiltinId) -> Option<bool> {
     })
 }
 
-/// The `serde_json` `as_*` family, by name only. A receiver of the wrong shape
-/// answers None rather than erroring, so the caller tests the name here and
-/// then decides whether the receiver matches.
+/// By name only, the caller decides whether the receiver matches. A wrong
+/// shape answers None.
 pub(super) fn json_accessor(name: BuiltinId) -> bool {
     matches!(
         name,
@@ -327,9 +298,8 @@ pub(super) fn json_accessor(name: BuiltinId) -> bool {
     )
 }
 
-/// The tokens of a json pointer, RFC 6901, or None when the text is not a
-/// pointer at all. An empty pointer selects the whole value, so it yields no
-/// tokens. `~1` and `~0` are the escapes for a slash and a tilde in a key.
+/// RFC 6901. An empty pointer selects the whole value. `~1` and `~0` escape
+/// a slash and a tilde.
 pub(super) fn json_pointer_tokens(pointer: &str) -> Option<Vec<String>> {
     if pointer.is_empty() {
         return Some(Vec::new());
@@ -346,8 +316,7 @@ pub(super) fn json_pointer_tokens(pointer: &str) -> Option<Vec<String>> {
     )
 }
 
-/// A pointer token as an array index. serde rejects a leading plus and a
-/// leading zero, so "01" is not index one.
+/// serde rejects a leading plus and a leading zero.
 pub(super) fn json_pointer_index(token: &str) -> Option<usize> {
     if token.starts_with('+') || (token.starts_with('0') && token.len() != 1) {
         return None;
@@ -357,19 +326,15 @@ pub(super) fn json_pointer_index(token: &str) -> Option<usize> {
 
 // -- chars -----------------------------------------------------------------
 
-/// The result of a `char` method, in a form the caller turns into a value.
-/// Keeps the classification table in one place.
 pub(super) enum CharOut {
     Bool(bool),
     Char(char),
     Str(String),
-    /// `to_digit`, whose payload is a u32 in real Rust.
+    /// `to_digit`, a u32 payload.
     OptU32(Option<u32>),
-    /// `len_utf8`.
     USize(usize),
 }
 
-/// The `char` classification and conversion methods.
 pub(super) fn char_method(ch: char, name: BuiltinId, args: &impl Args) -> Option<Result<CharOut>> {
     let b = |v: bool| Some(Ok(CharOut::Bool(v)));
     match name {
@@ -411,8 +376,7 @@ pub(super) fn char_method(ch: char, name: BuiltinId, args: &impl Args) -> Option
         BuiltinId::IsLowercase => b(ch.is_lowercase()),
         BuiltinId::ToAsciiUppercase => Some(Ok(CharOut::Char(ch.to_ascii_uppercase()))),
         BuiltinId::ToAsciiLowercase => Some(Ok(CharOut::Char(ch.to_ascii_lowercase()))),
-        // These yield an iterator in real Rust, but a script only ever renders
-        // or collects it, so the string it would produce is handed back.
+        // An iterator in real Rust, but a script only renders or collects it.
         BuiltinId::ToUppercase => Some(Ok(CharOut::Str(ch.to_uppercase().to_string()))),
         BuiltinId::ToLowercase => Some(Ok(CharOut::Str(ch.to_lowercase().to_string()))),
         _ => None,
@@ -421,12 +385,11 @@ pub(super) fn char_method(ch: char, name: BuiltinId, args: &impl Args) -> Option
 
 // -- strings ---------------------------------------------------------------
 
-/// What a string method produced, materialized by the caller. `Keep` and
-/// `OkKeep` hand the receiver back so the caller answers with a refcount
-/// bump, never a copy.
+/// `Keep` and `OkKeep` hand the receiver back, a refcount bump and never a
+/// copy.
 pub(super) enum StrOut {
     Bool(bool),
-    /// A length or count, materialized with the real `usize` width.
+    /// With the real `usize` width.
     USize(usize),
     Owned(String),
     Keep,
@@ -440,11 +403,9 @@ pub(super) enum StrOut {
     Ordering(Ordering),
 }
 
-/// `repeat` past the allocation limit aborts the real program instead of
-/// allocating, so the check raises a script panic rather than letting the
-/// interpreter itself die on the allocation with a different exit code. Rust
-/// refuses any allocation past `isize::MAX`, so that is the line. A count too
-/// large for `usize` stands for a huge count, not a zero one.
+/// `repeat` past `isize::MAX` is a script panic, not an interpreter death
+/// with a different exit code. A count too large for `usize` is a huge
+/// count, not zero.
 fn str_repeat(s: &str, args: &impl Args) -> Result<String> {
     let n = args
         .int(0)
@@ -455,7 +416,7 @@ fn str_repeat(s: &str, args: &impl Args) -> Result<String> {
     Ok(s.repeat(n))
 }
 
-/// The untyped `parse` guess: int first, then float, then bool.
+/// Int first, then float, then bool.
 pub(super) fn str_core(s: &str, name: BuiltinId, args: &impl Args) -> Result<Option<StrOut>> {
     let a = |i: usize| args.text(i);
     Ok(Some(match name {
@@ -473,12 +434,11 @@ pub(super) fn str_core(s: &str, name: BuiltinId, args: &impl Args) -> Result<Opt
         BuiltinId::TrimEnd => StrOut::Owned(s.trim_end().to_string()),
         BuiltinId::ToUppercase => StrOut::Owned(s.to_uppercase()),
         BuiltinId::ToLowercase => StrOut::Owned(s.to_lowercase()),
-        // The ascii variants leave non-ascii characters alone, they are not
-        // aliases of the unicode ones.
+        // The ascii variants leave non ascii characters alone.
         BuiltinId::ToAsciiUppercase => StrOut::Owned(s.to_ascii_uppercase()),
         BuiltinId::ToAsciiLowercase => StrOut::Owned(s.to_ascii_lowercase()),
-        // A char-set pattern like `[':', '.']` replaces any of its members, matching real Rust. Without
-        // this the array renders as text and matches nothing, silently leaving the string unchanged.
+        // A char set pattern like `[':', '.']` replaces any member. Without
+        // this the array rendered as text and matched nothing.
         BuiltinId::Replace => match args.pattern_chars(0) {
             Some(cs) => StrOut::Owned(s.replace(cs.as_slice(), &a(1))),
             None => StrOut::Owned(s.replace(&a(0), &a(1))),
@@ -488,10 +448,8 @@ pub(super) fn str_core(s: &str, name: BuiltinId, args: &impl Args) -> Result<Opt
             None => StrOut::Owned(s.replacen(&a(0), &a(1), usize_arg(args, 2)?)),
         },
         BuiltinId::Repeat => StrOut::Owned(str_repeat(s, args)?),
-        // String::as_str gives the string back. serde_json::Value::as_str
-        // gives an Option, and a json string is a plain Str here, so unwrap
-        // and expect on a string are identity to keep serde chains working.
-        // A String or a Cow that already owns its data, into_owned is self.
+        // A json string is a plain Str, so `unwrap` and `expect` on a string
+        // are identity to keep serde chains working.
         BuiltinId::ToOwned
         | BuiltinId::TrimString
         | BuiltinId::AsStr
@@ -503,20 +461,18 @@ pub(super) fn str_core(s: &str, name: BuiltinId, args: &impl Args) -> Result<Opt
         | BuiltinId::UnwrapOrDefault
         | BuiltinId::IntoOwned
         | BuiltinId::IntoString => StrOut::Keep,
-        // `Option::context` returns a Result, so the pre-unwrapped string has
-        // to come back wrapped or a following `?` would have nothing to unwrap.
+        // `Option::context` returns a Result, or a following `?` would have
+        // nothing to unwrap.
         BuiltinId::Context | BuiltinId::WithContext => StrOut::OkKeep,
         BuiltinId::IsSome => StrOut::Bool(true),
         BuiltinId::IsNone => StrOut::Bool(false),
         BuiltinId::AsBytes | BuiltinId::IntoBytes => {
             StrOut::Ints(s.bytes().map(i64::from).collect())
         }
-        // The utf-16 code units as an eager list of ints, mirroring `bytes`.
         BuiltinId::EncodeUtf16 => StrOut::Ints(s.encode_utf16().map(i64::from).collect()),
         BuiltinId::StripPrefix => StrOut::OptOwned(s.strip_prefix(&a(0)).map(str::to_string)),
         BuiltinId::StripSuffix => StrOut::OptOwned(s.strip_suffix(&a(0)).map(str::to_string)),
-        // Byte offsets, same as the real std, and slicing is byte based too,
-        // so `&s[..s.find(x).unwrap()]` behaves right.
+        // Byte offsets like std, so `&s[..s.find(x).unwrap()]` works.
         BuiltinId::Find => StrOut::OptInt(s.find(&a(0)).map(usize_i64)),
         BuiltinId::Rfind => StrOut::OptInt(s.rfind(&a(0)).map(usize_i64)),
         BuiltinId::SplitOnce => StrOut::OptPair(
@@ -527,8 +483,7 @@ pub(super) fn str_core(s: &str, name: BuiltinId, args: &impl Args) -> Result<Opt
             s.rsplit_once(&a(0))
                 .map(|(x, y)| (x.to_string(), y.to_string())),
         ),
-        // A char array like `['-', '_']` splits on any of its members, which
-        // a plain string pattern would only match as the literal sequence.
+        // A char array splits on any of its members.
         BuiltinId::Split => match args.pattern_chars(0) {
             Some(chars) => StrOut::Strs(
                 s.split(|c: char| chars.contains(&c))
@@ -555,7 +510,7 @@ pub(super) fn str_core(s: &str, name: BuiltinId, args: &impl Args) -> Result<Opt
             let out = match name {
                 BuiltinId::TrimStartMatches => s.trim_start_matches(&pat),
                 BuiltinId::TrimEndMatches => s.trim_end_matches(&pat),
-                // trim_matches only takes chars in real Rust.
+                // `trim_matches` only takes chars.
                 _ => match args.pattern_chars(0) {
                     Some(chars) => s.trim_matches(|c: char| chars.contains(&c)),
                     None => s.trim_matches(pat.chars().next().unwrap_or(' ')),
@@ -564,13 +519,11 @@ pub(super) fn str_core(s: &str, name: BuiltinId, args: &impl Args) -> Result<Opt
             StrOut::Owned(out.to_string())
         }
         BuiltinId::Cmp => StrOut::Ordering(s.cmp(a(0).as_str())),
-        // `parse` without a turbofish is answered through `parse_core`, which
-        // is the only place that sees the target type.
+        // `parse_core` is the only place that sees the target type.
         _ => return Ok(None),
     }))
 }
 
-/// What `str::parse` produced, before the caller wraps it in an `Ok`.
 pub(super) enum Parsed {
     Int(i128, IntWidth),
     F32(f32),
@@ -581,9 +534,8 @@ pub(super) enum Parsed {
     Fail(String),
 }
 
-/// The two `ParseIntError` range messages, written out because std exposes no
-/// way to build that error from outside the standard library. Every other parse
-/// failure carries the real error, so only these two are mirrored by hand.
+/// Written out because std exposes no way to build a `ParseIntError`.
+/// Every other parse failure carries the real error.
 fn out_of_range(too_small: bool) -> String {
     if too_small {
         "number too small to fit in target type".to_string()
@@ -592,21 +544,14 @@ fn out_of_range(too_small: bool) -> String {
     }
 }
 
-/// What a `text.parse::<i64>()` would report for text that is not a number.
 fn int_error(text: &str) -> String {
     text.parse::<i64>()
         .err()
         .map_or_else(|| format!("cannot parse `{text}`"), |e| e.to_string())
 }
 
-/// `str::parse`, honoring the target type when the call wrote one down.
-///
-/// Real Rust decides this entirely by the target: the text must be the whole
-/// value with no surrounding whitespace, and an integer target rejects
-/// anything outside its own range. Guessing instead made `"300".parse::<u8>()`
-/// an `Ok(300)` and `" 5 ".parse::<i64>()` an `Ok(5)`, both of which real Rust
-/// rejects. Without a turbofish there is no type to honor, so the old guess
-/// stays, which is what a plain `let n: u8 = s.parse()?` still lands on.
+/// Honors the target type when the call wrote one. Guessing made
+/// `"300".parse::<u8>()` an `Ok(300)`. Without a turbofish the guess stays.
 pub(super) fn parse_core(text: &str, target: Option<&ScalarTy>) -> Parsed {
     let fail = |e: &dyn std::fmt::Display| Parsed::Fail(e.to_string());
     let Some(target) = target else {
@@ -614,8 +559,7 @@ pub(super) fn parse_core(text: &str, target: Option<&ScalarTy>) -> Parsed {
         return if let Ok(value) = trimmed.parse::<i64>() {
             Parsed::Int(i128::from(value), IntWidth::I64)
         } else if let Ok(value) = trimmed.parse::<u128>() {
-            // An integer past i64 keeps its exact digits at 128 bits, a
-            // float fallback would round them away.
+            // An integer past i64 keeps its digits at 128 bits.
             Parsed::Int(value.cast_signed(), IntWidth::U128)
         } else if let Ok(value) = trimmed.parse::<i128>() {
             Parsed::Int(value, IntWidth::I128)
@@ -624,16 +568,14 @@ pub(super) fn parse_core(text: &str, target: Option<&ScalarTy>) -> Parsed {
         } else if let Ok(value) = trimmed.parse::<bool>() {
             Parsed::Bool(value)
         } else {
-            // All three failed, so report what an integer parse would have
-            // said. That is the common intent and it is a real std message.
+            // Report what an integer parse would have said, a real std
+            // message.
             Parsed::Fail(int_error(trimmed))
         };
     };
     match target {
-        // An unsigned target rejects a minus sign as an invalid digit before
-        // any range check, so `"-0"` is an error even though its value fits.
-        // Parsing through i128 accepted it by range, u128 refuses the sign
-        // with the real std message.
+        // An unsigned target rejects `"-0"` before any range check. i128
+        // accepted it, u128 refuses the sign with the real message.
         ScalarTy::Int(IntWidth::U128) => match text.parse::<u128>() {
             Ok(value) => Parsed::Int(value.cast_signed(), IntWidth::U128),
             Err(e) => fail(&e),
@@ -648,9 +590,8 @@ pub(super) fn parse_core(text: &str, target: Option<&ScalarTy>) -> Parsed {
         ScalarTy::Int(width) => match text.parse::<i128>() {
             Ok(value) if value >= width.min() && value <= width.max() => Parsed::Int(value, *width),
             Ok(value) => Parsed::Fail(out_of_range(value < width.min())),
-            // i128 is wider than every target, so a failure here is the text
-            // being unparseable rather than the target being too narrow, and
-            // the message reads the same for any width.
+            // i128 is wider than every target, so a failure here is
+            // unparseable text and the message reads the same for any width.
             Err(e) => fail(&e),
         },
         ScalarTy::F32 => text.parse::<f32>().map_or_else(|e| fail(&e), Parsed::F32),
@@ -658,8 +599,8 @@ pub(super) fn parse_core(text: &str, target: Option<&ScalarTy>) -> Parsed {
         ScalarTy::Bool => text.parse::<bool>().map_or_else(|e| fail(&e), Parsed::Bool),
         ScalarTy::Char => text.parse::<char>().map_or_else(|e| fail(&e), Parsed::Char),
         ScalarTy::Str => Parsed::Str(text.to_string()),
-        // No container implements `FromStr`, so these never name a parse
-        // target. They exist only to describe a `Default`.
+        // No container implements `FromStr`, these only describe a
+        // `Default`.
         ScalarTy::Opt(_)
         | ScalarTy::List(_)
         | ScalarTy::Map(_)
@@ -670,24 +611,18 @@ pub(super) fn parse_core(text: &str, target: Option<&ScalarTy>) -> Parsed {
 
 // -- regex -----------------------------------------------------------------
 
-/// What a `Regex` method produced. Spans index into the source string the
-/// caller already holds, so the caller materializes the match handles.
+/// Spans index into the source the caller holds.
 pub(super) enum RegexOut {
     Bool(bool),
     Text(String),
-    /// Answered with the shared pattern handle.
     Pattern,
-    /// `find`: the first match's span, if any.
     OptSpan(Option<(usize, usize)>),
-    /// `captures`: per group, its span when the group matched.
     OptGroups(Option<Vec<Option<(usize, usize)>>>),
-    /// `split`: the pieces as owned strings.
     Pieces(Vec<String>),
 }
 
-/// The eager `Regex` methods. The `find_iter` and `captures_iter` forms stay
-/// out of the core, the interpreter streams them lazily and
-/// collects them.
+/// The eager methods, `find_iter` and `captures_iter` stream lazily
+/// elsewhere.
 pub(super) fn regex_core(
     re: &regex::Regex,
     name: BuiltinId,
@@ -714,7 +649,6 @@ pub(super) fn regex_core(
     })
 }
 
-/// A `Match` method over its span.
 pub(super) enum MatchOut {
     Text(String),
     Int(i64),
@@ -734,10 +668,8 @@ pub(super) fn match_core(
     })
 }
 
-/// A `Captures` method: a group lookup resolved to its span, or the count.
 pub(super) enum CapturesOut {
     Int(i64),
-    /// The queried group's span, None when absent, out of range, or unmatched.
     OptSpan(Option<(usize, usize)>),
 }
 
@@ -772,9 +704,7 @@ pub(super) enum DurOut {
     Bool(bool),
 }
 
-/// `Duration + Duration` and `Duration - Duration`, the checked std ops with
-/// the real panic messages as the errors. Any other operator on two durations
-/// does not exist in std either.
+/// The checked std ops with the real panic messages.
 pub(super) fn duration_arith(op: BinKind, a: Duration, b: Duration) -> Result<Duration> {
     match op {
         BinKind::Add => a
@@ -787,8 +717,6 @@ pub(super) fn duration_arith(op: BinKind, a: Duration, b: Duration) -> Result<Du
     }
 }
 
-/// `Duration` accessors over the real `secs` plus `nanos` split, exactly the
-/// std methods per name.
 pub(super) fn duration_core(name: BuiltinId, secs: u64, nanos: u32) -> Option<DurOut> {
     let total = u128::from(secs) * 1_000_000_000 + u128::from(nanos);
     Some(match name {
@@ -814,11 +742,8 @@ pub(super) enum DateOut {
     Text(String),
 }
 
-/// `DateTime::parse_from_rfc3339` reduced to the three numbers the bridge
-/// store for a datetime, the unix seconds, the sub second nanos, and the
-/// seconds east of UTC the text carried. The error is the real chrono
-/// `ParseError` rendered as text, so a script sees the same message it would
-/// get compiled.
+/// `parse_from_rfc3339` reduced to unix seconds, nanos and the offset. The
+/// error is the real chrono message.
 pub(super) fn parse_rfc3339(text: &str) -> Result<(i64, u32, i32), String> {
     use chrono::{DateTime, Offset, Timelike};
     match DateTime::parse_from_rfc3339(text) {
@@ -831,12 +756,9 @@ pub(super) fn parse_rfc3339(text: &str) -> Result<(i64, u32, i32), String> {
     }
 }
 
-/// `DateTime` accessors over the stored unix timestamp. `local` selects the
-/// machine timezone, otherwise the value is read through `offset`, the seconds
-/// east of UTC that a parsed timestamp carried. `Utc::now` stores a zero
-/// offset, so it still reads as UTC. Every accessor goes through one fixed
-/// offset view, which is what real chrono does, a calendar field is read in the
-/// zone the value carries and not in UTC.
+/// `local` selects the machine timezone, otherwise the value reads through
+/// `offset`. A calendar field is read in the zone the value carries, like
+/// real chrono.
 pub(super) fn datetime_core(
     name: BuiltinId,
     secs: i64,
@@ -869,7 +791,6 @@ pub(super) fn datetime_core(
 
 // -- http and process scalars ----------------------------------------------
 
-/// `StatusCode` accessors over the numeric code.
 pub(super) enum StatusOut {
     Int(i64),
     Bool(bool),
@@ -885,9 +806,8 @@ pub(super) fn status_core(name: BuiltinId, code: i64) -> Option<StatusOut> {
     })
 }
 
-/// `HeaderValue` accessors over the header's text.
 pub(super) enum HeaderOut {
-    /// `to_str` answers `Ok(text)`, like the real fallible accessor.
+    /// `to_str` answers `Ok(text)` like the real fallible accessor.
     Ok(String),
     Text(String),
 }
@@ -900,10 +820,9 @@ pub(super) fn header_value_core(name: BuiltinId, text: String) -> Option<HeaderO
     })
 }
 
-/// `ExitStatus` accessors over the flag and the optional code.
 pub(super) enum ExitOut {
     Bool(bool),
-    /// `code()`: `Some(code)` normally, `None` after death by signal.
+    /// `None` after death by signal.
     OptInt(Option<i64>),
 }
 
@@ -919,10 +838,8 @@ pub(super) fn exit_status_core(
     })
 }
 
-/// The `colored` crate as string methods, shared so tokio scripts color their
-/// output the same way. Returns the styled text as a plain string carrying
-/// ANSI codes, so chaining and printing both work. Honors the crate's own
-/// `NO_COLOR` and terminal detection.
+/// The `colored` crate as string methods. Returns a plain string with ANSI
+/// codes, so chaining works. Honors `NO_COLOR` and terminal detection.
 pub(super) fn color_core(s: &str, name: BuiltinId) -> Option<String> {
     use colored::Colorize;
     let out = match name {

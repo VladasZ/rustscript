@@ -1,5 +1,4 @@
-//! Bridges for `std` paths a script calls: fs, io, env, paths, metadata, and
-//! streams.
+//! Bridges for `std` paths.
 
 use std::sync::Arc;
 
@@ -13,7 +12,6 @@ use super::native::Native;
 use super::native_methods;
 use super::value::{StructData, Value};
 
-/// The `std::fs` free functions.
 fn fs_native_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     let s = |i: usize| -> Result<String> {
         match args.get(i) {
@@ -65,9 +63,8 @@ fn fs_native_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
             Err(e) => Value::err(super::native::io_error_value(&e)),
         },
         PathId::FsHardLink => wrap_unit(std::fs::hard_link(s(0)?, s(1)?)),
-        // The platform specific names are aliased to one cross-platform
-        // helper, so the cfg gated `use` a script needs to type-check on
-        // each os all dispatch here at runtime.
+        // The platform specific names all dispatch to one helper, so a cfg
+        // gated `use` works on each os.
         PathId::FsSymlink | PathId::FsSymlinkFile | PathId::FsSymlinkDir => {
             wrap_unit(make_symlink(&s(0)?, &s(1)?))
         }
@@ -97,8 +94,8 @@ pub(super) fn native_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
         PathId::EnvArgs => Value::vec(super::script_args().into_iter().map(Value::str).collect()),
         PathId::EnvVar => match std::env::var(s(0)?) {
             Ok(v) => Value::ok(Value::str(v)),
-            // The structured `VarError`, so `Err(VarError::NotPresent)`
-            // matches and `{e:?}` prints `NotPresent` like real Rust.
+            // So `Err(VarError::NotPresent)` matches and `{e:?}` prints
+            // `NotPresent`.
             Err(std::env::VarError::NotPresent) => {
                 Value::err(Value::enum_of(&VAR_ERROR, NOT_PRESENT, Vec::new()))
             }
@@ -113,8 +110,7 @@ pub(super) fn native_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
             Err(e) => Value::err(super::native::io_error_value(&e)),
         },
         PathId::EnvSetVar => {
-            // Safety: scripts treat the environment as script-wide state, the
-            // same trade a single threaded interpreter always made.
+            // Safety: scripts treat the environment as script wide state.
             unsafe { std::env::set_var(s(0)?, s(1)?) };
             Value::Unit
         }
@@ -154,9 +150,7 @@ pub(super) fn native_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     }))
 }
 
-/// A symlink helper that picks the right platform call. On Windows a file vs
-/// dir symlink needs distinct functions; the target kind comes from whether
-/// the source exists as a directory.
+/// `Windows` needs distinct calls for a file and a dir symlink.
 fn make_symlink(src: &str, dst: &str) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -205,9 +199,8 @@ pub(super) fn as_i64(v: &Value) -> Option<i64> {
     }
 }
 
-/// Turn a value into a path string. A `Path`/`PathBuf` value carries the path
-/// in its `s` field; an `OsString` carries its text there too. Anything else
-/// uses its display form.
+/// A `PathBuf` or `OsString` carries the text in its `s` field, anything
+/// else uses its display form.
 pub(super) fn path_like(v: &Value) -> String {
     match v {
         Value::Str(s) => s.to_string(),
@@ -218,8 +211,7 @@ pub(super) fn path_like(v: &Value) -> String {
     }
 }
 
-/// Wrap a std stream handle so `is_terminal` can name its stream while reads
-/// and writes delegate to the inner native handle.
+/// So `is_terminal` can name its stream.
 pub(super) fn make_std_stream(kind: &str, inner: Native) -> Value {
     Value::struct_of(
         "StdStream",
@@ -258,7 +250,6 @@ pub(super) fn std_stream_method(
     }
 }
 
-/// Turn a script `Duration` value into a real `std::time::Duration`.
 pub(super) fn duration_from_value(v: &Value) -> Option<std::time::Duration> {
     if let Value::Struct(s) = v
         && &**s.name() == "Duration"
@@ -270,7 +261,6 @@ pub(super) fn duration_from_value(v: &Value) -> Option<std::time::Duration> {
     None
 }
 
-/// Build a `Duration` value carrying whole and sub-second parts.
 pub(super) fn make_duration(d: std::time::Duration) -> Value {
     Value::struct_of(
         "Duration",
@@ -284,9 +274,8 @@ pub(super) fn make_duration(d: std::time::Duration) -> Value {
     )
 }
 
-/// Build a `Metadata` value with the common accessors materialized as fields.
-/// The Unix `MetadataExt` fields are gated so the interpreter still builds on
-/// Windows, where a script would use different accessors.
+/// The Unix `MetadataExt` fields are gated so the interpreter still builds
+/// on `Windows`.
 pub(super) fn make_metadata(m: &std::fs::Metadata) -> Value {
     let mut f: Vec<(Arc<str>, Value)> = vec![
         (
@@ -352,8 +341,7 @@ pub(super) fn make_dir_entry(entry: &std::fs::DirEntry) -> Value {
 }
 
 pub(super) fn make_file_type(path: &std::path::Path) -> Value {
-    // DirEntry::file_type does not follow symlinks, so a symlink to a dir
-    // reports is_symlink, not is_dir, same as the real std.
+    // `DirEntry::file_type` does not follow symlinks, like real std.
     let ft = path.symlink_metadata().map(|m| m.file_type());
     let is = |f: &dyn Fn(&std::fs::FileType) -> bool| Value::Bool(ft.as_ref().is_ok_and(f));
     Value::struct_of(
@@ -416,8 +404,8 @@ pub(super) fn path_method(
             let joined = p.join(args.first().map(Value::display).unwrap_or_default());
             make_path(joined.display().to_string())
         }
-        // Path compares whole components, so "/a/bc" does not start with "/a/b"
-        // the way the str method would say it does.
+        // Path compares whole components, so "/a/bc" does not start with
+        // "/a/b".
         BuiltinId::StartsWith => {
             Value::Bool(p.starts_with(args.first().map(Value::display).unwrap_or_default()))
         }
@@ -530,10 +518,8 @@ pub(super) fn open_file(path: &str, opts: &std::fs::OpenOptions) -> Value {
     }
 }
 
-// Methods on the OpenOptions struct built by `OpenOptions::new`. The builder
-// setters return a fresh struct with one flag flipped, matching the real
-// `&mut self -> &mut Self` chain, and `open` assembles a real std OpenOptions
-// from the flags and opens the file.
+// The setters return a fresh struct with one flag flipped, `open` assembles
+// a real `OpenOptions` from the flags.
 pub(super) fn openoptions_method(
     s: &StructData,
     name: &MethodName,

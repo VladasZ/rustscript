@@ -1,6 +1,5 @@
 #!/usr/bin/env rust
 
-// Change the working directory and read it back.
 
 use std::env;
 use std::fs;

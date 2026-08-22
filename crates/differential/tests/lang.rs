@@ -1,9 +1,6 @@
-//! Guards for the type directed generator.
-//!
-//! The one that matters most is `generated_programs_compile`. A generator that
-//! emits Rust the compiler rejects reports `RustcRejected` as a hard failure,
-//! so a whole campaign turns into noise about the harness instead of findings
-//! about the interpreter.
+//! Guards for the type directed generator. The one that matters most is
+//! `generated_programs_compile`, a rejected program turns a campaign into
+//! noise about the harness.
 
 use std::collections::BTreeSet;
 
@@ -22,8 +19,7 @@ fn generation_is_deterministic() {
     }
 }
 
-/// Every generated program must be valid Rust. This is the contract that keeps
-/// a campaign's findings about the interpreter rather than about the harness.
+/// Every generated program must be valid Rust.
 #[test]
 fn generated_programs_compile() {
     let root = workspace_root();
@@ -46,8 +42,8 @@ fn generated_programs_compile() {
     );
 }
 
-/// Every shape that once hid a real divergence, or is the kind of shape that
-/// does. See `generation_covers_the_language`.
+/// Every shape that once hid a real divergence. See
+/// `generation_covers_the_language`.
 const EXPECTED_FEATURES: &[&str] = &[
     // types
     "lang-ty-u8",
@@ -177,10 +173,7 @@ const EXPECTED_FEATURES: &[&str] = &[
     "lang-print-named-width",
 ];
 
-/// The whole point of this generator is the language surface the old ones
-/// could not name. If a feature stops appearing, the dimension is invisible
-/// again and bugs living there become unfindable. Every name here is a shape
-/// that once hid a real divergence or is the kind of shape that does.
+/// If a feature stops appearing, bugs living there become unfindable again.
 #[test]
 fn generation_covers_the_language() {
     let mut features = BTreeSet::new();
@@ -196,8 +189,8 @@ fn generation_covers_the_language() {
     assert!(missing.is_empty(), "never generated: {missing:?}");
 }
 
-/// A method that no wanted type can ever solve against is dead weight in the
-/// catalog: it is written down but the generator can never place a call to it.
+/// A method no wanted type can solve against is dead weight, the generator
+/// can never place a call to it.
 #[test]
 fn every_catalog_method_is_reachable() {
     let mut wanted: Vec<Ty> = SCALAR_TYPES.to_vec();
@@ -236,8 +229,7 @@ fn every_catalog_method_is_reachable() {
     );
 }
 
-/// Catalog keys are looked up by name when rendering, so a duplicate would
-/// silently make one row render as another.
+/// A duplicate key would silently make one row render as another.
 #[test]
 fn catalog_names_are_unique() {
     let mut seen = BTreeSet::new();
@@ -250,11 +242,9 @@ fn catalog_names_are_unique() {
     }
 }
 
-/// A closure that can panic must not run on an unordered stretch. Which item
-/// panics first is the arrival order, and real Rust randomizes that order for
-/// maps and sets, so the same program can print two different panic messages.
-/// A nightly campaign hit exactly this: `into_values()` mapped through a
-/// fallible body, sorted only afterwards.
+/// A closure that can panic must not run on an unordered stretch, real Rust
+/// randomizes map and set order so the panic message changes per run. A
+/// nightly campaign hit this with `into_values()` sorted only after the map.
 #[test]
 fn fallible_closure_needs_defined_order() {
     use rustscript_differential::lang::expr::{BinOp, Expr};
@@ -293,19 +283,15 @@ fn fallible_closure_needs_defined_order() {
         },
     };
 
-    // Sorting only after the fallible map is the nightly's failing shape.
+    // The nightly's failing shape.
     assert!(!pipe_with(vec![fallible_map.clone(), Stage::Sorted]).is_deterministic());
-    // Sorting first defines the order the body runs in.
+    // Sorting first is fine.
     assert!(pipe_with(vec![Stage::Sorted, fallible_map]).is_deterministic());
 }
 
-/// A `Skip` that empties the pipeline can drop every closure call before it.
-/// Collecting a `Vec` source into a `Vec` takes the in-place path in std,
-/// which reads the length first and touches no item when that length is
-/// zero, so a panicking body earlier in the chain never runs while the
-/// interpreter's lazy chain still runs it. A nightly campaign hit exactly
-/// this: a one item vec mapped through an overflowing `sum`, then skipped
-/// past its end.
+/// A `Skip` past the end can drop every closure call before it. std collects
+/// a `Vec` into a `Vec` in place and touches no item when the length is
+/// zero, so a panicking body never runs there while the lazy chain runs it.
 #[test]
 fn fallible_closure_must_not_hide_behind_skip() {
     use rustscript_differential::lang::expr::{BinOp, Expr};
@@ -346,16 +332,16 @@ fn fallible_closure_must_not_hide_behind_skip() {
 
     // The nightly's failing shape.
     assert!(!pipe_with(vec![fallible_map.clone(), Stage::Skip(2)]).is_valid());
-    // Skipping first, the body only runs on items the pipe yields.
+    // Skipping first is fine.
     assert!(pipe_with(vec![Stage::Skip(2), fallible_map.clone()]).is_valid());
-    // A `Sorted` collects the chain so far, so the body has already run.
+    // A `Sorted` forces the body to run.
     assert!(pipe_with(vec![fallible_map.clone(), Stage::Sorted, Stage::Skip(2)]).is_valid());
-    // Other length-changing stages keep the body observable.
+    // Other length changing stages are fine.
     assert!(pipe_with(vec![fallible_map, Stage::Take(2)]).is_valid());
 }
 
-/// A shrunk program is still a program: every candidate parses, so the
-/// reducer never trades a real finding for a harness error.
+/// Every shrink candidate must parse, so the reducer never trades a finding
+/// for a harness error.
 #[test]
 fn shrink_candidates_parse() {
     for seed in 0..8u64 {
@@ -375,10 +361,8 @@ fn shrink_candidates_parse() {
     }
 }
 
-/// The reducer must end even when every candidate reproduces the failure.
-/// Some shrinks rewrite a node into a same-size form whose own shrinks lead
-/// back, and a reducer that took every reproducing candidate cycled between
-/// them for millions of cached steps on a real campaign artifact.
+/// The reducer must end even when every candidate reproduces. It once cycled
+/// between 2 same size forms for millions of steps.
 #[test]
 fn reduction_terminates_when_everything_reproduces() {
     use rustscript_differential::reduce::reduce_by;
@@ -414,10 +398,8 @@ fn reduction_terminates_when_everything_reproduces() {
     }
 }
 
-/// Every method a catalog template calls is a real std method on some
-/// receiver, read from the harvested `std_surface.txt`. A row that names a
-/// method only the interpreter invented would test the interpreter against
-/// itself.
+/// A row naming a method only the interpreter invented would test the
+/// interpreter against itself.
 #[test]
 fn catalog_calls_are_std() {
     use rustscript_differential::surface::{TRAIT_METHODS, load, template_methods};

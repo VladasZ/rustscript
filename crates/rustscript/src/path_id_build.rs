@@ -1,10 +1,6 @@
-//! Generate `PathId` from `src/interpreter/path_names.txt` at build time.
-//!
-//! The table is one path per line, sorted by byte order, written with `::`
-//! between segments. An entry is a suffix: `fs::read_to_string` also names
-//! `std::fs::read_to_string`, and a one segment entry like `drop` names
-//! `mem::drop` too. The compiler resolves a path once, and every bridge
-//! dispatches on the generated id, so a path name exists in exactly one place.
+//! Generates `PathId` from `src/interpreter/path_names.txt` at build time.
+//! One path per line, sorted. An entry is a suffix, so `fs::read_to_string`
+//! also names `std::fs::read_to_string`.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -32,10 +28,8 @@ pub fn read_paths(path: &Path) -> Vec<String> {
     rows
 }
 
-/// `fs::read_to_string` becomes `FsReadToString` and `HKEY_CURRENT_USER`
-/// becomes `HkeyCurrentUser`. A constant whose name collides with a function
-/// of the same spelling, `Padding::ZERO` next to `Padding::zero`, gets a
-/// `Const` suffix.
+/// `fs::read_to_string` becomes `FsReadToString`. A constant that collides
+/// with a function of the same spelling gets a `Const` suffix.
 pub fn variant_names(rows: &[String]) -> Vec<String> {
     let mut names: Vec<String> = rows.iter().map(|row| camel_path(row)).collect();
     let mut by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();

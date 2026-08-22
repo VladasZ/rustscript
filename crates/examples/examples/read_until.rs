@@ -1,11 +1,8 @@
 #!/usr/bin/env rust
 
-// Read a child's stdout with read_until instead of lines(), which is what output
-// that is not guaranteed to be UTF-8 needs. lines() yields an Err on a bad line
-// and a caller cannot tell that from end of output, so a single cp1252 byte
-// truncates the whole capture. read_until hands over the raw bytes, and
-// from_utf8_lossy turns just the bad byte into a replacement character while the
-// rest of that line and every line after it survive.
+// `lines()` yields an Err on a bad byte and the caller cannot tell that from
+// end of output, so one cp1252 byte truncates the capture. `read_until` plus
+// `from_utf8_lossy` survives it.
 
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};

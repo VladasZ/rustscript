@@ -1,16 +1,13 @@
 # Profiling the interpreter
 
-How to find out where the interpreter spends its time on macOS. The built-in
-`sample` profiler is enough, no instrumentation and no special build, the
-normal release binary works.
+How to find where the interpreter spends its time on `macOS`. The built in
+`sample` profiler on the normal release binary is enough.
 
 ## Getting a useful sample
 
-The bench cases in `bench/cases/` finish quickly at their default sizes, which
-is too short for `sample` to catch anything but process startup. Most sized
-cases take the size as their single argument, so pass one big enough that the
-run takes 1-2 seconds, for example `sort/case.rs 2000000`. Generate the large
-file fixtures into a temporary directory when profiling file-driven cases.
+The bench cases in `bench/cases/` are too short for `sample` at default
+sizes. Pass a size that makes the run take 1 to 2 seconds, for example
+`sort/case.rs 2000000`. File driven cases need the fixtures generated first.
 
 ```sh
 cargo run --release -p rustscript-bench --bin gendata -- /tmp/rustscript-bench-fixtures
@@ -31,25 +28,22 @@ sed -n '/Sort by top of stack/,/Binary/p' /tmp/prof.txt
 
 ## Reading the output
 
-The "Sort by top of stack" section lists leaf functions with the number of
-samples that landed in each. Patterns that have come up so far:
+The "Sort by top of stack" section lists leaf functions by sample count.
+Patterns seen so far:
 
-- `_nanov2_free`, `nanov2_malloc_type`, `_malloc_zone_malloc` high means the
-  workload is allocation bound. Look for per-iteration `Value` allocations,
-  string clones, or temporary containers.
-- `vm::exec` and `vm_step::step` are the frame loop and the op dispatch. A
-  high share here with low malloc means the remaining cost is opcode count,
-  so fewer or fused instructions help.
-- `drop_in_place<Value>` and `Value as Clone::clone` mean register and value
-  traffic. Look for clones that could be moves.
-- `sip..Hasher` means something fell back to the default SipHash hasher
-  instead of the `FxBuildHasher` aliases in `value.rs`.
+- `_nanov2_free`, `nanov2_malloc_type`, `_malloc_zone_malloc` high means
+  allocation bound. Look for per iteration `Value` allocations or clones.
+- `vm::exec` and `vm_step::step` high with low malloc means the cost is
+  opcode count, so fewer or fused ops help.
+- `drop_in_place<Value>` and `Value as Clone::clone` mean value traffic. Look
+  for clones that could be moves.
+- `sip..Hasher` means something fell back to SipHash instead of the
+  `FxBuildHasher` aliases in `value.rs`.
 
 ## Before timing anything
 
-Check that the machine is quiet first, or the numbers are garbage. A game, a
-video call, or one busy app can make every case read 3-4x slower with huge
-run-to-run variance, which looks exactly like a code regression.
+Check that the machine is quiet first. One busy app can make every case 3 to
+4x slower, which looks exactly like a regression.
 
 ```sh
 uptime                                     # load average should be well under
@@ -57,33 +51,28 @@ uptime                                     # load average should be well under
 ps aux | sort -k3 -rn | head -5            # nothing unexpected above ~20% cpu
 ```
 
-If something heavy is running, ask to close it and wait. Do not benchmark
-around it and do not trust best-of-N under load.
+If something heavy is running, wait. Do not trust best of N under load.
 
 ## Timing
 
-Do not take total time numbers from the profiler. Every bench case prints
-`COMPUTE_NS` to stderr around the compute part only. Run the case a few times
-and take the best:
+Every bench case prints `COMPUTE_NS` to stderr around the compute part. Run
+it a few times and take the best:
 
 ```sh
 ./target/release/rust bench/cases/fib/case.rs 2>&1 >/dev/null | grep COMPUTE_NS
 ```
 
-The full comparison against native Rust, Node, and Python lives in `bench/`,
-see `bench/README.md`. Quick run from the workspace root:
+The full comparison against `rust`, `node` and `python` lives in `bench/`.
+Quick run:
 
 ```sh
 cargo run --release -p rustscript-bench --bin bench -- --quick
 ```
 
-The harness builds and invokes the workspace's `target/release/rust` directly.
-
 ## After a change
 
-Run the test suite. The equivalence test compares interpreter output byte for
-byte against the compiled examples. Benchmark workloads are separate Cargo
-binary targets, so they do not share the examples output directory.
+Run the tests. The equivalence test compares interpreter output byte for byte
+against the compiled examples.
 
 ```sh
 cargo test --workspace

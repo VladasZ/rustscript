@@ -1,10 +1,6 @@
-//! A binding inside a loop starts a new variable every iteration, so the
-//! capture cell a closure shared with the last one must not survive into the
-//! next. The interpreter kept the first iteration's cell, which made every
-//! later binding write into it and read the value the closure left behind
-//! instead of the one the binding just gave. Every binding form that can run
-//! again inside a loop is here: a `let`, a `for` pattern, a `while let`
-//! pattern, and a match arm.
+//! A binding inside a loop starts a new capture cell every iteration. The
+//! interpreter once kept the first cell, so later bindings read the value
+//! the closure left behind. Every binding form that can rerun is here.
 
 fn opaque(value: i64) -> i64 {
     value
@@ -51,9 +47,8 @@ fn main() {
         }
     }
 
-    // A `DropCell` is inserted into code that is already full of jumps, so
-    // every jump target past one shifts. These loops jump backwards, forwards
-    // and out, over and around the bindings that carry one.
+    // A `DropCell` shifts every jump target past it, so these loops jump in
+    // every direction over the bindings that carry one.
     for step in 0..4i64 {
         if step % 2 == 0 {
             continue;

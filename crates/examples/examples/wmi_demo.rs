@@ -1,15 +1,13 @@
 #!/usr/bin/env rust
 
-// Queries WMI through the wmi bridge. Read only.
-//
-// Windows only. The examples suite skips it elsewhere.
+// Read only. `Windows` only.
 
 use wmi::WMIConnection;
 
 fn main() {
     let wmi = WMIConnection::new().expect("connect to root\\cimv2");
 
-    // The same class drivers.ps1 reads to gate itself to a known model.
+    // The class `drivers.ps1` reads.
     let rows = wmi
         .raw_query("SELECT Name, Version FROM Win32_ComputerSystemProduct")
         .expect("query the computer system product");
@@ -20,7 +18,7 @@ fn main() {
         println!("Version = {:?}", row.get("Version"));
     }
 
-    // A bad query reports an error rather than panicking.
+    // A bad query is an error, not a panic.
     let bad = wmi.raw_query("SELECT * FROM Win32_NoSuchClassHere");
     assert!(bad.is_err());
     println!("bad query reports an error, as expected");

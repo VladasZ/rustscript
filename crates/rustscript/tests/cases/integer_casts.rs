@@ -1,8 +1,7 @@
 #!/usr/bin/env rust
 
-// Narrowing `as` casts must truncate exactly like compiled Rust. This is the
-// shape that proved an earlier interpreter was keeping the full i64 value
-// instead of the narrowed one.
+// Narrowing `as` casts must truncate. An earlier interpreter kept the full
+// i64 value here.
 
 fn main() {
     let samples: Vec<i64> = vec![

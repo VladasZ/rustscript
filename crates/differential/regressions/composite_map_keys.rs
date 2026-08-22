@@ -1,6 +1,5 @@
-// A tuple, an option of a struct, and an enum as map and set keys, and a
-// key past i64::MAX that keeps its width on the way back out. The
-// interpreter once accepted only scalars as keys and dropped the width.
+// The interpreter once accepted only scalars as map keys and dropped the
+// width.
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]

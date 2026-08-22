@@ -1,9 +1,6 @@
 #!/usr/bin/env rust
 
-// SHA-256 three ways: the one-shot `Sha256::digest`, the incremental
-// `new` + `update` + `finalize`, and the chained `chain_update`. Hashing the
-// same bytes every way must produce the same digest, which the last line
-// asserts by printing whether all three agree.
+// All 3 ways must agree on the digest.
 
 use hex::encode;
 use sha2::{Digest, Sha256};

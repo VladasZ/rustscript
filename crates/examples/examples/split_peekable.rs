@@ -1,5 +1,4 @@
-//! `peekable` over a `split` iterator: peek to pick a separator, then hand
-//! the rest to `collect` with the peeked item still first.
+//! The peeked item must still be first in `collect`.
 
 fn main() {
     let mut parts = "a,b,,c".split(',').peekable();

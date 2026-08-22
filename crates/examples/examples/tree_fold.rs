@@ -1,11 +1,7 @@
 #!/usr/bin/env rust
 
-// Self-recursive functions that build and fold a recursive enum run as one
-// function plan, see interpreter/scalar_fn.rs. The traps are equivalence of
-// the plan's enum ops with the generic path: construction, match arm
-// selection, payload binding, values crossing the plan boundary both ways,
-// and a consumed payload never being read again. A wildcard pattern is not
-// in the plan subset, so left_depth pins the generic path on the same data.
+// Recursive enums in function plans, see `interpreter/scalar_fn.rs`.
+// `left_depth` uses a wildcard pattern, so it pins the generic path.
 
 enum Tree {
     Leaf,
@@ -35,8 +31,7 @@ fn lopsided(depth: i64) -> Tree {
     }
 }
 
-// Takes the tree by value and returns a new one, so plan-built values cross
-// the boundary in both directions and every bound payload is consumed.
+// Plan built values cross the boundary both ways.
 fn mirror(t: Tree) -> Tree {
     match t {
         Tree::Leaf => Tree::Leaf,
@@ -44,7 +39,7 @@ fn mirror(t: Tree) -> Tree {
     }
 }
 
-// A wildcard element is outside the plan subset, so this runs generically.
+// A wildcard is outside the plan subset.
 fn left_depth(t: &Tree) -> i64 {
     match t {
         Tree::Leaf => 0,
@@ -52,7 +47,7 @@ fn left_depth(t: &Tree) -> i64 {
     }
 }
 
-// Payloads mixing scalars and subtrees, across four variants.
+// Payloads mixing scalars and subtrees.
 enum Expr {
     Num(i64),
     Add(Box<Expr>, Box<Expr>),
@@ -104,7 +99,7 @@ fn sum_list(l: &IntList) -> i64 {
 fn main() {
     let t = make(4);
     println!("count {}", count(&t));
-    // The same tree again, so the returned value outlives its first use.
+    // The returned value outlives its first use.
     println!("count again {}", count(&t));
 
     let lop = lopsided(5);

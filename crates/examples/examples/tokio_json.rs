@@ -1,6 +1,4 @@
-// Typed and dynamic serde_json under `#[tokio::main]`: struct targets with optional and renamed fields, a generic helper
-// resolving its turbofish, an annotated let coercion, and serialization back
-// to text.
+// Typed and dynamic serde_json under `#[tokio::main]`.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};

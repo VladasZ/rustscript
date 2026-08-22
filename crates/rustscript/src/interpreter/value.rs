@@ -1,6 +1,5 @@
-//! The `Send + Sync` value model. `Arc` and `parking_lot::Mutex` back every
-//! shared value, so it can move between worker threads and be shared by
-//! concurrent tasks.
+//! The `Send + Sync` value model, `Arc` and `parking_lot::Mutex` back every
+//! shared value.
 
 use num_traits::AsPrimitive;
 use std::hash::{Hash, Hasher};
@@ -16,22 +15,18 @@ use super::native::Native;
 use super::numeric::IntWidth;
 pub use super::rs_str::RsStr;
 
-/// Shared, growable list. `Arc` for cross thread sharing, `Mutex` for the
-/// interior mutation the interpreter needs since it ignores ownership.
 pub type List = Arc<Mutex<Vec<Value>>>;
 pub type Map = Arc<Mutex<IndexMap<MapKey, Value>>>;
 
-/// A set shares the map storage, each element stored as key -> Unit. The kind
-/// is what makes iteration yield elements instead of pairs and routes the set
-/// halves of `insert`, `remove`, and `contains`.
+/// A set shares the map storage with Unit values. The kind makes iteration
+/// yield elements and routes the set halves of the methods.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MapKind {
     Map,
     Set,
 }
 
-/// Which wrapper type a `Value::Cell` models. The kind picks the method
-/// surface and the debug rendering, the storage is the same shared slot.
+/// The kind picks the method surface and the debug rendering.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CellKind {
     Rc,
@@ -39,13 +34,12 @@ pub enum CellKind {
     RefCell,
     Cell,
     Mutex,
-    /// `tokio::sync::Mutex`, whose `lock` is awaited and answers the guard
-    /// without a `Result` layer.
+    /// `tokio::sync::Mutex`, `lock` is awaited and has no `Result` layer.
     TokioMutex,
 }
 
 impl CellKind {
-    /// Rc and Arc share, they have no interior mutability of their own.
+    /// `Rc` and `Arc` have no interior mutability of their own.
     pub fn is_shared_pointer(self) -> bool {
         matches!(self, CellKind::Rc | CellKind::Arc)
     }
@@ -64,14 +58,12 @@ pub enum ValueRef {
         data: Arc<StructData>,
         slot: usize,
     },
-    /// The inside of a `Value::Cell`, handed out by `borrow_mut` and `lock`.
+    /// Handed out by `borrow_mut` and `lock`.
     CellSlot {
         slot: Arc<Mutex<Value>>,
     },
-    /// A mutable borrow of the wrapped value's own storage, handed out by
-    /// accessors like `as_object_mut`. Mutating through it must reach that
-    /// storage, so the mutation split never applies. It has no anchor to
-    /// assign a whole new value into, only in-place mutation goes through.
+    /// Handed out by accessors like `as_object_mut`. The mutation split never
+    /// applies, and only in place mutation goes through.
     Borrowed {
         value: Value,
     },
@@ -108,9 +100,7 @@ impl ValueRef {
         }
     }
 
-    /// Like `get`, but splits the referenced slot from value sharing first,
-    /// so an in-place mutation of the returned value stays private to the
-    /// slot. Used for mutating access through the reference.
+    /// `get` with the slot split from sharing first, for mutating access.
     pub fn get_unique(&self) -> Option<Value> {
         let unique = |slot: Option<&mut Value>| {
             slot.map(|v| {
@@ -123,18 +113,14 @@ impl ValueRef {
             Self::MapEntry { map, key } => unique(map.lock().get_mut(key)),
             Self::StructField { data, slot } => unique(data.values.lock().get_mut(*slot)),
             Self::CellSlot { slot } => unique(Some(&mut *slot.lock())),
-            // The wrapped value IS the borrowed storage, splitting it would
-            // disconnect the mutation from the borrow's referent.
+            // Splitting the borrowed storage would disconnect the mutation.
             Self::Borrowed { value } => Some(value.clone()),
         }
     }
 
-    /// Run `f` on the referenced slot under its lock, one atomic
-    /// read-modify-write for a fused compound assignment. `None` for a
-    /// dangling reference and for a `Borrowed` view, which has no
-    /// assignable slot, the caller then runs the unfused sequence and gets
-    /// its exact error. `f` must not run user code or lock other values,
-    /// the referent's lock is held across it.
+    /// One atomic read-modify-write under the slot's lock. `None` for a
+    /// dangling reference or a `Borrowed` view, the caller then runs the
+    /// unfused sequence. `f` must not run user code or lock other values.
     pub fn update<T>(&self, f: impl FnOnce(&mut Value) -> T) -> Option<T> {
         match self {
             Self::VecElement { values, index } => values.lock().get_mut(*index).map(f),
@@ -176,12 +162,9 @@ impl ValueRef {
     }
 }
 
-/// Field layout of a struct, shared by every instance from the same site.
-/// The compiler emits these shapes directly, so runtime and bytecode share
-/// one definition.
+/// Runtime and bytecode share one definition.
 pub use super::bytecode::StructShape;
 
-/// A struct instance: its shape plus one value per field, in shape order.
 pub struct StructData {
     pub shape: Arc<StructShape>,
     pub values: Mutex<Vec<Value>>,
@@ -209,7 +192,6 @@ impl StructData {
     }
 }
 
-/// A compiled closure body plus its captured upvalues.
 #[derive(Clone)]
 pub enum Upvalue {
     Value(Value),
@@ -238,20 +220,18 @@ pub struct ClosureData {
     pub captured: Vec<Upvalue>,
 }
 
-/// A runtime value that is `Send + Sync`.
 #[derive(Clone, Default)]
 pub enum Value {
     #[default]
     Unit,
     Bool(bool),
     Int(i64),
-    /// An integer with a real width other than i64, in the storage form
-    /// described in `numeric`.
+    /// A width other than i64, storage form in `numeric`.
     IntW(i64, IntWidth),
-    /// A 128-bit integer, i128 exactly or u128 as reinterpreted bits.
+    /// i128 exactly or u128 as reinterpreted bits.
     Big(i128, IntWidth),
     Float(f64),
-    /// A real f32, kept at f32 precision, mirroring `Value::F32`.
+    /// Kept at f32 precision.
     F32(f32),
     Char(char),
     Str(RsStr),
@@ -260,7 +240,7 @@ pub enum Value {
     Tuple(List),
     Struct(Arc<StructData>),
     /// The payload shares the list storage shape, so a `&mut` binding into
-    /// a payload slot is an addressable element reference.
+    /// it is an element reference.
     Enum {
         def: Arc<EnumDef>,
         variant: u16,
@@ -273,24 +253,19 @@ pub enum Value {
     },
     Closure(Arc<ClosureData>),
     Ref(Arc<ValueRef>),
-    /// A real shared cell: `Rc`, `Arc`, `RefCell`, `Cell`, or `Mutex`.
-    /// Cloning shares the slot on purpose, these are the types real Rust
-    /// uses when sharing is the point, so `make_unique` leaves them alone.
+    /// A real shared cell. Cloning shares on purpose and `make_unique` leaves
+    /// it alone.
     Cell(CellKind, Arc<Mutex<Value>>),
     Native(Arc<Mutex<Native>>),
 }
 
-/// Hashable map key, every value real Rust can hash: the scalars, and the
-/// tuples, options, vecs, structs, and enums built from them. The manual
-/// `Hash` pins the exact bytes each variant feeds the hasher, so the
-/// borrowed `StrKey` below can probe a map without building an owned key.
+/// The manual `Hash` pins the exact bytes per variant, so the borrowed
+/// `StrKey` can probe a map without an owned key.
 #[derive(Clone)]
 pub enum MapKey {
     Bool(bool),
     Int(i64),
-    /// An integer key with its width, so the key rebuilds as the same
-    /// value. Hashes and compares like `Int`, one real map never mixes
-    /// widths.
+    /// Hashes and compares like `Int`, one real map never mixes widths.
     Wide(i64, IntWidth),
     Char(char),
     Str(RsStr),
@@ -298,7 +273,7 @@ pub enum MapKey {
     Tuple(Vec<MapKey>),
     Opt(Option<Box<MapKey>>),
     Vec(Vec<MapKey>),
-    /// A struct with a derived `Hash`, its shape kept to rebuild the value.
+    /// The shape is kept to rebuild the value.
     Struct(Arc<StructShape>, Vec<MapKey>),
     Enum(Arc<EnumDef>, u16, Vec<MapKey>),
 }
@@ -371,13 +346,11 @@ impl Hash for MapKey {
     }
 }
 
-/// The keys of a list of values, `None` when any of them cannot key.
 fn keys_of(values: &[Value]) -> Option<Vec<MapKey>> {
     values.iter().map(Value::as_key).collect()
 }
 
-/// A borrowed string key for map probes that hold the slice but not an
-/// owned `RsStr`, hashing and comparing exactly like `MapKey::Str`.
+/// Hashes and compares exactly like `MapKey::Str`.
 pub struct StrKey<'a>(pub &'a str);
 
 impl Hash for StrKey<'_> {
@@ -441,7 +414,6 @@ impl Value {
         Value::enum_of(&OPTION, SOME, vec![v])
     }
 
-    /// An enum value with its payload in fresh list storage.
     pub fn enum_of(def: &Arc<EnumDef>, variant: u16, data: Vec<Value>) -> Value {
         Value::Enum {
             def: def.clone(),
@@ -450,9 +422,8 @@ impl Value {
         }
     }
 
-    /// An enum value by variant name, for the bridges that receive the
-    /// name from a script or from a crate's `Debug` output. None when the
-    /// definition has no such variant.
+    /// By variant name, for bridges that get the name from a script or a
+    /// crate's `Debug` output.
     pub fn enum_named(def: &Arc<EnumDef>, variant: &str, data: Vec<Value>) -> Option<Value> {
         Some(Value::enum_of(def, def.variant_index(variant)?, data))
     }
@@ -461,24 +432,20 @@ impl Value {
         Value::enum_of(&OPTION, NONE, Vec::new())
     }
 
-    /// Whether this is a variant of a builtin enum, `is_variant(EnumKind::Option, SOME)`.
+    /// `is_variant(EnumKind::Option, SOME)`.
     pub fn is_variant(&self, kind: EnumKind, index: u16) -> bool {
         matches!(self, Value::Enum { def, variant, .. } if def.kind == kind && *variant == index)
     }
 
-    /// Whether this is an enum of the given builtin kind, any variant.
     pub fn is_enum_kind(&self, kind: EnumKind) -> bool {
         matches!(self, Value::Enum { def, .. } if def.kind == kind)
     }
 
-    /// True for `Option::None`, used to keep a null json value as None rather
-    /// than wrapping it in Some when filling an Option struct field.
+    /// To keep a null json value as None when filling an Option field.
     pub fn is_none_value(&self) -> bool {
         self.is_variant(EnumKind::Option, NONE)
     }
 
-    /// The payload of an `Option::Some`, or None for `Option::None` and
-    /// for anything that is not an Option.
     pub fn some_payload(&self) -> Option<Value> {
         match self {
             Value::Enum { def, variant, data }
@@ -490,7 +457,7 @@ impl Value {
         }
     }
 
-    /// The payload of a `Some` or an `Ok`, the value a flatten keeps.
+    /// The value a flatten keeps.
     pub fn success_payload(&self) -> Option<Value> {
         match self {
             Value::Enum { def, variant, data }
@@ -503,9 +470,7 @@ impl Value {
         }
     }
 
-    /// The single payload of a `Some`, an `Ok`, or an `Err`. Those variants
-    /// always carry exactly one value, so an empty payload is an interpreter
-    /// bug and errors instead of standing in a Unit.
+    /// An empty payload is an interpreter bug.
     pub fn payload(data: &List) -> Result<Value> {
         data.lock()
             .first()
@@ -525,9 +490,7 @@ impl Value {
         matches!(self, Value::Bool(true))
     }
 
-    /// A fresh value of the same shape as this one, standing in for
-    /// `T::default()` where the runtime has no type: `mem::take` and
-    /// `RefCell::take`.
+    /// Stands in for `T::default()` in `mem::take` and `RefCell::take`.
     pub(super) fn default_like(&self) -> Value {
         match self {
             Value::Bool(_) => Value::Bool(false),
@@ -546,15 +509,10 @@ impl Value {
         }
     }
 
-    /// Split this value from any sharing so an in-place mutation stays
-    /// private: when the backing storage has another holder, replace it with
-    /// a fresh copy. One level deep on purpose, nested values split at their
-    /// own mutable access, so a chain of these along an access path behaves
-    /// like a deep copy paid lazily.
-    ///
-    /// Scalars and strings need nothing, a string splits inside its own
-    /// mutating methods via `Arc::make_mut`. Native handles and closures
-    /// keep their identity, sharing is their meaning.
+    /// Replace shared storage with a fresh copy. One level deep, nested
+    /// values split at their own mutable access, so an access path is a
+    /// deep copy paid lazily. Strings split inside their methods, native
+    /// handles and closures keep their identity.
     pub(super) fn make_unique(&mut self) {
         match self {
             Value::Vec(list) | Value::Tuple(list) => {
@@ -599,20 +557,17 @@ impl Value {
         }
     }
 
-    /// The value and width of an integer, tagged or plain. None otherwise.
     pub(super) fn int_parts(&self) -> Option<(i128, IntWidth)> {
         match self {
             Value::Int(i) => Some((i128::from(*i), IntWidth::I64)),
             Value::IntW(v, w) => Some((w.decode(*v), *w)),
             Value::Big(v, IntWidth::I128) => Some((*v, IntWidth::I128)),
             // A u128 fits the i128 pipeline only while its top bit is clear.
-            // Bigger values answer through the dedicated big paths instead.
             Value::Big(v, IntWidth::U128) if *v >= 0 => Some((*v, IntWidth::U128)),
             _ => None,
         }
     }
 
-    /// Build an integer of the given width from an in-range value.
     pub(super) fn int_of_width(value: i128, width: IntWidth) -> Value {
         match width {
             IntWidth::I64 => Value::Int(i64::try_from(value).expect("truncated to width")),
@@ -621,7 +576,6 @@ impl Value {
         }
     }
 
-    /// A tagged integer's value as an i64 when it fits.
     pub(super) fn untag_int(&self) -> Option<i64> {
         match self {
             Value::IntW(v, w) => i64::try_from(w.decode(*v)).ok(),
@@ -629,10 +583,8 @@ impl Value {
         }
     }
 
-    /// The i64 or f64 image of a width-tagged number, for the method and
-    /// bridge surface that predates real widths. A u64 value past `i64::MAX`
-    /// saturates, the clamp sentinels like `usize::MAX` always had here.
-    /// None when the value is not tagged.
+    /// The i64 or f64 image for the bridge surface that predates real
+    /// widths. A u64 past `i64::MAX` saturates. None when not tagged.
     pub(super) fn bridge_image(&self) -> Option<Value> {
         match self {
             Value::IntW(v, w) => {
@@ -700,8 +652,7 @@ impl Value {
         })
     }
 
-    /// Turn an owned value into a map key. Strings hand over their buffer,
-    /// no copy in any case.
+    /// Strings hand over their buffer, no copy.
     pub fn into_key(self) -> Option<MapKey> {
         Some(match self {
             Value::Bool(b) => MapKey::Bool(b),
@@ -720,9 +671,8 @@ impl Value {
         if let Value::Ref(reference) = other {
             return reference.get().is_some_and(|value| self.eq_value(&value));
         }
-        // Cells compare by content, the way Rc and RefCell equality does.
-        // Snapshots, not held guards, comparing a cell with itself would
-        // relock its own mutex.
+        // Cells compare by content. Snapshots, not held guards, comparing a
+        // cell with itself would relock its own mutex.
         if let Value::Cell(_, slot) = self {
             let inner = slot.lock().clone();
             return inner.eq_value(other);
@@ -743,15 +693,13 @@ impl Value {
             (Value::Big(..), Value::Int(_)) | (Value::Int(_), Value::Big(..)) => {
                 match (self.int_parts(), other.int_parts()) {
                     (Some((a, _)), Some((b, _))) => a == b,
-                    // One side is a u128 past the i128 range, the other an
-                    // i64, so they cannot be equal.
+                    // A u128 past the i128 range cannot equal an i64.
                     _ => false,
                 }
             }
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::F32(a), Value::F32(b)) => a == b,
-            // A bare float literal next to an f32 value is f32 in the source
-            // types, so it rounds to f32 before the comparison.
+            // A bare float literal next to an f32 is f32, so it rounds first.
             (Value::F32(a), Value::Float(b)) | (Value::Float(b), Value::F32(a)) => {
                 *a == AsPrimitive::<f32>::as_(*b)
             }
@@ -760,10 +708,8 @@ impl Value {
             }
             (Value::Char(a), Value::Char(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
-            // Snapshots, not held guards. Comparing a value with its own
-            // clone sees the same mutex on both sides, and a guard held
-            // across the recursion would relock a mutex the element methods
-            // lock again. Both are instant deadlocks under parking_lot.
+            // Snapshots, not held guards. Comparing a value with its own clone
+            // sees the same mutex on both sides, an instant deadlock.
             (Value::Vec(a), Value::Vec(b)) | (Value::Tuple(a), Value::Tuple(b)) => {
                 let a = a.lock().clone();
                 let b = b.lock().clone();
@@ -781,7 +727,7 @@ impl Value {
                     data: db,
                 },
             ) => {
-                // Snapshots, not held guards, see the container arms above.
+                // Snapshots, see above.
                 let da = da.lock().clone();
                 let db = db.lock().clone();
                 EnumDef::same(ea, eb)
@@ -789,8 +735,7 @@ impl Value {
                     && da.len() == db.len()
                     && da.iter().zip(db.iter()).all(|(x, y)| x.eq_value(y))
             }
-            // Maps and sets compare by content, whatever the insertion order.
-            // Snapshots, not held guards, see the container arms above.
+            // By content whatever the insertion order. Snapshots, see above.
             (Value::Map(a, ka), Value::Map(b, kb)) => {
                 let a = a.lock().clone();
                 let b = b.lock().clone();
@@ -799,10 +744,8 @@ impl Value {
                     && a.iter()
                         .all(|(key, value)| b.get(key).is_some_and(|other| value.eq_value(other)))
             }
-            // Snapshot both field vectors before comparing. The old code held
-            // both guards and then called `b.get`, which locks `b` again, so
-            // any struct comparison with at least one field deadlocked. That
-            // hung every script comparing two `PathBuf`s.
+            // Snapshot both field vectors first. Holding both guards and then
+            // calling `b.get` once deadlocked every `PathBuf` comparison.
             (Value::Struct(a), Value::Struct(b)) => {
                 a.name() == b.name() && {
                     let va = a.values.lock().clone();
@@ -815,8 +758,7 @@ impl Value {
                             .all(|(k, v)| b.shape.slot(k).is_some_and(|i| v.eq_value(&vb[i])))
                 }
             }
-            // Two parse errors compare by kind, as their derived `PartialEq`
-            // does. Every other native is a handle and compares by identity.
+            // Parse errors compare by kind, every other native by identity.
             (Value::Native(a), Value::Native(b)) => {
                 Arc::ptr_eq(a, b)
                     || matches!(
@@ -831,7 +773,6 @@ impl Value {
         }
     }
 
-    /// `Display`, the `{}` format.
     pub fn display(&self) -> String {
         match self {
             Value::Unit => "()".into(),
@@ -843,13 +784,11 @@ impl Value {
             Value::F32(f) => f.to_string(),
             Value::Char(c) => c.to_string(),
             Value::Str(s) => s.to_string(),
-            // Rc and Arc pass Display through to their content.
             Value::Cell(kind, slot) if kind.is_shared_pointer() => {
                 let inner = slot.lock().clone();
                 inner.display()
             }
-            // A reference displays what it points at, `{}` through a `&mut`
-            // borrow or a lock guard formats the content.
+            // A reference displays what it points at.
             Value::Ref(reference) => match reference.get() {
                 Some(value) => value.display(),
                 None => "<dangling reference>".to_string(),
@@ -860,8 +799,7 @@ impl Value {
                 | Native::ParseErr { display, .. } => display.clone(),
                 other => format!("<{}>", other.type_name()),
             },
-            // `std::env::VarError` implements `Display` in real Rust, and
-            // its text is what scripts print with `{e}`.
+            // `VarError` implements `Display`, scripts print it with `{e}`.
             Value::Enum { def, variant, data } if def.kind == EnumKind::VarError => {
                 if *variant == NOT_UNICODE {
                     let payload = data.lock().first().map(Value::display).unwrap_or_default();
@@ -874,13 +812,11 @@ impl Value {
         }
     }
 
-    /// `Debug`, the `{:?}` format.
     pub fn debug(&self) -> String {
         super::debug_fmt::render(self, &super::debug_fmt::DebugOpts::plain())
     }
 }
 
-/// A 128-bit value as text, u128 through its reinterpreted bits.
 pub(super) fn big_text(v: i128, w: IntWidth) -> String {
     if w == IntWidth::U128 {
         v.cast_unsigned().to_string()
@@ -914,8 +850,7 @@ impl MapKey {
     }
 }
 
-/// The host's Display and Debug are the target
-/// semantics, so delegate instead of approximating them.
+/// The host's `Display` and `Debug` are the target semantics, so delegate.
 fn format_float(f: f64) -> String {
     f.to_string()
 }

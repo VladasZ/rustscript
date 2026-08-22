@@ -1,5 +1,4 @@
-//! Bridge for the jsonwebtoken crate: Algorithm values, Header and
-//! `EncodingKey` construction, and `encode` for signing tokens.
+//! The jsonwebtoken bridge.
 
 use std::str::FromStr;
 
@@ -22,8 +21,7 @@ pub(super) fn jwt_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
                 None => Value::enum_named(&ALGORITHM, "HS256", Vec::new())
                     .expect("HS256 is a known algorithm"),
             };
-            // The shape carries every header field a script can set later,
-            // since a shape cannot grow after the instance exists.
+            // A shape cannot grow after the instance exists.
             Value::struct_of(
                 "Header",
                 [
@@ -45,8 +43,8 @@ pub(super) fn jwt_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     }))
 }
 
-/// The real `EncodingKey` is opaque, so the value keeps the constructor kind
-/// and its raw input, and the key is rebuilt when `encode` runs.
+/// The real `EncodingKey` is opaque, so the key is rebuilt when `encode`
+/// runs.
 fn key_value(kind: &str, args: &[Value]) -> Result<Value> {
     Ok(Value::struct_of(
         "EncodingKey",

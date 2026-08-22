@@ -1,11 +1,8 @@
 #!/usr/bin/env rust
 
-//! Sequences order lexicographically in Rust: the first differing element
-//! decides, and a prefix sorts before what extends it. Tuples order the same
-//! way, field by field. Comparing two vecs used to abort with "cannot compare
-//! Vec and Vec", and `a.max(b)` on two vecs answered with the largest element
-//! of `a` instead of the greater vec, because it was read as the iterator
-//! reduction rather than as `Ord::max`.
+//! Sequences order lexicographically. Comparing 2 vecs once aborted with
+//! "cannot compare Vec and Vec", and `a.max(b)` was read as the iterator
+//! reduction instead of `Ord::max`.
 
 fn main() {
     println!("first differs: {:?}", vec![1, 2] < vec![1, 3]);
@@ -15,21 +12,19 @@ fn main() {
     println!("tuple order:   {:?}", (1, "b") > (1, "a"));
     println!("string elems:  {:?}", vec!["a", "b"] < vec!["a", "c"]);
 
-    // With an argument these are `Ord`, and they hand back a whole vec.
+    // With an argument these are `Ord`.
     println!("ord max:       {:?}", vec![1, 2].max(vec![1, 3]));
     println!("ord min:       {:?}", vec![1, 2].min(vec![1, 3]));
 
-    // With no argument they are still the reduction over the elements.
+    // Without one they are the reduction.
     println!("iter max:      {:?}", [3, 1, 2].iter().max());
     println!("iter min:      {:?}", [3, 1, 2].iter().min());
 
-    // Sorting a vec of vecs needs the same order.
     let mut nested = vec![vec![2, 1], vec![1, 9], vec![1, 2]];
     nested.sort();
     println!("sorted nested: {nested:?}");
 
-    // Option and Result take their order from the variant order in the
-    // declaration, so None sorts before any Some and Ok before any Err.
+    // None sorts before Some and Ok before Err.
     println!("none first:    {:?}", None::<i32> < Some(1));
     println!("some order:    {:?}", Some(1) < Some(2));
     let ok: Result<i32, i32> = Ok(1);

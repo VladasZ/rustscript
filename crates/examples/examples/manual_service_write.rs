@@ -1,14 +1,9 @@
 #!/usr/bin/env rust
 
-// Exercises the service bridge write paths, which the read only service_demo
-// cannot cover. It changes real service state, so it is named manual_ and the
-// examples suite never runs it on its own. Run it by hand on a spare box:
-//
-//   rust crates/examples/examples/manual_service_write.rs
-//
-// Needs admin. Config changes go against a throwaway service this script
-// creates and deletes. Start and stop go against the print spooler, whose
-// original state is recorded up front and put back at the end.
+// The service bridge write paths. It changes real service state, so it is
+// `manual_` and the suite never runs it. Run by hand as admin on a spare box.
+// Config changes go against a throwaway service, start and stop against the
+// print spooler, which is put back at the end.
 
 use std::process::Command;
 
@@ -43,8 +38,7 @@ fn main() {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .expect("open the service manager");
 
-    // A dummy binary path is fine here. The service is never started, only
-    // reconfigured, and the config calls never launch it.
+    // A dummy binary path is fine, the service is never started.
     sc(vec!["delete", TEST_SVC]);
     if !sc(vec![
         "create",
@@ -64,9 +58,8 @@ fn main() {
     let status = svc.query_status().expect("status");
     println!("state = {:?}", status.current_state);
 
-    // The real risk here. change_config rewrites the whole service record, so a
-    // field the bridge fails to carry over would be silently wiped. Each pass
-    // checks the start type took and that the binary path survived unchanged.
+    // `change_config` rewrites the whole record, so a field the bridge drops
+    // would be silently wiped. Each pass checks the binary path survived.
     let before = binpath();
     let wanted = vec![
         ServiceStartType::Disabled,
@@ -74,9 +67,8 @@ fn main() {
         ServiceStartType::OnDemand,
     ];
     for want in wanted {
-        // A whole ServiceInfo, the way the real crate takes it. Everything
-        // except the start type is read straight back off the current config,
-        // which is what makes this a round trip rather than a rewrite.
+        // Everything except the start type is read back off the current
+        // config, so this is a round trip.
         let cfg = svc.query_config().expect("read the current config");
         let info = ServiceInfo {
             name: TEST_SVC.into(),
@@ -104,9 +96,8 @@ fn main() {
     println!("all service write paths passed");
 }
 
-// Start and stop against the print spooler, putting it back the way it was
-// found. Nothing on a dev box depends on it, and unlike the throwaway above it
-// is a real service that can actually reach Running.
+// The print spooler is a real service that can reach Running, and nothing
+// on a dev box depends on it.
 fn check_start_stop(manager: ServiceManager) {
     let access = ServiceAccess::QUERY_STATUS | ServiceAccess::START | ServiceAccess::STOP;
     let Ok(spooler) = manager.open_service("Spooler", access) else {
@@ -130,7 +121,7 @@ fn check_start_stop(manager: ServiceManager) {
     }
 }
 
-// Start and stop are asynchronous, so the state is polled rather than read once.
+// Start and stop are asynchronous, so the state is polled.
 fn wait_for(svc: &Service, want: ServiceState) {
     for _ in 0..150 {
         let now = svc.query_status().expect("status").current_state;

@@ -1,5 +1,4 @@
-//! Patterns for `match` arms: literals, ranges, bindings, tuples, option,
-//! result, enum variants, struct fields, and slices with rest bindings.
+//! Patterns for `match` arms.
 
 use std::collections::BTreeSet;
 
@@ -11,7 +10,6 @@ use crate::lang::user::UserShape;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Pat {
     Wild,
-    /// Binds the whole value under `name`.
     Bind {
         name: String,
         ty: Ty,
@@ -44,8 +42,7 @@ pub enum Pat {
         shape: Box<UserShape>,
         fields: Vec<(usize, Pat)>,
     },
-    /// `[prefix.., rest @ .., suffix..]` on a slice. Element binds are
-    /// references, the arm prologue clones them into owned values.
+    /// Element binds are references, the arm prologue clones them.
     Slice {
         elem: Ty,
         prefix: Vec<Pat>,
@@ -127,7 +124,6 @@ impl Pat {
         }
     }
 
-    /// Every name the pattern binds, with its owned type.
     pub fn bindings(&self, out: &mut Vec<(String, Ty)>) {
         match self {
             Self::Bind { name, ty } => out.push((name.clone(), ty.clone())),
@@ -164,8 +160,7 @@ impl Pat {
         }
     }
 
-    /// Whether the pattern matches every value of its type on its own, so
-    /// no `_` arm is needed after it.
+    /// Whether no `_` arm is needed after it.
     pub fn is_irrefutable(&self) -> bool {
         match self {
             Self::Wild | Self::Bind { .. } => true,
@@ -230,7 +225,6 @@ impl Pat {
     }
 }
 
-/// A negative literal needs no parentheses in a pattern.
 fn render_int(width: IntWidth, value: i128) -> String {
     format!("{value}{}", width.rust())
 }

@@ -1,11 +1,10 @@
 # Benchmark results
 
-Every case in the suite, one chart each, in run order. Each bar is the
-median of that case's samples. [README.md](README.md) explains the method and
-what every case measures.
+One chart per case, in run order. Each bar is the median of that case's
+samples. The method is in [README.md](README.md).
 
-This file is written by `cargo run --release --bin chart` together with the
-charts themselves. Edit that tool, not this file.
+This file is written by `cargo run --release --bin chart`. Edit that tool,
+not this file.
 
 - machine: Apple M1 Pro, 10 cores, macos aarch64
 - runtimes: node v26.7.0, Python 3.14.7, rustc 1.96.1

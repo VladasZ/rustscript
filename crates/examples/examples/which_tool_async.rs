@@ -1,8 +1,6 @@
 #!/usr/bin/env rust
 
-// Look up an executable on PATH from a tokio script, so the crate bridge
-// is proven under the async surface too and can still
-// be missing here. This is the twin of which_tool.rs that covers that engine.
+// The `#[tokio::main]` twin of `which_tool`.
 
 use which::which;
 

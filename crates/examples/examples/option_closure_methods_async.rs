@@ -1,5 +1,4 @@
-// Option's closure-taking methods under `#[tokio::main]`: map, map_or, and_then, filter, unwrap_or_else, is_some_and. The fast
-// engine already runs these, this proves the tokio engine matches.
+// Option's closure methods under `#[tokio::main]`.
 
 fn triple(x: i64) -> i64 {
     x * 3

@@ -1,7 +1,5 @@
 #!/usr/bin/env rust
 
-// Spawn a child, stream its stdout line by line while it runs, then feed a
-// second child through its stdin and collect the output.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};

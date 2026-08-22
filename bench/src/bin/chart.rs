@@ -1,8 +1,4 @@
-//! Render one PNG per benchmark case, dark themed, fixed color per
-//! language, linear scale. Each compute case gets three panels, total time,
-//! self timed compute, and peak memory. The startup cases skip the compute
-//! panel. The run also writes `bench/RESULTS.md`, the document that collects
-//! every chart.
+//! One PNG per benchmark case plus `bench/RESULTS.md`.
 //!
 //! Usage: cargo run --release --bin chart
 
@@ -18,8 +14,7 @@ use plotters::style::register_font;
 use plotters::style::text_anchor::{HPos, Pos, VPos};
 use rustscript_bench::{CaseResult, Meta, Report};
 
-/// Pixel density. Layout is in logical units and everything is drawn at
-/// double resolution so the PNGs stay sharp on hidpi screens.
+/// Layout is in logical units and drawn at double resolution for hidpi.
 const S: i32 = 2;
 
 fn s(v: i32) -> i32 {
@@ -33,12 +28,10 @@ const GRID: RGBColor = RGBColor(62, 64, 70);
 
 const LANG_ORDER: [&str; 4] = ["native", "rustscript", "node", "python"];
 
-/// The only font the charts use. It is embedded because the pure Rust text
-/// renderer has no system font source, so nothing is found by name.
+/// Embedded because the pure Rust text renderer has no system font source.
 const FONT: &[u8] = include_bytes!("../../fonts/Roboto-Regular.ttf");
 
-/// Bar geometry in logical units. Bars are packed 5 units apart and the
-/// panel width follows from the packed group, so there is no dead space.
+/// Bars are packed 5 units apart and the panel width follows from the group.
 const BAR_W: i32 = 52;
 const BAR_GAP: i32 = 5;
 const PANEL_MARGIN: i32 = 16;
@@ -57,8 +50,8 @@ fn color_for(lang: &str) -> RGBColor {
     }
 }
 
-/// The name under a bar. The `native` key in `results.json` is the compiled
-/// Rust binary, so the bar names the language instead.
+/// The `native` key in `results.json` is the compiled Rust binary, so the bar
+/// names the language instead.
 fn bar_label(lang: &str) -> String {
     match lang {
         "native" => "rust".to_string(),
@@ -66,8 +59,6 @@ fn bar_label(lang: &str) -> String {
     }
 }
 
-/// The chart title: the case name spelled out so the task is obvious.
-/// File names keep the short case name from `results.json`.
 fn display_title(name: &str) -> &'static str {
     match name {
         "hello" => "hello world",
@@ -97,7 +88,6 @@ fn display_title(name: &str) -> &'static str {
     }
 }
 
-/// One bar panel, values in the unit `fmt` renders.
 struct Panel {
     title: String,
     bars: Vec<(String, f64, RGBColor)>,
@@ -134,23 +124,22 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// The document that collects every chart. It is written next to the charts
-/// on every run, so it can never list a case the suite no longer measures.
+/// Written on every run, so it can never list a case the suite no longer
+/// measures.
 fn results_markdown(report: &Report) -> Result<String> {
     let meta = &report.meta;
     let mut out = String::new();
     writeln!(out, "# Benchmark results\n")?;
     writeln!(
         out,
-        r"Every case in the suite, one chart each, in run order. Each bar is the
-median of that case's samples. [README.md](README.md) explains the method and
-what every case measures.
+        r"One chart per case, in run order. Each bar is the median of that case's
+samples. The method is in [README.md](README.md).
 "
     )?;
     writeln!(
         out,
-        r"This file is written by `cargo run --release --bin chart` together with the
-charts themselves. Edit that tool, not this file.
+        r"This file is written by `cargo run --release --bin chart`. Edit that tool,
+not this file.
 "
     )?;
     writeln!(out, "{}\n", machine_lines(meta))?;
@@ -169,7 +158,6 @@ charts themselves. Edit that tool, not this file.
     Ok(out)
 }
 
-/// The machine, the runtimes, and the sample counts the recorded run used.
 fn machine_lines(meta: &Meta) -> String {
     let cores = match meta.cpu_cores {
         0 => String::new(),
@@ -199,17 +187,12 @@ fn machine_lines(meta: &Meta) -> String {
     )
 }
 
-/// The case name, its kind, and the arguments or fixture it ran with.
 fn case_line(c: &CaseResult) -> String {
     let mut parts = vec![format!("`{}`", c.name), c.kind.clone()];
     parts.extend(c.parameters.iter().map(|p| format!("`{p}`")));
     parts.join(", ")
 }
 
-/// One PNG for one case.
-/// The panels a case renders: total time, compute-only when self timed, and
-/// peak memory when measured. The time panels share one axis so bar heights
-/// compare directly.
 fn case_panels(c: &CaseResult) -> Vec<Panel> {
     let mut panels: Vec<Panel> = Vec::new();
 
@@ -273,10 +256,8 @@ fn case_panels(c: &CaseResult) -> Vec<Panel> {
     panels
 }
 
-/// The processor and runtime versions stamped on every chart,
-/// "Apple M1 Pro 10 cores  node v26.7.0  python 3.14.7". `meta.python` is
-/// the full `--version` line, its last word is the number. Results recorded
-/// before the core count existed carry a zero, which stays off the label.
+/// `meta.python` is the full `--version` line, its last word is the number.
+/// A zero core count from old results stays off the label.
 fn versions_label(meta: &Meta) -> String {
     let python = meta.python.split_whitespace().last().unwrap_or("?");
     let cores = match meta.cpu_cores {
@@ -303,9 +284,8 @@ fn render_case(out: &Path, c: &CaseResult, meta: &Meta) -> Result<()> {
     let title_style = ("sans-serif", s(30)).into_font().color(&INK);
     let versions_style = ("sans-serif", s(15)).into_font().color(&MUTED);
 
-    // The narrow two panel cases cannot hold the title and the machine line on
-    // one row without crowding, so the header stacks when the gap gets too
-    // small to read as a separation.
+    // The narrow 2 panel cases cannot hold the title and the machine line on
+    // one row, so the header stacks.
     let title_w = area.estimate_text_size(title, &title_style)?.0;
     let versions_w = area.estimate_text_size(&versions, &versions_style)?.0;
     let header_space = u32::try_from(s(28) * 2 + s(48)).expect("header margins fit u32");
@@ -332,7 +312,6 @@ fn render_case(out: &Path, c: &CaseResult, meta: &Meta) -> Result<()> {
     Ok(())
 }
 
-/// Draw one bar panel on a linear scale.
 fn panel<DB>(area: &DrawingArea<DB, Shift>, p: &Panel) -> Result<()>
 where
     DB: DrawingBackend,

@@ -1,8 +1,6 @@
-//! The ratatui bridge, widget side. Constructors and builder methods keep the
-//! real crate's shapes, and `Widget::render` rebuilds real ratatui widgets from
-//! the script values and lets ratatui draw them into a real `Buffer`. The cells
-//! come back into the script's buffer, so an interpreted script and the same
-//! file compiled by cargo paint identical output.
+//! The ratatui bridge, widget side. `Widget::render` rebuilds real widgets
+//! from the script values and lets ratatui draw them, so the output matches
+//! the compiled file.
 
 use std::sync::Arc;
 
@@ -46,8 +44,7 @@ use super::ratatui_bridge::value_style;
 use super::value::StructData;
 use super::value::Value;
 
-/// Associated functions, `Table::new`, `Block::bordered`, `Buffer::empty` and
-/// the rest. Returns None when the path is not a ratatui one.
+/// None when the path is not a ratatui one.
 pub(super) fn ratatui_assoc(id: PathId, args: &[Value]) -> Option<Value> {
     let argument = |i: usize| args.get(i).cloned();
     Some(match id {
@@ -161,8 +158,7 @@ fn line_from(v: &Value) -> Value {
     line_value(&value_line(v))
 }
 
-/// A builder method returns a fresh value the way the real consuming builders
-/// do, so a script that keeps the earlier value still sees the earlier state.
+/// A builder returns a fresh value like the real consuming builders.
 fn with(s: &StructData, field: &str, v: Value) -> Value {
     let out = Value::structure(Arc::clone(&s.shape), s.values.lock().clone());
     if let Value::Struct(data) = &out {
@@ -288,8 +284,7 @@ pub(super) fn sparkline_method(s: &StructData, name: &MethodName, args: &[Value]
 
 pub(super) fn buffer_method(s: &StructData, name: &MethodName, args: &[Value]) -> Result<Value> {
     Ok(match name.id {
-        // Indexes the cell list in place. Cloning the whole buffer per lookup
-        // makes drawing quadratic, and a full frame reads every cell.
+        // In place, cloning the buffer per lookup makes drawing quadratic.
         BuiltinId::Cell => {
             let (x, y) = coords(args.first());
             let area = s
@@ -453,8 +448,8 @@ fn build_sparkline(s: &StructData) -> Sparkline<'static> {
     spark
 }
 
-/// `Widget::render(widget, area, &mut buf)`. The script buffer is refilled
-/// from a real ratatui buffer, so ratatui itself decides every cell.
+/// The script buffer is refilled from a real ratatui buffer, so ratatui
+/// decides every cell.
 fn render_into(widget: &Value, area: &Value, target: &Value) -> Result<Value> {
     let Value::Struct(buffer) = target else {
         bail!("Widget::render expects a Buffer");
@@ -485,8 +480,7 @@ fn render_into(widget: &Value, area: &Value, target: &Value) -> Result<Value> {
     Ok(Value::Unit)
 }
 
-/// Cells the script already holds, so a second render draws over the first
-/// instead of starting from a blank buffer.
+/// So a second render draws over the first.
 fn restore(real: &mut Buffer, area: Rect, content: Option<&Value>) {
     let Some(cells) = content.map(items) else {
         return;
@@ -534,7 +528,6 @@ fn dump(real: &Buffer, area: Rect) -> Vec<Value> {
     out
 }
 
-/// The constraint constructors, `Constraint::Length(10)` and friends.
 pub(super) fn constraint_variant(id: PathId, args: &[Value]) -> Option<Value> {
     let n = args.first().map_or(0, int_of);
     let second = args.get(1).map_or(0, int_of);
@@ -557,8 +550,7 @@ pub(super) fn constraint_variant(id: PathId, args: &[Value]) -> Option<Value> {
     Some(constraint_value(c))
 }
 
-/// `Color::Rgb(r, g, b)` and `Color::Indexed(i)`, the two colour variants that
-/// carry data.
+/// The 2 colour variants that carry data.
 pub(super) fn color_variant(id: PathId, args: &[Value]) -> Option<Value> {
     let at = |i: usize| -> u8 {
         args.get(i)

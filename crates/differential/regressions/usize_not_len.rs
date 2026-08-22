@@ -1,8 +1,5 @@
-//! A container or string length is a real `usize`, so `!` and `%` on it run
-//! in the unsigned width. The campaign found `!vec.len()` answering a small
-//! negative i64 where compiled Rust answers a huge unsigned, which then
-//! steered a `%` to a wrong remainder two expressions later. From seed
-//! 20675317577.
+//! A length is a real `usize`. `!vec.len()` once answered a small negative
+//! i64 instead of a huge unsigned. From seed 20675317577.
 
 fn opaque(v: u64) -> u64 {
     v

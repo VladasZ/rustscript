@@ -1,12 +1,10 @@
-/// A script runtime abort. What a compiled binary would report as a panic,
-/// carried as a typed error so `main` can print the panic header and exit
-/// with the panic status 101, matching real Rust.
+/// A script panic as a typed error, so `main` can print the header and exit
+/// 101.
 #[derive(Debug)]
 pub struct ScriptPanic {
-    /// File and line of the innermost script frame, for the panic header.
+    /// For the panic header.
     pub file: String,
     pub line: u32,
-    /// The message with the script backtrace lines appended.
     pub rendered: String,
 }
 
@@ -18,8 +16,8 @@ impl std::fmt::Display for ScriptPanic {
 
 impl std::error::Error for ScriptPanic {}
 
-/// `main` returned a `Result::Err` value. A compiled binary prints it as
-/// `Error: ...` and exits 1, so this marks that outcome apart from a panic.
+/// A compiled binary prints `Error: ...` and exits 1, so this is marked
+/// apart from a panic.
 #[derive(Debug)]
 pub struct ErrReturn(pub String);
 
@@ -31,19 +29,16 @@ impl std::fmt::Display for ErrReturn {
 
 impl std::error::Error for ErrReturn {}
 
-/// Wrap a runtime error as a `ScriptPanic` carrying the script backtrace.
-/// Frames arrive innermost first as (function, file, line), line 0 meaning
-/// unknown. Deep chains cap at a fixed count so runaway recursion stays
-/// readable.
+/// Frames arrive innermost first, line 0 meaning unknown. Deep chains cap
+/// so runaway recursion stays readable.
 pub(super) fn trace_error(
     e: anyhow::Error,
     frames: impl Iterator<Item = (String, String, u32)>,
 ) -> anyhow::Error {
     const SHOWN: usize = 15;
     let mut msg = format!("{e:#}");
-    // A closure called from inside a bridge runs its own exec and wraps
-    // first; the panic origin must stay that innermost site, not this
-    // outer exec's current frame.
+    // A closure inside a bridge wraps first, the panic origin must stay that
+    // innermost site.
     let mut origin: Option<(String, u32)> = e
         .downcast_ref::<ScriptPanic>()
         .map(|p| (p.file.clone(), p.line));

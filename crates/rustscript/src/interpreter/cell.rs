@@ -1,9 +1,5 @@
-//! `Rc`, `Arc`, `RefCell`, `Cell`, and `Mutex` as real shared cells.
-//!
-//! These are the types real Rust uses when sharing is the point, so their
-//! sharing stays observable: cloning a cell shares its slot, and a write
-//! through one handle shows through every handle. Everything else in the
-//! value model copies on mutation instead.
+//! `Rc`, `Arc`, `RefCell`, `Cell` and `Mutex` as real shared cells. Cloning
+//! shares the slot, everything else in the value model copies on mutation.
 
 use std::sync::Arc;
 
@@ -18,16 +14,14 @@ pub(super) fn make_cell(kind: CellKind, inner: Value) -> Value {
     Value::Cell(kind, Arc::new(Mutex::new(inner)))
 }
 
-/// The methods that belong to the wrapper itself. Anything else reads
-/// through to the content, `eval_method` handles that fallthrough.
+/// Anything else reads through to the content in `eval_method`.
 pub(super) fn cell_method(
     kind: CellKind,
     slot: &Arc<Mutex<Value>>,
     name: BuiltinId,
     args: &mut [Value],
 ) -> Result<Option<Value>> {
-    // An interior method on an `Rc<RefCell<..>>` derefs the shared pointer
-    // and lands on the inner cell, the way real auto-deref does.
+    // An interior method on `Rc<RefCell<..>>` auto derefs to the inner cell.
     if kind.is_shared_pointer() && interior_method(name) {
         let inner = slot.lock().clone();
         let Value::Cell(inner_kind, inner_slot) = inner else {
@@ -46,10 +40,8 @@ pub(super) fn cell_method(
             Value::Ref(Arc::new(ValueRef::cell_slot(slot.clone())))
         }
         BuiltinId::Lock | BuiltinId::TryLock | BuiltinId::BlockingLock => {
-            // The tokio mutex hands its guard out directly: `lock` is
-            // awaited and the await passes the guard through, and only
-            // `try_lock` wraps a `Result`. The std mutex wraps its
-            // `LockResult` either way and has no `blocking_lock`.
+            // The tokio mutex hands its guard out directly, only `try_lock`
+            // wraps a `Result`. The std mutex wraps either way.
             if kind == CellKind::TokioMutex {
                 let guard = Value::Ref(Arc::new(ValueRef::cell_slot(slot.clone())));
                 if name == BuiltinId::TryLock {
@@ -96,8 +88,7 @@ pub(super) fn cell_method(
     }))
 }
 
-/// Whether the name is an interior-mutability method that auto-derefs
-/// through Rc and Arc to the cell inside.
+/// An interior mutability method that auto derefs through `Rc` and `Arc`.
 fn interior_method(name: BuiltinId) -> bool {
     matches!(
         name,

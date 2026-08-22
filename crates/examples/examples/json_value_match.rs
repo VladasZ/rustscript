@@ -1,7 +1,5 @@
-// A parsed `serde_json::Value` matched against its own variant patterns. The
-// interpreter stores a parsed json as native values, a string as a Str, a number
-// as an Int, an object as a Map, so matching `Value::String(s)` and friends has
-// to recognize those. This mirrors the shape of a real dotted-path field reader.
+// The interpreter stores parsed json as native values, so matching
+// `Value::String(s)` and friends has to recognize those.
 
 use serde_json::Value;
 

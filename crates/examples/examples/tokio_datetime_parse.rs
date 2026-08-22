@@ -1,5 +1,4 @@
-// The same RFC 3339 parsing under `#[tokio::main]`. Both engines route through one shared core, so the numbers here
-// must match the compiled build.
+// The `#[tokio::main]` copy of `datetime_parse`.
 
 use chrono::{DateTime, Timelike};
 

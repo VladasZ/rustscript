@@ -1,9 +1,8 @@
 #!/usr/bin/env rust
 
-// A bare unit-variant pattern like None, or an imported enum variant like Red, must be refutable,
-// not an always-true binding. The trap is the first arm: with a broken lowering a leading `None =>`
-// swallows a Some value, and a leading `Red =>` swallows every color. A lowercase ident in the same
-// spot is a real binding and must still act as a catch-all.
+// A bare unit variant pattern like `None` or an imported `Red` must be
+// refutable, not a binding. A broken lowering made a leading `None =>`
+// swallow a `Some`. A lowercase ident is still a catch all.
 
 use serde_json::Value;
 
@@ -16,8 +15,7 @@ enum Color {
     Blue,
 }
 
-// Bare unit variants, the leading arm first. Real Rust treats these as variant patterns because they
-// are imported, so every arm is reachable.
+// Imported unit variants, the leading arm first.
 fn bare_name(c: &Color) -> &str {
     match c {
         Red => "red",
@@ -26,7 +24,7 @@ fn bare_name(c: &Color) -> &str {
     }
 }
 
-// A lowercase ident after a variant arm still binds as a catch-all.
+// A lowercase ident still binds as a catch all.
 fn is_red(c: &Color) -> String {
     match c {
         Red => "yes".to_string(),
@@ -34,8 +32,8 @@ fn is_red(c: &Color) -> String {
     }
 }
 
-// None first, then Some: the exact shape that regressed. Uses as_str so no Value is Displayed, whose
-// text differs between the compiled and interpreted engines for a json string.
+// The exact shape that regressed. `as_str` avoids displaying a `Value`, whose
+// text differs between compiled and interpreted for a json string.
 fn field(data: &Value, key: &str) -> String {
     match data.get(key) {
         None => "absent".to_string(),

@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-//! A `let` with a tuple pattern states each name's type through its own
-//! element, so a later `unwrap_or_default()` builds the right default.
+//! A tuple pattern `let` states each name's type through its own element.
 
 fn opaque_i64(v: i64) -> i64 {
     v
@@ -22,7 +21,7 @@ fn main() {
         letter.unwrap_or_default()
     );
 
-    // An annotated tuple pattern answers the same way.
+    // Annotated.
     let (level, label): (Option<u8>, Option<String>) = (None, None);
     println!(
         "{:?} {:?}",
@@ -30,7 +29,6 @@ fn main() {
         label.unwrap_or_default()
     );
 
-    // A payload that is present still wins over the default.
     let (scale, flag) = (Some(2.5f64), None::<bool>);
     println!(
         "{:?} {:?}",

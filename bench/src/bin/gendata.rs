@@ -77,8 +77,7 @@ fn big_script(dir: &Path) -> Result<()> {
         )?;
     }
 
-    // The Rust chain is split into stages of 75 calls so no function trips
-    // clippy's too-many-lines lint, which CI runs over the generated case.
+    // Stages of 75 calls keep each function under clippy's too-many-lines lint.
     let stage_size = 75;
     let mut stage_count = 0;
     for (stage, chunk) in (0..functions)

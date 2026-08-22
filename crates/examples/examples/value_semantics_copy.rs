@@ -1,8 +1,7 @@
 #!/usr/bin/env rust
 
-// Assignment of a Copy composite must copy the data, not alias it. The
-// interpreter once shared the backing storage on `let b = a`, so mutating
-// `b` changed `a` too and this program printed "5 5" instead of "1 5".
+// The interpreter once shared storage on `let b = a`, so mutating `b`
+// changed `a` and this printed "5 5" instead of "1 5".
 
 #[derive(Clone, Copy, Debug)]
 struct Point {

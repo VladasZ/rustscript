@@ -1,8 +1,7 @@
 #!/usr/bin/env rust
 
-// A clone taken before a push must keep its own contents. The interpreter
-// shares string buffers and copies on the first append, so this guards the
-// copy-on-write path against writes leaking into an older handle.
+// String buffers are shared and copied on the first append, so a clone taken
+// before a push must keep its own contents.
 
 fn main() {
     let mut s = String::from("base");

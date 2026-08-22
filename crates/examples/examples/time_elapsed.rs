@@ -1,6 +1,6 @@
 #!/usr/bin/env rust
 
-// Measure elapsed time and build durations. Only stable facts are printed.
+// Only stable facts are printed.
 
 use std::time::{Duration, Instant};
 

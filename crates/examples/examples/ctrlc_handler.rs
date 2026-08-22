@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-// Register a Ctrl-C handler. The handler is not triggered here, so the program
-// just confirms it installed and exits.
+// The handler is not triggered, the program only confirms it installed.
 
 fn main() -> anyhow::Result<()> {
     ctrlc::set_handler(|| {

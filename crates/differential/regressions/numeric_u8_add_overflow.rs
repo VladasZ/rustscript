@@ -1,6 +1,4 @@
-// A u8 sum that leaves the width panics in debug Rust. The interpreter
-// tracks the real width at runtime, so it panics at the same statement with
-// the same message.
+// A u8 sum that leaves the width must panic at the same statement.
 
 fn diff_opaque(x: i64) -> i64 {
     x

@@ -1,11 +1,7 @@
 #!/usr/bin/env rust
 
-// Reading a json value that turned out to be null, and the serde type tests.
-// A json null is Option::None inside the interpreter, so `get` and the `as_*`
-// family have to answer on it the way serde does, with None, instead of
-// failing as an unknown method. This is the shape every service reader has:
-// the request comes back empty, the parse falls back to Value::Null, and the
-// field lookup still has to run.
+// A json null is `Option::None` inside the interpreter, so `get` and the
+// `as_*` family must answer None on it like serde instead of failing.
 
 use serde_json::Value;
 
@@ -23,7 +19,6 @@ fn bool_of(v: &Value, key: &str) -> bool {
     }
 }
 
-// Every serde type test, printed as the names that answered true.
 fn kind_of(v: &Value) -> String {
     let mut names: Vec<String> = Vec::new();
     if v.is_object() {
@@ -59,7 +54,7 @@ fn kind_of(v: &Value) -> String {
 fn main() {
     let text = r#"{"ip":"86.100.76.6","proxy":true,"port":8080,"share":0.5}"#;
     let live: Value = serde_json::from_str(text).unwrap();
-    // What a failed request leaves behind, an empty body that does not parse.
+    // What a failed request leaves behind.
     let dead: Value = serde_json::from_str("").unwrap_or(Value::Null);
 
     println!("live ip    [{}]", text_of(&live, "ip"));
@@ -87,7 +82,7 @@ fn main() {
     println!("kind int    {}", kind_of(live.get("port").unwrap()));
     println!("kind float  {}", kind_of(live.get("share").unwrap()));
 
-    // A json array reads by index, and a missing index is None like serde.
+    // A missing index is None.
     let list: Value = serde_json::from_str(r#"["first","second"]"#).unwrap();
     println!("kind array  {}", kind_of(&list));
     println!(
@@ -96,8 +91,7 @@ fn main() {
     );
     println!("index 9     {}", list.get(9).is_none());
 
-    // serde answers the integer tests by range, not by "it is an integer", so
-    // a negative number is not a u64 and one past i64::MAX is not an i64.
+    // serde answers the integer tests by range.
     let nums: Value =
         serde_json::from_str(r#"{"neg":-3,"pos":7,"big":18446744073709551615}"#).unwrap();
     let neg = nums.get("neg").unwrap();
@@ -111,9 +105,7 @@ fn main() {
     println!("big as_u64  {}", big.as_u64().unwrap_or(0));
     println!("big as_f64  {}", big.as_f64().unwrap_or(0.0));
 
-    // Json pointer, RFC 6901. A key with a slash or a tilde is escaped, an
-    // index with a leading zero is not an index, and a pointer that leaves
-    // the tree is None rather than an error.
+    // Json pointer, RFC 6901.
     let tree: Value =
         serde_json::from_str(r#"{"a":{"b c":[10,{"d":"deep"}]},"e/f":1,"g~h":2}"#).unwrap();
     println!(
@@ -157,10 +149,7 @@ fn main() {
             .unwrap_or(false)
     );
 
-    // `get` on a value that turned out to be a scalar answers None like serde,
-    // instead of failing the way an unknown method would. Every shape a json
-    // value can be has to answer, which is the whole point of the check that
-    // now guards this.
+    // `get` on a scalar answers None like serde.
     for text in ["\"hi\"", "5", "4.5", "true", "null", "{}", "[1,2]"] {
         let shape: Value = serde_json::from_str(text).unwrap_or(Value::Null);
         println!("shape {text} get {}", text_of(&shape, "k").is_empty());
@@ -169,8 +158,7 @@ fn main() {
     println!("arr by index {:?}", pair.get(1).and_then(Value::as_i64));
     println!("arr by key   {}", pair.get("k").is_none());
 
-    // `str::get` is the real slice method and keeps its own meaning, it is not
-    // the json lookup.
+    // `str::get` keeps its own meaning.
     let word = "hello".to_string();
     println!("str slice    {:?}", word.get(0..2));
     println!("str past end {:?}", word.get(0..99));

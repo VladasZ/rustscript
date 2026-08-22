@@ -1,8 +1,7 @@
 #!/usr/bin/env rust
 
-// Drops run where real Rust runs them: a `?` early return drops the scope,
-// a by-value argument drops at the callee's end, and guards inside
-// containers, cells, and `Rc` drop when their container dies.
+// Drops on `?` early return, by value arguments, and guards inside
+// containers, cells and `Rc`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;

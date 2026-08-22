@@ -1,15 +1,13 @@
 #!/usr/bin/env rust
 
-//! The type behind a bare `sum`, `product`, or `unwrap_or_default` can come
-//! from the signature of the function that hands the value back, and from
-//! the constructors and casts a chain is built from. The differential
-//! campaign found a float `sum` of nothing answering `0.0` where std answers
-//! `-0.0`, and defaults falling back to an empty string behind `Ok::<T, E>`,
-//! `Err::<T, E>`, a map `get`, and a `map` closure that builds a tuple.
+//! The type behind a bare `sum` or `unwrap_or_default` can come from a
+//! signature, a constructor or a cast. A float `sum` of nothing once
+//! answered `0.0` instead of `-0.0`, and defaults behind `Ok::<T, E>`, a map
+//! `get` or a tuple closure fell back to an empty string.
 
 use std::collections::{HashMap, HashSet};
 
-/// std sums floats from `-0.0`, so an empty sum keeps the negative sign.
+/// std sums floats from `-0.0`.
 fn empty_float_sum(values: Vec<f64>) -> f64 {
     values.into_iter().map(|value: f64| value * 2.0).sum()
 }
@@ -22,8 +20,7 @@ fn first_or_default(values: Vec<i16>) -> i16 {
     values.first().copied().unwrap_or_default()
 }
 
-/// A generic helper answers in the type its arguments state, so a miss
-/// through it still defaults to a typed zero.
+/// A generic helper answers in the type its arguments state.
 fn pick<T: Clone + std::fmt::Debug>(a: T, b: T, first: bool) -> T {
     if first { a } else { b }
 }
@@ -45,12 +42,11 @@ fn main() {
     println!("pair: {:?}", largest_pair(Vec::new()));
     println!("pair present: {:?}", largest_pair(vec![2, 9, 4]));
 
-    // Runtime false, so every Result below really is an Err when its
-    // default is taken.
+    // Runtime false, so nothing folds.
     let flag = std::env::args().count() > 1000;
 
-    // The `Ok` turbofish names the map, the map names its value, and a
-    // missed `get` defaults to that value, a one element tuple here.
+    // The `Ok` turbofish names the map, so a missed `get` defaults to its
+    // value type.
     let table = if flag {
         Ok::<HashMap<u32, (u8,)>, String>(HashMap::new())
     } else {
@@ -62,9 +58,7 @@ fn main() {
     .unwrap_or_default();
     println!("result map miss: {table:?}");
 
-    // An `Err` turbofish states the same map when the `Ok` side does not,
-    // so the miss defaults to an `i16` and the multiplication is integer
-    // arithmetic.
+    // The `Err` turbofish states the map when the `Ok` side does not.
     let scale = if flag {
         Ok(std::iter::empty().collect())
     } else {
@@ -76,9 +70,8 @@ fn main() {
     .unwrap_or_default();
     println!("err map miss: {}", scale * 3);
 
-    // The closure builds a tuple of a cast and a suffixed literal, which is
-    // the only place the item type is written, and `max` of nothing
-    // defaults from it.
+    // The closure's tuple of a cast and a suffixed literal is the only place
+    // the item type is written.
     let total = std::env::args().count();
     let pair = Vec::<u32>::new()
         .into_iter()
@@ -87,8 +80,7 @@ fn main() {
         .unwrap_or_default();
     println!("closure tuple miss: {pair:?}");
 
-    // A `collect` turbofish states the set, the set iterates its items, and
-    // `max` of none defaults to the tuple the turbofish named.
+    // Through a `collect` turbofish on a set.
     let largest = Vec::<(i32, bool)>::new()
         .into_iter()
         .collect::<HashSet<(i32, bool)>>()
@@ -97,8 +89,7 @@ fn main() {
         .unwrap_or_default();
     println!("set max miss: {largest:?}");
 
-    // A qualified `default` and a match arm both state the nested vec, so
-    // `concat` of nothing is an empty vec with elements to iterate.
+    // A qualified `default` and a match arm both state the nested vec.
     let mut rows = <Vec<Vec<f64>>>::default().concat();
     for row in &mut rows {
         *row += 1.0;
@@ -111,16 +102,13 @@ fn main() {
     .concat();
     println!("match concat: {picked:?}");
 
-    // `Some` of a tuple states the tuple through its items, a cast, a local
-    // with a known type, and a negation, so the miss destructures into
-    // typed defaults.
+    // `Some` of a tuple states it through its items.
     let (count, index, on) = Some((total as u64, total, !flag))
         .filter(|_| flag)
         .unwrap_or_default();
     println!("some tuple: {count} {index} {on}");
 
-    // A `map` closure building a `vec!` of a typed local states a vec of
-    // that type, and `nth` past the end defaults to the empty vec.
+    // A `map` closure building a `vec!` of a typed local.
     let seed: Vec<u8> = vec![1, 2];
     let rows = Vec::<u8>::new()
         .into_iter()
@@ -135,17 +123,14 @@ fn main() {
     later_misses(flag);
 }
 
-/// The misses whose type comes from a local, a block, a generic helper, or
-/// a literal rather than from a signature.
+/// Types from a local, a block, a generic helper or a literal.
 fn later_misses(flag: bool) {
-    // A tuple typed local states the element of the vec built around it,
-    // so a missed `get` defaults to the tuple, not to an empty string.
+    // A tuple typed local states the element of the vec around it.
     let mut label: (String,) = (String::from("start"),);
     label = [label.clone()].get(5).cloned().unwrap_or_default();
     println!("tuple miss: {label:?}");
 
-    // Two blocks reuse one local name for maps of different types, and each
-    // miss defaults to its own block's value type.
+    // 2 blocks reuse one local name for different map types.
     let outer = ({
         let mut table: HashMap<char, (Option<char>,)> = HashMap::new();
         table.insert('a', (None,));
@@ -165,8 +150,7 @@ fn later_misses(flag: bool) {
     .unwrap_or_default();
     println!("shadowed blocks: {outer:?}");
 
-    // A block's value read through a call on the block's own local, typed
-    // by that local's turbofish constructor.
+    // A block's value typed by its local's turbofish constructor.
     let removed = ({
         let mut owned = HashMap::<usize, (char, usize, Option<i8>)>::new();
         owned.remove(&1)
@@ -174,13 +158,11 @@ fn later_misses(flag: bool) {
     .unwrap_or_default();
     println!("block local miss: {removed:?}");
 
-    // The generic `pick` returns its `T`, which `None::<u16>` states, so the
-    // miss is a `u16` zero and the division is integer arithmetic.
+    // `pick` returns its `T`, which `None::<u16>` states.
     let ratio = pick(None::<u16>, Some(65_534u16), !flag).unwrap_or_default() / 7;
     println!("generic pick miss: {ratio}");
 
-    // `Some(x)` and `Ok(x)` state the payload through `x`, a suffixed
-    // literal here.
+    // `Some(x)` and `Ok(x)` state the payload through `x`.
     let absent = Some(5u16).filter(|_| flag).unwrap_or_default();
     let failed = if flag {
         Ok(9u16)

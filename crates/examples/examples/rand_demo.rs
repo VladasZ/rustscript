@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-// Random number generation. Only stable properties are printed so the output
-// does not change from run to run.
+// Only stable properties are printed.
 
 use rand::{RngExt, rng};
 

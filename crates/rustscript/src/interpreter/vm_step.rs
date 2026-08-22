@@ -1,7 +1,5 @@
-//! One dispatch step of the register machine. `step` executes the op at
-//! `ctx.ip` and answers with the `Flow` the frame loop in `vm.rs` applies:
-//! fall through, jump, return, or push a call frame. The frame bookkeeping
-//! stays in `exec`, the op bodies live here.
+//! One dispatch step. `step` executes the op at `ctx.ip` and answers the
+//! `Flow` the frame loop in `vm.rs` applies. The op bodies live here.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -28,7 +26,6 @@ use super::value::{ClosureData, StructShape, Upvalue, Value};
 use super::vm::{TypeEnv, Vm, empty_type_env};
 use super::vm_method::{get_or_default, method_op};
 
-/// What the executed op asks the frame loop to do next.
 pub(super) enum Flow {
     Next,
     Jump(usize),
@@ -36,7 +33,6 @@ pub(super) enum Flow {
     Call(CallReq),
 }
 
-/// A call the frame loop should push: the callee and its calling convention.
 pub(super) struct CallReq {
     pub chunk: Arc<Chunk>,
     pub closure: Option<Arc<ClosureData>>,
@@ -46,7 +42,6 @@ pub(super) struct CallReq {
     pub type_env: TypeEnv,
 }
 
-/// The execution state one op step sees, borrowed from the frame loop.
 pub(super) struct StepCtx<'a> {
     pub vm: &'a Arc<Vm>,
     pub cur: &'a Arc<Chunk>,
@@ -57,7 +52,7 @@ pub(super) struct StepCtx<'a> {
     pub stack: &'a mut Vec<Value>,
     pub base: usize,
     pub ip: usize,
-    /// Call frames below this one, for the function plan's depth budget.
+    /// For the function plan's depth budget.
     pub depth: usize,
 }
 
@@ -74,13 +69,11 @@ impl StepCtx<'_> {
         self.stack[self.base + reg as usize] = v;
     }
 
-    /// Write a register and fall through to the next op.
     pub(super) fn set(&mut self, reg: u16, v: Value) -> Flow {
         self.put(reg, v);
         Flow::Next
     }
 
-    /// Write a register unless the compiler discarded the result.
     pub(super) fn set_opt(&mut self, reg: u16, v: Value) -> Flow {
         if reg != u16::MAX {
             self.put(reg, v);
@@ -95,10 +88,7 @@ impl StepCtx<'_> {
         }
     }
 
-    /// The cell a mutably captured local lives in, built on first use.
-    /// The local keeps living in its register until some closure captures
-    /// it, so a branch that never runs leaves no cell behind and the first
-    /// read or write that lands here builds one from the register.
+    /// Built on first use, so a branch that never runs leaves no cell behind.
     pub(super) fn cell(&mut self, reg: u16) -> &Arc<Mutex<Value>> {
         let slot = self.base + reg as usize;
         match self.local_cells.entry(slot) {
@@ -110,7 +100,7 @@ impl StepCtx<'_> {
         }
     }
 
-    /// Move a run of registers out of the frame, `first` relative to `base`.
+    /// `first` is relative to `base`.
     pub(super) fn take_range(&mut self, first: usize, count: usize) -> Vec<Value> {
         let s = self.base + first;
         (0..count).map(|i| take(&mut self.stack[s + i])).collect()
@@ -210,9 +200,8 @@ pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
     })
 }
 
-/// Clear a moved-out binding register when its value has a user `Drop`
-/// impl, so the copy in the argument window is the last holder and the
-/// guard drops at the destination, not at this scope's end.
+/// So the copy in the argument window is the last holder and the guard
+/// drops at the destination.
 fn move_out(ctx: &mut StepCtx, src: u16) -> Flow {
     let has_drop = ctx
         .vm
@@ -225,9 +214,8 @@ fn move_out(ctx: &mut StepCtx, src: u16) -> Flow {
     Flow::Next
 }
 
-/// Run user `Drop` impls for a finished scope's bindings, in reverse
-/// declaration order. A binding whose storage still has another holder was
-/// moved out or is still shared, its real owner drops it later.
+/// Reverse declaration order. A binding with another holder was moved or
+/// is shared, its real owner drops it.
 fn drop_scope(ctx: &mut StepCtx, list: u16) -> Result<()> {
     let regs = ctx.cur.drop_lists[list as usize].clone();
     for reg in regs.iter().rev() {
@@ -237,10 +225,8 @@ fn drop_scope(ctx: &mut StepCtx, list: u16) -> Result<()> {
     Ok(())
 }
 
-/// A binary operator on a value whose type has the matching operator trait
-/// impl. `a + b` dispatches to the user `add`, and `a += b`, which the
-/// compiler lowers to `a = a + b`, falls back to a user `add_assign` that
-/// mutates its receiver in place and answers the mutated value.
+/// `a + b` dispatches to the user `add`. `a += b` is lowered to `a = a + b`
+/// and falls back to a user `add_assign` answering the mutated value.
 fn user_bin(
     ctx: &StepCtx,
     op: super::bytecode::BinKind,
@@ -258,9 +244,7 @@ fn user_bin(
     else {
         return Ok(None);
     };
-    // Equality and ordering answer through `eq_value` and `partial_compare`,
-    // whose derived semantics `apply_bin` runs, so `bin` has no slot for
-    // them.
+    // Equality and ordering go through `eq_value` and `partial_compare`.
     if let Some(chunk) = methods.bin(op) {
         let chunk = chunk.clone();
         return Ok(Some(ctx.vm.run_chunk(
@@ -271,15 +255,14 @@ fn user_bin(
     }
     if let Some(chunk) = methods.bin_assign(op) {
         let chunk = chunk.clone();
-        // The receiver mutates in place through its `&mut self`, and the
-        // mutated value is the store-back result of the lowered `a = a + b`.
+        // The mutated receiver is the store back result of `a = a + b`.
         ctx.vm.run_chunk(&chunk, &[a.clone(), b.clone()], &[])?;
         return Ok(Some(a.clone()));
     }
     Ok(None)
 }
 
-/// A unary operator with a user trait impl, `impl Neg for X`.
+/// `impl Neg for X`.
 fn user_un(ctx: &StepCtx, op: super::bytecode::UnKind, a: &Value) -> Result<Option<Value>> {
     if ctx.vm.impls.is_empty() {
         return Ok(None);
@@ -291,8 +274,7 @@ fn user_un(ctx: &StepCtx, op: super::bytecode::UnKind, a: &Value) -> Result<Opti
     Ok(Some(ctx.vm.run_chunk(&chunk, from_ref(a), &[])?))
 }
 
-/// The three call shapes, split from `step` to keep the dispatch match
-/// readable.
+/// Split from `step` to keep the dispatch match readable.
 fn call_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
     match op {
         Op::CallFn {
@@ -318,8 +300,7 @@ fn call_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
     }
 }
 
-/// The field, index, and dereference ops, split from `step` to keep the
-/// dispatch match readable.
+/// Split from `step` to keep the dispatch match readable.
 fn access_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
     match op {
         Op::Index { dst, base, key } => index_op(ctx, *dst, *base, *key),
@@ -333,8 +314,7 @@ fn access_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
     }
 }
 
-/// The place ops: uniqueness splits, reference builders, scope drops, and
-/// borrow wrapping. Split from `step` to keep the dispatch match readable.
+/// Split from `step` to keep the dispatch match readable.
 fn place_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
     Ok(match op {
         Op::UniqueReg { reg } => unique_reg(ctx, *reg),
@@ -395,7 +375,6 @@ fn un_op(ctx: &mut StepCtx, dst: u16, a: u16, op: super::bytecode::UnKind) -> Re
     }
 }
 
-/// The value of a written type's `Default::default()`.
 pub(super) fn build_default(ir: &DefaultIr) -> Value {
     match ir {
         DefaultIr::Int(width) => Value::int_of_width(0, *width),
@@ -421,14 +400,13 @@ pub(super) fn build_default(ir: &DefaultIr) -> Value {
     }
 }
 
-/// A fresh value of the same shape as `src`, see `Value::default_like`.
+/// See `Value::default_like`.
 fn default_of(ctx: &mut StepCtx, dst: u16, src: u16) -> Flow {
     let v = ctx.get(src).default_like();
     ctx.set(dst, v)
 }
 
-/// Wrap a place-loaded value as a mutable borrow of its own storage. A
-/// value that already is a reference stays one.
+/// A value that already is a reference stays one.
 fn make_borrow(ctx: &mut StepCtx, dst: u16, src: u16) -> Flow {
     let v = ctx.get(src).clone();
     let wrapped = match v {
@@ -451,10 +429,8 @@ fn branch(jump: bool, to: u32) -> Flow {
     }
 }
 
-/// A backward jump closes a loop iteration, the moment to run a pending
-/// Ctrl-C handler, and the moment the scalar while plan takes over the whole
-/// loop when its ops qualify, see `scalar_loop.rs`. A rejected loop's jump
-/// runs per iteration, so its whole cost here is the one atomic load.
+/// A backward jump runs a pending Ctrl-C handler and lets the while plan
+/// take over, see `scalar_loop.rs`. A rejected loop pays one atomic load.
 fn jump(ctx: &mut StepCtx, to: usize) -> Result<Flow> {
     if to <= ctx.ip {
         ctx.vm.run_pending_ctrlc()?;
@@ -471,10 +447,8 @@ fn jump(ctx: &mut StepCtx, to: usize) -> Result<Flow> {
     Ok(Flow::Jump(to))
 }
 
-/// The not-yet-rejected side of a backward jump, out of the hot path: mark a
-/// `for` body's back jump rejected on first sight, the `for` plan already
-/// owns that loop, or hand the loop to the while plan. Cold because it runs
-/// once per loop entry, not per iteration.
+/// Out of the hot path. A `for` body's back jump is rejected on first
+/// sight, the `for` plan owns that loop.
 #[cold]
 fn loop_plan_jump(ctx: &mut StepCtx, to: usize) -> Result<Option<Flow>> {
     if matches!(ctx.cur.code.get(to), Some(Op::ForNext { .. })) {
@@ -486,9 +460,8 @@ fn loop_plan_jump(ctx: &mut StepCtx, to: usize) -> Result<Option<Flow>> {
     super::scalar_while::try_run_while(ctx, to)
 }
 
-/// A `LoopHead` at a loop entry: hand the loop to the while plan before the
-/// first iteration runs, or fall through into the head when the loop has no
-/// plan.
+/// Hand the loop to the while plan before the first iteration, or fall
+/// through.
 fn loop_head(ctx: &mut StepCtx, jump: u32) -> Result<Flow> {
     let jump_ip = jump as usize;
     if ctx
@@ -514,9 +487,8 @@ fn store_cell(ctx: &mut StepCtx, cell: u16, src: u16) -> Flow {
     Flow::Next
 }
 
-/// A binding of a mutably captured local starts a new variable, so the cell
-/// the last one shared is forgotten here. The register still holds the new
-/// value, and the next read, write, or capture builds the cell from it.
+/// A binding starts a new variable, so the last cell is forgotten and the
+/// next use builds one from the register.
 fn drop_cell(ctx: &mut StepCtx, cell: u16) -> Flow {
     ctx.local_cells.remove(&(ctx.base + cell as usize));
     Flow::Next
@@ -538,14 +510,12 @@ fn call_fn(
     targ: u32,
 ) -> Result<Flow> {
     let callee = ctx.vm.functions[func as usize].clone();
-    // A self-recursive scalar function runs its whole call tree unboxed
-    // inside this dispatch, see `scalar_fn`.
+    // See `scalar_fn`.
     if targ == u32::MAX
         && let Some(v) = super::scalar_fn::try_call(ctx, &callee, abase, argc)?
     {
         return Ok(ctx.set(dst, v));
     }
-    // Bind the call's turbofish type args to the callee's generic parameters.
     let type_env: TypeEnv = if targ == u32::MAX {
         empty_type_env()
     } else {
@@ -569,8 +539,7 @@ fn call_value(ctx: &StepCtx, dst: u16, callee: u16, abase: u16, argc: u16) -> Re
     request_call(chunk, Some(clo), dst, abase, argc, empty_type_env())
 }
 
-/// Validate the arg count here, where the error can name the callee, then
-/// hand the frame push to the loop in `exec`.
+/// The arg count is checked here, where the error can name the callee.
 fn request_call(
     chunk: Arc<Chunk>,
     closure: Option<Arc<ClosureData>>,
@@ -579,9 +548,8 @@ fn request_call(
     argc: u16,
     type_env: TypeEnv,
 ) -> Result<Flow> {
-    // A path forwarder's arity is only a guess, so rebuild it for the count
-    // actually passed. `u8::saturating_add` handed to `fold` takes two
-    // arguments where the guess was one.
+    // A forwarder's arity is a guess, `u8::saturating_add` handed to `fold`
+    // takes 2 where the guess was 1.
     let chunk = if chunk.path_forwarder && argc as usize != chunk.num_params {
         path_call_chunk(chunk.paths[0].clone(), argc as usize)
     } else {
@@ -609,7 +577,7 @@ fn call_path(ctx: &mut StepCtx, dst: u16, path: u16, abase: u16, argc: u16) -> R
     let (vm, cur) = (ctx.vm, ctx.cur);
     let (abase, argc) = (abase as usize, argc as usize);
     let path = &cur.paths[path as usize];
-    // The compiler-internal paths, `::unreachable_match` and friends.
+    // `::unreachable_match` and friends.
     match path.id {
         PathId::UnreachableMatch => bail!("no match arm matched the value"),
         PathId::AssertFailed => bail!("assertion failed"),
@@ -624,8 +592,7 @@ fn call_path(ctx: &mut StepCtx, dst: u16, path: u16, abase: u16, argc: u16) -> R
         _ => {}
     }
     let call_args = ctx.take_range(abase, argc);
-    // Typed json parses straight into the target structs, no generic tree and
-    // no coercion pass afterwards.
+    // Typed json parses straight into the target structs.
     if let Some(ty) = &path.coerce
         && path.id == PathId::SerdeJsonFromStr
     {
@@ -677,11 +644,9 @@ fn make_range(ctx: &mut StepCtx, dst: u16, start: u16, end: u16, inclusive: bool
 }
 
 fn for_next(ctx: &mut StepCtx, iter: u16, idx: u16, val: u16, to: u32) -> Result<Flow> {
-    // The first iteration tries the scalar plan, which runs the whole loop
-    // on unboxed values when the body is int-only bytecode over a bytes or
-    // range source, see scalar_loop.rs. A fallback mid-loop leaves the index
-    // register at the consumed count, so the attempt happens once and the
-    // index is re-read below.
+    // The first iteration tries the scalar plan, see `scalar_loop.rs`. A
+    // mid loop fallback leaves the index at the consumed count, so the
+    // attempt happens once.
     if matches!(ctx.get(idx), Value::Int(0))
         && let Some(flow) = super::scalar_for::try_run(ctx, iter, idx, to)?
     {
@@ -691,9 +656,7 @@ fn for_next(ctx: &mut StepCtx, iter: u16, idx: u16, val: u16, to: u32) -> Result
         Value::Int(i) => *i,
         _ => unreachable!("for index is an integer"),
     };
-    // The simple source states produce their item in place under one lock,
-    // so a tight loop skips the handle clone and the step dispatch of the
-    // full `iterator_next` machinery.
+    // Simple sources produce their item in place, skipping `iterator_next`.
     let item = {
         let Value::Native(iterator) = ctx.get(iter) else {
             bail!("{} is not an iterator", ctx.get(iter).type_name());
@@ -730,13 +693,11 @@ fn make_struct(ctx: &mut StepCtx, dst: u16, info: u16, first: u16) -> Flow {
             let rvals = r.values.lock();
             for (slot, (k, v)) in r.shape.fields.iter().zip(rvals.iter()).enumerate() {
                 match lit.shape.slot(k) {
-                    // A declared field the literal left to the rest.
                     Some(index) if !lit.filled.get(index).copied().unwrap_or(true) => {
                         values[index] = v.clone();
                     }
                     Some(_) => {}
-                    // A field the literal's shape does not know, when the
-                    // struct definition was out of reach at compile time.
+                    // The struct definition was out of reach at compile time.
                     None => {
                         fields.push(k.clone());
                         values.push(v.clone());
@@ -791,10 +752,9 @@ fn spawn_op(ctx: &mut StepCtx, dst: u16, child: u16) -> Flow {
     let handle = ctx.vm.rt.spawn_blocking(move || {
         match interp.run_chunk(&clo.chunk, &[], &clo.captured) {
             Ok(v) => v,
-            // A panic inside a task prints when it happens and makes the
-            // join handle answer `Err(JoinError)`, the way real tokio does.
-            // `resume_unwind` skips the default panic hook, so the printed
-            // header is not doubled.
+            // A task panic prints and the join handle answers
+            // `Err(JoinError)`, like real tokio. `resume_unwind` skips the
+            // hook so the header is not doubled.
             Err(e) => {
                 if let Some(p) = e.downcast_ref::<super::vm_support::ScriptPanic>() {
                     if p.file.is_empty() {
@@ -812,9 +772,8 @@ fn spawn_op(ctx: &mut StepCtx, dst: u16, child: u16) -> Flow {
                 } else {
                     eprintln!("rust error in task: {e:#}");
                 }
-                // The payload is the bare panic message, so the JoinError
-                // the join handle answers formats exactly like real tokio's:
-                // `task 11 panicked with message "boom"`.
+                // The bare message, so the `JoinError` formats like real
+                // tokio's `task 11 panicked with message "boom"`.
                 let payload = match e.downcast_ref::<super::vm_support::ScriptPanic>() {
                     Some(p) => {
                         let first = p.rendered.lines().next().unwrap_or_default();
@@ -833,9 +792,7 @@ fn make_closure(ctx: &mut StepCtx, child: u16) -> Arc<ClosureData> {
     let cur = ctx.cur;
     let child_chunk = cur.children[child as usize].clone();
     let caps = &cur.child_caps[child as usize];
-    // A `move` closure takes its own copy of a mutable capture. The outer
-    // binding keeps its value, which is what a moved `Copy` integer does,
-    // and a moved non-`Copy` value cannot be read outside anyway.
+    // A `move` closure takes its own copy of a mutable capture.
     let moves = child_chunk.moves;
     let own = |value: Value| Upvalue::Mutable(Arc::new(Mutex::new(value)));
     let captured: Vec<Upvalue> = caps
@@ -864,9 +821,8 @@ fn make_closure(ctx: &mut StepCtx, child: u16) -> Arc<ClosureData> {
     })
 }
 
-/// The storage a field or index access should hit. A reference base
-/// resolves to its referent and a shared pointer auto-derefs to its
-/// content, so `body.attributes` works when `body` is a borrow binding.
+/// A reference base resolves to its referent and a shared pointer auto
+/// derefs.
 fn place_base(v: &Value) -> Result<Value> {
     Ok(match v {
         Value::Ref(reference) => reference
@@ -878,10 +834,8 @@ fn place_base(v: &Value) -> Result<Value> {
 }
 
 fn set_index(ctx: &mut StepCtx, base: u16, key: u16, val: u16) -> Result<Flow> {
-    // A range write into a string is the writeback of a mutating method
-    // called on a string slice, like `s[2..].make_ascii_uppercase()`. A
-    // string has no interior mutability, so the spliced value is stored
-    // through the base itself: its register, its cell, or its reference.
+    // A range write into a string is the writeback of
+    // `s[2..].make_ascii_uppercase()`, stored through the base itself.
     if let &Value::Range {
         start,
         end,
@@ -922,7 +876,7 @@ fn deref(v: &Value) -> Result<Value> {
         Value::Ref(reference) => reference
             .get()
             .ok_or_else(|| anyhow!("dereference of a dangling reference"))?,
-        // `*rc` reads the content, the way real Deref does.
+        // `*rc` reads the content.
         Value::Cell(_, slot) => slot.lock().clone(),
         value => value.clone(),
     })
@@ -938,10 +892,8 @@ fn set_deref(ctx: &StepCtx, target: u16, val: u16) -> Result<Flow> {
     Ok(Flow::Next)
 }
 
-/// A value a fused compound assignment may read and write under the
-/// referent's held lock: `apply_bin` on these is pure, it takes no lock and
-/// runs no user code, and `user_op_type` never answers for them, so the
-/// generic `Bin` op computes the identical result.
+/// A value a fused compound assignment may touch under the held lock,
+/// `apply_bin` on these takes no lock and runs no user code.
 fn fusable_scalar(v: &Value) -> bool {
     matches!(
         v,
@@ -949,12 +901,9 @@ fn fusable_scalar(v: &Value) -> bool {
     )
 }
 
-/// `DerefBinAssign`: `*r op= v` as one op. When the slot and the operand
-/// are both plain scalars the read-modify-write runs under the referent's
-/// lock, so concurrent compound assignments through a shared cell, a tokio
-/// mutex guard for one, cannot lose updates. Everything else runs the exact
-/// sequence the unfused `Deref`, `Bin`, `SetDeref` ops ran, errors and
-/// their order included.
+/// `*r op= v` as one op. Plain scalars run under the referent's lock so
+/// concurrent tasks cannot lose updates. Everything else runs the unfused
+/// sequence, errors included.
 fn deref_bin_assign(
     ctx: &mut StepCtx,
     target: u16,
@@ -994,9 +943,8 @@ fn deref_bin_assign(
     Ok(Flow::Next)
 }
 
-/// `SetDerefParam`: a deref assignment whose target the compiler proved to be
-/// a `&mut` parameter. A real reference is set through, and a plain value is
-/// written into the parameter register, where the caller's writeback finds it.
+/// A real reference is set through, a plain value is written into the
+/// parameter register for the caller's writeback.
 fn set_deref_param(ctx: &mut StepCtx, target: u16, val: u16) -> Result<Flow> {
     if let Value::Ref(reference) = ctx.get(target) {
         if !reference.set(ctx.get(val).clone()) {
@@ -1024,10 +972,8 @@ fn set_field_op(ctx: &StepCtx, base: u16, member: u16, val: u16) -> Result<Flow>
     Ok(Flow::Next)
 }
 
-/// Make the field's value unique inside `base` and load it into `dst`
-/// sharing the field's fresh storage. `base` was made unique by the ops the
-/// compiler emits before this one, so the split cannot leak into a sibling
-/// copy of the whole struct.
+/// `base` was made unique by the ops before this one, so the split cannot
+/// leak into a sibling copy.
 fn unique_reg(ctx: &mut StepCtx, reg: u16) -> Flow {
     ctx.stack[ctx.base + reg as usize].make_unique();
     Flow::Next
@@ -1066,9 +1012,8 @@ fn unique_field(ctx: &mut StepCtx, dst: u16, base: u16, member: u16) -> Result<F
     Ok(ctx.set(dst, v))
 }
 
-/// The indexed-element version of `unique_field`. Anything that is not a
-/// vec or map element read falls back to the plain index path, whose error
-/// wording stays authoritative.
+/// `unique_field` for an element. Anything else falls back to the plain
+/// index path, whose error wording stays authoritative.
 fn unique_index(ctx: &mut StepCtx, dst: u16, base: u16, key: u16) -> Result<Flow> {
     let target = place_base(ctx.get(base))?;
     let split = match (&target, ctx.get(key)) {
@@ -1096,8 +1041,7 @@ fn unique_index(ctx: &mut StepCtx, dst: u16, base: u16, key: u16) -> Result<Flow
         },
         _ => None,
     };
-    // Anything that was not a plain element hit falls back to the ordinary
-    // index path, whose error wording stays authoritative.
+    // Fall back to the ordinary index path for its error wording.
     let v = match split {
         Some(v) => v,
         None => ops::index(&target, ctx.get(key))?,
@@ -1127,9 +1071,7 @@ fn unique_upvalue(ctx: &mut StepCtx, dst: u16, idx: u16) -> Flow {
     ctx.set(dst, v)
 }
 
-/// `&mut base[key]` as a real reference value. The compiler makes the
-/// element unique first, so writes through the borrow stay private to the
-/// borrowed place.
+/// The compiler makes the element unique first.
 fn ref_index(ctx: &mut StepCtx, dst: u16, base: u16, key: u16) -> Result<Flow> {
     let target = place_base(ctx.get(base))?;
     let v = match (&target, ctx.get(key)) {
@@ -1153,8 +1095,7 @@ fn ref_index(ctx: &mut StepCtx, dst: u16, base: u16, key: u16) -> Result<Flow> {
     Ok(ctx.set(dst, v))
 }
 
-/// `&mut base.field` as a real reference value. A tuple field borrows as a
-/// list element, tuples share the vec storage shape.
+/// A tuple field borrows as a list element.
 fn ref_field(ctx: &mut StepCtx, dst: u16, base: u16, member: u16) -> Result<Flow> {
     let member = &ctx.cur.members[member as usize];
     let target = place_base(ctx.get(base))?;
@@ -1192,8 +1133,7 @@ fn try_jump(ctx: &mut StepCtx, dst: u16, src: u16, to: u32, conv: u16) -> Result
             ctx.put(dst, v);
             Flow::Jump(to as usize)
         }
-        // Falls through into the scope drops and the `Ret` emitted after
-        // this op, with the early-return value ready in `dst`.
+        // Falls through into the scope drops and the `Ret` after this op.
         Err(early) => {
             let early = convert_early(ctx, early, conv)?;
             ctx.set(dst, early)
@@ -1201,9 +1141,8 @@ fn try_jump(ctx: &mut StepCtx, dst: u16, src: u16, to: u32, conv: u16) -> Result
     })
 }
 
-/// The early return of a `?`, its error converted into the frame's error
-/// type through that type's `From` impl, the way `?` does in real Rust. An
-/// error already of that type, or one no impl converts, leaves as it is.
+/// The error converts through the frame type's `From` impl. One already of
+/// that type, or one no impl converts, leaves as it is.
 fn convert_early(ctx: &StepCtx, early: Value, conv: u16) -> Result<Value> {
     if conv == super::bytecode::NO_CONV {
         return Ok(early);
@@ -1243,9 +1182,7 @@ fn coerce_op(ctx: &mut StepCtx, dst: u16, src: u16, ty: u16) -> Flow {
 fn test_bind(ctx: &mut StepCtx, val: u16, pat: u16, dst: u16) -> Flow {
     let info = &ctx.cur.pats[pat as usize];
     let raw = ctx.get(val).clone();
-    // A reference scrutinee matches its referent, and its bindings borrow:
-    // a composite binds wrapped as a borrow of the payload's own storage,
-    // so mutation through the binding reaches the matched place, the way
+    // A reference scrutinee's bindings borrow, so
     // `if let Some(v) = &mut opt { v.push(..) }` writes into `opt`.
     let (value, by_ref) = match &raw {
         Value::Ref(reference) => match reference.get() {
@@ -1257,8 +1194,7 @@ fn test_bind(ctx: &mut StepCtx, val: u16, pat: u16, dst: u16) -> Flow {
     let binds = &info.binds;
     let mut writes: Vec<(u16, Value)> = Vec::new();
     let matched = if by_ref {
-        // Match first, then anchor each binding to the payload storage it
-        // came from, so writes through the binding land in the place.
+        // Match first, then anchor each binding to its payload storage.
         let matched = try_bind(&info.pat, &value, &mut |_, _| {});
         if matched {
             let mut define = |name: &str, v: Value| {
@@ -1328,8 +1264,6 @@ fn await_op(ctx: &mut StepCtx, dst: u16, src: u16) -> Result<Flow> {
     Ok(ctx.set(dst, ctx.vm.await_value(v)?))
 }
 
-/// Apply an `as` cast to a value, with the same width semantics as
-/// `eval_cast` in eval.rs.
 fn eval_cast(target: &CastIr, v: Value) -> Result<Value> {
     let width = match target {
         CastIr::F64 => {
@@ -1378,8 +1312,8 @@ fn eval_cast(target: &CastIr, v: Value) -> Result<Value> {
     let value = match v {
         Value::Int(i) => truncate(i128::from(i), width),
         Value::IntW(..) => truncate(v.int_parts().unwrap().0, width),
-        // The stored i128 already carries the exact bit pattern, u128
-        // included, so a narrowing cast keeps the low bits directly.
+        // The stored i128 carries the exact bits, so a narrowing cast keeps
+        // the low bits.
         Value::Big(bits, _) => truncate(bits, width),
         Value::Float(f) => float_to_int(f, width),
         Value::F32(f) => float_to_int(f64::from(f), width),

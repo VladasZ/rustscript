@@ -1,11 +1,5 @@
-//! Type directed generation. The generator is asked for an expression of a
-//! type and answers with any shape that produces it: a binding, a literal, an
-//! operator, a cast, a branch, a match, a field, a user method, a `?`, or a
-//! catalog method whose result unifies with the wanted type.
-//!
-//! Because every shape is chosen by type rather than by a hand written case,
-//! a method added to the catalog immediately appears inside conditions, inside
-//! loop bodies, as a receiver of another call, and at any depth.
+//! Type directed generation. Every shape is chosen by type, so a catalog
+//! method appears at any depth at once.
 
 mod exprs;
 mod matches;
@@ -23,11 +17,9 @@ use crate::lang::ty::{
 };
 use crate::lang::user::UserDef;
 
-/// How deep one expression may nest. Enough for a call whose receiver is a
-/// call whose argument is an operator, which is where composition bugs live.
+/// Enough for a call whose receiver is a call whose argument is an operator.
 pub(super) const MAX_EXPR_DEPTH: usize = 3;
 
-/// What a name in scope is.
 #[derive(Clone, Debug)]
 pub(super) enum BindKind {
     Local,
@@ -46,20 +38,17 @@ pub struct Generator<'a> {
     pub(super) rng: &'a mut StdRng,
     pub(super) scope: Vec<Binding>,
     pub(super) labels: usize,
-    /// The block's index within its program, baked into every top level
-    /// item name so two blocks never define the same item.
+    /// Baked into every item name so 2 blocks never collide.
     pub(super) tag: usize,
     pub(super) types: Vec<UserDef>,
     pub(super) fns: Vec<FnDef>,
     pub(super) consts: Vec<ConstDef>,
     pub(super) describes: Vec<Ty>,
-    /// The return type of the function body being generated, which is what
-    /// lets `?` and an early `return` appear.
+    /// Lets `?` and an early `return` appear.
     pub(super) fn_ret: Option<Ty>,
-    /// Inside a loop body, so `break` and `continue` may appear.
+    /// Lets `break` and `continue` appear.
     pub(super) in_loop: bool,
-    /// Inside a method receiver, where a bare literal would leave rustc
-    /// with an ambiguous `{integer}` to call the method on.
+    /// A bare literal here would be an ambiguous `{integer}`.
     pub(super) forbid_bare: bool,
 }
 
@@ -80,9 +69,8 @@ impl<'a> Generator<'a> {
         }
     }
 
-    /// Generate a closure body. A `?`, a `break`, a `continue`, or a
-    /// `return` inside it would answer to the closure, not to the function
-    /// or loop around it, so neither is offered there.
+    /// `?`, `break`, `continue` and `return` would answer to the closure,
+    /// so none is offered.
     pub(super) fn closure_body<T>(&mut self, build: impl FnOnce(&mut Self) -> T) -> T {
         let saved_ret = self.fn_ret.take();
         let saved_loop = std::mem::replace(&mut self.in_loop, false);
@@ -92,7 +80,6 @@ impl<'a> Generator<'a> {
         out
     }
 
-    /// Generate a receiver position, where no bare literal may sit.
     pub(super) fn typed_only<T>(&mut self, build: impl FnOnce(&mut Self) -> T) -> T {
         let was = std::mem::replace(&mut self.forbid_bare, true);
         let out = build(self);
@@ -113,8 +100,8 @@ impl<'a> Generator<'a> {
         for _ in 0..extras {
             statements.push(self.mutation());
         }
-        // Every binding is observed, then a few free standing expressions, so
-        // a divergence in a value that was never stored still shows up.
+        // A few free standing expressions, so a value that was never stored
+        // still shows up.
         let observed: Vec<(String, Ty)> = self
             .scope
             .iter()
@@ -162,7 +149,6 @@ impl<'a> Generator<'a> {
         &items[self.rng.random_range(0..items.len())]
     }
 
-    /// Locals of exactly this type.
     pub(super) fn locals_of(&self, want: &Ty) -> Vec<String> {
         self.scope
             .iter()
@@ -179,7 +165,6 @@ impl<'a> Generator<'a> {
         });
     }
 
-    /// Generate with extra locals visible, then forget them.
     pub(super) fn with_locals<T>(
         &mut self,
         locals: &[(String, Ty)],
@@ -195,8 +180,7 @@ impl<'a> Generator<'a> {
         out
     }
 
-    /// Generate with one binding hidden, for the argument of a call that
-    /// already borrows that binding mutably.
+    /// For the argument of a call that already borrows the binding.
     pub(super) fn without_binding<T>(
         &mut self,
         name: &str,
@@ -213,7 +197,7 @@ impl<'a> Generator<'a> {
         out
     }
 
-    /// Generate with the whole scope hidden, for a top level item body.
+    /// For a top level item body.
     pub(super) fn without_scope<T>(&mut self, build: impl FnOnce(&mut Self) -> T) -> T {
         let saved = std::mem::take(&mut self.scope);
         let saved_loop = std::mem::replace(&mut self.in_loop, false);
@@ -238,8 +222,6 @@ impl<'a> Generator<'a> {
         }
     }
 
-    /// An element type for a container: a scalar, a small tuple, a user
-    /// type, or another container one level down.
     pub(super) fn elem_ty(&mut self) -> Ty {
         match self.rng.random_range(0..10) {
             0 => self.tuple_ty(),
@@ -250,7 +232,6 @@ impl<'a> Generator<'a> {
         }
     }
 
-    /// A key for a map or set: hashable, `Eq`, and ordered.
     pub(super) fn key_ty(&mut self) -> Ty {
         for _ in 0..8 {
             let candidate = match self.rng.random_range(0..8) {
@@ -269,7 +250,7 @@ impl<'a> Generator<'a> {
         Ty::I64
     }
 
-    /// A map value: ordered and defaultable, see `is_map_val`.
+    /// See `is_map_val`.
     pub(super) fn val_ty(&mut self) -> Ty {
         for _ in 0..8 {
             let candidate = match self.rng.random_range(0..8) {
@@ -313,8 +294,8 @@ impl<'a> Generator<'a> {
         Ty::Tuple(items)
     }
 
-    /// `Result<T, E>` with a user error enum when the block declares one,
-    /// a std parse error or a `String` otherwise.
+    /// A user error enum when the block has one, else a parse error or
+    /// `String`.
     pub(super) fn res_ty(&mut self) -> Ty {
         let ok = if self.chance(0.3) {
             Ty::vec_of(self.scalar_ty())
@@ -333,7 +314,6 @@ impl<'a> Generator<'a> {
         Ty::res_of(ok, err)
     }
 
-    /// A user type the block declared, when there is one.
     pub(super) fn user_ty(&mut self) -> Option<Ty> {
         if self.types.is_empty() {
             return None;
@@ -342,8 +322,7 @@ impl<'a> Generator<'a> {
         Some(self.types[index].ty())
     }
 
-    /// A user enum that converts from a std parse error, the error side of a
-    /// generated `Result`.
+    /// A user enum that converts from a std parse error.
     pub(super) fn error_ty(&mut self) -> Option<Ty> {
         let errors: Vec<Ty> = self
             .types
@@ -370,7 +349,6 @@ impl<'a> Generator<'a> {
     }
 }
 
-/// Whether `<` and `>` compile between two values of the type.
 pub(super) fn is_partial_ord(ty: &Ty) -> bool {
     match ty {
         Ty::Float(_) => true,

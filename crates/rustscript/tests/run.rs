@@ -1,9 +1,6 @@
-//! End to end tests. Each writes a script to a temp file and runs it through
-//! the real `rustscript` binary, then checks stdout. The `cargo check` gate is
-//! skipped here so the interpreter is exercised on its own and stays fast.
-//! The two `check_` tests at the end are the exception, they invoke a real
-//! cargo, so they are ignored by default like the ones in `check.rs`. Run them
-//! with `cargo test --test run -- --ignored`.
+//! End to end tests through the real binary with the `cargo check` gate
+//! skipped. The 2 `check_` tests at the end run a real cargo and are ignored
+//! by default. Run them with `cargo test --test run -- --ignored`.
 
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -20,14 +17,12 @@ fn temp_script(src: &str) -> std::path::PathBuf {
     path
 }
 
-/// Render a real path for pasting into generated script source. A windows
-/// separator would read as an escape sequence in a string literal and fail to
-/// parse, and windows accepts a forward slash in a path just as well.
+/// A `Windows` separator reads as an escape in a string literal, and
+/// `Windows` accepts a forward slash anyway.
 fn embed_path(path: &std::path::Path) -> String {
     path.display().to_string().replace('\\', "/")
 }
 
-/// Run a script that is expected to succeed and return its stdout.
 fn run(src: &str) -> String {
     let path = temp_script(src);
     let out = Command::new(env!("CARGO_BIN_EXE_rust"))
@@ -44,7 +39,6 @@ fn run(src: &str) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// Run a script that is expected to fail and return its stderr.
 fn run_fail(src: &str) -> String {
     let path = temp_script(src);
     let out = Command::new(env!("CARGO_BIN_EXE_rust"))
@@ -295,8 +289,8 @@ fn main() -> anyhow::Result<()> {
 }
 "#
     };
-    // cmd echo ends its line with CRLF, sh echo with LF, and the point of the
-    // check is the missing variable, not the separator the shell chose.
+    // cmd echo ends with CRLF and sh echo with LF. The point is the missing
+    // variable.
     let expected = if cfg!(windows) {
         "absent\r\n"
     } else {
@@ -375,9 +369,8 @@ fn main() -> anyhow::Result<()> {
 
 #[test]
 fn json_float_integer_accessors_answer_none() {
-    // The claude statusline sends used_percentage as a float like 4.4. The
-    // integer accessors must answer None on it so the derived fallback runs,
-    // as real serde_json does, instead of failing on the method.
+    // The claude statusline sends `used_percentage` as a float. The integer
+    // accessors must answer `None` on it like real serde_json.
     let out = run(r##"
 use serde_json::Value;
 fn main() {
@@ -593,8 +586,7 @@ fn main() {
 
 #[test]
 fn method_path_function_values() {
-    // A method reference like `str::trim` or a constructor like `String::from`
-    // used as a function value, the form clippy suggests over a closure.
+    // Method references as function values, the form clippy suggests.
     let out = run(r#"
 fn main() {
     let v = vec![" a ", "b "];
@@ -729,8 +721,7 @@ async fn main() {
 
 #[test]
 fn tokio_current_thread_flavor_is_rejected() {
-    // Only the multi thread runtime is offered, so an explicit current_thread
-    // flavor is rejected at load time.
+    // Only the multi thread runtime exists, so `current_thread` is rejected.
     let err = run_fail(
         r#"
 #[tokio::main(flavor = "current_thread")]
@@ -742,8 +733,7 @@ async fn main() {}
 
 #[test]
 fn reqwest_bridge_builds_and_errors_gracefully() {
-    // No network: a refused local port must surface as an Err through the whole
-    // Client, request builder, and send path, not panic.
+    // A refused local port must be an `Err`, not a panic.
     let out = run(r#"
 fn main() {
     let client = reqwest::blocking::Client::new();
@@ -805,8 +795,7 @@ async fn main() {
 
 #[test]
 fn tokio_async_reqwest_errors_gracefully() {
-    // No network: a refused local port must surface as an Err through the async
-    // Client, request builder, and `.send().await` path, not panic.
+    // Same for the async client.
     let out = run(r#"
 #[tokio::main]
 async fn main() {
@@ -841,8 +830,8 @@ fn main() {
 
 #[test]
 fn annotated_let_collects_chars_into_string() {
-    // The trello script failure shape. Without the let annotation reaching
-    // collect, head and rest stayed char lists and trim on the result failed.
+    // The trello script shape. Without the let annotation reaching `collect`,
+    // head and rest stayed char lists.
     let out = run(r#"
 fn idx(arr: &[String], i: usize) -> &str {
     match arr.get(i) {
@@ -911,8 +900,8 @@ async fn main() {
 #[test]
 #[ignore = "runs real cargo check, slow"]
 fn check_reports_a_method_the_interpreter_lacks() {
-    // Valid Rust that `cargo check` accepts, but the interpreter has no
-    // `rposition`, so the coverage gate must catch it without running anything.
+    // Valid Rust, but the interpreter has no `rposition`, so the coverage gate
+    // must catch it before running.
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("script.rs");
     std::fs::write(
@@ -1065,10 +1054,8 @@ async fn main() {
 
 #[test]
 fn tokio_mutex_concurrent_compound_assign() {
-    // Eight parallel tasks each add to one shared counter. A compound
-    // assignment through the guard that reads and writes the slot as two
-    // separate steps loses updates under this load, which is what the
-    // fused `DerefBinAssign` op prevents.
+    // A read then write through the guard as 2 steps loses updates under this
+    // load. The fused `DerefBinAssign` op prevents it.
     let out = run(r#"
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -1097,10 +1084,8 @@ async fn main() {
 
 #[test]
 fn mut_scrutinee_slice_rest_bindings_anchor() {
-    // The head and tail bindings around a `..` anchor to the scrutinee's
-    // own elements, so writes through them land, and a named rest binds
-    // the middle. The rest detection once missed `rest @ ..`, which made
-    // this arm bind `rest` to a single element or not match at all.
+    // The rest detection once missed `rest @ ..`, which bound `rest` to a
+    // single element or did not match at all.
     let out = run(r#"
 fn main() {
     let mut nums = vec![1, 2, 3, 4, 5];

@@ -1,4 +1,4 @@
-//! Calls, closures, assignment, struct literals, and patterns. Split from the compiler.
+//! Calls, closures, assignment, struct literals and patterns.
 
 use std::sync::Arc;
 
@@ -24,9 +24,8 @@ use super::{
 };
 
 impl Compiler<'_> {
-    /// Compile arguments into a fresh contiguous register window and return its
-    /// base. The window is reserved first so an argument's own temporaries,
-    /// allocated above it, cannot break the packing.
+    /// The window is reserved first so an argument's own temporaries cannot
+    /// break the packing.
     pub(super) fn compile_args<'e>(&mut self, args: impl Iterator<Item = &'e Expr>) -> Result<Reg> {
         let list: Vec<&Expr> = args.collect();
         let base = self.cur().reg_top;
@@ -40,11 +39,8 @@ impl Compiler<'_> {
         Ok(base)
     }
 
-    /// A plain-path by-value argument is a move in real Rust. When the
-    /// program has `Drop` impls, clear the binding register after the copy
-    /// when the value's type has a user `Drop` impl, so the guard drops
-    /// where the move sent it. A reference argument compiles as
-    /// `Expr::Reference` and never reaches this.
+    /// A by value argument is a move. With `Drop` impls the binding register
+    /// clears after the copy, so the guard drops where the move sent it.
     fn emit_arg_move_out(&mut self, arg: &Expr) {
         if !self.ctx.has_drop {
             return;
@@ -56,17 +52,16 @@ impl Compiler<'_> {
             return;
         }
         if let NameLoc::Local(reg) = self.resolve(&name)
-            // A borrow parameter forwards a reference, not ownership, so the
-            // caller keeps its handle and the borrow take covers the call.
+            // A borrow parameter forwards a reference, so the caller keeps its
+            // handle.
             && !self.cur().borrow_params.contains(&reg)
         {
             self.emit(Op::MoveOut { src: reg });
         }
     }
 
-    /// Record the turbofish type args on a call path, e.g. the `AppList` in
-    /// `get_json::<AppList>(..)`, returning an index into the current chunk's
-    /// `call_type_args` table, or `u32::MAX` when there are none.
+    /// The `AppList` in `get_json::<AppList>(..)`. An index into
+    /// `call_type_args`, or `u32::MAX` when there are none.
     fn record_call_type_args(&mut self, path: &syn::Path) -> u32 {
         let Some(seg) = path.segments.last() else {
             return u32::MAX;
@@ -103,8 +98,8 @@ impl Compiler<'_> {
             return Ok(());
         };
         let path = &path_expr.path;
-        // tokio::spawn(async { .. }) lowers to a Spawn op carrying the async
-        // block as a child chunk, so the task runs on its own worker thread.
+        // `tokio::spawn(async { .. })` lowers to a `Spawn` op with the block
+        // as a child chunk.
         if self.ctx.async_mode && is_tokio_spawn(path) {
             match c.args.first() {
                 Some(Expr::Async(block)) if c.args.len() == 1 => {
@@ -123,8 +118,8 @@ impl Compiler<'_> {
                 self.emit_default(dst, ir);
                 return Ok(());
             }
-            // `<S>::default()` on a type with its own `fn default` is the
-            // plain `S::default()` call.
+            // `<S>::default()` on a type with its own `fn default` is
+            // `S::default()`.
             if let Some(qself) = &path_expr.qself
                 && let syn::Type::Path(tp) = &*qself.ty
             {
@@ -143,10 +138,8 @@ impl Compiler<'_> {
         self.compile_resolved_call(dst, c, path, coerce, argc)
     }
 
-    /// The type a `default()` call builds, when it is the `Default` trait's
-    /// and not a user `fn default`: `<T>::default()` names it in the
-    /// qualified self, `T::default()` in the path, and a bare
-    /// `Default::default()` takes it from the context that recorded a hint.
+    /// `<T>::default()` names it in the qualified self, `T::default()` in
+    /// the path, a bare `Default::default()` takes it from the context hint.
     fn default_call_ir(
         &mut self,
         c: &syn::ExprCall,
@@ -163,8 +156,7 @@ impl Compiler<'_> {
         if segs[..segs.len() - 1] == ["Default"] {
             return self.default_calls.remove(&std::ptr::from_ref(c));
         }
-        // A user `impl Default` or an inherent `fn default` wins over the
-        // derive, its body is the one real Rust runs.
+        // A user `impl Default` or inherent `fn default` wins over the derive.
         let owner = segs[segs.len() - 2].clone();
         let user_defined = self.ctx.impl_methods.iter().any(|(ty, name)| {
             name == "default" && (*ty == owner || super::super::resolver::bare(ty) == owner)
@@ -179,10 +171,9 @@ impl Compiler<'_> {
         self.default_ir_path_pub(&prefix)
     }
 
-    /// `Some(x)`, `Ok(x)`, the other builtin tuple variants, and the empty
-    /// container constructors build their value in place, the way a user
-    /// variant does, so a `Vec::new()` in a loop skips the path dispatch.
-    /// A `with_capacity` argument still runs, its value is only a hint.
+    /// Builtin variants and empty container constructors build in place, so
+    /// a `Vec::new()` in a loop skips the path dispatch. A `with_capacity`
+    /// argument still runs.
     fn compile_builtin_ctor(
         &mut self,
         dst: Reg,
@@ -226,8 +217,7 @@ impl Compiler<'_> {
         Ok(true)
     }
 
-    /// The path-resolved half of `compile_call`: a known function by id, a
-    /// constructor, an associated function, or an external bridge path.
+    /// The path resolved half of `compile_call`.
     fn compile_resolved_call(
         &mut self,
         dst: Reg,
@@ -237,8 +227,7 @@ impl Compiler<'_> {
         argc: u16,
     ) -> Result<()> {
         let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
-        // `Self::Variant(..)` and `Self::assoc(..)` inside an impl name the
-        // impl's own type.
+        // `Self::..` inside an impl names the impl's own type.
         let resolved = match (segs.first().map(String::as_str), self.ctx.impl_type) {
             (Some("Self"), Some(ty)) if segs.len() > 1 => {
                 Res::TypeMember(Arc::from(ty), segs[1..].to_vec())
@@ -246,8 +235,7 @@ impl Compiler<'_> {
             _ => self.resolve_path_res(&segs)?,
         };
         let path = match resolved {
-            // A known function, called directly by id. Turbofish type args are
-            // recorded so the callee can bind them to its generic parameters.
+            // Turbofish type args are recorded so the callee can bind them.
             Res::Fn(idx) => {
                 let targ = self.record_call_type_args(path);
                 let base = self.compile_args(c.args.iter())?;
@@ -262,9 +250,7 @@ impl Compiler<'_> {
                 self.emit_mut_arg_writebacks(c.args.iter(), base)?;
                 return Ok(());
             }
-            // A tuple struct constructor.
             Res::Struct(canon) => PathRef::user(vec![canon.to_string()], coerce),
-            // An associated function, UFCS method, or tuple enum variant.
             Res::TypeMember(canon, rest) => {
                 if let Some(variant) = self.enum_variant(&canon, &rest, |fields| {
                     matches!(fields, syn::Fields::Unnamed(fields) if fields.unnamed.len() == argc as usize)
@@ -283,7 +269,7 @@ impl Compiler<'_> {
                 segs.extend(rest);
                 PathRef::user(segs, coerce)
             }
-            // A tuple struct built through a type alias, `type P = Point; P(..)`.
+            // `type P = Point; P(..)`.
             Res::Alias(m, target) => {
                 let aliased = match &*target {
                     syn::Type::Path(p) => self.ctx.resolver.resolve_struct_key(m, &p.path),
@@ -297,7 +283,6 @@ impl Compiler<'_> {
             Res::Enum(_) | Res::Module | Res::Const(_) => {
                 bail!("cannot call `{}`", segs.join("::"))
             }
-            // Everything else, resolved by the VM through the bridge dispatch.
             Res::External(segs) => {
                 let path = self.external_path(segs, coerce);
                 match self.compile_external_call(dst, c, path, argc)? {
@@ -306,9 +291,8 @@ impl Compiler<'_> {
                 }
             }
         };
-        // Explicit `drop(x)` moves `x` out, so its register clears before
-        // the call and the callee sees the last holder, which is what lets
-        // a user `Drop` impl run at the call.
+        // `drop(x)` moves `x` out, so its register clears and the callee sees
+        // the last holder.
         let cleared = if path.id == PathId::Drop && c.args.len() == 1 {
             place::single_path_name(&c.args[0]).and_then(|n| {
                 let n = self.unalias(&n);
@@ -334,8 +318,7 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    /// The bridge paths the compiler lowers in place instead of emitting a
-    /// path call. Answers the path back when the call still needs the VM.
+    /// Answers the path back when the call still needs the VM.
     fn compile_external_call(
         &mut self,
         dst: Reg,
@@ -343,16 +326,14 @@ impl Compiler<'_> {
         path: PathRef,
         argc: u16,
     ) -> Result<Option<PathRef>> {
-        // Only `Box::new` is a compile time pass-through: a box is pure
-        // ownership, which the value model already gives every value. Rc,
-        // Arc, RefCell, Cell, and Mutex build real shared cells at runtime,
-        // their sharing is the point of the type.
+        // Only `Box::new` is a pass through, a box is pure ownership. `Rc`,
+        // `Arc`, `RefCell`, `Cell` and `Mutex` build real shared cells.
         if path.id == PathId::BoxNew && c.args.len() == 1 {
             self.compile_into(dst, &c.args[0])?;
             return Ok(None);
         }
-        // The mem place functions move whole values between places, which
-        // only the compiler can express.
+        // The mem place functions move values between places, which only the
+        // compiler can express.
         if matches!(
             path.id,
             PathId::MemSwap | PathId::MemTake | PathId::MemReplace
@@ -360,9 +341,8 @@ impl Compiler<'_> {
         {
             return Ok(None);
         }
-        // Numeric `T::from(x)` lowers to the same cast op as `x as T`. rustc
-        // has already proven the conversion lossless, so the widening cast
-        // computes the same value without the dynamic path dispatch.
+        // Numeric `T::from(x)` is the `x as T` cast op, `rustc` already proved
+        // it lossless.
         if let Some(ir) = numeric_from_cast(path.id, c.args.len()) {
             let src = self.compile_expr(&c.args[0])?;
             let f = self.cur();
@@ -377,10 +357,8 @@ impl Compiler<'_> {
         Ok(Some(path))
     }
 
-    /// The coercion target of a call: its own turbofish, a pending `let`
-    /// annotation attached to exactly this call, or the enclosing signature
-    /// when the function hands this parse back. See `Compiler::json_let` and
-    /// `Compiler::json_tails`.
+    /// Its own turbofish, a pending `let` annotation, or the enclosing
+    /// signature. See `Compiler::json_let` and `Compiler::json_tails`.
     fn call_coerce(&mut self, c: &syn::ExprCall, path: &syn::Path) -> Option<TypeIr> {
         let coerce = path
             .segments
@@ -400,7 +378,6 @@ impl Compiler<'_> {
         }
     }
 
-    /// A local or captured closure value called directly by its bare name.
     /// True when the call was emitted here.
     fn try_compile_closure_call(
         &mut self,
@@ -445,20 +422,11 @@ impl Compiler<'_> {
     pub(super) fn compile_method(&mut self, dst: Reg, m: &syn::ExprMethodCall) -> Result<()> {
         self.seed_bare_receiver_width(m);
         self.seed_bare_fallback_width(m);
-        // `v[a..b].copy_from_slice(src)` must write through to `v`. Indexing
-        // with a range builds a copied temporary, so the call is compiled
-        // against the base vec with the bounds as leading arguments instead.
-        // An open end becomes the max sentinel the bridge clamps to the len.
         if m.method == "copy_from_slice" {
             return self.compile_copy_from_slice(dst, m);
         }
-        // A zero-argument `take` empties its place: `Option::take` leaves
-        // None behind and `RefCell::take` leaves a default. The receiver
-        // compiles as a place below because `take` is in the mutating set,
-        // and the VM writes the emptied receiver back through it, so the
-        // type decides at runtime and `child.stdin.take()` drops the pipe.
-        // Fuse `x.get(k).copied().unwrap_or(d)` into one op. The chain builds
-        // and tears down an Option per call, which dominates counting loops.
+        // `x.get(k).copied().unwrap_or(d)` builds and tears down an Option
+        // per call, which dominates counting loops.
         if dst != DISCARD
             && m.method == "unwrap_or"
             && m.args.len() == 1
@@ -480,11 +448,8 @@ impl Compiler<'_> {
             });
             return Ok(());
         }
-        // An `unwrap_or_default` whose own result is unwrapped again must have
-        // produced an `Option`, so its default is `None`. That is a fact about
-        // the shape of the chain, not a guess about the type, and it is the
-        // only thing that can type the inner call of
-        // `x.unwrap_or_default().unwrap_or_default()`.
+        // An `unwrap_or_default` unwrapped again must have produced an
+        // `Option`, so its default is `None`.
         let outer_option_hint = self.option_result.take();
         if m.method == "unwrap_or_default"
             && let Expr::MethodCall(inner) = &*m.receiver
@@ -492,8 +457,8 @@ impl Compiler<'_> {
         {
             self.option_result = Some(std::ptr::from_ref(inner));
         }
-        // `v.into()` under a `let x: T` annotation is `T::from(v)`, the
-        // conversion the annotation picks. Without one the call is identity.
+        // `v.into()` under `let x: T` is `T::from(v)`, without one it is
+        // identity.
         if m.method == "into"
             && m.args.is_empty()
             && let Some((ptr, canon)) = &self.into_let
@@ -512,12 +477,9 @@ impl Compiler<'_> {
             });
             return Ok(());
         }
-        // A mutating method's receiver is a place: its storage splits from
-        // any value sharing first, and the receiver value stores back after,
-        // which lands the split buffer of a string mutation in its place.
         let method_text = m.method.to_string();
-        // `Sum<T> for T` types a `map` closure's body as `T`, so the literals
-        // in it adopt the reduction's width before the closure compiles.
+        // `Sum<T> for T` types a `map` closure's body as `T`, so its literals
+        // adopt the reduction's width.
         if matches!(method_text.as_str(), "sum" | "product")
             && let Some(target) = self.reduce_target(m)
         {
@@ -525,9 +487,8 @@ impl Compiler<'_> {
         }
         let mutating = (BuiltinId::resolve(&method_text).mutates()
             || self.ctx.mut_methods.contains(&method_text))
-            // `rotate_left` and `rotate_right` mutate a slice in place but
-            // return a value on an integer. Writing back over an integer
-            // receiver undid whatever the call's own result was assigned to.
+            // `rotate_left` mutates a slice but returns a value on an integer.
+            // Writing back over an integer receiver undid the assignment.
             && !(matches!(method_text.as_str(), "rotate_left" | "rotate_right")
                 && matches!(self.stated_ty(&m.receiver), Some(ScalarTy::Int(_))));
         let (recv, receiver_place) = if mutating {
@@ -538,10 +499,8 @@ impl Compiler<'_> {
         };
         let place = mutating && place::is_place_expr(&m.receiver);
         self.option_result = outer_option_hint;
-        // A `fold` closure's parameters have no annotation of their own: the
-        // accumulator is the init's type and the item is the sequence's
-        // element. Binding them lets a default built inside the body know
-        // what it is building.
+        // A `fold` closure's accumulator is the init's type and the item is the
+        // element, so a default built inside the body knows its type.
         let folded = self.bind_fold_params(m);
         let base = self.compile_args(m.args.iter())?;
         for (name, previous) in folded {
@@ -557,9 +516,8 @@ impl Compiler<'_> {
             None
         };
         let name = self.add_name_full(method, scalar, default, place);
-        // A multiline chain compiles its receiver and args first, so restamp
-        // with the method's own line before the op lands, the line rustc
-        // would name for this call.
+        // Restamp with the method's own line, the one `rustc` names for a
+        // multiline chain.
         self.set_line(m.method.span());
         self.emit(Op::Method {
             dst,
@@ -571,17 +529,15 @@ impl Compiler<'_> {
         if let Some(p) = &receiver_place {
             self.emit_place_writeback(p);
         }
-        // Methods that fill a `&mut` argument, like read_line, write the new
-        // value into the arg window. The window slot is only a copy of the
-        // variable, so move the result back into the variable register.
+        // `read_line` and friends write into the arg window copy, so move the
+        // result back into the variable.
         self.emit_mut_arg_writebacks(m.args.iter(), base)?;
         Ok(())
     }
 
-    /// `v[a..b].copy_from_slice(src)` must write through to `v`. Indexing
-    /// with a range builds a copied temporary, so the call is compiled
-    /// against the base vec with the bounds as leading arguments instead.
-    /// An open end becomes the max sentinel the bridge clamps to the len.
+    /// `v[a..b].copy_from_slice(src)` must write through to `v`, and a range
+    /// index builds a copy. So the call compiles against the base vec with
+    /// the bounds as leading arguments.
     fn compile_copy_from_slice(&mut self, dst: Reg, m: &syn::ExprMethodCall) -> Result<()> {
         let Expr::Index(ix) = &*m.receiver else {
             bail!("copy_from_slice is only supported on a `v[a..b]` receiver");
@@ -631,13 +587,9 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    /// The lowered method name and its scalar result type, where knowable.
-    /// `collect` is type driven in real Rust; the interpreter has no types, so
-    /// the three places the target is knowable rename the call to
-    /// `collect_string`: a turbofish asking for a String, a pending
-    /// `let s: String` annotation attached to exactly this call, and a
-    /// `-> String` signature on the function whose returned value this call
-    /// produces. See `Compiler::string_let` and `Compiler::string_tails`.
+    /// `collect` into a String renames to `collect_string` from a turbofish,
+    /// a pending `let s: String`, or a `-> String` signature. See
+    /// `Compiler::string_let` and `Compiler::string_tails`.
     fn method_name_and_scalar(&mut self, m: &syn::ExprMethodCall) -> (String, Option<ScalarTy>) {
         let mut method = m.method.to_string();
         if method == "collect" {
@@ -648,43 +600,34 @@ impl Compiler<'_> {
             };
             let from_tail = self.collect_tails.get(&std::ptr::from_ref(m)).copied();
             if let Some(target) = from_turbofish.or(from_let).or(from_tail) {
-                // Cleared only when this call consumed the pending `let`
-                // hint. A turbofish collect nested inside the annotated
-                // chain, say in one branch of its `if`, resolves through
-                // its own turbofish, and clearing here made the outer
-                // collect fall back to a vec of pairs.
+                // Cleared only when this call consumed the hint. A nested
+                // turbofish collect once cleared it and the outer collect fell
+                // back to a vec of pairs.
                 if from_let.is_some() {
                     self.collect_let = None;
                 }
                 method = target.method_name().to_string();
             }
         }
-        // An explicit turbofish is the only place a method's result type is
-        // written down, so it rides on the name for the methods that need it.
+        // The turbofish rides on the name for the methods that need it.
         let mut scalar = turbofish_scalar(m.turbofish.as_ref());
-        // `unwrap_or_default` carries no turbofish of its own, its type is the
-        // payload of the Option it is called on. Wherever the source states
-        // that payload, as `None::<u64>` or `then_some(1u8)` do, the receiver
-        // is where it appears, and without it the default fell back to an
-        // empty string whatever the real type was.
+        // `unwrap_or_default` takes its type from the receiver's payload, as
+        // `None::<u64>` or `then_some(1u8)` state it.
         if scalar.is_none() && m.method == "unwrap_or_default" {
             let env = TyEnv::new(&self.typed_locals, self.ctx.fn_returns);
             scalar = option_payload(&m.receiver, &env);
         }
-        // A script method on a builtin receiver dispatches on the value's
-        // own shape, which an empty vec does not have, so the receiver's
-        // written type rides along for that case.
+        // An empty vec has no shape to dispatch a script method on, so the
+        // written type rides along.
         if scalar.is_none() && self.ctx.method_atoms.contains_key(&method) {
             scalar = self.stated_ty(&m.receiver);
         }
-        // `concat` of nothing cannot tell nested vecs from strings, so the
-        // receiver's written element type rides along for that case.
+        // `concat` of nothing cannot tell nested vecs from strings.
         if scalar.is_none() && method == "concat" {
             let env = TyEnv::new(&self.typed_locals, self.ctx.fn_returns);
             scalar = element_of(&m.receiver, &env);
         }
-        // A pending `let x: T = ...sum()` annotation names the width of the
-        // outermost reduction in the chain.
+        // `let x: T = ...sum()` names the width of the outermost reduction.
         if scalar.is_none()
             && (method == "sum" || method == "product")
             && let Some((ptr, ty)) = &self.reduce_let
@@ -693,8 +636,7 @@ impl Compiler<'_> {
             scalar = Some(ty.clone());
             self.reduce_let = None;
         }
-        // A pending `let x: T = ...unwrap_or_default()` annotation names the
-        // payload of the outermost call in the chain.
+        // `let x: T = ...unwrap_or_default()` names the outermost payload.
         if scalar.is_none()
             && let Some((ptr, ty)) = &self.default_let
             && std::ptr::eq(*ptr, m)
@@ -702,16 +644,14 @@ impl Compiler<'_> {
             scalar = Some(ty.clone());
             self.default_let = None;
         }
-        // A `-> T` signature names the type of a bare reduction or default
-        // the function hands back.
+        // A `-> T` signature names a bare reduction or default handed back.
         if scalar.is_none()
             && matches!(method.as_str(), "sum" | "product" | "unwrap_or_default")
             && let Some(ty) = self.return_tails.get(&std::ptr::from_ref(m))
         {
             scalar = ScalarTy::lower(ty);
         }
-        // Failing all of that, this call's own result is unwrapped again, so
-        // whatever it holds, it produced an Option and defaults to None.
+        // Failing all that, a result unwrapped again is an Option.
         if matches!(self.option_result, Some(ptr) if std::ptr::eq(ptr, m)) {
             self.option_result = None;
             scalar = scalar.or(Some(ScalarTy::Opt(Box::new(ScalarTy::Other))));
@@ -719,9 +659,7 @@ impl Compiler<'_> {
         (method, scalar)
     }
 
-    /// The numeric type a `sum` or `product` call is known to answer in,
-    /// from its turbofish, a pending `let` annotation, or the signature of
-    /// the function handing it back, read without consuming the hint.
+    /// Read without consuming the hint.
     fn reduce_target(&self, m: &syn::ExprMethodCall) -> Option<NumericTy> {
         let scalar = turbofish_scalar(m.turbofish.as_ref())
             .or_else(|| match &self.reduce_let {
@@ -736,12 +674,8 @@ impl Compiler<'_> {
         numeric_target(&scalar)
     }
 
-    /// Walk back through the pass-through stages of a reduction's chain to
-    /// the `map` closure feeding it, and type that closure's tails.
-    /// A receiver built from nothing but unsuffixed integer literals is
-    /// `i32`, the type Rust gives a literal that nothing else constrains. The
-    /// receiver's width picks both the method and the `From` impl an `into`
-    /// goes through, so it is settled before anything else runs.
+    /// A receiver of only unsuffixed literals is `i32`. Its width picks the
+    /// method and the `From` impl, so it is settled first.
     fn seed_bare_receiver_width(&mut self, m: &syn::ExprMethodCall) {
         if self
             .numeric_hints
@@ -756,10 +690,8 @@ impl Compiler<'_> {
         );
     }
 
-    /// `opt.unwrap_or(v)` gives the fallback the payload's own type, so one
-    /// built from nothing but unsuffixed literals adopts that width instead
-    /// of widening to i64. Without a payload to read it is `i32`, the type
-    /// Rust gives an unconstrained literal.
+    /// `unwrap_or(v)` gives the fallback the payload's type. Without one it
+    /// is `i32`.
     fn seed_bare_fallback_width(&mut self, m: &syn::ExprMethodCall) {
         if m.method != "unwrap_or" {
             return;
@@ -781,9 +713,7 @@ impl Compiler<'_> {
         self.numeric_hints.insert(std::ptr::from_ref(arg), target);
     }
 
-    /// Bind a `fold` closure's two parameters to the types the call gives
-    /// them, returning what each name held before so the caller can put it
-    /// back. Anything the walk cannot type is simply left alone.
+    /// Returns what each name held before so the caller can put it back.
     fn bind_fold_params(&mut self, m: &syn::ExprMethodCall) -> Vec<(String, Option<syn::Type>)> {
         if m.method != "fold" || m.args.len() != 2 {
             return Vec::new();
@@ -804,8 +734,7 @@ impl Compiler<'_> {
             return Vec::new();
         }
         // The body produces the next accumulator, so it carries the init's
-        // width. Without it a bare literal there widens to i64 and the whole
-        // fold answers at the wrong width.
+        // width.
         if let Some(target) = m
             .args
             .first()
@@ -861,9 +790,7 @@ impl Compiler<'_> {
         }
     }
 
-    /// The written payload type behind `recv.unwrap_or_default()`, lowered
-    /// to a default: the `let` annotation attached to this call, or the
-    /// type the receiver chain states.
+    /// From the `let` annotation or the receiver chain.
     fn default_for_unwrap(&mut self, m: &syn::ExprMethodCall) -> Option<DefaultIr> {
         if let Some((ptr, ty)) = &self.default_let_ty
             && std::ptr::eq(*ptr, m)
@@ -882,20 +809,15 @@ impl Compiler<'_> {
         self.default_ir(&payload)
     }
 
-    /// The type an expression states about itself, read against the current
-    /// typed locals. Lets `compile_let` record an unannotated
-    /// `let sorted = vec!['a', 'b']` so a later default built from `sorted`'s
-    /// elements has the right type.
+    /// Lets `compile_let` record an unannotated `let sorted = vec!['a', 'b']`.
     pub(super) fn stated_ty(&self, expr: &Expr) -> Option<ScalarTy> {
         let env = TyEnv::new(&self.typed_locals, self.ctx.fn_returns);
         written_ty(expr, &env)
     }
 
-    /// Emit a writeback for every `&mut variable` argument of a finished call.
-    /// The callee worked on the arg window copy, and the VM hands the final
-    /// values back into that window on return, so a move from the window slot
-    /// lands the mutation in the caller's variable. Only calls whose window
-    /// survives the call may use this, a `CallPath` consumes its args instead.
+    /// The callee worked on the arg window copy and the VM hands it back on
+    /// return. Only for calls whose window survives, a `CallPath` consumes
+    /// its args.
     fn emit_mut_arg_writebacks<'e>(
         &mut self,
         args: impl Iterator<Item = &'e Expr>,
@@ -913,10 +835,8 @@ impl Compiler<'_> {
                 self.emit_name_store(location, base + idx16(i), &name)?;
                 continue;
             }
-            // A register cleared by the borrow take gets its handle back
-            // from the callee's returned parameter window. The window slot
-            // clears after the move, a stale copy there would inflate
-            // `Rc::strong_count` on the next call.
+            // The window slot clears after the move, a stale copy would
+            // inflate `Rc::strong_count`.
             if let Some(reg) = self.borrowed_local(arg) {
                 self.emit(Op::Move {
                     dst: reg,
@@ -930,10 +850,8 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    /// The plain immutable local a call argument borrows: `&name`,
-    /// `&mut name`, or a plain path forwarding one of this function's own
-    /// borrow parameters. A mutable local lives in a cell and a `&mut`
-    /// alias points elsewhere, so both stay out.
+    /// A mutable local lives in a cell and a `&mut` alias points elsewhere,
+    /// so both stay out.
     fn borrowed_local(&mut self, arg: &Expr) -> Option<Reg> {
         let (name, forwarded) = match arg {
             Expr::Reference(r) => (place::single_path_name(&r.expr)?, false),
@@ -951,10 +869,8 @@ impl Compiler<'_> {
         Some(reg)
     }
 
-    /// Clear the registers a call borrows, for the call's duration. The
-    /// callee then holds the only live handle, so `Rc::strong_count` reads
-    /// the same at any call depth, and the writebacks after the call
-    /// restore every cleared register from the returned parameter window.
+    /// The callee then holds the only live handle, so `Rc::strong_count`
+    /// reads the same at any depth. The writebacks restore the registers.
     fn emit_borrow_takes<'e>(&mut self, args: impl Iterator<Item = &'e Expr>) {
         let regs: Vec<Reg> = args.filter_map(|arg| self.borrowed_local(arg)).collect();
         for reg in regs {
@@ -962,8 +878,7 @@ impl Compiler<'_> {
         }
     }
 
-    /// Compile an `async { .. }` block from `tokio::spawn` into a zero argument
-    /// child chunk and emit a Spawn op. Captures work like a closure's.
+    /// Captures work like a closure's.
     fn compile_spawn(&mut self, dst: Reg, block: &syn::Block) -> Result<()> {
         self.frames.push(FnState::new("<task>".to_string()));
         self.cur().num_params = 0;
@@ -991,17 +906,16 @@ impl Compiler<'_> {
         self.cur().num_params = params.len();
         for p in &params {
             let reg = self.alloc();
-            // An annotated param is a type the program wrote down, recorded
-            // like an annotated let, so a default built from the param in the
-            // closure body reads the right type.
+            // Recorded like an annotated let, so a default built from the
+            // param knows its type.
             if let Pat::Type(t) = p
                 && let Pat::Ident(id) = &*t.pat
                 && let Some(declared) = annotation_scalar(&t.ty)
             {
                 self.typed_locals.insert(id.ident.to_string(), declared);
             }
-            // A reference param shares the caller's storage on purpose, so
-            // mutable access through it never splits, same rule as fn params.
+            // A reference param shares the caller's storage, so it never
+            // splits.
             if let Pat::Type(t) = p
                 && matches!(&*t.ty, syn::Type::Reference(_))
             {
@@ -1011,8 +925,7 @@ impl Compiler<'_> {
                 Pat::Ident(id) if id.subpat.is_none() => self.define(&id.ident.to_string(), reg),
                 _ => self.bind_pattern_irrefutable(p, reg)?,
             }
-            // A numeric param annotation retags the incoming value, the same
-            // rule as a fn param, so the body computes in the stated width.
+            // A numeric annotation retags the value like a fn param.
             if let Pat::Type(t) = p
                 && numeric_annotation(&t.ty).is_some()
             {
@@ -1059,10 +972,8 @@ impl Compiler<'_> {
 
     // -- assignment --------------------------------------------------------
 
-    /// The register of a `&mut` parameter named as a bare deref target,
-    /// `*seq` for a `seq: &mut usize` parameter of the current function.
-    /// Only a plain local parameter qualifies. A cell-promoted or captured
-    /// name keeps the strict reference-only op.
+    /// `*seq` for a `seq: &mut usize` parameter. A cell promoted or captured
+    /// name keeps the strict op.
     fn deref_param_reg(&self, expr: &Expr) -> Option<Reg> {
         let Expr::Path(p) = expr else { return None };
         if p.qself.is_some() || p.path.segments.len() != 1 {
@@ -1077,10 +988,8 @@ impl Compiler<'_> {
         ((reg as usize) < frame.num_params).then_some(reg)
     }
 
-    /// The value stored by `name = expr`. A local declared with a numeric
-    /// type types a bare literal here, the way an annotated `let` does, so
-    /// the stored value never exists at the wrong width. Without this a
-    /// reassigned `i32` keeps a 64 bit pattern and `{:b}` prints 64 digits.
+    /// A numeric local types a bare literal here like an annotated `let`, or
+    /// a reassigned `i32` prints 64 digits under `{:b}`.
     fn compile_stored_value(&mut self, name: &str, value: &Expr) -> Result<Reg> {
         let Some(target) = self
             .typed_local_types
@@ -1106,8 +1015,7 @@ impl Compiler<'_> {
             }
             Expr::Index(idx) => {
                 let val = self.compile_expr(value)?;
-                // The base splits from value sharing before the write, so
-                // the new element cannot leak into a clone of the container.
+                // The base splits from sharing before the write.
                 let base = self.compile_place_base(&idx.expr)?;
                 let key = self.compile_expr(&idx.index)?;
                 self.emit(Op::SetIndex { base, key, val });
@@ -1119,9 +1027,8 @@ impl Compiler<'_> {
                 self.emit(Op::SetField { base, member, val });
             }
             Expr::Unary(u) if matches!(u.op, UnOp::Deref(_)) => {
-                // `*r = v` where `r` is a `&mut variable` alias writes the
-                // variable itself. The alias may live in this frame or, for
-                // a closure that captured it, in an enclosing function's.
+                // `*r = v` on a `&mut variable` alias writes the variable, which
+                // may live in an enclosing frame.
                 if let Some(name) = place::single_path_name(&u.expr) {
                     let target = match self.unalias(&name) {
                         same if same == name => self.enclosing_alias_target(&name),
@@ -1148,15 +1055,14 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    /// Rust evaluates a compound assignment's right operand before the place,
-    /// so a panic in the value fires before a panic in the place expression.
+    /// The right operand evaluates before the place, so its panic fires
+    /// first.
     pub(super) fn compile_compound_assign(
         &mut self,
         target: &Expr,
         op: BinKind,
         rhs: &Expr,
     ) -> Result<()> {
-        // `a op= b` becomes `a = a op b`.
         match target {
             Expr::Path(p) if p.path.segments.len() == 1 => {
                 let name = p.path.segments[0].ident.to_string();
@@ -1238,19 +1144,17 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    /// `*target op= rhs`, the deref arm of `compile_compound_assign`.
+    /// The deref arm of `compile_compound_assign`.
     fn compile_compound_deref_assign(
         &mut self,
         u: &syn::ExprUnary,
         op: BinKind,
         rhs: &Expr,
     ) -> Result<()> {
-        // `*r op= rhs` where `r` is a `&mut variable` alias reads and writes
-        // the variable itself.
+        // A `&mut variable` alias reads and writes the variable itself.
         if let Some(name) = place::single_path_name(&u.expr) {
             let target = match self.unalias(&name) {
-                // A closure dereferencing an alias it captured finds the
-                // alias in an enclosing function's frame.
+                // A captured alias lives in an enclosing frame.
                 same if same == name => self.enclosing_alias_target(&name),
                 target => Some(target),
             };
@@ -1273,10 +1177,8 @@ impl Compiler<'_> {
         let param = self.deref_param_reg(&u.expr);
         let target = self.compile_expr(&u.expr)?;
         let Some(target) = param else {
-            // Not a `&mut` parameter: the fused op holds the referent's
-            // lock across a scalar read-modify-write, so concurrent
-            // compound assignments through a shared cell cannot lose
-            // updates.
+            // The fused op holds the lock across the read-modify-write, so
+            // concurrent tasks cannot lose updates.
             self.emit(Op::DerefBinAssign { target, val: b, op });
             return Ok(());
         };
@@ -1337,9 +1239,8 @@ impl Compiler<'_> {
     }
 
     pub(super) fn compile_struct_literal(&mut self, dst: Reg, s: &syn::ExprStruct) -> Result<()> {
-        // A user struct resolves to its canonical name, which keys shapes,
-        // methods, and coercions. Anything else, an enum struct variant for
-        // example, keeps the bare last segment.
+        // A user struct resolves to its canonical name, anything else keeps
+        // the last segment.
         let self_type = (s.path.segments.len() == 1 && s.path.segments[0].ident == "Self")
             .then_some(self.ctx.impl_type)
             .flatten();
@@ -1360,7 +1261,6 @@ impl Compiler<'_> {
                 .unwrap_or_default();
             (bare, None)
         };
-        // Written fields keyed by name.
         let mut written: Vec<(String, &Expr)> = Vec::new();
         for f in &s.fields {
             let key = match &f.member {
@@ -1369,16 +1269,12 @@ impl Compiler<'_> {
             };
             written.push((key, &f.expr));
         }
-        // Field order follows the declaration when the struct is known.
-        // Written fields in declaration order, then any extras. A trailing
-        // `..rest` fills whatever was not written.
-        // With a `..rest` the shape lists every declared field, so the value
-        // keeps declaration order whichever fields the literal wrote. Without
-        // one, only written fields, since the literal must have written all.
+        // With a `..rest` the shape lists every declared field, without one
+        // only the written ones, since the literal must have written all.
         let has_rest = s.rest.is_some();
         let (order, renames) = literal_field_order(def.as_deref(), &written, has_rest);
-        // Reserve a packed window, then fill it, so field temporaries do not
-        // break the packing.
+        // Reserve the window first so field temporaries do not break the
+        // packing.
         let slots = order.len() + usize::from(has_rest);
         let base = self.cur().reg_top;
         for _ in 0..slots {
@@ -1430,7 +1326,6 @@ impl Compiler<'_> {
 
     // -- patterns ----------------------------------------------------------
 
-    /// Register a pattern and the slot each bound name uses.
     pub(super) fn pattern_info(&mut self, pat: &Pat) -> Result<u16> {
         let mut names = Vec::new();
         collect_pattern_names(pat, &mut names);
@@ -1449,9 +1344,8 @@ impl Compiler<'_> {
         Ok(u16::try_from(f.pats.len() - 1)?)
     }
 
-    /// The variant a pattern path names, through the user enums first and
-    /// the builtin tables second. A path nothing resolves keeps only its
-    /// last segment, and the runtime test falls back to the name.
+    /// User enums first, builtin tables second. An unresolved path keeps its
+    /// last segment and the runtime test falls back to the name.
     fn variant_tag(&self, path: &syn::Path) -> PTag {
         let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
         self.variant_tag_of(&segs)
@@ -1537,7 +1431,6 @@ impl Compiler<'_> {
         }
     }
 
-    /// Bind an irrefutable pattern whose value already sits in `reg`.
     pub(super) fn bind_pattern_irrefutable(&mut self, pat: &Pat, reg: Reg) -> Result<()> {
         match pat {
             Pat::Ident(id) if id.subpat.is_none() => {
@@ -1549,8 +1442,6 @@ impl Compiler<'_> {
             Pat::Paren(p) => self.bind_pattern_irrefutable(&p.pat, reg),
             Pat::Reference(r) => self.bind_pattern_irrefutable(&r.pat, reg),
             _ => {
-                // Tuple or struct destructuring, use a test-and-bind that always
-                // matches for these irrefutable shapes.
                 let matched = self.alloc();
                 let pidx = self.pattern_info(pat)?;
                 self.emit(Op::TestBind {
@@ -1566,8 +1457,7 @@ impl Compiler<'_> {
     // -- macros ------------------------------------------------------------
 }
 
-/// The cast target of a numeric `T::from(x)` call, when the whole call is
-/// exactly that shape.
+/// The cast target of a numeric `T::from(x)` call.
 fn numeric_from_cast(id: PathId, argc: usize) -> Option<CastIr> {
     if argc != 1 {
         return None;
@@ -1591,11 +1481,9 @@ fn numeric_from_cast(id: PathId, argc: usize) -> Option<CastIr> {
     }
 }
 
-// A bare identifier pattern that names a unit variant, not a new binding. Real Rust tells the two
-// apart by name resolution, which we do not have, so we lean on the naming rule these scripts
-// follow. Bindings are snake_case and variants are UpperCamel. So an uppercase-initial ident with no
-// ref, mut, or subpattern is a unit-variant pattern like None, not a binding. Without this a bare
-// None arm lowers to an always-true catch-all and matches a Some value.
+// Real Rust tells a unit variant from a binding by name resolution, which we
+// do not have. So an uppercase ident with no `ref`, `mut` or subpattern is a
+// variant like `None`. Without this a bare `None` arm matched a `Some`.
 pub(super) fn is_unit_variant_ident(id: &syn::PatIdent) -> bool {
     id.by_ref.is_none()
         && id.mutability.is_none()
@@ -1609,8 +1497,7 @@ pub(super) fn is_unit_variant_ident(id: &syn::PatIdent) -> bool {
 }
 
 fn lower_range(range: &syn::PatRange) -> PPat {
-    // Outer None means a present endpoint that is not a supported literal,
-    // inner None means that side of the range is unbounded.
+    // Outer None is an unsupported literal, inner None is unbounded.
     let endpoint = |e: &Option<Box<Expr>>| match e {
         Some(e) => endpoint_lit(e).map(Some),
         None => Some(None),
@@ -1625,7 +1512,7 @@ fn lower_range(range: &syn::PatRange) -> PPat {
     }
 }
 
-/// A literal range endpoint, including a negated number, seen through parens.
+/// Including a negated number, seen through parens.
 fn endpoint_lit(e: &Expr) -> Option<PLit> {
     match e {
         Expr::Lit(l) => match &l.lit {
@@ -1651,9 +1538,7 @@ fn endpoint_lit(e: &Expr) -> Option<PLit> {
     }
 }
 
-/// The `MIN` or `MAX` associated const of an integer type, as the i64 the
-/// interpreter stores every integer in. Bounds outside i64, the u64 and u128
-/// maxima, clamp to i64's range, which acts as unbounded for stored values.
+/// Bounds outside i64 clamp to its range, which acts as unbounded.
 fn int_type_bound(ty: &str, which: &str) -> Option<i128> {
     let width = IntWidth::parse(ty)?;
     match which {
@@ -1679,15 +1564,12 @@ fn lower_literal(literal: &Lit) -> PPat {
     }
 }
 
-/// Whether a call path names tokio's `spawn`, either `tokio::spawn` or
-/// `tokio::task::spawn`.
+/// `tokio::spawn` or `tokio::task::spawn`.
 fn is_tokio_spawn(path: &syn::Path) -> bool {
     let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
     segs.last().map(String::as_str) == Some("spawn") && segs.iter().any(|s| s == "tokio")
 }
 
-/// The collect target a turbofish asks for, as in `collect::<String>()` or
-/// `collect::<HashMap<K, V>>()`.
 fn turbofish_collect_target(tf: &syn::AngleBracketedGenericArguments) -> Option<CollectTarget> {
     tf.args.iter().find_map(|arg| match arg {
         syn::GenericArgument::Type(ty) => CollectTarget::of_type(ty),
@@ -1695,8 +1577,7 @@ fn turbofish_collect_target(tf: &syn::AngleBracketedGenericArguments) -> Option<
     })
 }
 
-/// The empty container a constructor path builds, lowered to one op so a
-/// `Vec::new()` in a loop does not go through the path dispatch.
+/// One op, so a `Vec::new()` in a loop skips the path dispatch.
 enum EmptyKind {
     Vec,
     Str,
@@ -1715,8 +1596,7 @@ fn empty_container(id: PathId) -> Option<EmptyKind> {
 }
 
 impl Compiler<'_> {
-    /// `field: Default::default()` takes the field's written type from the
-    /// struct definition.
+    /// `field: Default::default()` takes the type from the struct definition.
     fn field_default_hint(&mut self, e: &Expr, def: Option<&syn::ItemStruct>, fname: &str) {
         if let Some(call) = bare_default_call(e)
             && let Some(field_ty) = def.and_then(|def| {
@@ -1731,7 +1611,6 @@ impl Compiler<'_> {
         }
     }
 
-    /// `..Default::default()` completes the struct itself.
     fn rest_default_hint(&mut self, rest: &Expr, self_type: Option<&str>, path: &syn::Path) {
         if let Some(call) = bare_default_call(rest)
             && let Some(canon) = self_type
@@ -1744,9 +1623,8 @@ impl Compiler<'_> {
     }
 }
 
-/// Field order of a struct literal: the declaration order when the struct
-/// is known, written fields first otherwise, with the serde rename of each
-/// ordered field. With a `..rest` every declared field is listed.
+/// Declaration order when the struct is known, with the serde rename of
+/// each field. With a `..rest` every declared field is listed.
 fn literal_field_order(
     def: Option<&syn::ItemStruct>,
     written: &[(String, &Expr)],
@@ -1765,8 +1643,7 @@ fn literal_field_order(
                     ordered.push(k.clone());
                 }
             }
-            // One rename slot per ordered field, read from the struct def so
-            // a serialized literal uses the same json keys as deserialize.
+            // So a serialized literal uses the same json keys as deserialize.
             let renames = ordered
                 .iter()
                 .map(|k| {
@@ -1783,8 +1660,7 @@ fn literal_field_order(
     }
 }
 
-/// The call behind a bare `Default::default()` expression, parentheses
-/// stripped.
+/// Parentheses stripped.
 pub(super) fn bare_default_call(e: &Expr) -> Option<&syn::ExprCall> {
     match e {
         Expr::Paren(p) => bare_default_call(&p.expr),

@@ -1,9 +1,7 @@
 #!/usr/bin/env rust
 
-//! f32 methods compute in real f32 and their results stay f32, so `{:?}`
-//! prints the f32 shortest form, `3.4028235e38` for `f32::MAX`, never the
-//! f64 image `3.4028234663852886e38`. NaN handling in `min` and `max` and
-//! the rounding family match the compiled binary bit for bit.
+//! f32 methods stay f32, so `{:?}` prints `3.4028235e38` for `f32::MAX` and
+//! not the f64 image.
 
 fn main() {
     let largest: f32 = f32::MAX;
@@ -36,7 +34,7 @@ fn main() {
     println!("is finite:  {:?}", f32::INFINITY.is_finite());
     println!("infinite:   {:?}", f32::NEG_INFINITY.is_infinite());
 
-    // Chained results stay f32 too.
+    // Chained results stay f32.
     let tiny: f32 = f32::MIN_POSITIVE;
     println!("tiny:       {tiny:?}");
     println!("chained:    {:?}", tiny.max(0.1f32).sqrt().min(largest));

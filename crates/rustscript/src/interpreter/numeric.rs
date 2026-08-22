@@ -1,12 +1,6 @@
-//! Width-aware integer semantics. Values carry their
-//! real Rust integer width at runtime, so arithmetic panics exactly where
-//! debug Rust panics, casts truncate and saturate the same way, and u64 and
-//! usize keep their full range.
-//!
-//! Storage convention: a width-tagged value lives in one i64. Signed widths
-//! and unsigned widths up to u32 store the true value. U64 and `USize` store
-//! the raw bits, reinterpreted through `u64` on decode. `I64` never appears
-//! in a tag, a plain i64 stays the untagged integer value.
+//! Width aware integer semantics. A tagged value lives in one i64. Widths up
+//! to u32 store the true value, `U64` and `USize` store the raw bits. `I64`
+//! never appears in a tag.
 
 use num_traits::AsPrimitive;
 use std::ops::{Add, Div, Mul, Rem, Sub};
@@ -15,9 +9,7 @@ use anyhow::{Result, anyhow, bail};
 
 use super::bytecode::{BinKind, overflow_message};
 
-/// Every integer width real Rust has on a 64-bit target. `I64` doubles as
-/// the width of an untagged value, which is also what a bare literal carries
-/// until an operation with a tagged operand adopts its width.
+/// `I64` doubles as the width of an untagged value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IntWidth {
     U8,
@@ -25,13 +17,13 @@ pub enum IntWidth {
     U32,
     U64,
     USize,
-    /// Stored in a `Value::Big`, never in the one-i64 `IntW` form.
+    /// Stored in a `Value::Big`.
     U128,
     I8,
     I16,
     I32,
     I64,
-    /// Stored in a `Value::Big`, never in the one-i64 `IntW` form.
+    /// Stored in a `Value::Big`.
     I128,
 }
 
@@ -48,14 +40,13 @@ impl IntWidth {
             "i16" => Self::I16,
             "i32" => Self::I32,
             "i128" => Self::I128,
-            // The interpreter runs on 64-bit targets only, so isize is i64.
+            // 64 bit targets only, so isize is i64.
             "i64" | "isize" => Self::I64,
             _ => return None,
         })
     }
 
-    /// The type name this width is written as in a script. `I64` also covers
-    /// isize and `USize` also covers u64, so a name here is the canonical one.
+    /// `I64` also covers isize and `USize` also covers u64.
     pub fn name(self) -> &'static str {
         match self {
             Self::U8 => "u8",
@@ -79,8 +70,6 @@ impl IntWidth {
         )
     }
 
-    /// Whether values of this width live in `Value::Big` rather than the
-    /// one-i64 `IntW` storage.
     pub fn is_big(self) -> bool {
         matches!(self, Self::I128 | Self::U128)
     }
@@ -95,8 +84,7 @@ impl IntWidth {
         }
     }
 
-    /// The smallest value, for the widths whose bounds fit an i128. `U128`
-    /// never asks, its arithmetic runs natively in u128.
+    /// `U128` never asks, its arithmetic runs natively.
     pub fn min(self) -> i128 {
         match self {
             Self::I128 => i128::MIN,
@@ -105,8 +93,7 @@ impl IntWidth {
         }
     }
 
-    /// The largest value. `U128`'s does not fit an i128, so its arithmetic
-    /// runs natively in u128 and never asks.
+    /// `U128` never asks, its bound does not fit an i128.
     pub fn max(self) -> i128 {
         match self {
             Self::I128 => i128::MAX,
@@ -116,7 +103,6 @@ impl IntWidth {
         }
     }
 
-    /// Decode a stored i64 into the value it represents.
     pub fn decode(self, stored: i64) -> i128 {
         match self {
             Self::U64 | Self::USize => i128::from(stored.cast_unsigned()),
@@ -125,7 +111,6 @@ impl IntWidth {
         }
     }
 
-    /// Encode an in-range value into its i64 storage form.
     pub fn encode(self, value: i128) -> i64 {
         match self {
             Self::U64 | Self::USize => AsPrimitive::<u64>::as_(value).cast_signed(),
@@ -135,9 +120,7 @@ impl IntWidth {
     }
 }
 
-/// `+ - * / % | & ^ << >>` and comparisons at 128 bits, natively checked in
-/// the real width so overflow panics land exactly where debug Rust panics.
-/// `U128` stores its bits reinterpreted in the i128, decoded here.
+/// 128 bit ops, natively checked. `U128` bits are decoded here.
 pub fn big_arith(op: BinKind, width: IntWidth, a: i128, b: i128) -> Result<i128> {
     if width == IntWidth::U128 {
         let (x, y) = (a.cast_unsigned(), b.cast_unsigned());
@@ -201,10 +184,8 @@ pub fn big_arith(op: BinKind, width: IntWidth, a: i128, b: i128) -> Result<i128>
     })
 }
 
-/// The width two operands of one binary op compute in. Equal widths agree,
-/// an untagged i64 side is a bare literal adopting the other side's width,
-/// and u64 with usize share one 64-bit unsigned semantic. Anything else
-/// cannot appear in a program that passed the real type checker.
+/// An untagged side is a bare literal adopting the other width, u64 and
+/// usize share one semantic. Anything else cannot pass the type checker.
 pub fn unify(a: IntWidth, b: IntWidth) -> Result<IntWidth> {
     if a == b || b == IntWidth::I64 {
         return Ok(a);
@@ -219,7 +200,6 @@ pub fn unify(a: IntWidth, b: IntWidth) -> Result<IntWidth> {
     bail!("cannot mix integer widths in one operation")
 }
 
-/// `+ - * / %` in a real width, panicking exactly like debug Rust.
 pub fn int_arith(op: BinKind, width: IntWidth, a: i128, b: i128) -> Result<i128> {
     let result = match op {
         BinKind::Add => a + b,
@@ -235,7 +215,7 @@ pub fn int_arith(op: BinKind, width: IntWidth, a: i128, b: i128) -> Result<i128>
             if b == 0 {
                 bail!("attempt to calculate the remainder with a divisor of zero");
             }
-            // MIN % -1 is 0 in i128 but overflows in the real width.
+            // `MIN % -1` is 0 in i128 but overflows in the real width.
             if a == width.min() && b == -1 {
                 bail!("{}", overflow_message(op));
             }
@@ -249,8 +229,7 @@ pub fn int_arith(op: BinKind, width: IntWidth, a: i128, b: i128) -> Result<i128>
     Ok(result)
 }
 
-/// `+ - * / %` on u64 values, panicking exactly like debug Rust. The native
-/// fast path of the tagged 64-bit unsigned widths.
+/// The native fast path of the 64 bit unsigned widths.
 #[inline]
 pub fn u64_arith(op: BinKind, a: u64, b: u64) -> Result<u64> {
     Ok(match op {
@@ -279,9 +258,8 @@ pub fn u64_arith(op: BinKind, a: u64, b: u64) -> Result<u64> {
     })
 }
 
-/// `+ - * / %` on untagged i64 values, panicking exactly like debug Rust.
-/// The hot fast path of the VM, so it stays checked native arithmetic
-/// with no i128 widening.
+/// The hot fast path of the VM, checked native arithmetic with no i128
+/// widening.
 #[inline]
 pub fn i64_arith(op: BinKind, a: i64, b: i64) -> Result<i64> {
     Ok(match op {
@@ -312,7 +290,6 @@ pub fn i64_arith(op: BinKind, a: i64, b: i64) -> Result<i64> {
     })
 }
 
-/// `+ - * / %` at one float width. Rust float arithmetic never panics.
 #[inline]
 pub fn float_arith<T>(op: BinKind, x: T, y: T) -> T
 where
@@ -328,9 +305,8 @@ where
     }
 }
 
-/// `<<` and `>>`. The amount carries its own width and never unifies with
-/// the shifted side. An amount at or past the width's bit count panics like
-/// debug Rust, and bits shifted out are discarded like release Rust.
+/// The amount never unifies with the shifted side. An amount at the bit
+/// count panics, bits shifted out are discarded.
 pub fn int_shift(op: BinKind, width: IntWidth, value: i128, amount: i128) -> Result<i128> {
     let (verb, left) = match op {
         BinKind::Shl => ("left", true),
@@ -340,8 +316,8 @@ pub fn int_shift(op: BinKind, width: IntWidth, value: i128, amount: i128) -> Res
     if amount < 0 || amount >= i128::from(width.bits()) {
         bail!("attempt to shift {verb} with overflow");
     }
-    // u128 shifts logically over its reinterpreted bits, an arithmetic
-    // i128 shift would smear the sign bit across the high half.
+    // u128 shifts logically, an arithmetic i128 shift would smear the sign
+    // bit.
     if width == IntWidth::U128 {
         let bits = value.cast_unsigned();
         let shifted = if left { bits << amount } else { bits >> amount };
@@ -355,7 +331,7 @@ pub fn int_shift(op: BinKind, width: IntWidth, value: i128, amount: i128) -> Res
     Ok(shifted)
 }
 
-/// `-x`. Only signed widths implement negation in real Rust.
+/// Only signed widths implement negation.
 pub fn int_neg(width: IntWidth, value: i128) -> Result<i128> {
     if !width.is_signed() {
         bail!("cannot negate an unsigned integer");
@@ -366,8 +342,8 @@ pub fn int_neg(width: IntWidth, value: i128) -> Result<i128> {
     Ok(-value)
 }
 
-/// `& | ^` on two same-width operands. Two's complement on i128 agrees with
-/// the real width for canonical values, only `!` needs a truncation.
+/// Two's complement on i128 agrees with the real width, only `!` needs a
+/// truncation.
 pub fn int_bit(op: BinKind, a: i128, b: i128) -> Result<i128> {
     Ok(match op {
         BinKind::BitAnd => a & b,
@@ -377,13 +353,12 @@ pub fn int_bit(op: BinKind, a: i128, b: i128) -> Result<i128> {
     })
 }
 
-/// `!x` in a real width.
 pub fn int_not(width: IntWidth, value: i128) -> i128 {
     truncate(!value, width)
 }
 
-/// An `as` cast between integer widths: keep the low bits, reinterpret in
-/// the target, exactly the host's own cast per width.
+/// Keep the low bits, reinterpret in the target, the host's own cast per
+/// width.
 pub fn truncate(value: i128, target: IntWidth) -> i128 {
     match target {
         IntWidth::U8 => i128::from(AsPrimitive::<u8>::as_(value)),
@@ -394,14 +369,12 @@ pub fn truncate(value: i128, target: IntWidth) -> i128 {
         IntWidth::I16 => i128::from(AsPrimitive::<i16>::as_(value)),
         IntWidth::I32 => i128::from(AsPrimitive::<i32>::as_(value)),
         IntWidth::I64 => i128::from(AsPrimitive::<i64>::as_(value)),
-        // The 128-bit widths keep the whole i128, U128 as raw bits.
+        // The 128 bit widths keep the whole i128.
         IntWidth::U128 | IntWidth::I128 => value,
     }
 }
 
-/// A float to integer `as` cast: truncate toward zero, saturate at the
-/// bounds, NaN becomes zero. The host's own cast has exactly these
-/// semantics, so delegate per width.
+/// The host's own cast has exactly these semantics, so delegate per width.
 pub fn float_to_int(value: f64, target: IntWidth) -> i128 {
     match target {
         IntWidth::U8 => i128::from(AsPrimitive::<u8>::as_(value)),

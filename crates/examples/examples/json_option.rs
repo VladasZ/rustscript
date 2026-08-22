@@ -1,10 +1,7 @@
 #!/usr/bin/env rust
 
-// The serde_json accessors that hand back an Option, and the json null value.
-// A json string is a plain String in the interpreter, so `as_str` gives it
-// back as an already unwrapped Some. These are the shapes that have to keep
-// behaving like a real Option anyway: match, if let, or_else, and the `?`
-// operator, which passes an already unwrapped value through as its own Some.
+// A json string is a plain String in the interpreter, so `as_str` answers an
+// already unwrapped value. It must still behave like a real Option.
 
 use serde_json::Value;
 
@@ -23,8 +20,7 @@ fn dir_of(data: &Value) -> String {
     }
 }
 
-// The `?` chain over json accessors, get and as_str each answer an Option in
-// real Rust while the interpreter sees plain values in the middle.
+// The interpreter sees plain values in the middle of this `?` chain.
 fn tag_of(data: &Value) -> Option<String> {
     Some(data.get("tag_name")?.as_str()?.to_string())
 }
@@ -60,8 +56,7 @@ fn main() {
         .unwrap_or("none");
     println!("or_else {picked}");
 
-    // A missing branch falls back to the json null value, and the accessors
-    // still answer on it instead of failing.
+    // The accessors still answer on json null.
     let missing = empty.get("context").cloned().unwrap_or(Value::Null);
     println!("missing is_null {}", missing.is_null());
     println!(
@@ -79,8 +74,7 @@ fn main() {
             .unwrap_or("none")
     );
 
-    // A json float stays f64, so the integer accessors answer None on it even
-    // for a whole value like 5.0, and the caller's fallback has to kick in.
+    // The integer accessors answer None on a float, even 5.0.
     let nums: Value = serde_json::from_str(r#"{"pct":4.4,"whole":5.0,"count":7}"#).unwrap();
     let derived = 42;
     println!(

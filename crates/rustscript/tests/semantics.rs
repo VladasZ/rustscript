@@ -1,10 +1,6 @@
-//! Runs every script in `tests/cases` twice, once compiled by rustc and once
-//! through the rustscript interpreter, and asserts the stdout is byte for
-//! byte identical. These cases exist to pin down numeric semantics, `as`
-//! casts, float formatting, and float comparison, so their sources use the
-//! constructs on purpose. They are compiled here at test time rather than as
-//! cargo targets, the same way the differential harness compiles its
-//! generated programs.
+//! Runs every script in `tests/cases` compiled and interpreted and asserts
+//! identical stdout. The cases pin numeric semantics, casts and float
+//! formatting, so they use those constructs on purpose.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -35,8 +31,7 @@ fn semantics_cases_match_compiler() {
         let name = path.file_stem().unwrap().to_str().unwrap().to_string();
         let binary = out_dir.join(&name);
 
-        // Overflow checks match the debug profile the equivalence examples
-        // build under, so aborting arithmetic aborts in both runs.
+        // Overflow checks match the debug profile of the equivalence examples.
         let compile = Command::new("rustc")
             .args(["--edition", "2024", "-C", "overflow-checks=yes", "-o"])
             .arg(&binary)

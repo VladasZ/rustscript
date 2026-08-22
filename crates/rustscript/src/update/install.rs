@@ -9,9 +9,7 @@ use which::which;
 
 pub const BINARY: &str = if cfg!(windows) { "rust.exe" } else { "rust" };
 
-/// Where cargo keeps its installed binaries and its install records.
-/// `RustScript` needs cargo anyway to check and build scripts, so a missing
-/// cargo directory is a broken setup rather than a case to work around.
+/// `RustScript` needs cargo anyway, so a missing cargo dir is a broken setup.
 pub fn cargo_home() -> Result<PathBuf> {
     let home = match var_os("CARGO_HOME") {
         Some(value) if !value.is_empty() => PathBuf::from(value),
@@ -29,8 +27,8 @@ pub fn cargo_home() -> Result<PathBuf> {
     Ok(home)
 }
 
-/// An older copy earlier on PATH keeps winning after a successful update, so
-/// say which file is really being run.
+/// An older copy earlier on PATH keeps winning after an update, so say
+/// which file is really being run.
 pub fn warn_if_shadowed(target: &Path) {
     let Ok(found) = which("rust") else {
         return;
@@ -50,8 +48,7 @@ fn same_file(left: &Path, right: &Path) -> bool {
     resolve(left) == resolve(right)
 }
 
-/// Prove the downloaded binary runs and is the version it claims, while the
-/// installed one is still untouched.
+/// The installed binary is still untouched here.
 pub fn verify(binary: &Path, tag: &str) -> Result<()> {
     let output = Command::new(binary)
         .arg("--version")
@@ -74,8 +71,8 @@ pub fn verify(binary: &Path, tag: &str) -> Result<()> {
     Ok(())
 }
 
-/// Put `staged` in place of `target`, keeping the old binary until the new one
-/// is in place so a failure can put it back.
+/// The old binary is kept until the new one is in place, so a failure can put
+/// it back.
 pub fn swap(staged: &Path, target: &Path) -> Result<()> {
     let moved = if target.exists() {
         Some(move_aside(target)?)
@@ -117,8 +114,8 @@ fn old_path(target: &Path, index: usize) -> PathBuf {
     PathBuf::from(format!("{}{suffix}", target.display()))
 }
 
-/// Windows cannot delete the running binary, so its leftovers go on the next
-/// run instead.
+/// `Windows` cannot delete the running binary, so leftovers go on the next
+/// run.
 pub fn cleanup_stale_binaries(target: &Path) {
     for index in 0..100 {
         let old = old_path(target, index);

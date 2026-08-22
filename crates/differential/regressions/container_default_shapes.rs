@@ -1,8 +1,5 @@
-//! Container and element defaults in the literal shapes the differential
-//! campaign generated: `None` with a turbofish unwrapped straight to a
-//! default, out-of-range gets whose payload type only the source states, and
-//! truncating casts reading a `u64` sum back down. The interpreter answered
-//! an empty string for the defaults and clamped the sum at `i64::MAX`.
+//! Container and element defaults in generated shapes. The interpreter once
+//! answered an empty string for them and clamped a `u64` sum at `i64::MAX`.
 
 use std::collections::{HashMap, HashSet};
 

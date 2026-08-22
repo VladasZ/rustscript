@@ -1,9 +1,7 @@
 #!/usr/bin/env rust
 
-// A typed json parse whose chain rewrites the error before the `?`. The
-// annotation still names the struct to build, so the renamed keys must be
-// honored. Getting this wrong is silent, the parse succeeds and every renamed
-// field comes back empty, which is why it is worth an example of its own.
+// A `map_err` before the `?` must not lose the annotated struct. Getting it
+// wrong is silent, every renamed field comes back empty.
 
 use serde::Deserialize;
 

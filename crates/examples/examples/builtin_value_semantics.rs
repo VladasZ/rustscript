@@ -1,11 +1,6 @@
 #!/usr/bin/env rust
 
-//! Builtin values behaving like std's. Each line here is a divergence the
-//! differential campaign found: two empty sets comparing unequal, a
-//! `String::clear` answered by the colored crate's `clear` and leaving the
-//! text in place, `concat` of no nested vecs answering a string, the zero
-//! flag lost in front of a positional width, and a bare literal under a
-//! `let` annotation living as an i64 until the binding retagged it.
+//! Each line here is a divergence the differential campaign found.
 
 use std::collections::HashSet;
 
@@ -19,12 +14,9 @@ struct Reading {
     label: String,
 }
 
-/// A `let` annotation types the bare literals inside its init, through the
-/// branches of an `if`, the elements of a `vec!`, an array, a tuple, and the
-/// payload of a `Some`, so each value wraps at its own width.
+/// A `let` annotation types the bare literals inside its init.
 fn typed_literals(flag: bool) {
-    // The annotation types the literals inside the branches, so the
-    // negation runs at i32 and the bytes wrap at u8.
+    // The negation runs at i32 and the bytes wrap at u8.
     let picked: i32 = -(if flag { 7 } else { 2_000_000_000 });
     println!("picked: {picked}");
     let bytes: Vec<u8> = vec![250, 10, if flag { 1 } else { 255 }];
@@ -78,14 +70,13 @@ fn main() {
     println!("empty string concat: {:?}", words.concat());
 
     println!("zero flag width: {0:#01$x}", 0i64, 9usize);
-    // A print argument made only of bare literals is the `i32` rustc falls
-    // back to, so a negative one shows eight hex digits.
+    // Bare literals are `i32`, so a negative one shows 8 hex digits.
     println!(
         "bare literal hex: {:#x} {:b}",
         if flag { 0 } else { -1 },
         -(2 + 3)
     );
-    // A suffixed literal in one branch types the bare one in the other.
+    // A suffixed literal in one branch types the other.
     let shown = if flag { 0i32 } else { -1 };
     println!(
         "sibling typed: {shown:#x} {:#x}",
@@ -99,15 +90,14 @@ fn main() {
 
     typed_literals(flag);
 
-    // The annotated sum types the closure body too, so its literal is an
-    // i32 and wraps the way an i32 does.
+    // The annotated sum types the closure body too.
     let folded: i32 = vec![1u8, 2]
         .into_iter()
         .map(|_| if flag { 7 } else { 1_000_000_000 })
         .sum();
     println!("folded: {}", folded.wrapping_add(2_000_000_000));
 
-    // A range pattern bound past `i64::MAX` still matches.
+    // A range pattern past `i64::MAX`.
     let big: u64 = 9_223_372_036_854_775_808;
     let bucket = match big {
         0..=9_223_372_036_854_775_807 => "low",
@@ -115,7 +105,7 @@ fn main() {
     };
     println!("bucket: {bucket}");
 
-    // A derived `Ord` orders by the fields in declaration order.
+    // Derived `Ord` orders by declaration order.
     let readings = [
         Reading {
             tick: 9_223_372_036_854_775_806,
@@ -134,8 +124,7 @@ fn main() {
     println!("min: {:?}", readings.iter().min());
     println!("ordered: {}", readings[0] < readings[1]);
 
-    // `sort` orders enums by variant and then by payload, not by their
-    // printed form.
+    // Enums sort by variant then payload, not by printed form.
     let mut options = vec![Some(-1i16), None, Some(-32767i16), Some(7)];
     options.sort();
     println!("sorted options: {options:?}");
@@ -143,8 +132,7 @@ fn main() {
     results.sort();
     println!("sorted results: {results:?}");
 
-    // A `move` closure owns a copy of the counter, so the outer binding
-    // keeps its value after the closure counts down.
+    // A `move` closure owns a copy of the counter.
     let mut remaining: u64 = 10;
     let mut countdown = move || -> u64 {
         remaining -= 2;

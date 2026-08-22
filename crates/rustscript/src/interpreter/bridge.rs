@@ -1,6 +1,6 @@
-//! The bridge front door: format rendering, method and path
-//! dispatch. The per-receiver method families live in `methods`, `vecmap`,
-//! `higher_order`, and `iterator`; this file routes to them.
+//! The bridge front door, format rendering and method and path dispatch.
+//! The per receiver families live in `methods`, `vecmap`, `higher_order`
+//! and `iterator`.
 
 use num_traits::AsPrimitive;
 use std::f64::consts::PI;
@@ -43,9 +43,7 @@ impl Vm {
         render_template(self, &f.template, &positional, &named)
     }
 
-    /// The text a user `Display` or `Debug` impl renders for this value, or
-    /// None when the value's type has no such impl. The impl runs with the
-    /// value and a formatter buffer, and the buffer is the answer.
+    /// None when the type has no user `Display` or `Debug` impl.
     pub(super) fn user_fmt_text(
         self: &Arc<Self>,
         v: &Value,
@@ -54,8 +52,7 @@ impl Vm {
         Ok(self.user_fmt(v, debug)?.map(|(text, _)| text))
     }
 
-    /// `user_fmt_text` plus whether the impl padded through `f.pad`, which
-    /// is when the caller's width applies.
+    /// `user_fmt_text` plus whether the impl padded through `f.pad`.
     pub(super) fn user_fmt(
         self: &Arc<Self>,
         v: &Value,
@@ -85,12 +82,9 @@ impl Vm {
         Ok(Some(out))
     }
 
-    /// Run the value's user `Drop::drop` when this is its last holder, then
-    /// drop what it contains. Another holder means the value was moved or is
-    /// still shared, and the real owner drops it at its own end of life.
-    /// Containers, cells, and `Rc` hand their contents on when they die, so
-    /// a guard inside them still drops. A shared cycle never reaches one
-    /// holder, so it leaks exactly like real `Rc` cycles do.
+    /// Runs `Drop::drop` only when this is the last holder, another holder
+    /// means moved or shared. Containers hand their contents on. A shared
+    /// cycle never reaches one holder, so it leaks like a real `Rc` cycle.
     pub(super) fn run_user_drop(self: &Arc<Self>, value: Value) -> Result<()> {
         match value {
             Value::Struct(s) => {
@@ -98,13 +92,11 @@ impl Vm {
                     return Ok(());
                 }
                 self.run_drop_impl(Value::Struct(s.clone()))?;
-                // The impl could have stored a clone of self somewhere, in
-                // which case the fields live on with it.
+                // The impl could have stored a clone of self somewhere.
                 if Arc::strong_count(&s) != 1 {
                     return Ok(());
                 }
-                // Fields drop after the type's own `Drop::drop`, in
-                // declaration order, like real Rust.
+                // Fields drop after `Drop::drop` in declaration order.
                 let fields = take(&mut *s.values.lock());
                 for field in fields {
                     self.run_user_drop(field)?;
@@ -160,7 +152,6 @@ impl Vm {
         }
     }
 
-    /// Run the value type's own `Drop::drop`, when the script defines one.
     fn run_drop_impl(self: &Arc<Self>, value: Value) -> Result<()> {
         let Some(chunk) = self
             .impls
@@ -182,16 +173,12 @@ impl Vm {
         if let Some(v) = path_constant(path.id) {
             return Ok(v);
         }
-        // A path used as a function value. A zero-arg constructor like
-        // `Vec::new` handed to `or_insert_with` becomes a nullary closure.
-        // Anything else, `Some` handed to `map`, becomes a one-arg closure,
-        // and `dispatch_call` runs the call.
+        // A zero arg constructor like `Vec::new` becomes a nullary closure,
+        // anything else a one arg closure.
         let arity = usize::from(!matches!(path.id.name(), "new" | "default"));
         Ok(path_closure(path.clone(), arity))
     }
 
-    /// A user item used as a value: a unit variant, a unit struct, a
-    /// function by bare name, or a method reference.
     fn user_path_value(&self, path: &PathRef) -> Result<Value> {
         let segs = &path.segs;
         let Some(last) = segs.last().map(String::as_str) else {
@@ -206,8 +193,7 @@ impl Vm {
             if let Some(v) = self.unit_variant(None, last) {
                 return Ok(v);
             }
-            // A unit struct used as a value, `struct Marker;` then
-            // `Marker`.
+            // `struct Marker;` then `Marker`.
             if let Some(name) = self
                 .unit_structs
                 .iter()
@@ -219,17 +205,13 @@ impl Vm {
                     Vec::new(),
                 ));
             }
-            // A bare function name used as a value, `.map(strip_html)`. The
-            // closure forwards its arguments to the call, which
-            // `dispatch_call` resolves back to the user function.
+            // `.map(strip_html)`, the closure forwards to `dispatch_call`.
             if let Some(chunk) = self.user_function(last) {
                 return Ok(path_closure(path.clone(), chunk.num_params));
             }
         }
-        // A path used as a function value. A zero-arg constructor handed to
-        // `or_insert_with` becomes a nullary closure. A method reference like
-        // `Value::as_str` handed to `and_then` becomes a one-arg closure, and
-        // `dispatch_call` resolves it as a UFCS method call on that argument.
+        // A zero arg constructor becomes a nullary closure, a method reference
+        // like `Value::as_str` a one arg closure resolved as a UFCS call.
         if matches!(last, "new" | "default") {
             return Ok(path_closure(path.clone(), 0));
         }
@@ -241,9 +223,8 @@ impl Vm {
         {
             return Ok(path_closure(path.clone(), chunk.num_params));
         }
-        // A SCREAMING_CASE tail is a constant, never a function, so
-        // wrapping it in the closure fallback would smuggle a closure
-        // value into arithmetic.
+        // A `SCREAMING_CASE` tail is a constant, the closure fallback would
+        // smuggle a closure into arithmetic.
         if last.chars().any(|c| c.is_ascii_uppercase())
             && !last.chars().any(|c| c.is_ascii_lowercase())
         {
@@ -264,16 +245,14 @@ impl Vm {
             PathId::Some => return Ok(Value::some(one(args)?)),
             PathId::Ok => return Ok(Value::ok(one(args)?)),
             PathId::Err => return Ok(Value::err(one(args)?)),
-            // A user type with a `Drop` impl runs it now, its register was
-            // cleared at the call site so this is the last holder. Anything
-            // else dies with its register, file writes are unbuffered.
+            // The register was cleared at the call site, so this is the last
+            // holder and a user `Drop` runs now.
             PathId::Drop => {
                 self.run_user_drop(one(args)?)?;
                 return Ok(Value::Unit);
             }
             // The Ctrl-C handler must reach back into the interpreter to run
-            // the script's own closure, so it cannot go through the plain
-            // native call.
+            // the script's closure.
             PathId::CtrlcSetHandler => {
                 let closure = arg(&args, 0)?;
                 return Ok(match super::set_ctrlc_handler(closure) {
@@ -281,7 +260,7 @@ impl Vm {
                     Err(e) => Value::err(Value::str(e.to_string())),
                 });
             }
-            // sleep is the one thread function that needs no threading.
+            // `sleep` is the one thread function that needs no threading.
             PathId::ThreadSleep => {
                 let Some(d) = args
                     .first()
@@ -292,8 +271,7 @@ impl Vm {
                 std::thread::sleep(d);
                 return Ok(Value::Unit);
             }
-            // `tokio::sync::Mutex` is its own kind: its `lock` is awaited and
-            // answers the guard with no `Result` layer, unlike `std::sync`.
+            // `tokio::sync::Mutex::lock` is awaited and has no `Result` layer.
             PathId::TokioSyncMutexNew => {
                 let inner = one(args)?;
                 return Ok(super::cell::make_cell(
@@ -301,9 +279,8 @@ impl Vm {
                     inner,
                 ));
             }
-            // A json value written out in a script, `Value::String(s)`. A
-            // parsed json is held as native values here, so each variant is
-            // exactly its own payload.
+            // `Value::String(s)` is exactly its payload, parsed json is held as
+            // native values.
             PathId::ValueString
             | PathId::ValueBool
             | PathId::ValueNumber
@@ -311,10 +288,8 @@ impl Vm {
             | PathId::ValueObject => return one(args),
             _ => {}
         }
-        // Namespaced calls reaching native bridges compute in i64 and f64, so
-        // width-tagged numbers pass those their plain image. The script-level
-        // targets above and in `dispatch_user_call` hand values through, so
-        // they keep the real args and their width tags.
+        // Native bridges compute in i64 and f64, so they get the plain image.
+        // Script level targets keep the real args with width tags.
         let images: Vec<Value> = args
             .iter()
             .map(|arg| match arg.bridge_image() {
@@ -328,8 +303,7 @@ impl Vm {
         }
     }
 
-    /// A call the path table does not name: a script function, a method on
-    /// a user type, a tuple struct or variant, or a UFCS method reference.
+    /// A call the path table does not name.
     fn dispatch_user_call(self: &Arc<Self>, path: &PathRef, args: Vec<Value>) -> Result<Value> {
         let [.., namespace, last] = path.segs.as_slice() else {
             let name = path.segs.first().map_or("", String::as_str);
@@ -350,28 +324,22 @@ impl Vm {
         if let Some(chunk) = self.user_function(&path.display()) {
             return self.run_chunk(&chunk, &args, &[]);
         }
-        // `Type::from(x)` picks the `From` impl for `x`'s type.
         if last == "from"
             && args.len() == 1
             && let Some(chunk) = self.conversion_impl(namespace, &args[0])
         {
             return self.run_chunk(&chunk, &args, &[]);
         }
-        // A method on a user type, `Type::assoc(..)` or UFCS
-        // `Type::method(recv, ..)`. The receiver, if any, is simply
-        // the first argument, matching param 0.
+        // The receiver, if any, is the first argument.
         if let Some(chunk) = self.user_method(namespace, last) {
             return self.run_chunk(&chunk, &args, &[]);
         }
         if let Some(v) = self.make_tuple_variant(Some(namespace), last, &args) {
             return Ok(v);
         }
-        // UFCS fallback: `Type::method(recv, ..)` dispatches `method`
-        // on the receiver. This is what makes a method reference used
-        // as a value, like `str::trim` handed to `map`, callable.
-        // `eval_method` takes the real args, it images them itself
-        // where a method needs that, so a width-aware method like
-        // `u8::saturating_add` still sees its real width.
+        // UFCS fallback, what makes `str::trim` handed to `map` callable.
+        // `eval_method` takes the real args so `u8::saturating_add` sees its
+        // width.
         if let Some((recv, rest)) = args.split_first() {
             let recv = recv.clone();
             let mut rest = rest.to_vec();
@@ -383,11 +351,9 @@ impl Vm {
 
     // -- methods -----------------------------------------------------------
 
-    /// Generic method dispatch, in stages. The receiver place is read
-    /// through first. Then the script's own impl method, which wins over
-    /// every builtin the way an inherent method wins in rustc. Then the
-    /// families keyed by method id that answer for any receiver type, the
-    /// numeric methods at their real width, and the per receiver bridges.
+    /// In stages. The script's own impl method wins over every builtin like
+    /// an inherent method in `rustc`, then the any receiver families, the
+    /// numeric methods at their width, and the per receiver bridges.
     pub(super) fn eval_method(
         self: &Arc<Self>,
         recv: &Value,
@@ -402,8 +368,8 @@ impl Vm {
             _ => None,
         };
         let recv = dereferenced.as_ref().unwrap_or(recv);
-        // A shared cell answers its own wrapper methods, everything else
-        // auto-derefs to the value inside.
+        // A shared cell answers its wrapper methods, everything else auto
+        // derefs.
         if let Value::Cell(kind, slot) = recv {
             if let Some(v) = super::cell::cell_method(*kind, slot, name.id, args)? {
                 return Ok(v);
@@ -417,14 +383,12 @@ impl Vm {
         if let Some(v) = self.any_receiver_method(recv, name, args)? {
             return Ok(v);
         }
-        // Integer methods answer from the real width, before `bridge_image`
-        // below flattens the receiver to an i64 that saturates at `i64::MAX`
-        // and forgets whether it was a u8 or a u64.
+        // Before `bridge_image` flattens the receiver to an i64 and forgets
+        // its width.
         if let Some(result) = int_method(recv, name, args) {
             return result;
         }
-        // f32 methods likewise: computed in real f32 before the image below
-        // widens the receiver to an f64 that prints the wrong shortest form.
+        // f32 likewise, before the image widens it to f64.
         if let Value::F32(f) = recv
             && let Some(value) = f32_method(*f, name.id, args)?
         {
@@ -439,9 +403,8 @@ impl Vm {
             None => recv,
         };
         image_args(recv, name, args);
-        // A range and a user type with its own `Iterator::next` answer the
-        // iterator methods through their iterator value. A range answers its
-        // own handful of methods first.
+        // A range answers its own handful of methods first, then the iterator
+        // methods through its iterator value.
         let expanded;
         let recv = match recv {
             Value::Range { .. } => {
@@ -465,9 +428,7 @@ impl Vm {
         self.method_by_receiver(recv, name, args)
     }
 
-    /// The script's own `impl` method for the receiver's type, run with the
-    /// receiver as its first argument. `None` when the type declares no such
-    /// method.
+    /// `None` when the type declares no such method.
     fn user_impl_method(
         self: &Arc<Self>,
         recv: &Value,
@@ -488,12 +449,8 @@ impl Vm {
         self.run_chunk(&chunk, &full, &[]).map(Some)
     }
 
-    /// The methods that answer for any receiver type, keyed by id:
-    /// `to_string` through a user `Display` impl, the width tagged number
-    /// shortcuts, and the `serde_json` type tests and pointer lookups, which
-    /// apply to a json value whatever shape it turned out to be. They run
-    /// before `bridge_image`, since a u64 past `i64::MAX` saturates there
-    /// and would then claim to be an i64.
+    /// The any receiver methods. They run before `bridge_image`, since a u64
+    /// past `i64::MAX` saturates there and would claim to be an i64.
     fn any_receiver_method(
         self: &Arc<Self>,
         recv: &Value,
@@ -513,7 +470,6 @@ impl Vm {
         })
     }
 
-    /// The per-receiver dispatch, after the any-receiver families above.
     fn method_by_receiver(
         self: &Arc<Self>,
         recv: &Value,
@@ -523,10 +479,8 @@ impl Vm {
         match recv {
             Value::Str(s) => methods::str_method(s, name, args),
             Value::Vec(v) => {
-                // Vec::extend takes any IntoIterator, so a lazy argument such
-                // as `.iter().map(..)` has to be drained here, where the
-                // interpreter is in reach. The vec method itself cannot read
-                // one.
+                // A lazy `extend` argument is drained here, the vec method
+                // itself cannot read one.
                 if matches!(name.id, BuiltinId::Extend | BuiltinId::ExtendFromSlice)
                     && let Some(first) = args.first()
                     && !matches!(first, Value::Vec(_))
@@ -571,7 +525,6 @@ impl Vm {
         }
     }
 
-    /// A method on one of the bridge's own struct types, by type name.
     fn bridge_struct_method(
         recv: &Value,
         st: &Arc<super::value::StructData>,
@@ -626,7 +579,6 @@ impl Vm {
         {
             return Ok(super::std_bridge::make_duration(instant.elapsed()));
         }
-        // Files, readers, writers, sockets, children, clocks, temp files.
         if let Some(v) = super::native_methods::native_method(native, name, args)? {
             return Ok(v);
         }
@@ -639,15 +591,11 @@ impl Vm {
 
 // -- free helpers ----------------------------------------------------------
 
-/// A path value the table names: env consts, numeric limits, and the bridge
-/// constants that hang off a type name. None for a path that names a
-/// function, which becomes a closure instead.
+/// None for a path that names a function, which becomes a closure.
 fn path_constant(id: PathId) -> Option<Value> {
     let text = match id {
         PathId::UnixEpoch => return Some(Native::SystemTime(std::time::UNIX_EPOCH).wrap()),
-        // A json null is None here, the same mapping the parser uses, so
-        // `serde_json::Value::Null` written in a script lands on the same
-        // value.
+        // A json null is None, the same mapping the parser uses.
         PathId::ValueNull => return Some(Value::none()),
         PathId::ConstsPi => return Some(Value::Float(PI)),
         PathId::ConstsOs => std::env::consts::OS,
@@ -667,12 +615,8 @@ fn path_constant(id: PathId) -> Option<Value> {
 }
 
 /// Flatten width tagged arguments to the i64 and f64 images the bridges
-/// compute in. Option and Result methods hand arguments through to the
-/// caller, `unwrap_or` for one, and `flag.then_some(x)` on a bool does the
-/// same, so their width tags must survive. `fold` hands its initial value
-/// through the closure and the result the same way, and the containers and
-/// a map entry store their arguments, so a pushed or inserted number keeps
-/// its real width too.
+/// compute in. Methods that hand arguments through or store them, like
+/// `unwrap_or`, `then_some`, `fold` and the containers, keep the tags.
 fn image_args(recv: &Value, name: &MethodName, args: &mut [Value]) {
     let hands_args_through = matches!(
         recv,
@@ -695,17 +639,14 @@ fn one(args: Vec<Value>) -> Result<Value> {
         .ok_or_else(|| anyhow::anyhow!("expected one argument"))
 }
 
-/// The argument at `i`. A script that passes `rust check` always supplies
-/// every argument, so a missing one is an interpreter bug and errors
-/// instead of standing in a Unit.
+/// A missing argument is an interpreter bug, the checker rules it out.
 pub(super) fn arg(args: &[Value], i: usize) -> Result<Value> {
     args.get(i)
         .cloned()
         .ok_or_else(|| anyhow!("missing argument {}", i + 1))
 }
 
-/// The builtin methods a range answers directly, before it expands to its
-/// iterator value.
+/// Answered before the range expands to its iterator value.
 fn range_builtin(recv: &Value, name: &MethodName, args: &[Value]) -> Result<Option<Value>> {
     let Value::Range {
         start,
@@ -744,12 +685,9 @@ fn range_builtin(recv: &Value, name: &MethodName, args: &[Value]) -> Result<Opti
 }
 
 /// `usize::MAX`, `i32::MIN`, `f32::NAN` and friends, at their real width.
-/// The widths that tag their values, `u16::MAX`, carry the tag so the
-/// constant keeps its real width.
 fn numeric_limit(id: PathId) -> Option<Value> {
     use super::numeric::IntWidth;
     Some(match id {
-        // The float limits first, `f64::EPSILON` guards float comparisons.
         PathId::F64Epsilon => Value::Float(f64::EPSILON),
         PathId::F64Max => Value::Float(f64::MAX),
         PathId::F64Min => Value::Float(f64::MIN),
@@ -764,8 +702,7 @@ fn numeric_limit(id: PathId) -> Option<Value> {
         PathId::F32Infinity => Value::F32(f32::INFINITY),
         PathId::F32NegInfinity => Value::F32(f32::NEG_INFINITY),
         PathId::F32Nan => Value::F32(f32::NAN),
-        // The 128-bit bounds live in `Value::Big`, u128's as reinterpreted
-        // bits.
+        // u128 bounds are reinterpreted bits in `Value::Big`.
         PathId::I128Max => Value::Big(i128::MAX, IntWidth::I128),
         PathId::I128Min => Value::Big(i128::MIN, IntWidth::I128),
         PathId::U128Max => Value::Big(u128::MAX.cast_signed(), IntWidth::U128),
@@ -800,9 +737,7 @@ fn numeric_limit(id: PathId) -> Option<Value> {
     })
 }
 
-/// The bridge call behind a table path: chrono, the async sleeps, reqwest,
-/// ratatui, std, and the associated functions. None when no bridge answers
-/// the id, which is a table entry with no implementation behind it.
+/// None when no bridge answers the id.
 fn bridge_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     match id {
         PathId::UtcNow | PathId::LocalNow => {
@@ -882,7 +817,6 @@ fn yield_future() -> Value {
     .wrap()
 }
 
-/// Build a `DateTime` value carrying its zone.
 fn datetime_value(secs: i64, nanos: u32, local: bool, offset: i32) -> Value {
     Value::struct_of(
         "DateTime",
@@ -895,8 +829,6 @@ fn datetime_value(secs: i64, nanos: u32, local: bool, offset: i32) -> Value {
     )
 }
 
-/// Build a `DateTime` value for `Utc::now()` / `Local::now()`,storing the
-/// unix timestamp.
 fn now_datetime(local: bool) -> Value {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -967,12 +899,10 @@ fn duration_method(
     }
 }
 
-/// Width-aware integer methods.
 fn int_method(recv: &Value, name: &MethodName, args: &[Value]) -> Option<Result<Value>> {
     let m = name.id;
-    // An operand with no i128 image is a u128 past `i128::MAX`; it answers
-    // on the native 128-bit cores over raw bits. Checking through the
-    // `int_parts` failure keeps this off the hot 64-bit dispatch path.
+    // An operand with no i128 image is a u128 past `i128::MAX`. Checking
+    // through the `int_parts` failure keeps this off the hot path.
     let Some((value, mut width)) = recv.int_parts() else {
         return big_int_route(recv, name, args);
     };
@@ -982,16 +912,15 @@ fn int_method(recv: &Value, name: &MethodName, args: &[Value]) -> Option<Result<
             return big_int_route(recv, name, args);
         };
         decoded.push(arg_value);
-        // Receiver and argument share one type in real Rust, so a width
-        // either side states answers for both. A shift amount's own u32 must not redefine the receiver.
+        // Receiver and argument share one type, so either width answers for
+        // both. A shift amount's u32 must not redefine the receiver.
         if !super::int_methods::takes_amount_arg(m)
             && let Ok(unified) = super::numeric::unify(width, arg_width)
         {
             width = unified;
         }
     }
-    // The in-range 128-bit values decode losslessly, so `value` is already
-    // the raw bit pattern the native cores take.
+    // `value` is already the raw bit pattern the native cores take.
     if width.is_big() {
         let out = super::int_methods::big_int_method(m, width, value, &decoded)?;
         return Some(out.map(|o| int_out(o, width)));
@@ -1004,10 +933,8 @@ fn int_method(recv: &Value, name: &MethodName, args: &[Value]) -> Option<Result<
     )
 }
 
-/// The 128-bit method route for a call whose receiver or argument has no
-/// i128 image. Answers `None` when no 128-bit operand is present at all,
-/// which is any non-integer receiver. Cold: the hot integer dispatch calls
-/// it only through the `int_parts` failure path.
+/// `None` when no 128 bit operand is present. Cold, reached only through
+/// the `int_parts` failure path.
 #[cold]
 fn big_int_route(recv: &Value, name: &MethodName, args: &[Value]) -> Option<Result<Value>> {
     let m = name.id;
@@ -1028,10 +955,8 @@ fn big_int_route(recv: &Value, name: &MethodName, args: &[Value]) -> Option<Resu
     Some(out.map(|o| int_out(o, width)))
 }
 
-/// Storage bits of an operand in a 128-bit method call: a `Big` carries
-/// them directly, an untagged literal or a tagged value by its value, which
-/// is the same bit pattern for everything valid Rust can mix with a
-/// 128-bit operand.
+/// A `Big` carries the bits directly, anything else by its value, which is
+/// the same pattern for everything valid Rust can mix with it.
 fn big_bits(v: &Value) -> Option<i128> {
     match v {
         Value::Big(bits, _) => Some(*bits),
@@ -1040,8 +965,8 @@ fn big_bits(v: &Value) -> Option<i128> {
     }
 }
 
-/// Materialize an f32 core answer as a runtime value. Called before
-/// `bridge_image` widens the receiver, so the result keeps the f32 tag.
+/// Called before `bridge_image` widens the receiver, so the result keeps
+/// the f32 tag.
 fn f32_method(recv: f32, name: BuiltinId, args: &[Value]) -> Result<Option<Value>> {
     Ok(
         shared::f32_core(recv, name, &VArgs(args))?.map(|out| match out {
@@ -1056,9 +981,8 @@ fn int_out(out: super::int_methods::IntOut, width: super::numeric::IntWidth) -> 
     use super::int_methods::IntOut;
     match out {
         IntOut::Same(value) => Value::int_of_width(value, width),
-        // The counting family answers u32 in real Rust, so the tag has to say
-        // so, or `!x.count_ones()` computes in 64 bits and prints -1 where the
-        // compiled binary prints 4294967295.
+        // Counts are u32, or `!x.count_ones()` prints -1 instead of
+        // 4294967295.
         IntOut::Count(count) => {
             Value::int_of_width(i128::from(count), super::numeric::IntWidth::U32)
         }
@@ -1086,17 +1010,14 @@ fn int_out(out: super::int_methods::IntOut, width: super::numeric::IntWidth) -> 
 
 fn scalar_method(recv: &Value, name: &MethodName, args: &[Value]) -> Result<Value> {
     let m = name.id;
-    // A conversion that only changes the static type is a no-op on a scalar,
-    // and a number never reaches a generic dispatch, so these are answered
-    // here. `2.into()` for a `serde_json::Number` is the same 2.
+    // A conversion that only changes the static type is a no-op on a scalar.
     match m {
         BuiltinId::ToString => return Ok(Value::str(recv.display())),
         BuiltinId::Clone | BuiltinId::Into => return Ok(recv.clone()),
         _ => {}
     }
-    // Serde accessors on an already decoded scalar. A json bool arrives as a
-    // plain Bool here, so `as_bool` has to answer on it, and an accessor for
-    // the wrong type is None rather than an error, matching serde.
+    // Serde accessors on a decoded scalar. A wrong type accessor is None,
+    // matching serde.
     if matches!(
         m,
         BuiltinId::AsStr
@@ -1154,7 +1075,6 @@ fn scalar_method(recv: &Value, name: &MethodName, args: &[Value]) -> Result<Valu
     methods::generic_method(recv, name, args)
 }
 
-/// Turn a neutral numeric core answer into a runtime value.
 fn num_out(out: NumOut) -> Value {
     match out {
         NumOut::Int(i) => Value::Int(i),
@@ -1168,8 +1088,7 @@ fn num_out(out: NumOut) -> Value {
     }
 }
 
-/// A closure that forwards its arguments to a path call, so a path written as
-/// a value can be handed to `map` or `and_then`.
+/// So a path written as a value can be handed to `map` or `and_then`.
 fn path_closure(path: PathRef, num_params: usize) -> Value {
     Value::Closure(Arc::new(ClosureData {
         chunk: super::bytecode::path_call_chunk(path, num_params),
@@ -1177,7 +1096,6 @@ fn path_closure(path: PathRef, num_params: usize) -> Value {
     }))
 }
 
-/// The interpreter's argument view for the shared cores.
 pub(super) struct VArgs<'a>(pub(super) &'a [Value]);
 
 impl Args for VArgs<'_> {
@@ -1221,19 +1139,14 @@ impl Args for VArgs<'_> {
     }
 }
 
-/// What reading a method receiver through a reference produced.
 enum RefRead {
     Value(Value),
-    /// A string grow method already ran and stored back through the
-    /// reference, nothing further to dispatch.
+    /// A string grow already ran and stored back, nothing left to dispatch.
     StrGrown,
 }
 
-/// Read a method's receiver through its reference. A mutating method splits
-/// the referenced slot from value sharing first, so the in-place mutation
-/// stays private to the borrowed place. A string mutates by growing its own
-/// buffer rather than shared storage, so the grown buffer stores back
-/// through the reference to land in the borrowed place.
+/// A mutating method splits the referenced slot first. A string grows its
+/// own buffer, so the grown buffer stores back through the reference.
 fn deref_receiver(
     reference: &super::value::ValueRef,
     name: &MethodName,
@@ -1255,15 +1168,14 @@ fn deref_receiver(
         reference.set(Value::Str(grown));
         return Ok(RefRead::StrGrown);
     }
-    // A reference is always a place, so `clear` through one is
-    // `String::clear`, never the colored crate's.
+    // A reference is a place, so `clear` is `String::clear`, never the
+    // colored crate's.
     if matches!(value, Value::Str(_)) && name.id == BuiltinId::Clear && args.is_empty() {
         reference.set(Value::str(String::new()));
         return Ok(RefRead::StrGrown);
     }
-    // In-place ascii casing through a `&mut` receiver stores back the same
-    // way a grow does. The upper flag reuses the harvested arm literal, a
-    // partial literal here would leak a bogus name into the bridge tables.
+    // The upper flag reuses the harvested arm literal, a partial literal
+    // would leak a bogus name into the bridge tables.
     if matches!(
         name.id,
         BuiltinId::MakeAsciiUppercase | BuiltinId::MakeAsciiLowercase
@@ -1333,8 +1245,6 @@ fn render_template(
     Ok(out)
 }
 
-/// One `{..}` placeholder rendered: the argument it names, the width and
-/// precision it takes from other arguments, and the spec applied.
 fn render_placeholder(
     vm: &Arc<Vm>,
     spec: &str,
@@ -1343,8 +1253,7 @@ fn render_placeholder(
     named: &[(&str, Value)],
 ) -> Result<String> {
     let (name, fmt) = spec.split_once(':').unwrap_or((spec, ""));
-    // `{:.*}` takes its precision from the next positional
-    // argument, before the value.
+    // `{:.*}` takes its precision from the next positional argument.
     let fmt = if fmt.contains(".*") {
         let precision = match resolve_arg("", next_pos, positional, named)? {
             Value::Int(i) => i,
@@ -1364,8 +1273,7 @@ fn render_placeholder(
     };
     let fmt = fmt.as_str();
     let value = resolve_arg(name, next_pos, positional, named)?;
-    // A `{:w$}` width names another argument, so resolve it against
-    // the same tables before the spec is applied.
+    // A `{:w$}` width names another argument.
     let mut lookup = |token: &str| -> Result<i64> {
         let mut pos = 0;
         match resolve_arg(token, &mut pos, positional, named)? {
@@ -1393,12 +1301,9 @@ fn render_placeholder(
         }),
         _ => None,
     };
-    // A user `Display` or `Debug` impl overrides the built-in
-    // rendering. Only the form the spec asks for runs, an impl
-    // may have side effects.
+    // Only the form the spec asks for runs, an impl may have side effects.
     let wants_debug = fmt.contains('?');
-    // A user impl that writes through `write!` ignores the
-    // caller's width, one that goes through `f.pad` honors it.
+    // `write!` ignores the caller's width, `f.pad` honors it.
     let mut user_padded = None;
     let display_text = if wants_debug {
         String::new()
@@ -1419,8 +1324,7 @@ fn render_placeholder(
         user_padded = Some(padded);
         text
     } else {
-        // The flags reach every leaf, the alternate flag picks the pretty
-        // form.
+        // The flags reach every leaf.
         let leaf: String = fmt.chars().filter(|c| !matches!(c, '#' | '?')).collect();
         super::debug_fmt::render(
             &value,
@@ -1430,8 +1334,7 @@ fn render_placeholder(
             },
         )
     };
-    // The debug renderer applied the spec at every leaf
-    // already, a second pass would sign and pad again.
+    // The debug renderer applied the spec at every leaf already.
     if wants_debug && !user_debug {
         return Ok(debug_text);
     }

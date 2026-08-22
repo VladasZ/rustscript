@@ -13,8 +13,7 @@ fn main() {
     let all_short = names.iter().all(|n| n.len() < 10);
     println!("any long: {any_long}, all short: {all_short}");
 
-    // `zip` pairs until the shorter side ends, `chain` runs one after the
-    // other, and both stay lazy under `take`.
+    // Both stay lazy under `take`.
     let ages = [31, 27];
     let paired: Vec<(String, i32)> = names
         .iter()

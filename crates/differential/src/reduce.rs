@@ -29,11 +29,8 @@ pub fn reduce_with_progress(
     reduce_by(|source| runner.run_source(source), original, target, report)
 }
 
-/// Greedy descent over `shrink_candidates`, with `run` as the oracle. A
-/// candidate is taken only when its rendering is strictly shorter than the
-/// current one. A shrink can rewrite a node into a form of the same size
-/// whose own shrinks lead back to the original, and accepting every
-/// reproducing candidate then cycles between them forever.
+/// A candidate is taken only when strictly shorter. A same size rewrite can
+/// lead back to the original, and accepting it cycles forever.
 pub fn reduce_by(
     mut run: impl FnMut(&str) -> Result<RunResult>,
     original: &Program,

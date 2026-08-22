@@ -1,7 +1,7 @@
 # GitHub Actions
 
-RustScript ships as a GitHub Action, so a workflow can install the interpreter
-and run scripts with it without compiling anything.
+RustScript ships as a GitHub Action. A workflow can install the interpreter
+and run scripts without compiling anything.
 
 ## Usage
 
@@ -43,11 +43,9 @@ Pin the interpreter version independently of the action.
 | `args` | empty | extra arguments passed to the script |
 | `github-token` | `github.token` | only used to resolve the newest release |
 
-`mode` maps straight onto the CLI. `run` interprets, `build` compiles with cargo
-and then runs, and `check` validates with `cargo check` and the interpreter
-coverage walk without running. Both
-`build` and `check` need a cargo toolchain in the job, which the GitHub hosted
-images already provide.
+`mode` maps onto the CLI. `run` interprets, `build` compiles and runs,
+`check` validates without running. `build` and `check` need a cargo
+toolchain, which the GitHub hosted images have.
 
 ## Outputs
 
@@ -58,16 +56,14 @@ images already provide.
 
 ## How the version is resolved
 
-The action checks three things in order.
+The action checks 3 things in order.
 
-1. The `version` input, when it is set.
-2. The tag the action itself was called with, when that tag is an exact version
-   like `v0.2.0`. This is what makes a pinned action install a matching
-   interpreter with no extra configuration.
-3. The newest release otherwise, which is what a moving tag like `@v0.2` or a
-   branch like `@main` falls back to.
+1. The `version` input.
+2. The tag the action was called with, when it is an exact version like
+   `v0.2.0`. So a pinned action installs a matching interpreter.
+3. The newest release otherwise. This is what `@v0.2` or `@main` get.
 
-A leading `v` is optional in the input, so `0.2.0` and `v0.2.0` both work.
+A leading `v` is optional in the input.
 
 ## Platforms
 
@@ -79,93 +75,59 @@ A leading `v` is optional in the input, so `0.2.0` and `v0.2.0` both work.
 | Windows x86_64 | `x86_64-pc-windows-msvc` | `zip` |
 | Windows arm64 | `aarch64-pc-windows-msvc` | `zip` |
 
-The Linux builds are static musl binaries, so they need no particular glibc and
-run in any container, Alpine included. macOS is a single universal binary, so
-Intel and Apple Silicon share one asset. A runner outside this table fails with
-a clear message rather than downloading something wrong.
+The Linux builds are static musl, so they run in any container. `macOS` is
+one universal binary. A runner outside this table fails with a clear message.
 
-Every download is checked against the `SHA256SUMS` file published with the
-release. A mismatch fails the step, so a truncated or tampered download cannot
-surface later as a confusing interpreter error.
-
-Within one job a repeat install is skipped, because the first one unpacks into a
-versioned directory under the runner tool cache and the second finds it there.
+Every download is checked against the `SHA256SUMS` file of the release. A
+repeat install in one job is skipped because the first one lands in the
+runner tool cache.
 
 ## Cutting a release
 
-Releases start from the Actions tab. Open the Release workflow, press Run
-workflow, and choose `patch`, `minor` or `major`. There is no version to
-remember to bump.
+Run the Release workflow from the Actions tab and choose `patch`, `minor` or
+`major`. In one run it bumps the version in `crates/rustscript/Cargo.toml`,
+commits `release vX.Y.Z`, pushes the tag, builds all 5 assets on native
+runners, writes `SHA256SUMS`, creates the release and force moves the minor
+tag.
 
-The workflow then does all of this in one run.
+It is one workflow on purpose. A tag pushed with the default `GITHUB_TOKEN`
+does not trigger other workflows, and splitting it would need a personal
+access token.
 
-1. Works out the next version from the current one in
-   `crates/rustscript/Cargo.toml`.
-2. Stops if that tag already exists on the remote.
-3. Rewrites the package version, syncs `Cargo.lock`, and commits it as
-   `release v0.2.5`.
-4. Pushes the commit and the tag.
-5. Checks the tag matches the crate version, so assets can never disagree with
-   the tag they ship under.
-6. Builds all five assets on native runners, so nothing is cross compiled.
-7. Writes `SHA256SUMS` over the assets.
-8. Creates the release with generated notes.
-9. Force moves the minor tag, so `v0.2` follows the newest `v0.2.z`.
+The workflow does not publish to crates.io on purpose, so the token stays on
+the local machine. After the run, pull and run `cargo publish -p run-rs`. A
+release is not complete until crates.io has it.
 
-It is one workflow rather than a bump workflow feeding a release workflow on
-purpose. A tag pushed with the default `GITHUB_TOKEN` does not trigger other
-workflows, since GitHub blocks that cascade to prevent loops. Keeping it in one
-run avoids needing a personal access token just to wire two halves together.
-
-The workflow does not publish to crates.io on purpose, so the registry token
-never leaves the local machine. After the run finishes, pull the release commit
-and publish with `cargo publish -p run-rs`. A release is not complete until
-crates.io has it.
-
-Pushing a tag by hand still works and skips only the bump.
+Pushing a tag by hand still works.
 
 ```
 git tag v0.2.0-rc.1
 git push origin v0.2.0-rc.1
 ```
 
-That is also the only way to cut a prerelease, since the dispatch form offers
-just the three ordinary bumps. A tag with a hyphen in it is marked as a
-prerelease on the release, does not move the minor tag, and is never picked by
-a bare `rust update`. Naming it installs it, `rust update v0.2.0-rc.1`.
+That is also the only way to cut a prerelease. A tag with a hyphen is marked
+as a prerelease, does not move the minor tag and is never picked by a bare
+`rust update`. `rust update v0.2.0-rc.1` installs it.
 
 ## CI
 
 `ci.yml` runs on every push to `main` and every pull request. It checks
-formatting and spelling on Linux, and runs clippy and the full test suite on
-Linux, macOS and Windows. Clippy runs with `-D warnings`, so a warning fails
-the build.
+formatting and spelling on `Linux` and runs clippy with `-D warnings` and the
+full test suite on `Linux`, `macOS` and `Windows`.
 
-Spelling uses `crate-ci/typos`. Its dictionary rejects a few words that are
-correct here, such as the `ratatui` crate name, so `typos.toml` in the repo root
-lists them. Add a word there when the checker flags a name it does not know.
+Spelling uses `crate-ci/typos`. Words it does not know, like `ratatui`, go
+into `typos.toml`.
 
-Every job sets `timeout-minutes`, so a step that hangs on the runner fails in
-minutes instead of burning to the six hour job limit. No job installs system
-packages. The bench crate draws charts with `plotters`, and it uses the
-`ab_glyph` text renderer with a font embedded in the binary, so no platform
-needs system font libraries to build.
+Every job sets `timeout-minutes`. No job installs system packages. The bench
+crate embeds its font, so no platform needs system font libraries.
 
 ## Marketplace
 
-Listing on the GitHub Marketplace is a manual step. It needs the repository to
-be public, and it is done from the release page in the GitHub web interface
-after accepting the developer agreement. Everything the listing needs, including
-the `branding` block, is already in `action.yml`.
+Listing on the Marketplace is a manual step from the release page in the
+web interface. Everything it needs is already in `action.yml`.
 
 ## Future work
 
-Caching is not implemented yet. Two things would be worth caching.
-
-- The compiled script binaries that `rust build` and `cmp` mode produce, keyed
-  by source hash, so a CPU heavy script pays its cargo build once across runs
-  rather than once per run.
-- The `rust check` result cache, for the same reason.
-
-Both would sit on top of [actions/cache](https://github.com/actions/cache) and
-would add a `cache` input to the action.
+Caching is not implemented yet. The `rust build` binaries and the
+`rust check` result cache would be worth caching on top of
+[actions/cache](https://github.com/actions/cache) with a `cache` input.

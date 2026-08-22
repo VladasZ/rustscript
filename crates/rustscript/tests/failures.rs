@@ -1,7 +1,5 @@
-//! Failure behavior parity. Each case runs twice, compiled by the real
-//! rustc and interpreted, and both runs must agree on the exit code and on the
-//! failure text. This is the failing-path twin of the equivalence suite, which
-//! only covers success output.
+//! Each case runs compiled and interpreted, and both must agree on the exit
+//! code and the failure text. The failing path twin of the equivalence suite.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -25,7 +23,6 @@ fn run_interpreted(path: &PathBuf) -> Output {
         .expect("failed to launch rustscript")
 }
 
-/// Compile with plain rustc, std only, and run the binary.
 fn run_compiled(path: &PathBuf) -> Output {
     let bin = path.with_extension("bin");
     let build = Command::new("rustc")
@@ -44,7 +41,6 @@ fn run_compiled(path: &PathBuf) -> Output {
     out
 }
 
-/// Both runs must exit with `code` and mention `needle` on stderr.
 fn assert_parity(src: &str, code: i32, needle: &str) {
     let path = temp_script(src);
     let compiled = run_compiled(&path);
@@ -154,8 +150,8 @@ fn panic_macro_panics_alike() {
 
 #[test]
 fn divide_by_zero_panics_alike() {
-    // The divisor comes from argc so rustc cannot deny the division at
-    // compile time. Run with no arguments, argc is 1, the divisor is 0.
+    // The divisor comes from argc so `rustc` cannot reject the division at
+    // compile time.
     assert_parity(
         "fn main() {\n    let a = 10;\n    let b = std::env::args().count() as i64 - 1;\n    println!(\"{}\", a / b);\n}\n",
         101,
@@ -163,9 +159,8 @@ fn divide_by_zero_panics_alike() {
     );
 }
 
-/// Newer rustc adds a thread id to the header, `thread 'main' (123) panicked
-/// at`, so the shared needle stays looser and the interpreter's own header is
-/// pinned exactly on top.
+/// Newer `rustc` adds a thread id to the header, so the shared needle stays
+/// loose and the interpreter's own header is pinned exactly on top.
 #[test]
 fn both_print_the_panic_header() {
     let src = "fn main() {\n    let v = vec![1];\n    let i = 5;\n    println!(\"{}\", v[i]);\n}\n";
@@ -181,9 +176,8 @@ fn both_print_the_panic_header() {
     );
 }
 
-/// Integer overflow aborts like debug Rust with the same
-/// message. The `keep` helper is not `const`, so the compiler cannot fold the
-/// operation and reject it, which leaves the overflow to happen at runtime.
+/// `keep` is not `const`, so the compiler cannot fold the overflow and reject
+/// it.
 #[test]
 fn integer_overflow_panics_like_rust() {
     fn overflow(expr: &str) -> String {
@@ -211,18 +205,16 @@ fn integer_overflow_panics_like_rust() {
     );
 }
 
-/// The scalar while plan runs this loop unboxed until the multiplication
-/// overflows, then the generic path re-runs the failing iteration and must
-/// panic with the exact debug Rust message.
+/// The while plan runs unboxed until the overflow, then the generic re-run
+/// must panic with the exact message.
 #[test]
 fn while_plan_overflow_panics_like_rust() {
     let src = "fn main() {\n    let mut n: i64 = 3;\n    let mut rounds: i64 = 0;\n    while n != 0 {\n        n *= 3;\n        rounds += 1;\n    }\n    println!(\"{rounds}\");\n}\n";
     assert_parity(src, 101, "attempt to multiply with overflow");
 }
 
-/// The vec while plan journals writes; an out-of-bounds store fails the
-/// iteration over to the generic path, which must panic with the exact
-/// debug Rust message on the exact write.
+/// An out of bounds store fails the while plan over and the generic path
+/// must panic on the exact write.
 #[test]
 fn while_plan_vec_write_oob_panics_like_rust() {
     let src = "fn main() {\n    let mut v = vec![1i64, 2, 3];\n    let mut i: usize = 0;\n    while i < 5 {\n        v[i] = 0;\n        i += 1;\n    }\n    println!(\"{}\", v[0]);\n}\n";
@@ -233,17 +225,14 @@ fn while_plan_vec_write_oob_panics_like_rust() {
     );
 }
 
-/// The map effects plan journals inserts; an overflow after an insert in
-/// the same iteration fails over, the undo removes the insert, and the
-/// generic re-run must panic with the exact debug Rust message.
+/// The undo must remove the journaled insert before the generic re-run.
 #[test]
 fn map_plan_overflow_after_insert_panics_like_rust() {
     let src = "use std::collections::HashMap;\nfn main() {\n    let mut m: HashMap<i64, i64> = HashMap::new();\n    let mut acc: i64 = i64::MAX - 5;\n    for k in 0..10 {\n        m.insert(k, k);\n        acc += 1;\n    }\n    println!(\"{} {acc}\", m.len());\n}\n";
     assert_parity(src, 101, "attempt to add with overflow");
 }
 
-/// The read twin: the element load past the end fails over and the generic
-/// path panics.
+/// The read twin of the store test above.
 #[test]
 fn while_plan_vec_read_oob_panics_like_rust() {
     let src = "fn main() {\n    let v = vec![5i64, 6];\n    let mut sum: i64 = 0;\n    let mut i: usize = 0;\n    while i < 4 {\n        sum += v[i];\n        i += 1;\n    }\n    println!(\"{sum}\");\n}\n";
@@ -254,17 +243,15 @@ fn while_plan_vec_read_oob_panics_like_rust() {
     );
 }
 
-/// The function plan runs this recursion unboxed until the multiplication
-/// overflows, then the plan discards the run and the generic path runs the
-/// whole call again, which must panic with the exact debug Rust message.
+/// The function plan discards the run on overflow and the generic path runs
+/// the whole call again.
 #[test]
 fn fn_plan_overflow_panics_like_rust() {
     let src = "fn grow(n: i64) -> i64 {\n    if n <= 0 { 1 } else { grow(n - 1) * 3 }\n}\nfn main() {\n    println!(\"{}\", grow(45));\n}\n";
     assert_parity(src, 101, "attempt to multiply with overflow");
 }
 
-/// The u64 twin: the width-tagged subtraction underflows mid-tree and the
-/// generic re-run must panic on the exact op.
+/// The u64 twin, underflow mid tree.
 #[test]
 fn fn_plan_underflow_panics_like_rust() {
     let src = "fn down(n: u64) -> u64 {\n    if n == 0 { 0 } else { down(n - 2) }\n}\nfn main() {\n    println!(\"{}\", down(5));\n}\n";
@@ -276,10 +263,8 @@ fn process_exit_code_passes_through_alike() {
     assert_parity("fn main() {\n    std::process::exit(3);\n}\n", 3, "");
 }
 
-/// An `Err` out of main exits 1 in both worlds, and the message renders the
-/// `Debug` form of the payload exactly like a compiled binary, quotes on a
-/// `String` included. The interpreter once printed the bare `Display` text
-/// here, which dropped the quotes.
+/// The message is the `Debug` form of the payload, quotes on a `String`
+/// included. The interpreter once printed `Display` here.
 #[test]
 fn err_from_main_exits_one_alike() {
     let src = "fn main() -> Result<(), String> {\n    Err(\"boom\".to_string())\n}\n";
@@ -295,9 +280,7 @@ fn err_from_main_exits_one_alike() {
     );
 }
 
-/// The other common error payloads out of `main` keep their compiled
-/// rendering too: a boxed message stays quoted, an io error prints its
-/// `Os { .. }` debug shape.
+/// A boxed message stays quoted and an io error prints its `Os { .. }` shape.
 #[test]
 fn err_from_main_matches_compiled_rendering() {
     assert_parity(
@@ -312,9 +295,8 @@ fn err_from_main_matches_compiled_rendering() {
     );
 }
 
-/// An `anyhow::Result` main is the exception to the debug rendering: real
-/// anyhow's `Debug` prints the bare message, no quotes. Interpreter only,
-/// the plain rustc this suite compiles with has no anyhow.
+/// Real anyhow's `Debug` prints the bare message without quotes. Interpreter
+/// only, plain `rustc` has no anyhow.
 #[test]
 fn err_from_anyhow_main_prints_the_bare_message() {
     for src in [
@@ -333,9 +315,7 @@ fn err_from_anyhow_main_prints_the_bare_message() {
     }
 }
 
-/// A missing feature found at compile time reports with the stable
-/// machine-readable prefix and exit 1. The differential harness keys its
-/// gap-versus-bug split on this line.
+/// The differential harness keys its gap versus bug split on this prefix.
 #[test]
 fn unsupported_errors_carry_the_stable_prefix() {
     let path =
@@ -350,9 +330,8 @@ fn unsupported_errors_carry_the_stable_prefix() {
     );
 }
 
-/// A missing feature only discovered at runtime aborts like a panic, and its
-/// message names the gap, an unknown constant here, so tooling can still
-/// tell it apart from a genuine script panic.
+/// A runtime gap aborts like a panic but names the gap, so tooling can tell
+/// it from a script panic.
 #[test]
 fn runtime_unsupported_constant_names_the_gap() {
     let path =

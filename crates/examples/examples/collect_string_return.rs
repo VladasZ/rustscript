@@ -1,12 +1,10 @@
 #!/usr/bin/env rust
 
-// `collect` is type driven, and a function's own `-> String` is the third place
-// that names the target, after a turbofish and an annotated `let`. The shape
-// comes from a real script whose timestamp helper returned a bare
-// `chars().take(19).collect()`, which built a char list and stamped
-// run-['2', '0', '2', '6', ..].log into a filename instead of failing.
+// A function's `-> String` names the `collect` target. A real script once
+// returned a bare `chars().take(19).collect()`, got a char list, and stamped
+// `run-['2', '0', '2', '6', ..].log` into a filename.
 
-// The plain case: the body's trailing expression is the collect.
+// The tail expression.
 fn stamp(iso: &str) -> String {
     iso.replace([':', '.'], "-")
         .replace('T', "_")
@@ -15,7 +13,7 @@ fn stamp(iso: &str) -> String {
         .collect()
 }
 
-// A tail `if` returns from both branches, so both collects are the return value.
+// Both branches of a tail `if`.
 fn initials(name: &str, short: bool) -> String {
     if short {
         name.chars().take(1).collect()
@@ -24,7 +22,7 @@ fn initials(name: &str, short: bool) -> String {
     }
 }
 
-// A tail `match` does the same across its arms.
+// The arms of a tail `match`.
 fn head(s: &str, how: u8) -> String {
     match how {
         0 => s.chars().take(0).collect(),
@@ -33,7 +31,7 @@ fn head(s: &str, how: u8) -> String {
     }
 }
 
-// An early `return` hands back a collect too, and the tail is a plain String.
+// An early `return`.
 fn label(s: &str) -> String {
     if s.is_empty() {
         return "abc".chars().collect();
@@ -41,7 +39,7 @@ fn label(s: &str) -> String {
     s.to_string()
 }
 
-// A `let else` commonly returns, and that return is not part of the let's value.
+// A `let else` return is not part of the let's value.
 fn first_word(s: &str) -> String {
     let Some(idx) = s.find(' ') else {
         return s.chars().collect();
@@ -49,8 +47,7 @@ fn first_word(s: &str) -> String {
     s[0..idx].to_string()
 }
 
-// The return type must not reach a closure's own collect, which builds a Vec
-// here and would be broken by inheriting the outer String.
+// The return type must not reach a closure's own collect.
 fn lengths(words: &[String]) -> String {
     let counts: Vec<usize> = words
         .iter()
@@ -66,8 +63,7 @@ fn lengths(words: &[String]) -> String {
     out
 }
 
-// A function that does not return String must keep collecting into a Vec, even
-// when the tail is a bare collect.
+// A non String return type still collects into a Vec.
 fn chars_of(s: &str) -> Vec<char> {
     s.chars().collect()
 }

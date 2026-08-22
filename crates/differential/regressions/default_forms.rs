@@ -1,6 +1,4 @@
-// Every spelling of `Default::default()` the generator emits, a struct
-// update that keeps declaration order, and `unwrap_or_default` reading the
-// payload type off a turbofish, an annotation, a `None::<T>`, and a branch.
+// Every spelling of `Default::default()` the generator emits.
 use std::collections::HashMap;
 
 #[derive(Default, Debug, Clone, PartialEq)]

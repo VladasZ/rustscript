@@ -1,6 +1,4 @@
-// The format spec surface: width, fill, alignment, sign, sign-aware zero
-// padding, precision, radix and exponent types, and their `#` alternate
-// forms, over integers, floats, and strings.
+// The format spec surface.
 
 fn main() {
     let number = 255i64;

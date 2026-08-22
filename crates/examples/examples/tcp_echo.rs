@@ -1,7 +1,5 @@
 #!/usr/bin/env rust
 
-// A tiny loopback exchange: bind a listener, connect to it, send a line, and
-// read it back on the server side.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};

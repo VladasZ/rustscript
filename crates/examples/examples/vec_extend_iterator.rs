@@ -1,8 +1,7 @@
 #!/usr/bin/env rust
 
-// extend takes anything iterable, not only another Vec. A lazy argument such as
-// `.iter().map(..)` used to append nothing at all and still report success, so
-// the caller saw a short vec and no error.
+// `extend` with a lazy argument like `.iter().map(..)` once appended nothing
+// and reported success.
 
 fn argv(devices: &[String]) -> Vec<&str> {
     let mut out: Vec<&str> = vec!["readlink", "-f"];

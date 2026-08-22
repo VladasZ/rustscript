@@ -1,12 +1,6 @@
-//! Discover and parse every module file a script pulls in through `mod`
-//! declarations, following the same directory rules as rustc. The result is a
-//! flat list of modules, each with its path from the crate root, plus the file
-//! set the checker mirrors into its cargo project.
-//!
-//! A script that lives inside a cargo crate may also depend on a local `path`
-//! crate, for example a `shared` helper library. Such a crate is grafted in as
-//! a top level module so `use shared::x` resolves at runtime without a `mod`
-//! declaration, while the checker sees it as a real path dependency.
+//! Loads every module a script pulls in through `mod` with the `rustc`
+//! directory rules. Local `path` crates are grafted in as top level modules,
+//! the checker sees them as real path dependencies.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -15,44 +9,31 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow, bail};
 use syn::{Item, LitStr};
 
-/// One module of the script, file backed or inline.
 pub struct ModuleSrc {
-    /// Segments from the crate root, empty for the root module.
     pub path: Vec<String>,
-    /// The module's items, with `mod` declarations already expanded away.
+    /// `mod` declarations are already expanded away.
     pub items: Vec<Item>,
-    /// The file the module was read from, relative to the script directory.
     /// Inline modules carry their parent's file. Shown in error traces.
     pub file: Arc<str>,
-    /// True for the root module of a crate: the script root, or the grafted
-    /// root of a local path dependency. `crate::` paths pin here, and `super`
-    /// must not walk past it into the surrounding script.
+    /// `crate::` pins here and `super` must not walk past it.
     pub crate_root: bool,
 }
 
-/// A local `path` dependency crate that the script uses, grafted in from
-/// source. The checker adds it to the cargo project as a path dependency.
 pub struct CrateDep {
-    /// The crate name, which is also the top level module it grafts as.
+    /// Also the top level module it grafts as.
     pub name: String,
-    /// The crate directory, the one that holds its `Cargo.toml`.
     pub dir: PathBuf,
-    /// The crate's source files, kept only so a change re-triggers the check.
+    /// Kept only so a change re-triggers the check.
     pub files: Vec<(PathBuf, String)>,
 }
 
-/// The whole script as parsed source files.
 pub struct Program {
-    /// Root module first, then discovery order, then grafted crate modules.
+    /// Root first, then discovery order, then grafted crates.
     pub modules: Vec<ModuleSrc>,
-    /// Every source file: path relative to the script directory, and content.
-    /// The root script is first, stored under its own file name so rustc
-    /// diagnostics from the mirrored project show the real script name.
+    /// The root script is first under its own name so diagnostics show it.
     pub files: Vec<(PathBuf, String)>,
-    /// Local crates the script pulls in through a `path` dependency.
     pub crate_deps: Vec<CrateDep>,
-    /// True when `fn main` carries `#[tokio::main]`, routing the script to the
-    /// async surface: `.await`, `tokio::spawn`, and `join!`.
+    /// `fn main` carries `#[tokio::main]`.
     pub tokio_main: bool,
 }
 
@@ -84,9 +65,7 @@ pub fn load(script_path: &Path, root_source: &str) -> Result<Program> {
     })
 }
 
-/// The name the root script keeps inside the mirrored cargo project. An
-/// extensionless name, a launcher symlink target for example, falls back to
-/// `main.rs` so the mirrored file stays a name cargo builds without fuss.
+/// An extensionless name falls back to `main.rs` so cargo builds it.
 fn root_file_name(script_path: &Path) -> String {
     match script_path.file_name().and_then(|n| n.to_str()) {
         Some(name) if Path::new(name).extension() == Some(OsStr::new("rs")) => name.to_string(),
@@ -94,9 +73,7 @@ fn root_file_name(script_path: &Path) -> String {
     }
 }
 
-/// Look for `#[tokio::main]` on `fn main`. Only the multi thread runtime is
-/// offered, so a `current_thread` flavor is rejected with a clear error, as is
-/// any other explicit flavor. A missing flavor means the multi thread default.
+/// Only the multi thread runtime exists, so any explicit flavor is rejected.
 fn detect_tokio_main(items: &[Item]) -> Result<bool> {
     for item in items {
         let Item::Fn(f) = item else { continue };
@@ -133,8 +110,7 @@ fn detect_tokio_main(items: &[Item]) -> Result<bool> {
     Ok(false)
 }
 
-/// Whether an item is gated to `#[cfg(test)]`, matched narrowly so a
-/// `#[cfg(not(test))]` item is still kept.
+/// Matched narrowly so `#[cfg(not(test))]` is still kept.
 fn is_cfg_test(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|a| {
         a.path().is_ident("cfg")
@@ -158,14 +134,11 @@ fn item_attrs(item: &Item) -> &[syn::Attribute] {
     }
 }
 
-/// How deep `mod` nesting may go before the loader calls it a cycle. Real
-/// module trees are a handful of levels, so this only ever catches a loop.
+/// Real trees are a handful of levels, so this only ever catches a loop.
 const MAX_MODULE_DEPTH: usize = 64;
 
-/// Walk one module's items, loading `mod name;` files and expanding inline
-/// `mod name { .. }` blocks. `children_dir` is where this module's child
-/// files live. Returns this module with its `mod` items stripped; discovered
-/// children are appended to `modules` depth first, their files to `files`.
+/// Returns this module with its `mod` items stripped. Children are appended
+/// depth first.
 fn collect(
     modules: &mut Vec<ModuleSrc>,
     files: &mut Vec<(PathBuf, String)>,
@@ -175,12 +148,10 @@ fn collect(
     file: Arc<str>,
     items: Vec<Item>,
 ) -> Result<ModuleSrc> {
-    // A `#[path]` that points back at its own file recurses forever. Without
-    // this the loader overflowed the native stack and the process died with a
-    // bare "fatal runtime error", naming neither the script nor the module.
+    // A `#[path]` pointing at its own file once overflowed the native stack
+    // with a bare "fatal runtime error".
     if path.len() > MAX_MODULE_DEPTH {
-        // Only the tail is named. The full path at this depth is the same
-        // segment repeated sixty times, which tells the reader nothing.
+        // Only the tail, the full path is one segment repeated 60 times.
         bail!(
             "module `{}` nests deeper than {MAX_MODULE_DEPTH} levels, which usually means a `#[path]` points back at its own file",
             path.last().map_or("", String::as_str)
@@ -189,8 +160,8 @@ fn collect(
     let mut kept = Vec::with_capacity(items.len());
     let mut seen: Vec<String> = Vec::new();
     for item in items {
-        // A `#[cfg(test)]` item, usually a `mod tests`, never runs under the
-        // interpreter, so skip it rather than compile its test-only constructs.
+        // A `#[cfg(test)]` item never runs here, so skip its test only
+        // constructs.
         if is_cfg_test(item_attrs(&item)) {
             continue;
         }
@@ -208,15 +179,12 @@ fn collect(
         seen.push(name.clone());
         let mut child_path = path.clone();
         child_path.push(name.clone());
-        // `#[path = ".."]` on `mod name;` points at an explicit file, resolved relative to the
-        // declaring module's directory. A file loaded that way has its own submodules resolve
-        // relative to that file's own directory, which is what Rust does. This lets a bin split its
-        // modules into a subdirectory named after the bin, the only way to avoid cargo treating each
-        // module file in src/bin as a separate binary.
+        // A `#[path]` file's own submodules resolve relative to that file's
+        // directory, like Rust does. This lets a bin keep its modules in a
+        // subdirectory so cargo does not treat each as a binary.
         let path_attr = mod_path_attr(&m);
         let child_dir;
         let (child_items, child_file) = match m.content {
-            // An inline module lives in its parent's file.
             Some((_, inline_items)) => {
                 child_dir = children_dir.join(&name);
                 (inline_items, file.clone())
@@ -254,7 +222,6 @@ fn collect(
     })
 }
 
-/// The string in `#[path = ".."]` on a `mod`, if present.
 fn mod_path_attr(m: &syn::ItemMod) -> Option<String> {
     for attr in &m.attrs {
         if attr.path().is_ident("path")
@@ -270,8 +237,7 @@ fn mod_path_attr(m: &syn::ItemMod) -> Option<String> {
     None
 }
 
-/// Read and parse the file behind `mod name;`, trying `name.rs` then
-/// `name/mod.rs` inside the declaring module's directory.
+/// `name.rs` then `name/mod.rs`.
 fn load_file(
     files: &mut Vec<(PathBuf, String)>,
     script_dir: &Path,
@@ -300,7 +266,6 @@ fn load_file(
     load_file_at(files, script_dir, &file, child_path)
 }
 
-/// Read and parse one module source file at an explicit path, recording it for the checker.
 fn load_file_at(
     files: &mut Vec<(PathBuf, String)>,
     script_dir: &Path,
@@ -324,14 +289,9 @@ fn load_file_at(
     Ok((ast.items, display))
 }
 
-/// Graft each local `path` dependency crate in as a top level module named
-/// after the crate, loading its `src/lib.rs` and the module tree below it. The
-/// runtime then resolves `use crate_name::..` against the grafted modules, and
-/// the returned deps tell the checker to add them as path dependencies.
-/// Whether any of the script's own sources names this crate. Grafting one the
-/// script never mentions would pull its whole surface into `rust check`, so a
-/// `#[tokio::main]` script sharing a crate with a big helper library was
-/// rejected for methods that only the helper calls and it never reaches.
+/// Whether the script's own sources name this crate. Grafting an unused one
+/// pulls its whole surface into `rust check`, which once rejected a script for
+/// methods only a helper library calls.
 fn uses_crate(files: &[(PathBuf, String)], module_name: &str) -> bool {
     let needle = format!("{module_name}::");
     files.iter().any(|(_, source)| source.contains(&needle))
@@ -349,11 +309,8 @@ fn graft_crate_deps(
         if !lib.is_file() {
             continue;
         }
-        // Rust code refers to a crate by its identifier, so a hyphenated
-        // package name like `verify-common` is `verify_common` in `use`. Cargo
-        // does this mapping for the checker's real path dependency; the grafted
-        // module must match it or `use verify_common::..` resolves against
-        // nothing at runtime.
+        // `verify-common` is `verify_common` in `use`, the grafted module must
+        // match.
         let module_name = name.replace('-', "_");
         if !uses_crate(files, &module_name) {
             continue;
@@ -383,8 +340,7 @@ fn graft_crate_deps(
     Ok(deps)
 }
 
-/// Read the nearest `Cargo.toml` above the script and return its `[dependencies]`
-/// entries that point at a local `path`, resolved to absolute directories.
+/// The local `path` entries of the nearest `Cargo.toml`, as absolute dirs.
 fn local_path_deps(script_path: &Path) -> Vec<(String, PathBuf)> {
     let Some(manifest) = nearest_manifest(script_path) else {
         return Vec::new();
@@ -406,9 +362,8 @@ fn local_path_deps(script_path: &Path) -> Vec<(String, PathBuf)> {
             .and_then(|t| t.get("path"))
             .and_then(|p| p.as_str())
         {
-            // The checker writes this dir into a throwaway manifest under the
-            // cache dir, so a relative path would resolve against the wrong
-            // root. Canonicalize to an absolute path pinned to the real crate.
+            // The checker writes this into a manifest under the cache dir, so
+            // a relative path would resolve against the wrong root.
             let dir = manifest_dir.join(rel);
             let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
             out.push((name.clone(), dir));
@@ -417,10 +372,7 @@ fn local_path_deps(script_path: &Path) -> Vec<(String, PathBuf)> {
     out
 }
 
-/// The closest `Cargo.toml` at or above the script's directory, if any. The
-/// path is canonicalized first, so a script run by a bare relative name like
-/// `rust kimai.rs` still walks up the real tree to find the manifest that
-/// grafts its `shared` crate.
+/// Canonicalized first, so `rust kimai.rs` still walks up the real tree.
 fn nearest_manifest(script_path: &Path) -> Option<PathBuf> {
     let absolute = std::fs::canonicalize(script_path).unwrap_or_else(|_| script_path.to_path_buf());
     let mut dir = absolute.parent();

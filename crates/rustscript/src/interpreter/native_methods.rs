@@ -1,6 +1,4 @@
-//! Methods on live host resources:
-//! files, readers, writers, sockets, children, clocks, and temp files, all
-//! behind `Value::Native(Arc<Mutex<Native>>)`.
+//! Methods on live host resources behind `Value::Native`.
 
 use std::io::{Seek, SeekFrom, Write};
 use std::sync::Arc;
@@ -15,8 +13,7 @@ use super::value::Value;
 
 type Handle = Arc<Mutex<Native>>;
 
-/// Pull the next line from a lazy `Lines` iterator, `None` at end of input.
-/// Each item is a `Result<String>` so a script can use `line?` in the loop.
+/// Each item is a `Result<String>` so a script can use `line?`.
 pub(super) fn lines_next(handle: &Handle) -> Option<Value> {
     let mut h = handle.lock();
     if let Native::Lines(it) = &mut *h {
@@ -30,8 +27,6 @@ pub(super) fn lines_next(handle: &Handle) -> Option<Value> {
     }
 }
 
-/// Drain a lazy `Lines` iterator fully, for `.collect()` or a materializing
-/// `for` loop.
 pub(super) fn drain_lines(handle: &Handle) -> Vec<Value> {
     let mut out = Vec::new();
     while let Some(v) = lines_next(handle) {
@@ -40,7 +35,6 @@ pub(super) fn drain_lines(handle: &Handle) -> Vec<Value> {
     out
 }
 
-/// A byte count as the integer scripts see.
 fn int_len(n: usize) -> i64 {
     i64::try_from(n).expect("length exceeds i64")
 }
@@ -52,9 +46,8 @@ fn io_err<T>(r: std::io::Result<T>, on_ok: impl FnOnce(T) -> Value) -> Value {
     }
 }
 
-/// The buffer arrives as a copy of the script variable, so the vm moves the
-/// updated value back into the variable register after the call, see the
-/// mut-reference handling in `compile_method`.
+/// The buffer arrives as a copy, the vm moves it back into the variable
+/// after the call, see `compile_method`.
 fn append_string(target: &mut Value, text: &str) {
     if let Value::Str(s) = target {
         let mut out = s.to_string();
@@ -63,7 +56,7 @@ fn append_string(target: &mut Value, text: &str) {
     }
 }
 
-/// A `u8` argument, which a script writes as `b'\n'` or as a plain integer.
+/// Written as `b'\n'` or as a plain integer.
 fn byte_arg(arg: Option<&Value>, method: &str) -> Result<u8> {
     let Some(Value::Int(n)) = arg else {
         bail!("{method} needs a byte as its first argument");
@@ -81,15 +74,14 @@ fn append_bytes(target: &Value, bytes: &[u8]) {
     }
 }
 
-/// Dispatch a method call on a native handle. Returns `Ok(None)` when the
-/// method is unknown for this handle so the caller can raise a good error.
+/// `Ok(None)` when the method is unknown for this handle.
 pub(super) fn native_method(
     handle: &Handle,
     method: &MethodName,
     args: &mut [Value],
 ) -> Result<Option<Value>> {
-    // A lopdf Document dispatches by receiver first, its method names mirror
-    // the real crate and must not collide with the name-keyed arms below.
+    // A lopdf Document dispatches by receiver first, its names must not
+    // collide with the name keyed arms below.
     if matches!(&*handle.lock(), Native::Pdf(_)) {
         let mut h = handle.lock();
         let Native::Pdf(doc) = &mut *h else {
@@ -108,9 +100,8 @@ pub(super) fn native_method(
     if let Some(v) = joinerr_method(handle, method) {
         return Ok(Some(v));
     }
-    // The families use disjoint method names, so the first helper that
-    // recognizes the name answers. Handles that consume self or hand out
-    // sub-handles move out of the Mutex inside their family helper.
+    // The families use disjoint names. Handles that consume self move out of
+    // the Mutex inside their helper.
     if let Some(v) = reader_native_method(handle, method, args)? {
         return Ok(Some(v));
     }
@@ -135,7 +126,6 @@ pub(super) fn native_method(
     temp_native_method(handle, method)
 }
 
-/// The accessors of a structured io error value.
 pub(super) fn io_error_method(handle: &Handle, method: &MethodName) -> Option<Value> {
     let h = handle.lock();
     let Native::IoErr { kind, code, .. } = &*h else {
@@ -151,9 +141,8 @@ pub(super) fn io_error_method(handle: &Handle, method: &MethodName) -> Option<Va
     }
 }
 
-/// The accessors of a structured `JoinError` value. A task the interpreter
-/// runs can end early only by panicking, so cancellation always answers
-/// false, exactly like a program that never calls `abort`.
+/// A task can end early only by panicking, so cancellation always answers
+/// false.
 pub(super) fn joinerr_method(handle: &Handle, method: &MethodName) -> Option<Value> {
     let h = handle.lock();
     let Native::JoinErr { is_panic, .. } = &*h else {
@@ -166,7 +155,6 @@ pub(super) fn joinerr_method(handle: &Handle, method: &MethodName) -> Option<Val
     }
 }
 
-/// Readers: files, socket readers, and lazy line iterators.
 fn reader_native_method(
     handle: &Handle,
     method: &MethodName,
@@ -208,8 +196,7 @@ fn reader_native_method(
             let Some(r) = h.as_read() else {
                 bail!("read on non-reader {}", h.type_name());
             };
-            // Fill up to the script buffer's length, then copy back into it,
-            // since the buffer arg arrives as a shared Vec value.
+            // The buffer arrives as a shared Vec, so copy back into it.
             let len = match args.first() {
                 Some(Value::Vec(v)) => v.lock().len(),
                 _ => 0,
@@ -242,10 +229,8 @@ fn reader_native_method(
                 Value::Int(int_len(n))
             })));
         }
-        // The byte oriented counterpart of read_line, for output that is not
-        // guaranteed to be UTF-8. The delimiter is kept in the buffer, as the
-        // real method does, so a caller can tell a final unterminated line
-        // from a terminated one.
+        // The delimiter is kept in the buffer like the real method, so a
+        // caller can tell a final unterminated line.
         BuiltinId::ReadUntil => {
             let delim = byte_arg(args.first(), "read_until")?;
             let mut h = handle.lock();
@@ -270,13 +255,11 @@ fn reader_native_method(
     Ok(None)
 }
 
-/// The lazy line iterator family: `lines()` moves the reader out, `next` and
-/// `collect` walk the iterator it left behind.
+/// `lines()` moves the reader out, `next` and `collect` walk the iterator.
 fn lines_native_method(handle: &Handle, method: &MethodName) -> Option<Value> {
     match method.id {
         BuiltinId::Lines => {
-            // Move the reader out into a lazy line iterator so a for-loop can
-            // stream it. The original handle is left empty.
+            // The original handle is left empty.
             let taken = std::mem::replace(&mut *handle.lock(), Native::Taken);
             let iter: super::native::LineIter = match taken {
                 Native::File(r) => {
@@ -313,12 +296,10 @@ fn lines_native_method(handle: &Handle, method: &MethodName) -> Option<Value> {
     }
 }
 
-/// Writers shared by files, sockets, and process stdin.
 fn writer_native_method(handle: &Handle, method: &MethodName, args: &mut [Value]) -> Option<Value> {
     match method.id {
-        // The formatter buffer of a user `fmt` impl. `write!` lowers to
-        // `write_all`, and `f.write_str(..)` is the same append. The answer
-        // is `fmt::Result`, which `?` in the impl body unwraps.
+        // The formatter buffer of a user `fmt` impl, the answer is
+        // `fmt::Result`.
         BuiltinId::WriteAll
         | BuiltinId::Write
         | BuiltinId::WriteStr
@@ -368,7 +349,6 @@ fn writer_native_method(handle: &Handle, method: &MethodName, args: &mut [Value]
     None
 }
 
-/// File-only extras beyond plain reads and writes.
 fn file_native_method(
     handle: &Handle,
     method: &MethodName,
@@ -432,7 +412,6 @@ fn file_native_method(
     Ok(None)
 }
 
-/// A spawned child process.
 fn child_native_method(handle: &Handle, method: &MethodName) -> Result<Option<Value>> {
     match method.id {
         BuiltinId::Wait => {
@@ -486,7 +465,6 @@ fn child_native_method(handle: &Handle, method: &MethodName) -> Result<Option<Va
     Ok(None)
 }
 
-/// TCP listeners and streams.
 fn net_native_method(handle: &Handle, method: &MethodName) -> Result<Option<Value>> {
     match method.id {
         BuiltinId::Accept => {
@@ -548,7 +526,6 @@ fn net_native_method(handle: &Handle, method: &MethodName) -> Result<Option<Valu
     Ok(None)
 }
 
-/// UDP sockets.
 fn udp_native_method(
     handle: &Handle,
     method: &MethodName,
@@ -595,7 +572,6 @@ fn udp_native_method(
     Ok(None)
 }
 
-/// `Instant` and `SystemTime`.
 fn time_native_method(
     handle: &Handle,
     method: &MethodName,
@@ -642,7 +618,6 @@ fn time_native_method(
     Ok(None)
 }
 
-/// Temp dirs and named temp files.
 fn temp_native_method(handle: &Handle, method: &MethodName) -> Result<Option<Value>> {
     match method.id {
         BuiltinId::Path => {
@@ -723,8 +698,7 @@ fn as_int(v: Option<&Value>) -> Option<i64> {
 }
 
 fn seek_from(v: Option<&Value>) -> SeekFrom {
-    // A script passes SeekFrom::Start(n) etc., which the interpreter models as
-    // an enum value carrying the offset.
+    // `SeekFrom::Start(n)` is an enum value carrying the offset.
     if let Some(Value::Enum { def, variant, data }) = v {
         let n = data.lock().first().and_then(|x| match x {
             Value::Int(i) => Some(*i),

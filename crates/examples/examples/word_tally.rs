@@ -1,6 +1,5 @@
 #!/usr/bin/env rust
 
-// Group values with the HashMap entry API.
 
 use std::collections::HashMap;
 

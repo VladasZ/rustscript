@@ -1,9 +1,7 @@
 #!/usr/bin/env rust
 
-// An iterator that is read part way and then handed on. What it already gave
-// out must not come back a second time. Getting this wrong is quiet, the first
-// item simply appears twice, once from `next` and once from whatever drains
-// the rest.
+// An iterator read part way and handed on must not give the first item
+// twice.
 
 fn main() {
     let mut words = "max 20x extra".split(' ');
@@ -12,7 +10,7 @@ fn main() {
     println!("split first: {first:?}");
     println!("split rest: {rest:?}");
 
-    // The shape this came from, a leading word styled apart from the tail.
+    // The shape this came from.
     let mut parts = "default_claude_max_20x"
         .trim_start_matches("default_claude_")
         .split('_');
@@ -33,8 +31,7 @@ fn main() {
     println!("first letter: {:?}", letters.next());
     println!("rest of letters: {}", letters.as_str());
 
-    // `by_ref` lends the iterator out and hands it back consumed, so the two
-    // halves below must not overlap.
+    // The 2 halves must not overlap.
     let mut rest = "a b c d e".split(' ');
     let head: Vec<&str> = rest.by_ref().take(2).collect();
     let tail: Vec<&str> = rest.collect();

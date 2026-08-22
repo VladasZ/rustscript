@@ -1,11 +1,8 @@
-//! `rust supported`: print the bridged method surface the binary actually
-//! carries, straight from the tables the coverage harvest generated. The same
-//! rendering produces `docs/supported.md`, and a test keeps that page in sync,
-//! so neither view can drift from the dispatch source.
+//! `rust supported` and `docs/supported.md`, both from the harvested tables.
+//! A test keeps the page in sync.
 
 use crate::interpreter::coverage::surface;
 
-/// Receiver display names for the internal table keys.
 fn recv_label(recv: &str) -> &str {
     match recv {
         "*" => "any value",
@@ -16,7 +13,6 @@ fn recv_label(recv: &str) -> &str {
     }
 }
 
-/// Group the surface by receiver, in table order.
 fn groups() -> Vec<(&'static str, Vec<&'static str>)> {
     let mut out: Vec<(&'static str, Vec<&'static str>)> = Vec::new();
     for (recv, name) in surface() {
@@ -28,7 +24,6 @@ fn groups() -> Vec<(&'static str, Vec<&'static str>)> {
     out
 }
 
-/// The terminal listing.
 pub fn print_supported() {
     println!("Methods the interpreter implements, by receiver.\n");
     for (recv, names) in groups() {
@@ -37,13 +32,12 @@ pub fn print_supported() {
     }
 }
 
-/// The markdown page committed as `docs/supported.md`.
 pub fn markdown() -> String {
     let mut out = String::from(
         "# Supported interpreter surface\n\n\
-         Generated from the bridge dispatch tables. Do not edit by hand; run\n\
-         `rust supported md > docs/supported.md` after changing a bridge, and\n\
-         the `supported_page_is_current` test enforces it.\n",
+         Generated from the bridge tables, do not edit by hand. Run\n\
+         `rust supported md > docs/supported.md` after changing a bridge.\n\
+         The `supported_page_is_current` test enforces it.\n",
     );
     for (recv, names) in groups() {
         out.push_str(&format!("\n## {}\n\n", recv_label(recv)));
@@ -59,7 +53,6 @@ mod tests {
     use super::*;
     use std::fs::read_to_string;
 
-    /// The committed page must match what the tables render right now.
     /// Regenerate with `rust supported md > docs/supported.md`.
     #[test]
     fn supported_page_is_current() {

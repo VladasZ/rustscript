@@ -1,5 +1,4 @@
-//! A generated program body with the items it needs above `main`: user
-//! types, consts, and helper functions.
+//! A generated program body with the items it needs above `main`.
 
 use std::collections::BTreeSet;
 
@@ -13,7 +12,7 @@ use crate::lang::user::UserDef;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ParamMode {
     Owned,
-    /// `&T`, cloned into an owned local first thing in the body.
+    /// `&T`, cloned into an owned local first.
     Ref,
 }
 
@@ -26,16 +25,14 @@ pub struct Param {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum FnKind {
-    /// A body over owned and borrowed parameters. The return type is the
-    /// only place a bare `collect` or `sum` in the body states its target,
-    /// and a `Result` return is where `?` converts through `From`.
+    /// The return type is where a bare `collect` states its target and where
+    /// `?` converts through `From`.
     Plain {
         params: Vec<Param>,
         ret: Ty,
         body: Expr,
     },
-    /// `fn name(target: &mut T, params..) { *target = value; }`, the value
-    /// reading the old target through `diff_cur`.
+    /// `fn name(target: &mut T, params..) { *target = value; }`.
     Writer {
         target: Ty,
         params: Vec<Param>,
@@ -116,7 +113,6 @@ impl FnDef {
         }
     }
 
-    /// Every expression the definition holds.
     pub fn exprs(&self) -> Vec<&Expr> {
         match &self.kind {
             FnKind::Plain { body, .. } => vec![body],
@@ -144,8 +140,7 @@ impl FnDef {
     }
 }
 
-/// The signature text and the prologue that clones borrowed parameters
-/// into the owned locals the body is typed against.
+/// The signature and the prologue that clones borrowed parameters.
 fn render_params(params: &[Param]) -> (String, String) {
     let mut sig = Vec::new();
     let mut prologue = String::new();
@@ -166,7 +161,6 @@ fn render_params(params: &[Param]) -> (String, String) {
     (sig.join(", "), prologue)
 }
 
-/// The bindings a statement list writes to, for `mut` on its own lets.
 pub fn block_mutable(stmts: &[Stmt]) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for stmt in stmts {
@@ -193,7 +187,6 @@ impl ConstDef {
     }
 }
 
-/// One generated program body, plus the items its statements use.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Block {
     pub statements: Vec<Stmt>,
@@ -222,10 +215,8 @@ impl Block {
         out
     }
 
-    /// The items rendered above `fn main`: types, consts, and helper
-    /// functions. The describe impls on builtin types are rendered by the
-    /// program, once across every block, because two blocks may name the
-    /// same builtin type.
+    /// The describe impls on builtin types are rendered by the program, once
+    /// across every block, because 2 blocks may name the same type.
     pub fn render_items(&self) -> String {
         let mut out = String::new();
         for def in &self.types {
@@ -240,7 +231,6 @@ impl Block {
         out
     }
 
-    /// Whether the program needs the `DiffDescribe` trait declared.
     pub fn uses_describe(&self) -> bool {
         !self.describes.is_empty() || self.types.iter().any(|def| def.shape.describe)
     }
@@ -324,12 +314,10 @@ impl Block {
         out.push(']');
     }
 
-    /// Every literal is laundered as soon as the block contains anything
-    /// that can abort, so an overflow stays a runtime panic that the harness
-    /// can compare instead of a compile error that wastes the case.
-    /// Rewrite every apply-helper call whose closure is used more than once
-    /// in the same expression, so no generated program hands the compiler a
-    /// borrow conflict.
+    /// Every literal is laundered once the block can abort, so an overflow
+    /// stays a runtime panic. Apply helper calls whose closure is used twice
+    /// in one expression are rewritten, or the compiler sees a borrow
+    /// conflict.
     pub fn fix_apply_borrows(&mut self) {
         for stmt in &mut self.statements {
             for expr in stmt.exprs_mut() {
@@ -381,8 +369,7 @@ impl Block {
         }
     }
 
-    /// Drop helper functions, consts, and types nothing refers to anymore,
-    /// so a shrunk program never carries an orphan definition.
+    /// A shrunk program never carries an orphan definition.
     fn retain_used(&mut self) {
         let statements_text: String = self
             .statements
@@ -416,7 +403,7 @@ impl Block {
         self.fns = kept_fns;
         let uses = |name: &str| statements_text.contains(name) || fn_text.contains(name);
         self.consts.retain(|def| uses(&def.name));
-        // A type can be named only by another type, so drop until stable.
+        // A type can be named only by another type, so loop until stable.
         loop {
             let types_text: String = self.types.iter().map(UserDef::render).collect();
             let before = self.types.len();
@@ -457,8 +444,7 @@ impl Block {
         candidates
     }
 
-    /// Drop one statement, and everything that depended on it, so the result
-    /// still compiles.
+    /// Drop one statement and everything that depended on it.
     fn without(&self, index: usize) -> Self {
         let mut dropped: BTreeSet<String> = self.statements[index].declared().into_iter().collect();
         let mut statements = Vec::new();
@@ -485,8 +471,8 @@ impl Block {
     }
 }
 
-/// How often a type's own declaration mentions its name: the declaration
-/// line and each impl header, which must not count as a use by another type.
+/// The declaration line and each impl header must not count as a use by
+/// another type.
 fn occurrences_in_own(def: &UserDef) -> usize {
     def.render().matches(&def.shape.name).count()
 }

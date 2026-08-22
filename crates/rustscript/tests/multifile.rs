@@ -1,7 +1,6 @@
-//! Multifile script tests. The conformance test compiles the dedicated
-//! `rustscript-conformance` crate with cargo, runs the binary, runs the same
-//! `main.rs` through the interpreter, and asserts identical stdout. The rest
-//! exercise the loader's error paths and import resolution on temp fixtures.
+//! Multifile script tests. The conformance test compares the compiled
+//! `rustscript-conformance` crate with the interpreted run. The rest cover the
+//! loader's error paths on temp fixtures.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -18,7 +17,6 @@ fn workspace_root() -> PathBuf {
         .expect("workspace root")
 }
 
-/// A fresh temp directory populated with the given relative files.
 fn fixture(files: &[(&str, &str)]) -> PathBuf {
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir =
@@ -42,9 +40,8 @@ fn run_script(path: &Path) -> std::process::Output {
 #[test]
 fn conformance_matches_compiler() {
     let root = workspace_root();
-    // The compiled binary is looked up next to this test binary, so it has to be
-    // built into the same profile. Without this a `cargo test --release` run
-    // builds a debug binary and then goes looking for it in the release tree.
+    // The binary is looked up next to this test binary, so it must be built
+    // into the same profile or `cargo test --release` looks in the wrong tree.
     let mut build_args = vec!["build", "-p", "rustscript-conformance"];
     if !cfg!(debug_assertions) {
         build_args.push("--release");
@@ -190,8 +187,8 @@ pub use crate::inner::{Widget, WIDGET_NAME};
 
 #[test]
 fn path_attribute_points_at_an_explicit_file() {
-    // A bin splits its modules into a subdirectory via #[path], and a #[path] module's own
-    // submodules resolve relative to that file's directory, so the nested inner lands in sub/.
+    // Submodules of a `#[path]` module resolve relative to that file's
+    // directory, so the nested inner lands in `sub/`.
     let dir = fixture(&[
         (
             "main.rs",

@@ -1,8 +1,6 @@
 #!/usr/bin/env rust
 
-// Ask the terminal how big it is and how bright its background is. Both
-// answers depend on the window the program runs in, so this prints only what
-// it decided, never the raw reading.
+// Only the decision is printed, the raw reading depends on the window.
 
 use crossterm::terminal::size;
 use terminal_light::luma;

@@ -1,8 +1,6 @@
 #!/usr/bin/env rust
 
-// A closure that captures a `let r = &mut v` alias from the enclosing
-// function resolves the alias across the frame boundary: reads see the
-// variable and writes reach it.
+// A captured `let r = &mut v` alias must resolve across the frame boundary.
 
 fn main() {
     let mut v = vec![1, 2];

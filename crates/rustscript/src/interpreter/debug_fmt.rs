@@ -1,10 +1,5 @@
-//! The `{:?}` rendering of a value, with the two things a formatter carries
-//! into it that a plain string cannot: the alternate flag, which is the
-//! pretty multi line form, and the width, fill, sign, and precision, which
-//! real Rust hands down to every leaf. `{:>4?}` of `vec![1]` is `[   1]`
-//! because the `Debug` of a `Vec` formats each element with the caller's
-//! formatter, while `str` and `char` write their text straight through and
-//! never pad.
+//! The `{:?}` rendering. The spec reaches every leaf, `{:>4?}` of
+//! `vec![1]` is `[   1]`, while `str` and `char` never pad.
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -16,10 +11,8 @@ use super::native::Native;
 use super::value::{CellKind, MapKind, StructData, Value, big_text, format_float_debug};
 
 pub(super) struct DebugOpts<'a> {
-    /// `{:#?}`.
     pub pretty: bool,
-    /// The spec every leaf is formatted with, `{:?}` flags without the
-    /// alternate, empty for a bare `{:?}`.
+    /// The spec every leaf is formatted with, empty for a bare `{:?}`.
     pub leaf: &'a str,
 }
 
@@ -38,8 +31,7 @@ pub(super) fn render(value: &Value, opts: &DebugOpts) -> String {
     out
 }
 
-/// A number or bool leaf, padded and signed per the spec. The text is the
-/// debug form, so a float keeps its `1.0`, unless a precision rounds it.
+/// A float keeps its `1.0` unless a precision rounds it.
 fn leaf_number(text: String, number: SpecNumber, opts: &DebugOpts, out: &mut String) {
     if opts.leaf.is_empty() {
         out.push_str(&text);
@@ -63,7 +55,7 @@ fn f32_text(f: f32, opts: &DebugOpts) -> String {
     }
 }
 
-/// The precision a leaf spec carries, `2` in `>8.2`.
+/// `2` in `>8.2`.
 fn precision_of(leaf: &str) -> Option<usize> {
     let after = leaf.split_once('.')?.1;
     let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
@@ -73,7 +65,7 @@ fn precision_of(leaf: &str) -> Option<usize> {
 fn write_value(value: &Value, opts: &DebugOpts, indent: usize, out: &mut String) {
     match value {
         Value::Unit => out.push_str("()"),
-        // `bool` routes `Debug` to its padding `Display`, the numbers too.
+        // `bool` and the numbers route `Debug` to a padding `Display`.
         Value::Bool(_)
         | Value::Int(_)
         | Value::IntW(..)
@@ -120,8 +112,8 @@ fn write_value(value: &Value, opts: &DebugOpts, indent: usize, out: &mut String)
         },
         Value::Cell(kind, slot) => write_cell(*kind, slot, opts, indent, out),
         Value::Native(n) => match &*n.lock() {
-            // A one field error struct, `ParseIntError { kind: InvalidDigit }`,
-            // spreads over lines in the pretty form like any struct.
+            // `ParseIntError { kind: InvalidDigit }` spreads over lines in the
+            // pretty form like any struct.
             Native::ParseErr { debug, .. } if opts.pretty && debug.contains(" { ") => {
                 let (name, rest) = debug.split_once(" { ").unwrap_or((debug, ""));
                 let field = rest.trim_end_matches(" }");
@@ -148,7 +140,6 @@ fn write_value(value: &Value, opts: &DebugOpts, indent: usize, out: &mut String)
     }
 }
 
-/// The scalar leaves, where the spec applies to the text itself.
 fn write_leaf(value: &Value, opts: &DebugOpts, out: &mut String) {
     match value {
         Value::Bool(b) => {
@@ -196,8 +187,7 @@ fn pad(indent: usize) -> String {
     "    ".repeat(indent)
 }
 
-/// `[a, b]`, or pretty with one item per line and a trailing comma. An
-/// empty sequence is `[]` in both forms.
+/// An empty sequence is `[]` in both forms.
 fn write_seq(
     open: &str,
     close: &str,
@@ -269,8 +259,7 @@ fn write_map(
     out.push('}');
 }
 
-/// The derived-Debug form of a struct: `Name`, `Name(a, b)`, or
-/// `Name { f: v }`, pretty with one field per line.
+/// `Name`, `Name(a, b)` or `Name { f: v }`.
 fn write_struct(s: &StructData, opts: &DebugOpts, indent: usize, out: &mut String) {
     out.push_str(super::resolver::bare(s.name()));
     let values = s.values.lock().clone();
@@ -310,9 +299,7 @@ fn write_struct(s: &StructData, opts: &DebugOpts, indent: usize, out: &mut Strin
     }
 }
 
-/// A shared cell's debug form, each wrapper rendering the way its real
-/// derive does. The slot is snapshotted, not held, so a nested read cannot
-/// relock it.
+/// The slot is snapshotted, not held, so a nested read cannot relock it.
 fn write_cell(
     kind: CellKind,
     slot: &Arc<Mutex<Value>>,
@@ -330,7 +317,6 @@ fn write_cell(
         CellKind::Cell => ("Cell", "value"),
         CellKind::Mutex | CellKind::TokioMutex => ("Mutex", "data"),
     };
-    // `std::sync::Mutex` also shows its poison flag and a `..`.
     let poisoned = kind == CellKind::Mutex;
     if opts.pretty {
         write!(out, "{name} {{\n{}{field}: ", pad(indent + 1)).unwrap();

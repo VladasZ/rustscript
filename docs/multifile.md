@@ -1,8 +1,7 @@
 # Writing multifile scripts
 
-A script can grow past one file using normal Rust module syntax. This guide
-walks through doing it properly, from a single file to a small tree, and lists
-the rules and the common mistakes.
+A script can grow past one file with normal Rust module syntax. This guide
+shows how, and lists the rules and common mistakes.
 
 ## Start with one file
 
@@ -18,12 +17,12 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
-When the file gets long, split it. Nothing about how you run it changes. You
-still run the root file, and the root file pulls the rest in.
+When the file gets long, split it. You still run the root file and it pulls
+the rest in.
 
 ## The worked example
 
-A word frequency report tool split into four files. The layout:
+A word frequency tool split into 4 files.
 
 ```
 report.rs        the root, has the shebang and fn main
@@ -98,7 +97,7 @@ pub fn top_words(text: &str, limit: usize) -> Vec<(String, i64)> {
 }
 ```
 
-Run the root file. The other files are found through the `mod` declarations.
+Run the root file. The others are found through `mod`.
 
 ```
 chmod +x report.rs
@@ -107,20 +106,15 @@ chmod +x report.rs
 
 ## File layout rules
 
-The rules are exactly the ones rustc uses.
+The rules are the ones `rustc` uses.
 
-- `mod name;` in the root file loads `name.rs` or `name/mod.rs` from the
-  directory the root file sits in.
+- `mod name;` loads `name.rs` or `name/mod.rs` next to the file.
 - `mod child;` inside `name.rs` loads `name/child.rs` or `name/child/mod.rs`.
-  A module's children live in the directory named after it.
-- Both styles work and mix freely. `name.rs` plus a `name/` directory for its
-  children, or `name/mod.rs` with siblings in the same directory.
-- Inline modules work too, `mod helpers { .. }` right in any file, nested as
-  deep as you like.
-- If both `name.rs` and `name/mod.rs` exist the script errors, same as rustc.
+- Both styles mix freely.
+- Inline `mod helpers { .. }` works at any depth.
+- Both `name.rs` and `name/mod.rs` present is an error, same as `rustc`.
 
-Only the root file gets a shebang. Module files are plain Rust source, they
-are never run directly.
+Only the root file gets a shebang.
 
 ## Imports
 
@@ -136,16 +130,13 @@ use stats::{self, words::top_words};  // groups and nested groups
 use which::which;                   // a crate function named like its crate
 ```
 
-Two things trip people up.
+2 things trip people up.
 
-- In the root file a plain `use stats::words::X` works because `stats` is a
-  top level module. Inside a submodule a plain path does not see its own
-  children. Write `use self::words::X` there, or go absolute with
-  `use crate::stats::words::X`.
-- Glob imports of script modules are not supported. `use stats::*` stops with
-  a clear error. Import the names you use, or re-export them under one roof.
+- A plain `use stats::words::X` works only in the root file. Inside a
+  submodule write `use self::words::X` or `use crate::stats::words::X`.
+- Glob imports of script modules like `use stats::*` are not supported.
 
-Re-exports work and chain. A prelude style module is fine:
+Re-exports work and chain, so a prelude module is fine:
 
 ```rust
 // prelude.rs
@@ -157,43 +148,31 @@ Then `use prelude::{Config, top_words};` from the root.
 
 ## What crosses file boundaries
 
-Everything a script can define: functions, structs, tuple and unit structs,
-enums, `impl` blocks, module level `const` and `static`, and type aliases.
-An `impl` can live in the same file as its type and be called from anywhere.
-Struct literals and tuple struct constructors work through a type alias.
-Consts can reference consts from other modules in any order, they are
-evaluated on first use.
-
-Two modules can each define a type with the same name. `a::Config` and
-`b::Config` are distinct types with their own methods.
+Everything a script can define: functions, structs, enums, `impl` blocks,
+`const`, `static` and type aliases. Consts can reference consts from other
+modules in any order, they are evaluated on first use. `a::Config` and
+`b::Config` are distinct types.
 
 ## Visibility
 
-Write `pub` where real Rust needs it, because `rust check` enforces it and a
-missing `pub` fails that check. The interpreter itself does not check
-visibility at runtime, the compiler stays the authority when you ask for it.
+Write `pub` where real Rust needs it, `rust check` enforces it. The
+interpreter does not check visibility at runtime.
 
 ## The check gate and caching
 
-The `cargo check` gate runs when you invoke `rust check`, not when a script
-runs. It covers the whole file tree. The cache key hashes every file reachable
-through `mod` declarations, so editing any module means the next `rust check`
-rechecks, while an unchanged tree returns from cache at once. Running a script
-never waits on the gate.
+`rust check` covers the whole file tree. The cache key hashes every file
+reachable through `mod`, so editing any module rechecks and an unchanged tree
+hits the cache. Running a script never waits on the gate.
 
 ## Local crate dependencies
 
-A script that lives inside a cargo crate can also pull in a local library crate
-through a normal `path` dependency, not just its own `mod` files. This is how a
-set of scripts shares one helper crate instead of copying modules around.
+A script inside a cargo crate can use a local library crate through a normal
+`path` dependency. This is how a set of scripts shares one helper crate.
 
-The interpreter reads the nearest `Cargo.toml` at or above the script, finds each
-`[dependencies]` entry that points at a local `path`, and grafts that crate in.
-Its `src/lib.rs` and the module tree below it load as a top level module named
-after the crate, so `use shared::run::capture` resolves at runtime. The
-`cargo check` gate adds the same crate as a real path dependency, so the editor
-and clippy resolve it too. The dependency directory is pinned to an absolute path,
-so the gate finds it no matter where it runs from.
+The interpreter reads the nearest `Cargo.toml` above the script and grafts
+every `path` dependency in as a top level module named after the crate, so
+`use shared::run::capture` resolves. The `cargo check` gate adds the same
+crate as a real path dependency, so clippy and the editor resolve it too.
 
 For example, a `shared` crate next to the scripts:
 
@@ -207,12 +186,9 @@ tools/
     st.rs            # use shared::run::capture;
 ```
 
-The grafted crate can have its own multi-file module tree, loaded by the same
-rules as a script's own modules. A change to any of its files re-triggers the
-check for every script that uses it, since the cache key hashes the crate's
-sources too. Inside the grafted crate, `crate::` and `super::` resolve against
-the crate's own root, never the script's, so its files mean the same thing
-interpreted as they do compiled.
+The grafted crate can have its own module tree. Its sources are part of the
+cache key. Inside it `crate::` and `super::` resolve against its own root, so
+its files mean the same thing interpreted and compiled.
 
 ## Not supported
 
@@ -220,11 +196,10 @@ interpreted as they do compiled.
 - Glob imports of script modules, `use util::*`.
 - `static mut`. A plain `static` behaves like a const.
 
-Each one stops with a clear error instead of misbehaving.
+Each one stops with a clear error.
 
 ## A bigger reference
 
-The `crates/conformance` crate in this repo is a full multifile program that
-exercises every import style, re-export chains, and cross module types,
-consts, statics, and aliases. It compiles with cargo and runs under the
-interpreter with identical output, so everything in it is known to work.
+`crates/conformance` is a full multifile program with every import style,
+re-export chains and cross module items. It compiles with cargo and runs
+under the interpreter with identical output.

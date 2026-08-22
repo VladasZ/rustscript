@@ -1,6 +1,5 @@
 #!/usr/bin/env rust
 
-// base64 and hex encoding, both ways.
 
 use base64::prelude::*;
 use hex::{decode, encode};

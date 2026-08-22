@@ -1,11 +1,8 @@
-// Pins the scalar chain reductions and the for-plan vec pushes against the
-// compiler: adaptor chains keep generic consumption semantics, early exits
-// leave the source where real iterators leave it, and every fallback shape
-// answers the same values as the specialized path.
+// Pins the scalar chain reductions and the for plan vec pushes against the
+// compiler, early exits and fallback shapes included.
 
 fn main() {
-    // The specialized shapes: map and filter stages into sum, count, any,
-    // and all, over a vec and over a range.
+    // The specialized shapes.
     let mut x: i64 = 12345;
     let mut v: Vec<i64> = Vec::new();
     for _ in 0..1000 {
@@ -31,8 +28,7 @@ fn main() {
     let rest2: Vec<i64> = it2.copied().collect();
     println!("all={all} rest2={rest2:?}");
 
-    // A captured immutable int folds into the plan, a mutable capture and
-    // non-integer elements fall back to the generic path.
+    // A mutable capture and non integer elements fall back.
     let k = 10i64;
     let ks: i64 = probe.iter().map(|a| a * k).sum();
     let mut seen = 0i64;
@@ -47,7 +43,6 @@ fn main() {
     let letters: i64 = words.iter().map(|w| w.len() as i64).sum();
     println!("ks={ks} odd={odd} seen={seen} letters={letters}");
 
-    // Empty sources.
     let e: Vec<i64> = Vec::new();
     let es: i64 = e.iter().sum();
     let ec = e.iter().filter(|a| **a > 0).count();
@@ -60,7 +55,7 @@ fn main() {
     let ts: u8 = small.iter().map(|a| *a).sum::<u8>();
     println!("ts={ts}");
 
-    // Push loops: two vecs in one loop, a break, a continue, and floats.
+    // Push loops.
     let mut evens: Vec<i64> = Vec::new();
     let mut halves: Vec<f64> = Vec::new();
     for i in 0..20 {
@@ -75,8 +70,7 @@ fn main() {
     }
     println!("evens={evens:?} halves={halves:?}");
 
-    // A nested push loop rolls all its inner pushes into the outer
-    // iteration.
+    // A nested push loop rolls its inner pushes into the outer iteration.
     let mut pairs: Vec<i64> = Vec::new();
     for i in 0..4 {
         for j in 0..3 {
@@ -85,7 +79,7 @@ fn main() {
     }
     println!("pairs={pairs:?}");
 
-    // A push of a non-scalar value falls back to the generic loop.
+    // A non scalar push falls back.
     let mut names: Vec<String> = Vec::new();
     for i in 0..3 {
         names.push(format!("n{i}"));

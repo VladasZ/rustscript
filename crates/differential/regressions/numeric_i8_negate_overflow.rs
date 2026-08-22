@@ -1,5 +1,5 @@
-// Negating i8::MIN overflows in debug Rust, and the value only becomes
-// i8::MIN through a runtime cast, so the panic is a width-tracking event.
+// The value becomes `i8::MIN` only through a runtime cast, so the panic
+// depends on width tracking.
 
 fn diff_opaque(x: i64) -> i64 {
     x

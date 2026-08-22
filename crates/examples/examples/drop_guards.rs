@@ -1,7 +1,7 @@
 #!/usr/bin/env rust
 
-// User `Drop` impls run when a binding's scope ends, in reverse declaration
-// order, on explicit `drop`, and per loop iteration.
+// `Drop` runs at scope end in reverse order, on explicit `drop` and per loop
+// iteration.
 
 struct Guard {
     name: String,

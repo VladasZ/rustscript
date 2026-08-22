@@ -1,57 +1,40 @@
 # bench
 
-Compares RustScript against native Rust, Node, and Python 3 on equivalent tasks.
-The Python interpreter is pinned to `python3.14`, not the plain `python3` name,
-because stock macOS still points `python3` at 3.9 and an old interpreter would
-skew every comparison. The pin is the `PYTHON` constant in `src/lib.rs`.
-The Rust file is both a compiled Cargo binary and the interpreted RustScript
-source. TypeScript and Python use normal idioms for their runtimes. Every case
-must print byte-identical stdout, and cases that write files must also produce
-byte-identical files.
+Compares RustScript against native `rust`, `node` and `python` on the same
+tasks. Python is pinned to `python3.14` by the `PYTHON` constant in
+`src/lib.rs`, because stock `macOS` points `python3` at 3.9. The Rust file is
+both the compiled binary and the interpreted source. Every case must print
+byte identical stdout and files.
 
 ## Measurements
 
-Each timed command runs as a fresh process. The harness records three tracks.
+Each timed command is a fresh process. 3 tracks are recorded.
 
-- Total time covers process launch, runtime startup, parsing, compilation,
-  and work.
-- Compute time comes from a timer inside each workload, after argument handling
-  and immediately around the described work.
-- Peak memory is the most RAM the process held at any moment, reported for
-  each run by `/usr/bin/time`.
+- Total time, from process launch to exit.
+- Compute time, from a timer inside each workload around the work only.
+- Peak memory, from `/usr/bin/time`.
 
-The report and charts use the median for every track and retain every raw sample
-in `results.json`. Every chart carries the Node and Python versions the run
-measured, in the top right corner. Timed stdout always goes to `/dev/null`, so total time and compute
-runs see the same output destination. Samples run round-robin with a rotating
-language order to spread temperature and background-system drift.
+Charts use the median and `results.json` keeps every raw sample. Stdout goes
+to `/dev/null`. Samples run round robin with a rotating language order to
+spread drift.
 
-The default is one warmup, five total time samples, and five compute/memory samples
-for every case. `--quick` uses three samples per track. `--samples N` sets
-both sample counts explicitly. `--case NAME` runs one case only and replaces
-its entry in the existing `results.json`, leaving the other cases untouched.
+Default is 1 warmup and 5 samples per track. `--quick` uses 3. `--samples N`
+sets it. `--case NAME` runs one case and replaces its entry in `results.json`.
 
 ## Runtime behavior
 
-Each runtime uses its default source-loading behavior. In particular, Node does
-not receive an opt-in persistent compile cache. The harness builds and invokes
-the workspace's `target/release/rust` directly rather than trusting a `rust`
-binary from `PATH`.
+Each runtime uses its default source loading. Node gets no persistent
+compile cache. The harness runs the workspace `target/release/rust`, not the
+one on `PATH`.
 
-Script validation is not part of an interpreted run, so it is reported
-separately. The
-suite records only an unchanged-script warm `rust check` cache hit. Priming and
-measurement use an isolated temporary cache and never touch the user's
-`~/.cache/rustscript`.
+`rust check` is reported separately as a warm cache hit, using an isolated
+temporary cache.
 
 ## Idiomatic tasks
 
-The cases implement the same task and output, not mechanically identical
-operations. Python uses `join` to build strings and its standard comparator or
-key adapters for the corresponding sort case. JavaScript uses its normal regex
-splitting and collection methods. Container representations and iterator
-allocation can differ between runtimes. This suite measures programs a
-competent user would write, not equal VM instruction streams.
+The cases implement the same task and output with the normal idioms of each
+language. This measures programs a competent user would write, not equal VM
+instruction streams.
 
 ## Cases
 
@@ -87,40 +70,33 @@ The exact arguments and fixture hashes are recorded in the report.
 
 ## Fixtures and provenance
 
-`gendata` recreates all deterministic inputs and generated sources before every
-run. Committed fixtures stay synchronized with the generator. Temporary
-outputs, the HTTP server, and the check cache live under an isolated temporary
-benchmark directory.
+`gendata` recreates all inputs and generated sources before every run.
+Temporary outputs live in an isolated directory.
 
-`results.json` records the Git commit and dirty state, RustScript binary hash,
-benchmark-source hash, fixture hashes, tool versions, machine information,
-settings, and all raw measurements.
+`results.json` records the commit, binary and fixture hashes, tool versions,
+machine, settings and all raw measurements.
 
 ## Running
 
-The suite needs `node` and `python3.14` on `PATH`. Cargo builds all Rust
-binaries it uses.
+Needs `node` and `python3.14` on `PATH`.
 
 ```
 cargo run --release --bin bench
 cargo run --release --bin chart
 ```
 
-The chart run writes one PNG per case into `results/` and rewrites
-[RESULTS.md](RESULTS.md), the document that collects every chart. Text is drawn
-with Roboto, embedded from `fonts/`, so the tool needs no system fonts and
-renders the same on every machine.
+`chart` writes one PNG per case into `results/` and rewrites
+[RESULTS.md](RESULTS.md). The font is embedded from `fonts/`, so it renders
+the same on every machine.
 
 ## Performance goal
 
-The goal is judged on total time, the whole run including startup. The floor
-is to never be the slowest interpreted runtime on any case, the target is to
-beat both Node and Python. All cases currently beat both rivals.
+Judged on total time including startup. The target is to beat both `node`
+and `python` on every case. All cases currently do.
 
 ## Scope limits
 
-The committed report is one run on one machine, not a cross-platform average.
-The suite does not measure live internet services, CPU-parallel equivalents
-across different concurrency models, cold dependency compilation, or cached
-`rust build` mode. Results are directional evidence for the recorded machine
-and versions, not a universal ranking of languages.
+The committed report is one run on one machine. It does not measure internet
+services, parallel CPU work, cold dependency compilation or `rust build`
+mode. I think of it as evidence for this machine, not a ranking of
+languages.

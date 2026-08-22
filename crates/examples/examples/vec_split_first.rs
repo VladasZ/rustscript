@@ -1,8 +1,6 @@
 #!/usr/bin/env rust
 
-// split_first hands back the head and the rest in one step. This is the shape a
-// command's output takes when the first line is the thing being looked for and
-// the rest are the candidates, as `readlink -f target a b c` returns.
+// The shape of `readlink -f target a b c` output.
 
 fn resolved(out: &str) -> String {
     let lines: Vec<String> = out.lines().map(str::trim).map(str::to_string).collect();

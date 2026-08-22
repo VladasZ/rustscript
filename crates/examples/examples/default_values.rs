@@ -1,8 +1,6 @@
 #!/usr/bin/env rust
 
-// Every spelling of `Default::default()`: builtin types, qualified paths,
-// an annotated let, derived structs and enums, a hand written impl, and a
-// struct update that keeps declaration order.
+// Every spelling of `Default::default()`.
 
 #[derive(Default, Debug, Clone, PartialEq)]
 struct Inner {

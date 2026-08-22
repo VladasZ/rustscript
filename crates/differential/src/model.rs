@@ -1,6 +1,3 @@
-//! A generated program: its seed, the blocks that make up `fn main`, and the
-//! structured mutation it came from, if any.
-
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
@@ -10,7 +7,7 @@ use crate::lang::user::{DESCRIBE_TRAIT, render_describe_impl};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum MutationOperation {
-    /// A same-typed subtree from the donor replaced a subtree here.
+    /// A same typed subtree from the donor replaced one here.
     Splice,
     /// The blocks were rendered in reverse order.
     BlockOrder,
@@ -83,8 +80,7 @@ impl Program {
         source
     }
 
-    /// The coverage features every block contributes, for the generator
-    /// tests and the campaign gap report.
+    /// For the generator tests and the campaign gap report.
     pub fn structural_features(&self) -> BTreeSet<&'static str> {
         let mut out = BTreeSet::new();
         for block in &self.blocks {
@@ -93,7 +89,7 @@ impl Program {
         out
     }
 
-    /// A compact shape string, so a campaign can count distinct topologies.
+    /// So a campaign can count distinct topologies.
     pub fn structural_signature(&self) -> String {
         let mut out = String::new();
         for block in &self.blocks {
@@ -102,8 +98,7 @@ impl Program {
         out
     }
 
-    /// Smaller programs that may reproduce the same failure, tried in order
-    /// by the reducer.
+    /// Smaller programs in reducer order.
     pub fn shrink_candidates(&self) -> Vec<Program> {
         let mut out = Vec::new();
         if self.blocks.len() > 1 {

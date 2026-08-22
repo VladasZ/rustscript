@@ -1,7 +1,5 @@
 #!/usr/bin/env rust
 
-// Widening `from` and fallible `try_from` between integer types, plus the
-// `bool` and `float` conversions clippy suggests in place of `as` casts.
 
 fn main() {
     let small: i32 = 42;

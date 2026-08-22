@@ -1,6 +1,5 @@
-//! The register machine frame loop. It runs `Chunk` over `Value`, so a task
-//! can run on any worker thread. `exec` owns the call frames and applies the
-//! `Flow` each dispatched op answers with; the op bodies live in `vm_step`.
+//! The frame loop. `exec` owns the call frames and applies the `Flow` each
+//! op answers with, the op bodies live in `vm_step`.
 
 use std::collections::HashMap;
 use std::mem::{replace, take};
@@ -21,13 +20,12 @@ use super::vm_support::trace_error;
 
 pub(super) const MAX_CALL_DEPTH: usize = 100_000;
 
-/// Deeper nesting than this returns buffers to the allocator, so a burst of
-/// recursion does not pin its high-water memory forever.
+/// Deeper nesting returns buffers to the allocator, so a burst of
+/// recursion does not pin its memory forever.
 const MAX_POOLED_STACKS: usize = 32;
 
 thread_local! {
-    /// Reusable value stacks for `run_chunk`, one popped per live call on
-    /// this thread.
+    /// One popped per live call on this thread.
     static STACK_POOL: std::cell::RefCell<Vec<Vec<Value>>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -39,41 +37,37 @@ fn swap_option<T>(current: &mut Option<T>, next: Option<T>) -> Option<T> {
     }
 }
 
-/// One backtrace entry: the function, its file, and the line of the op at
-/// `ip`.
 fn frame_line(chunk: &Chunk, ip: usize) -> (String, String, u32) {
     let line = chunk.lines.get(ip).copied().unwrap_or(0);
     (chunk.name.clone(), chunk.file.to_string(), line)
 }
 
-/// A module level const or static: converted once, evaluated on first read.
-/// Each slot has its own lock so tasks on different threads can read globals.
+/// Each slot has its own lock so tasks on different threads can read
+/// globals.
 pub enum GlobalSlot {
     Todo(Arc<Chunk>),
     Busy,
     Ready(Value),
 }
 
-/// The compiled program plus the runtime handle, shared across worker threads.
 pub struct Vm {
     pub functions: Vec<Arc<Chunk>>,
     pub fn_index: HashMap<String, u32>,
-    /// The script's impl methods, by type id and method id.
     pub impls: Arc<ImplTable>,
     pub globals: Vec<Mutex<GlobalSlot>>,
-    /// User struct layouts precomputed at load, for coercion and typed json.
+    /// For coercion and typed json.
     pub structs: super::json_bridge::Structs,
-    /// User enums with their variants, for dynamic variant construction.
+    /// For dynamic variant construction.
     pub enums: Vec<Arc<EnumDef>>,
-    /// Canonical names of unit structs, for `struct Marker;` used as a value.
+    /// For `struct Marker;` used as a value.
     pub unit_structs: Vec<Arc<str>>,
-    /// Canonical names of every user struct, for tuple struct calls.
+    /// For tuple struct calls.
     pub struct_names: std::collections::HashSet<String>,
     pub rt: Handle,
 }
 
 impl Vm {
-    /// A unit variant of a user enum, matched by canonical or bare enum name.
+    /// Matched by canonical or bare enum name.
     pub(super) fn unit_variant(&self, enum_name: Option<&str>, variant: &str) -> Option<Value> {
         for def in &self.enums {
             if let Some(want) = enum_name
@@ -91,7 +85,6 @@ impl Vm {
         None
     }
 
-    /// A tuple variant of a user enum built from call arguments.
     pub(super) fn make_tuple_variant(
         &self,
         enum_name: Option<&str>,
@@ -118,7 +111,6 @@ impl Vm {
         Value::structure(StructShape::typed(name, type_id, fields, Vec::new()), args)
     }
 
-    /// If a Ctrl-C arrived, run the script's registered handler closure.
     pub(super) fn run_pending_ctrlc(self: &Arc<Self>) -> Result<()> {
         if let Some(handler) = super::pending_ctrlc_handler()
             && let Value::Closure(clo) = handler
@@ -129,8 +121,6 @@ impl Vm {
     }
 }
 
-/// A binding of a generic parameter name to the lowered concrete type a
-/// caller passed by turbofish.
 pub(super) type TypeEnv = Arc<[(Arc<str>, TypeIr)]>;
 
 pub(super) fn empty_type_env() -> TypeEnv {
@@ -143,8 +133,8 @@ struct Frame {
     ip: usize,
     base: usize,
     dst: u16,
-    /// The caller's arg window, so the callee's final parameter values can be
-    /// handed back on return for `&mut` argument writebacks.
+    /// So the callee's final parameter values can be handed back for `&mut`
+    /// writebacks.
     abase: u16,
     argc: u16,
     type_env: TypeEnv,
@@ -157,9 +147,8 @@ impl Vm {
         args: &[Value],
         upvalues: &[Upvalue],
     ) -> Result<Value> {
-        // A path forwarder's arity is only a guess, so rebuild it for the
-        // count actually passed. `u8::saturating_add` handed to `fold` takes
-        // two arguments where the guess was one.
+        // A forwarder's arity is a guess, `u8::saturating_add` handed to
+        // `fold` takes 2 where the guess was 1.
         let rebuilt;
         let chunk = if chunk.path_forwarder && args.len() != chunk.num_params {
             rebuilt = path_call_chunk(chunk.paths[0].clone(), args.len());
@@ -175,10 +164,8 @@ impl Vm {
                 args.len()
             );
         }
-        // A closure called per element allocated a fresh stack per call,
-        // which dominated comparator sorts. The pool hands the buffer back
-        // for the next call on this thread instead. Nested calls each pop
-        // their own buffer, so re-entrancy just deepens the pool.
+        // A fresh stack per call once dominated comparator sorts. Nested
+        // calls each pop their own buffer.
         let mut stack = STACK_POOL
             .with(|pool| pool.borrow_mut().pop())
             .unwrap_or_default();
@@ -211,10 +198,9 @@ impl Vm {
         let mut base = 0usize;
         let mut ip = 0usize;
 
-        // The dispatch runs inside one immediately called closure so an error
-        // can be annotated with the script call chain still held in `frames`
-        // and the failing op still addressed by `cur` and `ip`. The closure
-        // runs exactly once, so the hot loop itself is unchanged.
+        // One immediately called closure, so an error can be annotated with
+        // the call chain still in `frames` and the failing op in `cur` and
+        // `ip`.
         let result = (|| -> Result<Value> {
             loop {
                 let flow = match cur.code.get(ip) {
@@ -247,9 +233,8 @@ impl Vm {
                         cur_clo = f.closure;
                         cur_tenv = f.type_env;
                         ip = f.ip;
-                        // The callee's final parameter values go back into the
-                        // caller's arg window, where a `&mut` argument
-                        // writeback emitted by the compiler picks them up.
+                        // The `&mut` argument writeback picks these up from the
+                        // caller's arg window.
                         base = f.base;
                         for i in 0..f.argc as usize {
                             stack[base + f.abase as usize + i] = take(&mut stack[callee_base + i]);
@@ -299,14 +284,9 @@ impl Vm {
         })
     }
 
-    /// Run user `Drop` impls for every live local of every frame being
-    /// unwound by a panic, innermost frame first and highest register first,
-    /// the way real Rust unwinding drops locals in reverse declaration
-    /// order. A register whose storage has another holder was moved or is
-    /// still shared, so its real owner drops it, exactly like a scope-end
-    /// drop. A panic inside one of these drops cannot unwind again, real
-    /// Rust would abort there, so it is reported and the original panic
-    /// keeps propagating.
+    /// Innermost frame first and highest register first, like real
+    /// unwinding. A panic inside a drop is reported and the original panic
+    /// keeps propagating, real Rust would abort there.
     fn unwind_drops(
         self: &Arc<Self>,
         cur: &Arc<Chunk>,
@@ -329,20 +309,16 @@ impl Vm {
         }
     }
 
-    /// Drive an awaited value to its result. A `JoinHandle` joins, a future is
-    /// run to completion, anything else is already a value.
     pub(super) fn await_value(&self, v: Value) -> Result<Value> {
         let Value::Native(n) = v else { return Ok(v) };
         let taken = replace(&mut *n.lock(), Native::Taken);
         match taken {
-            // Awaiting a JoinHandle yields `Result<T, JoinError>` in real Rust,
-            // so it wraps. A script that passes `rust check` writes `.await?` or
-            // `.await.unwrap()`, and both need the Ok layer to be here.
+            // A `JoinHandle` yields `Result<T, JoinError>`, so `.await?` needs
+            // the Ok layer.
             Native::Task(h) => Ok(match self.rt.block_on(h) {
                 Ok(v) => Value::ok(v),
-                // The real JoinError renders both its format forms here, so
-                // `{e:?}` prints the same `JoinError::Panic(Id(11), "boom",
-                // ...)` a compiled binary prints.
+                // Both format forms of the real `JoinError`, so `{e:?}` prints
+                // what a compiled binary prints.
                 Err(e) => Value::err(
                     Native::JoinErr {
                         display: e.to_string(),
@@ -352,11 +328,10 @@ impl Vm {
                     .wrap(),
                 ),
             }),
-            // Awaiting a plain future yields its output directly, no wrapper.
             Native::Future(f) => Ok(self.rt.block_on(f)),
             Native::Taken => bail!("this value was already awaited"),
-            // Everything else is a live resource, not an awaitable. Put it back
-            // so the handle stays usable after the bad await is reported.
+            // Put a non awaitable back so the handle stays usable after the
+            // error.
             other => {
                 let name = other.type_name();
                 *n.lock() = other;
@@ -371,21 +346,17 @@ impl Vm {
             .map(|&i| self.functions[i as usize].clone())
     }
 
-    /// A user method named at runtime, `Type::method` in a path call.
     pub(super) fn user_method(&self, ty: &str, name: &str) -> Option<Arc<Chunk>> {
         self.impls.by_name(ty, name)
     }
 
-    /// The `impl From<S> for T` whose `S` is the value's type, registered
-    /// under `from<S>`. The plain `from` entry answers when the type has one
-    /// impl only, so a script with a single `From` keeps working whatever
-    /// the value.
+    /// Registered under `from<S>`. The plain `from` entry answers when the
+    /// type has one impl only.
     pub(super) fn conversion_impl(&self, target: &str, value: &Value) -> Option<Arc<Chunk>> {
         let source = source_type_name(value);
         let base = source.split(['<', '(']).next().unwrap_or(&source);
-        // A value that already is the target type needs no conversion. `?`
-        // on an error the function already returns is identity, and running
-        // a `From` impl here picked an unrelated variant.
+        // A value already of the target type needs no conversion, running a
+        // `From` impl here once picked an unrelated variant.
         if base == super::resolver::bare(target) {
             return None;
         }
@@ -395,7 +366,7 @@ impl Vm {
             .or_else(|| self.impls.by_name(target, "from"))
     }
 
-    /// Value of a module const or static, evaluated on first read and cached.
+    /// Evaluated on first read and cached.
     pub(super) fn global(self: &Arc<Self>, idx: usize) -> Result<Value> {
         {
             match &*self.globals[idx].lock() {
@@ -422,7 +393,6 @@ impl Vm {
     }
 }
 
-/// A field access on a struct or tuple.
 impl Vm {
     pub(super) fn get_field(recv: &Value, member: &Member) -> Result<Value> {
         match (recv, member) {
@@ -466,15 +436,12 @@ impl Vm {
     }
 }
 
-/// The type name a `From` impl is keyed by for this value: the bare name of
-/// a user type, the std name of a builtin, the error struct of a parse
-/// error.
+/// The type name a `From` impl is keyed by for this value.
 fn source_type_name(value: &Value) -> String {
     match value {
         Value::Struct(s) => super::resolver::bare(s.name()).to_string(),
-        // `Some(x)` names its payload, so `From<Option<usize>>` and
-        // `From<Option<u16>>` stay apart. `None` carries nothing to name and
-        // answers through the bare `Option` key instead.
+        // `Some(x)` names its payload, `None` answers through the bare
+        // `Option` key.
         Value::Enum { def, data, .. } if def.kind == super::enum_def::EnumKind::Option => {
             let base = super::resolver::bare(&def.name).to_string();
             match data.lock().first() {
@@ -494,9 +461,8 @@ fn source_type_name(value: &Value) -> String {
         Value::F32(_) => "f32".to_string(),
         Value::Bool(_) => "bool".to_string(),
         Value::Char(_) => "char".to_string(),
-        // A non empty vec names its element, so `From<Vec<bool>>` and
-        // `From<Vec<char>>` stay apart. An empty one names nothing and
-        // answers through the bare `Vec` key.
+        // A non empty vec names its element, an empty one answers through
+        // the bare `Vec` key.
         Value::Vec(items) => match items.lock().first() {
             Some(first) => format!("Vec<{}>", source_type_name(first)),
             None => "Vec".to_string(),

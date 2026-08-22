@@ -1,5 +1,4 @@
-// Integer byte conversions under `#[tokio::main]`, in both directions and
-// both byte orders.
+// Integer byte conversions under `#[tokio::main]`.
 
 fn hex(bytes: &[u8]) -> String {
     let parts: Vec<String> = bytes.iter().map(|b| format!("{b:02x}")).collect();

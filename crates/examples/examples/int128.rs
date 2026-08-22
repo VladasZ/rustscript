@@ -1,7 +1,5 @@
 #!/usr/bin/env rust
 
-// Real 128-bit integers: full-range values, arithmetic with overflow
-// checks, casts, comparisons, parsing, and formatting.
 
 fn main() {
     let max: u128 = u128::MAX;

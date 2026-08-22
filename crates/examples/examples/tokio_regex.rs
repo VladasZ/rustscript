@@ -1,6 +1,4 @@
-// The regex family and Duration accessors under `#[tokio::main]`, backed by the same shared cores as the fast
-// engine: match spans, named captures, replace, split, and the full
-// Duration accessor set.
+// Regex and Duration under `#[tokio::main]`.
 
 use std::time::Duration;
 

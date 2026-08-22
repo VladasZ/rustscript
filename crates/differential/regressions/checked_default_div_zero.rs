@@ -1,8 +1,6 @@
-// Reduced from differential seed 20673100883. `checked_add` overflows to
-// None, `unwrap_or_default` must build a zero of the receiver's width, and
-// the division then panics with the compiled binary's exact divide-by-zero
-// message. The default used to come out as an empty string, which panicked
-// with "expected a number" instead.
+// Reduced from seed 20673100883. The default after `checked_add` once came
+// out as an empty string and panicked with "expected a number" instead of
+// the divide by zero message.
 
 fn diff_opaque_u64(value: u64) -> u64 {
     value

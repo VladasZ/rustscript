@@ -1,6 +1,4 @@
-// The bare-function-as-value form under `#[tokio::main]`. This uses the consumers
-// that are: binding the function to a variable and calling it, and handing it to
-// an iterator adaptor.
+// Bare functions as values under `#[tokio::main]`.
 
 fn triple(x: i64) -> i64 {
     x * 3
