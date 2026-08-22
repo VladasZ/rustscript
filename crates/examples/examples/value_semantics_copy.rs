@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-// The interpreter once shared storage on `let b = a`, so mutating `b`
-// changed `a` and this printed "5 5" instead of "1 5".
+// `let b = a` copies, mutating `b` must not change `a`, this must print "1 5".
 
 #[derive(Clone, Copy, Debug)]
 struct Point {

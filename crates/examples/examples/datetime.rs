@@ -1,6 +1,6 @@
 #!/usr/bin/env rust
 
-// Only stable properties are printed.
+// only stable properties are printed
 
 use chrono::{Datelike, Utc};
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env rust
 
-// String buffers are shared and copied on the first append, so a clone taken
-// before a push must keep its own contents.
+// String buffers are shared and copied on the first append, so a clone taken before a push must
+// keep its own contents.
 
 fn main() {
     let mut s = String::from("base");

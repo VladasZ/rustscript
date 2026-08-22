@@ -1,5 +1,4 @@
-//! Statements. Every observation is a labeled print, so a mismatch names the
-//! line that produced it.
+//! Statements. Every observation is a labeled print, so a mismatch names the line that produced it.
 
 use std::collections::BTreeSet;
 
@@ -9,8 +8,7 @@ use crate::lang::expr::{BinOp, Expr, Helper};
 use crate::lang::fmt::FmtSpec;
 use crate::lang::ty::Ty;
 
-/// An inferred binding is where the interpreter must learn a type from the
-/// initializer alone.
+/// An inferred binding is where the interpreter must learn a type from the initializer alone.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Ann {
     Typed,
@@ -19,15 +17,15 @@ pub enum Ann {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum PrintForm {
-    /// `{spec}`.
+    /// `{spec}`
     Plain,
-    /// `{0spec}`.
+    /// `{0spec}`
     Indexed,
-    /// `{0spec} {0:?}`, the same argument twice.
+    /// `{0spec} {0:?}`, the same argument twice
     Twice,
-    /// `{0:>1$}`, the width taken from a second argument.
+    /// `{0:>1$}`, the width taken from a second argument
     WidthArg(u8),
-    /// `{:>diff_w$}` with `diff_w = n` named.
+    /// `{:>diff_w$}` with `diff_w = n` named
     NamedWidth(u8),
 }
 
@@ -45,16 +43,16 @@ impl PrintForm {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ClosureSource {
-    /// `|params| -> ret { body }`, `move` when `capture_move`.
+    /// `|params| -> ret { body }`, `move` when `capture_move`
     Literal {
         params: Vec<(String, Ty)>,
         ret: Ty,
         body: Expr,
         capture_move: bool,
-        /// The body writes a captured binding, so the closure is `FnMut`.
+        /// the body writes a captured binding, so the closure is `FnMut`
         mutates: bool,
     },
-    /// `diff_factory(arg)`, a helper returning `impl Fn(T) -> T`.
+    /// `diff_factory(arg)`, a helper returning `impl Fn(T) -> T`
     Factory { fn_name: String, arg: Expr, ty: Ty },
 }
 
@@ -66,25 +64,25 @@ pub enum Stmt {
         expr: Expr,
         ann: Ann,
     },
-    /// `let (a, b) = tuple;`.
+    /// `let (a, b) = tuple;`
     LetTuple {
         names: Vec<(String, Ty)>,
         expr: Expr,
         ann: Ann,
     },
-    /// A closure bound by `let`. Its calls follow at once when it borrows
-    /// mutably, so the borrow ends before anything else reads the binding.
+    /// A closure bound by `let`. Its calls follow at once when it borrows mutably, so the borrow
+    /// ends before anything else reads the binding.
     LetClosure {
         name: String,
         source: ClosureSource,
-        /// The calls printed right after the binding.
+        /// the calls printed right after the binding
         calls: Vec<Expr>,
     },
     Assign {
         name: String,
         expr: Expr,
     },
-    /// `name op= expr;`.
+    /// `name op= expr;`
     Compound {
         name: String,
         op: BinOp,
@@ -106,7 +104,7 @@ pub enum Stmt {
         count: usize,
         body: Vec<Stmt>,
     },
-    /// The counter is incremented first so a `continue` cannot loop forever.
+    /// The counter is incremented first so a `continue` can't loop forever.
     While {
         counter: String,
         limit: u8,
@@ -117,15 +115,15 @@ pub enum Stmt {
         limit: u8,
         body: Vec<Stmt>,
     },
-    /// `if condition { break; }`, inside a loop body only.
+    /// `if condition { break; }`, inside a loop body only
     Break {
         condition: Expr,
     },
-    /// `if condition { continue; }`, inside a loop body only.
+    /// `if condition { continue; }`, inside a loop body only
     Continue {
         condition: Expr,
     },
-    /// `if condition { return value; }`, inside a function body only.
+    /// `if condition { return value; }`, inside a function body only
     Return {
         condition: Expr,
         value: Expr,
@@ -134,22 +132,22 @@ pub enum Stmt {
         name: String,
         op: MutOp,
     },
-    /// `for var in source { accumulate into target }`. The source must have
-    /// a defined order, so it is always a vec.
+    /// `for var in source { accumulate into target }`. The source must have a defined order, so
+    /// it is always a vec.
     ForAccum {
         var: String,
         source: Expr,
         target: String,
         op: MutOp,
     },
-    /// `for r in name.iter_mut() { let var: T = r.clone(); *r = expr; }`.
+    /// `for r in name.iter_mut() { let var: T = r.clone(); *r = expr; }`
     ForMut {
         name: String,
         var: String,
         elem: Ty,
         expr: Expr,
     },
-    /// `fn_name(&mut name, args);`, a helper that writes through a `&mut`.
+    /// `fn_name(&mut name, args);`, a helper that writes through a `&mut`
     CallMut {
         name: String,
         fn_name: String,
@@ -167,7 +165,7 @@ pub enum MutOp {
     VecClear,
     VecTruncate(u8),
     VecSwap(u8, u8),
-    /// `name[i] = value;`, panics out of bounds.
+    /// `name[i] = value;`, panics out of bounds
     VecSetIndex {
         index: u8,
         value: Expr,
@@ -187,20 +185,20 @@ pub enum MutOp {
     MapRemove {
         key: Expr,
     },
-    /// `*name.entry(key).or_insert(default) += add;`, integer values only.
+    /// `*name.entry(key).or_insert(default) += add;`, integer values only
     MapEntryAdd {
         key: Expr,
         default: Expr,
         add: Expr,
     },
-    /// `name.entry(key).or_default().push(value);`, vec values only.
+    /// `name.entry(key).or_default().push(value);`, vec values only
     MapEntryPush {
         key: Expr,
         value: Expr,
     },
     SetInsert(Expr),
     SetRemove(Expr),
-    /// `name = Some(value)` through `replace`, `name.take()` observed.
+    /// `name = Some(value)` through `replace`, `name.take()` observed
     OptTake,
     OptReplace(Expr),
 }
@@ -451,8 +449,7 @@ impl Stmt {
         out
     }
 
-    /// Names this statement writes to, so the renderer knows which bindings
-    /// need `mut`.
+    /// Names this statement writes to, so the renderer knows which bindings need `mut`.
     pub fn assigned(&self, out: &mut BTreeSet<String>) {
         match self {
             Self::Assign { name, .. }
@@ -483,7 +480,7 @@ impl Stmt {
                             stmt.assigned(out);
                         }
                     }
-                    // The apply helper takes the closure by `&mut`.
+                    // the apply helper takes the closure by `&mut`
                     Expr::ApplyCall { closure, .. } => {
                         out.insert(closure.clone());
                     }
@@ -520,8 +517,7 @@ impl Stmt {
         direct || self.exprs().iter().any(|expr| expr.uses_any(names))
     }
 
-    /// Whether this statement assigns to a name it does not own, so the
-    /// reducer cannot drop that binding.
+    /// Whether this statement assigns to a name it doesn't own, so the reducer can't drop that binding.
     pub fn writes_any(&self, names: &BTreeSet<String>) -> bool {
         let mut written = BTreeSet::new();
         self.assigned(&mut written);
@@ -674,7 +670,7 @@ impl Stmt {
             } => render_closure(&pad, name, source, calls, mutable.contains(name)),
             Self::Assign { name, expr } => format!("{pad}{name} = {};\n", expr.render()),
             Self::Compound { name, op, expr } => {
-                // `String += &str`, every other compound takes the value.
+                // `String += &str`, every other compound takes the value
                 let rhs = if matches!(expr.ty(), Ty::Str) {
                     format!("&{}", expr.render())
                 } else {
@@ -934,8 +930,7 @@ fn render_closure(
     out
 }
 
-/// A map or set prints through a sorted vec, real Rust randomizes its order
-/// per process.
+/// A map or set prints through a sorted vec, real Rust randomizes its order per process.
 fn observed(expr: &Expr) -> String {
     match expr.ty() {
         Ty::Map(key, value) => format!(
@@ -987,8 +982,7 @@ fn render_print(pad: &str, label: &str, expr: &Expr, spec: &FmtSpec, form: Print
     }
 }
 
-/// The width goes after the flags and before any precision and the trait
-/// letter.
+/// The width goes after the flags and before any precision and the trait letter.
 fn with_width(body: &str, width: &str) -> String {
     let split = body
         .find(['.', '?', 'x', 'X', 'o', 'b', 'e', 'E'])

@@ -1,29 +1,20 @@
-//! One dispatch step. `step` executes the op at `ctx.ip` and answers the
-//! `Flow` the frame loop in `vm.rs` applies. The op bodies live here.
+//! One dispatch step. `step` executes the op at `ctx.ip` and returns the `Flow` the frame loop in
+//! `vm.rs` applies.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::iter::repeat_n;
 use std::mem::take;
 use std::slice::from_ref;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use anyhow::{Result, anyhow, bail};
-use num_traits::AsPrimitive;
+use anyhow::{Result, bail};
 use parking_lot::Mutex;
 
-use super::bytecode::{
-    CapSource, Chunk, DefaultIr, MacroKind, Member, Op, PathId, path_call_chunk,
-};
-use super::iterator::FastNext;
-use super::native::Native;
-use super::numeric::{float_to_int, truncate};
-use super::ops::{self, apply_bin, apply_bin_imm, apply_un, cmp_test, cmp_test_imm, int_of};
-use super::pattern::{bind_pattern_refs, try_bind};
-use super::typeir::CastIr;
-use super::value::{ClosureData, StructShape, Upvalue, Value};
-use super::vm::{TypeEnv, Vm, empty_type_env};
+use super::bytecode::{Chunk, DefaultIr, Op};
+use super::ops::{self, apply_bin, apply_bin_imm, apply_un, cmp_test, cmp_test_imm};
+use super::value::{ClosureData, Upvalue, Value};
+use super::vm::{TypeEnv, Vm};
 use super::vm_method::{get_or_default, method_op};
 
 pub(super) enum Flow {
@@ -52,7 +43,7 @@ pub(super) struct StepCtx<'a> {
     pub stack: &'a mut Vec<Value>,
     pub base: usize,
     pub ip: usize,
-    /// For the function plan's depth budget.
+    /// for the depth budget of the function plan
     pub depth: usize,
 }
 
@@ -100,7 +91,7 @@ impl StepCtx<'_> {
         }
     }
 
-    /// `first` is relative to `base`.
+    /// `first` is relative to `base`
     pub(super) fn take_range(&mut self, first: usize, count: usize) -> Vec<Value> {
         let s = self.base + first;
         (0..count).map(|i| take(&mut self.stack[s + i])).collect()
@@ -200,8 +191,7 @@ pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
     })
 }
 
-/// So the copy in the argument window is the last holder and the guard
-/// drops at the destination.
+/// So the copy in the argument window is the last holder and the guard drops at the destination.
 fn move_out(ctx: &mut StepCtx, src: u16) -> Flow {
     let has_drop = ctx
         .vm
@@ -214,8 +204,8 @@ fn move_out(ctx: &mut StepCtx, src: u16) -> Flow {
     Flow::Next
 }
 
-/// Reverse declaration order. A binding with another holder was moved or
-/// is shared, its real owner drops it.
+/// Reverse declaration order. A binding with another holder was moved or is shared, its real
+/// owner drops it.
 fn drop_scope(ctx: &mut StepCtx, list: u16) -> Result<()> {
     let regs = ctx.cur.drop_lists[list as usize].clone();
     for reg in regs.iter().rev() {
@@ -225,8 +215,8 @@ fn drop_scope(ctx: &mut StepCtx, list: u16) -> Result<()> {
     Ok(())
 }
 
-/// `a + b` dispatches to the user `add`. `a += b` is lowered to `a = a + b`
-/// and falls back to a user `add_assign` answering the mutated value.
+/// `a + b` dispatches to the user `add`. `a += b` is lowered to `a = a + b` and falls back to a
+/// user `add_assign` that returns the mutated value.
 fn user_bin(
     ctx: &StepCtx,
     op: super::bytecode::BinKind,
@@ -244,7 +234,7 @@ fn user_bin(
     else {
         return Ok(None);
     };
-    // Equality and ordering go through `eq_value` and `partial_compare`.
+    // equality and ordering go through `eq_value` and `partial_compare`
     if let Some(chunk) = methods.bin(op) {
         let chunk = chunk.clone();
         return Ok(Some(ctx.vm.run_chunk(
@@ -255,14 +245,14 @@ fn user_bin(
     }
     if let Some(chunk) = methods.bin_assign(op) {
         let chunk = chunk.clone();
-        // The mutated receiver is the store back result of `a = a + b`.
+        // the mutated receiver is the store back result of `a = a + b`
         ctx.vm.run_chunk(&chunk, &[a.clone(), b.clone()], &[])?;
         return Ok(Some(a.clone()));
     }
     Ok(None)
 }
 
-/// `impl Neg for X`.
+/// `impl Neg for X`
 fn user_un(ctx: &StepCtx, op: super::bytecode::UnKind, a: &Value) -> Result<Option<Value>> {
     if ctx.vm.impls.is_empty() {
         return Ok(None);
@@ -274,7 +264,7 @@ fn user_un(ctx: &StepCtx, op: super::bytecode::UnKind, a: &Value) -> Result<Opti
     Ok(Some(ctx.vm.run_chunk(&chunk, from_ref(a), &[])?))
 }
 
-/// Split from `step` to keep the dispatch match readable.
+/// Split out of `step` to keep the dispatch match readable.
 fn call_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
     match op {
         Op::CallFn {
@@ -300,7 +290,7 @@ fn call_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
     }
 }
 
-/// Split from `step` to keep the dispatch match readable.
+/// Split out of `step` to keep the dispatch match readable.
 fn access_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
     match op {
         Op::Index { dst, base, key } => index_op(ctx, *dst, *base, *key),
@@ -314,7 +304,7 @@ fn access_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
     }
 }
 
-/// Split from `step` to keep the dispatch match readable.
+/// Split out of `step` to keep the dispatch match readable.
 fn place_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
     Ok(match op {
         Op::UniqueReg { reg } => unique_reg(ctx, *reg),
@@ -429,8 +419,8 @@ fn branch(jump: bool, to: u32) -> Flow {
     }
 }
 
-/// A backward jump runs a pending Ctrl-C handler and lets the while plan
-/// take over, see `scalar_loop.rs`. A rejected loop pays one atomic load.
+/// A backward jump runs a pending Ctrl-C handler and lets the while plan take over, see
+/// `scalar_loop.rs`. A rejected loop pays 1 atomic load.
 fn jump(ctx: &mut StepCtx, to: usize) -> Result<Flow> {
     if to <= ctx.ip {
         ctx.vm.run_pending_ctrlc()?;
@@ -447,8 +437,8 @@ fn jump(ctx: &mut StepCtx, to: usize) -> Result<Flow> {
     Ok(Flow::Jump(to))
 }
 
-/// Out of the hot path. A `for` body's back jump is rejected on first
-/// sight, the `for` plan owns that loop.
+/// Out of the hot path. The back jump of a `for` body is rejected on first sight, the `for` plan
+/// owns that loop.
 #[cold]
 fn loop_plan_jump(ctx: &mut StepCtx, to: usize) -> Result<Option<Flow>> {
     if matches!(ctx.cur.code.get(to), Some(Op::ForNext { .. })) {
@@ -460,8 +450,7 @@ fn loop_plan_jump(ctx: &mut StepCtx, to: usize) -> Result<Option<Flow>> {
     super::scalar_while::try_run_while(ctx, to)
 }
 
-/// Hand the loop to the while plan before the first iteration, or fall
-/// through.
+/// Hand the loop to the while plan before the first iteration, or fall through.
 fn loop_head(ctx: &mut StepCtx, jump: u32) -> Result<Flow> {
     let jump_ip = jump as usize;
     if ctx
@@ -487,8 +476,8 @@ fn store_cell(ctx: &mut StepCtx, cell: u16, src: u16) -> Flow {
     Flow::Next
 }
 
-/// A binding starts a new variable, so the last cell is forgotten and the
-/// next use builds one from the register.
+/// A binding starts a new variable, so the last cell is forgotten and the next use builds one
+/// from the register.
 fn drop_cell(ctx: &mut StepCtx, cell: u16) -> Flow {
     ctx.local_cells.remove(&(ctx.base + cell as usize));
     Flow::Next
@@ -501,825 +490,19 @@ fn store_upvalue(ctx: &StepCtx, idx: u16, src: u16) -> Result<Flow> {
     Ok(Flow::Next)
 }
 
-fn call_fn(
-    ctx: &mut StepCtx,
-    dst: u16,
-    func: u32,
-    abase: u16,
-    argc: u16,
-    targ: u32,
-) -> Result<Flow> {
-    let callee = ctx.vm.functions[func as usize].clone();
-    // See `scalar_fn`.
-    if targ == u32::MAX
-        && let Some(v) = super::scalar_fn::try_call(ctx, &callee, abase, argc)?
-    {
-        return Ok(ctx.set(dst, v));
-    }
-    let type_env: TypeEnv = if targ == u32::MAX {
-        empty_type_env()
-    } else {
-        let targs = &ctx.cur.call_type_args[targ as usize];
-        callee
-            .generics
-            .iter()
-            .zip(targs.iter())
-            .map(|(name, ty)| (name.clone(), ty.clone()))
-            .collect()
-    };
-    request_call(callee, None, dst, abase, argc, type_env)
-}
+mod calls;
+mod control;
+mod places;
 
-fn call_value(ctx: &StepCtx, dst: u16, callee: u16, abase: u16, argc: u16) -> Result<Flow> {
-    let clo = match ctx.get(callee) {
-        Value::Closure(clo) => clo.clone(),
-        other => bail!("cannot call {}", other.type_name()),
-    };
-    let chunk = clo.chunk.clone();
-    request_call(chunk, Some(clo), dst, abase, argc, empty_type_env())
-}
-
-/// The arg count is checked here, where the error can name the callee.
-fn request_call(
-    chunk: Arc<Chunk>,
-    closure: Option<Arc<ClosureData>>,
-    dst: u16,
-    abase: u16,
-    argc: u16,
-    type_env: TypeEnv,
-) -> Result<Flow> {
-    // A forwarder's arity is a guess, `u8::saturating_add` handed to `fold`
-    // takes 2 where the guess was 1.
-    let chunk = if chunk.path_forwarder && argc as usize != chunk.num_params {
-        path_call_chunk(chunk.paths[0].clone(), argc as usize)
-    } else {
-        chunk
-    };
-    if argc as usize != chunk.num_params {
-        bail!(
-            "`{}` expects {} args but got {}",
-            chunk.name,
-            chunk.num_params,
-            argc
-        );
-    }
-    Ok(Flow::Call(CallReq {
-        chunk,
-        closure,
-        dst,
-        abase: abase as usize,
-        argc: argc as usize,
-        type_env,
-    }))
-}
-
-fn call_path(ctx: &mut StepCtx, dst: u16, path: u16, abase: u16, argc: u16) -> Result<Flow> {
-    let (vm, cur) = (ctx.vm, ctx.cur);
-    let (abase, argc) = (abase as usize, argc as usize);
-    let path = &cur.paths[path as usize];
-    // `::unreachable_match` and friends.
-    match path.id {
-        PathId::UnreachableMatch => bail!("no match arm matched the value"),
-        PathId::AssertFailed => bail!("assertion failed"),
-        PathId::EnsureFail => {
-            let message = if argc > 0 {
-                ctx.stack[ctx.base + abase].display()
-            } else {
-                "condition failed".to_string()
-            };
-            return Ok(ctx.set(dst, Value::err(Value::str(message))));
-        }
-        _ => {}
-    }
-    let call_args = ctx.take_range(abase, argc);
-    // Typed json parses straight into the target structs.
-    if let Some(ty) = &path.coerce
-        && path.id == PathId::SerdeJsonFromStr
-    {
-        return Ok(ctx.set(dst, vm.typed_from_str(&call_args, ty, ctx.cur_tenv)?));
-    }
-    let mut v = vm.dispatch_call(path, call_args)?;
-    if let Some(ty) = &path.coerce {
-        v = vm.coerce_result(v, ty);
-    }
-    Ok(ctx.set(dst, v))
-}
-
-fn path_value(ctx: &mut StepCtx, dst: u16, path: u16) -> Result<Flow> {
-    let path = &ctx.cur.paths[path as usize];
-    Ok(ctx.set(dst, ctx.vm.eval_path_value(path)?))
-}
-
-fn make_vec(ctx: &mut StepCtx, dst: u16, first: u16, count: u16) -> Flow {
-    let items = ctx.take_range(first as usize, count as usize);
-    ctx.set(dst, Value::vec(items))
-}
-
-fn make_tuple(ctx: &mut StepCtx, dst: u16, first: u16, count: u16) -> Flow {
-    let items = ctx.take_range(first as usize, count as usize);
-    ctx.set(dst, Value::tuple(items))
-}
-
-fn array_repeat(ctx: &mut StepCtx, dst: u16, val: u16, count: u16) -> Result<Flow> {
-    let n = match ctx.get(count) {
-        Value::Int(n) => usize::try_from(*n)?,
-        v if v.untag_int().is_some() => usize::try_from(v.untag_int().unwrap())?,
-        _ => bail!("array repeat length must be an integer"),
-    };
-    let v = ctx.get(val).clone();
-    Ok(ctx.set(dst, Value::vec(repeat_n(v, n).collect())))
-}
-
-fn make_range(ctx: &mut StepCtx, dst: u16, start: u16, end: u16, inclusive: bool) -> Result<Flow> {
-    let start = int_of(ctx.get(start))?;
-    let end = int_of(ctx.get(end))?;
-    Ok(ctx.set(
-        dst,
-        Value::Range {
-            start,
-            end,
-            inclusive,
-        },
-    ))
-}
-
-fn for_next(ctx: &mut StepCtx, iter: u16, idx: u16, val: u16, to: u32) -> Result<Flow> {
-    // The first iteration tries the scalar plan, see `scalar_loop.rs`. A
-    // mid loop fallback leaves the index at the consumed count, so the
-    // attempt happens once.
-    if matches!(ctx.get(idx), Value::Int(0))
-        && let Some(flow) = super::scalar_for::try_run(ctx, iter, idx, to)?
-    {
-        return Ok(flow);
-    }
-    let i = match ctx.get(idx) {
-        Value::Int(i) => *i,
-        _ => unreachable!("for index is an integer"),
-    };
-    // Simple sources produce their item in place, skipping `iterator_next`.
-    let item = {
-        let Value::Native(iterator) = ctx.get(iter) else {
-            bail!("{} is not an iterator", ctx.get(iter).type_name());
-        };
-        let fast = match &mut *iterator.lock() {
-            Native::Iterator(state) => state.fast_next(),
-            _ => FastNext::NotSimple,
-        };
-        match fast {
-            FastNext::Ready(item) => item,
-            FastNext::NotSimple => {
-                let iterator = iterator.clone();
-                ctx.vm.iterator_next(&iterator)?
-            }
-        }
-    };
-    let Some(v) = item else {
-        return Ok(Flow::Jump(to as usize));
-    };
-    ctx.put(val, v);
-    ctx.vm.run_pending_ctrlc()?;
-    Ok(ctx.set(idx, Value::Int(i + 1)))
-}
-
-fn make_struct(ctx: &mut StepCtx, dst: u16, info: u16, first: u16) -> Flow {
-    let lit = &ctx.cur.struct_lits[info as usize];
-    let written = lit.shape.fields.len();
-    let mut values = ctx.take_range(first as usize, written);
-    let v = if lit.has_rest {
-        let rest = ctx.stack[ctx.base + first as usize + written].clone();
-        let mut fields = lit.shape.fields.clone();
-        let mut renames = lit.shape.renames.clone();
-        if let Value::Struct(r) = rest {
-            let rvals = r.values.lock();
-            for (slot, (k, v)) in r.shape.fields.iter().zip(rvals.iter()).enumerate() {
-                match lit.shape.slot(k) {
-                    Some(index) if !lit.filled.get(index).copied().unwrap_or(true) => {
-                        values[index] = v.clone();
-                    }
-                    Some(_) => {}
-                    // The struct definition was out of reach at compile time.
-                    None => {
-                        fields.push(k.clone());
-                        values.push(v.clone());
-                        if !renames.is_empty() {
-                            renames.push(r.shape.renames.get(slot).cloned().flatten());
-                        }
-                    }
-                }
-            }
-        }
-        let shape = StructShape::typed(lit.shape.name.clone(), lit.shape.type_id, fields, renames);
-        Value::structure(shape, values)
-    } else {
-        Value::structure(lit.shape.clone(), values)
-    };
-    ctx.set(dst, v)
-}
-
-fn make_enum(ctx: &mut StepCtx, dst: u16, info: u16, first: u16, count: u16) -> Flow {
-    let variant = &ctx.cur.enum_variants[info as usize];
-    let data = Arc::new(Mutex::new(ctx.take_range(first as usize, count as usize)));
-    ctx.set(
-        dst,
-        Value::Enum {
-            def: variant.def.clone(),
-            variant: variant.variant,
-            data,
-        },
-    )
-}
-
-fn load_enum(ctx: &mut StepCtx, dst: u16, info: u16) -> Flow {
-    let variant = &ctx.cur.enum_variants[info as usize];
-    ctx.set(
-        dst,
-        Value::Enum {
-            def: variant.def.clone(),
-            variant: variant.variant,
-            data: Arc::new(Mutex::new(Vec::new())),
-        },
-    )
-}
-
-fn closure_op(ctx: &mut StepCtx, dst: u16, child: u16) -> Flow {
-    let clo = make_closure(ctx, child);
-    ctx.set(dst, Value::Closure(clo))
-}
-
-fn spawn_op(ctx: &mut StepCtx, dst: u16, child: u16) -> Flow {
-    let clo = make_closure(ctx, child);
-    let interp = ctx.vm.clone();
-    let handle = ctx.vm.rt.spawn_blocking(move || {
-        match interp.run_chunk(&clo.chunk, &[], &clo.captured) {
-            Ok(v) => v,
-            // A task panic prints and the join handle answers
-            // `Err(JoinError)`, like real tokio. `resume_unwind` skips the
-            // hook so the header is not doubled.
-            Err(e) => {
-                if let Some(p) = e.downcast_ref::<super::vm_support::ScriptPanic>() {
-                    if p.file.is_empty() {
-                        eprintln!("thread 'tokio-runtime-worker' panicked:");
-                    } else {
-                        eprintln!(
-                            "thread 'tokio-runtime-worker' panicked at {}:{}:",
-                            p.file, p.line
-                        );
-                    }
-                    eprintln!("{}", p.rendered);
-                    eprintln!(
-                        "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace"
-                    );
-                } else {
-                    eprintln!("rust error in task: {e:#}");
-                }
-                // The bare message, so the `JoinError` formats like real
-                // tokio's `task 11 panicked with message "boom"`.
-                let payload = match e.downcast_ref::<super::vm_support::ScriptPanic>() {
-                    Some(p) => {
-                        let first = p.rendered.lines().next().unwrap_or_default();
-                        first.strip_prefix("panicked: ").unwrap_or(first).to_string()
-                    }
-                    None => format!("{e:#}"),
-                };
-                std::panic::resume_unwind(Box::new(payload))
-            }
-        }
-    });
-    ctx.set(dst, Native::Task(handle).wrap())
-}
-
-fn make_closure(ctx: &mut StepCtx, child: u16) -> Arc<ClosureData> {
-    let cur = ctx.cur;
-    let child_chunk = cur.children[child as usize].clone();
-    let caps = &cur.child_caps[child as usize];
-    // A `move` closure takes its own copy of a mutable capture.
-    let moves = child_chunk.moves;
-    let own = |value: Value| Upvalue::Mutable(Arc::new(Mutex::new(value)));
-    let captured: Vec<Upvalue> = caps
-        .iter()
-        .map(|c| match c {
-            CapSource::Local(reg) => Upvalue::Value(ctx.stack[ctx.base + *reg as usize].clone()),
-            CapSource::Upvalue(idx) => ctx.upvalues()[*idx as usize].clone(),
-            CapSource::MutableUpvalue(idx) => {
-                let shared = ctx.upvalues()[*idx as usize].clone();
-                if moves { own(shared.get()) } else { shared }
-            }
-            CapSource::MutableLocal(reg) => {
-                let cell = ctx.cell(*reg).clone();
-                if moves {
-                    let value = cell.lock().clone();
-                    own(value)
-                } else {
-                    Upvalue::Mutable(cell)
-                }
-            }
-        })
-        .collect();
-    Arc::new(ClosureData {
-        chunk: child_chunk,
-        captured,
-    })
-}
-
-/// A reference base resolves to its referent and a shared pointer auto
-/// derefs.
-fn place_base(v: &Value) -> Result<Value> {
-    Ok(match v {
-        Value::Ref(reference) => reference
-            .get()
-            .ok_or_else(|| anyhow!("access through a dangling reference"))?,
-        Value::Cell(_, slot) => slot.lock().clone(),
-        other => other.clone(),
-    })
-}
-
-fn set_index(ctx: &mut StepCtx, base: u16, key: u16, val: u16) -> Result<Flow> {
-    // A range write into a string is the writeback of
-    // `s[2..].make_ascii_uppercase()`, stored through the base itself.
-    if let &Value::Range {
-        start,
-        end,
-        inclusive,
-    } = ctx.get(key)
-    {
-        let target = place_base(ctx.get(base))?;
-        if let Value::Str(s) = &target {
-            let new = Value::str(ops::splice_str(s, start, end, inclusive, ctx.get(val))?);
-            let flow = match ctx.get(base).clone() {
-                Value::Cell(_, slot) => {
-                    *slot.lock() = new;
-                    Flow::Next
-                }
-                Value::Ref(reference) => {
-                    if !reference.set(new) {
-                        bail!("assignment through a dangling reference");
-                    }
-                    Flow::Next
-                }
-                _ => ctx.set(base, new),
-            };
-            return Ok(flow);
-        }
-    }
-    let target = place_base(ctx.get(base))?;
-    ops::set_index(&target, ctx.get(key), ctx.get(val).clone())?;
-    Ok(Flow::Next)
-}
-
-fn deref_op(ctx: &mut StepCtx, dst: u16, src: u16) -> Result<Flow> {
-    let v = deref(ctx.get(src))?;
-    Ok(ctx.set(dst, v))
-}
-
-fn deref(v: &Value) -> Result<Value> {
-    Ok(match v {
-        Value::Ref(reference) => reference
-            .get()
-            .ok_or_else(|| anyhow!("dereference of a dangling reference"))?,
-        // `*rc` reads the content.
-        Value::Cell(_, slot) => slot.lock().clone(),
-        value => value.clone(),
-    })
-}
-
-fn set_deref(ctx: &StepCtx, target: u16, val: u16) -> Result<Flow> {
-    let Value::Ref(reference) = ctx.get(target) else {
-        bail!("assignment through a non-reference value");
-    };
-    if !reference.set(ctx.get(val).clone()) {
-        bail!("assignment through a dangling reference");
-    }
-    Ok(Flow::Next)
-}
-
-/// A value a fused compound assignment may touch under the held lock,
-/// `apply_bin` on these takes no lock and runs no user code.
-fn fusable_scalar(v: &Value) -> bool {
-    matches!(
-        v,
-        Value::Int(_) | Value::IntW(..) | Value::Float(_) | Value::F32(_) | Value::Bool(_)
-    )
-}
-
-/// `*r op= v` as one op. Plain scalars run under the referent's lock so
-/// concurrent tasks cannot lose updates. Everything else runs the unfused
-/// sequence, errors included.
-fn deref_bin_assign(
-    ctx: &mut StepCtx,
-    target: u16,
-    val: u16,
-    op: super::bytecode::BinKind,
-) -> Result<Flow> {
-    if let Value::Ref(reference) = ctx.get(target)
-        && fusable_scalar(ctx.get(val))
-    {
-        let reference = reference.clone();
-        let b = ctx.get(val).clone();
-        let fused = reference.update(|current| {
-            if !fusable_scalar(current) {
-                return Ok(false);
-            }
-            *current = apply_bin(op, current, &b)?;
-            Ok(true)
-        });
-        match fused {
-            Some(Ok(true)) => return Ok(Flow::Next),
-            Some(Err(e)) => return Err(e),
-            Some(Ok(false)) | None => {}
-        }
-    }
-    let current = deref(ctx.get(target))?;
-    let b = ctx.get(val).clone();
-    let result = match user_bin(ctx, op, &current, &b)? {
-        Some(v) => v,
-        None => apply_bin(op, &current, &b)?,
-    };
-    let Value::Ref(reference) = ctx.get(target) else {
-        bail!("assignment through a non-reference value");
-    };
-    if !reference.set(result) {
-        bail!("assignment through a dangling reference");
-    }
-    Ok(Flow::Next)
-}
-
-/// A real reference is set through, a plain value is written into the
-/// parameter register for the caller's writeback.
-fn set_deref_param(ctx: &mut StepCtx, target: u16, val: u16) -> Result<Flow> {
-    if let Value::Ref(reference) = ctx.get(target) {
-        if !reference.set(ctx.get(val).clone()) {
-            bail!("assignment through a dangling reference");
-        }
-        return Ok(Flow::Next);
-    }
-    let value = ctx.get(val).clone();
-    Ok(ctx.set(target, value))
-}
-
-fn get_field_op(ctx: &mut StepCtx, dst: u16, base: u16, member: u16) -> Result<Flow> {
-    let target = place_base(ctx.get(base))?;
-    let v = Vm::get_field(&target, &ctx.cur.members[member as usize])?;
-    Ok(ctx.set(dst, v))
-}
-
-fn set_field_op(ctx: &StepCtx, base: u16, member: u16, val: u16) -> Result<Flow> {
-    let target = place_base(ctx.get(base))?;
-    Vm::set_field(
-        &target,
-        &ctx.cur.members[member as usize],
-        ctx.get(val).clone(),
-    )?;
-    Ok(Flow::Next)
-}
-
-/// `base` was made unique by the ops before this one, so the split cannot
-/// leak into a sibling copy.
-fn unique_reg(ctx: &mut StepCtx, reg: u16) -> Flow {
-    ctx.stack[ctx.base + reg as usize].make_unique();
-    Flow::Next
-}
-
-fn unique_field(ctx: &mut StepCtx, dst: u16, base: u16, member: u16) -> Result<Flow> {
-    let member = &ctx.cur.members[member as usize];
-    let target = place_base(ctx.get(base))?;
-    let v = match (&target, member) {
-        (Value::Struct(s), Member::Named(n)) => {
-            let Some(i) = n.slot_in(&s.shape) else {
-                bail!("no field `{n}`");
-            };
-            let mut values = s.values.lock();
-            values[i].make_unique();
-            values[i].clone()
-        }
-        (Value::Struct(s), Member::Indexed(i)) => {
-            let mut values = s.values.lock();
-            let Some(slot) = values.get_mut(*i) else {
-                bail!("no field {i}");
-            };
-            slot.make_unique();
-            slot.clone()
-        }
-        (Value::Tuple(t), Member::Indexed(i)) => {
-            let mut items = t.lock();
-            let Some(slot) = items.get_mut(*i) else {
-                bail!("no tuple index {i}");
-            };
-            slot.make_unique();
-            slot.clone()
-        }
-        (recv, _) => Vm::get_field(recv, member)?,
-    };
-    Ok(ctx.set(dst, v))
-}
-
-/// `unique_field` for an element. Anything else falls back to the plain
-/// index path, whose error wording stays authoritative.
-fn unique_index(ctx: &mut StepCtx, dst: u16, base: u16, key: u16) -> Result<Flow> {
-    let target = place_base(ctx.get(base))?;
-    let split = match (&target, ctx.get(key)) {
-        (Value::Vec(list), key_val) => {
-            match int_of(key_val).ok().and_then(|i| usize::try_from(i).ok()) {
-                Some(i) => {
-                    let mut items = list.lock();
-                    items.get_mut(i).map(|slot| {
-                        slot.make_unique();
-                        slot.clone()
-                    })
-                }
-                None => None,
-            }
-        }
-        (Value::Map(map, _), key_val) => match key_val.as_key() {
-            Some(k) => {
-                let mut entries = map.lock();
-                entries.get_mut(&k).map(|slot| {
-                    slot.make_unique();
-                    slot.clone()
-                })
-            }
-            None => None,
-        },
-        _ => None,
-    };
-    // Fall back to the ordinary index path for its error wording.
-    let v = match split {
-        Some(v) => v,
-        None => ops::index(&target, ctx.get(key))?,
-    };
-    Ok(ctx.set(dst, v))
-}
-
-fn unique_cell(ctx: &mut StepCtx, dst: u16, cell: u16) -> Flow {
-    let cell = ctx.cell(cell).clone();
-    let v = {
-        let mut slot = cell.lock();
-        slot.make_unique();
-        slot.clone()
-    };
-    ctx.set(dst, v)
-}
-
-fn unique_upvalue(ctx: &mut StepCtx, dst: u16, idx: u16) -> Flow {
-    let v = match &ctx.upvalues()[idx as usize] {
-        Upvalue::Value(v) => v.clone(),
-        Upvalue::Mutable(cell) => {
-            let mut slot = cell.lock();
-            slot.make_unique();
-            slot.clone()
-        }
-    };
-    ctx.set(dst, v)
-}
-
-/// The compiler makes the element unique first.
-fn ref_index(ctx: &mut StepCtx, dst: u16, base: u16, key: u16) -> Result<Flow> {
-    let target = place_base(ctx.get(base))?;
-    let v = match (&target, ctx.get(key)) {
-        (Value::Vec(list), key_val) => {
-            let i = usize::try_from(int_of(key_val)?)?;
-            let len = list.lock().len();
-            if i >= len {
-                bail!("index out of bounds: the len is {len} but the index is {i}");
-            }
-            Value::Ref(Arc::new(super::value::ValueRef::vec_element(
-                list.clone(),
-                i,
-            )))
-        }
-        (Value::Map(map, _), key_val) => {
-            let k = key_val.as_key().ok_or_else(|| anyhow!("invalid map key"))?;
-            Value::Ref(Arc::new(super::value::ValueRef::map_entry(map.clone(), k)))
-        }
-        (recv, _) => bail!("cannot take `&mut` of an element of {}", recv.type_name()),
-    };
-    Ok(ctx.set(dst, v))
-}
-
-/// A tuple field borrows as a list element.
-fn ref_field(ctx: &mut StepCtx, dst: u16, base: u16, member: u16) -> Result<Flow> {
-    let member = &ctx.cur.members[member as usize];
-    let target = place_base(ctx.get(base))?;
-    let v = match (&target, member) {
-        (Value::Struct(s), Member::Named(n)) => {
-            let Some(slot) = n.slot_in(&s.shape) else {
-                bail!("no field `{n}`");
-            };
-            Value::Ref(Arc::new(super::value::ValueRef::struct_field(
-                s.clone(),
-                slot,
-            )))
-        }
-        (Value::Struct(s), Member::Indexed(i)) => Value::Ref(Arc::new(
-            super::value::ValueRef::struct_field(s.clone(), *i),
-        )),
-        (Value::Tuple(t), Member::Indexed(i)) => {
-            Value::Ref(Arc::new(super::value::ValueRef::vec_element(t.clone(), *i)))
-        }
-        (recv, _) => bail!("cannot take `&mut` of a field of {}", recv.type_name()),
-    };
-    Ok(ctx.set(dst, v))
-}
-
-fn try_op(ctx: &mut StepCtx, dst: u16, src: u16, conv: u16) -> Result<Flow> {
-    Ok(match ops::eval_try(ctx.get(src).clone())? {
-        Ok(v) => ctx.set(dst, v),
-        Err(early) => Flow::Ret(convert_early(ctx, early, conv)?),
-    })
-}
-
-fn try_jump(ctx: &mut StepCtx, dst: u16, src: u16, to: u32, conv: u16) -> Result<Flow> {
-    Ok(match ops::eval_try(ctx.get(src).clone())? {
-        Ok(v) => {
-            ctx.put(dst, v);
-            Flow::Jump(to as usize)
-        }
-        // Falls through into the scope drops and the `Ret` after this op.
-        Err(early) => {
-            let early = convert_early(ctx, early, conv)?;
-            ctx.set(dst, early)
-        }
-    })
-}
-
-/// The error converts through the frame type's `From` impl. One already of
-/// that type, or one no impl converts, leaves as it is.
-fn convert_early(ctx: &StepCtx, early: Value, conv: u16) -> Result<Value> {
-    if conv == super::bytecode::NO_CONV {
-        return Ok(early);
-    }
-    let target = &ctx.cur.try_targets[conv as usize];
-    let payload = match &early {
-        Value::Enum { def, variant, data }
-            if def.kind == super::enum_def::EnumKind::Result
-                && *variant == super::enum_def::ERR =>
-        {
-            data.lock().first().cloned()
-        }
-        _ => None,
-    };
-    let Some(payload) = payload else {
-        return Ok(early);
-    };
-    let Some(chunk) = ctx.vm.conversion_impl(target, &payload) else {
-        return Ok(early);
-    };
-    let converted = ctx.vm.run_chunk(&chunk, &[payload], &[])?;
-    Ok(Value::err(converted))
-}
-
-fn cast_op(ctx: &mut StepCtx, dst: u16, src: u16, ty: u16) -> Result<Flow> {
-    let v = eval_cast(&ctx.cur.casts[ty as usize], ctx.get(src).clone())?;
-    Ok(ctx.set(dst, v))
-}
-
-fn coerce_op(ctx: &mut StepCtx, dst: u16, src: u16, ty: u16) -> Flow {
-    let v = ctx
-        .vm
-        .coerce_value(ctx.get(src).clone(), &ctx.cur.coerces[ty as usize]);
-    ctx.set(dst, v)
-}
-
-fn test_bind(ctx: &mut StepCtx, val: u16, pat: u16, dst: u16) -> Flow {
-    let info = &ctx.cur.pats[pat as usize];
-    let raw = ctx.get(val).clone();
-    // A reference scrutinee's bindings borrow, so
-    // `if let Some(v) = &mut opt { v.push(..) }` writes into `opt`.
-    let (value, by_ref) = match &raw {
-        Value::Ref(reference) => match reference.get() {
-            Some(inner) => (inner, true),
-            None => (Value::Unit, false),
-        },
-        _ => (raw, false),
-    };
-    let binds = &info.binds;
-    let mut writes: Vec<(u16, Value)> = Vec::new();
-    let matched = if by_ref {
-        // Match first, then anchor each binding to its payload storage.
-        let matched = try_bind(&info.pat, &value, &mut |_, _| {});
-        if matched {
-            let mut define = |name: &str, v: Value| {
-                if let Some((_, reg)) = binds.iter().find(|(n, _)| n == name) {
-                    writes.push((*reg, v));
-                }
-            };
-            bind_pattern_refs(&info.pat, &value, &mut define);
-        }
-        matched
-    } else {
-        let mut define = |name: &str, v: Value| {
-            if let Some((_, reg)) = binds.iter().find(|(n, _)| n == name) {
-                writes.push((*reg, v));
-            }
-        };
-        try_bind(&info.pat, &value, &mut define)
-    };
-    for (reg, v) in writes {
-        ctx.put(reg, v);
-    }
-    ctx.set(dst, Value::Bool(matched))
-}
-
-fn fmt_op(ctx: &mut StepCtx, dst: u16, spec: u16) -> Result<Flow> {
-    let text = ctx.vm.render_fmt(ctx.cur, spec, &ctx.stack[ctx.base..])?;
-    Ok(ctx.set(dst, Value::str(text)))
-}
-
-fn macro_call(ctx: &mut StepCtx, kind: MacroKind, dst: u16, spec: u16) -> Result<Flow> {
-    let text = ctx.vm.render_fmt(ctx.cur, spec, &ctx.stack[ctx.base..])?;
-    Ok(match kind {
-        MacroKind::Println => {
-            println!("{text}");
-            ctx.set(dst, Value::Unit)
-        }
-        MacroKind::Print => {
-            print!("{text}");
-            ctx.set(dst, Value::Unit)
-        }
-        MacroKind::Eprintln => {
-            eprintln!("{text}");
-            ctx.set(dst, Value::Unit)
-        }
-        MacroKind::Eprint => {
-            eprint!("{text}");
-            ctx.set(dst, Value::Unit)
-        }
-        MacroKind::Panic => bail!("panicked: {text}"),
-        MacroKind::Anyhow => ctx.set(dst, Value::err(Value::str(text))),
-        MacroKind::Bail => Flow::Ret(Value::err(Value::str(text))),
-    })
-}
-
-fn dbg_op(ctx: &mut StepCtx, dst: u16, first: u16, argc: u16) -> Flow {
-    let (first, argc) = (first as usize, argc as usize);
-    let mut last = Value::Unit;
-    for i in 0..argc {
-        last = ctx.stack[ctx.base + first + i].clone();
-        eprintln!("[dbg] {}", last.debug());
-    }
-    ctx.set(dst, last)
-}
-
-fn await_op(ctx: &mut StepCtx, dst: u16, src: u16) -> Result<Flow> {
-    let v = ctx.take(src);
-    Ok(ctx.set(dst, ctx.vm.await_value(v)?))
-}
-
-fn eval_cast(target: &CastIr, v: Value) -> Result<Value> {
-    let width = match target {
-        CastIr::F64 => {
-            return Ok(Value::Float(match v {
-                Value::Int(i) => AsPrimitive::<f64>::as_(i),
-                Value::IntW(..) => AsPrimitive::<f64>::as_(v.int_parts().unwrap().0),
-                Value::Big(bits, w) => {
-                    if w == super::numeric::IntWidth::U128 {
-                        AsPrimitive::<f64>::as_(bits.cast_unsigned())
-                    } else {
-                        AsPrimitive::<f64>::as_(bits)
-                    }
-                }
-                Value::Float(f) => f,
-                Value::F32(f) => f64::from(f),
-                other => bail!("cannot cast {} to float", other.type_name()),
-            }));
-        }
-        CastIr::F32 => {
-            return Ok(Value::F32(match v {
-                Value::Int(i) => AsPrimitive::<f32>::as_(i),
-                Value::IntW(..) => AsPrimitive::<f32>::as_(v.int_parts().unwrap().0),
-                Value::Float(f) => AsPrimitive::<f32>::as_(f),
-                Value::F32(f) => f,
-                other => bail!("cannot cast {} to float", other.type_name()),
-            }));
-        }
-        CastIr::Char => {
-            return Ok(match v {
-                Value::Int(_) | Value::IntW(..) => {
-                    let i = v.int_parts().map_or(0, |(value, _)| value);
-                    Value::Char(
-                        u32::try_from(i)
-                            .ok()
-                            .and_then(char::from_u32)
-                            .ok_or_else(|| anyhow!("invalid char code {i}"))?,
-                    )
-                }
-                Value::Char(c) => Value::Char(c),
-                other => bail!("cannot cast {} to char", other.type_name()),
-            });
-        }
-        CastIr::Unsupported(name) => bail!("unsupported cast target: {name}"),
-        CastIr::Int(width) => *width,
-    };
-    let value = match v {
-        Value::Int(i) => truncate(i128::from(i), width),
-        Value::IntW(..) => truncate(v.int_parts().unwrap().0, width),
-        // The stored i128 carries the exact bits, so a narrowing cast keeps
-        // the low bits.
-        Value::Big(bits, _) => truncate(bits, width),
-        Value::Float(f) => float_to_int(f, width),
-        Value::F32(f) => float_to_int(f64::from(f), width),
-        Value::Char(c) => truncate(i128::from(c as u32), width),
-        Value::Bool(b) => i128::from(b),
-        other => bail!("cannot cast {} to integer", other.type_name()),
-    };
-    Ok(Value::int_of_width(value, width))
-}
+use calls::{
+    array_repeat, call_fn, call_path, call_value, closure_op, for_next, load_enum, make_enum,
+    make_range, make_struct, make_tuple, make_vec, path_value, spawn_op,
+};
+use control::{
+    await_op, cast_op, coerce_op, dbg_op, fmt_op, macro_call, test_bind, try_jump, try_op,
+};
+use places::{
+    deref_bin_assign, deref_op, get_field_op, place_base, ref_field, ref_index, set_deref,
+    set_deref_param, set_field_op, set_index, unique_cell, unique_field, unique_index, unique_reg,
+    unique_upvalue,
+};

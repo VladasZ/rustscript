@@ -181,7 +181,7 @@ impl Generator<'_> {
             10 => format!("0.5{suffix}"),
             _ => {
                 let value = f64::from(self.rng.random_range(0..2_000_000)) / 1000.0 - 1000.0;
-                // A bare negative literal binds looser than a method call.
+                // a bare negative literal binds looser than a method call
                 if value < 0.0 {
                     format!("({value:?}{suffix})")
                 } else {
@@ -216,8 +216,8 @@ impl Generator<'_> {
         *self.pick(POOL)
     }
 
-    /// Full of things that look parseable on purpose, a pool of plain words
-    /// would never exercise `parse`.
+    /// Full of things that look parseable on purpose, a pool of plain words would never exercise
+    /// `parse`.
     pub(super) fn string_value(&mut self) -> String {
         const POOL: &[&str] = &[
             "",
@@ -254,10 +254,10 @@ impl Generator<'_> {
         (*self.pick(POOL)).to_string()
     }
 
-    // -- catalog calls --------------------------------------------------------
+    // catalog calls
 
     pub(super) fn call(&mut self, want: &Ty, depth: usize) -> Option<Expr> {
-        // Solving touches no generator state, so it runs first.
+        // solving touches no generator state, so it runs first
         let solved: Vec<(&'static Method, Solved)> = METHODS
             .iter()
             .filter_map(|method| Some((method, solve(method, want)?)))
@@ -316,8 +316,7 @@ impl Generator<'_> {
         fish: Option<&Ty>,
         depth: usize,
     ) -> Option<Expr> {
-        // A count stays a small literal, or `repeat` and `pow` eat the whole
-        // timeout.
+        // a count stays a small literal, or `repeat` and `pow` eat the whole timeout
         let small = match pattern {
             TyPat::SmallU32 => Some((IntWidth::U32, i128::from(self.rng.random_range(0..=9)))),
             TyPat::SmallI32 => Some((IntWidth::I32, i128::from(self.rng.random_range(-3..=5)))),
@@ -335,8 +334,8 @@ impl Generator<'_> {
         Some(self.expr(&ty, depth - 1))
     }
 
-    /// A receiver type for a method whose result did not pin one. The sample
-    /// completes a half pinned pair.
+    /// A receiver type for a method whose result didn't pin one. The sample completes a half
+    /// pinned pair.
     fn sample_recv(&mut self, method: &Method, key: Option<&Ty>, val: Option<&Ty>) -> Option<Ty> {
         let ty = match method.recv {
             RecvClass::Int => Ty::Int(self.int_width()),
@@ -426,7 +425,7 @@ impl Generator<'_> {
         None
     }
 
-    // -- operators ------------------------------------------------------------
+    // operators
 
     pub(super) fn binary(&mut self, want: &Ty, depth: usize) -> Option<Expr> {
         let (op, right_ty) = match want {
@@ -519,11 +518,11 @@ impl Generator<'_> {
                 _ if want.is_int() => Ty::Char,
                 _ => Ty::Int(self.int_width()),
             },
-            // Only `u8` casts to `char`.
+            // only `u8` casts to `char`
             Ty::Char => Ty::Int(IntWidth::U8),
             _ => return None,
         };
-        // `char as f64` does not exist.
+        // `char as f64` doesn't exist
         if matches!(source, Ty::Char) && !want.is_int() {
             return None;
         }
@@ -598,7 +597,7 @@ impl Generator<'_> {
         }
     }
 
-    // -- accesses -------------------------------------------------------------
+    // accesses
 
     pub(super) fn access(&mut self, want: &Ty, depth: usize) -> Option<Expr> {
         let mut options: Vec<Expr> = Vec::new();
@@ -655,7 +654,7 @@ impl Generator<'_> {
                 _ => {}
             }
         }
-        // A field read off a fresh struct value.
+        // a field read off a fresh struct value
         if options.is_empty() || self.chance(0.2) {
             let shapes: Vec<UserShape> = self
                 .types
@@ -680,7 +679,7 @@ impl Generator<'_> {
         Some(self.pick(&options).clone())
     }
 
-    // -- user types -----------------------------------------------------------
+    // user types
 
     pub(super) fn user_expr(&mut self, want: &Ty, depth: usize) -> Option<Expr> {
         let method = self.method_call(want, depth);
@@ -791,7 +790,7 @@ impl Generator<'_> {
         })
     }
 
-    // -- named calls ----------------------------------------------------------
+    // named calls
 
     pub(super) fn call_named(&mut self, want: &Ty, depth: usize) -> Option<Expr> {
         let mut options: Vec<Expr> = Vec::new();
@@ -839,12 +838,10 @@ impl Generator<'_> {
             return None;
         }
         let (name, params) = self.pick(&closures).clone();
-        // A closure over its own return type can also go through the apply
-        // helper.
+        // a closure over its own return type can also go through the apply helper
         if params.len() == 1 && params[0] == *want && self.chance(0.3) {
             let helper = self.apply_fn(want);
-            // The helper holds the closure by `&mut`, so the argument must not
-            // call it.
+            // the helper holds the closure by `&mut`, so the argument must not call it
             let arg = self.without_binding(&name, |inner| inner.expr(want, depth - 1));
             return Some(Expr::ApplyCall {
                 helper,
@@ -853,8 +850,7 @@ impl Generator<'_> {
                 ty: want.clone(),
             });
         }
-        // A `FnMut` borrow is exclusive, so the arguments must not reach the
-        // same closure.
+        // a `FnMut` borrow is exclusive, so the arguments must not reach the same closure
         let args = self.without_binding(&name, |inner| {
             params
                 .iter()
@@ -880,7 +876,7 @@ impl Generator<'_> {
             })
             .collect();
         let (name, params) = if plain.is_empty() || self.chance(0.3) {
-            // A new helper, so the wanted type gets a body out of sight.
+            // a new helper, so the wanted type gets a body out of sight
             if depth < MAX_EXPR_DEPTH {
                 return None;
             }

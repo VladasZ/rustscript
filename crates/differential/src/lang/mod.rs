@@ -1,6 +1,5 @@
-//! A type directed Rust program generator. Ask for a `u8` and the solver
-//! offers every shape that can produce one, so a catalog row composes at
-//! any depth.
+//! A type directed Rust program generator. Ask for a `u8` and the solver offers every shape that
+//! can produce one, so a catalog row composes at any depth.
 
 pub mod block;
 pub mod catalog;

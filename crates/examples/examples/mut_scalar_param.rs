@@ -1,8 +1,7 @@
 #!/usr/bin/env rust
 
-// `*n += 1` on a `&mut` scalar parameter once failed with "assignment
-// through a non-reference value". A scalar arrives as a copy and the write
-// rides the `&mut` argument writeback home.
+// `*n += 1` on a `&mut` scalar parameter. A scalar arrives as a copy and the write rides the
+// `&mut` argument writeback home.
 
 fn bump(n: &mut i64, by: i64) {
     *n += by;

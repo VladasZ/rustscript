@@ -1,7 +1,5 @@
-//! `Windows` services, mirroring the windows-service crate. An earlier
-//! version invented a `WindowsService` type that could never pass `cargo
-//! check`. Handles are reopened per call, so the `Native` enum stays free
-//! of cfg. Off `Windows` every call returns an error.
+//! `Windows` services, mirroring the windows-service crate. Handles are reopened per call, so the
+//! `Native` enum stays free of cfg. Off `Windows` every call returns an error.
 
 use anyhow::Result;
 
@@ -12,7 +10,7 @@ use super::value::{StructData, Value};
 /// As plain ints, so `|` on the script side works.
 pub(super) fn service_const(id: PathId) -> Option<Value> {
     let n: i64 = match id {
-        // `ServiceManagerAccess` and `ServiceAccess` share the low bits.
+        // `ServiceManagerAccess` and `ServiceAccess` share the low bits
         PathId::Connect | PathId::QueryConfig => 0x0001,
         PathId::CreateService | PathId::ChangeConfig => 0x0002,
         PathId::EnumerateService | PathId::QueryStatus => 0x0004,
@@ -24,8 +22,7 @@ pub(super) fn service_const(id: PathId) -> Option<Value> {
     Some(Value::Int(n))
 }
 
-/// The database argument is accepted and ignored, `None` is the only value
-/// scripts pass.
+/// The database argument is accepted and ignored, `None` is the only value scripts pass.
 pub(super) fn local_computer(args: &[Value]) -> Value {
     let access = args.get(1).and_then(as_i64).unwrap_or(0x0001);
     Value::ok(Value::struct_of(
@@ -81,8 +78,7 @@ mod imp {
         Ok(ServiceManager::local_computer(None::<&str>, mask)?)
     }
 
-    /// The manager mask travels with the service so a reopen matches the
-    /// original request.
+    /// The manager mask travels with the service so a reopen matches the original request.
     fn open(s: &StructData) -> Result<Service> {
         let access = ServiceAccess::from_bits_truncate(mask(field_i64(s, "access"))?);
         Ok(manager(field_i64(s, "manager_access"))?.open_service(field_str(s, "name"), access)?)
@@ -151,7 +147,7 @@ mod imp {
     }
 
     fn dependency_from(name: &str) -> ServiceDependency {
-        // A leading plus marks a load order group, the crate's own variant.
+        // a leading plus marks a load order group, the crate's own variant
         match name.strip_prefix('+') {
             Some(group) => ServiceDependency::Group(group.into()),
             None => ServiceDependency::Service(name.into()),
@@ -222,8 +218,7 @@ mod imp {
                         ("manager_access".into(), Value::Int(field_i64(s, "access"))),
                     ],
                 );
-                // Open it once now so a missing service reports here like the
-                // real call.
+                // open it once now so a missing service reports here like the real call
                 let Value::Struct(probe) = &value else {
                     bail!("could not build the service value");
                 };
@@ -253,9 +248,8 @@ mod imp {
                 )),
                 Err(e) => Value::err(Value::str(e.to_string())),
             },
-            // Every field comes back, `change_config` needs a complete
-            // `ServiceInfo`. Raw values round trip without modeling every
-            // variant.
+            // Every field comes back, `change_config` needs a complete `ServiceInfo`. Raw values
+            // round trip without modeling every variant.
             BuiltinId::QueryConfig => match open(s).and_then(|svc| Ok(svc.query_config()?)) {
                 Ok(cfg) => Value::ok(Value::struct_of(
                     "ServiceConfig",
@@ -303,8 +297,8 @@ mod imp {
                 )),
                 Err(e) => Value::err(Value::str(e.to_string())),
             },
-            // `ChangeServiceConfigW` rewrites the whole record, so every field
-            // is used and nothing is silently substituted.
+            // `ChangeServiceConfigW` rewrites the whole record, so every field is used and
+            // nothing is silently substituted
             BuiltinId::ChangeConfig => {
                 let Some(Value::Struct(info)) = args.first() else {
                     bail!("change_config takes a ServiceInfo");

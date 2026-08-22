@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-// The interpreter once treated a clone as a refcount bump or a one level
-// copy, so mutating the clone leaked into the original.
+// A clone is a deep copy, mutating the clone must not leak into the original.
 
 #[derive(Clone, Debug)]
 struct Basket {

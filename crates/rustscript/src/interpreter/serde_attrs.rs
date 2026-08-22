@@ -75,7 +75,7 @@ impl RenameRule {
         })
     }
 
-    /// Following serde's field rules.
+    /// following serde's field rules
     pub(super) fn apply(self, field: &str) -> String {
         match self {
             RenameRule::Lower | RenameRule::Snake => field.to_string(),

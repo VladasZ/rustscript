@@ -1,6 +1,5 @@
-//! An assignment evaluates its right operand before the place. The
-//! interpreter once evaluated the `entry(..).or_insert(..)` place first and
-//! panicked on the wrong overflow. From seed 20675014558.
+//! The right operand of an assignment evaluates before the place, so `entry(..).or_insert(..)`
+//! must not panic first. Seed 20675014558.
 
 use std::collections::HashMap;
 

@@ -1,6 +1,5 @@
-//! Multifile script tests. The conformance test compares the compiled
-//! `rustscript-conformance` crate with the interpreted run. The rest cover the
-//! loader's error paths on temp fixtures.
+//! Multifile script tests. The conformance test compares the compiled `rustscript-conformance` crate
+//! with the interpreted run. The rest cover the loader's error paths on temp fixtures.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -40,8 +39,8 @@ fn run_script(path: &Path) -> std::process::Output {
 #[test]
 fn conformance_matches_compiler() {
     let root = workspace_root();
-    // The binary is looked up next to this test binary, so it must be built
-    // into the same profile or `cargo test --release` looks in the wrong tree.
+    // the binary is looked up next to this test binary, so it must be built into the same profile
+    // or `cargo test --release` looks in the wrong tree
     let mut build_args = vec!["build", "-p", "rustscript-conformance"];
     if !cfg!(debug_assertions) {
         build_args.push("--release");
@@ -187,8 +186,8 @@ pub use crate::inner::{Widget, WIDGET_NAME};
 
 #[test]
 fn path_attribute_points_at_an_explicit_file() {
-    // Submodules of a `#[path]` module resolve relative to that file's
-    // directory, so the nested inner lands in `sub/`.
+    // submodules of a `#[path]` module resolve relative to that file's directory, so the nested
+    // inner lands in `sub/`
     let dir = fixture(&[
         (
             "main.rs",

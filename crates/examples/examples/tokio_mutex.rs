@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-// `tokio::sync::Mutex` has no `Result` layer on `lock().await` and no
-// poison field in debug.
+// `tokio::sync::Mutex` has no `Result` layer on `lock().await` and no poison field in debug.
 
 use std::sync::Arc;
 use tokio::sync::Mutex;

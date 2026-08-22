@@ -1,9 +1,8 @@
-// Float casts inside scalar plans. The plan arms `s_cast` and `s_cast_f64`
-// must match the compiled program on the saturated, NaN and precision loss
-// edges.
+// Float casts inside scalar plans. `s_cast` and `s_cast_f64` must match the compiled program on
+// the saturated, NaN and precision loss edges.
 
 fn main() {
-    // Saturation past `i32::MAX`.
+    // saturation past `i32::MAX`
     let mut grow = 1.0f64;
     let mut caps: i64 = 0;
     let mut casts: i64 = 0;
@@ -14,7 +13,7 @@ fn main() {
     }
     println!("caps {caps}");
 
-    // NaN and the infinities, u8 included.
+    // NaN and the infinities, u8 included
     let specials: [f64; 4] = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 300.9];
     let mut narrow: i64 = 0;
     let mut bytes: i64 = 0;
@@ -24,7 +23,7 @@ fn main() {
     }
     println!("narrow {narrow} bytes {bytes}");
 
-    // Precision loss past 2^53.
+    // precision loss past 2^53
     let mut total = 0.0;
     let mut big: i64 = 9_007_199_254_740_993;
     let mut rounds: i64 = 0;

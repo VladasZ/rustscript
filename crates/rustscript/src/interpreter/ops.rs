@@ -66,11 +66,11 @@ pub(super) fn cmp_test_imm(op: BinKind, l: &Value, imm: i64) -> Result<bool> {
 }
 
 fn arith(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
-    // Same type numbers first, they dominate hot loops.
+    // same type numbers first, they dominate hot loops
     if let (Value::Int(a), Value::Int(b)) = (l, r) {
         return Ok(Value::Int(i64_arith(op, *a, *b)?));
     }
-    // A 64 bit unsigned pair computes natively instead of through i128.
+    // a 64 bit unsigned pair computes natively instead of through i128
     if let Value::IntW(a, wa @ (IntWidth::U64 | IntWidth::USize)) = l {
         let rhs = match r {
             Value::IntW(b, wb) if wa == wb => Some(b.cast_unsigned()),
@@ -92,7 +92,7 @@ fn arith(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
         out.push_str(b);
         return Ok(Value::str(out));
     }
-    // The discriminant check keeps the Duration probe off every numeric op.
+    // the discriminant check keeps the Duration probe off every numeric op
     if matches!(l, Value::Struct(_))
         && let (Some(a), Some(b)) = (duration_from_value(l), duration_from_value(r))
     {
@@ -115,8 +115,7 @@ fn arith(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
     }
 }
 
-/// An untagged f64 next to an f32 is a bare literal that is f32 in the
-/// source.
+/// An untagged f64 next to an f32 is a bare literal that is f32 in the source.
 enum FloatPair {
     F64(f64, f64),
     F32(f32, f32),
@@ -162,7 +161,7 @@ fn bit_i64(op: BinKind) -> fn(i64, i64) -> i64 {
     }
 }
 
-/// The result keeps the shifted side's width.
+/// The result keeps the width of the shifted side.
 fn shift_bin(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
     if let Value::Big(a, w) = l {
         let Some((amount, _)) = r.int_parts() else {
@@ -180,8 +179,8 @@ pub(super) fn compare_values(l: &Value, r: &Value) -> Result<Ordering> {
     partial_compare(l, r)?.ok_or_else(|| anyhow!("cannot order NaN"))
 }
 
-/// `PartialOrd` semantics, NaN makes every comparison false. Sorting goes
-/// through `compare_values` and rejects NaN.
+/// `PartialOrd` semantics, NaN makes every comparison false. Sorting goes through
+/// `compare_values` and rejects NaN.
 fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
     Ok(match (l, r) {
         (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
@@ -193,7 +192,7 @@ fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
         (Value::Big(..), Value::Int(_)) | (Value::Int(_), Value::Big(..)) => {
             match (l.int_parts(), r.int_parts()) {
                 (Some((a, _)), Some((b, _))) => Some(a.cmp(&b)),
-                // A u128 past the i128 range is larger than any i64.
+                // a u128 past the i128 range is larger than any i64
                 (None, _) => Some(Ordering::Greater),
                 (_, None) => Some(Ordering::Less),
             }
@@ -212,10 +211,10 @@ fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
         (Value::Str(a), Value::Str(b)) => Some(a.as_ref().cmp(b.as_ref())),
         (Value::Char(a), Value::Char(b)) => Some(a.cmp(b)),
         (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
-        // Sequences and tuples order lexicographically.
+        // sequences and tuples order lexicographically
         (Value::Vec(a), Value::Vec(b)) | (Value::Tuple(a), Value::Tuple(b)) => {
-            // 2 statements on purpose, in one both guards live to the end and
-            // a value against its own clone deadlocks.
+            // 2 statements on purpose, in 1 both guards live to the end and a value against its
+            // own clone deadlocks
             let a = a.lock().clone();
             let b = b.lock().clone();
             let mut order = None;
@@ -233,7 +232,7 @@ fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
                 None => Some(a.len().cmp(&b.len())),
             }
         }
-        // `None` sorts before `Some` and `Ok` before `Err`.
+        // `None` sorts before `Some` and `Ok` before `Err`
         (
             Value::Enum {
                 def: left_def,
@@ -248,8 +247,7 @@ fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
         ) if EnumDef::same(left_def, right_def) => {
             match left_variant.cmp(right_variant) {
                 Ordering::Equal => {
-                    // Snapshots, a value against its own clone sees the same
-                    // storage on both sides.
+                    // snapshots, a value against its own clone sees the same storage on both sides
                     let left_data = left_data.lock().clone();
                     let right_data = right_data.lock().clone();
                     let mut order = None;
@@ -270,7 +268,7 @@ fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
                 decided => Some(decided),
             }
         }
-        // Declaration order, see `compile_struct_literal`.
+        // declaration order, see `compile_struct_literal`
         (Value::Struct(a), Value::Struct(b)) if a.name() == b.name() => {
             let a = a.values.lock().clone();
             let b = b.values.lock().clone();
@@ -296,7 +294,7 @@ fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
 fn to_float(v: &Value) -> Result<f64> {
     match v {
         Value::Int(i) => Ok(AsPrimitive::<f64>::as_(*i)),
-        // Leaving the tagged widths out once made a `u8` operand abort.
+        // keep the tagged widths here, otherwise a `u8` operand aborts
         Value::IntW(i, width) => Ok(AsPrimitive::<f64>::as_(width.decode(*i))),
         Value::Big(i, width) => Ok(if *width == super::numeric::IntWidth::U128 {
             AsPrimitive::<f64>::as_(i.cast_unsigned())
@@ -341,8 +339,7 @@ pub(super) fn int_of(v: &Value) -> Result<i64> {
     }
 }
 
-/// A `u64` past `i64::MAX` reports out of bounds with its full value, not a
-/// conversion failure.
+/// A `u64` past `i64::MAX` reports out of bounds with its full value, not a conversion failure.
 fn index_of(key: &Value) -> Result<u128> {
     if let Value::Big(bits, super::numeric::IntWidth::U128) = key {
         return Ok(bits.cast_unsigned());
@@ -353,7 +350,7 @@ fn index_of(key: &Value) -> Result<u128> {
     u128::try_from(n).map_err(|_| anyhow!("negative index"))
 }
 
-/// The untagged side is a bare literal adopting the big side's width.
+/// The untagged side is a bare literal adopting the width of the big side.
 fn big_operands(l: &Value, r: &Value) -> Option<super::numeric::IntWidth> {
     match (l, r) {
         (Value::Big(_, w), Value::Big(..) | Value::Int(_)) | (Value::Int(_), Value::Big(_, w)) => {
@@ -371,7 +368,7 @@ fn big_bits(v: &Value) -> i128 {
     }
 }
 
-// -- indexing and `?` ------------------------------------------------------
+// indexing and `?`
 
 pub(super) fn index(recv: &Value, key: &Value) -> Result<Value> {
     if let Value::Range {
@@ -423,8 +420,8 @@ pub(super) fn index(recv: &Value, key: &Value) -> Result<Value> {
     }
 }
 
-/// The messages are the exact debug Rust texts. Inverted range here, out of
-/// bounds and char boundary at the use site.
+/// The messages are the exact debug Rust texts. Inverted range here, out of bounds and char
+/// boundary at the use site.
 fn range_bounds(len: usize, start: i64, end: i64, inclusive: bool) -> Result<(usize, usize)> {
     if start < 0 {
         bail!("negative slice start {start}");
@@ -489,8 +486,7 @@ fn slice_value(base: &Value, start: i64, end: i64, inclusive: bool) -> Result<Va
     }
 }
 
-/// The writeback of `s[2..].make_ascii_uppercase()`, the mutated bytes are
-/// spliced back into the base.
+/// The writeback of `s[2..].make_ascii_uppercase()`, the mutated bytes are spliced back into the base.
 pub(super) fn splice_str(
     s: &str,
     start: i64,
@@ -546,7 +542,7 @@ pub(super) fn eval_try(v: Value) -> Result<Result<Value, Value>> {
             (EnumKind::Result, OK) | (EnumKind::Option, SOME) => Ok(Ok(Value::payload(&data)?)),
             (EnumKind::Result, ERR) => Ok(Err(Value::err(Value::payload(&data)?))),
             (EnumKind::Option, NONE) => Ok(Err(Value::none())),
-            // Any other value acts as its own Some.
+            // any other value acts as its own Some
             _ => Ok(Ok(Value::Enum { def, variant, data })),
         },
         other => Ok(Ok(other)),

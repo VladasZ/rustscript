@@ -1,8 +1,7 @@
 #!/usr/bin/env rust
 
-// `lines()` yields an Err on a bad byte and the caller cannot tell that from
-// end of output, so one cp1252 byte truncates the capture. `read_until` plus
-// `from_utf8_lossy` survives it.
+// `lines()` yields an Err on a bad byte and the caller can't tell that from end of output, so 1 cp1252
+// byte truncates the capture. `read_until` plus `from_utf8_lossy` survives it.
 
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};

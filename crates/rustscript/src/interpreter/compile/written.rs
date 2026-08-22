@@ -1,6 +1,5 @@
-//! The types a program writes down about itself. This is not inference,
-//! anything not stated answers `None`. Only `Default` payloads are built
-//! from these answers, `None` carries no runtime type.
+//! The types a program writes down about itself. This is not inference, anything not stated gives
+//! `None`. Only `Default` payloads are built from these, `None` carries no runtime type.
 
 use std::collections::HashMap;
 
@@ -12,12 +11,11 @@ use crate::interpreter::numeric::IntWidth;
 pub(super) struct TyEnv<'a> {
     locals: &'a HashMap<String, ScalarTy>,
     fn_returns: &'a HashMap<String, ScalarTy>,
-    /// `Some` only while inside the closure's body.
+    /// `Some` only while inside the closure body
     param: Option<(&'a str, &'a ScalarTy)>,
-    /// Its own `let`s shadow everything outside, even after the compiler has
-    /// left the block.
+    /// its own `let`s shadow everything outside, even after the compiler has left the block
     block: Option<&'a syn::Block>,
-    /// So a closure nested in a closure still reads the outer parameter.
+    /// so a closure nested in a closure still reads the outer parameter
     outer: Option<&'a TyEnv<'a>>,
 }
 
@@ -55,8 +53,8 @@ impl<'a> TyEnv<'a> {
         }
     }
 
-    /// Closure parameters and block `let`s innermost first, annotated locals
-    /// otherwise. An unannotated block `let` answers through its init.
+    /// Closure parameters and block `let`s innermost first, annotated locals otherwise. An
+    /// unannotated block `let` reads its init.
     fn lookup(&self, name: &str) -> Option<ScalarTy> {
         let mut env = Some(self);
         while let Some(current) = env {
@@ -134,7 +132,7 @@ pub(super) fn option_payload(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
         Expr::Paren(inner) => option_payload(&inner.expr, env),
         Expr::Group(inner) => option_payload(&inner.expr, env),
         Expr::Block(block) => block_value(&block.block, env, option_payload),
-        // Either branch.
+        // either branch
         Expr::If(sel) => block_tail(&sel.then_branch)
             .and_then(|e| option_payload(e, env))
             .or_else(|| {
@@ -142,21 +140,21 @@ pub(super) fn option_payload(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                     .as_ref()
                     .and_then(|(_, e)| option_payload(e, env))
             }),
-        // Any arm.
+        // any arm
         Expr::Match(m) => m.arms.iter().find_map(|arm| option_payload(&arm.body, env)),
         Expr::Path(path) => {
             let segment = path.path.segments.last()?;
-            // `None::<T>`.
+            // `None::<T>`
             if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
                 return turbofish_scalar(Some(args));
             }
-            // `let opt: Option<T>`.
+            // `let opt: Option<T>`
             match env.lookup(&segment.ident.to_string()) {
                 Some(ScalarTy::Opt(payload)) => Some(*payload),
                 _ => None,
             }
         }
-        // `Some(x)` and `Option::<T>::default()`.
+        // `Some(x)` and `Option::<T>::default()`
         Expr::Call(call) => {
             let Expr::Path(path) = &*call.func else {
                 return None;
@@ -170,25 +168,24 @@ pub(super) fn option_payload(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                 .flatten()
         }
         Expr::MethodCall(call) => match call.method.to_string().as_str() {
-            // `then_some(x)`.
+            // `then_some(x)`
             "then_some" => call.args.first().and_then(|a| written_ty(a, env)),
-            // `parse::<T>()`.
+            // `parse::<T>()`
             "parse" => turbofish_scalar(call.turbofish.as_ref()),
-            // `or` and `xor` keep the payload both sides share.
+            // `or` and `xor` keep the payload both sides share
             "or" | "xor" => call
                 .args
                 .first()
                 .and_then(|a| option_payload(a, env))
                 .or_else(|| option_payload(&call.receiver, env)),
-            // `a.and(b)` answers `b`'s `Option`, the receiver only when the
-            // argument does not state it.
+            // `a.and(b)` gives `b`'s `Option`, the receiver only when the argument doesn't state it
             "and" => call
                 .args
                 .first()
                 .and_then(|a| option_payload(a, env))
                 .or_else(|| option_payload(&call.receiver, env)),
-            // `map` and `and_then` also belong to iterators, so both arms only
-            // apply once the receiver has proven itself an `Option`.
+            // `map` and `and_then` also belong to iterators, so both arms only apply once the
+            // receiver has proven itself an `Option`
             "map" | "and_then" => {
                 let payload = option_payload(&call.receiver, env)?;
                 match call.args.first() {
@@ -201,40 +198,37 @@ pub(super) fn option_payload(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                     _ => None,
                 }
             }
-            // Same payload through, `ok` included.
+            // same payload through, `ok` included
             "clone" | "cloned" | "copied" | "take" | "as_ref" | "as_mut" | "filter" | "ok" => {
                 option_payload(&call.receiver, env)
             }
-            // Peel one layer.
+            // peel 1 layer
             "unwrap_or_default" | "unwrap" | "expect" => {
                 option_payload(&call.receiver, env)?.payload().cloned()
             }
-            // `unwrap_or(d)` peels one layer, `d` states the type when the
-            // receiver does not.
+            // `unwrap_or(d)` peels 1 layer, `d` states the type when the receiver doesn't
             "unwrap_or" => option_payload(&call.receiver, env)
                 .and_then(|payload| payload.payload().cloned())
                 .or_else(|| call.args.first().and_then(|a| option_payload(a, env))),
-            // `v.get(i)` and the reductions answer the element, `map.get(k)`
-            // the value.
+            // `v.get(i)` and the reductions give the element, `map.get(k)` the value
             "get" => element_ty(&call.receiver, env).or_else(|| map_value_ty(&call.receiver, env)),
-            // A vec's `remove` answers its element outright, so only a map
-            // receiver answers here.
+            // a vec `remove` gives its element outright, so only a map receiver matters here
             "remove" => map_value_ty(&call.receiver, env),
-            // `to_digit` is `Option<u32>`.
+            // `to_digit` is `Option<u32>`
             "to_digit" => Some(ScalarTy::Int(IntWidth::U32)),
-            // `position` is `Option<usize>`.
+            // `position` is `Option<usize>`
             "position" | "rposition" => Some(ScalarTy::Int(IntWidth::USize)),
-            // `find` on a string answers a byte offset, on an iterator an
-            // item. Only the iterator form takes a closure.
+            // `find` on a string gives a byte offset, on an iterator an item, only the iterator
+            // form takes a closure
             "find" | "rfind" => match call.args.first() {
                 Some(Expr::Closure(_)) => element_ty(&call.receiver, env),
                 _ => Some(ScalarTy::Int(IntWidth::USize)),
             },
-            // One item of what the receiver holds.
+            // 1 item of what the receiver holds
             "first" | "last" | "next_back" | "pop" | "next" | "nth" | "reduce" | "min_by_key"
             | "max_by_key" => element_ty(&call.receiver, env),
             "min" | "max" if call.args.is_empty() => element_ty(&call.receiver, env),
-            // `checked_add` answers the receiver's width.
+            // `checked_add` keeps the receiver width
             "checked_add" | "checked_sub" | "checked_mul" | "checked_div" | "checked_rem"
             | "checked_neg" | "checked_abs" | "checked_pow" | "checked_shl" | "checked_shr"
             | "checked_div_euclid" | "checked_rem_euclid" => {
@@ -249,8 +243,8 @@ pub(super) fn option_payload(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
     }
 }
 
-/// A tail naming a block local answers through that `let`, so 2 blocks
-/// reusing a name never read each other's type.
+/// A tail naming a block local reads that `let`, so 2 blocks reusing a name never read each
+/// other's type.
 fn block_value(
     block: &syn::Block,
     env: &TyEnv,
@@ -290,20 +284,19 @@ pub(super) fn block_tail(block: &syn::Block) -> Option<&Expr> {
     }
 }
 
-/// The element type of a `Vec`, a `HashSet` or an iterator, as literal as
-/// `option_payload`.
+/// The element type of a `Vec`, a `HashSet` or an iterator, as literal as `option_payload`.
 fn element_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
     match expr {
         Expr::Paren(inner) => element_ty(&inner.expr, env),
         Expr::Group(inner) => element_ty(&inner.expr, env),
         Expr::Block(block) => block_value(&block.block, env, element_ty),
-        // Either end of a range.
+        // either end of a range
         Expr::Range(range) => range
             .start
             .as_ref()
             .and_then(|e| written_ty(e, env))
             .or_else(|| range.end.as_ref().and_then(|e| written_ty(e, env))),
-        // Either branch.
+        // either branch
         Expr::If(sel) => block_tail(&sel.then_branch)
             .and_then(|e| element_ty(e, env))
             .or_else(|| {
@@ -312,7 +305,7 @@ fn element_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                     .and_then(|(_, e)| element_ty(e, env))
             }),
         Expr::Match(m) => m.arms.iter().find_map(|arm| element_ty(&arm.body, env)),
-        // `let v: Vec<T>` or `let s: HashSet<T>`.
+        // `let v: Vec<T>` or `let s: HashSet<T>`
         Expr::Path(path) => {
             let segment = path.path.segments.last()?;
             match env.lookup(&segment.ident.to_string()) {
@@ -320,32 +313,31 @@ fn element_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                 _ => None,
             }
         }
-        // Any element of a `vec![..]`.
+        // any element of a `vec![..]`
         Expr::Macro(mac) if mac.mac.path.is_ident("vec") => vec_macro_element(&mac.mac, env),
-        // `Vec::<T>::new()` and `HashSet::<T>::new()`.
+        // `Vec::<T>::new()` and `HashSet::<T>::new()`
         Expr::Call(_) => match written_ty(expr, env) {
             Some(ScalarTy::List(element) | ScalarTy::Set(element)) => Some(*element),
             _ => None,
         },
         Expr::MethodCall(call) => match call.method.to_string().as_str() {
-            // Elements through unchanged, the middle of a chain too.
+            // elements through unchanged, the middle of a chain too
             "iter" | "into_iter" | "iter_mut" | "cloned" | "copied" | "clone" | "to_vec"
             | "rev" | "filter" | "take" | "skip" | "take_while" | "skip_while" | "peekable"
             | "by_ref" => element_ty(&call.receiver, env),
-            // `concat` flattens one layer. Without this a second `concat` fell
-            // back to joining strings.
+            // `concat` flattens 1 layer, without this a second `concat` falls back to joining strings
             "concat" => match written_ty(expr, env) {
                 Some(ScalarTy::List(element)) => Some(*element),
                 _ => None,
             },
-            // `map(|x| e)` makes `e`'s type the element.
+            // `map(|x| e)` makes the type of `e` the element
             "map" => match call.args.first() {
                 Some(Expr::Closure(closure)) => {
                     in_closure(closure, element_ty(&call.receiver, env), env, written_ty)
                 }
                 _ => None,
             },
-            // `filter_map` yields the payload of `e`'s `Option`.
+            // `filter_map` yields the payload of the `Option` of `e`
             "filter_map" => match call.args.first() {
                 Some(Expr::Closure(closure)) => in_closure(
                     closure,
@@ -355,17 +347,16 @@ fn element_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                 ),
                 _ => None,
             },
-            // Keys are not here because `ScalarTy::Map` only carries the value
-            // side.
+            // keys are not here because `ScalarTy::Map` only carries the value side
             "values" | "into_values" | "values_mut" => map_value_ty(&call.receiver, env),
             "chars" => Some(ScalarTy::Char),
             "bytes" => Some(ScalarTy::Int(IntWidth::U8)),
-            // `collect::<Vec<T>>()`.
+            // `collect::<Vec<T>>()`
             "collect" => match turbofish_scalar(call.turbofish.as_ref()) {
                 Some(ScalarTy::List(element) | ScalarTy::Set(element)) => Some(*element),
                 _ => None,
             },
-            // The vec an unwrap settles on.
+            // the vec an unwrap settles on
             "unwrap" | "unwrap_or" | "unwrap_or_default" => {
                 let from_receiver = match option_payload(&call.receiver, env) {
                     Some(ScalarTy::List(element)) => Some(*element),
@@ -397,8 +388,7 @@ fn vec_macro_element(mac: &syn::Macro, env: &TyEnv) -> Option<ScalarTy> {
         .and_then(|e| written_ty(e, env))
 }
 
-/// A method whose answer has its receiver's type, `clone`, the ASCII case
-/// methods and arithmetic.
+/// A method whose result has the receiver type, `clone`, the ASCII case methods and arithmetic.
 fn keeps_receiver_ty(method: &str) -> bool {
     matches!(
         method,
@@ -429,9 +419,9 @@ pub(super) fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
     match expr {
         Expr::Paren(inner) => written_ty(&inner.expr, env),
         Expr::Group(inner) => written_ty(&inner.expr, env),
-        // A block answers through its tail.
+        // a block reads its tail
         Expr::Block(block) => block_value(&block.block, env, written_ty),
-        // Either branch.
+        // either branch
         Expr::If(sel) => block_tail(&sel.then_branch)
             .and_then(|e| written_ty(e, env))
             .or_else(|| {
@@ -458,17 +448,17 @@ pub(super) fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
             },
             _ => None,
         },
-        // The receiver states it for the whole call.
+        // the receiver states it for the whole call
         Expr::MethodCall(call) if keeps_receiver_ty(&call.method.to_string()) => {
             written_ty(&call.receiver, env)
         }
-        // `collect::<T>()`.
+        // `collect::<T>()`
         Expr::MethodCall(call)
             if call.method == "collect" && turbofish_scalar(call.turbofish.as_ref()).is_some() =>
         {
             turbofish_scalar(call.turbofish.as_ref())
         }
-        // `sum::<T>()` and `product::<T>()`.
+        // `sum::<T>()` and `product::<T>()`
         Expr::MethodCall(call)
             if matches!(call.method.to_string().as_str(), "sum" | "product")
                 && turbofish_scalar(call.turbofish.as_ref()).is_some() =>
@@ -482,11 +472,11 @@ pub(super) fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                 _ => None,
             }
         }
-        // A fold answers in its init's type.
+        // a fold has its init's type
         Expr::MethodCall(call) if call.method == "fold" => {
             call.args.first().and_then(|init| written_ty(init, env))
         }
-        // An unwrap's value is the receiver's payload.
+        // the value of an unwrap is the receiver payload
         Expr::MethodCall(call)
             if matches!(
                 call.method.to_string().as_str(),
@@ -495,7 +485,7 @@ pub(super) fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
         {
             option_payload(&call.receiver, env)
         }
-        // An `Option` is one layer deeper.
+        // an `Option` is 1 layer deeper
         Expr::Call(_) | Expr::Path(_) | Expr::MethodCall(_) => {
             if let Some(payload) = option_payload(expr, env) {
                 Some(ScalarTy::Opt(Box::new(payload)))
@@ -513,7 +503,7 @@ pub(super) fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                 && path.path.segments.len() == 1
                 && let Some(declared) = env.lookup(&path.path.segments[0].ident.to_string())
             {
-                // Any scalar annotation, `let x: u16` included.
+                // any scalar annotation, `let x: u16` included
                 Some(declared)
             } else {
                 fn_return_ty(expr, env)
@@ -526,8 +516,7 @@ pub(super) fn written_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
     }
 }
 
-/// Either arithmetic side that states its type answers. A comparison is a
-/// bool.
+/// Either arithmetic side that states its type wins. A comparison is a bool.
 fn binary_written_ty(bin: &syn::ExprBinary, env: &TyEnv) -> Option<ScalarTy> {
     use syn::BinOp::{
         Add, And, BitAnd, BitOr, BitXor, Div, Eq, Ge, Gt, Le, Lt, Mul, Ne, Or, Rem, Shl, Shr, Sub,
@@ -554,7 +543,7 @@ fn fn_return_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
     env.fn_returns.get(&segment.ident.to_string()).cloned()
 }
 
-/// `String::from(..)` or `String::new()`.
+/// `String::from(..)` or `String::new()`
 fn is_string_call(expr: &Expr) -> bool {
     let Expr::Call(call) = expr else {
         return false;
@@ -569,7 +558,7 @@ fn is_string_call(expr: &Expr) -> bool {
     is_ctor && segments.next().is_some_and(|s| s.ident == "String")
 }
 
-/// `Vec::<T>::new()` or `VecDeque::<T>::new()`.
+/// `Vec::<T>::new()` or `VecDeque::<T>::new()`
 fn vec_new_element(expr: &Expr) -> Option<ScalarTy> {
     let Expr::Call(call) = expr else {
         return None;
@@ -620,7 +609,7 @@ fn is_ctor(name: &syn::Ident) -> bool {
     name == "new" || name == "default" || name == "with_capacity"
 }
 
-/// `<Vec<Vec<f64>>>::default()`.
+/// `<Vec<Vec<f64>>>::default()`
 fn qualified_ctor_ty(expr: &Expr) -> Option<ScalarTy> {
     let Expr::Call(call) = expr else {
         return None;
@@ -649,7 +638,7 @@ fn map_value_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                     .and_then(|(_, e)| map_value_ty(e, env))
             }),
         Expr::Match(m) => m.arms.iter().find_map(|arm| map_value_ty(&arm.body, env)),
-        // `let m: HashMap<K, V>`.
+        // `let m: HashMap<K, V>`
         Expr::Path(path) => {
             let segment = path.path.segments.last()?;
             match env.lookup(&segment.ident.to_string()) {
@@ -657,13 +646,13 @@ fn map_value_ty(expr: &Expr, env: &TyEnv) -> Option<ScalarTy> {
                 _ => None,
             }
         }
-        // `HashMap::<K, V>::new()`.
+        // `HashMap::<K, V>::new()`
         Expr::Call(_) => match container_new_ty(expr) {
             Some(ScalarTy::Map(value)) => Some(*value),
             _ => None,
         },
         Expr::MethodCall(call) if call.method == "clone" => map_value_ty(&call.receiver, env),
-        // `collect::<HashMap<K, V>>()`.
+        // `collect::<HashMap<K, V>>()`
         Expr::MethodCall(call) if call.method == "collect" => {
             match turbofish_scalar(call.turbofish.as_ref()) {
                 Some(ScalarTy::Map(value)) => Some(*value),

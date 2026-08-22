@@ -1,14 +1,14 @@
-//! WMI queries. A connection is stored as its namespace path and reopened
-//! per call, so nothing lands in the `Native` enum. A query returns a vec of
-//! maps like `Get-CimInstance`. Off `Windows` every call returns an error.
+//! WMI queries. A connection is stored as its namespace path and reopened per call, so nothing lands
+//! in the `Native` enum. A query returns a vec of maps like `Get-CimInstance`. Off `Windows`
+//! every call returns an error.
 
 use anyhow::Result;
 
 use super::bytecode::MethodName;
 use super::value::{StructData, Value};
 
-/// `WMIConnection::new()` defaults to `root\cimv2`. Neither takes a
-/// `COMLibrary`, the crate initializes COM per thread.
+/// `WMIConnection::new()` defaults to `root\cimv2`. Neither takes a `COMLibrary`, the crate
+/// initializes COM per thread.
 pub(super) fn connection(args: &[Value], default_namespace: bool) -> Value {
     let ns = if default_namespace {
         r"root\cimv2".to_string()
@@ -47,8 +47,8 @@ mod imp {
         Ok(WMIConnection::with_namespace_path(namespace)?)
     }
 
-    /// Values are returned bare, the map lookup already hands back an
-    /// Option. A present null reads as None inside that outer Some.
+    /// Values are returned bare, the map lookup already hands back an Option. A present null
+    /// reads as None inside that outer Some.
     fn from_variant(v: &Variant) -> Value {
         match v {
             Variant::Empty | Variant::Null => Value::none(),
@@ -71,7 +71,7 @@ mod imp {
 
     fn row_to_value(row: &HashMap<String, Variant>) -> Value {
         let mut names: Vec<&String> = row.keys().collect();
-        // Sorted for a stable result.
+        // sorted for a stable result
         names.sort();
         let mut map = IndexMap::default();
         for name in names {

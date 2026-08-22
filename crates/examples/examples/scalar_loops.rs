@@ -1,4 +1,4 @@
-//! Loops the scalar for plan specializes, one edge per block.
+//! Loops the scalar for plan specializes, 1 edge per block.
 
 fn main() {
     let text = String::from("the quick brown fox jumps over the lazy dog");
@@ -68,7 +68,7 @@ fn main() {
     }
     println!("empty {empty_iterations}");
 
-    // A float in the body falls back on the first read.
+    // a float in the body falls back on the first read
     let mut mixed = 0.0f64;
     let mut shifted: i64 = 0;
     for n in 0..50 {
@@ -84,8 +84,7 @@ fn main() {
     }
     println!("last {last}");
 
-    // A mid loop fallback. The generic path must resume exactly where the
-    // plan left off.
+    // a mid loop fallback, the generic path must resume exactly where the plan left off
     let fraction = 2.5f64;
     let threshold = 2.0f64;
     let mut caught: i64 = 0;

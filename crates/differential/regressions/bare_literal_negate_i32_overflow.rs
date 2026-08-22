@@ -1,5 +1,4 @@
-//! Bare literals are `i32`. `-(i32::MIN)` once widened to i64 and printed
-//! 2147483648 instead of panicking. From seed 255775.
+//! Bare literals are `i32`, so `-(i32::MIN)` must panic and not widen to i64. Seed 255775.
 
 fn diff_opaque_true() -> bool {
     true

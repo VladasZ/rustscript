@@ -1,5 +1,5 @@
-//! The interpreter once guessed `"160"` into an int where the annotation
-//! said f64, so the float methods here prove that path.
+//! `"160"` under an f64 annotation must parse as a float, not an int. The float methods here
+//! prove that path.
 
 fn fmt_qty(q: f64) -> String {
     if (q - q.trunc()).abs() < f64::EPSILON {

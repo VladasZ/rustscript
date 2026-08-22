@@ -1,5 +1,5 @@
-//! Each case runs compiled and interpreted, and both must agree on the exit
-//! code and the failure text. The failing path twin of the equivalence suite.
+//! Each case runs compiled and interpreted, and both must agree on the exit code and the failure
+//! text. The failing path twin of the equivalence suite.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -150,8 +150,7 @@ fn panic_macro_panics_alike() {
 
 #[test]
 fn divide_by_zero_panics_alike() {
-    // The divisor comes from argc so `rustc` cannot reject the division at
-    // compile time.
+    // the divisor comes from argc so `rustc` can't reject the division at compile time
     assert_parity(
         "fn main() {\n    let a = 10;\n    let b = std::env::args().count() as i64 - 1;\n    println!(\"{}\", a / b);\n}\n",
         101,
@@ -159,8 +158,8 @@ fn divide_by_zero_panics_alike() {
     );
 }
 
-/// Newer `rustc` adds a thread id to the header, so the shared needle stays
-/// loose and the interpreter's own header is pinned exactly on top.
+/// Newer `rustc` adds a thread id to the header, so the shared needle stays loose and the
+/// interpreter's own header is pinned exactly on top.
 #[test]
 fn both_print_the_panic_header() {
     let src = "fn main() {\n    let v = vec![1];\n    let i = 5;\n    println!(\"{}\", v[i]);\n}\n";
@@ -176,8 +175,7 @@ fn both_print_the_panic_header() {
     );
 }
 
-/// `keep` is not `const`, so the compiler cannot fold the overflow and reject
-/// it.
+/// `keep` is not `const`, so the compiler can't fold the overflow and reject it.
 #[test]
 fn integer_overflow_panics_like_rust() {
     fn overflow(expr: &str) -> String {
@@ -205,16 +203,15 @@ fn integer_overflow_panics_like_rust() {
     );
 }
 
-/// The while plan runs unboxed until the overflow, then the generic re-run
-/// must panic with the exact message.
+/// The while plan runs unboxed until the overflow, then the generic re-run must panic with the
+/// exact message.
 #[test]
 fn while_plan_overflow_panics_like_rust() {
     let src = "fn main() {\n    let mut n: i64 = 3;\n    let mut rounds: i64 = 0;\n    while n != 0 {\n        n *= 3;\n        rounds += 1;\n    }\n    println!(\"{rounds}\");\n}\n";
     assert_parity(src, 101, "attempt to multiply with overflow");
 }
 
-/// An out of bounds store fails the while plan over and the generic path
-/// must panic on the exact write.
+/// An out of bounds store fails the while plan over and the generic path must panic on the exact write.
 #[test]
 fn while_plan_vec_write_oob_panics_like_rust() {
     let src = "fn main() {\n    let mut v = vec![1i64, 2, 3];\n    let mut i: usize = 0;\n    while i < 5 {\n        v[i] = 0;\n        i += 1;\n    }\n    println!(\"{}\", v[0]);\n}\n";
@@ -243,8 +240,7 @@ fn while_plan_vec_read_oob_panics_like_rust() {
     );
 }
 
-/// The function plan discards the run on overflow and the generic path runs
-/// the whole call again.
+/// The function plan discards the run on overflow and the generic path runs the whole call again.
 #[test]
 fn fn_plan_overflow_panics_like_rust() {
     let src = "fn grow(n: i64) -> i64 {\n    if n <= 0 { 1 } else { grow(n - 1) * 3 }\n}\nfn main() {\n    println!(\"{}\", grow(45));\n}\n";
@@ -263,8 +259,7 @@ fn process_exit_code_passes_through_alike() {
     assert_parity("fn main() {\n    std::process::exit(3);\n}\n", 3, "");
 }
 
-/// The message is the `Debug` form of the payload, quotes on a `String`
-/// included. The interpreter once printed `Display` here.
+/// The message is the `Debug` form of the payload, quotes on a `String` included. Not `Display`.
 #[test]
 fn err_from_main_exits_one_alike() {
     let src = "fn main() -> Result<(), String> {\n    Err(\"boom\".to_string())\n}\n";
@@ -295,8 +290,8 @@ fn err_from_main_matches_compiled_rendering() {
     );
 }
 
-/// Real anyhow's `Debug` prints the bare message without quotes. Interpreter
-/// only, plain `rustc` has no anyhow.
+/// Real anyhow `Debug` prints the bare message without quotes. Interpreter only, plain `rustc`
+/// has no anyhow.
 #[test]
 fn err_from_anyhow_main_prints_the_bare_message() {
     for src in [
@@ -330,8 +325,7 @@ fn unsupported_errors_carry_the_stable_prefix() {
     );
 }
 
-/// A runtime gap aborts like a panic but names the gap, so tooling can tell
-/// it from a script panic.
+/// A runtime gap aborts like a panic but names the gap, so tooling can tell it from a script panic.
 #[test]
 fn runtime_unsupported_constant_names_the_gap() {
     let path =

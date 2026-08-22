@@ -19,8 +19,7 @@ fn generation_includes_replayable_structured_mutations() {
     }
 }
 
-/// A splice must land now and then, or every mutated seed is only its parent
-/// with the blocks reversed.
+/// A splice must land now and then, or every mutated seed is only its parent with the blocks reversed.
 #[test]
 fn mutations_splice_subtrees() {
     use rustscript_differential::model::MutationOperation;
@@ -37,8 +36,7 @@ fn mutations_splice_subtrees() {
     assert!(spliced >= 20, "only {spliced} of 49 mutated seeds spliced");
 }
 
-/// Every 4th seed is a mutation of its predecessor, so only base seeds
-/// count.
+/// Every 4th seed is a mutation of its predecessor, so only base seeds count.
 #[test]
 fn generation_varies_program_topology() {
     let base: Vec<u64> = (0..250).filter(|seed| seed % 4 != 0).collect();

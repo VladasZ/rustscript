@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-//! A default at the end of an iterator chain finds its type through the
-//! chain.
+//! A default at the end of an iterator chain finds its type through the chain.
 
 #[derive(Debug, Clone, Default)]
 struct Row {
@@ -28,7 +27,7 @@ fn opaque_i32(v: i32) -> i32 {
 }
 
 fn main() {
-    // A struct literal in `map` names the element type.
+    // a struct literal in `map` names the element type
     let row = Vec::<Vec<i8>>::new()
         .into_iter()
         .map(|_| Row {
@@ -39,7 +38,7 @@ fn main() {
         .unwrap_or_default();
     println!("row: {row:?} {}", row.describe());
 
-    // A range source.
+    // a range source
     let (total, label, level) = (-1i64..-1i64)
         .map(|_| (opaque_u64(0), String::new(), opaque_i32(0)))
         .next_back()

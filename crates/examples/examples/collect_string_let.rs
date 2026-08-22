@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-// A `let` annotation names the `collect` target. A real script once got a
-// char list instead of a String here.
+// A `let` annotation names the `collect` target, this must be a String and not a char list.
 
 fn split_whitespace_once(s: &str) -> Vec<String> {
     let trimmed = s.trim_start();
@@ -36,7 +35,7 @@ fn main() {
     let turbo = "xyz".chars().collect::<String>();
     println!("turbo [{turbo}]");
 
-    // An annotated let inside the closure must not eat the outer hint.
+    // an annotated let inside the closure must not eat the outer hint
     let words = ["alpha".to_string(), "beta".to_string()];
     let initials: String = words
         .iter()

@@ -1,9 +1,8 @@
 #!/usr/bin/env rust
 
-// The service bridge write paths. It changes real service state, so it is
-// `manual_` and the suite never runs it. Run by hand as admin on a spare box.
-// Config changes go against a throwaway service, start and stop against the
-// print spooler, which is put back at the end.
+// The service bridge write paths. It changes real service state, so it is `manual_` and the suite
+// never runs it. Run by hand as admin on a spare box. Config changes go against a throwaway service,
+// start and stop against the print spooler, which is put back at the end.
 
 use std::process::Command;
 
@@ -38,7 +37,7 @@ fn main() {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .expect("open the service manager");
 
-    // A dummy binary path is fine, the service is never started.
+    // a dummy binary path is fine, the service is never started
     sc(vec!["delete", TEST_SVC]);
     if !sc(vec![
         "create",
@@ -58,8 +57,8 @@ fn main() {
     let status = svc.query_status().expect("status");
     println!("state = {:?}", status.current_state);
 
-    // `change_config` rewrites the whole record, so a field the bridge drops
-    // would be silently wiped. Each pass checks the binary path survived.
+    // `change_config` rewrites the whole record, so a field the bridge drops would be silently
+    // wiped. Each pass checks the binary path survived.
     let before = binpath();
     let wanted = vec![
         ServiceStartType::Disabled,
@@ -67,8 +66,7 @@ fn main() {
         ServiceStartType::OnDemand,
     ];
     for want in wanted {
-        // Everything except the start type is read back off the current
-        // config, so this is a round trip.
+        // everything except the start type is read back off the current config, so this is a round trip
         let cfg = svc.query_config().expect("read the current config");
         let info = ServiceInfo {
             name: TEST_SVC.into(),
@@ -96,8 +94,7 @@ fn main() {
     println!("all service write paths passed");
 }
 
-// The print spooler is a real service that can reach Running, and nothing
-// on a dev box depends on it.
+// The print spooler is a real service that can reach Running, and nothing on a dev box depends on it.
 fn check_start_stop(manager: ServiceManager) {
     let access = ServiceAccess::QUERY_STATUS | ServiceAccess::START | ServiceAccess::STOP;
     let Ok(spooler) = manager.open_service("Spooler", access) else {

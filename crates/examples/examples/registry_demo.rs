@@ -1,7 +1,7 @@
 #!/usr/bin/env rust
 
-// Everything happens under a throwaway HKCU key that is deleted at the end.
-// `Windows` only, elsewhere every call returns an error.
+// Everything happens under a throwaway HKCU key that is deleted at the end. `Windows` only,
+// elsewhere every call returns an error.
 
 use winreg::RegKey;
 use winreg::RegValue;
@@ -19,8 +19,7 @@ fn main() {
     key.set_value("Count", &7u32).expect("set Count");
     key.set_value("Label", &"hello").expect("set Label");
 
-    // Binary goes through the untyped pair, the shape the CapsLock scancode
-    // map needs.
+    // binary goes through the untyped pair, the shape the CapsLock scancode map needs
     let blob = RegValue {
         bytes: vec![0, 1, 2, 253, 254, 255].into(),
         vtype: RegType::REG_BINARY,
@@ -56,7 +55,7 @@ fn main() {
     }
     assert_eq!(left, 2);
 
-    // A missing value is an error, not a panic.
+    // a missing value is an error, not a panic
     assert!(key.get_raw_value("Nope").is_err());
 
     hkcu.delete_subkey_all(PATH).expect("remove the demo key");

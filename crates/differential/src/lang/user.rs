@@ -1,5 +1,5 @@
-//! User declared types. A `UserShape` is what typing needs and travels
-//! inside `Ty`. A `UserDef` is the shape plus every body.
+//! User declared types. A `UserShape` is what typing needs and travels inside `Ty`. A `UserDef`
+//! is the shape plus every body.
 
 use serde::{Deserialize, Serialize};
 
@@ -7,7 +7,7 @@ use crate::lang::expr::Expr;
 use crate::lang::fmt::FmtSpec;
 use crate::lang::ty::Ty;
 
-/// `Ord` implies `Eq`, so the 2 are one axis.
+/// `Ord` implies `Eq`, so the 2 are 1 axis.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum Compare {
     #[default]
@@ -62,9 +62,9 @@ pub enum Ret {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum MethodKind {
-    /// `fn name(&self, ..)`.
+    /// `fn name(&self, ..)`
     Method,
-    /// `fn name(..) -> Self`, called as `Type::name(..)`.
+    /// `fn name(..) -> Self`, called as `Type::name(..)`
     Assoc,
 }
 
@@ -91,10 +91,10 @@ pub struct UserShape {
     pub kind: UserKind,
     pub derives: Derives,
     pub display: bool,
-    /// Implements the program local `DiffDescribe` trait.
+    /// implements the program local `DiffDescribe` trait
     pub describe: bool,
     pub methods: Vec<MethodSig>,
-    /// Source types of the `From` impls.
+    /// source types of the `From` impls
     pub froms: Vec<Ty>,
     pub depth: usize,
     pub has_float: bool,
@@ -126,10 +126,9 @@ impl UserShape {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum DisplayForm {
-    /// `write!(f, "..", fields..)`, ignores the caller's width like most
-    /// hand written impls.
+    /// `write!(f, "..", fields..)`, ignores the caller's width like most hand written impls
     Write,
-    /// `f.pad(&format!(..))`, which honors them.
+    /// `f.pad(&format!(..))`, which honors them
     Pad,
 }
 
@@ -141,7 +140,7 @@ pub struct DisplayPiece {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DisplayImpl {
     pub form: DisplayForm,
-    /// Per struct field, or per enum variant a list per payload slot.
+    /// per struct field, or per enum variant a list per payload slot
     pub pieces: Vec<Vec<DisplayPiece>>,
 }
 
@@ -152,13 +151,12 @@ pub struct UserMethod {
     pub body: Expr,
 }
 
-/// A struct receives the value in one field and defaults the rest, an enum
-/// wraps it in one variant.
+/// A struct receives the value in 1 field and defaults the rest, an enum wraps it in 1 variant.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct FromImpl {
     pub src: Ty,
     pub slot: usize,
-    /// The fields a struct fills with literals when it cannot default.
+    /// the fields a struct fills with literals when it can't default
     pub rest: Vec<Expr>,
 }
 
@@ -228,7 +226,7 @@ impl UserDef {
             UserKind::Enum(variants) => {
                 out.push_str(&format!("enum {} {{\n", self.shape.name));
                 for (index, variant) in variants.iter().enumerate() {
-                    // The first unit variant carries the derived `Default`.
+                    // the first unit variant carries the derived `Default`
                     if index == 0 && self.shape.derives.default {
                         out.push_str("    #[default]\n");
                     }
@@ -362,11 +360,11 @@ fn render_write(form: &DisplayForm, template: &str, args: &[String], indent: usi
     }
 }
 
-/// One declaration per program.
+/// 1 declaration per program.
 pub const DESCRIBE_TRAIT: &str =
     "trait DiffDescribe {\n    fn diff_describe(&self) -> String;\n}\n\n";
 
-/// `impl DiffDescribe for <builtin>`.
+/// `impl DiffDescribe for <builtin>`
 pub fn render_describe_impl(ty: &Ty) -> String {
     format!(
         "impl DiffDescribe for {} {{\n    fn diff_describe(&self) -> String {{\n        format!(\"{}={{:?}}\", self)\n    }}\n}}\n\n",

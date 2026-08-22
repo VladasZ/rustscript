@@ -7,9 +7,9 @@ use crate::lang::user::{DESCRIBE_TRAIT, render_describe_impl};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum MutationOperation {
-    /// A same typed subtree from the donor replaced one here.
+    /// a same typed subtree from the donor replaced one here
     Splice,
-    /// The blocks were rendered in reverse order.
+    /// the blocks were rendered in reverse order
     BlockOrder,
 }
 

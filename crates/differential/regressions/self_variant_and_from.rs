@@ -1,5 +1,4 @@
-// `Self::Variant(x)`, `?` through `From`, and a `From` picked by the
-// argument's type.
+// `Self::Variant(x)`, `?` through `From`, and a `From` picked by the argument type.
 #[derive(Debug)]
 enum Inner {
     Bad(String),

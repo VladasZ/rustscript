@@ -1,5 +1,4 @@
-//! A narrow `fold` init keeps its width. The dispatch once flattened it to
-//! i64, so `leading_zeros` counted 64 bits instead of 32.
+//! A narrow `fold` init keeps its width, so `leading_zeros` counts 32 bits and not 64.
 
 fn opaque(v: i64) -> i64 {
     v

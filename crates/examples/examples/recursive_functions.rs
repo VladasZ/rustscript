@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-//! Self recursive scalar functions run as function plans, see
-//! `interpreter/scalar_fn.rs`.
+//! Self recursive scalar functions run as function plans, see `interpreter/scalar_fn.rs`.
 
 fn fib(n: u64) -> u64 {
     if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
@@ -11,12 +10,12 @@ fn gcd(a: u64, b: u64) -> u64 {
     if b == 0 { a } else { gcd(b, a % b) }
 }
 
-// Deep recursion, so the plan's frame stack grows past one window.
+// deep recursion, so the plan's frame stack grows past 1 window
 fn sum_to(n: i64, acc: i64) -> i64 {
     if n == 0 { acc } else { sum_to(n - 1, acc + n) }
 }
 
-// A numeric method and a 3 way branch inside the plan.
+// a numeric method and a 3 way branch inside the plan
 fn collatz_len(n: u64, steps: u64) -> u64 {
     if n == 1 {
         steps
@@ -27,7 +26,7 @@ fn collatz_len(n: u64, steps: u64) -> u64 {
     }
 }
 
-// Mutual recursion stays on the generic path.
+// mutual recursion stays on the generic path
 fn is_even(n: u64) -> bool {
     if n == 0 { true } else { is_odd(n - 1) }
 }

@@ -1,21 +1,20 @@
 #!/usr/bin/env rust
 
-//! `parse` honors its turbofish. Guessing made `"300".parse::<u8>()` an
-//! `Ok(300)`, so a script validating with `parse().is_err()` accepted
-//! garbage.
+//! `parse` honors its turbofish, `"300".parse::<u8>()` must be an `Err`. Otherwise a script
+//! validating with `parse().is_err()` accepts garbage.
 
 fn main() {
     println!("u8 in range:    {:?}", "255".parse::<u8>());
     println!("u8 over range:  {:?}", "300".parse::<u8>().is_err());
     println!("u8 negative:    {:?}", "-1".parse::<u8>().is_err());
-    // "-0" is an error for an unsigned target even though it fits.
+    // "-0" is an error for an unsigned target even though it fits
     println!("u64 minus zero: {:?}", "-0".parse::<u64>().is_err());
     println!("i8 min:         {:?}", "-128".parse::<i8>());
     println!("i8 under range: {:?}", "-129".parse::<i8>().is_err());
     println!("u32 leading nl: {:?}", "007".parse::<u32>());
     println!("i32 plus sign:  {:?}", "+7".parse::<i32>());
 
-    // Whitespace is an error.
+    // whitespace is an error
     println!("padded:         {:?}", " 5 ".parse::<i64>().is_err());
     println!("trailing space: {:?}", "5 ".parse::<i64>().is_err());
 
@@ -28,7 +27,7 @@ fn main() {
     println!("char single:    {:?}", "a".parse::<char>());
     println!("char many:      {:?}", "NaN".parse::<char>().is_err());
 
-    // The annotation drives it without a turbofish.
+    // the annotation drives it without a turbofish
     let annotated: u8 = "42".parse().unwrap();
     println!("annotated u8:   {annotated}");
 

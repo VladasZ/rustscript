@@ -146,7 +146,7 @@ impl Generator<'_> {
                     let a = self.int_value(width);
                     let b = self.int_value(width);
                     let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-                    // An empty half open range is a compile error.
+                    // an empty half open range is a compile error
                     let inclusive = lo == hi || self.chance(0.5);
                     Pat::IntRange {
                         width,
@@ -174,7 +174,7 @@ impl Generator<'_> {
     fn tuple_arms(&mut self, items: &[Ty], want: &Ty, depth: usize) -> Vec<Arm> {
         let mut arms = Vec::new();
         if self.chance(0.5) {
-            // A literal in one slot, so the arm can miss.
+            // a literal in 1 slot, so the arm can miss
             let pats: Vec<Pat> = items
                 .iter()
                 .enumerate()
@@ -240,7 +240,7 @@ impl Generator<'_> {
                     suffix: Vec::new(),
                 },
             };
-            // A guard would see `&T`, the arm body clones later.
+            // a guard would see `&T`, the arm body clones later
             arms.push(self.arm(pat, false, want, depth));
         }
         arms.push(self.wild_arm(want, depth));

@@ -1,8 +1,6 @@
-//! `sum`, `count`, `any` and `all` over `map` and `filter` stages run
-//! unboxed inside one dispatch. Every stage is pure, so nothing advances
-//! the source until the whole reduction succeeds, and any surprise discards
-//! the run for the generic path to re-run. The plan IR lives in
-//! `scalar_loop`.
+//! `sum`, `count`, `any` and `all` over `map` and `filter` stages run unboxed inside 1 dispatch.
+//! Every stage is pure, so nothing advances the source until the whole reduction succeeds, and any
+//! surprise discards the run for the generic path to re-run. The plan IR lives in `scalar_loop`.
 
 use std::sync::Arc;
 
@@ -22,23 +20,22 @@ use super::vm::Vm;
 
 type Handle = Arc<Mutex<Native>>;
 
-/// Source elements between Ctrl-C polls, the source lock drops around each.
+/// source elements between Ctrl-C polls, the source lock drops around each
 const CHUNK: usize = 4096;
 
-/// So a body that runs long fails over to the generic path, which polls
-/// Ctrl-C.
+/// So a body that runs long fails over to the generic path, which polls Ctrl-C.
 const MAX_BODY_STEPS: u32 = 65_536;
 
 /// `Any` and `All` carry their predicate, applied after the stages.
 pub(super) enum ChainReduce<'a> {
-    /// With the turbofish target.
+    /// with the turbofish target
     Sum(Option<&'a ScalarTy>),
     Count,
     Any(&'a Arc<ClosureData>),
     All(&'a Arc<ClosureData>),
 }
 
-/// Slot 0 is the parameter, `Ret` answers the call.
+/// Slot 0 is the parameter, `Ret` returns from the call.
 struct ChainPlan {
     ops: Vec<LOp>,
     slots: Vec<SVal>,
@@ -51,7 +48,7 @@ enum Stage {
 
 /// Snapshotted at analysis, the run consumes nothing until it commits.
 enum Base {
-    /// The index a `Values` or `Owned` state would read next.
+    /// the index a `Values` or `Owned` state would read next
     Indexed { start: usize },
     Range {
         next: i64,
@@ -67,8 +64,8 @@ fn closure_plan(vm: &Vm, clo: &ClosureData) -> Option<ChainPlan> {
         return None;
     }
     let mut regs: Vec<u16> = vec![0];
-    // A closure body has no loop to re-enter, and falling off the end
-    // returns unit like the generic frame loop.
+    // a closure body has no loop to re-enter, and falling off the end returns unit like the
+    // generic frame loop
     let region = Region {
         head: usize::MAX,
         body: 0,
@@ -81,8 +78,8 @@ fn closure_plan(vm: &Vm, clo: &ClosureData) -> Option<ChainPlan> {
             Op::Ret { src } => LOp::Ret {
                 src: slot_of(&mut regs, *src)?,
             },
-            // A mutable cell could change between calls, so only an immutable
-            // scalar capture is a safe constant.
+            // a mutable cell could change between calls, so only an immutable scalar capture is a
+            // safe constant
             Op::LoadUpvalue { dst, idx } => {
                 let dst = slot_of(&mut regs, *dst)?;
                 match clo.captured.get(*idx as usize)? {
@@ -117,8 +114,7 @@ fn slot_of(regs: &mut Vec<u16>, r: u16) -> Option<u16> {
 impl ChainPlan {
     /// `None` fails the whole reduction over.
     fn eval(&mut self, arg: SVal) -> Option<SVal> {
-        // Slots reset per call, a leftover is a value the generic call would
-        // not see.
+        // slots reset per call, a leftover would be a value the generic call never sees
         self.slots.fill(SVal::Opaque);
         self.slots[0] = arg;
         let mut ip = 0usize;
@@ -136,8 +132,7 @@ impl ChainPlan {
                 OpOut::Jump(LTo::Exit) => return Some(SVal::Unit),
                 OpOut::Jump(LTo::Op(t)) => {
                     let t = t as usize;
-                    // Only backward jumps count, so straight bodies pay no
-                    // counter.
+                    // only backward jumps count, so straight bodies pay no counter
                     if t <= ip {
                         steps += 1;
                         if steps > MAX_BODY_STEPS {
@@ -151,9 +146,8 @@ impl ChainPlan {
     }
 }
 
-/// Walk the chain down to a supported source, translating every closure.
-/// The source handle comes back separately, the run reads through it and
-/// the commit advances it.
+/// Walk the chain down to a supported source, translating every closure. The source handle comes
+/// back separately, the run reads through it and the commit advances it.
 fn analyze(vm: &Vm, handle: &Handle) -> Option<(Vec<Stage>, Base, Handle)> {
     let mut stages: Vec<Stage> = Vec::new();
     let mut cur = handle.clone();
@@ -199,10 +193,10 @@ fn analyze(vm: &Vm, handle: &Handle) -> Option<(Vec<Stage>, Base, Handle)> {
     }
 }
 
-/// Mirrors the generic drain's accumulator.
+/// Mirrors the accumulator of the generic drain.
 enum Acc {
-    /// The i128 accumulator and bounds of `sum_values`. Without a target the
-    /// first tagged element sets the bounds.
+    /// The i128 accumulator and bounds of `sum_values`. Without a target the first tagged element
+    /// sets the bounds.
     Sum {
         total: i128,
         low: i128,
@@ -215,8 +209,7 @@ enum Acc {
 }
 
 impl Acc {
-    /// None when the reduction falls outside the subset, a float sum answers
-    /// a float even when empty.
+    /// None when the reduction falls outside the subset. A float sum gives a float even when empty.
     fn new(reduce: &ChainReduce) -> Option<Acc> {
         Some(match reduce {
             ChainReduce::Sum(target) => {
@@ -238,8 +231,7 @@ impl Acc {
         })
     }
 
-    /// `None` fails the reduction over, `Some(true)` answers early like the
-    /// generic `any` and `all` exit.
+    /// `None` fails the reduction over, `Some(true)` exits early like the generic `any` and `all`.
     fn feed(&mut self, v: SVal) -> Option<bool> {
         match self {
             Acc::Sum {
@@ -259,8 +251,8 @@ impl Acc {
                     }
                     _ => return None,
                 };
-                // Mirrors `sum_values`, so an overflow falls back and the
-                // generic re-run raises the exact error.
+                // mirrors `sum_values`, so an overflow falls back and the generic re-run raises
+                // the exact error
                 *total = total.checked_add(n)?;
                 if *total < *low || *total > *high {
                     return None;
@@ -310,14 +302,14 @@ struct ChainRun {
     stages: Vec<Stage>,
     predicate: Option<ChainPlan>,
     acc: Acc,
-    /// The commit offset.
+    /// the commit offset
     done: usize,
-    /// Live only for a `Range` base.
+    /// live only for a `Range` base
     cursor: i64,
 }
 
 impl ChainRun {
-    /// `None` fails over, `Some(true)` answers early.
+    /// `None` fails over, `Some(true)` exits early.
     fn one(&mut self, item: SVal) -> Option<bool> {
         let mut v = item;
         for stage in &mut self.stages {
@@ -379,8 +371,7 @@ impl ChainRun {
     }
 }
 
-/// `None` means the generic path should drain the chain, with every
-/// iterator state untouched.
+/// `None` means the generic path should drain the chain, with every iterator state untouched.
 pub(super) fn try_reduce(
     vm: &Arc<Vm>,
     iterator: &Handle,
@@ -431,12 +422,11 @@ pub(super) fn try_reduce(
         match out {
             SpanOut::Fail => return Ok(None),
             SpanOut::Done => break,
-            // The source lock is dropped so a Ctrl-C handler cannot deadlock
-            // on it.
+            // the source lock is dropped so a Ctrl-C handler can't deadlock on it
             SpanOut::More => vm.run_pending_ctrlc()?,
         }
     }
-    // Commit the consumed elements, the state the generic pulls would leave.
+    // commit the consumed elements, the state the generic pulls would leave
     {
         let mut native = source.lock();
         match &mut *native {

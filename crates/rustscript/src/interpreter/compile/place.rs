@@ -1,6 +1,5 @@
-//! Place aware lowering for mutable access. The chain of `Unique*` ops
-//! splits each level of the place from sharing, then the mutation runs in
-//! place. See `Value::make_unique`.
+//! Place aware lowering for mutable access. The chain of `Unique*` ops splits each level of the place
+//! from sharing, then the mutation runs in place. See `Value::make_unique`.
 
 use anyhow::Result;
 use syn::Expr;
@@ -8,31 +7,28 @@ use syn::Expr;
 use super::super::bytecode::{Op, PathId, Reg};
 use super::{Compiler, NameLoc};
 
-/// Composite storage is shared with the place, so the store is a refcount
-/// move. A string splits inside its methods and only the store brings the
-/// new buffer home.
+/// Composite storage is shared with the place, so the store is a refcount move. A string splits inside
+/// its methods and only the store brings the new buffer home.
 pub(super) enum PlaceBack {
-    /// Nothing to store.
+    /// nothing to store
     None,
     Cell(Reg),
     Upvalue(u16),
     Field {
         base: Reg,
         member: u16,
-        /// So a projection whose base is a cell or another projection still
-        /// lands.
+        /// so a projection whose base is a cell or another projection still lands
         parent: Box<PlaceBack>,
     },
     Index {
         base: Reg,
         key: Reg,
-        /// See `Field::parent`.
+        /// see `Field::parent`
         parent: Box<PlaceBack>,
     },
 }
 
-/// A register sharing the place's now unique storage, plus how to store
-/// back.
+/// A register sharing the now unique storage of the place, plus how to store back.
 pub(super) struct Place {
     pub reg: Reg,
     pub back: PlaceBack,
@@ -52,7 +48,7 @@ impl Compiler<'_> {
     pub(super) fn compile_place(&mut self, expr: &Expr) -> Result<Option<Place>> {
         match expr {
             Expr::Paren(p) => self.compile_place(&p.expr),
-            // A borrow of a place is the place.
+            // a borrow of a place is the place
             Expr::Reference(r) => self.compile_place(&r.expr),
             Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => {
                 if let Some(name) = single_path_name(&u.expr) {
@@ -60,7 +56,7 @@ impl Compiler<'_> {
                     if target != name {
                         return Ok(self.compile_name_place(&target));
                     }
-                    // A captured alias lives in an enclosing frame.
+                    // a captured alias lives in an enclosing frame
                     if let Some(target) = self.enclosing_alias_target(&name) {
                         return Ok(self.compile_name_place(&target));
                     }
@@ -106,7 +102,7 @@ impl Compiler<'_> {
     fn compile_name_place(&mut self, name: &str) -> Option<Place> {
         match self.resolve_for_write(name) {
             NameLoc::Local(reg) => {
-                // The caller split a borrow parameter before the call.
+                // the caller split a borrow parameter before the call
                 if !self.cur().borrow_params.contains(&reg) {
                     self.emit(Op::UniqueReg { reg });
                 }
@@ -135,8 +131,7 @@ impl Compiler<'_> {
         }
     }
 
-    /// A temporary base may still share storage with what produced it, so
-    /// it is split too.
+    /// A temporary base may still share storage with what produced it, so it is split too.
     pub(super) fn compile_place_base(&mut self, expr: &Expr) -> Result<Reg> {
         Ok(self.compile_base_with_back(expr)?.0)
     }
@@ -155,8 +150,8 @@ impl Compiler<'_> {
         self.emit_back(place.reg, &place.back);
     }
 
-    /// One level, then the base's own. A string projection replaces its base
-    /// buffer and only the parent chain lands that.
+    /// 1 level, then the base's own. A string projection replaces its base buffer and only the
+    /// parent chain lands that.
     fn emit_back(&mut self, reg: Reg, back: &PlaceBack) {
         match back {
             PlaceBack::None => {}
@@ -191,8 +186,8 @@ impl Compiler<'_> {
         }
     }
 
-    /// `let r = &mut PLACE`. A variable borrow becomes a name alias, a field
-    /// or element borrow a real reference value.
+    /// `let r = &mut PLACE`. A variable borrow becomes a name alias, a field or element borrow a
+    /// real reference value.
     pub(super) fn compile_let_borrow(
         &mut self,
         local: &syn::Local,
@@ -257,8 +252,7 @@ impl Compiler<'_> {
         Ok(true)
     }
 
-    /// A `&mut place` scrutinee wraps the place as a borrow, so bindings
-    /// write through.
+    /// A `&mut place` scrutinee wraps the place as a borrow, so bindings write through.
     pub(super) fn compile_scrutinee(&mut self, expr: &Expr) -> Result<Reg> {
         if let Expr::Reference(r) = expr
             && r.mutability.is_some()
@@ -289,8 +283,8 @@ impl Compiler<'_> {
 }
 
 impl Compiler<'_> {
-    /// `mem::swap`, `mem::take` and `mem::replace` replace whole values, so
-    /// nothing is mutated in place. False hands the call back.
+    /// `mem::swap`, `mem::take` and `mem::replace` replace whole values, so nothing is mutated in
+    /// place. False hands the call back.
     pub(super) fn compile_mem_intrinsic(
         &mut self,
         dst: Reg,

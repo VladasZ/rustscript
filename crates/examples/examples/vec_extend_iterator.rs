@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-// `extend` with a lazy argument like `.iter().map(..)` once appended nothing
-// and reported success.
+// `extend` with a lazy argument like `.iter().map(..)` must append the items.
 
 fn argv(devices: &[String]) -> Vec<&str> {
     let mut out: Vec<&str> = vec!["readlink", "-f"];

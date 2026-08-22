@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-// `map_or_else` differs from the Option form, its fallback receives the
-// error.
+// `map_or_else` differs from the Option form, its fallback receives the error.
 
 fn parse(text: &str) -> Result<i64, String> {
     text.parse::<i64>()

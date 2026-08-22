@@ -1,6 +1,5 @@
-//! A chained `concat` keeps its element type. The second `concat` once fell
-//! back to the string join, so an empty `Vec<Vec<T>>` printed as `""`. From
-//! seed 241759.
+//! A chained `concat` keeps its element type, so an empty `Vec<Vec<T>>` prints as `[]` and not
+//! `""`. Seed 241759.
 
 fn main() {
     let one = Vec::<Vec<(f64, i16)>>::new().concat();
@@ -12,7 +11,7 @@ fn main() {
     let three = Vec::<Vec<Vec<Vec<i32>>>>::new().concat().concat().concat();
     println!("three: {three:?}");
 
-    // Real strings still join.
+    // real strings still join
     let joined = Vec::<String>::new().concat();
     println!("joined: {joined:?}");
 

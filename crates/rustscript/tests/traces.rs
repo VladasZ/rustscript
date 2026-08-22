@@ -1,5 +1,4 @@
-//! A failing script must name the failing line and the call chain, with deep
-//! recursion capped.
+//! A failing script must name the failing line and the call chain, with deep recursion capped.
 
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -99,8 +98,7 @@ fn main() {
 }
 "#,
     );
-    // The coverage gate refuses the script before it runs and names the
-    // receiver type.
+    // the coverage gate refuses the script before it runs and names the receiver type
     assert!(
         err.contains("`fly` on Dog is not implemented by the interpreter"),
         "stderr was: {err}"

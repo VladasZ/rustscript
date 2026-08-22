@@ -1,5 +1,4 @@
-// Constants like `u16::MAX` once fell through the bridge under
-// `#[tokio::main]` as unsupported.
+// Constants like `u16::MAX` under `#[tokio::main]`.
 
 #[tokio::main]
 async fn main() {

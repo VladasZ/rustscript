@@ -63,8 +63,7 @@ fn fs_native_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
             Err(e) => Value::err(super::native::io_error_value(&e)),
         },
         PathId::FsHardLink => wrap_unit(std::fs::hard_link(s(0)?, s(1)?)),
-        // The platform specific names all dispatch to one helper, so a cfg
-        // gated `use` works on each os.
+        // the platform specific names all dispatch to 1 helper, so a cfg gated `use` works on each os
         PathId::FsSymlink | PathId::FsSymlinkFile | PathId::FsSymlinkDir => {
             wrap_unit(make_symlink(&s(0)?, &s(1)?))
         }
@@ -94,8 +93,7 @@ pub(super) fn native_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
         PathId::EnvArgs => Value::vec(super::script_args().into_iter().map(Value::str).collect()),
         PathId::EnvVar => match std::env::var(s(0)?) {
             Ok(v) => Value::ok(Value::str(v)),
-            // So `Err(VarError::NotPresent)` matches and `{e:?}` prints
-            // `NotPresent`.
+            // so `Err(VarError::NotPresent)` matches and `{e:?}` prints `NotPresent`
             Err(std::env::VarError::NotPresent) => {
                 Value::err(Value::enum_of(&VAR_ERROR, NOT_PRESENT, Vec::new()))
             }
@@ -139,7 +137,7 @@ pub(super) fn native_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
         }
         PathId::ProcessAbort => std::process::abort(),
         PathId::ProcessId => Value::Int(i64::from(std::process::id())),
-        // -- io -------------------------------------------------------
+        // io
         PathId::IoStdin => make_std_stream(
             "stdin",
             Native::Reader(std::io::BufReader::new(Box::new(std::io::stdin()))),
@@ -199,8 +197,7 @@ pub(super) fn as_i64(v: &Value) -> Option<i64> {
     }
 }
 
-/// A `PathBuf` or `OsString` carries the text in its `s` field, anything
-/// else uses its display form.
+/// A `PathBuf` or `OsString` has the text in its `s` field, anything else uses its display form.
 pub(super) fn path_like(v: &Value) -> String {
     match v {
         Value::Str(s) => s.to_string(),
@@ -274,8 +271,7 @@ pub(super) fn make_duration(d: std::time::Duration) -> Value {
     )
 }
 
-/// The Unix `MetadataExt` fields are gated so the interpreter still builds
-/// on `Windows`.
+/// The Unix `MetadataExt` fields are gated so the interpreter still builds on `Windows`.
 pub(super) fn make_metadata(m: &std::fs::Metadata) -> Value {
     let mut f: Vec<(Arc<str>, Value)> = vec![
         (
@@ -304,7 +300,7 @@ pub(super) fn make_metadata(m: &std::fs::Metadata) -> Value {
     Value::struct_of("Metadata", f)
 }
 
-// -- path, directory entry, and file type ----------------------------------
+// path, directory entry, and file type
 
 pub(super) fn make_path(s: impl Into<String>) -> Value {
     Value::struct_of("Path", [("s".into(), Value::str(s.into()))])
@@ -341,7 +337,7 @@ pub(super) fn make_dir_entry(entry: &std::fs::DirEntry) -> Value {
 }
 
 pub(super) fn make_file_type(path: &std::path::Path) -> Value {
-    // `DirEntry::file_type` does not follow symlinks, like real std.
+    // `DirEntry::file_type` doesn't follow symlinks, like real std
     let ft = path.symlink_metadata().map(|m| m.file_type());
     let is = |f: &dyn Fn(&std::fs::FileType) -> bool| Value::Bool(ft.as_ref().is_ok_and(f));
     Value::struct_of(
@@ -404,8 +400,7 @@ pub(super) fn path_method(
             let joined = p.join(args.first().map(Value::display).unwrap_or_default());
             make_path(joined.display().to_string())
         }
-        // Path compares whole components, so "/a/bc" does not start with
-        // "/a/b".
+        // Path compares whole components, so "/a/bc" doesn't start with "/a/b"
         BuiltinId::StartsWith => {
             Value::Bool(p.starts_with(args.first().map(Value::display).unwrap_or_default()))
         }
@@ -518,8 +513,8 @@ pub(super) fn open_file(path: &str, opts: &std::fs::OpenOptions) -> Value {
     }
 }
 
-// The setters return a fresh struct with one flag flipped, `open` assembles
-// a real `OpenOptions` from the flags.
+// the setters return a fresh struct with 1 flag flipped, `open` builds a real `OpenOptions` from
+// the flags
 pub(super) fn openoptions_method(
     s: &StructData,
     name: &MethodName,

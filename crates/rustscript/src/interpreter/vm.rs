@@ -1,5 +1,5 @@
-//! The frame loop. `exec` owns the call frames and applies the `Flow` each
-//! op answers with, the op bodies live in `vm_step`.
+//! The frame loop. `exec` owns the call frames and applies the `Flow` each op returns. The op
+//! bodies are in `vm_step`.
 
 use std::collections::HashMap;
 use std::mem::{replace, take};
@@ -20,12 +20,12 @@ use super::vm_support::trace_error;
 
 pub(super) const MAX_CALL_DEPTH: usize = 100_000;
 
-/// Deeper nesting returns buffers to the allocator, so a burst of
-/// recursion does not pin its memory forever.
+/// Deeper nesting gives buffers back to the allocator, so a burst of recursion doesn't pin its
+/// memory forever.
 const MAX_POOLED_STACKS: usize = 32;
 
 thread_local! {
-    /// One popped per live call on this thread.
+    /// 1 popped per live call on this thread
     static STACK_POOL: std::cell::RefCell<Vec<Vec<Value>>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -42,8 +42,7 @@ fn frame_line(chunk: &Chunk, ip: usize) -> (String, String, u32) {
     (chunk.name.clone(), chunk.file.to_string(), line)
 }
 
-/// Each slot has its own lock so tasks on different threads can read
-/// globals.
+/// Each slot has its own lock so tasks on different threads can read globals.
 pub enum GlobalSlot {
     Todo(Arc<Chunk>),
     Busy,
@@ -55,19 +54,19 @@ pub struct Vm {
     pub fn_index: HashMap<String, u32>,
     pub impls: Arc<ImplTable>,
     pub globals: Vec<Mutex<GlobalSlot>>,
-    /// For coercion and typed json.
+    /// for coercion and typed json
     pub structs: super::json_bridge::Structs,
-    /// For dynamic variant construction.
+    /// for dynamic variant construction
     pub enums: Vec<Arc<EnumDef>>,
-    /// For `struct Marker;` used as a value.
+    /// for `struct Marker;` used as a value
     pub unit_structs: Vec<Arc<str>>,
-    /// For tuple struct calls.
+    /// for tuple struct calls
     pub struct_names: std::collections::HashSet<String>,
     pub rt: Handle,
 }
 
 impl Vm {
-    /// Matched by canonical or bare enum name.
+    /// matched by canonical or bare enum name
     pub(super) fn unit_variant(&self, enum_name: Option<&str>, variant: &str) -> Option<Value> {
         for def in &self.enums {
             if let Some(want) = enum_name
@@ -133,8 +132,7 @@ struct Frame {
     ip: usize,
     base: usize,
     dst: u16,
-    /// So the callee's final parameter values can be handed back for `&mut`
-    /// writebacks.
+    /// So the final parameter values of the callee can be handed back for `&mut` writebacks.
     abase: u16,
     argc: u16,
     type_env: TypeEnv,
@@ -147,8 +145,8 @@ impl Vm {
         args: &[Value],
         upvalues: &[Upvalue],
     ) -> Result<Value> {
-        // A forwarder's arity is a guess, `u8::saturating_add` handed to
-        // `fold` takes 2 where the guess was 1.
+        // A forwarder's arity is a guess. `u8::saturating_add` handed to `fold` takes 2 where the
+        // guess was 1.
         let rebuilt;
         let chunk = if chunk.path_forwarder && args.len() != chunk.num_params {
             rebuilt = path_call_chunk(chunk.paths[0].clone(), args.len());
@@ -164,8 +162,8 @@ impl Vm {
                 args.len()
             );
         }
-        // A fresh stack per call once dominated comparator sorts. Nested
-        // calls each pop their own buffer.
+        // A fresh stack per call was the main cost in comparator sorts. Nested calls each pop
+        // their own buffer.
         let mut stack = STACK_POOL
             .with(|pool| pool.borrow_mut().pop())
             .unwrap_or_default();
@@ -198,9 +196,8 @@ impl Vm {
         let mut base = 0usize;
         let mut ip = 0usize;
 
-        // One immediately called closure, so an error can be annotated with
-        // the call chain still in `frames` and the failing op in `cur` and
-        // `ip`.
+        // One immediately called closure, so an error can be annotated with the call chain still in
+        // `frames` and the failing op in `cur` and `ip`.
         let result = (|| -> Result<Value> {
             loop {
                 let flow = match cur.code.get(ip) {
@@ -233,8 +230,7 @@ impl Vm {
                         cur_clo = f.closure;
                         cur_tenv = f.type_env;
                         ip = f.ip;
-                        // The `&mut` argument writeback picks these up from the
-                        // caller's arg window.
+                        // the `&mut` argument writeback picks these up from the caller's arg window
                         base = f.base;
                         for i in 0..f.argc as usize {
                             stack[base + f.abase as usize + i] = take(&mut stack[callee_base + i]);
@@ -284,9 +280,8 @@ impl Vm {
         })
     }
 
-    /// Innermost frame first and highest register first, like real
-    /// unwinding. A panic inside a drop is reported and the original panic
-    /// keeps propagating, real Rust would abort there.
+    /// Innermost frame first and highest register first, like real unwinding. A panic inside a drop is
+    /// reported and the original panic keeps going. Real Rust would abort there.
     fn unwind_drops(
         self: &Arc<Self>,
         cur: &Arc<Chunk>,
@@ -313,12 +308,11 @@ impl Vm {
         let Value::Native(n) = v else { return Ok(v) };
         let taken = replace(&mut *n.lock(), Native::Taken);
         match taken {
-            // A `JoinHandle` yields `Result<T, JoinError>`, so `.await?` needs
-            // the Ok layer.
+            // a `JoinHandle` yields `Result<T, JoinError>`, so `.await?` needs the Ok layer
             Native::Task(h) => Ok(match self.rt.block_on(h) {
                 Ok(v) => Value::ok(v),
-                // Both format forms of the real `JoinError`, so `{e:?}` prints
-                // what a compiled binary prints.
+                // both format forms of the real `JoinError`, so `{e:?}` prints what a compiled
+                // binary prints
                 Err(e) => Value::err(
                     Native::JoinErr {
                         display: e.to_string(),
@@ -330,8 +324,7 @@ impl Vm {
             }),
             Native::Future(f) => Ok(self.rt.block_on(f)),
             Native::Taken => bail!("this value was already awaited"),
-            // Put a non awaitable back so the handle stays usable after the
-            // error.
+            // put a non awaitable back so the handle stays usable after the error
             other => {
                 let name = other.type_name();
                 *n.lock() = other;
@@ -350,13 +343,12 @@ impl Vm {
         self.impls.by_name(ty, name)
     }
 
-    /// Registered under `from<S>`. The plain `from` entry answers when the
-    /// type has one impl only.
+    /// Registered under `from<S>`. The plain `from` entry is used when the type has only 1 impl.
     pub(super) fn conversion_impl(&self, target: &str, value: &Value) -> Option<Arc<Chunk>> {
         let source = source_type_name(value);
         let base = source.split(['<', '(']).next().unwrap_or(&source);
-        // A value already of the target type needs no conversion, running a
-        // `From` impl here once picked an unrelated variant.
+        // A value already of the target type needs no conversion. Running a `From` impl here can
+        // pick an unrelated variant.
         if base == super::resolver::bare(target) {
             return None;
         }
@@ -366,7 +358,7 @@ impl Vm {
             .or_else(|| self.impls.by_name(target, "from"))
     }
 
-    /// Evaluated on first read and cached.
+    /// evaluated on first read and cached
     pub(super) fn global(self: &Arc<Self>, idx: usize) -> Result<Value> {
         {
             match &*self.globals[idx].lock() {
@@ -440,8 +432,7 @@ impl Vm {
 fn source_type_name(value: &Value) -> String {
     match value {
         Value::Struct(s) => super::resolver::bare(s.name()).to_string(),
-        // `Some(x)` names its payload, `None` answers through the bare
-        // `Option` key.
+        // `Some(x)` names its payload, `None` goes through the bare `Option` key
         Value::Enum { def, data, .. } if def.kind == super::enum_def::EnumKind::Option => {
             let base = super::resolver::bare(&def.name).to_string();
             match data.lock().first() {
@@ -461,8 +452,7 @@ fn source_type_name(value: &Value) -> String {
         Value::F32(_) => "f32".to_string(),
         Value::Bool(_) => "bool".to_string(),
         Value::Char(_) => "char".to_string(),
-        // A non empty vec names its element, an empty one answers through
-        // the bare `Vec` key.
+        // a non empty vec names its element, an empty one goes through the bare `Vec` key
         Value::Vec(items) => match items.lock().first() {
             Some(first) => format!("Vec<{}>", source_type_name(first)),
             None => "Vec".to_string(),

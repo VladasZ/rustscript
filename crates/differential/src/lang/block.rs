@@ -12,7 +12,7 @@ use crate::lang::user::UserDef;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ParamMode {
     Owned,
-    /// `&T`, cloned into an owned local first.
+    /// `&T`, cloned into an owned local first
     Ref,
 }
 
@@ -25,24 +25,24 @@ pub struct Param {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum FnKind {
-    /// The return type is where a bare `collect` states its target and where
-    /// `?` converts through `From`.
+    /// The return type is where a bare `collect` states its target and where `?` converts through
+    /// `From`.
     Plain {
         params: Vec<Param>,
         ret: Ty,
         body: Expr,
     },
-    /// `fn name(target: &mut T, params..) { *target = value; }`.
+    /// `fn name(target: &mut T, params..) { *target = value; }`
     Writer {
         target: Ty,
         params: Vec<Param>,
         value: Expr,
     },
-    /// `fn name<T: Clone + Debug>(a: T, b: T, first: bool) -> T`.
+    /// `fn name<T: Clone + Debug>(a: T, b: T, first: bool) -> T`
     GenericPick,
-    /// `fn name<F: FnMut(T) -> T>(f: &mut F, x: T) -> T { f(x) }`.
+    /// `fn name<F: FnMut(T) -> T>(f: &mut F, x: T) -> T { f(x) }`
     Apply { ty: Ty },
-    /// `fn name(n: T) -> impl Fn(T) -> T { move |x: T| (x op n) }`.
+    /// `fn name(n: T) -> impl Fn(T) -> T { move |x: T| (x op n) }`
     Factory { ty: Ty, op: BinOp },
 }
 
@@ -196,7 +196,7 @@ pub struct Block {
     pub consts: Vec<ConstDef>,
     #[serde(default)]
     pub types: Vec<UserDef>,
-    /// Builtin types the block implements `DiffDescribe` for.
+    /// builtin types the block implements `DiffDescribe` for
     #[serde(default)]
     pub describes: Vec<Ty>,
 }
@@ -215,8 +215,8 @@ impl Block {
         out
     }
 
-    /// The describe impls on builtin types are rendered by the program, once
-    /// across every block, because 2 blocks may name the same type.
+    /// The describe impls on builtin types are rendered by the program, once across every block,
+    /// because 2 blocks may name the same type.
     pub fn render_items(&self) -> String {
         let mut out = String::new();
         for def in &self.types {
@@ -314,10 +314,9 @@ impl Block {
         out.push(']');
     }
 
-    /// Every literal is laundered once the block can abort, so an overflow
-    /// stays a runtime panic. Apply helper calls whose closure is used twice
-    /// in one expression are rewritten, or the compiler sees a borrow
-    /// conflict.
+    /// Every literal is laundered once the block can abort, so an overflow stays a runtime panic. Apply
+    /// helper calls whose closure is used twice in 1 expression are rewritten, otherwise the
+    /// compiler sees a borrow conflict.
     pub fn fix_apply_borrows(&mut self) {
         for stmt in &mut self.statements {
             for expr in stmt.exprs_mut() {
@@ -403,7 +402,7 @@ impl Block {
         self.fns = kept_fns;
         let uses = |name: &str| statements_text.contains(name) || fn_text.contains(name);
         self.consts.retain(|def| uses(&def.name));
-        // A type can be named only by another type, so loop until stable.
+        // a type can be named only by another type, so loop until stable
         loop {
             let types_text: String = self.types.iter().map(UserDef::render).collect();
             let before = self.types.len();
@@ -444,7 +443,7 @@ impl Block {
         candidates
     }
 
-    /// Drop one statement and everything that depended on it.
+    /// Drop 1 statement and everything that depended on it.
     fn without(&self, index: usize) -> Self {
         let mut dropped: BTreeSet<String> = self.statements[index].declared().into_iter().collect();
         let mut statements = Vec::new();
@@ -471,8 +470,7 @@ impl Block {
     }
 }
 
-/// The declaration line and each impl header must not count as a use by
-/// another type.
+/// The declaration line and each impl header must not count as a use by another type.
 fn occurrences_in_own(def: &UserDef) -> usize {
     def.render().matches(&def.shape.name).count()
 }

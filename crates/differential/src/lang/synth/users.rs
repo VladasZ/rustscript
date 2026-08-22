@@ -14,7 +14,7 @@ use crate::lang::user::{
 };
 
 impl Generator<'_> {
-    // -- user types -----------------------------------------------------------
+    // user types
 
     pub(super) fn declare_types(&mut self) {
         let count = self.rng.random_range(0..=3);
@@ -28,8 +28,7 @@ impl Generator<'_> {
         }
     }
 
-    /// Mostly scalars, sometimes a container, a tuple, a std error or an
-    /// earlier user type.
+    /// Mostly scalars, sometimes a container, a tuple, a std error or an earlier user type.
     fn member_ty(&mut self, error: bool) -> Ty {
         if error && self.chance(0.4) {
             return Ty::StdErr(if self.chance(0.7) {
@@ -97,7 +96,7 @@ impl Generator<'_> {
             depth,
             has_float,
         };
-        // From<the first scalar field>.
+        // From<the first scalar field>
         let from_slot = fields
             .iter()
             .position(|field| matches!(field.ty, Ty::Int(_) | Ty::Str | Ty::Bool | Ty::Char));
@@ -147,7 +146,7 @@ impl Generator<'_> {
     fn struct_methods(&mut self, shape: &mut UserShape, fields: &[Field]) -> Vec<UserMethod> {
         let owner = Ty::user(shape.clone());
         let mut methods = Vec::new();
-        // A local named `self.f0` renders exactly like a field read.
+        // a local named `self.f0` renders exactly like a field read
         let self_locals: Vec<(String, Ty)> = fields
             .iter()
             .map(|field| (format!("self.{}", field.name), field.ty.clone()))
@@ -227,8 +226,7 @@ impl Generator<'_> {
         methods
     }
 
-    /// With `error`, the payloads include std parse errors and `From` impls
-    /// convert them.
+    /// With `error`, the payloads include std parse errors and `From` impls convert them.
     fn enum_def(&mut self, index: usize, error: bool) -> UserDef {
         let name = format!(
             "Diff{}{}_{index}",
@@ -238,8 +236,7 @@ impl Generator<'_> {
         let count = self.rng.random_range(2..=4);
         let mut variants = Vec::new();
         for slot in 0..count {
-            // The first variant is a unit so a derived `Default` has one to
-            // mark.
+            // the first variant is a unit so a derived `Default` has one to mark
             let payload_count = if slot == 0 {
                 0
             } else {
@@ -278,8 +275,7 @@ impl Generator<'_> {
             depth,
             has_float,
         };
-        // `From<payload>` for every single payload variant, so `?` has
-        // conversions to go through.
+        // `From<payload>` for every single payload variant, so `?` has conversions to go through
         let mut froms = Vec::new();
         for (slot, variant) in variants.iter().enumerate() {
             if let [payload] = variant.payload.as_slice()
@@ -325,7 +321,7 @@ impl Generator<'_> {
         }
     }
 
-    /// `fn diff_code(&self) -> i64`.
+    /// `fn diff_code(&self) -> i64`
     fn enum_methods(&mut self, shape: &mut UserShape, variants: &[Variant]) -> Vec<UserMethod> {
         if !self.chance(0.6) {
             return Vec::new();
@@ -384,7 +380,7 @@ impl Generator<'_> {
         }]
     }
 
-    // -- consts and trait impls -----------------------------------------------
+    // consts and trait impls
 
     pub(super) fn declare_consts(&mut self) {
         let count = self.rng.random_range(0..=2);
@@ -424,12 +420,12 @@ impl Generator<'_> {
         }
     }
 
-    // -- helper functions -----------------------------------------------------
+    // helper functions
 
-    /// A helper returning `ret`. Answers the name and parameter types.
+    /// A helper returning `ret`. Gives the name and parameter types.
     pub(super) fn helper_fn(&mut self, ret: &Ty) -> Option<(String, Vec<Param>)> {
         if self.fn_ret.is_some() {
-            // No helper inside a helper, or the nesting never ends.
+            // no helper inside a helper, or the nesting never ends
             return None;
         }
         let name = self.fresh("diff_fn");
@@ -468,8 +464,7 @@ impl Generator<'_> {
         Some((name, params))
     }
 
-    /// A couple of lets, maybe an early return, and a tail that may be a
-    /// bare pipe.
+    /// A couple of lets, maybe an early return, and a tail that may be a bare pipe.
     fn fn_body(&mut self, ret: &Ty) -> Expr {
         let mut stmts = Vec::new();
         let lets = self.rng.random_range(0..=2);
@@ -557,7 +552,7 @@ impl Generator<'_> {
         name
     }
 
-    /// One per type per block.
+    /// 1 per type per block.
     pub(super) fn apply_fn(&mut self, ty: &Ty) -> String {
         if let Some(def) = self
             .fns

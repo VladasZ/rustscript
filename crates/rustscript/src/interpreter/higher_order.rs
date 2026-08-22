@@ -1,5 +1,4 @@
-//! The closure taking methods on Vec, map entries, Option, Result and lazy
-//! iterators.
+//! The closure taking methods on Vec, map entries, Option, Result and lazy iterators.
 
 use std::slice::from_ref;
 use std::sync::Arc;
@@ -27,7 +26,7 @@ impl Vm {
         args: &[Value],
     ) -> Result<Option<Value>> {
         match recv {
-            // `then` takes a closure, unlike `then_some`.
+            // `then` takes a closure, unlike `then_some`
             Value::Bool(b) if name == BuiltinId::Then => {
                 if !*b {
                     return Ok(Some(Value::none()));
@@ -62,8 +61,8 @@ impl Vm {
                 };
                 self.entry_higher_order(recv, &map, &key, name, args)
             }
-            // `Value::as_str` hands a json string back pre unwrapped, so its
-            // Option closure methods route here as Some.
+            // `Value::as_str` hands a json string back pre unwrapped, so its Option closure
+            // methods go here as Some
             Value::Str(s) => {
                 let data: super::value::List =
                     Arc::new(parking_lot::Mutex::new(vec![Value::Str(s.clone())]));
@@ -95,7 +94,7 @@ impl Vm {
                     let v = self.call_closure_data(&clo, &call_args)?;
                     map.lock().insert(key.clone(), v);
                 }
-                // `&mut V`, so writes must reach the map.
+                // `&mut V`, so writes must reach the map
                 Ok(Some(Value::Ref(Arc::new(ValueRef::map_entry(
                     map.clone(),
                     key.clone(),
@@ -106,12 +105,12 @@ impl Vm {
                 if let Some(current) = current {
                     let clo = as_closure(args.first())?;
                     let updated = self.call_closure_data(&clo, &[current])?;
-                    // A unit return means it mutated in place.
+                    // a unit return means it mutated in place
                     if !matches!(updated, Value::Unit) {
                         map.lock().insert(key.clone(), updated);
                     }
                 }
-                // The Entry, so `or_insert` still chains.
+                // the Entry, so `or_insert` still chains
                 Ok(Some(entry.clone()))
             }
             _ => Ok(None),
@@ -352,7 +351,7 @@ impl Vm {
             }
             BuiltinId::SortBy => {
                 let f = clo(0)?;
-                // An int only comparator sorts unboxed.
+                // an int only comparator sorts unboxed
                 if let Some(sorted) = scalar_sort_by(self, &list, &f) {
                     *items.lock() = sorted;
                     return Ok(Some(Value::Unit));
@@ -553,7 +552,7 @@ impl Vm {
                     default
                 }
             }
-            // The fallback is handed the error, unlike the Option form.
+            // the fallback gets the error, unlike the Option form
             BuiltinId::MapOrElse => {
                 if is_ok {
                     self.call_closure_data(&clo(1)?, &[inner()?])?

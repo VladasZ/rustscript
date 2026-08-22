@@ -1,6 +1,6 @@
-//! Structured mutation by subtree splicing. A same typed subtree from a
-//! donor replaces a node, with its free variables fixed up for the target
-//! scope. This creates nesting the top down generator never emits.
+//! Structured mutation by subtree splicing. A same typed subtree from a donor replaces a node, with
+//! its free variables fixed up for the target scope. This creates nesting the top down generator
+//! never emits.
 
 use std::collections::BTreeSet;
 
@@ -42,8 +42,8 @@ pub fn mutate(parent: &Program, parent_seed: u64, donor_seed: u64, output_seed: 
             operations.push(MutationOperation::BlockOrder);
         }
     }
-    // A spliced subtree can land in a receiver position, so the whole program
-    // is repaired again after the operations.
+    // a spliced subtree can land in a receiver position, so the whole program is repaired again
+    // after the operations
     for block in &mut program.blocks {
         block.fix_apply_borrows();
     }
@@ -56,9 +56,8 @@ pub fn mutate(parent: &Program, parent_seed: u64, donor_seed: u64, output_seed: 
     program
 }
 
-/// Whether a subtree can move between programs. It must name nothing only its
-/// own program declares and need no function body or `let` annotation around
-/// it.
+/// Whether a subtree can move between programs. It must name nothing only its own program
+/// declares and need no function body or `let` annotation around it.
 fn is_portable(expr: &Expr) -> bool {
     expr.nodes().iter().all(|node| {
         let own = !matches!(
@@ -149,8 +148,7 @@ fn bind_names(bind: &Bind, out: &mut BTreeSet<String>) {
     }
 }
 
-/// A free variable with no same typed binding in scope becomes the minimal
-/// literal of its type.
+/// A free variable with no same typed binding in scope becomes the minimal literal of its type.
 fn rebind(
     expr: &mut Expr,
     environment: &[(String, Ty)],
@@ -244,8 +242,7 @@ fn splice(program: &mut Program, donor: &Program, rng: &mut StdRng) -> bool {
     binders(&graft, &mut bound);
     rebind(&mut graft, &environment, &bound, rng);
     *target = graft;
-    // A graft whose terminal states no type cannot initialize an unannotated
-    // binding.
+    // a graft whose terminal states no type can't initialize an unannotated binding
     if let Stmt::Let { expr, ann, .. } = stmt
         && let Expr::Pipe(pipe) = expr
         && !pipe.states_type()

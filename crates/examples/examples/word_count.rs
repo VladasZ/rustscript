@@ -10,7 +10,7 @@ fn main() {
         counts.insert(word.to_string(), n + 1);
     }
     let mut pairs: Vec<(String, i64)> = counts.into_iter().collect();
-    // Stable order regardless of how the map iterates.
+    // stable order regardless of how the map iterates
     pairs.sort_by_key(|p| (-p.1, p.0.clone()));
     for (word, n) in pairs {
         println!("{n} {word}");

@@ -22,7 +22,7 @@ fn main() {
         .unwrap_or_default();
     println!("through_and: {through_and:?}");
 
-    // `and` takes the argument's type.
+    // `and` takes the argument type
     let widened = opaque_u8(1)
         .checked_add(opaque_u8(1))
         .and(None::<i64>)

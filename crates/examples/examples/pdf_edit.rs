@@ -1,5 +1,4 @@
-//! The PDF is built by hand with computed xref offsets, so no data file is
-//! needed.
+//! The PDF is built by hand with computed xref offsets, so no data file is needed.
 
 use lopdf::Document;
 

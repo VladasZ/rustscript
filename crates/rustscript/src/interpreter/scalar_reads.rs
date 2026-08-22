@@ -1,5 +1,4 @@
-//! Which frame registers a chunk reads, for the dead store removal in
-//! `scalar_loop.rs`.
+//! Which frame registers a chunk reads, for the dead store removal in `scalar_loop.rs`.
 
 use super::bytecode::{CapSource, Chunk, Op};
 
@@ -32,8 +31,7 @@ fn mark_reads(chunk: &Chunk, op: &Op, mark: &mut impl FnMut(u16)) {
         | Op::UniqueUpvalue { .. }
         | Op::Jump { .. }
         | Op::LoopHead { .. } => {}
-        // `DropCell` sends the next read back to the register, so the write
-        // that fills it is not dead.
+        // `DropCell` sends the next read back to the register, so the write that fills it is not dead
         Op::LoadCell { cell, .. } | Op::UniqueCell { cell, .. } | Op::DropCell { cell } => {
             mark(*cell);
         }

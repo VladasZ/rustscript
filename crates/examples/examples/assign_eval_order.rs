@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-//! An assignment evaluates its right operand before the place, in plain and
-//! compound form.
+//! An assignment evaluates its right operand before the place, plain and compound form.
 
 use std::collections::HashMap;
 

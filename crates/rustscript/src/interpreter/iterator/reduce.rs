@@ -1,0 +1,310 @@
+//! The closure taking iterator methods and the reductions.
+
+use num_traits::AsPrimitive;
+use std::slice::from_ref;
+use std::sync::Arc;
+
+use anyhow::{Result, anyhow, bail};
+
+use super::{Handle, IteratorState, as_closure, option_inner, sum_values, wrap};
+use crate::interpreter::bridge::arg;
+use crate::interpreter::bytecode::{BuiltinId, ScalarTy};
+use crate::interpreter::ops::compare_values;
+use crate::interpreter::scalar_chain::{ChainReduce, try_reduce};
+use crate::interpreter::value::{ClosureData, Value};
+use crate::interpreter::vm::Vm;
+
+impl Vm {
+    pub(in crate::interpreter) fn iterator_higher_order(
+        self: &Arc<Self>,
+        iterator: &Handle,
+        name: BuiltinId,
+        args: &[Value],
+    ) -> Result<Option<Value>> {
+        let closure = |index| as_closure(args.get(index));
+        let value = match name {
+            BuiltinId::Map => wrap(IteratorState::Map {
+                source: iterator.clone(),
+                closure: closure(0)?,
+            }),
+            BuiltinId::Filter => wrap(IteratorState::Filter {
+                source: iterator.clone(),
+                closure: closure(0)?,
+            }),
+            BuiltinId::FilterMap => wrap(IteratorState::FilterMap {
+                source: iterator.clone(),
+                closure: closure(0)?,
+            }),
+            BuiltinId::TakeWhile => wrap(IteratorState::TakeWhile {
+                source: iterator.clone(),
+                closure: closure(0)?,
+                done: false,
+            }),
+            BuiltinId::SkipWhile => wrap(IteratorState::SkipWhile {
+                source: iterator.clone(),
+                closure: closure(0)?,
+                skipping: true,
+            }),
+            BuiltinId::ForEach => {
+                let closure = closure(0)?;
+                while let Some(value) = self.iterator_next(iterator)? {
+                    self.call_closure_data(&closure, &[value])?;
+                }
+                Value::Unit
+            }
+            BuiltinId::FindMap => {
+                let closure = closure(0)?;
+                let mut found = Value::none();
+                while let Some(value) = self.iterator_next(iterator)? {
+                    if let Some(inner) = option_inner(&self.call_closure_data(&closure, &[value])?)
+                    {
+                        found = Value::some(inner);
+                        break;
+                    }
+                }
+                found
+            }
+            BuiltinId::Find
+            | BuiltinId::Position
+            | BuiltinId::Rposition
+            | BuiltinId::Any
+            | BuiltinId::All => {
+                let closure = closure(0)?;
+                let reduce = match name {
+                    BuiltinId::Any => Some(ChainReduce::Any(&closure)),
+                    BuiltinId::All => Some(ChainReduce::All(&closure)),
+                    _ => None,
+                };
+                if let Some(reduce) = reduce
+                    && let Some(v) = try_reduce(self, iterator, &reduce)?
+                {
+                    return Ok(Some(v));
+                }
+                return self.iterator_predicate(iterator, name, &closure).map(Some);
+            }
+            _ => return self.iterator_reduce_ho(iterator, name, args),
+        };
+        Ok(Some(value))
+    }
+
+    pub(super) fn iterator_reduce_ho(
+        self: &Arc<Self>,
+        iterator: &Handle,
+        name: BuiltinId,
+        args: &[Value],
+    ) -> Result<Option<Value>> {
+        let closure = |index| as_closure(args.get(index));
+        let value = match name {
+            BuiltinId::Fold => {
+                let closure = closure(1)?;
+                let mut accumulator = arg(args, 0)?;
+                while let Some(value) = self.iterator_next(iterator)? {
+                    accumulator = self.call_closure_data(&closure, &[accumulator, value])?;
+                }
+                accumulator
+            }
+            BuiltinId::Reduce => {
+                let closure = closure(0)?;
+                let Some(mut accumulator) = self.iterator_next(iterator)? else {
+                    return Ok(Some(Value::none()));
+                };
+                while let Some(value) = self.iterator_next(iterator)? {
+                    accumulator = self.call_closure_data(&closure, &[accumulator, value])?;
+                }
+                Value::some(accumulator)
+            }
+            BuiltinId::FlatMap => {
+                let closure = closure(0)?;
+                let mut output = Vec::new();
+                while let Some(value) = self.iterator_next(iterator)? {
+                    let mapped = self.call_closure_data(&closure, &[value])?;
+                    output.extend(self.drain_items(mapped)?);
+                }
+                Value::vec(output)
+            }
+            BuiltinId::Flatten => {
+                let mut output = Vec::new();
+                while let Some(value) = self.iterator_next(iterator)? {
+                    output.extend(self.drain_items(value)?);
+                }
+                Value::vec(output)
+            }
+            BuiltinId::Partition => {
+                let closure = closure(0)?;
+                let (mut yes, mut no) = (Vec::new(), Vec::new());
+                while let Some(value) = self.iterator_next(iterator)? {
+                    if self
+                        .call_closure_data(&closure, from_ref(&value))?
+                        .is_truthy()
+                    {
+                        yes.push(value);
+                    } else {
+                        no.push(value);
+                    }
+                }
+                Value::tuple(vec![Value::vec(yes), Value::vec(no)])
+            }
+            BuiltinId::MaxByKey | BuiltinId::MinByKey => {
+                let closure = closure(0)?;
+                let mut best: Option<(Value, Value)> = None;
+                while let Some(value) = self.iterator_next(iterator)? {
+                    let key = self.call_closure_data(&closure, from_ref(&value))?;
+                    let take = match &best {
+                        None => true,
+                        Some((best_key, _)) => {
+                            let order = compare_values(&key, best_key)?;
+                            if name == BuiltinId::MaxByKey {
+                                order.is_ge()
+                            } else {
+                                order.is_lt()
+                            }
+                        }
+                    };
+                    if take {
+                        best = Some((key, value));
+                    }
+                }
+                best.map_or_else(Value::none, |(_, value)| Value::some(value))
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(value))
+    }
+
+    pub(super) fn drain_iterator(self: &Arc<Self>, iterator: &Handle) -> Result<Vec<Value>> {
+        let mut values = Vec::new();
+        while let Some(value) = self.iterator_next(iterator)? {
+            values.push(value);
+        }
+        Ok(values)
+    }
+
+    pub(super) fn iterator_sum(
+        self: &Arc<Self>,
+        iterator: &Handle,
+        target: Option<&ScalarTy>,
+    ) -> Result<Value> {
+        let items = self.drain_iterator(iterator)?;
+        sum_values(items, target)
+    }
+
+    pub(super) fn iterator_product(
+        self: &Arc<Self>,
+        iterator: &Handle,
+        target: Option<&ScalarTy>,
+    ) -> Result<Value> {
+        // i128 for the same reason as `sum_values`, a `product::<u16>()` overflows at the target width
+        let mut integers = 1i128;
+        let mut floats = 1f64;
+        let mut has_float = false;
+        let mut has_int = false;
+        let (mut low, mut high) = match target {
+            Some(ScalarTy::Int(width)) => (width.min(), width.max()),
+            _ => (i128::from(i64::MIN), i128::from(i64::MAX)),
+        };
+        let mut bounded = matches!(target, Some(ScalarTy::Int(_)));
+        let mut seen_width = None;
+        while let Some(value) = self.iterator_next(iterator)? {
+            if let Some((value, width)) = value.int_parts() {
+                // see `sum_values`
+                if !bounded {
+                    (low, high) = (width.min(), width.max());
+                    bounded = true;
+                    seen_width = Some(width);
+                }
+                has_int = true;
+                integers = integers
+                    .checked_mul(value)
+                    .ok_or_else(|| anyhow!("attempt to multiply with overflow"))?;
+                if integers < low || integers > high {
+                    bail!("attempt to multiply with overflow");
+                }
+                continue;
+            }
+            match value.bridge_image().unwrap_or(value) {
+                Value::Float(value) => {
+                    floats *= value;
+                    has_float = true;
+                }
+                other => bail!("product needs numbers, got {}", other.type_name()),
+            }
+        }
+        // only a `product::<f64>()` turbofish tells an empty float product from an integer one
+        let float_target = matches!(target, Some(ScalarTy::F32 | ScalarTy::F64));
+        Ok(if has_float || (float_target && !has_int) {
+            let total = floats * AsPrimitive::<f64>::as_(integers);
+            if matches!(target, Some(ScalarTy::F32)) {
+                Value::F32(AsPrimitive::<f32>::as_(total))
+            } else {
+                Value::Float(total)
+            }
+        } else if let Some(ScalarTy::Int(width)) = target {
+            // keep the tag, otherwise `product::<u16>().checked_mul(..)` misses its overflow
+            Value::int_of_width(integers, *width)
+        } else if let Some(width) = seen_width {
+            Value::int_of_width(integers, width)
+        } else {
+            Value::Int(i64::try_from(integers).expect("product is range-checked per step"))
+        })
+    }
+
+    pub(super) fn iterator_extreme(
+        self: &Arc<Self>,
+        iterator: &Handle,
+        name: BuiltinId,
+    ) -> Result<Value> {
+        let mut best: Option<Value> = None;
+        while let Some(value) = self.iterator_next(iterator)? {
+            let take = match &best {
+                None => true,
+                Some(current) => {
+                    let order = compare_values(&value, current)?;
+                    if name == BuiltinId::Max {
+                        order.is_gt()
+                    } else {
+                        order.is_lt()
+                    }
+                }
+            };
+            if take {
+                best = Some(value);
+            }
+        }
+        Ok(best.map_or_else(Value::none, Value::some))
+    }
+
+    pub(super) fn iterator_predicate(
+        self: &Arc<Self>,
+        iterator: &Handle,
+        name: BuiltinId,
+        closure: &Arc<ClosureData>,
+    ) -> Result<Value> {
+        let mut index = 0;
+        // `rposition` walks to the end and keeps the last match, same index without a reversible
+        // iterator
+        let mut last_match = None;
+        while let Some(value) = self.iterator_next(iterator)? {
+            let matches = self
+                .call_closure_data(closure, from_ref(&value))?
+                .is_truthy();
+            match name {
+                BuiltinId::Find if matches => return Ok(Value::some(value)),
+                BuiltinId::Position if matches => return Ok(Value::some(Value::Int(index))),
+                BuiltinId::Rposition if matches => last_match = Some(index),
+                BuiltinId::Any if matches => return Ok(Value::Bool(true)),
+                BuiltinId::All if !matches => return Ok(Value::Bool(false)),
+                _ => {}
+            }
+            index += 1;
+        }
+        Ok(match name {
+            BuiltinId::Find | BuiltinId::Position => Value::none(),
+            BuiltinId::Rposition => {
+                last_match.map_or_else(Value::none, |i| Value::some(Value::Int(i)))
+            }
+            BuiltinId::Any => Value::Bool(false),
+            BuiltinId::All => Value::Bool(true),
+            _ => unreachable!(),
+        })
+    }
+}

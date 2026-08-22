@@ -1,6 +1,5 @@
-//! `into()` picks the `From` impl by the source type. The interpreter once
-//! keyed `From<Option<usize>>` and `From<Option<u16>>` both on `Option`.
-//! From seed 20686200357.
+//! `into()` picks the `From` impl by the source type, `From<Option<usize>>` and
+//! `From<Option<u16>>` are different impls. Seed 20686200357.
 
 #[derive(Debug)]
 enum Wrapped {
@@ -75,14 +74,14 @@ fn main() {
     let pair: Wrapped = (opaque_u8(7), true).into();
     println!("{pair:?} {}", pair.tag());
 
-    // Apart by element type.
+    // apart by element type
     let flags: Wrapped = vec![false, true].into();
     println!("{flags:?} {}", flags.tag());
 
     let letters: Wrapped = vec!['x', 'y'].into();
     println!("{letters:?} {}", letters.tag());
 
-    // `None` names no inner type and still reaches an impl.
+    // `None` names no inner type and still reaches an impl
     let empty: Wrapped = None::<u16>.into();
     println!("{empty:?} {}", empty.tag());
 }

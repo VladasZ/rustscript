@@ -1,10 +1,9 @@
 #!/usr/bin/env rust
 
-//! An unsigned parse rejects "-0" even though zero fits. The interpreter once
-//! parsed through a wide signed integer and accepted it.
+//! An unsigned parse rejects "-0" even though zero fits.
 
 fn main() {
-    // Negative zero formats with its sign, that is where "-0" comes from.
+    // negative zero formats with its sign, that is where "-0" comes from
     let text = (-0.0f32).to_string();
     println!("text:           {text:?}");
     println!("u64 minus zero: {}", text.parse::<u64>().is_err());

@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-// A binding inside a loop starts a new capture cell every iteration, one
-// bound outside keeps the one cell.
+// A binding inside a loop gets a new capture cell every iteration, one bound outside keeps 1 cell.
 
 fn main() {
     for step in 0..3i64 {
@@ -35,7 +34,7 @@ fn main() {
         }
     }
 
-    // Bound outside the loop.
+    // bound outside the loop
     let mut running = 0i64;
     for step in 1..4i64 {
         let mut add = || running += step;
@@ -43,8 +42,7 @@ fn main() {
     }
     println!("running {running}");
 
-    // A closure from one iteration read in the next reaches the variable it
-    // captured.
+    // a closure from 1 iteration read in the next reaches the variable it captured
     let mut carried: Vec<i64> = Vec::new();
     for step in 1..4i64 {
         let mut kept = step;

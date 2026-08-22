@@ -40,7 +40,7 @@ fn main() -> Result<()> {
     let back = fs::read_to_string(&file)?;
     println!("read back: {back}");
 
-    // `Windows` has no echo binary, it is a cmd builtin.
+    // `Windows` has no echo binary, it is a cmd builtin
     let out = if OS == "windows" {
         Command::new("cmd")
             .arg("/C")

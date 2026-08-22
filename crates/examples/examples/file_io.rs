@@ -21,14 +21,14 @@ fn main() -> anyhow::Result<()> {
     println!("bytes written: {}", contents.len());
     println!("lines: {}", contents.lines().count());
 
-    // Append does not truncate.
+    // append doesn't truncate
     let mut appended = OpenOptions::new().create(true).append(true).open(&path)?;
     appended.write_all(b"third line\n")?;
     let after = fs::read_to_string(&path)?;
     println!("lines after append: {}", after.lines().count());
 
-    // `SystemTime` values are not printed, their identity differs between
-    // the interpreter and compiled Rust.
+    // `SystemTime` values are not printed, their identity differs between the interpreter and
+    // compiled Rust
     let copy = std::env::temp_dir().join("rustscript_file_io_copy.txt");
     let copy = copy.to_string_lossy().to_string();
     fs::copy(&path, &copy)?;

@@ -1,5 +1,5 @@
-//! Types lowered at compile time into a plain IR. syn nodes are not
-//! `Send`, and this moves all name resolution to load time.
+//! Types lowered at compile time into a plain IR. syn nodes are not `Send`, and this moves all
+//! name resolution to load time.
 
 use std::sync::Arc;
 
@@ -12,7 +12,7 @@ pub enum CastIr {
     F32,
     Char,
     Int(IntWidth),
-    /// Kept so the cast fails only if it runs, dead code may hold one.
+    /// kept so the cast fails only if it runs, dead code may hold one
     Unsupported(Arc<str>),
 }
 
@@ -30,7 +30,7 @@ pub fn lower_cast(ty: &syn::Type) -> CastIr {
         "f64" => CastIr::F64,
         "f32" => CastIr::F32,
         "char" => CastIr::Char,
-        // u128 and i128 keep the i64 passthrough.
+        // u128 and i128 keep the i64 passthrough
         _ => match IntWidth::parse(&name) {
             Some(w) => CastIr::Int(w),
             None => CastIr::Unsupported(Arc::from(name.as_str())),
@@ -38,20 +38,19 @@ pub fn lower_cast(ty: &syn::Type) -> CastIr {
     }
 }
 
-/// Aliases are followed and struct paths canonicalized here, so runtime
-/// never resolves a name.
+/// Aliases are followed and struct paths canonicalized here, so runtime never resolves a name.
 #[derive(Clone)]
 pub enum TypeIr {
-    /// A type coercion cannot change.
+    /// a type coercion can't change
     Dynamic,
     Vec(Arc<TypeIr>),
-    /// Coercion leaves maps untouched, typed json uses the value type.
+    /// coercion leaves maps untouched, typed json uses the value type
     MapValue(Arc<TypeIr>),
-    /// Coercion turns a collected Vec into a set.
+    /// coercion turns a collected Vec into a set
     Set(Arc<TypeIr>),
     Option(Arc<TypeIr>),
     Struct(Arc<str>),
-    /// Bound by the caller's turbofish through the type environment.
+    /// bound by the caller's turbofish through the type environment
     Generic(Arc<str>),
 }
 
@@ -65,8 +64,7 @@ impl TypeIr {
     }
 }
 
-/// So a `type A = B; type B = A;` cycle lowers to `Dynamic` instead of
-/// hanging.
+/// So a `type A = B; type B = A;` cycle lowers to `Dynamic` instead of hanging.
 const MAX_DEPTH: u32 = 32;
 
 /// A bare generic parameter name shadows any type of the same name.
@@ -126,8 +124,7 @@ fn lower(
                 .map(|s| s.ident.to_string())
                 .collect();
             match resolver.resolve(module, &segs) {
-                // An alias target resolves in its own module, where no function
-                // generics apply.
+                // an alias target resolves in its own module, where no function generics apply
                 Ok(Res::Alias(m, target)) => lower(&target, resolver, m, &[], depth + 1),
                 _ => TypeIr::Dynamic,
             }

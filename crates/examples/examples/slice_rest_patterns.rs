@@ -7,7 +7,7 @@ fn classify(v: &[i32]) -> String {
     }
 }
 
-/// One element falls past the 2 ended arm.
+/// 1 element falls past the 2 ended arm
 fn ends(v: &[i32]) -> String {
     match v {
         [x, .., y] => format!("pair {x} {y}"),
@@ -27,7 +27,7 @@ fn main() {
     println!("{}", ends(&[3, 4]));
     println!("{}", ends(&[3, 5, 8, 4]));
 
-    // A tail after the rest.
+    // a tail after the rest
     let arr = [10, 20, 30, 40, 50];
     let [a, .., y, z] = arr;
     println!("{a} {y} {z}");
@@ -36,7 +36,7 @@ fn main() {
     let [first, mid @ .., end] = arr;
     println!("{first} {mid:?} {end}");
 
-    // A vec derefs to a slice at the call.
+    // a vec derefs to a slice at the call
     let grown: Vec<i32> = (1..=6).collect();
     println!("{}", classify(&grown));
     println!("{}", ends(&grown));

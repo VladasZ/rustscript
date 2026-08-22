@@ -1,5 +1,5 @@
-// The interpreter stores parsed json as native values, so matching
-// `Value::String(s)` and friends has to recognize those.
+// The interpreter stores parsed json as native values, so matching `Value::String(s)` and friends
+// has to recognize those.
 
 use serde_json::Value;
 

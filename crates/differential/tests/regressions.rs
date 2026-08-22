@@ -1,6 +1,5 @@
-//! Replays every case under `regressions/` compiled and interpreted and
-//! requires full agreement, panic payloads included. The equivalence suite
-//! cannot hold panicking cases.
+//! Replays every case under `regressions/` compiled and interpreted and requires full agreement, panic
+//! payloads included. The equivalence suite can't hold panicking cases.
 
 use rustscript_differential::runner::{Classification, Runner};
 use rustscript_differential::workspace_root;

@@ -1,8 +1,7 @@
 #!/usr/bin/env rust
 
-//! Sequences order lexicographically. Comparing 2 vecs once aborted with
-//! "cannot compare Vec and Vec", and `a.max(b)` was read as the iterator
-//! reduction instead of `Ord::max`.
+//! Sequences order lexicographically, 2 vecs compare, and `a.max(b)` is `Ord::max` and not the
+//! iterator reduction.
 
 fn main() {
     println!("first differs: {:?}", vec![1, 2] < vec![1, 3]);
@@ -12,11 +11,11 @@ fn main() {
     println!("tuple order:   {:?}", (1, "b") > (1, "a"));
     println!("string elems:  {:?}", vec!["a", "b"] < vec!["a", "c"]);
 
-    // With an argument these are `Ord`.
+    // with an argument these are `Ord`
     println!("ord max:       {:?}", vec![1, 2].max(vec![1, 3]));
     println!("ord min:       {:?}", vec![1, 2].min(vec![1, 3]));
 
-    // Without one they are the reduction.
+    // without one they are the reduction
     println!("iter max:      {:?}", [3, 1, 2].iter().max());
     println!("iter min:      {:?}", [3, 1, 2].iter().min());
 
@@ -24,7 +23,7 @@ fn main() {
     nested.sort();
     println!("sorted nested: {nested:?}");
 
-    // None sorts before Some and Ok before Err.
+    // None sorts before Some and Ok before Err
     println!("none first:    {:?}", None::<i32> < Some(1));
     println!("some order:    {:?}", Some(1) < Some(2));
     let ok: Result<i32, i32> = Ok(1);

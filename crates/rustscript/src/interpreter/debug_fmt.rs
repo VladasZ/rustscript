@@ -1,5 +1,5 @@
-//! The `{:?}` rendering. The spec reaches every leaf, `{:>4?}` of
-//! `vec![1]` is `[   1]`, while `str` and `char` never pad.
+//! The `{:?}` rendering. The spec reaches every leaf, `{:>4?}` of `vec![1]` is `[   1]`, while
+//! `str` and `char` never pad.
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -12,7 +12,7 @@ use super::value::{CellKind, MapKind, StructData, Value, big_text, format_float_
 
 pub(super) struct DebugOpts<'a> {
     pub pretty: bool,
-    /// The spec every leaf is formatted with, empty for a bare `{:?}`.
+    /// the spec every leaf is formatted with, empty for a bare `{:?}`
     pub leaf: &'a str,
 }
 
@@ -55,7 +55,7 @@ fn f32_text(f: f32, opts: &DebugOpts) -> String {
     }
 }
 
-/// `2` in `>8.2`.
+/// `2` in `>8.2`
 fn precision_of(leaf: &str) -> Option<usize> {
     let after = leaf.split_once('.')?.1;
     let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
@@ -65,7 +65,7 @@ fn precision_of(leaf: &str) -> Option<usize> {
 fn write_value(value: &Value, opts: &DebugOpts, indent: usize, out: &mut String) {
     match value {
         Value::Unit => out.push_str("()"),
-        // `bool` and the numbers route `Debug` to a padding `Display`.
+        // `bool` and the numbers route `Debug` to a padding `Display`
         Value::Bool(_)
         | Value::Int(_)
         | Value::IntW(..)
@@ -112,8 +112,8 @@ fn write_value(value: &Value, opts: &DebugOpts, indent: usize, out: &mut String)
         },
         Value::Cell(kind, slot) => write_cell(*kind, slot, opts, indent, out),
         Value::Native(n) => match &*n.lock() {
-            // `ParseIntError { kind: InvalidDigit }` spreads over lines in the
-            // pretty form like any struct.
+            // `ParseIntError { kind: InvalidDigit }` spreads over lines in the pretty form like
+            // any struct
             Native::ParseErr { debug, .. } if opts.pretty && debug.contains(" { ") => {
                 let (name, rest) = debug.split_once(" { ").unwrap_or((debug, ""));
                 let field = rest.trim_end_matches(" }");
@@ -259,7 +259,7 @@ fn write_map(
     out.push('}');
 }
 
-/// `Name`, `Name(a, b)` or `Name { f: v }`.
+/// `Name`, `Name(a, b)` or `Name { f: v }`
 fn write_struct(s: &StructData, opts: &DebugOpts, indent: usize, out: &mut String) {
     out.push_str(super::resolver::bare(s.name()));
     let values = s.values.lock().clone();
@@ -299,7 +299,7 @@ fn write_struct(s: &StructData, opts: &DebugOpts, indent: usize, out: &mut Strin
     }
 }
 
-/// The slot is snapshotted, not held, so a nested read cannot relock it.
+/// The slot is snapshotted, not held, so a nested read can't relock it.
 fn write_cell(
     kind: CellKind,
     slot: &Arc<Mutex<Value>>,

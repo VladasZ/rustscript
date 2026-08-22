@@ -1,7 +1,7 @@
 #!/usr/bin/env rust
 
-// A json string is a plain String in the interpreter, so `as_str` answers an
-// already unwrapped value. It must still behave like a real Option.
+// A json string is a plain String in the interpreter, so `as_str` gives an already unwrapped
+// value. It must still behave like a real Option.
 
 use serde_json::Value;
 
@@ -20,7 +20,7 @@ fn dir_of(data: &Value) -> String {
     }
 }
 
-// The interpreter sees plain values in the middle of this `?` chain.
+// the interpreter sees plain values in the middle of this `?` chain
 fn tag_of(data: &Value) -> Option<String> {
     Some(data.get("tag_name")?.as_str()?.to_string())
 }
@@ -56,7 +56,7 @@ fn main() {
         .unwrap_or("none");
     println!("or_else {picked}");
 
-    // The accessors still answer on json null.
+    // the accessors still work on json null
     let missing = empty.get("context").cloned().unwrap_or(Value::Null);
     println!("missing is_null {}", missing.is_null());
     println!(
@@ -74,7 +74,7 @@ fn main() {
             .unwrap_or("none")
     );
 
-    // The integer accessors answer None on a float, even 5.0.
+    // the integer accessors are None on a float, even 5.0
     let nums: Value = serde_json::from_str(r#"{"pct":4.4,"whole":5.0,"count":7}"#).unwrap();
     let derived = 42;
     println!(

@@ -1,5 +1,4 @@
-//! Struct elements in vecs through the while plan's element handles, sharing
-//! edges included.
+//! Struct elements in vecs through the element handles of the while plan, sharing edges included.
 
 struct Body {
     x: f64,
@@ -19,7 +18,7 @@ struct Tagged {
 }
 
 fn main() {
-    // An nbody style pair interaction.
+    // an nbody style pair interaction
     let mut bodies = vec![
         Body {
             x: 1.5,
@@ -69,7 +68,7 @@ fn main() {
     }
     println!("checksum {} hits {total_hits}", checksum.round());
 
-    // A clone taken before the loop keeps its values.
+    // a clone taken before the loop keeps its values
     let mut points = [Point { x: 1, y: 10 }, Point { x: 2, y: 20 }];
     let kept = points[0].clone();
     let mut rounds = 0;
@@ -83,7 +82,7 @@ fn main() {
         kept.x, kept.y, points[0].x, points[0].y
     );
 
-    // 2 slots holding one shared element split on their first writes.
+    // 2 slots holding 1 shared element split on their first writes
     let seed = Point { x: 100, y: 0 };
     let mut pair = [seed.clone(), seed];
     let mut turns = 0;
@@ -94,8 +93,8 @@ fn main() {
     }
     println!("pair {} {}", pair[0].x, pair[1].x);
 
-    // A string field read fails the iteration over. The id write is undone and
-    // re-applied, so the increment lands once.
+    // A string field read fails the iteration over. The id write is undone and re-applied, so the
+    // increment lands once.
     let mut tags = [
         Tagged {
             id: 1,

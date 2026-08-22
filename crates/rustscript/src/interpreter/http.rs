@@ -1,5 +1,4 @@
-//! The reqwest bridge, blocking and async. Only `.send()`, `.text()` and
-//! `.json()` yield futures.
+//! The reqwest bridge, blocking and async. Only `.send()`, `.text()` and `.json()` yield futures.
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -15,7 +14,7 @@ use super::native::Native;
 use super::std_bridge::duration_from_value;
 use super::value::{StructData, Value};
 
-/// So many one off gets reuse one connection pool.
+/// So many one off gets reuse 1 connection pool.
 fn default_client() -> Client {
     static C: OnceLock<Client> = OnceLock::new();
     C.get_or_init(Client::new).clone()
@@ -25,7 +24,7 @@ fn client_value(c: Client) -> Value {
     Native::HttpClient(c).wrap()
 }
 
-// -- the blocking client ---------------------------------------------------
+// the blocking client
 
 fn build_blocking_client(
     cookie_store: bool,
@@ -47,8 +46,8 @@ fn build_blocking_client(
         .map_err(|e| anyhow!("http client build failed: {e}"))
 }
 
-/// So many one off gets do not spin up a runtime thread per call. Safe
-/// because script code always runs on blocking threads.
+/// So many one off gets don't spin up a runtime thread per call. Safe because script code always
+/// runs on blocking threads.
 fn default_blocking_client() -> Result<reqwest::blocking::Client> {
     static C: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     if let Some(c) = C.get() {
@@ -68,12 +67,12 @@ fn blocking_client_value(c: reqwest::blocking::Client) -> Value {
     Native::BlockingHttpClient(c).wrap()
 }
 
-// -- dispatch of `reqwest::..` path calls ----------------------------------
+// dispatch of `reqwest::..` path calls
 
 /// Both the blocking and the async API.
 pub(super) fn reqwest_call(id: PathId, args: &[Value]) -> Result<Value> {
     Ok(match id {
-        // A redirect policy marker.
+        // a redirect policy marker
         PathId::RedirectPolicyNone => {
             Value::struct_of("RedirectPolicy", [("kind".into(), Value::str("none"))])
         }
@@ -102,7 +101,7 @@ pub(super) fn reqwest_call(id: PathId, args: &[Value]) -> Result<Value> {
     })
 }
 
-// -- request and builder values --------------------------------------------
+// request and builder values
 
 fn request_struct(method: &str, url: &str, client: Value) -> Arc<StructData> {
     let v = Value::struct_of(
@@ -149,7 +148,7 @@ fn blocking_builder_value() -> Value {
     )
 }
 
-// The redirect policy a builder stashed via `.redirect(..)`.
+// the redirect policy a builder stashed via `.redirect(..)`
 fn redirect_policy(s: &StructData) -> Option<reqwest::redirect::Policy> {
     let Some(Value::Struct(rp)) = s.get("redirect") else {
         return None;
@@ -170,7 +169,7 @@ fn redirect_policy(s: &StructData) -> Option<reqwest::redirect::Policy> {
     }
 }
 
-// -- method dispatch -------------------------------------------------------
+// method dispatch
 
 /// `None` when the receiver is not an http type.
 pub(super) fn http_method(
@@ -333,7 +332,7 @@ fn request_method(s: &Arc<StructData>, method: &MethodName, args: &[Value]) -> R
             s.set("timeout", arg(args, 0)?);
             Ok(this())
         }
-        // A blocking client runs at once, an async one hands back a future.
+        // a blocking client runs at once, an async one hands back a future
         BuiltinId::Send => {
             let blocking = matches!(
                 s.get("client"),
@@ -349,7 +348,7 @@ fn request_method(s: &Arc<StructData>, method: &MethodName, args: &[Value]) -> R
     }
 }
 
-// -- blocking execution ----------------------------------------------------
+// blocking execution
 
 fn run_blocking(s: &StructData) -> Value {
     match execute_blocking(s) {
@@ -392,15 +391,14 @@ fn execute_blocking(s: &StructData) -> Result<Value> {
         .iter()
         .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
         .collect();
-    // Taken before the body is read, which consumes the response.
+    // taken before the body is read, which consumes the response
     let length = resp.content_length();
     let text = resp.text()?;
     Ok(Value::struct_of(
         "ReqwestResponse",
         [
             ("status".into(), Value::Int(i64::from(status))),
-            // A blocking body is already decoded, so `text` and `json` answer
-            // directly.
+            // a blocking body is already decoded, so `text` and `json` return directly
             ("body".into(), Value::str(text)),
             ("headers".into(), header_pairs(headers)),
             (
@@ -421,7 +419,7 @@ fn add_header(s: &StructData, k: &str, v: &str) {
     }
 }
 
-// -- execution -------------------------------------------------------------
+// execution
 
 /// Free of any `!Send` value.
 struct Plan {
@@ -491,11 +489,10 @@ async fn run_plan(plan: Plan) -> Result<Value> {
         .iter()
         .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
         .collect();
-    // Taken before the body is read, which consumes the response. A speed
-    // test counts these, not the decoded text.
+    // taken before the body is read, which consumes the response, a speed test counts these and
+    // not the decoded text
     let length = resp.content_length();
-    // Kept in wire form, so `content_length` never pays for a UTF-8
-    // conversion.
+    // kept in wire form, so `content_length` never pays for a UTF-8 conversion
     let raw = resp.bytes().await?.to_vec();
     Ok(Value::struct_of(
         "ReqwestResponse",
@@ -548,12 +545,12 @@ fn duration_field(s: &StructData, field: &str) -> Option<Duration> {
     duration_from_value(&v)
 }
 
-// -- response methods ------------------------------------------------------
+// response methods
 
 fn response_method(s: &Arc<StructData>, method: &MethodName) -> Result<Value> {
     let this = || Value::Struct(s.clone());
     let body = || body_bytes(s);
-    // A blocking response holds decoded text, an async one wire bytes.
+    // a blocking response holds decoded text, an async one wire bytes
     let is_blocking = matches!(s.get("body"), Some(Value::Str(_)));
     Ok(match method.id {
         BuiltinId::Status => Value::struct_of(
@@ -675,8 +672,8 @@ fn status_method(s: &StructData, method: &MethodName) -> Value {
 mod tests {
     use super::*;
 
-    /// A json null from a response once answered Unit, so `Value::Null`
-    /// matched or not depending on where the null came from.
+    /// A json null from a response must be `Value::Null`, not Unit, otherwise a match depends on
+    /// where the null came from.
     #[test]
     fn a_response_null_is_the_none_the_parsers_make() {
         assert!(json_to_pvalue(serde_json::Value::Null).is_none_value());

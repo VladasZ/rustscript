@@ -1,6 +1,6 @@
 #!/usr/bin/env rust
 
-// The shape comes from reading one setting out of a CMakeCache.txt.
+// The shape comes from reading 1 setting out of a CMakeCache.txt.
 
 fn main() {
     let cache = [
@@ -16,12 +16,12 @@ fn main() {
     let missing = cache.iter().find_map(|l| l.strip_prefix("NO_SUCH_KEY="));
     println!("missing: {missing:?}");
 
-    // Stops at the first Some.
+    // stops at the first Some
     let words = ["one", "22", "three", "44"];
     let first_number = words.iter().find_map(|w| w.parse::<i64>().ok());
     println!("first number: {first_number:?}");
 
-    // Nothing converts, and an empty run.
+    // nothing converts, and an empty run
     let none_convert = ["a", "b"];
     println!(
         "none convert: {:?}",
@@ -39,7 +39,7 @@ fn main() {
         .find_map(|n| if n % 2 == 0 { Some(n * 10) } else { None });
     println!("first even times ten: {doubled_even:?}");
 
-    // A lazy chain takes the other path through the interpreter.
+    // a lazy chain takes the other path through the interpreter
     let lazy = numbers
         .iter()
         .map(|n| n + 1)

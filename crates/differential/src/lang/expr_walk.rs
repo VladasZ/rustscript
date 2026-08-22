@@ -1,5 +1,5 @@
-//! Walks over the expression tree. Every walk goes through `children`, so a
-//! new node kind is handled in one place.
+//! Walks over the expression tree. Every walk goes through `children`, so a new node kind is
+//! handled in 1 place.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -7,13 +7,12 @@ use crate::lang::expr::{Arm, BinOp, Expr, Helper, UnOp, lookup, minimal};
 use crate::lang::stmt::Stmt;
 use crate::lang::ty::FloatWidth;
 
-/// The reducer takes the first improvement, so a short list keeps each round
-/// cheap. The next round reaches the deep ones.
+/// The reducer takes the first improvement, so a short list keeps each round cheap. The next
+/// round reaches the deep ones.
 const CHILD_SHRINKS: usize = 3;
 
 impl Expr {
-    /// Same order as `children_mut`, so a shrink can rewrite the child it
-    /// inspected.
+    /// Same order as `children_mut`, so a shrink can rewrite the child it inspected.
     pub fn children(&self) -> Vec<&Expr> {
         match self {
             Self::Bin { left, right, .. } => vec![left, right],
@@ -158,7 +157,7 @@ impl Expr {
         }
     }
 
-    /// Stable pre-order.
+    /// stable pre-order
     pub fn nodes(&self) -> Vec<&Expr> {
         let mut out = vec![self];
         for child in self.children() {
@@ -203,8 +202,8 @@ impl Expr {
     pub fn has_fallible_op(&self) -> bool {
         match self {
             Self::Bin { op, .. } if op.is_fallible() => true,
-            // The const propagator can look through calls like `pow`, so any
-            // call, pipe, helper body or index counts as fallible.
+            // the const propagator can look through calls like `pow`, so any call, pipe, helper
+            // body or index counts as fallible
             Self::Unary { op: UnOp::Neg, .. }
             | Self::Call { .. }
             | Self::Pipe(_)
@@ -354,9 +353,8 @@ impl Expr {
         }
     }
 
-    /// A receiver must state its type, `(if c { 0 } else { 0 }).abs()` is an
-    /// ambiguous `{integer}`. Runs over the finished program so a rebuilt
-    /// receiver is covered too.
+    /// A receiver must state its type, `(if c { 0 } else { 0 }).abs()` is an ambiguous `{integer}`. Runs
+    /// over the finished program so a rebuilt receiver is covered too.
     pub fn fix_call_receivers(&mut self) {
         if let Self::Call { recv, .. } = self {
             let taken = std::mem::replace(
@@ -373,9 +371,9 @@ impl Expr {
         }
     }
 
-    /// `helper(&mut cl, arg)` holds the closure while the argument runs, so a
-    /// second use in the same expression is a borrow conflict. The direct
-    /// call means the same thing, so the apply form gives way.
+    /// `helper(&mut cl, arg)` holds the closure while the argument runs, so a second use in the same
+    /// expression is a borrow conflict. The direct call means the same thing, so the apply form
+    /// gives way.
     pub fn repair_apply_borrows(&mut self) {
         let mut uses: BTreeMap<String, usize> = BTreeMap::new();
         for node in self.nodes() {
@@ -407,8 +405,8 @@ impl Expr {
         }
     }
 
-    /// A bare literal or a local bound to one stays `{integer}`, so a numeric
-    /// method on it is rejected with E0689.
+    /// A bare literal or a local bound to one stays `{integer}`, so a numeric method on it is
+    /// rejected with E0689.
     pub fn states_concrete_ty(&self) -> bool {
         match self {
             Self::BareInt { .. } | Self::BareFloat { .. } => false,
@@ -421,13 +419,13 @@ impl Expr {
             } => then_expr.states_concrete_ty() && else_expr.states_concrete_ty(),
             Self::Match { arms, .. } => arms.iter().all(|arm| arm.body.states_concrete_ty()),
             Self::Block { tail, .. } => tail.states_concrete_ty(),
-            // A shift takes its type from the left operand alone.
+            // a shift takes its type from the left operand alone
             Self::Bin {
                 op: BinOp::Shl | BinOp::Shr,
                 left,
                 ..
             } => left.states_concrete_ty(),
-            // Either operand types the other operators.
+            // either operand types the other operators
             Self::Bin { left, right, .. } => {
                 left.states_concrete_ty() || right.states_concrete_ty()
             }

@@ -1,5 +1,4 @@
-//! The `Send + Sync` value model, `Arc` and `parking_lot::Mutex` back every
-//! shared value.
+//! The value model. `Send + Sync`, every shared value sits behind `Arc` and `parking_lot::Mutex`.
 
 use num_traits::AsPrimitive;
 use std::hash::{Hash, Hasher};
@@ -18,15 +17,15 @@ pub use super::rs_str::RsStr;
 pub type List = Arc<Mutex<Vec<Value>>>;
 pub type Map = Arc<Mutex<IndexMap<MapKey, Value>>>;
 
-/// A set shares the map storage with Unit values. The kind makes iteration
-/// yield elements and routes the set halves of the methods.
+/// A set is a map with Unit values. The kind makes iteration yield elements and picks the set
+/// half of the methods.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MapKind {
     Map,
     Set,
 }
 
-/// The kind picks the method surface and the debug rendering.
+/// Picks the method surface and the debug rendering.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CellKind {
     Rc,
@@ -34,12 +33,12 @@ pub enum CellKind {
     RefCell,
     Cell,
     Mutex,
-    /// `tokio::sync::Mutex`, `lock` is awaited and has no `Result` layer.
+    /// `tokio::sync::Mutex`, `lock` is awaited and there is no `Result` layer
     TokioMutex,
 }
 
 impl CellKind {
-    /// `Rc` and `Arc` have no interior mutability of their own.
+    /// `Rc` and `Arc` have no interior mutability on their own
     pub fn is_shared_pointer(self) -> bool {
         matches!(self, CellKind::Rc | CellKind::Arc)
     }
@@ -58,12 +57,11 @@ pub enum ValueRef {
         data: Arc<StructData>,
         slot: usize,
     },
-    /// Handed out by `borrow_mut` and `lock`.
+    /// from `borrow_mut` and `lock`
     CellSlot {
         slot: Arc<Mutex<Value>>,
     },
-    /// Handed out by accessors like `as_object_mut`. The mutation split never
-    /// applies, and only in place mutation goes through.
+    /// From accessors like `as_object_mut`. No mutation split here, only in place mutation goes through.
     Borrowed {
         value: Value,
     },
@@ -100,7 +98,7 @@ impl ValueRef {
         }
     }
 
-    /// `get` with the slot split from sharing first, for mutating access.
+    /// `get` for mutating access, the slot is split from sharing first.
     pub fn get_unique(&self) -> Option<Value> {
         let unique = |slot: Option<&mut Value>| {
             slot.map(|v| {
@@ -113,14 +111,14 @@ impl ValueRef {
             Self::MapEntry { map, key } => unique(map.lock().get_mut(key)),
             Self::StructField { data, slot } => unique(data.values.lock().get_mut(*slot)),
             Self::CellSlot { slot } => unique(Some(&mut *slot.lock())),
-            // Splitting the borrowed storage would disconnect the mutation.
+            // splitting the borrowed storage would disconnect the mutation
             Self::Borrowed { value } => Some(value.clone()),
         }
     }
 
-    /// One atomic read-modify-write under the slot's lock. `None` for a
-    /// dangling reference or a `Borrowed` view, the caller then runs the
-    /// unfused sequence. `f` must not run user code or lock other values.
+    /// One atomic read-modify-write under the slot lock. `None` for a dangling reference or a
+    /// `Borrowed` view, then the caller runs the unfused sequence. `f` must not run user code or
+    /// lock other values.
     pub fn update<T>(&self, f: impl FnOnce(&mut Value) -> T) -> Option<T> {
         match self {
             Self::VecElement { values, index } => values.lock().get_mut(*index).map(f),
@@ -162,7 +160,7 @@ impl ValueRef {
     }
 }
 
-/// Runtime and bytecode share one definition.
+/// Runtime and bytecode share 1 definition.
 pub use super::bytecode::StructShape;
 
 pub struct StructData {
@@ -226,12 +224,12 @@ pub enum Value {
     Unit,
     Bool(bool),
     Int(i64),
-    /// A width other than i64, storage form in `numeric`.
+    /// any width other than i64, storage form is in `numeric`
     IntW(i64, IntWidth),
-    /// i128 exactly or u128 as reinterpreted bits.
+    /// i128 as is, u128 as reinterpreted bits
     Big(i128, IntWidth),
     Float(f64),
-    /// Kept at f32 precision.
+    /// kept at f32 precision
     F32(f32),
     Char(char),
     Str(RsStr),
@@ -239,8 +237,7 @@ pub enum Value {
     Map(Map, MapKind),
     Tuple(List),
     Struct(Arc<StructData>),
-    /// The payload shares the list storage shape, so a `&mut` binding into
-    /// it is an element reference.
+    /// Payload uses the list storage shape, so a `&mut` binding into it is an element reference.
     Enum {
         def: Arc<EnumDef>,
         variant: u16,
@@ -253,19 +250,18 @@ pub enum Value {
     },
     Closure(Arc<ClosureData>),
     Ref(Arc<ValueRef>),
-    /// A real shared cell. Cloning shares on purpose and `make_unique` leaves
-    /// it alone.
+    /// A real shared cell. Cloning shares on purpose and `make_unique` leaves it alone.
     Cell(CellKind, Arc<Mutex<Value>>),
     Native(Arc<Mutex<Native>>),
 }
 
-/// The manual `Hash` pins the exact bytes per variant, so the borrowed
-/// `StrKey` can probe a map without an owned key.
+/// Manual `Hash` so the exact bytes per variant are fixed and the borrowed `StrKey` can probe a
+/// map without an owned key.
 #[derive(Clone)]
 pub enum MapKey {
     Bool(bool),
     Int(i64),
-    /// Hashes and compares like `Int`, one real map never mixes widths.
+    /// hashes and compares like `Int`, 1 real map never mixes widths
     Wide(i64, IntWidth),
     Char(char),
     Str(RsStr),
@@ -273,7 +269,7 @@ pub enum MapKey {
     Tuple(Vec<MapKey>),
     Opt(Option<Box<MapKey>>),
     Vec(Vec<MapKey>),
-    /// The shape is kept to rebuild the value.
+    /// the shape is kept to rebuild the value
     Struct(Arc<StructShape>, Vec<MapKey>),
     Enum(Arc<EnumDef>, u16, Vec<MapKey>),
 }
@@ -422,8 +418,7 @@ impl Value {
         }
     }
 
-    /// By variant name, for bridges that get the name from a script or a
-    /// crate's `Debug` output.
+    /// By variant name, for bridges that get the name from a script or from a crate's `Debug` output.
     pub fn enum_named(def: &Arc<EnumDef>, variant: &str, data: Vec<Value>) -> Option<Value> {
         Some(Value::enum_of(def, def.variant_index(variant)?, data))
     }
@@ -432,7 +427,7 @@ impl Value {
         Value::enum_of(&OPTION, NONE, Vec::new())
     }
 
-    /// `is_variant(EnumKind::Option, SOME)`.
+    /// `is_variant(EnumKind::Option, SOME)`
     pub fn is_variant(&self, kind: EnumKind, index: u16) -> bool {
         matches!(self, Value::Enum { def, variant, .. } if def.kind == kind && *variant == index)
     }
@@ -441,7 +436,7 @@ impl Value {
         matches!(self, Value::Enum { def, .. } if def.kind == kind)
     }
 
-    /// To keep a null json value as None when filling an Option field.
+    /// To keep a json null as None when filling an Option field.
     pub fn is_none_value(&self) -> bool {
         self.is_variant(EnumKind::Option, NONE)
     }
@@ -457,7 +452,7 @@ impl Value {
         }
     }
 
-    /// The value a flatten keeps.
+    /// What a flatten keeps.
     pub fn success_payload(&self) -> Option<Value> {
         match self {
             Value::Enum { def, variant, data }
@@ -509,10 +504,9 @@ impl Value {
         }
     }
 
-    /// Replace shared storage with a fresh copy. One level deep, nested
-    /// values split at their own mutable access, so an access path is a
-    /// deep copy paid lazily. Strings split inside their methods, native
-    /// handles and closures keep their identity.
+    /// Replaces shared storage with a fresh copy. Only 1 level deep, nested values split at their own
+    /// mutable access, so a deep copy is paid lazily along the access path. Strings split inside their
+    /// methods, native handles and closures keep their identity.
     pub(super) fn make_unique(&mut self) {
         match self {
             Value::Vec(list) | Value::Tuple(list) => {
@@ -562,7 +556,7 @@ impl Value {
             Value::Int(i) => Some((i128::from(*i), IntWidth::I64)),
             Value::IntW(v, w) => Some((w.decode(*v), *w)),
             Value::Big(v, IntWidth::I128) => Some((*v, IntWidth::I128)),
-            // A u128 fits the i128 pipeline only while its top bit is clear.
+            // a u128 fits the i128 pipeline only while its top bit is clear
             Value::Big(v, IntWidth::U128) if *v >= 0 => Some((*v, IntWidth::U128)),
             _ => None,
         }
@@ -583,8 +577,8 @@ impl Value {
         }
     }
 
-    /// The i64 or f64 image for the bridge surface that predates real
-    /// widths. A u64 past `i64::MAX` saturates. None when not tagged.
+    /// The i64 or f64 image for the older bridge surface that has no widths. A u64 past
+    /// `i64::MAX` saturates. None when not tagged.
     pub(super) fn bridge_image(&self) -> Option<Value> {
         match self {
             Value::IntW(v, w) => {
@@ -671,8 +665,8 @@ impl Value {
         if let Value::Ref(reference) = other {
             return reference.get().is_some_and(|value| self.eq_value(&value));
         }
-        // Cells compare by content. Snapshots, not held guards, comparing a
-        // cell with itself would relock its own mutex.
+        // Cells compare by content. Use snapshots, not held guards, comparing a cell with itself
+        // would relock its own mutex.
         if let Value::Cell(_, slot) = self {
             let inner = slot.lock().clone();
             return inner.eq_value(other);
@@ -693,13 +687,13 @@ impl Value {
             (Value::Big(..), Value::Int(_)) | (Value::Int(_), Value::Big(..)) => {
                 match (self.int_parts(), other.int_parts()) {
                     (Some((a, _)), Some((b, _))) => a == b,
-                    // A u128 past the i128 range cannot equal an i64.
+                    // a u128 past the i128 range can't equal an i64
                     _ => false,
                 }
             }
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::F32(a), Value::F32(b)) => a == b,
-            // A bare float literal next to an f32 is f32, so it rounds first.
+            // a bare float literal next to an f32 is f32, so round first
             (Value::F32(a), Value::Float(b)) | (Value::Float(b), Value::F32(a)) => {
                 *a == AsPrimitive::<f32>::as_(*b)
             }
@@ -708,8 +702,8 @@ impl Value {
             }
             (Value::Char(a), Value::Char(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
-            // Snapshots, not held guards. Comparing a value with its own clone
-            // sees the same mutex on both sides, an instant deadlock.
+            // Snapshots, not held guards. Comparing a value with its own clone sees the same
+            // mutex on both sides, instant deadlock.
             (Value::Vec(a), Value::Vec(b)) | (Value::Tuple(a), Value::Tuple(b)) => {
                 let a = a.lock().clone();
                 let b = b.lock().clone();
@@ -727,7 +721,7 @@ impl Value {
                     data: db,
                 },
             ) => {
-                // Snapshots, see above.
+                // snapshots, see above
                 let da = da.lock().clone();
                 let db = db.lock().clone();
                 EnumDef::same(ea, eb)
@@ -735,7 +729,7 @@ impl Value {
                     && da.len() == db.len()
                     && da.iter().zip(db.iter()).all(|(x, y)| x.eq_value(y))
             }
-            // By content whatever the insertion order. Snapshots, see above.
+            // by content, insertion order doesn't matter. Snapshots, see above
             (Value::Map(a, ka), Value::Map(b, kb)) => {
                 let a = a.lock().clone();
                 let b = b.lock().clone();
@@ -744,8 +738,8 @@ impl Value {
                     && a.iter()
                         .all(|(key, value)| b.get(key).is_some_and(|other| value.eq_value(other)))
             }
-            // Snapshot both field vectors first. Holding both guards and then
-            // calling `b.get` once deadlocked every `PathBuf` comparison.
+            // Snapshot both field vectors first. Holding both guards and then calling `b.get`
+            // deadlocks on every `PathBuf` comparison.
             (Value::Struct(a), Value::Struct(b)) => {
                 a.name() == b.name() && {
                     let va = a.values.lock().clone();
@@ -758,7 +752,7 @@ impl Value {
                             .all(|(k, v)| b.shape.slot(k).is_some_and(|i| v.eq_value(&vb[i])))
                 }
             }
-            // Parse errors compare by kind, every other native by identity.
+            // parse errors compare by kind, every other native by identity
             (Value::Native(a), Value::Native(b)) => {
                 Arc::ptr_eq(a, b)
                     || matches!(
@@ -788,7 +782,7 @@ impl Value {
                 let inner = slot.lock().clone();
                 inner.display()
             }
-            // A reference displays what it points at.
+            // a reference displays what it points at
             Value::Ref(reference) => match reference.get() {
                 Some(value) => value.display(),
                 None => "<dangling reference>".to_string(),
@@ -799,7 +793,7 @@ impl Value {
                 | Native::ParseErr { display, .. } => display.clone(),
                 other => format!("<{}>", other.type_name()),
             },
-            // `VarError` implements `Display`, scripts print it with `{e}`.
+            // `VarError` implements `Display`, scripts print it with `{e}`
             Value::Enum { def, variant, data } if def.kind == EnumKind::VarError => {
                 if *variant == NOT_UNICODE {
                     let payload = data.lock().first().map(Value::display).unwrap_or_default();
@@ -850,7 +844,7 @@ impl MapKey {
     }
 }
 
-/// The host's `Display` and `Debug` are the target semantics, so delegate.
+/// Delegate to the host `Display` and `Debug`, that is exactly the target behavior.
 fn format_float(f: f64) -> String {
     f.to_string()
 }

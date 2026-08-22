@@ -1,13 +1,11 @@
 //! Iterator pipelines, a source, adapters and a terminal.
 //!
-//! Determinism rule. A map or set source iterates in an order real Rust
-//! randomizes, so such a pipe passes a `Sorted` stage before anything order
-//! sensitive, float items and fallible closures included.
+//! Determinism rule. A map or set source iterates in an order real Rust randomizes, so such a pipe
+//! passes a `Sorted` stage before anything order sensitive, float items and fallible closures included.
 //!
-//! Panic reach rule. std collects a `Vec` into a `Vec` in place and touches
-//! no item when a `Skip` emptied it, so a panicking body before a `Skip`
-//! never runs there while a lazy engine runs it. A `Sorted` stage runs every
-//! body before it, so it clears the flag.
+//! Panic reach rule. std collects a `Vec` into a `Vec` in place and touches no item when a `Skip`
+//! emptied it, so a panicking body before a `Skip` never runs there while a lazy engine runs it. A
+//! `Sorted` stage runs every body before it, so it clears the flag.
 //!
 //! `is_valid` re-checks both rules on every generated and shrunk pipe.
 
@@ -49,15 +47,15 @@ impl Item {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Access {
-    /// `vec.into_iter()`, ordered scalar items.
+    /// `vec.into_iter()`, ordered scalar items
     VecInto,
-    /// `set.into_iter()`, unordered scalar items.
+    /// `set.into_iter()`, unordered scalar items
     SetInto,
-    /// `map.into_iter()`, unordered pair items.
+    /// `map.into_iter()`, unordered pair items
     MapPairs,
-    /// `map.into_keys()`, unordered key items.
+    /// `map.into_keys()`, unordered key items
     MapKeys,
-    /// `map.into_values()`, unordered value items.
+    /// `map.into_values()`, unordered value items
     MapValues,
 }
 
@@ -67,7 +65,7 @@ pub enum Source {
         expr: Expr,
         access: Access,
     },
-    /// `(start..start + count)`, ordered i64 items.
+    /// `(start..start + count)`, ordered i64 items
     Range {
         start: i64,
         count: u8,
@@ -134,7 +132,7 @@ pub enum Bind {
 }
 
 impl Bind {
-    /// `x` or `(k, v)`.
+    /// `x` or `(k, v)`
     fn pattern(&self) -> String {
         match self {
             Self::One(name) => name.clone(),
@@ -143,8 +141,7 @@ impl Bind {
     }
 }
 
-/// An untyped parameter is where the interpreter must learn the item type
-/// from the chain.
+/// An untyped parameter is where the interpreter must learn the item type from the chain.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ParamAnn {
     Typed,
@@ -153,34 +150,32 @@ pub enum ParamAnn {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Stage {
-    /// `.map(|item| body)`, item to `Scalar(body.ty())`.
+    /// `.map(|item| body)`, item to `Scalar(body.ty())`
     Map {
         bind: Bind,
         body: Expr,
         ann: ParamAnn,
     },
-    /// `.map(|k| (k.clone(), body))`, `Scalar(k)` to `Pair(k, body.ty())`.
+    /// `.map(|k| (k.clone(), body))`, `Scalar(k)` to `Pair(k, body.ty())`
     PairWith {
         bind: Bind,
         body: Expr,
     },
-    /// `.filter(|r| { let item = r.clone(); pred })`, type preserving.
+    /// `.filter(|r| { let item = r.clone(); pred })`, type preserving
     Filter {
         bind: Bind,
         pred: Expr,
         ann: ParamAnn,
     },
-    /// Order sensitive, ordered pipelines only.
+    /// order sensitive, ordered pipelines only
     Rev,
     Take(u8),
     Skip(u8),
-    /// `.step_by(n)`, order sensitive, panics on zero.
+    /// `.step_by(n)`, order sensitive, panics on zero
     StepBy(u8),
-    /// `.enumerate()` with the index widened to i64, `Scalar(t)` to
-    /// `Pair(i64, t)`. Order sensitive.
+    /// `.enumerate()` with the index widened to i64, `Scalar(t)` to `Pair(i64, t)`. Order sensitive.
     Enumerate,
-    /// Collect, sort, re-iterate. The only door from a map or set source to
-    /// an order sensitive stage.
+    /// Collect, sort, re-iterate. The only door from a map or set source to an order sensitive stage.
     Sorted,
 }
 
@@ -212,13 +207,12 @@ impl Stage {
         )
     }
 
-    /// A panicking body observes arrival order, the first item to panic
-    /// decides the message.
+    /// A panicking body observes arrival order, the first item to panic decides the message.
     fn fallible(&self) -> bool {
         match self {
             Self::Map { body, .. } | Self::PairWith { body, .. } => body.has_fallible_op(),
             Self::Filter { pred, .. } => pred.has_fallible_op(),
-            // A zero step panics before any item flows.
+            // a zero step panics before any item flows
             Self::StepBy(step) => *step == 0,
             Self::Rev | Self::Take(_) | Self::Skip(_) | Self::Enumerate | Self::Sorted => false,
         }
@@ -286,9 +280,9 @@ pub fn fallible_pending(stages: &[Stage]) -> bool {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Site {
-    /// `::<T>()` on the call itself.
+    /// `::<T>()` on the call itself
     Turbofish,
-    /// A bare call typed by the `let` annotation or the helper return type.
+    /// a bare call typed by the `let` annotation or the helper return type
     Bare,
 }
 
@@ -298,8 +292,7 @@ pub enum Term {
         target: Ty,
         site: Site,
     },
-    /// `.sum()` into the item type, so a u8 sum panics at the u8 bound. A
-    /// bare sum was once seen to wrap.
+    /// `.sum()` into the item type, so a u8 sum panics at the u8 bound and doesn't wrap
     Sum {
         out: Ty,
         site: Site,
@@ -353,11 +346,10 @@ impl Term {
 
     fn order_sensitive(&self, item: &Item) -> bool {
         match self {
-            // A map or set forgets arrival order, a vec keeps it.
+            // a map or set forgets arrival order, a vec keeps it
             Self::Collect { target, .. } => matches!(target, Ty::Vec(_)),
-            // A float sum rounds per order, a signed sum panics on an order
-            // dependent prefix, a product meets its zero in some order. An
-            // unsigned sum only grows.
+            // A float sum rounds per order, a signed sum panics on an order dependent prefix, a
+            // product meets its zero in some order. An unsigned sum only grows.
             Self::Sum { out, .. } => {
                 item.is_float() || matches!(out, Ty::Int(width) if width.is_signed())
             }
@@ -498,8 +490,7 @@ impl Pipe {
         )
     }
 
-    /// Both rules from the module docs. A pipe that fails one is a harness
-    /// bug.
+    /// Both rules from the module docs. A pipe that fails one is a harness bug.
     pub fn is_valid(&self) -> bool {
         self.is_deterministic() && self.panics_reach_output()
     }
@@ -531,7 +522,7 @@ impl Pipe {
                 return false;
             }
             if matches!(stage, Stage::Map { .. }) {
-                // Mapped items may be floats only if order is defined.
+                // mapped items may be floats only if order is defined
                 item = stage.out(&item);
                 if !ordered && item.is_float() {
                     return false;
@@ -687,8 +678,8 @@ impl Pipe {
     pub fn shrinks(&self) -> Vec<Pipe> {
         let mut out = Vec::new();
         for index in 0..self.stages.len() {
-            // Only type preserving stages can vanish. `Sorted` stays, dropping
-            // it could break determinism.
+            // only type preserving stages can vanish, `Sorted` stays, dropping it could break
+            // determinism
             if matches!(
                 self.stages[index],
                 Stage::Filter { .. }

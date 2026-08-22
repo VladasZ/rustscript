@@ -1,5 +1,4 @@
-//! `?` on an error the function already returns is identity. The interpreter
-//! once ran an unrelated `From` impl. From seed 140079.
+//! `?` on an error the function already returns is identity, no `From` impl may run. Seed 140079.
 
 #[derive(Debug)]
 enum Failure {

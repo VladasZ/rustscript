@@ -1,6 +1,6 @@
 #!/usr/bin/env rust
 
-// Every spelling of `Default::default()`.
+// every spelling of `Default::default()`
 
 #[derive(Default, Debug, Clone, PartialEq)]
 struct Inner {

@@ -71,8 +71,7 @@ use compile::{Compiler, Ctx};
 use resolver::{ModuleSyms, Res, Resolver, StructDef};
 pub use vm_support::{ErrReturn, ScriptPanic};
 
-/// Set by the real Ctrl-C handler and drained between loop iterations to run
-/// the script's own handler.
+/// Set by the real Ctrl-C handler, drained between loop iterations to run the script's own handler.
 static CTRLC_HIT: AtomicBool = AtomicBool::new(false);
 static CTRLC_INSTALLED: OnceLock<bool> = OnceLock::new();
 static CTRLC_HANDLER: parking_lot::Mutex<Option<value::Value>> = parking_lot::Mutex::new(None);
@@ -86,9 +85,9 @@ pub(crate) fn set_ctrlc_handler(closure: value::Value) -> Result<()> {
     Ok(())
 }
 
-/// Draining the flag here means each Ctrl-C runs the handler once.
+/// Drains the flag, so each Ctrl-C runs the handler once.
 pub(crate) fn pending_ctrlc_handler() -> Option<value::Value> {
-    // Relaxed load first, this runs on every loop iteration.
+    // relaxed load first, this runs on every loop iteration
     if !CTRLC_HIT.load(Ordering::Relaxed) {
         return None;
     }
@@ -98,7 +97,7 @@ pub(crate) fn pending_ctrlc_handler() -> Option<value::Value> {
     CTRLC_HANDLER.lock().clone()
 }
 
-/// Index 0 is the script path, like a real binary.
+/// Index 0 is the script path, like in a real binary.
 static SCRIPT_ARGS: OnceLock<Vec<String>> = OnceLock::new();
 
 pub fn set_script_args(args: Vec<String>) {
@@ -111,12 +110,11 @@ pub(crate) fn script_args() -> Vec<String> {
     SCRIPT_ARGS.get().cloned().unwrap_or_default()
 }
 
-/// `async_mode` marks a `#[tokio::main]` script.
+/// `async_mode` means the script has `#[tokio::main]`.
 pub fn run(modules: &[ModuleSrc], async_mode: bool) -> Result<()> {
     let interp = Interp::load(modules, async_mode)?;
-    // The coverage walk runs first, so an unchecked script cannot die on a
-    // cold branch after half its side effects. It costs well under a
-    // millisecond.
+    // Coverage walk first. Otherwise an unchecked script can die on a cold branch after doing
+    // half of its side effects. Costs well under a millisecond.
     interp.coverage_gate()?;
     interp.run()
 }
@@ -127,23 +125,22 @@ enum GlobalSlot {
 }
 
 pub struct Interp {
-    /// Indexed by id, direct calls use the id.
+    /// indexed by id, direct calls use the id
     functions: Vec<Arc<Chunk>>,
-    /// For calls resolved at runtime.
+    /// for calls resolved at runtime
     fn_index: HashMap<String, u32>,
     impls: Arc<impls::ImplTable>,
     resolver: Resolver,
-    /// Evaluated lazily so declaration order is free.
+    /// lazy, so declaration order doesn't matter
     globals: RefCell<Vec<GlobalSlot>>,
-    /// For the bridge dispatch to expand aliases.
+    /// for the bridge dispatch to expand aliases
     main_index: Option<u32>,
-    /// Whether an `Err` out of `main` prints `Display` rather than `Debug`.
+    /// an `Err` out of `main` prints `Display` instead of `Debug`
     main_err_display: bool,
 }
 
-/// Real Rust prints the `Debug` form, except `anyhow::Error` whose `Debug`
-/// prints the bare message. A `Result` with fewer than 2 type arguments is
-/// the anyhow shape unless the imports say otherwise.
+/// Real Rust prints the `Debug` form, except `anyhow::Error` whose `Debug` is the bare message.
+/// A `Result` with less than 2 type arguments is the anyhow shape unless the imports say otherwise.
 fn main_err_uses_display(output: &syn::ReturnType, uses: &HashMap<String, Vec<String>>) -> bool {
     let from_anyhow = |segs: &[String]| -> bool {
         match segs {
@@ -175,7 +172,7 @@ fn main_err_uses_display(output: &syn::ReturnType, uses: &HashMap<String, Vec<St
         }
     }
     let Some(err_ty) = types.get(1) else {
-        // A plain `Result<()>` resolves through the imports.
+        // a plain `Result<()>` resolves through the imports
         let segs: Vec<String> = p
             .path
             .segments
@@ -196,9 +193,8 @@ fn main_err_uses_display(output: &syn::ReturnType, uses: &HashMap<String, Vec<St
     from_anyhow(&segs)
 }
 
-/// The return type of every function whose name is declared once. A name
-/// defined twice with different returns is absent, the call site cannot tell
-/// which one it reaches.
+/// Return type of every function declared exactly once. A name defined twice with different
+/// return types is skipped, the call site can't tell which one it hits.
 fn register_items(
     resolver: &mut Resolver,
     modules: &[ModuleSrc],
@@ -221,8 +217,7 @@ fn register_items(
     Ok(())
 }
 
-/// So a call to a generic helper can read the type its arguments give a type
-/// parameter.
+/// So a call to a generic helper can read the type its arguments give to a type parameter.
 fn collect_fn_signatures(
     pending_fns: &[(usize, Rc<syn::ItemFn>)],
 ) -> HashMap<String, syn::Signature> {
@@ -404,12 +399,12 @@ impl Interp {
         })
     }
 
-    /// Used by `rust check`.
+    /// used by `rust check`
     pub fn coverage(&self) -> Vec<coverage::Finding> {
         coverage::report(&self.functions, self.impls.names())
     }
 
-    /// `rust check` and every interpreted run share this exact report.
+    /// `rust check` and every interpreted run share this report
     pub fn coverage_gate(&self) -> Result<()> {
         let findings = self.coverage();
         if findings.is_empty() {
@@ -447,8 +442,7 @@ impl Interp {
                 parking_lot::Mutex::new(vm::GlobalSlot::Todo(c.clone()))
             })
             .collect();
-        // Precomputed so nothing at runtime touches the syn AST, which is not
-        // `Send`.
+        // precomputed, nothing at runtime may touch the syn AST, it is not `Send`
         let enums: Vec<Arc<enum_def::EnumDef>> =
             self.resolver.enum_defs.values().cloned().collect();
         let unit_structs: Vec<Arc<str>> = self
@@ -480,9 +474,8 @@ impl Interp {
             .ok_or_else(|| anyhow!("no `main` function found"))? as usize;
         let main_chunk = pinterp.functions[idx].clone();
         let runner = pinterp.clone();
-        // A plain thread, not a blocking task, so `main` consumes no tokio
-        // task id and the first `tokio::spawn` gets the same id as in a
-        // compiled binary.
+        // A plain thread, not a blocking task. So `main` takes no tokio task id and the first
+        // `tokio::spawn` gets the same id as in a compiled binary.
         let joined = std::thread::Builder::new()
             .name("main".to_string())
             .spawn(move || runner.run_chunk(&main_chunk, &[], &[]))
@@ -500,8 +493,7 @@ impl Interp {
             && def.kind == enum_def::EnumKind::Result
             && *variant == enum_def::ERR
         {
-            // A compiled binary prints `Debug` here, anyhow prints the bare
-            // message.
+            // a compiled binary prints `Debug` here, anyhow prints the bare message
             let render: fn(&value::Value) -> String = if self.main_err_display {
                 value::Value::display
             } else {
@@ -638,7 +630,7 @@ fn register_item(
 
 type PendingMethod = (String, String, usize, Rc<syn::ImplItemFn>);
 
-/// So an impl can pull in the default bodies it does not override.
+/// So an impl can pull in the default bodies it doesn't override.
 fn collect_traits(modules: &[ModuleSrc]) -> HashMap<String, (usize, Rc<syn::ItemTrait>)> {
     let mut traits: HashMap<String, (usize, Rc<syn::ItemTrait>)> = HashMap::default();
     for (m, src) in modules.iter().enumerate() {
@@ -677,10 +669,9 @@ fn build_impl_table(
     ))
 }
 
-/// Whether any impl defines `Drop::drop`, and the names of `&mut self`
-/// methods. A call to one compiles its receiver as a place split from
-/// sharing. By name because the runtime type is unknown at compile time, an
-/// extra split is wasted work, never wrong.
+/// Whether any impl has `Drop::drop`, and the names of `&mut self` methods. A call to one compiles
+/// its receiver as a place split from sharing. By name, because the runtime type is unknown at
+/// compile time. An extra split is wasted work but never wrong.
 fn collect_mut_methods(pending_methods: &[PendingMethod]) -> (bool, HashSet<String>) {
     let has_drop = pending_methods
         .iter()
@@ -713,8 +704,8 @@ fn from_source_name(imp: &syn::ItemImpl) -> Option<String> {
     from_type_key(ty)
 }
 
-/// The generic arguments are part of the key, so `From<Option<usize>>` and
-/// `From<Option<u16>>` stay apart.
+/// Generic arguments are part of the key, `From<Option<usize>>` and `From<Option<u16>>` are
+/// different impls.
 fn from_type_key(ty: &syn::Type) -> Option<String> {
     match ty {
         syn::Type::Path(p) => {
@@ -768,9 +759,8 @@ fn collect_impl_items(
                 syn::ImplItem::Fn(f) => {
                     let method = f.sig.ident.to_string();
                     written.push(method.clone());
-                    // `Display` and `Debug` both define `fmt`, so they are
-                    // stored trait qualified. A plain `x.drop()` must never
-                    // reach `Drop::drop`.
+                    // `Display` and `Debug` both define `fmt`, so they are stored trait qualified.
+                    // A plain `x.drop()` must never hit `Drop::drop`.
                     let key = match trait_name.as_deref() {
                         Some(t @ ("Display" | "Debug")) if method == "fmt" => {
                             format!("{t}::fmt")
@@ -778,8 +768,7 @@ fn collect_impl_items(
                         Some("Drop") if method == "drop" => "Drop::drop".to_string(),
                         _ => method,
                     };
-                    // Also under `from<S>`, so several `From` impls stay
-                    // apart.
+                    // also under `from<S>`, so several `From` impls don't clash
                     if key == "from"
                         && let Some(source) = from_source_name(imp)
                     {
@@ -789,8 +778,8 @@ fn collect_impl_items(
                             *m,
                             Rc::new(f.clone()),
                         ));
-                        // `None` cannot name its payload and still reaches a
-                        // single impl through the bare outer name.
+                        // `None` can't name its payload, it still reaches a single impl through
+                        // the bare outer name
                         if let Some(base) = source.split(['<', '(']).next()
                             && base != source
                         {
@@ -851,14 +840,13 @@ fn impl_target(resolver: &Resolver, m: usize, ty: &syn::Type) -> Option<String> 
         .collect();
     match resolver.resolve(m, &segs) {
         Ok(Res::Struct(c) | Res::Enum(c)) => Some(c.to_string()),
-        // A builtin is keyed by the written type with generics, so
-        // `Vec<u8>` and `Vec<String>` stay apart. See `ImplTable::of_builtin`.
+        // Builtins are keyed by the written type with generics, `Vec<u8>` and `Vec<String>` are
+        // different keys. See `ImplTable::of_builtin`.
         _ => Some(foreign_impl_key(&p.path)),
     }
 }
 
-/// `Vec<String>` for `std::vec::Vec<String>` too, token printer whitespace
-/// dropped.
+/// `Vec<String>` for `std::vec::Vec<String>` too, without the token printer whitespace.
 fn foreign_impl_key(path: &syn::Path) -> String {
     let last = path.segments.last().expect("a type path has a segment");
     last.to_token_stream()

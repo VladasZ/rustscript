@@ -1,6 +1,5 @@
-//! Width aware integer semantics. A tagged value lives in one i64. Widths up
-//! to u32 store the true value, `U64` and `USize` store the raw bits. `I64`
-//! never appears in a tag.
+//! Width aware integer semantics. A tagged value lives in 1 i64. Widths up to u32 store the true
+//! value, `U64` and `USize` store the raw bits. `I64` never appears in a tag.
 
 use num_traits::AsPrimitive;
 use std::ops::{Add, Div, Mul, Rem, Sub};
@@ -17,13 +16,13 @@ pub enum IntWidth {
     U32,
     U64,
     USize,
-    /// Stored in a `Value::Big`.
+    /// stored in a `Value::Big`
     U128,
     I8,
     I16,
     I32,
     I64,
-    /// Stored in a `Value::Big`.
+    /// stored in a `Value::Big`
     I128,
 }
 
@@ -40,7 +39,7 @@ impl IntWidth {
             "i16" => Self::I16,
             "i32" => Self::I32,
             "i128" => Self::I128,
-            // 64 bit targets only, so isize is i64.
+            // 64 bit targets only, so isize is i64
             "i64" | "isize" => Self::I64,
             _ => return None,
         })
@@ -93,7 +92,7 @@ impl IntWidth {
         }
     }
 
-    /// `U128` never asks, its bound does not fit an i128.
+    /// `U128` never asks, its bound doesn't fit an i128.
     pub fn max(self) -> i128 {
         match self {
             Self::I128 => i128::MAX,
@@ -184,8 +183,8 @@ pub fn big_arith(op: BinKind, width: IntWidth, a: i128, b: i128) -> Result<i128>
     })
 }
 
-/// An untagged side is a bare literal adopting the other width, u64 and
-/// usize share one semantic. Anything else cannot pass the type checker.
+/// An untagged side is a bare literal adopting the other width, u64 and usize share 1 semantic.
+/// Anything else can't pass the type checker.
 pub fn unify(a: IntWidth, b: IntWidth) -> Result<IntWidth> {
     if a == b || b == IntWidth::I64 {
         return Ok(a);
@@ -215,7 +214,7 @@ pub fn int_arith(op: BinKind, width: IntWidth, a: i128, b: i128) -> Result<i128>
             if b == 0 {
                 bail!("attempt to calculate the remainder with a divisor of zero");
             }
-            // `MIN % -1` is 0 in i128 but overflows in the real width.
+            // `MIN % -1` is 0 in i128 but overflows in the real width
             if a == width.min() && b == -1 {
                 bail!("{}", overflow_message(op));
             }
@@ -258,8 +257,7 @@ pub fn u64_arith(op: BinKind, a: u64, b: u64) -> Result<u64> {
     })
 }
 
-/// The hot fast path of the VM, checked native arithmetic with no i128
-/// widening.
+/// The hot fast path of the VM, checked native arithmetic with no i128 widening.
 #[inline]
 pub fn i64_arith(op: BinKind, a: i64, b: i64) -> Result<i64> {
     Ok(match op {
@@ -305,8 +303,8 @@ where
     }
 }
 
-/// The amount never unifies with the shifted side. An amount at the bit
-/// count panics, bits shifted out are discarded.
+/// The amount never unifies with the shifted side. An amount at the bit count panics, bits
+/// shifted out are discarded.
 pub fn int_shift(op: BinKind, width: IntWidth, value: i128, amount: i128) -> Result<i128> {
     let (verb, left) = match op {
         BinKind::Shl => ("left", true),
@@ -316,8 +314,7 @@ pub fn int_shift(op: BinKind, width: IntWidth, value: i128, amount: i128) -> Res
     if amount < 0 || amount >= i128::from(width.bits()) {
         bail!("attempt to shift {verb} with overflow");
     }
-    // u128 shifts logically, an arithmetic i128 shift would smear the sign
-    // bit.
+    // u128 shifts logically, an arithmetic i128 shift would smear the sign bit
     if width == IntWidth::U128 {
         let bits = value.cast_unsigned();
         let shifted = if left { bits << amount } else { bits >> amount };
@@ -342,8 +339,7 @@ pub fn int_neg(width: IntWidth, value: i128) -> Result<i128> {
     Ok(-value)
 }
 
-/// Two's complement on i128 agrees with the real width, only `!` needs a
-/// truncation.
+/// Two's complement on i128 agrees with the real width, only `!` needs a truncation.
 pub fn int_bit(op: BinKind, a: i128, b: i128) -> Result<i128> {
     Ok(match op {
         BinKind::BitAnd => a & b,
@@ -357,8 +353,7 @@ pub fn int_not(width: IntWidth, value: i128) -> i128 {
     truncate(!value, width)
 }
 
-/// Keep the low bits, reinterpret in the target, the host's own cast per
-/// width.
+/// Keep the low bits, reinterpret in the target, the host's own cast per width.
 pub fn truncate(value: i128, target: IntWidth) -> i128 {
     match target {
         IntWidth::U8 => i128::from(AsPrimitive::<u8>::as_(value)),
@@ -369,7 +364,7 @@ pub fn truncate(value: i128, target: IntWidth) -> i128 {
         IntWidth::I16 => i128::from(AsPrimitive::<i16>::as_(value)),
         IntWidth::I32 => i128::from(AsPrimitive::<i32>::as_(value)),
         IntWidth::I64 => i128::from(AsPrimitive::<i64>::as_(value)),
-        // The 128 bit widths keep the whole i128.
+        // the 128 bit widths keep the whole i128
         IntWidth::U128 | IntWidth::I128 => value,
     }
 }

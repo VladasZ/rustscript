@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-// Every combination is sorted before printing because the order is
-// unpromised.
+// Every combination is sorted before printing because the order is not promised.
 
 use std::collections::HashSet;
 

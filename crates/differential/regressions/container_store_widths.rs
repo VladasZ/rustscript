@@ -1,5 +1,4 @@
-//! `push` once flattened a usize to i64, so `usize::MAX` printed back as
-//! `i64::MAX`. From seed 20675004001.
+//! `push` keeps the usize width, so `usize::MAX` prints back as itself. Seed 20675004001.
 
 fn opaque(v: u64) -> u64 {
     v
@@ -11,7 +10,7 @@ fn main() {
     values.push(opaque(2) as usize);
     println!("{values:?}");
 
-    // u64 values past `i64::MAX` sort by value.
+    // u64 values past `i64::MAX` sort by value
     let mut big: Vec<u64> = Vec::new();
     big.push(opaque(18446744073709551615));
     big.push(opaque(18446744073709551614));

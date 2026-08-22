@@ -1,6 +1,4 @@
-//! A turbofish collect nested inside an annotated chain once consumed the
-//! outer hint, so the outer collect built a vec of pairs. From seed
-//! 20675319747.
+//! A turbofish collect nested inside an annotated chain must not eat the outer hint. Seed 20675319747.
 
 use std::collections::HashMap;
 

@@ -1,7 +1,6 @@
 #!/usr/bin/env rust
 
-// The parse target comes from the signature only. Without it the renamed
-// fields vanish.
+// The parse target comes from the signature only. Without it the renamed fields vanish.
 
 use serde::Deserialize;
 
@@ -22,12 +21,12 @@ const TEXT: &str = r#"{"limits": [
     {"kind": "weekly", "usedPercent": 64.5}
 ]}"#;
 
-// A `map_err` on the tail keeps the return type's payload.
+// a `map_err` on the tail keeps the payload of the return type
 fn parse(text: &str) -> Result<Report, String> {
     serde_json::from_str(text).map_err(|e| format!("bad report, {e}"))
 }
 
-// An early `return`.
+// an early `return`
 fn parse_early(text: &str) -> Result<Report, String> {
     if !text.is_empty() {
         return serde_json::from_str(text).map_err(|e| e.to_string());

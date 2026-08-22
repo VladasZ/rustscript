@@ -1,10 +1,10 @@
 #!/usr/bin/env rust
 
-// A function's `-> String` names the `collect` target. A real script once
-// returned a bare `chars().take(19).collect()`, got a char list, and stamped
-// `run-['2', '0', '2', '6', ..].log` into a filename.
+// A function's `-> String` names the `collect` target. A bare `chars().take(19).collect()` in tail
+// position must be a String, not a char list. A real script stamped `run-['2', '0', '2', '6',
+// ..].log` into a filename because of this.
 
-// The tail expression.
+// the tail expression
 fn stamp(iso: &str) -> String {
     iso.replace([':', '.'], "-")
         .replace('T', "_")
@@ -13,7 +13,7 @@ fn stamp(iso: &str) -> String {
         .collect()
 }
 
-// Both branches of a tail `if`.
+// both branches of a tail `if`
 fn initials(name: &str, short: bool) -> String {
     if short {
         name.chars().take(1).collect()
@@ -22,7 +22,7 @@ fn initials(name: &str, short: bool) -> String {
     }
 }
 
-// The arms of a tail `match`.
+// the arms of a tail `match`
 fn head(s: &str, how: u8) -> String {
     match how {
         0 => s.chars().take(0).collect(),
@@ -31,7 +31,7 @@ fn head(s: &str, how: u8) -> String {
     }
 }
 
-// An early `return`.
+// an early `return`
 fn label(s: &str) -> String {
     if s.is_empty() {
         return "abc".chars().collect();
@@ -39,7 +39,7 @@ fn label(s: &str) -> String {
     s.to_string()
 }
 
-// A `let else` return is not part of the let's value.
+// a `let else` return is not part of the let's value
 fn first_word(s: &str) -> String {
     let Some(idx) = s.find(' ') else {
         return s.chars().collect();
@@ -47,7 +47,7 @@ fn first_word(s: &str) -> String {
     s[0..idx].to_string()
 }
 
-// The return type must not reach a closure's own collect.
+// the return type must not reach a closure's own collect
 fn lengths(words: &[String]) -> String {
     let counts: Vec<usize> = words
         .iter()
@@ -63,7 +63,7 @@ fn lengths(words: &[String]) -> String {
     out
 }
 
-// A non String return type still collects into a Vec.
+// a non String return type still collects into a Vec
 fn chars_of(s: &str) -> Vec<char> {
     s.chars().collect()
 }

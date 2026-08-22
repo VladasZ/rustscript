@@ -1,7 +1,7 @@
 #!/usr/bin/env rust
 
-// Recursive enums in function plans, see `interpreter/scalar_fn.rs`.
-// `left_depth` uses a wildcard pattern, so it pins the generic path.
+// Recursive enums in function plans, see `interpreter/scalar_fn.rs`. `left_depth` uses a wildcard
+// pattern, so it covers the generic path.
 
 enum Tree {
     Leaf,
@@ -31,7 +31,7 @@ fn lopsided(depth: i64) -> Tree {
     }
 }
 
-// Plan built values cross the boundary both ways.
+// plan built values cross the boundary both ways
 fn mirror(t: Tree) -> Tree {
     match t {
         Tree::Leaf => Tree::Leaf,
@@ -39,7 +39,7 @@ fn mirror(t: Tree) -> Tree {
     }
 }
 
-// A wildcard is outside the plan subset.
+// a wildcard is outside the plan subset
 fn left_depth(t: &Tree) -> i64 {
     match t {
         Tree::Leaf => 0,
@@ -47,7 +47,7 @@ fn left_depth(t: &Tree) -> i64 {
     }
 }
 
-// Payloads mixing scalars and subtrees.
+// payloads mixing scalars and subtrees
 enum Expr {
     Num(i64),
     Add(Box<Expr>, Box<Expr>),
@@ -99,7 +99,7 @@ fn sum_list(l: &IntList) -> i64 {
 fn main() {
     let t = make(4);
     println!("count {}", count(&t));
-    // The returned value outlives its first use.
+    // the returned value outlives its first use
     println!("count again {}", count(&t));
 
     let lop = lopsided(5);

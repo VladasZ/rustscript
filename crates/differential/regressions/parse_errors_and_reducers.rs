@@ -1,5 +1,4 @@
-// Parse errors have the std `Debug` and `Display` forms, and a bare `sum`
-// runs in the element width.
+// Parse errors have the std `Debug` and `Display` forms, and a bare `sum` runs in the element width.
 fn main() {
     let e = "x".parse::<i32>().unwrap_err();
     let f = "".parse::<f64>().unwrap_err();

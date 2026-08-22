@@ -107,8 +107,8 @@ pub(super) fn vec_method(v: &List, method: &MethodName, args: &mut [Value]) -> R
     })
 }
 
-/// `get_mut` answers a real element reference so writes land. A non
-/// integer argument is None like serde.
+/// `get_mut` gives a real element reference so writes land. A non integer argument is None like
+/// in serde.
 fn vec_get(v: &List, method: &MethodName, args: &[Value]) -> Value {
     let index = args
         .first()
@@ -178,8 +178,8 @@ fn vec_product(v: &List) -> Result<Value> {
     })
 }
 
-/// Nested vecs flatten, strings join, told apart by the first element. An
-/// empty receiver goes by the written element type, or the string form.
+/// Nested vecs flatten, strings join, told apart by the first element. An empty receiver goes by
+/// the written element type, or the string form.
 fn vec_concat(v: &List, element: Option<&ScalarTy>) -> Value {
     let items = v.lock();
     if items.is_empty() && matches!(element, Some(ScalarTy::List(_))) {
@@ -216,8 +216,8 @@ fn vec_method_by_name(v: &List, method: &MethodName, args: &mut [Value]) -> Resu
         BuiltinId::ToVec | BuiltinId::Collect | BuiltinId::Cloned | BuiltinId::Copied => {
             Value::vec(v.lock().clone())
         }
-        // `by_ref` is a draining view over the same vector, so whatever it
-        // hands on is gone from this one too.
+        // `by_ref` is a draining view over the same vector, so whatever it hands on is gone from
+        // this one too
         BuiltinId::ByRef => iterator::draining_iter(v.clone()),
         BuiltinId::Peekable => iterator::peekable_draining(v.clone()),
         BuiltinId::Nth => match v.lock().get(usize::try_from(int_arg(args, 0)?)?) {
@@ -264,19 +264,18 @@ fn vec_method_by_name(v: &List, method: &MethodName, args: &mut [Value]) -> Resu
             v.lock().truncate(n);
             Value::Unit
         }
-        // A lazy argument is drained in `eval_method` first. Anything else is
-        // an error, a silent no-op hides the bug.
+        // A lazy argument is drained in `eval_method` first. Anything else is an error, a silent
+        // no-op would hide the bug.
         BuiltinId::Extend | BuiltinId::Append | BuiltinId::ExtendFromSlice => {
             let Some(Value::Vec(other)) = args.first() else {
                 bail!("`{}` needs something iterable", method.text);
             };
-            // Cloned first, so extending a vec with itself does not deadlock.
+            // cloned first, so extending a vec with itself doesn't deadlock
             let appended: Vec<Value> = other.lock().clone();
             v.lock().extend(appended);
             Value::Unit
         }
-        // One level, `Ok` and `Some` yield their inner value, `Err` and `None`
-        // drop out.
+        // 1 level, `Ok` and `Some` yield their inner value, `Err` and `None` drop out
         BuiltinId::Flatten => {
             let items = v.lock().clone();
             let mut out: Vec<Value> = Vec::new();
@@ -295,8 +294,8 @@ fn vec_method_by_name(v: &List, method: &MethodName, args: &mut [Value]) -> Resu
             }
             Value::vec(out)
         }
-        // `next` takes the front item. Handing it back without removing it
-        // once made a following `collect` see it again.
+        // `next` takes the front item, handing it back without removing it makes a following
+        // `collect` see it again
         BuiltinId::Next => {
             let mut items = v.lock();
             if items.is_empty() {
@@ -306,23 +305,22 @@ fn vec_method_by_name(v: &List, method: &MethodName, args: &mut [Value]) -> Resu
             }
         }
         BuiltinId::Max | BuiltinId::Min => return vec_min_max(v, method, args),
-        // A parsed json array is a plain Vec.
+        // a parsed json array is a plain Vec
         BuiltinId::AsArray => Value::some(Value::vec(v.lock().clone())),
-        // The mut accessor hands back the same list, so a push reaches the
-        // original.
+        // the mut accessor hands back the same list, so a push reaches the original
         BuiltinId::AsArrayMut => Value::some(Value::Ref(Arc::new(
             super::value::ValueRef::borrowed(Value::Vec(v.clone())),
         ))),
         BuiltinId::AsObject | BuiltinId::AsObjectMut => Value::none(),
-        // Any receiver names live in one place.
+        // any receiver names live in 1 place
         _ => {
             return super::methods::generic_method(&Value::Vec(v.clone()), method, args);
         }
     })
 }
 
-/// `v[a..b].copy_from_slice(src)` with the bounds as leading args, so the
-/// write reaches the base vec. An open end arrives as the max sentinel.
+/// `v[a..b].copy_from_slice(src)` with the bounds as leading args, so the write reaches the base
+/// vec. An open end arrives as the max sentinel.
 fn vec_copy_from_slice(v: &List, args: &[Value]) -> Result<Value> {
     let start = usize::try_from(int_arg(args, 0)?)?;
     let end_raw = int_arg(args, 1)?;
@@ -355,8 +353,7 @@ fn vec_copy_from_slice(v: &List, args: &[Value]) -> Result<Value> {
     Ok(Value::Unit)
 }
 
-/// With an argument this is `Ord::max` on 2 whole vecs, without one the
-/// iterator reduction.
+/// With an argument this is `Ord::max` on 2 whole vecs, without one the iterator reduction.
 fn vec_min_max(v: &List, method: &MethodName, args: &[Value]) -> Result<Value> {
     if let Some(other) = args.first() {
         let recv = Value::Vec(v.clone());
@@ -408,8 +405,7 @@ pub(super) fn map_method(
             let k = take(&mut args[0])
                 .into_key()
                 .ok_or_else(|| anyhow!("invalid map key"))?;
-            // A set's insert answers whether it was new, a map's the old
-            // value.
+            // a set insert returns whether it was new, a map insert the old value
             if kind == MapKind::Set {
                 let old = m.lock().insert(k, Value::Unit);
                 return Ok(Value::Bool(old.is_none()));
@@ -421,7 +417,7 @@ pub(super) fn map_method(
                 None => Value::none(),
             }
         }
-        // A set's get answers the element, not the Unit that backs it.
+        // a set `get` returns the element, not the Unit that backs it
         BuiltinId::Get if kind == MapKind::Set => {
             let arg = args.first().ok_or_else(|| anyhow!("invalid map key"))?;
             let k = arg.as_key().ok_or_else(|| anyhow!("invalid map key"))?;
@@ -430,7 +426,7 @@ pub(super) fn map_method(
                 None => Value::none(),
             }
         }
-        // `get_mut` is `&mut V`, so writes must land in the entry.
+        // `get_mut` is `&mut V`, so writes must land in the entry
         BuiltinId::GetMut => {
             let arg = args.first().ok_or_else(|| anyhow!("invalid map key"))?;
             let k = arg.as_key().ok_or_else(|| anyhow!("invalid map key"))?;
@@ -492,8 +488,7 @@ pub(super) fn map_method(
             set_items(m)
         }
         BuiltinId::Iter | BuiltinId::IntoIter | BuiltinId::Drain => map_pairs(m),
-        // A parsed json object is an Arc shared Map, so the mut accessor hands
-        // back the same map.
+        // a parsed json object is an Arc shared Map, so the mut accessor hands back the same map
         BuiltinId::AsObject => Value::some(Value::Map(m.clone(), kind)),
         BuiltinId::AsObjectMut => Value::some(Value::Ref(Arc::new(
             super::value::ValueRef::borrowed(Value::Map(m.clone(), kind)),
@@ -505,7 +500,7 @@ pub(super) fn map_method(
 
 fn vec_slice_view(v: &List, id: BuiltinId, args: &[Value]) -> Result<Value> {
     Ok(match id {
-        // The value model has no separate slice type.
+        // the value model has no separate slice type
         BuiltinId::AsSlice => Value::Vec(v.clone()),
         BuiltinId::Windows => {
             let size = usize::try_from(int_arg(args, 0)?)?;
@@ -531,21 +526,18 @@ fn vec_slice_view(v: &List, id: BuiltinId, args: &[Value]) -> Result<Value> {
             )))
         }
         BuiltinId::Repeat => {
-            // A count past `usize` stands for a huge count, not a conversion
-            // failure.
+            // a count past `usize` is a huge count, not a conversion failure
             let n = usize::try_from(int_arg(args, 0)?).unwrap_or(usize::MAX);
             let items = v.lock();
-            // A script panic, not an interpreter death with another exit code.
-            // The line is `isize::MAX` bytes, so elements are weighed like
-            // the allocator does.
+            // A script panic, not an interpreter death with another exit code. The line is
+            // `isize::MAX` bytes, so elements are weighed like the allocator does.
             let total = items.len().saturating_mul(n);
             let bytes = total.saturating_mul(size_of::<Value>());
             if bytes > isize::MAX.cast_unsigned() {
                 bail!("capacity overflow");
             }
             let mut out = Vec::with_capacity(total);
-            // Repeating nothing is nothing, the loop would run for the whole
-            // count.
+            // repeating nothing is nothing, the loop would run for the whole count
             if !items.is_empty() {
                 for _ in 0..n {
                     out.extend(items.iter().cloned());
@@ -570,13 +562,13 @@ fn vec_slice_view(v: &List, id: BuiltinId, args: &[Value]) -> Result<Value> {
     })
 }
 
-/// The combinations iterate this set's elements then the other's, an order
-/// real Rust leaves unpromised.
+/// The combinations iterate this set's elements then the other's. Real Rust doesn't promise any
+/// order here.
 fn set_relation(m: &Arc<Mutex<MapStore>>, id: BuiltinId, args: &[Value]) -> Result<Value> {
     let Some(Value::Map(other, MapKind::Set)) = args.first() else {
         bail!("set operation needs a set argument");
     };
-    // Snapshots, a set compared with itself would relock.
+    // snapshots, a set compared with itself would relock
     let mine: Vec<MapKey> = m.lock().keys().cloned().collect();
     let theirs: MapStore = other.lock().clone();
     let has = |k: &MapKey| theirs.contains_key(k);
@@ -647,7 +639,7 @@ pub(super) fn collect_set(items: Vec<Value>) -> Result<Value> {
 
 pub(super) fn int_arg(args: &[Value], i: usize) -> Result<i64> {
     match args.get(i).and_then(Value::int_parts) {
-        // A count past i64 saturates like the old i64 image.
+        // a count past i64 saturates like the old i64 image
         Some((n, _)) => Ok(i64::try_from(n).unwrap_or(i64::MAX)),
         None => bail!("expected an integer argument"),
     }
@@ -657,7 +649,7 @@ pub(super) fn int_arg(args: &[Value], i: usize) -> Result<i64> {
 pub(super) fn sort_key(v: &Value) -> SortKey {
     match v {
         Value::Int(i) => SortKey::Int(i128::from(*i)),
-        // The full i128 value, so 2 u64 values past `i64::MAX` still order.
+        // the full i128 value, so 2 u64 values past `i64::MAX` still order
         Value::IntW(..) => match v.int_parts() {
             Some((i, _)) => SortKey::Int(i),
             None => SortKey::Str(v.display()),
@@ -670,8 +662,8 @@ pub(super) fn sort_key(v: &Value) -> SortKey {
         Value::Tuple(items) | Value::Vec(items) => {
             SortKey::List(items.lock().iter().map(sort_key).collect())
         }
-        // Derived `Ord` orders by variant first, then payload. A struct by
-        // its fields in declaration order.
+        // derived `Ord` orders by variant first, then payload, a struct by its fields in
+        // declaration order
         Value::Enum { variant, data, .. } => {
             let mut keys = vec![SortKey::Int(i128::from(*variant))];
             keys.extend(data.lock().iter().map(sort_key));

@@ -1,6 +1,6 @@
 #!/usr/bin/env rust
 
-// All 3 ways must agree on the digest.
+// all 3 ways must agree on the digest
 
 use hex::encode;
 use sha2::{Digest, Sha256};

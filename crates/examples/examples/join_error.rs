@@ -1,6 +1,6 @@
 #!/usr/bin/env rust
 
-// A panicked task's `handle.await` answers a real `JoinError`.
+// A panicked task's `handle.await` gives a real `JoinError`.
 
 fn doomed() {
     panic!("boom");

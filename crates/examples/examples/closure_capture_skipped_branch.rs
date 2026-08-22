@@ -1,7 +1,7 @@
 #!/usr/bin/env rust
 
-// A branch that never runs creates no closure and no capture cell, so later
-// reads of the local must still work.
+// A branch that never runs creates no closure and no capture cell, later reads of the local must
+// still work.
 
 fn main() {
     let mut total = 3i64;
@@ -21,7 +21,7 @@ fn main() {
     }
     println!("taken {count}");
 
-    // The same local read from a skipped closure and the branch that runs.
+    // the same local read from a skipped closure and the branch that runs
     let seed = 9i64;
     let shifts: Vec<u32> = Vec::new();
     let rotated: Vec<i64> = if shifts.is_empty() {
@@ -34,7 +34,7 @@ fn main() {
     };
     println!("rotated {rotated:?} seed {seed}");
 
-    // A skipped closure in a loop.
+    // a skipped closure in a loop
     let mut sum = 0i64;
     for step in 1..4i64 {
         if step > 10 {

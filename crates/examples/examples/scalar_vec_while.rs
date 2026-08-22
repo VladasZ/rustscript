@@ -1,6 +1,6 @@
-//! While loops the scalar plan runs with vec indexing, one edge per block.
+//! While loops the scalar plan runs with vec indexing, 1 edge per block.
 
-/// 2 vecs in one loop.
+/// 2 vecs in 1 loop
 fn sum_and_double(len: usize) -> (i64, Vec<i64>) {
     let mut source = vec![0i64; len];
     let mut fill: usize = 0;
@@ -21,7 +21,7 @@ fn sum_and_double(len: usize) -> (i64, Vec<i64>) {
     (sum, doubled)
 }
 
-/// The sieve shape.
+/// the sieve shape
 fn count_primes(limit: usize) -> u64 {
     let mut is_prime = vec![true; limit + 1];
     is_prime[0] = false;
@@ -67,8 +67,8 @@ fn split_from_clone(len: usize) -> (Vec<i64>, Vec<i64>) {
     (cells, before)
 }
 
-/// A failover after a write already landed. The journal must undo it, or the
-/// generic re-run doubles the increment.
+/// A failover after a write already landed. The journal must undo it, or the generic re-run
+/// doubles the increment.
 fn journaled_failover(rounds: i64, slots: usize, lo: f64, hi: f64) -> (i64, i64) {
     let mut acc = vec![0i64; slots];
     acc[0] = 100;
@@ -85,8 +85,7 @@ fn journaled_failover(rounds: i64, slots: usize, lo: f64, hi: f64) -> (i64, i64)
     (acc[0], fired)
 }
 
-/// String elements fail over on the first read and leave everything
-/// untouched.
+/// String elements fail over on the first read and leave everything untouched.
 fn count_matches(text: &str) -> i64 {
     let mut words: Vec<String> = Vec::new();
     for word in text.split(' ') {
@@ -104,7 +103,7 @@ fn count_matches(text: &str) -> i64 {
     matches
 }
 
-/// A break right after a write. Only a failing iteration's writes are undone.
+/// A break right after a write. Only the writes of a failing iteration are undone.
 fn toggle_until(len: usize, stop: usize) -> Vec<bool> {
     let mut flags = vec![false; len];
     let mut idx: usize = 0;
@@ -121,7 +120,7 @@ fn toggle_until(len: usize, stop: usize) -> Vec<bool> {
     flags
 }
 
-/// u64 elements keep their width.
+/// u64 elements keep their width
 fn sum_widths(len: usize) -> (u64, Vec<u64>) {
     let mut totals = vec![0u64; len];
     let mut idx: usize = 0;

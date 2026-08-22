@@ -18,7 +18,7 @@ pub enum Pat {
         width: IntWidth,
         value: i128,
     },
-    /// `lo..=hi` or `lo..hi`.
+    /// `lo..=hi` or `lo..hi`
     IntRange {
         width: IntWidth,
         lo: i128,
@@ -37,17 +37,16 @@ pub enum Pat {
         variant: usize,
         payload: Vec<Pat>,
     },
-    /// `Name { field: pat, .. }`, only the listed fields.
+    /// `Name { field: pat, .. }`, only the listed fields
     Struct {
         shape: Box<UserShape>,
         fields: Vec<(usize, Pat)>,
     },
-    /// Element binds are references, the arm prologue clones them.
+    /// element binds are references, the arm prologue clones them
     Slice {
         elem: Ty,
         prefix: Vec<Pat>,
-        /// `None` for no rest, `Some(None)` for a bare `..`, `Some(Some(n))`
-        /// for `n @ ..`.
+        /// `None` for no rest, `Some(None)` for a bare `..`, `Some(Some(n))` for `n @ ..`
         rest: Option<Option<String>>,
         suffix: Vec<Pat>,
     },

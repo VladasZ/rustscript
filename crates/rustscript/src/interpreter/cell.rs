@@ -1,5 +1,5 @@
-//! `Rc`, `Arc`, `RefCell`, `Cell` and `Mutex` as real shared cells. Cloning
-//! shares the slot, everything else in the value model copies on mutation.
+//! `Rc`, `Arc`, `RefCell`, `Cell` and `Mutex` as real shared cells. Cloning shares the slot,
+//! everything else in the value model copies on mutation.
 
 use std::sync::Arc;
 
@@ -21,7 +21,7 @@ pub(super) fn cell_method(
     name: BuiltinId,
     args: &mut [Value],
 ) -> Result<Option<Value>> {
-    // An interior method on `Rc<RefCell<..>>` auto derefs to the inner cell.
+    // an interior method on `Rc<RefCell<..>>` auto derefs to the inner cell
     if kind.is_shared_pointer() && interior_method(name) {
         let inner = slot.lock().clone();
         let Value::Cell(inner_kind, inner_slot) = inner else {
@@ -40,8 +40,8 @@ pub(super) fn cell_method(
             Value::Ref(Arc::new(ValueRef::cell_slot(slot.clone())))
         }
         BuiltinId::Lock | BuiltinId::TryLock | BuiltinId::BlockingLock => {
-            // The tokio mutex hands its guard out directly, only `try_lock`
-            // wraps a `Result`. The std mutex wraps either way.
+            // The tokio mutex hands its guard out directly, only `try_lock` wraps a `Result`. The
+            // std mutex wraps either way.
             if kind == CellKind::TokioMutex {
                 let guard = Value::Ref(Arc::new(ValueRef::cell_slot(slot.clone())));
                 if name == BuiltinId::TryLock {

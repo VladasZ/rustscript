@@ -1,6 +1,6 @@
 #!/usr/bin/env rust
 
-// A missing variable answers `VarError::NotPresent`.
+// A missing variable gives `VarError::NotPresent`.
 
 use std::env;
 use std::env::VarError;

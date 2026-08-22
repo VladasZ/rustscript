@@ -1,5 +1,4 @@
-//! `or_insert` once answered a detached clone and `+=` died with
-//! "assignment through a non-reference value".
+//! `or_insert` gives a reference into the map, so `+=` through it works and overflows like real Rust.
 
 use std::collections::HashMap;
 

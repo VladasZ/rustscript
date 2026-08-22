@@ -1,5 +1,5 @@
-//! The ratatui bridge, value side. Every type is a plain data struct with
-//! the real fields, nothing renders here, see `ratatui_render`.
+//! The ratatui bridge, value side. Every type is a plain data struct with the real fields,
+//! nothing renders here, see `ratatui_render`.
 
 use num_traits::AsPrimitive;
 use ratatui::layout::Constraint;
@@ -16,8 +16,7 @@ use super::bytecode::PathId;
 use super::enum_def::{BORDER_TYPE, COLOR, CONSTRAINT, EnumKind};
 use super::value::Value;
 
-/// `Modifier::BOLD` and friends. The colour and border constants are enum
-/// variants.
+/// `Modifier::BOLD` and friends. The colour and border constants are enum variants.
 pub(super) fn ratatui_const(id: PathId) -> Option<Value> {
     modifier_const(id).map(modifier_value)
 }
@@ -351,8 +350,7 @@ pub(super) fn value_padding(v: &Value) -> Padding {
     Padding::new(field("left"), field("right"), field("top"), field("bottom"))
 }
 
-/// So a script may pass a `u16` field or a plain literal to the same
-/// helper.
+/// So a script may pass a `u16` field or a plain literal to the same helper.
 pub(super) fn int_of(v: &Value) -> i64 {
     match v {
         Value::Int(i) | Value::IntW(i, _) => *i,

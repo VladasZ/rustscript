@@ -1,8 +1,8 @@
-//! Float loops the scalar plans run unboxed. The float to int cast is in the
-//! semantics test `scalar_float_casts`, pedantic clippy bans it here.
+//! Float loops the scalar plans run unboxed. The float to int cast is in the semantics test
+//! `scalar_float_casts`, pedantic clippy bans it here.
 
 fn main() {
-    // A mandelbrot style escape region.
+    // a mandelbrot style escape region
     let mut in_set: u32 = 0;
     let mut py: i32 = 0;
     while py < 40 {
@@ -28,7 +28,7 @@ fn main() {
     }
     println!("in set {in_set}");
 
-    // A `for` range accumulating a float.
+    // a `for` range accumulating a float
     let mut sum = 0.0;
     for step in 0..100_000i32 {
         sum += f64::from(step) * 0.5;
@@ -36,7 +36,7 @@ fn main() {
     }
     println!("sum {sum}");
 
-    // NaN comparisons are false on both sides.
+    // NaN comparisons are false on both sides
     let nan = f64::NAN;
     let mut below: i64 = 0;
     let mut above: i64 = 0;
@@ -56,7 +56,7 @@ fn main() {
     }
     println!("below {below} above {above} ordered {ordered}");
 
-    // Division by zero is infinity, and it survives writeback.
+    // division by zero is infinity, and it survives writeback
     let mut harmonic = 0.0;
     let mut denom = 4.0;
     let mut steps: i64 = 0;
@@ -68,7 +68,7 @@ fn main() {
     }
     println!("harmonic {harmonic}");
 
-    // Float vec elements in while and for plans.
+    // float vec elements in while and for plans
     let mut prices = vec![1.0, 2.5, 4.0, 8.5];
     let count = prices.len();
     let mut slot = 0;

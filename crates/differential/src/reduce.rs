@@ -29,8 +29,8 @@ pub fn reduce_with_progress(
     reduce_by(|source| runner.run_source(source), original, target, report)
 }
 
-/// A candidate is taken only when strictly shorter. A same size rewrite can
-/// lead back to the original, and accepting it cycles forever.
+/// A candidate is taken only when strictly shorter. A same size rewrite can lead back to the
+/// original, and accepting it cycles forever.
 pub fn reduce_by(
     mut run: impl FnMut(&str) -> Result<RunResult>,
     original: &Program,
