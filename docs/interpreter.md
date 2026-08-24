@@ -90,6 +90,12 @@ closure parameter type or the return type of the function. `into()` picks the
 `From` impl by the source type. A value that already is the target type
 needs no conversion, so `?` on the same error type is identity.
 
+An untyped parse such as `serde_json::from_str` takes its target from the
+annotation above it. The annotation reaches through `?`, `unwrap`, `expect`
+and an error only `map_err`, and into the scrutinee of a `match` whose arm
+hands the `Ok` or `Some` payload straight out. An arm that returns something
+of its own instead keeps its own type, so `Ok(_) => 7` is untouched.
+
 Bare literals are typed by context like `rustc` does. A `let` annotation
 reaches through `if`, `match`, negation, `vec!`, tuples and `Some`. A literal
 with no other use is `i32`, so `{:x}` of `-1` shows 8 digits. A float `sum`

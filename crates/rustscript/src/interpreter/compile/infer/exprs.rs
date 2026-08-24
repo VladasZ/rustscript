@@ -10,6 +10,59 @@ use crate::interpreter::bytecode::BinKind;
 use crate::interpreter::numeric::IntWidth;
 use crate::interpreter::resolver::Res;
 
+/// The name a one binding tuple struct pattern binds, `Ok(config)` gives `config`.
+fn single_binding(pat: &Pat, wrapper: &str) -> Option<String> {
+    let Pat::TupleStruct(ts) = pat else {
+        return None;
+    };
+    if ts.path.segments.last()?.ident != wrapper || ts.elems.len() != 1 {
+        return None;
+    }
+    match ts.elems.first()? {
+        Pat::Ident(id) => Some(id.ident.to_string()),
+        _ => None,
+    }
+}
+
+/// True when the body is exactly `name`, looking through parens and a block tail.
+fn returns_binding(body: &Expr, name: &str) -> bool {
+    match body {
+        Expr::Path(p) => p.qself.is_none() && p.path.is_ident(name),
+        Expr::Paren(p) => returns_binding(&p.expr, name),
+        Expr::Group(g) => returns_binding(&g.expr, name),
+        Expr::Block(b) => match b.block.stmts.last() {
+            Some(syn::Stmt::Expr(tail, None)) => returns_binding(tail, name),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// What the scrutinee of a `match` should be, given what the whole `match` must produce.
+///
+/// A `match parse() { Ok(v) => v, Err(e) => .. }` hands its payload straight out, so the
+/// expectation on the arm is the payload of the scrutinee, the same way `?` carries an annotation
+/// into the parse under it. Without this the scrutinee is inferred blind and a `serde_json::from_str`
+/// there has no target type to parse into, which is silent, the fields come back empty.
+fn match_scrutinee_expectation(m: &syn::ExprMatch, expected: &Ty) -> Ty {
+    if matches!(expected, Ty::Unknown) {
+        return Ty::Unknown;
+    }
+    for arm in &m.arms {
+        if let Some(name) = single_binding(&arm.pat, "Ok")
+            && returns_binding(&arm.body, &name)
+        {
+            return Ty::result(expected.clone(), Ty::Unknown);
+        }
+        if let Some(name) = single_binding(&arm.pat, "Some")
+            && returns_binding(&arm.body, &name)
+        {
+            return Ty::option(expected.clone());
+        }
+    }
+    Ty::Unknown
+}
+
 impl Infer<'_, '_> {
     /// The type of `e`, recorded. `expected` flows down into literals and constructors.
     pub(super) fn expr(&mut self, e: &Expr, expected: &Ty) -> Ty {
@@ -163,7 +216,8 @@ impl Infer<'_, '_> {
         match e {
             Expr::If(i) => self.if_expr(i, expected),
             Expr::Match(m) => {
-                let scrutinee = self.expr(&m.expr, &Ty::Unknown);
+                let want = match_scrutinee_expectation(m, expected);
+                let scrutinee = self.expr(&m.expr, &want);
                 let mut out = Ty::Unknown;
                 for arm in &m.arms {
                     self.push();
