@@ -91,15 +91,17 @@ impl Compiler<'_> {
         let ast = def.ast.clone();
         let mut names = Vec::new();
         let mut renames = Vec::new();
+        let mut skip_none = Vec::new();
         let mut fields = Vec::new();
         for field in &ast.fields {
             let name = field.ident.as_ref()?.to_string();
             names.push(Arc::<str>::from(name));
             renames
                 .push(crate::interpreter::serde_attrs::serde_rename(field).map(Arc::<str>::from));
+            skip_none.push(crate::interpreter::serde_attrs::serde_skip_none(field));
             fields.push(self.default_ir_at(&field.ty, depth + 1)?);
         }
-        let shape = self.shape_for(canon, names, renames);
+        let shape = self.shape_for(canon, names, renames, skip_none);
         Some(DefaultIr::Struct { shape, fields })
     }
 
@@ -128,16 +130,18 @@ impl Compiler<'_> {
         name: &Arc<str>,
         fields: Vec<Arc<str>>,
         renames: Vec<Option<Arc<str>>>,
+        skip_none: Vec<bool>,
     ) -> Arc<StructShape> {
-        if let Some(known) = self
-            .shapes
-            .iter()
-            .find(|s| s.name == *name && s.fields == fields && s.renames == renames)
-        {
+        if let Some(known) = self.shapes.iter().find(|s| {
+            s.name == *name
+                && s.fields == fields
+                && s.renames == renames
+                && s.skip_none == skip_none
+        }) {
             return known.clone();
         }
         let type_id = self.ctx.resolver.type_id_of(name);
-        let built = StructShape::typed(name.clone(), type_id, fields, renames);
+        let built = StructShape::typed(name.clone(), type_id, fields, renames, skip_none);
         self.shapes.push(built.clone());
         built
     }

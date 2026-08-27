@@ -7,7 +7,7 @@ use syn::Expr;
 
 use crate::interpreter::bytecode::StructShape;
 use crate::interpreter::bytecode::{Op, Reg, StructLit};
-use crate::interpreter::serde_attrs::serde_rename;
+use crate::interpreter::serde_attrs::{serde_rename, serde_rename_all, serde_skip_none};
 
 use super::{Compiler, idx16};
 
@@ -45,7 +45,7 @@ impl Compiler<'_> {
         // With a `..rest` the shape lists every declared field, without one only the written
         // ones, the literal must have written all.
         let has_rest = s.rest.is_some();
-        let (order, renames) = literal_field_order(def.as_deref(), &written, has_rest);
+        let (order, renames, skip_none) = literal_field_order(def.as_deref(), &written, has_rest);
         // reserve the window first so field temporaries don't break the packing
         let slots = order.len() + usize::from(has_rest);
         let base = self.cur().reg_top;
@@ -70,15 +70,17 @@ impl Compiler<'_> {
             .collect();
         let info = {
             let fields: Vec<Arc<str>> = order.into_iter().map(Into::into).collect();
-            let known = self
-                .shapes
-                .iter()
-                .find(|s| *s.name == name && s.fields == fields && s.renames == renames);
+            let known = self.shapes.iter().find(|s| {
+                *s.name == name
+                    && s.fields == fields
+                    && s.renames == renames
+                    && s.skip_none == skip_none
+            });
             let shape = if let Some(shared) = known {
                 shared.clone()
             } else {
                 let type_id = self.ctx.resolver.type_id_of(&name);
-                let built = StructShape::typed(name, type_id, fields, renames);
+                let built = StructShape::typed(name, type_id, fields, renames, skip_none);
                 self.shapes.push(built.clone());
                 built
             };
@@ -102,7 +104,7 @@ pub(super) fn literal_field_order(
     def: Option<&syn::ItemStruct>,
     written: &[(String, &Expr)],
     has_rest: bool,
-) -> (Vec<String>, Vec<Option<Arc<str>>>) {
+) -> (Vec<String>, Vec<Option<Arc<str>>>, Vec<bool>) {
     match def {
         Some(def) => {
             let mut ordered: Vec<String> = def
@@ -117,6 +119,7 @@ pub(super) fn literal_field_order(
                 }
             }
             // so a serialized literal uses the same json keys as deserialize
+            let rule = serde_rename_all(&def.attrs);
             let renames = ordered
                 .iter()
                 .map(|k| {
@@ -124,11 +127,25 @@ pub(super) fn literal_field_order(
                         .iter()
                         .find(|f| f.ident.as_ref().is_some_and(|i| i == k))
                         .and_then(serde_rename)
+                        .or_else(|| rule.map(|r| r.apply(k)))
                         .map(Arc::<str>::from)
                 })
                 .collect();
-            (ordered, renames)
+            let skip_none = ordered
+                .iter()
+                .map(|k| {
+                    def.fields
+                        .iter()
+                        .find(|f| f.ident.as_ref().is_some_and(|i| i == k))
+                        .is_some_and(serde_skip_none)
+                })
+                .collect();
+            (ordered, renames, skip_none)
         }
-        None => (written.iter().map(|(k, _)| k.clone()).collect(), Vec::new()),
+        None => (
+            written.iter().map(|(k, _)| k.clone()).collect(),
+            Vec::new(),
+            Vec::new(),
+        ),
     }
 }

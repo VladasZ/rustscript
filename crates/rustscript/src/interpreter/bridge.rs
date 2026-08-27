@@ -191,7 +191,13 @@ impl Vm {
             {
                 let type_id = self.impls.type_id(name);
                 return Ok(Value::structure(
-                    super::value::StructShape::typed(&**name, type_id, Vec::new(), Vec::new()),
+                    super::value::StructShape::typed(
+                        &**name,
+                        type_id,
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                    ),
                     Vec::new(),
                 ));
             }

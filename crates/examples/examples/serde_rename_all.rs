@@ -9,6 +9,7 @@ struct Person {
     account_id: i64,
     #[serde(rename = "emailAddress")]
     email: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     nick_name: Option<String>,
 }
 
@@ -32,6 +33,11 @@ fn main() {
     println!("{} {} {}", p.display_name, p.account_id, p.email);
     println!("{}", p.nick_name.is_none());
     println!("{}", serde_json::to_string(&p).unwrap());
+    let with_nick = Person {
+        nick_name: Some("jim".to_string()),
+        ..p
+    };
+    println!("{}", serde_json::to_string(&with_nick).unwrap());
 
     let l: Limits = serde_json::from_str(r#"{"MAX_RETRY_COUNT":5}"#).unwrap();
     println!("{}", l.max_retry_count);

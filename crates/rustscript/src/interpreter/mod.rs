@@ -8,6 +8,7 @@ mod console;
 pub mod coverage;
 mod crates_bridge;
 mod debug_fmt;
+mod ed25519_bridge;
 mod enum_def;
 mod format;
 mod higher_order;

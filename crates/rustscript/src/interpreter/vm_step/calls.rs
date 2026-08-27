@@ -210,6 +210,7 @@ pub(super) fn make_struct(ctx: &mut StepCtx, dst: u16, info: u16, first: u16) ->
         let rest = ctx.stack[ctx.base + first as usize + written].clone();
         let mut fields = lit.shape.fields.clone();
         let mut renames = lit.shape.renames.clone();
+        let mut skip_none = lit.shape.skip_none.clone();
         if let Value::Struct(r) = rest {
             let rvals = r.values.lock();
             for (slot, (k, v)) in r.shape.fields.iter().zip(rvals.iter()).enumerate() {
@@ -225,11 +226,20 @@ pub(super) fn make_struct(ctx: &mut StepCtx, dst: u16, info: u16, first: u16) ->
                         if !renames.is_empty() {
                             renames.push(r.shape.renames.get(slot).cloned().flatten());
                         }
+                        if !skip_none.is_empty() {
+                            skip_none.push(r.shape.skip_none.get(slot).copied().unwrap_or(false));
+                        }
                     }
                 }
             }
         }
-        let shape = StructShape::typed(lit.shape.name.clone(), lit.shape.type_id, fields, renames);
+        let shape = StructShape::typed(
+            lit.shape.name.clone(),
+            lit.shape.type_id,
+            fields,
+            renames,
+            skip_none,
+        );
         Value::structure(shape, values)
     } else {
         Value::structure(lit.shape.clone(), values)

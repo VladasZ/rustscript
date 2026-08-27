@@ -284,6 +284,7 @@ is_nan
 is_ne
 is_negative
 is_none
+is_none_or
 is_normal
 is_null
 is_number
@@ -477,6 +478,7 @@ set_readonly
 set_value
 shuffle mut
 shutdown
+sign
 signum
 sin
 sinh
@@ -539,6 +541,7 @@ title
 to_ascii_lowercase
 to_ascii_uppercase
 to_be_bytes
+to_bytes
 to_degrees
 to_digit
 to_le_bytes
@@ -585,6 +588,9 @@ url_safe_no_pad
 user_agent
 values
 values_mut mut
+verify
+verify_strict
+verifying_key
 wait
 wait_with_output
 white
