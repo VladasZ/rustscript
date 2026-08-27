@@ -81,7 +81,8 @@ Values carry their real integer width, `u8` through `u64`, `usize`, `i8`
 through `i64`, `f32`, `f64`. Overflow panics where debug Rust panics. `as`
 truncates or saturates like `rustc`. `f32` computes at `f32` precision.
 Integer methods answer in the receiver's width. Declared parameter and
-return types retag values.
+return types retag values. A declared `const` or `static` type retags the
+same way, so a `const N: u16` is a real u16 and meets other u16 values.
 
 Result types chosen by the caller follow the source. `parse` and `sum` take
 the turbofish, so `"300".parse::<u8>()` is an `Err`. `unwrap_or_default`

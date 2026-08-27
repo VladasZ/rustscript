@@ -192,7 +192,7 @@ fn register_items(
     modules: &[ModuleSrc],
     pending_fns: &mut Vec<(usize, Rc<syn::ItemFn>)>,
     pending_impls: &mut Vec<(usize, Rc<syn::ItemImpl>)>,
-    pending_consts: &mut Vec<(usize, Rc<syn::Expr>)>,
+    pending_consts: &mut Vec<PendingConst>,
 ) -> Result<()> {
     for (m, src) in modules.iter().enumerate() {
         for item in &src.items {
@@ -244,7 +244,7 @@ impl Interp {
         let mut resolver = build_module_tree(modules);
         let mut pending_fns: Vec<(usize, Rc<syn::ItemFn>)> = Vec::new();
         let mut pending_impls: Vec<(usize, Rc<syn::ItemImpl>)> = Vec::new();
-        let mut pending_consts: Vec<(usize, Rc<syn::Expr>)> = Vec::new();
+        let mut pending_consts: Vec<PendingConst> = Vec::new();
 
         let traits = collect_traits(modules);
         register_items(
@@ -313,7 +313,7 @@ impl Interp {
         }
         let impls = build_impl_table(&resolver, methods, &method_atoms);
         let mut globals = Vec::with_capacity(pending_consts.len());
-        for (m, expr) in &pending_consts {
+        for (m, expr, ty) in &pending_consts {
             let ctx = Ctx {
                 resolver: &resolver,
                 module: *m,
@@ -329,7 +329,7 @@ impl Interp {
                 has_drop,
             };
             let mut c = Compiler::new(&ctx);
-            globals.push(GlobalSlot::Todo(Arc::new(c.compile_const(expr)?)));
+            globals.push(GlobalSlot::Todo(Arc::new(c.compile_const(expr, ty)?)));
         }
 
         let fn_index = build_fn_index(&resolver);
@@ -500,7 +500,7 @@ fn register_item(
     item: &Item,
     pending_fns: &mut Vec<(usize, Rc<syn::ItemFn>)>,
     pending_impls: &mut Vec<(usize, Rc<syn::ItemImpl>)>,
-    pending_consts: &mut Vec<(usize, Rc<syn::Expr>)>,
+    pending_consts: &mut Vec<PendingConst>,
 ) -> Result<()> {
     match item {
         Item::Fn(f) => {
@@ -554,7 +554,7 @@ fn register_item(
                 c.ident.to_string(),
                 u32::try_from(pending_consts.len()).expect("table fits u32"),
             );
-            pending_consts.push((m, Rc::new((*c.expr).clone())));
+            pending_consts.push((m, Rc::new((*c.expr).clone()), Rc::new((*c.ty).clone())));
         }
         Item::Static(s) => {
             if matches!(s.mutability, syn::StaticMutability::Mut(_)) {
@@ -564,7 +564,7 @@ fn register_item(
                 s.ident.to_string(),
                 u32::try_from(pending_consts.len()).expect("table fits u32"),
             );
-            pending_consts.push((m, Rc::new((*s.expr).clone())));
+            pending_consts.push((m, Rc::new((*s.expr).clone()), Rc::new((*s.ty).clone())));
         }
         Item::Type(t) => {
             resolver.modules[m]
@@ -579,6 +579,11 @@ fn register_item(
 }
 
 type PendingMethod = (String, String, usize, Rc<syn::ImplItemFn>);
+
+/// The module, the initializer, and the declared type. The type is what gives an integer const its
+/// width, without it a `const N: u16` would run as a plain untagged int and refuse to meet a real
+/// `u16` in one operation.
+type PendingConst = (usize, Rc<syn::Expr>, Rc<syn::Type>);
 
 /// So an impl can pull in the default bodies it doesn't override.
 fn collect_traits(modules: &[ModuleSrc]) -> HashMap<String, (usize, Rc<syn::ItemTrait>)> {
@@ -691,7 +696,7 @@ fn collect_impl_items(
     resolver: &mut Resolver,
     pending_impls: &[(usize, Rc<syn::ItemImpl>)],
     traits: &HashMap<String, (usize, Rc<syn::ItemTrait>)>,
-    pending_consts: &mut Vec<(usize, Rc<syn::Expr>)>,
+    pending_consts: &mut Vec<PendingConst>,
 ) -> Result<Vec<PendingMethod>> {
     let mut pending_methods: Vec<PendingMethod> = Vec::new();
     for (m, imp) in pending_impls {
@@ -749,7 +754,7 @@ fn collect_impl_items(
                         key,
                         u32::try_from(pending_consts.len()).expect("table fits u32"),
                     );
-                    pending_consts.push((*m, Rc::new(c.expr.clone())));
+                    pending_consts.push((*m, Rc::new(c.expr.clone()), Rc::new(c.ty.clone())));
                 }
                 _ => {}
             }

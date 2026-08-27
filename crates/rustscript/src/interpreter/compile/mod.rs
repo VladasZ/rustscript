@@ -503,8 +503,8 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    pub fn compile_const(&mut self, expr: &Expr) -> Result<Chunk> {
-        self.types = infer::infer_const(self.ctx, expr, None);
+    pub fn compile_const(&mut self, expr: &Expr, ty: &syn::Type) -> Result<Chunk> {
+        self.types = infer::infer_const(self.ctx, expr, Some(ty));
         self.frames.push(FnState::new("<const>".to_string()));
         let ret = self.alloc();
         self.compile_into(ret, expr)?;
