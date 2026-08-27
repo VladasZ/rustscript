@@ -1,4 +1,30 @@
-//! `#[serde(rename = "..")]` and `#[serde(rename_all = "..")]`.
+//! `#[serde(rename = "..")]`, `#[serde(rename_all = "..")]` and
+//! `#[serde(skip_serializing_if = "Option::is_none")]`.
+
+/// True for `skip_serializing_if = "Option::is_none"`, the one predicate serialization honors.
+pub(super) fn serde_skip_none(field: &syn::Field) -> bool {
+    let mut skip = false;
+    for attr in &field.attrs {
+        if !attr.path().is_ident("serde") {
+            continue;
+        }
+        if attr
+            .parse_nested_meta(|meta| {
+                if meta.path.is_ident("skip_serializing_if")
+                    && let Ok(value) = meta.value()
+                    && let Ok(lit) = value.parse::<syn::LitStr>()
+                {
+                    skip = lit.value() == "Option::is_none";
+                }
+                Ok(())
+            })
+            .is_err()
+        {
+            return false;
+        }
+    }
+    skip
+}
 
 pub(super) fn serde_rename(field: &syn::Field) -> Option<String> {
     let mut renamed = None;

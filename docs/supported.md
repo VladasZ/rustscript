@@ -126,7 +126,7 @@ The `supported_page_is_current` test enforces it.
 
 ## Option
 
-`and`, `and_then`, `as_deref`, `as_mut`, `as_ref`, `clone`, `cloned`, `context`, `copied`, `expect`, `filter`, `get`, `into_iter`, `is_none`, `is_some`, `is_some_and`, `iter`, `map`, `map_or`, `map_or_else`, `ok_or`, `ok_or_else`, `or`, `or_else`, `take`, `unwrap`, `unwrap_or`, `unwrap_or_default`, `unwrap_or_else`, `with_context`, `xor`
+`and`, `and_then`, `as_deref`, `as_mut`, `as_ref`, `clone`, `cloned`, `context`, `copied`, `expect`, `filter`, `get`, `into_iter`, `is_none`, `is_none_or`, `is_some`, `is_some_and`, `iter`, `map`, `map_or`, `map_or_else`, `ok_or`, `ok_or_else`, `or`, `or_else`, `take`, `unwrap`, `unwrap_or`, `unwrap_or_default`, `unwrap_or_else`, `with_context`, `xor`
 
 ## Ordering
 
@@ -184,6 +184,14 @@ The `supported_page_is_current` test enforces it.
 
 `chain_update`, `finalize`, `update`
 
+## Signature
+
+`to_bytes`, `to_vec`
+
+## SigningKey
+
+`as_bytes`, `sign`, `to_bytes`, `verifying_key`
+
 ## Span
 
 `content`, `style`, `width`
@@ -211,6 +219,10 @@ The `supported_page_is_current` test enforces it.
 ## Vec
 
 `all`, `any`, `append`, `as_array`, `as_array_mut`, `as_object`, `as_object_mut`, `as_slice`, `back`, `back_mut`, `binary_search`, `by_ref`, `chunks`, `clear`, `clone`, `cloned`, `collect`, `collect_map`, `collect_set`, `collect_string`, `concat`, `contains`, `copied`, `copy_from_slice`, `count`, `dedup`, `enumerate`, `extend`, `extend_from_slice`, `filter`, `filter_map`, `find`, `find_map`, `first`, `first_mut`, `flat_map`, `flatten`, `fold`, `for_each`, `front`, `front_mut`, `get`, `get_mut`, `insert`, `into_iter`, `is_empty`, `iter`, `iter_mut`, `join`, `last`, `last_mut`, `len`, `make_contiguous`, `map`, `max`, `max_by_key`, `min`, `min_by_key`, `next`, `next_back`, `nth`, `partition`, `peekable`, `pop`, `pop_back`, `pop_front`, `position`, `product`, `push`, `push_back`, `push_front`, `reduce`, `remove`, `repeat`, `retain`, `rev`, `reverse`, `skip`, `skip_while`, `sort`, `sort_by`, `sort_by_cached_key`, `sort_by_key`, `sort_unstable`, `split_first`, `sum`, `swap`, `swap_remove`, `take`, `take_while`, `to_vec`, `truncate`, `windows`
+
+## VerifyingKey
+
+`as_bytes`, `to_bytes`, `verify`, `verify_strict`
 
 ## WmiConnection
 

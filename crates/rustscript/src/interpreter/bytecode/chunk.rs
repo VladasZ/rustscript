@@ -504,6 +504,8 @@ pub struct StructShape {
     pub fields: Vec<Arc<str>>,
     /// `#[serde(rename = "..")]` per field, empty when none. Read when serializing.
     pub renames: Vec<Option<Arc<str>>>,
+    /// `#[serde(skip_serializing_if = "Option::is_none")]` per field, empty when none.
+    pub skip_none: Vec<bool>,
 }
 
 impl StructShape {
@@ -513,6 +515,7 @@ impl StructShape {
             type_id: NO_TYPE,
             fields,
             renames: Vec::new(),
+            skip_none: Vec::new(),
         })
     }
 
@@ -521,12 +524,14 @@ impl StructShape {
         type_id: u16,
         fields: Vec<Arc<str>>,
         renames: Vec<Option<Arc<str>>>,
+        skip_none: Vec<bool>,
     ) -> Arc<StructShape> {
         Arc::new(StructShape {
             name: name.into(),
             type_id,
             fields,
             renames,
+            skip_none,
         })
     }
 

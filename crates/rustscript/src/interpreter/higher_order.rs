@@ -414,6 +414,9 @@ impl Vm {
             BuiltinId::IsSomeAnd => {
                 Value::Bool(is_some && self.call_closure_data(&clo(0)?, &[inner()?])?.is_truthy())
             }
+            BuiltinId::IsNoneOr => {
+                Value::Bool(!is_some || self.call_closure_data(&clo(0)?, &[inner()?])?.is_truthy())
+            }
             BuiltinId::Map => {
                 if is_some {
                     Value::some(self.call_closure_data(&clo(0)?, &[inner()?])?)

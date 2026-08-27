@@ -94,6 +94,15 @@ pub(super) fn native_method(
     if let Some(v) = super::crates_bridge::sha256_method(handle, method, args)? {
         return Ok(Some(v));
     }
+    if let Some(v) = super::ed25519_bridge::signing_key_method(handle, method, args)? {
+        return Ok(Some(v));
+    }
+    if let Some(v) = super::ed25519_bridge::verifying_key_method(handle, method, args)? {
+        return Ok(Some(v));
+    }
+    if let Some(v) = super::ed25519_bridge::signature_method(handle, method)? {
+        return Ok(Some(v));
+    }
     if let Some(v) = io_error_method(handle, method) {
         return Ok(Some(v));
     }
@@ -680,6 +689,7 @@ pub(super) fn value_to_bytes(v: Option<&Value>) -> Vec<u8> {
             .iter()
             .filter_map(|x| match x {
                 Value::Int(i) => u8::try_from(*i).ok(),
+                Value::IntW(v, w) => u8::try_from(w.decode(*v)).ok(),
                 _ => None,
             })
             .collect(),

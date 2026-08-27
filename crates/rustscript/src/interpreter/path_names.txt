@@ -124,6 +124,10 @@ ServiceManager::local_computer
 Sha256::default
 Sha256::digest
 Sha256::new
+Signature::from_bytes
+Signature::from_slice
+SigningKey::from_bytes
+SigningKey::try_from
 Some
 Span::raw
 Span::styled
@@ -161,6 +165,8 @@ Vec::with_capacity
 VecDeque::from
 VecDeque::new
 VecDeque::with_capacity
+VerifyingKey::from_bytes
+VerifyingKey::try_from
 WMIConnection::new
 WMIConnection::with_namespace_path
 Widget::render

@@ -29,6 +29,10 @@ pub struct StructInfo {
 
 pub type Structs = HashMap<Arc<str>, Arc<StructInfo>>;
 
+fn is_none(value: &Value) -> bool {
+    matches!(value, Value::Enum { def, variant, .. } if def.kind == EnumKind::Option && *variant != SOME)
+}
+
 impl Interp {
     pub(super) fn build_structs(&self) -> Structs {
         let mut out = Structs::default();
@@ -37,6 +41,7 @@ impl Interp {
             let ast = def.ast.clone();
             let mut fields: Vec<Arc<str>> = Vec::new();
             let mut renames: Vec<Option<Arc<str>>> = Vec::new();
+            let mut skip_none: Vec<bool> = Vec::new();
             let mut coerce = Vec::new();
             let mut json = Vec::new();
             let mut optional = Vec::new();
@@ -51,6 +56,7 @@ impl Interp {
                         .or_else(|| rule.map(|r| r.apply(&name)));
                     fields.push(Arc::from(name.as_str()));
                     renames.push(rename.as_deref().map(Arc::from));
+                    skip_none.push(super::serde_attrs::serde_skip_none(f));
                     let ir = lower_type(&f.ty, self.resolver(), module, &[]);
                     coerce.push(ir.is_active().then(|| ir.clone()));
                     json.push(ir);
@@ -68,6 +74,7 @@ impl Interp {
                 self.resolver().type_id_of(canon),
                 fields,
                 renames,
+                skip_none,
             );
             out.insert(
                 Arc::from(&**canon),
@@ -586,6 +593,9 @@ pub(super) fn pvalue_to_json(v: &Value) -> Result<serde_json::Value> {
             let mut obj = serde_json::Map::default();
             let values = s.values.lock();
             for (slot, (field, val)) in s.shape.fields.iter().zip(values.iter()).enumerate() {
+                if s.shape.skip_none.get(slot).copied().unwrap_or(false) && is_none(val) {
+                    continue;
+                }
                 let key = s
                     .shape
                     .renames

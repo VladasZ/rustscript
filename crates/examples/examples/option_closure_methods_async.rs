@@ -25,4 +25,6 @@ async fn main() {
     println!("{}", n.unwrap_or_else(|| triple(3)));
     println!("{:?}", s.filter(|x| *x > 10));
     println!("{}", s.is_some_and(|x| x == 4));
+    println!("{}", s.is_none_or(|x| x == 4));
+    println!("{}", n.is_none_or(|x| x == 4));
 }

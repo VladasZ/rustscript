@@ -113,7 +113,10 @@ impl Vm {
     pub(super) fn make_tuple_struct(&self, name: &str, args: Vec<Value>) -> Value {
         let fields = (0..args.len()).map(|i| i.to_string().into()).collect();
         let type_id = self.impls.type_id(name);
-        Value::structure(StructShape::typed(name, type_id, fields, Vec::new()), args)
+        Value::structure(
+            StructShape::typed(name, type_id, fields, Vec::new(), Vec::new()),
+            args,
+        )
     }
 
     pub(super) fn run_pending_ctrlc(self: &Arc<Self>) -> Result<()> {

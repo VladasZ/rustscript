@@ -46,6 +46,9 @@ pub enum Native {
     TempDir(tempfile::TempDir),
     NamedTempFile(tempfile::NamedTempFile),
     Sha256(sha2::Sha256),
+    SigningKey(ed25519_dalek::SigningKey),
+    VerifyingKey(ed25519_dalek::VerifyingKey),
+    Signature(ed25519_dalek::Signature),
     /// lazy, so `for line in reader.lines()` streams a pipe
     Lines(LineIter),
     /// kept undecoded so a script that only wants the byte count never pays for a UTF-8 conversion
@@ -106,6 +109,9 @@ impl Native {
             Native::TempDir(_) => "TempDir",
             Native::NamedTempFile(_) => "NamedTempFile",
             Native::Sha256(_) => "Sha256",
+            Native::SigningKey(_) => "SigningKey",
+            Native::VerifyingKey(_) => "VerifyingKey",
+            Native::Signature(_) => "Signature",
             Native::Lines(_) => "Lines",
             Native::Body(_) => "Body",
             Native::Regex(_) => "Regex",

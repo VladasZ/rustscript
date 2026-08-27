@@ -25,6 +25,9 @@ pub(super) fn bytes_to_vec(b: &[u8]) -> Value {
 }
 
 pub(super) fn crate_bridge(id: PathId, args: &[Value]) -> Result<Option<Value>> {
+    if let Some(v) = super::ed25519_bridge::ed25519_call(id, args)? {
+        return Ok(Some(v));
+    }
     let s0 = || args.first().map(Value::display).unwrap_or_default();
     Ok(Some(match id {
         // dirs
