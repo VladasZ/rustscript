@@ -26,7 +26,8 @@ pub(super) fn vec_method(v: &List, method: &MethodName, args: &mut [Value]) -> R
         BuiltinId::Len | BuiltinId::Count => super::shared::usize_value(v.lock().len()),
         BuiltinId::IsEmpty => Value::Bool(v.lock().is_empty()),
         BuiltinId::Clone => Value::Vec(v.clone()).deep_clone(),
-        BuiltinId::Iter | BuiltinId::IntoIter => iterator::value_iter(v.clone()),
+        BuiltinId::Iter => iterator::value_iter(v.clone()),
+        BuiltinId::IntoIter => iterator::owned_iter(v.clone()),
         BuiltinId::IterMut => iterator::value_iter_mut(v.clone()),
         BuiltinId::Push | BuiltinId::PushBack => {
             v.lock().push(args.first_mut().map_or(Value::Unit, take));
@@ -83,7 +84,7 @@ pub(super) fn vec_method(v: &List, method: &MethodName, args: &mut [Value]) -> R
         BuiltinId::Join => vec_join(v, args),
         BuiltinId::Concat => vec_concat(v, method.scalar.as_ref()),
         BuiltinId::Sum => return vec_sum(v, method),
-        BuiltinId::Product => return vec_product(v),
+        BuiltinId::Product => return vec_product(v, method),
         BuiltinId::Rev => {
             let mut items = v.lock().clone();
             items.reverse();
@@ -191,32 +192,8 @@ fn vec_sum(v: &List, method: &MethodName) -> Result<Value> {
     iterator::sum_values(v.lock().clone(), method.scalar.as_ref())
 }
 
-/// Floats fold in at the end.
-fn vec_product(v: &List) -> Result<Value> {
-    Ok({
-        let mut acc_i = 1i64;
-        let mut acc_f = 1f64;
-        let mut is_float = false;
-        for x in v.lock().iter() {
-            match &x.bridge_image().unwrap_or_else(|| x.clone()) {
-                Value::Int(i) => {
-                    acc_i = acc_i
-                        .checked_mul(*i)
-                        .ok_or_else(|| anyhow!("attempt to multiply with overflow"))?;
-                }
-                Value::Float(f) => {
-                    is_float = true;
-                    acc_f *= f;
-                }
-                _ => bail!("product needs numbers"),
-            }
-        }
-        if is_float {
-            Value::Float(acc_f * AsPrimitive::<f64>::as_(acc_i))
-        } else {
-            Value::Int(acc_i)
-        }
-    })
+fn vec_product(v: &List, method: &MethodName) -> Result<Value> {
+    iterator::product_values(v.lock().clone(), method.scalar.as_ref())
 }
 
 /// Nested vecs flatten, strings join, told apart by the first element. An empty receiver goes by

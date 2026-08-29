@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
 
+use super::back::supports_back;
+use super::in_place;
 use super::{
     Handle, IteratorState, Step, chars, int_arg, lines_next, option_inner, value_iter, wrap,
 };
@@ -47,6 +49,7 @@ impl Vm {
             return Ok(wrap(IteratorState::Owned {
                 values: items,
                 index: 0,
+                vec: true,
             }));
         }
         self.iterator_value(value)
@@ -78,6 +81,7 @@ impl Vm {
                 wrap(IteratorState::Owned {
                     values: owned,
                     index: 0,
+                    vec: false,
                 })
             }
             Value::Range {
@@ -102,6 +106,7 @@ impl Vm {
                 wrap(IteratorState::Owned {
                     values: yields,
                     index: 0,
+                    vec: false,
                 })
             }
             other => bail!("{} is not iterable", other.type_name()),
@@ -205,6 +210,7 @@ impl Vm {
                 self.chain_next(iterator, &left, &right, left_done)
             }
             Step::Take(source) => self.iterator_next(&source),
+            Step::Rev(source) => self.iterator_next_back(&source),
             Step::Cloned(source) => Ok(self.iterator_next(&source)?.map(|v| v.deep_clone())),
             Step::Stride(source, count) | Step::Skip(source, count) => {
                 self.skip_then_next(&source, count)
@@ -400,11 +406,20 @@ impl Vm {
             },
             BuiltinId::Count => self.iterator_count(iterator)?,
             // every iterator is driven forwards, so `last` drains to the end
+            BuiltinId::NextBack if supports_back(iterator) => self
+                .iterator_next_back(iterator)?
+                .map_or_else(Value::none, Value::some),
             BuiltinId::Last | BuiltinId::NextBack => self.iterator_last(iterator)?,
             BuiltinId::Sum => self.iterator_sum(iterator, scalar)?,
             BuiltinId::Product => self.iterator_product(iterator, scalar)?,
             BuiltinId::Max | BuiltinId::Min => self.iterator_extreme(iterator, method.id)?,
-            BuiltinId::Collect | BuiltinId::ToVec => Value::vec(self.drain_iterator(iterator)?),
+            BuiltinId::Collect | BuiltinId::ToVec => {
+                if in_place::collects_nothing(iterator, scalar) {
+                    Value::vec(Vec::new())
+                } else {
+                    Value::vec(self.drain_iterator(iterator)?)
+                }
+            }
             BuiltinId::CollectString => Value::str(
                 self.drain_iterator(iterator)?
                     .iter()
@@ -417,6 +432,9 @@ impl Vm {
             BuiltinId::CollectSet => {
                 crate::interpreter::vecmap::collect_set(self.drain_iterator(iterator)?)?
             }
+            BuiltinId::Rev if supports_back(iterator) => wrap(IteratorState::Rev {
+                source: iterator.clone(),
+            }),
             BuiltinId::Rev => {
                 let mut items = self.drain_iterator(iterator)?;
                 items.reverse();

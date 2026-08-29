@@ -324,8 +324,11 @@ impl Infer<'_, '_> {
         };
         self.generics = saved;
         let mut bound: HashMap<Arc<str>, Ty> = HashMap::new();
-        // a generic return bound by the expectation helps a literal argument
-        bind_generic(&ret, expected, &mut bound);
+        // The expectation only hints a literal argument and fills a parameter no argument bound.
+        // The arguments win, `E::from(pick(5usize, 6, false))` expects the payload of some `From`
+        // impl and that must not decide what `pick` returns.
+        let mut hint: HashMap<Arc<str>, Ty> = HashMap::new();
+        bind_generic(&ret, expected, &mut hint);
         // the receiver of a method call sits before the typed params
         let skip = usize::from(sig.receiver().is_some());
         for (i, arg) in args.iter().enumerate() {
@@ -338,11 +341,11 @@ impl Infer<'_, '_> {
             } else {
                 param
             };
-            let want = subst(&param, &bound);
+            let want = subst(&subst(&param, &bound), &hint);
             let got = self.expr(arg, &erase(&want));
             bind_generic(&param, &got, &mut bound);
         }
-        let ret = subst(&ret, &bound);
+        let ret = subst(&subst(&ret, &bound), &hint);
         match (&ret, self_ty) {
             (Ty::Unknown, Some(s)) if is_self_return(sig) => s.clone(),
             _ => erase(&ret),

@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::lang::catalog::TyPat;
 use crate::lang::expr::{Arm, BinOp, Expr, Helper, UnOp, lookup, minimal};
 use crate::lang::stmt::Stmt;
 use crate::lang::ty::FloatWidth;
@@ -527,4 +528,37 @@ fn shrink_arms(whole: &Expr, arms: &[Arm]) -> Vec<Expr> {
         out.push(candidate);
     }
     out
+}
+
+impl Expr {
+    /// One flag per node in `nodes` order. A node inside a `SmallUsize` or similar catalog argument
+    /// is pinned, a graft there can be any value and `repeat` with a huge count kills the native
+    /// binary before anything is compared.
+    pub fn pinned_nodes(&self) -> Vec<bool> {
+        let mut out = Vec::new();
+        self.pinned_inner(false, &mut out);
+        out
+    }
+
+    fn pinned_inner(&self, pinned: bool, out: &mut Vec<bool>) {
+        out.push(pinned);
+        if let Self::Call {
+            method, recv, args, ..
+        } = self
+        {
+            let patterns = lookup(method).map(|entry| entry.args).unwrap_or_default();
+            recv.pinned_inner(pinned, out);
+            for (index, arg) in args.iter().enumerate() {
+                let small = matches!(
+                    patterns.get(index),
+                    Some(TyPat::SmallUsize | TyPat::SmallU32 | TyPat::SmallI32)
+                );
+                arg.pinned_inner(pinned || small, out);
+            }
+            return;
+        }
+        for child in self.children() {
+            child.pinned_inner(pinned, out);
+        }
+    }
 }

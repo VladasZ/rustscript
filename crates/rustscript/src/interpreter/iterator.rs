@@ -1,13 +1,11 @@
 //! Lazy, stateful iterators. An iterator is a shared native handle, so `by_ref`, `peekable` and
 //! open ended ranges keep their real semantics.
 
-use num_traits::AsPrimitive;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use parking_lot::Mutex;
 
-use super::bytecode::ScalarTy;
 use super::native::Native;
 use super::regex_bridge::{CapturesValue, MatchValue, RegexValue};
 use super::value::{ClosureData, List, RsStr, Value, ValueRef};
@@ -18,6 +16,10 @@ pub enum IteratorState {
     Values {
         values: List,
         index: usize,
+        /// `into_iter()` on a vec, the source a `collect` can rebuild in place
+        owned: bool,
+        /// items already handed out by `next_back`
+        back: usize,
     },
     MutableValues {
         values: List,
@@ -35,6 +37,8 @@ pub enum IteratorState {
     Owned {
         values: Vec<Value>,
         index: usize,
+        /// taken from a vec, so a `collect` can rebuild it in place, unlike the items of a map
+        vec: bool,
     },
     Range {
         next: i64,
@@ -106,6 +110,10 @@ pub enum IteratorState {
         source: Handle,
         remaining: usize,
     },
+    /// `rev`, each pull is a `next_back` of the source
+    Rev {
+        source: Handle,
+    },
     /// `step_by`
     StepBy {
         source: Handle,
@@ -142,6 +150,7 @@ enum Step {
     Take(Handle),
     Cloned(Handle),
     Skip(Handle, usize),
+    Rev(Handle),
     Stride(Handle, usize),
     TakeWhile(Handle, Arc<ClosureData>),
     SkipWhile(Handle, Arc<ClosureData>, bool),
@@ -155,6 +164,17 @@ pub(super) fn value_iter(items: List) -> Value {
     wrap(IteratorState::Values {
         values: items,
         index: 0,
+        owned: false,
+        back: 0,
+    })
+}
+
+pub(super) fn owned_iter(items: List) -> Value {
+    wrap(IteratorState::Values {
+        values: items,
+        index: 0,
+        owned: true,
+        back: 0,
     })
 }
 
@@ -275,7 +295,7 @@ impl IteratorState {
     /// The items an owning iterator still holds, for its drop. A borrowing iterator holds nothing.
     pub(super) fn take_remaining(&mut self) -> Vec<Value> {
         match self {
-            IteratorState::Owned { values, index } => values.drain(*index..).collect(),
+            IteratorState::Owned { values, index, .. } => values.drain(*index..).collect(),
             _ => Vec::new(),
         }
     }
@@ -332,8 +352,14 @@ impl IteratorState {
     fn step(&mut self) -> Step {
         match self {
             IteratorState::UserNext { value } => Step::User(value.clone()),
-            IteratorState::Values { values, index } => {
-                let value = values.lock().get(*index).cloned();
+            IteratorState::Values {
+                values,
+                index,
+                back,
+                ..
+            } => {
+                let items = values.lock();
+                let value = (*index + *back < items.len()).then(|| items[*index].clone());
                 *index += usize::from(value.is_some());
                 Step::Ready(value)
             }
@@ -353,7 +379,7 @@ impl IteratorState {
                 };
                 Step::Ready(value)
             }
-            IteratorState::Owned { values, index } => {
+            IteratorState::Owned { values, index, .. } => {
                 let value = values.get(*index).cloned();
                 *index += usize::from(value.is_some());
                 Step::Ready(value)
@@ -411,6 +437,7 @@ impl IteratorState {
                 *remaining = 0;
                 Step::Skip(source.clone(), count)
             }
+            IteratorState::Rev { source } => Step::Rev(source.clone()),
             other => other.step_adaptor(),
         }
     }
@@ -513,67 +540,10 @@ fn int_arg(args: &[Value]) -> Result<i64> {
     }
 }
 
-/// Shared by the lazy and the eager path so both agree on every width.
-pub(super) fn sum_values(items: Vec<Value>, target: Option<&ScalarTy>) -> Result<Value> {
-    // i128 so a `u64` element past `i64::MAX` keeps its value
-    let mut integers = 0i128;
-    // `Sum` for floats starts at -0.0, so negative zeros keep the sign
-    let mut floats = -0.0f64;
-    let mut has_float = false;
-    // without a target the width of the first tagged element is the width of the sum
-    let (mut low, mut high) = match target {
-        Some(ScalarTy::Int(width)) => (width.min(), width.max()),
-        _ => (i128::from(i64::MIN), i128::from(i64::MAX)),
-    };
-    let mut bounded = matches!(target, Some(ScalarTy::Int(_)));
-    let mut seen_width = None;
-    for value in items {
-        if let Some((value, width)) = value.int_parts() {
-            if !bounded {
-                (low, high) = (width.min(), width.max());
-                bounded = true;
-                seen_width = Some(width);
-            }
-            integers = integers
-                .checked_add(value)
-                .ok_or_else(|| anyhow!("attempt to add with overflow"))?;
-            // a `sum::<u8>()` overflows at 255
-            if integers < low || integers > high {
-                bail!("attempt to add with overflow");
-            }
-            continue;
-        }
-        match value.bridge_image().unwrap_or(value) {
-            Value::Float(value) => {
-                floats += value;
-                has_float = true;
-            }
-            other => bail!("sum needs numbers, got {}", other.type_name()),
-        }
-    }
-    // only a `sum::<f64>()` turbofish tells an empty float sum from an integer one
-    let float_target = matches!(target, Some(ScalarTy::F32 | ScalarTy::F64));
-    Ok(if has_float || (float_target && integers == 0) {
-        // the integer side only joins with a value, so it can't cancel the -0.0 identity
-        let total = if integers == 0 {
-            floats
-        } else {
-            floats + AsPrimitive::<f64>::as_(integers)
-        };
-        if matches!(target, Some(ScalarTy::F32)) {
-            Value::F32(AsPrimitive::<f32>::as_(total))
-        } else {
-            Value::Float(total)
-        }
-    } else if let Some(ScalarTy::Int(width)) = target {
-        // keep the tag, otherwise `!0u16` gives -1
-        Value::int_of_width(integers, *width)
-    } else if let Some(width) = seen_width {
-        Value::int_of_width(integers, width)
-    } else {
-        Value::Int(i64::try_from(integers).expect("sum is range-checked per step"))
-    })
-}
-
+mod arith;
+mod back;
 mod drive;
+mod in_place;
 mod reduce;
+
+pub(super) use arith::{product_values, sum_values};

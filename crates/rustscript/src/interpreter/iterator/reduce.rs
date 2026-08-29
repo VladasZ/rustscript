@@ -1,12 +1,11 @@
 //! The closure taking iterator methods and the reductions.
 
-use num_traits::AsPrimitive;
 use std::slice::from_ref;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::Result;
 
-use super::{Handle, IteratorState, as_closure, option_inner, sum_values, wrap};
+use super::{Handle, IteratorState, as_closure, option_inner, product_values, sum_values, wrap};
 use crate::interpreter::bridge::arg;
 use crate::interpreter::bytecode::{BuiltinId, ScalarTy};
 use crate::interpreter::ops::compare_values;
@@ -182,59 +181,8 @@ impl Vm {
         iterator: &Handle,
         target: Option<&ScalarTy>,
     ) -> Result<Value> {
-        // i128 for the same reason as `sum_values`, a `product::<u16>()` overflows at the target width
-        let mut integers = 1i128;
-        let mut floats = 1f64;
-        let mut has_float = false;
-        let mut has_int = false;
-        let (mut low, mut high) = match target {
-            Some(ScalarTy::Int(width)) => (width.min(), width.max()),
-            _ => (i128::from(i64::MIN), i128::from(i64::MAX)),
-        };
-        let mut bounded = matches!(target, Some(ScalarTy::Int(_)));
-        let mut seen_width = None;
-        while let Some(value) = self.iterator_next(iterator)? {
-            if let Some((value, width)) = value.int_parts() {
-                // see `sum_values`
-                if !bounded {
-                    (low, high) = (width.min(), width.max());
-                    bounded = true;
-                    seen_width = Some(width);
-                }
-                has_int = true;
-                integers = integers
-                    .checked_mul(value)
-                    .ok_or_else(|| anyhow!("attempt to multiply with overflow"))?;
-                if integers < low || integers > high {
-                    bail!("attempt to multiply with overflow");
-                }
-                continue;
-            }
-            match value.bridge_image().unwrap_or(value) {
-                Value::Float(value) => {
-                    floats *= value;
-                    has_float = true;
-                }
-                other => bail!("product needs numbers, got {}", other.type_name()),
-            }
-        }
-        // only a `product::<f64>()` turbofish tells an empty float product from an integer one
-        let float_target = matches!(target, Some(ScalarTy::F32 | ScalarTy::F64));
-        Ok(if has_float || (float_target && !has_int) {
-            let total = floats * AsPrimitive::<f64>::as_(integers);
-            if matches!(target, Some(ScalarTy::F32)) {
-                Value::F32(AsPrimitive::<f32>::as_(total))
-            } else {
-                Value::Float(total)
-            }
-        } else if let Some(ScalarTy::Int(width)) = target {
-            // keep the tag, otherwise `product::<u16>().checked_mul(..)` misses its overflow
-            Value::int_of_width(integers, *width)
-        } else if let Some(width) = seen_width {
-            Value::int_of_width(integers, width)
-        } else {
-            Value::Int(i64::try_from(integers).expect("product is range-checked per step"))
-        })
+        let items = self.drain_iterator(iterator)?;
+        product_values(items, target)
     }
 
     pub(super) fn iterator_extreme(
