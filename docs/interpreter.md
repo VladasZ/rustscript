@@ -56,7 +56,11 @@ Strings are `Arc<String>` read lock free. `push` grows in place when the
 buffer is not shared, so a build up loop stays linear.
 
 Iterators are lazy native resources, so `by_ref`, `peekable` and open ranges
-keep their real semantics.
+keep their real semantics. `rev` is lazy too, each pull is a `next_back` of
+the source, so a `map` closure runs from the back. A `vec.into_iter()` chain
+of `map`, `skip` and `cloned` collected into a `Vec` of a compatible layout
+follows the in place collect of std, the size is read first and a `skip` past
+the end never runs the closure.
 
 Arithmetic and comparisons on operands the inference pass typed compile to
 typed ops that skip the generic dispatch. There is no hot loop tier any more,

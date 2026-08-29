@@ -223,8 +223,17 @@ fn splice(program: &mut Program, donor: &Program, rng: &mut StdRng) -> bool {
     }
     let slot_index = rng.random_range(0..slots.len());
     let slot = &mut *slots[slot_index];
-    let node_count = slot.nodes().len();
-    let node_index = rng.random_range(0..node_count);
+    let open: Vec<usize> = slot
+        .pinned_nodes()
+        .iter()
+        .enumerate()
+        .filter(|(_, pinned)| !**pinned)
+        .map(|(index, _)| index)
+        .collect();
+    if open.is_empty() {
+        return false;
+    }
+    let node_index = open[rng.random_range(0..open.len())];
     let Some(target) = slot.nth_node_mut(node_index) else {
         return false;
     };

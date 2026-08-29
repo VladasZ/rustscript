@@ -2,7 +2,7 @@
 //! layer only adapts values and the coverage harvest reads each core once. Nothing lazy or
 //! stateful here.
 
-use num_traits::AsPrimitive;
+use num_traits::{AsPrimitive, PrimInt};
 use std::cmp::Ordering;
 use std::time::Duration;
 
@@ -605,26 +605,18 @@ pub(super) fn parse_core(text: &str, target: Option<&ScalarTy>) -> Parsed {
         };
     };
     match target {
-        // An unsigned target rejects `"-0"` before any range check. i128 accepts it, u128 refuses
-        // the sign with the real message.
-        ScalarTy::Int(IntWidth::U128) => match text.parse::<u128>() {
-            Ok(value) => Parsed::Int(value.cast_signed(), IntWidth::U128),
-            Err(e) => fail(&e),
-        },
-        ScalarTy::Int(width) if !width.is_signed() => match text.parse::<u128>() {
-            Ok(value) => match i128::try_from(value) {
-                Ok(value) if value <= width.max() => Parsed::Int(value, *width),
-                _ => Parsed::Fail(out_of_range(false)),
-            },
-            Err(e) => fail(&e),
-        },
-        ScalarTy::Int(width) => match text.parse::<i128>() {
-            Ok(value) if value >= width.min() && value <= width.max() => Parsed::Int(value, *width),
-            Ok(value) => Parsed::Fail(out_of_range(value < width.min())),
-            // i128 is wider than every target, so a failure here is unparseable text and the
-            // message is the same for any width
-            Err(e) => fail(&e),
-        },
+        ScalarTy::Int(IntWidth::U128) => {
+            match parse_int_digits::<u128>(text, false, 0, u128::MAX) {
+                Ok(value) => Parsed::Int(value.cast_signed(), IntWidth::U128),
+                Err(message) => Parsed::Fail(message),
+            }
+        }
+        ScalarTy::Int(width) => {
+            match parse_int_digits::<i128>(text, width.is_signed(), width.min(), width.max()) {
+                Ok(value) => Parsed::Int(value, *width),
+                Err(message) => Parsed::Fail(message),
+            }
+        }
         ScalarTy::F32 => text.parse::<f32>().map_or_else(|e| fail(&e), Parsed::F32),
         ScalarTy::F64 => text.parse::<f64>().map_or_else(|e| fail(&e), Parsed::F64),
         ScalarTy::Bool => text.parse::<bool>().map_or_else(|e| fail(&e), Parsed::Bool),
@@ -896,4 +888,45 @@ pub(super) fn color_core(s: &str, name: BuiltinId) -> Option<String> {
         _ => return None,
     };
     Some(out.to_string())
+}
+
+/// The digit loop of `from_str_radix`, so the first error in reading order wins the way it does
+/// in std. `"99999999999999999999\n".parse::<usize>()` overflows before the newline is seen, and
+/// `"-1".parse::<u8>()` rejects the sign as a digit. The bounds stand in for the target width.
+fn parse_int_digits<T: PrimInt>(text: &str, signed: bool, low: T, high: T) -> Result<T, String> {
+    let bytes = text.as_bytes();
+    if bytes.is_empty() {
+        return Err("cannot parse integer from empty string".to_string());
+    }
+    let (positive, digits) = match bytes {
+        [b'+' | b'-'] => return Err("invalid digit found in string".to_string()),
+        [b'+', rest @ ..] => (true, rest),
+        [b'-', rest @ ..] if signed => (false, rest),
+        _ => (true, bytes),
+    };
+    let overflow = || Err(out_of_range(!positive));
+    let radix = T::from(10).expect("10 fits every integer");
+    let mut result = T::zero();
+    for byte in digits {
+        let scaled = result
+            .checked_mul(&radix)
+            .filter(|v| *v >= low && *v <= high);
+        let Some(digit) = (*byte as char).to_digit(10) else {
+            return Err("invalid digit found in string".to_string());
+        };
+        let Some(scaled) = scaled else {
+            return overflow();
+        };
+        let digit = T::from(digit).expect("a digit fits every integer");
+        let next = if positive {
+            scaled.checked_add(&digit)
+        } else {
+            scaled.checked_sub(&digit)
+        };
+        match next.filter(|v| *v >= low && *v <= high) {
+            Some(next) => result = next,
+            None => return overflow(),
+        }
+    }
+    Ok(result)
 }

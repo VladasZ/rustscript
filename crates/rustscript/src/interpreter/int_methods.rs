@@ -146,16 +146,26 @@ fn in_range(width: IntWidth, value: i128) -> Option<i128> {
 }
 
 /// Checked step by step so the panic lands where debug Rust panics. The multiply is checked in
-/// i128 too, a `u64` product can pass what it holds.
+/// i128 too, a `u64` product can pass what it holds. Squaring like std, a
+/// `saturating_pow(u32::MAX)` must not loop 4 billion times. A square that leaves the width while
+/// exponent bits remain is an overflow of the result too, since it is multiplied in once more.
 fn pow(width: IntWidth, base: i128, exponent: u32) -> Result<i128> {
+    let in_width = |a: i128, b: i128| -> Result<i128> {
+        match a.checked_mul(b) {
+            Some(v) if v >= width.min() && v <= width.max() => Ok(v),
+            _ => bail!("attempt to exponentiate with overflow"),
+        }
+    };
     let mut result: i128 = 1;
-    for _ in 0..exponent {
-        let Some(next) = result.checked_mul(base) else {
-            bail!("attempt to exponentiate with overflow");
-        };
-        result = next;
-        if result < width.min() || result > width.max() {
-            bail!("attempt to exponentiate with overflow");
+    let mut base = base;
+    let mut exponent = exponent;
+    while exponent > 0 {
+        if exponent & 1 == 1 {
+            result = in_width(result, base)?;
+        }
+        exponent >>= 1;
+        if exponent > 0 {
+            base = in_width(base, base)?;
         }
     }
     Ok(result)
@@ -359,10 +369,15 @@ fn int_wrapping_family(
             } else {
                 (1u128 << bits) - 1
             };
-            let base = raw(width, recv);
+            let mut base = raw(width, recv);
             let mut acc: u128 = 1;
-            for _ in 0..e {
-                acc = acc.wrapping_mul(base) & mask;
+            let mut e = e;
+            while e > 0 {
+                if e & 1 == 1 {
+                    acc = acc.wrapping_mul(base) & mask;
+                }
+                e >>= 1;
+                base = base.wrapping_mul(base) & mask;
             }
             IntOut::Same(from_raw(width, acc))
         }),

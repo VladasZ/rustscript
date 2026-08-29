@@ -402,7 +402,7 @@ impl Vm {
             }
             None => recv,
         };
-        image_args(recv, name, args);
+        image_args(recv, name, args)?;
         // A range handles its own few methods first, then the iterator methods through its
         // iterator value.
         let expanded;
@@ -650,20 +650,38 @@ fn path_constant(id: PathId) -> Option<Value> {
 /// Flatten width tagged arguments to the i64 and f64 images the bridges compute in. Methods that hand
 /// arguments through or store them, like `unwrap_or`, `then_some`, `fold` and the containers,
 /// keep the tags.
-fn image_args(recv: &Value, name: &MethodName, args: &mut [Value]) {
+fn image_args(recv: &Value, name: &MethodName, args: &mut [Value]) -> Result<()> {
+    // `bridge_image` saturates a count past `i64::MAX` to `isize::MAX`, and `"0".repeat(isize::MAX)`
+    // is a failed allocation, not the `capacity overflow` panic the real count gives
+    if name.id == BuiltinId::Repeat
+        && let Some(count) = args.first()
+        && count
+            .int_parts()
+            .is_some_and(|(n, _)| n > i128::from(i64::MAX))
+    {
+        let empty = match recv {
+            Value::Str(s) => s.is_empty(),
+            Value::Vec(v) => v.lock().is_empty(),
+            _ => false,
+        };
+        if !empty {
+            bail!("capacity overflow");
+        }
+    }
     let hands_args_through = matches!(
         recv,
         Value::Enum { .. } | Value::Bool(_) | Value::Vec(_) | Value::Map(..)
     ) || matches!(recv, Value::Native(n) if matches!(&*n.lock(), Native::Entry { .. }))
         || name.id == BuiltinId::Fold;
     if hands_args_through {
-        return;
+        return Ok(());
     }
     for arg in args.iter_mut() {
         if let Some(image) = arg.bridge_image() {
             *arg = image;
         }
     }
+    Ok(())
 }
 
 fn one(args: Vec<Value>) -> Result<Value> {

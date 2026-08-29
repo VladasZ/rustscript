@@ -194,12 +194,17 @@ impl Generator<'_> {
             });
             (ret, body)
         };
-        // a `move` closure owns every non `Copy` local it names, so those leave the scope
+        // A `move` closure owns every non `Copy` local it names, so those leave the scope. A
+        // closure binding goes too, a factory returns `impl Fn` which is never `Copy`.
         if capture_move {
             let moved: Vec<String> = self
                 .scope
                 .iter()
-                .filter(|binding| matches!(binding.kind, BindKind::Local) && !binding.ty.is_copy())
+                .filter(|binding| match binding.kind {
+                    BindKind::Local => !binding.ty.is_copy(),
+                    BindKind::Closure { .. } => true,
+                    BindKind::Const => false,
+                })
                 .map(|binding| binding.name.clone())
                 .filter(|name| body.uses_any(&BTreeSet::from([name.clone()])))
                 .collect();

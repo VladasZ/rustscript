@@ -83,3 +83,32 @@ fn generated_sources_compile_with_rustc() {
         );
     }
 }
+
+#[test]
+fn splice_never_targets_a_small_count_argument() {
+    use rustscript_differential::lang::expr::Expr;
+    use rustscript_differential::lang::ty::Ty;
+    use rustscript_differential::lang::width::IntWidth;
+    let count = Expr::IntLit {
+        width: IntWidth::USize,
+        value: 2,
+        opaque: true,
+    };
+    let receiver = Expr::VecLit {
+        elem: Ty::Int(IntWidth::I64),
+        items: vec![Expr::IntLit {
+            width: IntWidth::I64,
+            value: 1,
+            opaque: false,
+        }],
+    };
+    let call = Expr::Call {
+        method: "vec_repeat".to_string(),
+        recv: Box::new(receiver),
+        args: vec![count],
+        fish: None,
+        ty: Ty::Vec(Box::new(Ty::Int(IntWidth::I64))),
+    };
+    // the call, the receiver vec, its item, then the count
+    assert_eq!(call.pinned_nodes(), vec![false, false, false, true]);
+}
