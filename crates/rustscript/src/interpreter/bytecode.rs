@@ -354,9 +354,9 @@ impl BuiltinId {
             Iter => &["Vec", "Map", "Option"],
             IterMut | Pop | First | Last | SplitFirst | Sort | SortByKey | SortByCachedKey
             | SortBy | Join | Concat | Retain => &["Vec"],
-            Push | Contains => &["Str", "Vec"],
-            PushStr | SplitWhitespace | Split | Chars | Lines | Trim | StartsWith | EndsWith
-            | Parse | WriteAll | WriteStr | WriteFmt => &["Str"],
+            Push | Contains | StartsWith | EndsWith => &["Str", "Vec"],
+            PushStr | SplitWhitespace | Split | Chars | Lines | Trim | Parse | WriteAll
+            | WriteStr | WriteFmt => &["Str"],
             Take | Unwrap | UnwrapOr | UnwrapOrElse | Copied | Map | Filter | AndThen | MapOr
             | OkOrElse => &["Option"],
             _ => &[],

@@ -345,6 +345,7 @@ fn vec_method_by_name(v: &List, method: &MethodName, args: &mut [Value]) -> Resu
                 Value::some(items.remove(0))
             }
         }
+        BuiltinId::StartsWith | BuiltinId::EndsWith => return vec_prefix_suffix(v, method, args),
         BuiltinId::Max | BuiltinId::Min => return vec_min_max(v, method, args),
         // a parsed json array is a plain Vec
         BuiltinId::AsArray => Value::some(Value::vec(v.lock().clone())),
@@ -395,6 +396,23 @@ fn vec_copy_from_slice(v: &List, args: &[Value]) -> Result<Value> {
 }
 
 /// With an argument this is `Ord::max` on 2 whole vecs, without one the iterator reduction.
+fn vec_prefix_suffix(v: &List, method: &MethodName, args: &mut [Value]) -> Result<Value> {
+    let Value::Vec(needle) = arg(args, 0)? else {
+        bail!("`{}` on a vec needs a slice argument", method.text);
+    };
+    // cloned first, so `v.starts_with(&v)` doesn't deadlock
+    let needle: Vec<Value> = needle.lock().clone();
+    let items = v.lock();
+    let window: &[Value] = if method.id == BuiltinId::StartsWith {
+        &items[..needle.len().min(items.len())]
+    } else {
+        &items[items.len() - needle.len().min(items.len())..]
+    };
+    Ok(Value::Bool(
+        window.len() == needle.len() && window.iter().zip(&needle).all(|(a, b)| a.eq_value(b)),
+    ))
+}
+
 fn vec_min_max(v: &List, method: &MethodName, args: &[Value]) -> Result<Value> {
     if let Some(other) = args.first() {
         let recv = Value::Vec(v.clone());
