@@ -158,11 +158,22 @@ impl Compiler<'_> {
         if self.compile_let_borrow(local, dst, is_last)? {
             return Ok(());
         }
-        let val = self.alloc();
-        match &local.init {
-            Some(init) => self.compile_owned_into(val, &init.expr)?,
-            None => self.emit(Op::LoadUnit { dst: val }),
-        }
+        let val = match &local.init {
+            // `let (a, b) = &mut place` destructures a borrow, so the bindings write into it
+            Some(init) if matches!(&*init.expr, Expr::Reference(r) if r.mutability.is_some()) => {
+                self.compile_scrutinee(&init.expr, false)?
+            }
+            Some(init) => {
+                let val = self.alloc();
+                self.compile_owned_into(val, &init.expr)?;
+                val
+            }
+            None => {
+                let val = self.alloc();
+                self.emit(Op::LoadUnit { dst: val });
+                val
+            }
+        };
         self.copy_mut_binding(local, val);
         // a `from_str` init already parsed into the annotated type, see `call_coerce`
         let parsed = local

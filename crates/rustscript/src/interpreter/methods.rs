@@ -412,7 +412,9 @@ pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
             .ok_or_else(|| anyhow!("{}", args.first().map(Value::display).unwrap_or_default()))?,
         // no runtime type, so only what the call site wrote can build the default
         BuiltinId::UnwrapOrDefault => inner.unwrap_or_else(|| payload_default(method)),
-        BuiltinId::AsRef | BuiltinId::AsDeref | BuiltinId::Take | BuiltinId::AsMut => recv.clone(),
+        BuiltinId::AsRef | BuiltinId::AsDeref | BuiltinId::Take => recv.clone(),
+        // a borrow, so an `if let` on it anchors its bindings to the payload
+        BuiltinId::AsMut | BuiltinId::AsDerefMut => borrow(recv),
         // as a vec so `collect`, `rev` and friends compose on it
         BuiltinId::IntoIter | BuiltinId::Iter => Value::vec(inner.into_iter().collect()),
         // a json null is None, so a serde lookup on it is None and not an unknown method error
@@ -423,6 +425,10 @@ pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
         },
         _ => return generic_method(recv, method, args),
     })
+}
+
+fn borrow(recv: &Value) -> Value {
+    Value::Ref(Arc::new(ValueRef::borrowed(recv.clone())))
 }
 
 pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> Result<Value> {
@@ -448,11 +454,8 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
             }
         }
         // a reference view is the value
-        BuiltinId::Clone
-        | BuiltinId::AsRef
-        | BuiltinId::AsMut
-        | BuiltinId::AsDeref
-        | BuiltinId::AsDerefMut => recv.clone(),
+        BuiltinId::Clone | BuiltinId::AsRef | BuiltinId::AsDeref => recv.clone(),
+        BuiltinId::AsMut | BuiltinId::AsDerefMut => borrow(recv),
         BuiltinId::Unwrap => {
             if is_ok {
                 inner

@@ -11,7 +11,24 @@ Each seed replays with `generate --seed N` only for the generator at the time
 of the run. The old sources are in the run artifacts of the Differential
 workflow.
 
+## Open
+
+Nothing open.
+
 ## Done
+
+### Batch 4, mutation through `Option::as_mut`
+
+Found 2026-08-29 in hilen `build/ui-test.rs`, not by the generator. Writing
+through the binding of `if let Some((_, body)) = current.as_mut()` did not
+reach the option, `as_mut` returned a copy of the enum so the `if let` bound
+copies. `as_mut` and `as_deref_mut` on `Option` and `Result` return a borrow
+now, in `interpreter/methods.rs`, so the bindings anchor to the payload.
+
+Found beside it: `let (a, b) = &mut pair; a.push('x')` also wrote into a
+copy, a destructuring `let` of a `&mut` place compiled the init as an owned
+value. It compiles as a scrutinee now, `compile/block.rs`. Both are covered
+by `crates/examples/examples/option_as_mut_pattern.rs`.
 
 ### Batch 1, f32 precision in the interpreter
 
