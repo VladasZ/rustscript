@@ -151,11 +151,11 @@ fn pow(width: IntWidth, base: i128, exponent: u32) -> Result<i128> {
     let mut result: i128 = 1;
     for _ in 0..exponent {
         let Some(next) = result.checked_mul(base) else {
-            bail!("attempt to multiply with overflow");
+            bail!("attempt to exponentiate with overflow");
         };
         result = next;
         if result < width.min() || result > width.max() {
-            bail!("attempt to multiply with overflow");
+            bail!("attempt to exponentiate with overflow");
         }
     }
     Ok(result)

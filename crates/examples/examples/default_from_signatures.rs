@@ -101,7 +101,7 @@ fn main() {
 
     // `Some` of a tuple states it through its items
     let (count, index, on) = Some((total as u64, total, !flag))
-        .filter(|_| flag)
+        .filter(|(seen, _, _)| flag && *seen > 0)
         .unwrap_or_default();
     println!("some tuple: {count} {index} {on}");
 
@@ -160,7 +160,9 @@ fn later_misses(flag: bool) {
     println!("generic pick miss: {ratio}");
 
     // `Some(x)` and `Ok(x)` state the payload through `x`
-    let absent = Some(5u16).filter(|_| flag).unwrap_or_default();
+    let absent = Some(5u16)
+        .filter(|value| flag && *value > 0)
+        .unwrap_or_default();
     let failed = if flag {
         Ok(9u16)
     } else {

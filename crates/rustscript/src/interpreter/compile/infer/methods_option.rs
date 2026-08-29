@@ -59,6 +59,10 @@ impl Infer<'_, '_> {
                 recv.clone()
             }
             "and" => self.arg_ty(args, 0, expected),
+            "context" | "with_context" => {
+                self.walk_all(args);
+                Ty::result(payload.clone(), Ty::named("anyhow::Error"))
+            }
             "ok_or" => {
                 let err = self.arg_ty(args, 0, &Ty::Unknown);
                 Ty::result(payload.clone(), err)
@@ -159,16 +163,28 @@ impl Infer<'_, '_> {
                 self.closure_ret(args, 0, vec![err.clone()]);
                 recv.clone()
             }
+            "and" => self.arg_ty(args, 0, expected),
+            // the ok type survives, the error type becomes the one the other result carries
+            "or" => match self.arg_ty(args, 0, recv) {
+                Ty::Result(_, other) => Ty::result(ok.clone(), *other),
+                _ => recv.clone(),
+            },
             "context" | "with_context" => {
                 self.walk_all(args);
                 Ty::result(ok.clone(), Ty::named("anyhow::Error"))
             }
-            "as_ref" | "as_mut" | "clone" | "cloned" | "copied" | "inspect" | "inspect_err" => {
+            "as_ref" | "as_mut" | "as_deref" | "as_deref_mut" | "clone" | "cloned" | "copied"
+            | "inspect" | "inspect_err" => {
                 self.walk_all(args);
                 recv.clone()
             }
             "map_or" => {
                 let default = self.arg_ty(args, 0, expected);
+                let got = self.closure_ret_expecting(args, 1, vec![ok.clone()], &default);
+                self.vars.meet(&default, &got)
+            }
+            "map_or_else" => {
+                let default = self.closure_ret(args, 0, vec![err.clone()]);
                 let got = self.closure_ret_expecting(args, 1, vec![ok.clone()], &default);
                 self.vars.meet(&default, &got)
             }

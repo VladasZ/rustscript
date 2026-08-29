@@ -9,6 +9,7 @@ use parking_lot::Mutex;
 use super::bytecode::{BuiltinId, MethodName};
 use super::enum_def::ERROR_KIND;
 use super::native::Native;
+use super::std_bridge::as_i64;
 use super::value::Value;
 
 type Handle = Arc<Mutex<Native>>;
@@ -687,11 +688,7 @@ pub(super) fn value_to_bytes(v: Option<&Value>) -> Vec<u8> {
         Some(Value::Vec(items)) => items
             .lock()
             .iter()
-            .filter_map(|x| match x {
-                Value::Int(i) => u8::try_from(*i).ok(),
-                Value::IntW(v, w) => u8::try_from(w.decode(*v)).ok(),
-                _ => None,
-            })
+            .filter_map(|x| as_i64(x).and_then(|i| u8::try_from(i).ok()))
             .collect(),
         Some(other) => other.display().into_bytes(),
         None => Vec::new(),

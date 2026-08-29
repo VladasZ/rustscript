@@ -36,7 +36,7 @@ macro_rules! big_methods {
                 BuiltinId::CheckedShr => count_arg(args, 0).map(|n| checked(recv.checked_shr(n))),
                 BuiltinId::Pow => count_arg(args, 0).and_then(|e| match recv.checked_pow(e) {
                     Some(v) => Ok(same(v)),
-                    None => bail!("attempt to multiply with overflow"),
+                    None => bail!("attempt to exponentiate with overflow"),
                 }),
                 BuiltinId::CheckedPow => count_arg(args, 0).map(|e| checked(recv.checked_pow(e))),
                 BuiltinId::SaturatingPow => {

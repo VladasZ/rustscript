@@ -206,6 +206,15 @@ fn integer_overflow_panics_like_rust() {
     );
 }
 
+/// `pow` names the exponentiation, not the multiply it runs underneath.
+#[test]
+fn pow_overflow_panics_like_rust() {
+    let src = "fn keep(n: i64) -> i64 {\n    n\n}\nfn main() {\n    println!(\"{}\", keep(3).pow(60));\n}\n";
+    assert_parity(src, 101, "attempt to exponentiate with overflow");
+    let wide = "fn keep(n: u128) -> u128 {\n    n\n}\nfn main() {\n    println!(\"{}\", keep(3).pow(200));\n}\n";
+    assert_parity(wide, 101, "attempt to exponentiate with overflow");
+}
+
 /// An overflow inside a `while` body panics with the exact message.
 #[test]
 fn while_overflow_panics_like_rust() {

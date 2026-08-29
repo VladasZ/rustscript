@@ -12,6 +12,7 @@
 use std::collections::BTreeSet;
 
 use super::bytecode::{BuiltinId, Chunk, Const, Op};
+use super::numeric::IntWidth;
 
 include!(concat!(env!("OUT_DIR"), "/bridge_tables.rs"));
 
@@ -71,13 +72,19 @@ impl<'a> Ty<'a> {
         }
     }
 
-    /// Only the shapes the tables can check are mapped, the rest stays `Unknown`.
+    /// Only the shapes the tables can check are mapped, the rest stays `Unknown`. A builtin name is
+    /// read before the script's own impls, otherwise `impl MyTrait for char` would hide the whole
+    /// char bridge behind the 1 method the script wrote.
     fn from_annotation(name: &'a str, user: &UserMethods) -> Ty<'a> {
         match name {
             "Value" => Ty::Json,
             "String" | "str" => Ty::Str,
             "Vec" | "VecDeque" => Ty::Vec,
             "HashMap" | "BTreeMap" | "IndexMap" => Ty::Map,
+            "char" => Ty::Char,
+            "bool" => Ty::Bool,
+            "f32" | "f64" => Ty::Float,
+            _ if IntWidth::parse(name).is_some() => Ty::Int,
             other if user.types.contains(other) => Ty::User(other),
             _ => Ty::Unknown,
         }

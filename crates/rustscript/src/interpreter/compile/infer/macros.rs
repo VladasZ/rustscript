@@ -19,10 +19,13 @@ impl Infer<'_, '_> {
         match name.as_str() {
             "vec" => {
                 if let Ok((value, count)) = mac.parse_body_with(parse_vec_repeat) {
-                    let item = self.expr(&value, &expected.item());
-                    self.expr(&count, &Ty::usize());
-                    let body = Rc::new(MacroBody::Repeat(Box::new((value, count))));
-                    self.macros.insert(std::ptr::from_ref(mac), body);
+                    // every inferred type is keyed by the address of its node, so the pair has to
+                    // reach its final place before the walk, not after
+                    let pair = Box::new((value, count));
+                    let item = self.expr(&pair.0, &expected.item());
+                    self.expr(&pair.1, &Ty::usize());
+                    self.macros
+                        .insert(std::ptr::from_ref(mac), Rc::new(MacroBody::Repeat(pair)));
                     return Ty::vec(item);
                 }
                 let Ok(exprs) = parse_exprs(mac) else {
@@ -41,17 +44,16 @@ impl Infer<'_, '_> {
                 let Ok((scrutinee, pat, guard)) = parse_matches(mac) else {
                     return Ty::Bool;
                 };
-                let ty = self.expr(&scrutinee, &Ty::Unknown);
+                let parts = Box::new((scrutinee, pat, guard));
+                let ty = self.expr(&parts.0, &Ty::Unknown);
                 self.push();
-                self.bind_pat(&pat, &ty);
-                if let Some(guard) = &guard {
+                self.bind_pat(&parts.1, &ty);
+                if let Some(guard) = &parts.2 {
                     self.expr(guard, &Ty::Bool);
                 }
                 self.pop();
-                self.macros.insert(
-                    std::ptr::from_ref(mac),
-                    Rc::new(MacroBody::Matches(Box::new((scrutinee, pat, guard)))),
-                );
+                self.macros
+                    .insert(std::ptr::from_ref(mac), Rc::new(MacroBody::Matches(parts)));
                 Ty::Bool
             }
             "format" | "println" | "print" | "eprintln" | "eprint" | "panic" | "anyhow"

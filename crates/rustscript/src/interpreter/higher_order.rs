@@ -474,31 +474,7 @@ impl Vm {
                     self.call_closure_data(&clo(0)?, &[])?
                 }
             }
-            BuiltinId::Or => {
-                if is_some {
-                    Value::some(inner()?)
-                } else {
-                    args.first().cloned().unwrap_or_else(Value::none)
-                }
-            }
-            BuiltinId::And => {
-                if is_some {
-                    args.first().cloned().unwrap_or_else(Value::none)
-                } else {
-                    Value::none()
-                }
-            }
-            BuiltinId::Xor => {
-                let other = args.first().cloned().unwrap_or_else(Value::none);
-                let other_some = other.is_enum_kind(EnumKind::Option)
-                    && matches!(&other, Value::Enum { variant, .. } if *variant == SOME);
-                match (is_some, other_some) {
-                    (true, false) => Value::some(inner()?),
-                    (false, true) => other,
-                    _ => Value::none(),
-                }
-            }
-            _ => return Ok(None),
+            _ => return option_pair(is_some, data, name, args),
         };
         Ok(Some(out))
     }
@@ -579,4 +555,48 @@ impl Vm {
         };
         Ok(Some(out))
     }
+}
+
+/// The `Option` methods that pair the receiver with a second option and take no closure.
+fn option_pair(
+    is_some: bool,
+    data: &List,
+    name: BuiltinId,
+    args: &[Value],
+) -> Result<Option<Value>> {
+    let other = || args.first().cloned().unwrap_or_else(Value::none);
+    let out = match name {
+        BuiltinId::Or => {
+            if is_some {
+                Value::some(Value::payload(data)?)
+            } else {
+                other()
+            }
+        }
+        BuiltinId::And => {
+            if is_some {
+                other()
+            } else {
+                Value::none()
+            }
+        }
+        BuiltinId::Zip => match (is_some, other().some_payload()) {
+            (true, Some(payload)) => {
+                Value::some(Value::tuple(vec![Value::payload(data)?, payload]))
+            }
+            _ => Value::none(),
+        },
+        BuiltinId::Xor => {
+            let other = other();
+            let other_some = other.is_enum_kind(EnumKind::Option)
+                && matches!(&other, Value::Enum { variant, .. } if *variant == SOME);
+            match (is_some, other_some) {
+                (true, false) => Value::some(Value::payload(data)?),
+                (false, true) => other,
+                _ => Value::none(),
+            }
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(out))
 }

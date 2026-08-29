@@ -70,6 +70,7 @@ pub const BRIDGES: &[Bridge] = &[
     b("higher_order.rs", "vec_reduce_ho", "Vec"),
     b("higher_order.rs", "vec_order_ho", "Vec"),
     b("higher_order.rs", "option_higher_order", "Option"),
+    b("higher_order.rs", "option_pair", "Option"),
     b("higher_order.rs", "result_higher_order", "Result"),
     b("higher_order.rs", "entry_higher_order", "Entry"),
     b("iterator/drive.rs", "iterator_method", "Iterator"),

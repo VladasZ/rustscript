@@ -190,11 +190,11 @@ fn set_permissions_impl(path: &str, mode: Option<u32>) -> std::io::Result<()> {
     }
 }
 
+/// A value nested in a struct field or a vec never passed through `bridge_image`, so it still
+/// carries its declared width and a plain `Int` match would miss it.
 pub(super) fn as_i64(v: &Value) -> Option<i64> {
-    match v {
-        Value::Int(i) => Some(*i),
-        _ => None,
-    }
+    let (n, _) = v.int_parts()?;
+    i64::try_from(n).ok()
 }
 
 /// A `PathBuf` or `OsString` has the text in its `s` field, anything else uses its display form.
@@ -489,10 +489,7 @@ pub(super) fn wrap_unit(r: std::io::Result<()>) -> Value {
 }
 
 pub(super) fn field_int(s: &StructData, k: &str) -> i64 {
-    match s.get(k) {
-        Some(Value::Int(i)) => i,
-        _ => 0,
-    }
+    s.get(k).as_ref().and_then(as_i64).unwrap_or(0)
 }
 
 pub(super) fn arg_str(args: &[Value], i: usize) -> String {
@@ -560,10 +557,7 @@ pub(super) fn bytes_to_string(arg: Option<&Value>) -> String {
             let bytes: Vec<u8> = v
                 .lock()
                 .iter()
-                .filter_map(|x| match x {
-                    Value::Int(i) => u8::try_from(*i).ok(),
-                    _ => None,
-                })
+                .filter_map(|x| as_i64(x).and_then(|i| u8::try_from(i).ok()))
                 .collect();
             String::from_utf8_lossy(&bytes).into_owned()
         }

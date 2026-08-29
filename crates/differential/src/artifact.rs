@@ -46,8 +46,14 @@ impl Artifact {
         Ok(path)
     }
 
+    /// The campaign report names the directory, so both that and the file inside it are accepted.
     pub fn load(path: &Path) -> Result<Self> {
-        Ok(serde_json::from_slice(&fs::read(path)?)?)
+        let file = if path.is_dir() {
+            path.join("artifact.json")
+        } else {
+            path.to_path_buf()
+        };
+        Ok(serde_json::from_slice(&fs::read(file)?)?)
     }
 }
 
