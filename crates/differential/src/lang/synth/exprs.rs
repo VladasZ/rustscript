@@ -841,11 +841,13 @@ impl Generator<'_> {
                 }
                 _ => None,
             })
+            .filter(|(name, _)| !self.called_closures.contains(name))
             .collect();
         if closures.is_empty() {
             return None;
         }
         let (name, params) = self.pick(&closures).clone();
+        self.called_closures.push(name.clone());
         // a closure over its own return type can also go through the apply helper
         if params.len() == 1 && params[0] == *want && self.chance(0.3) {
             let helper = self.apply_fn(want);

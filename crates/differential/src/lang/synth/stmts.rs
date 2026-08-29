@@ -297,22 +297,24 @@ impl Generator<'_> {
         let applies = params.len() == 1 && params[0] == *ret;
         (0..count)
             .map(|_| {
-                if applies && self.chance(0.35) {
-                    let helper = self.apply_fn(ret);
-                    let arg = self.expr(ret, 1);
-                    return Expr::ApplyCall {
-                        helper,
-                        closure: name.to_string(),
-                        arg: Box::new(arg),
+                self.statement(|inner| {
+                    if applies && inner.chance(0.35) {
+                        let helper = inner.apply_fn(ret);
+                        let arg = inner.expr(ret, 1);
+                        return Expr::ApplyCall {
+                            helper,
+                            closure: name.to_string(),
+                            arg: Box::new(arg),
+                            ty: ret.clone(),
+                        };
+                    }
+                    let args = params.iter().map(|ty| inner.expr(ty, 1)).collect();
+                    Expr::ClosureCall {
+                        name: name.to_string(),
+                        args,
                         ty: ret.clone(),
-                    };
-                }
-                let args = params.iter().map(|ty| self.expr(ty, 1)).collect();
-                Expr::ClosureCall {
-                    name: name.to_string(),
-                    args,
-                    ty: ret.clone(),
-                }
+                    }
+                })
             })
             .collect()
     }
@@ -470,16 +472,16 @@ impl Generator<'_> {
         let count = self.rng.random_range(1..=2);
         let mut body = Vec::new();
         for _ in 0..count {
-            let stmt = match self.rng.random_range(0..6) {
-                0 => self.assign_stmt(),
-                1 => self.compound_stmt().unwrap_or_else(|| self.observation()),
-                2 => self
+            let stmt = self.statement(|inner| match inner.rng.random_range(0..6) {
+                0 => inner.assign_stmt(),
+                1 => inner.compound_stmt().unwrap_or_else(|| inner.observation()),
+                2 => inner
                     .collection_mutation()
-                    .unwrap_or_else(|| self.observation()),
-                3 if self.in_loop => self.break_or_continue(),
-                4 if self.fn_ret.is_some() => self.return_stmt(),
-                _ => self.observation(),
-            };
+                    .unwrap_or_else(|| inner.observation()),
+                3 if inner.in_loop => inner.break_or_continue(),
+                4 if inner.fn_ret.is_some() => inner.return_stmt(),
+                _ => inner.observation(),
+            });
             body.push(stmt);
         }
         body

@@ -126,7 +126,7 @@ The `supported_page_is_current` test enforces it.
 
 ## Option
 
-`and`, `and_then`, `as_deref`, `as_mut`, `as_ref`, `clone`, `cloned`, `context`, `copied`, `expect`, `filter`, `get`, `into_iter`, `is_none`, `is_none_or`, `is_some`, `is_some_and`, `iter`, `map`, `map_or`, `map_or_else`, `ok_or`, `ok_or_else`, `or`, `or_else`, `take`, `unwrap`, `unwrap_or`, `unwrap_or_default`, `unwrap_or_else`, `with_context`, `xor`
+`and`, `and_then`, `as_deref`, `as_mut`, `as_ref`, `clone`, `cloned`, `context`, `copied`, `expect`, `filter`, `get`, `into_iter`, `is_none`, `is_none_or`, `is_some`, `is_some_and`, `iter`, `map`, `map_or`, `map_or_else`, `ok_or`, `ok_or_else`, `or`, `or_else`, `take`, `unwrap`, `unwrap_or`, `unwrap_or_default`, `unwrap_or_else`, `with_context`, `xor`, `zip`
 
 ## Ordering
 

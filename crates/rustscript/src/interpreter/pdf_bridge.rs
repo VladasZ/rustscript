@@ -7,6 +7,7 @@ use lopdf::{Document, ObjectId};
 
 use super::bytecode::{BuiltinId, MethodName};
 use super::native::Native;
+use super::std_bridge::as_i64;
 use super::value::Value;
 
 pub(super) fn load(path: &str) -> Value {
@@ -87,9 +88,6 @@ fn bytes_arg(args: &[Value], i: usize) -> Vec<u8> {
     items
         .lock()
         .iter()
-        .filter_map(|v| match v {
-            Value::Int(n) => u8::try_from(*n).ok(),
-            _ => None,
-        })
+        .filter_map(|v| as_i64(v).and_then(|n| u8::try_from(n).ok()))
         .collect()
 }

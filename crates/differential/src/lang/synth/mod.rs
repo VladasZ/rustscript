@@ -52,6 +52,10 @@ pub struct Generator<'a> {
     pub(super) loop_labels: Vec<String>,
     /// a bare literal here would be an ambiguous `{integer}`
     pub(super) forbid_bare: bool,
+    /// closures already called in the statement being built. A closure literal that names one
+    /// holds it borrowed for as long as the literal lives, so a second mention in the same
+    /// statement is 2 mutable borrows at once and rustc rejects it.
+    pub(super) called_closures: Vec<String>,
 }
 
 impl<'a> Generator<'a> {
@@ -69,7 +73,16 @@ impl<'a> Generator<'a> {
             in_loop: false,
             loop_labels: Vec::new(),
             forbid_bare: false,
+            called_closures: Vec::new(),
         }
+    }
+
+    /// Wraps one statement, so the closures called inside it are forgotten again at its end.
+    pub(super) fn statement<T>(&mut self, build: impl FnOnce(&mut Self) -> T) -> T {
+        let saved = std::mem::take(&mut self.called_closures);
+        let out = build(self);
+        self.called_closures = saved;
+        out
     }
 
     /// `?`, `break`, `continue` and `return` would apply to the closure, so none is offered.
@@ -96,11 +109,11 @@ impl<'a> Generator<'a> {
         let mut statements = Vec::new();
         let bindings = self.rng.random_range(3..=6);
         for _ in 0..bindings {
-            statements.push(self.binding_stmt());
+            statements.push(self.statement(Self::binding_stmt));
         }
         let extras = self.rng.random_range(3..=7);
         for _ in 0..extras {
-            statements.push(self.mutation());
+            statements.push(self.statement(Self::mutation));
         }
         // a few free standing expressions, so a value that was never stored still shows up
         let observed: Vec<(String, Ty)> = self
@@ -115,7 +128,7 @@ impl<'a> Generator<'a> {
         let observations = self.rng.random_range(2..=4);
         for _ in 0..observations {
             let ty = self.any_ty();
-            let expr = self.expr(&ty, MAX_EXPR_DEPTH);
+            let expr = self.statement(|inner| inner.expr(&ty, MAX_EXPR_DEPTH));
             statements.push(self.print_stmt(expr));
         }
         let mut block = Block {
