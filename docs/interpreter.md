@@ -60,7 +60,9 @@ keep their real semantics. `rev` is lazy too, each pull is a `next_back` of
 the source, so a `map` closure runs from the back. A `vec.into_iter()` chain
 of `map`, `skip` and `cloned` collected into a `Vec` of a compatible layout
 follows the in place collect of std, the size is read first and a `skip` past
-the end never runs the closure.
+the end never runs the closure. `sum` and `product` fold one element at a
+time as they pull, so an overflow of the running total panics before the
+source makes the next element.
 
 Arithmetic and comparisons on operands the inference pass typed compile to
 typed ops that skip the generic dispatch. There is no hot loop tier any more,

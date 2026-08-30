@@ -121,6 +121,7 @@ impl IntAcc {
     }
 }
 
+#[derive(Clone, Copy)]
 struct Reduction {
     op: fn(i128, i128) -> Option<i128>,
     op64: fn(f64, f64) -> f64,
@@ -145,47 +146,84 @@ const PRODUCT: Reduction = Reduction {
     what: "product",
 };
 
-fn reduce(
-    items: impl IntoIterator<Item = Value>,
-    target: Option<&ScalarTy>,
-    r: &Reduction,
-    int_identity: i128,
-    float_identity: f64,
-) -> Result<Value> {
-    // i128 so a `u64` element past `i64::MAX` keeps its value
-    let mut integers = IntAcc::new(target, int_identity);
-    let mut floats = FloatAcc::new(target, float_identity);
-    let mut has_float = false;
-    for value in items {
-        if let Some((value, width)) = value.int_parts() {
-            integers.apply(value, width, r.op, r.overflow)?;
-            continue;
+/// Folds one element at a time. A lazy source is pulled through this, so an accumulator
+/// overflow panics before the next element is produced, the way the native `Sum` and `Product`
+/// impls do. Draining the source first would report a panic from a later element instead.
+pub(in crate::interpreter) struct Reducer<'a> {
+    target: Option<&'a ScalarTy>,
+    reduction: Reduction,
+    integers: IntAcc,
+    floats: FloatAcc,
+    has_float: bool,
+}
+
+impl<'a> Reducer<'a> {
+    fn new(
+        target: Option<&'a ScalarTy>,
+        reduction: Reduction,
+        int_identity: i128,
+        float_identity: f64,
+    ) -> Self {
+        Self {
+            target,
+            reduction,
+            // i128 so a `u64` element past `i64::MAX` keeps its value
+            integers: IntAcc::new(target, int_identity),
+            floats: FloatAcc::new(target, float_identity),
+            has_float: false,
         }
-        floats.apply(&value, r.op64, r.op32)?;
-        has_float = true;
     }
-    // only a `sum::<f64>()` turbofish tells an empty float sum from an integer one
-    let float_target = matches!(target, Some(ScalarTy::F32 | ScalarTy::F64));
-    Ok(if has_float || (float_target && !integers.seen) {
-        // the integer side only joins with a value, so it can't cancel the -0.0 identity
-        let joined = integers.seen.then_some(integers.value);
-        floats.finish(r.op64, r.op32, joined)
-    } else {
-        integers.finish(target, r.what)
-    })
+
+    pub(in crate::interpreter) fn push(&mut self, value: &Value) -> Result<()> {
+        let r = self.reduction;
+        if let Some((int, width)) = value.int_parts() {
+            return self.integers.apply(int, width, r.op, r.overflow);
+        }
+        self.floats.apply(value, r.op64, r.op32)?;
+        self.has_float = true;
+        Ok(())
+    }
+
+    pub(in crate::interpreter) fn finish(self) -> Value {
+        let r = self.reduction;
+        // only a `sum::<f64>()` turbofish tells an empty float sum from an integer one
+        let float_target = matches!(self.target, Some(ScalarTy::F32 | ScalarTy::F64));
+        if self.has_float || (float_target && !self.integers.seen) {
+            // the integer side only joins with a value, so it can't cancel the -0.0 identity
+            let joined = self.integers.seen.then_some(self.integers.value);
+            self.floats.finish(r.op64, r.op32, joined)
+        } else {
+            self.integers.finish(self.target, r.what)
+        }
+    }
+}
+
+/// `Sum` for floats starts at -0.0, so negative zeros keep the sign
+pub(in crate::interpreter) fn sum_reducer(target: Option<&ScalarTy>) -> Reducer<'_> {
+    Reducer::new(target, SUM, 0, -0.0)
+}
+
+pub(in crate::interpreter) fn product_reducer(target: Option<&ScalarTy>) -> Reducer<'_> {
+    Reducer::new(target, PRODUCT, 1, 1.0)
+}
+
+fn reduce(items: impl IntoIterator<Item = Value>, mut reducer: Reducer<'_>) -> Result<Value> {
+    for value in items {
+        reducer.push(&value)?;
+    }
+    Ok(reducer.finish())
 }
 
 pub(in crate::interpreter) fn sum_values(
     items: impl IntoIterator<Item = Value>,
     target: Option<&ScalarTy>,
 ) -> Result<Value> {
-    // `Sum` for floats starts at -0.0, so negative zeros keep the sign
-    reduce(items, target, &SUM, 0, -0.0)
+    reduce(items, sum_reducer(target))
 }
 
 pub(in crate::interpreter) fn product_values(
     items: impl IntoIterator<Item = Value>,
     target: Option<&ScalarTy>,
 ) -> Result<Value> {
-    reduce(items, target, &PRODUCT, 1, 1.0)
+    reduce(items, product_reducer(target))
 }

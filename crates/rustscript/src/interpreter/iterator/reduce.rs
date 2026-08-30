@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use super::{Handle, IteratorState, as_closure, option_inner, product_values, sum_values, wrap};
+use super::{
+    Handle, IteratorState, Reducer, as_closure, option_inner, product_reducer, sum_reducer, wrap,
+};
 use crate::interpreter::bridge::arg;
 use crate::interpreter::bytecode::{BuiltinId, ScalarTy};
 use crate::interpreter::ops::compare_values;
@@ -172,8 +174,7 @@ impl Vm {
         iterator: &Handle,
         target: Option<&ScalarTy>,
     ) -> Result<Value> {
-        let items = self.drain_iterator(iterator)?;
-        sum_values(items, target)
+        self.reduce_iterator(iterator, sum_reducer(target))
     }
 
     pub(super) fn iterator_product(
@@ -181,8 +182,21 @@ impl Vm {
         iterator: &Handle,
         target: Option<&ScalarTy>,
     ) -> Result<Value> {
-        let items = self.drain_iterator(iterator)?;
-        product_values(items, target)
+        self.reduce_iterator(iterator, product_reducer(target))
+    }
+
+    /// One element at a time, so a step that overflows the accumulator panics before the
+    /// source produces the next element. A source with a side effect that panics on its own
+    /// would otherwise report that later panic instead.
+    fn reduce_iterator(
+        self: &Arc<Self>,
+        iterator: &Handle,
+        mut reducer: Reducer<'_>,
+    ) -> Result<Value> {
+        while let Some(value) = self.iterator_next(iterator)? {
+            reducer.push(&value)?;
+        }
+        Ok(reducer.finish())
     }
 
     pub(super) fn iterator_extreme(
