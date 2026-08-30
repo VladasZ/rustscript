@@ -17,6 +17,21 @@ Nothing open.
 
 ## Done
 
+### Batch 5, `sum` and `product` pulled ahead of the fold
+
+Found by the nightly run of 2026-08-30, seeds 20695202191 and 20695202192 on
+Windows, both the same bug. `sum` and `product` on a lazy iterator drained the
+whole source into a vector and only then folded it. Native Rust folds as it
+pulls, so an accumulator overflow panics before the next element is produced.
+The case mapped a closure whose own body overflowed on a later call, so the
+compiled run panicked with `attempt to multiply with overflow` and the
+interpreted run with `attempt to add with overflow`.
+
+Both now fold one element at a time through a `Reducer` in
+`iterator/arith.rs`, driven by `iterator/reduce.rs`. The eager vec path runs
+the same reducer, so both sides still agree on every width. Covered by
+`crates/differential/regressions/product_overflows_before_next_item.rs`.
+
 ### Batch 4, mutation through `Option::as_mut`
 
 Found 2026-08-29 in hilen `build/ui-test.rs`, not by the generator. Writing

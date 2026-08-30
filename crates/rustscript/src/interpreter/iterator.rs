@@ -546,4 +546,4 @@ mod drive;
 mod in_place;
 mod reduce;
 
-pub(super) use arith::{product_values, sum_values};
+pub(super) use arith::{Reducer, product_reducer, product_values, sum_reducer, sum_values};
