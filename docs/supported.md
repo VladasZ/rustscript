@@ -86,7 +86,7 @@ The `supported_page_is_current` test enforces it.
 
 ## HeaderMap
 
-`get`, `map`, `text`
+`append`, `clone`, `contains_key`, `get`, `get_all`, `insert`, `is_empty`, `iter`, `keys`, `keys_len`, `len`, `map`, `remove`, `values`
 
 ## HeaderValue
 
