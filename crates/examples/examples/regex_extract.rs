@@ -37,6 +37,11 @@ fn main() -> Result<()> {
     let errors = Regex::new(r"ERROR")?;
     let redacted = errors.replace_all(text, "WARN");
     println!("redacted: {redacted}");
+    println!("first only: {}", errors.replace(text, "WARN"));
+    println!("first two: {}", errors.replacen(text, 2, "WARN"));
+    // a zero limit means no limit, the same as `replace_all`
+    println!("no limit: {}", errors.replacen(text, 0, "WARN"));
+    println!("swapped: {}", re.replacen(text, 1, "$3.$2.$1 $4"));
 
     println!("escaped: {}", escape("a.b*c?"));
     Ok(())

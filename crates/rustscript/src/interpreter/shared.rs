@@ -648,9 +648,9 @@ pub(super) fn regex_core(
     re: &regex::Regex,
     name: BuiltinId,
     source: &str,
-    replacement: &dyn Fn() -> String,
-) -> Option<RegexOut> {
-    Some(match name {
+    args: &impl Args,
+) -> Result<Option<RegexOut>> {
+    Ok(Some(match name {
         BuiltinId::IsMatch => RegexOut::Bool(re.is_match(source)),
         BuiltinId::Find => RegexOut::OptSpan(re.find(source).map(|m| (m.start(), m.end()))),
         BuiltinId::Captures => RegexOut::OptGroups(re.captures(source).map(|c| {
@@ -659,15 +659,20 @@ pub(super) fn regex_core(
                 .collect()
         })),
         BuiltinId::Replace => {
-            RegexOut::Text(re.replacen(source, 1, replacement().as_str()).into_owned())
+            RegexOut::Text(re.replacen(source, 1, args.text(1).as_str()).into_owned())
         }
         BuiltinId::ReplaceAll => {
-            RegexOut::Text(re.replace_all(source, replacement().as_str()).into_owned())
+            RegexOut::Text(re.replace_all(source, args.text(1).as_str()).into_owned())
         }
+        // the limit comes before the replacement, unlike `str::replacen`
+        BuiltinId::Replacen => RegexOut::Text(
+            re.replacen(source, usize_arg(args, 1)?, args.text(2).as_str())
+                .into_owned(),
+        ),
         BuiltinId::Split => RegexOut::Pieces(re.split(source).map(str::to_string).collect()),
         BuiltinId::AsStr => RegexOut::Pattern,
-        _ => return None,
-    })
+        _ => return Ok(None),
+    }))
 }
 
 pub(super) enum MatchOut {

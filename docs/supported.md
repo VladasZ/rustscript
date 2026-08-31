@@ -150,7 +150,7 @@ The `supported_page_is_current` test enforces it.
 
 ## Regex
 
-`as_str`, `captures`, `captures_iter`, `find`, `find_iter`, `is_match`, `replace`, `replace_all`, `split`
+`as_str`, `captures`, `captures_iter`, `find`, `find_iter`, `is_match`, `replace`, `replace_all`, `replacen`, `split`
 
 ## Request
 

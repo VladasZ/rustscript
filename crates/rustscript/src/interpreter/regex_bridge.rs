@@ -95,8 +95,7 @@ fn regex_method(regex: &RegexValue, method: &MethodName, args: &[Value]) -> Resu
         }
         _ => {}
     }
-    let replacement = || args.get(1).map(Value::display).unwrap_or_default();
-    let Some(out) = regex_core(&regex.compiled, method.id, &source, &replacement) else {
+    let Some(out) = regex_core(&regex.compiled, method.id, &source, &VArgs(args))? else {
         bail!("unknown method `{}` on Regex", method.text);
     };
     Ok(match out {
