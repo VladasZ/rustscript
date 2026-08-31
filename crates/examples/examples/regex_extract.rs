@@ -43,6 +43,13 @@ fn main() -> Result<()> {
     println!("no limit: {}", errors.replacen(text, 0, "WARN"));
     println!("swapped: {}", re.replacen(text, 1, "$3.$2.$1 $4"));
 
+    // the replace family hands back a `Cow<str>`, so the borrowed view and the owned one
+    // both have to read the same text
+    let patched = errors.replacen(text, 1, "WARN");
+    let view: &str = patched.as_ref();
+    println!("as_ref: {view}");
+    println!("into_owned: {}", errors.replace(text, "WARN").into_owned());
+
     println!("escaped: {}", escape("a.b*c?"));
     Ok(())
 }
