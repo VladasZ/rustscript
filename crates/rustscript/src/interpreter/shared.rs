@@ -482,9 +482,11 @@ pub(super) fn str_core(s: &str, name: BuiltinId, args: &impl Args) -> Result<Opt
         },
         BuiltinId::Repeat => StrOut::Owned(str_repeat(s, args)?),
         // A json string is a plain Str, so `unwrap` and `expect` on a string are identity. Keeps
-        // serde chains working.
+        // serde chains working. `as_ref` and `into_owned` are what the regex replace family needs,
+        // it hands back a `Cow<str>` in real Rust and a plain Str here.
         BuiltinId::ToOwned
         | BuiltinId::TrimString
+        | BuiltinId::AsRef
         | BuiltinId::AsStr
         | BuiltinId::AsString
         | BuiltinId::Unwrap
