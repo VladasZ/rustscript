@@ -99,6 +99,15 @@ impl Compiler<'_> {
                     argc: u16::try_from(args.len())?,
                 });
             }
+            // the path this module was loaded from, which is what the compiler stamps too
+            "file" => {
+                if !mac.tokens.is_empty() {
+                    bail!("file! takes no arguments");
+                }
+                let path = self.ctx.file.clone();
+                let k = self.add_const(Const::Str(path));
+                self.emit(Op::LoadConst { dst, k });
+            }
             "join" => self.compile_join_macro(dst, mac)?,
             other => bail!("unsupported macro: {other}!"),
         }

@@ -117,7 +117,7 @@ pub const BRIDGES: &[Bridge] = &[
     b("http.rs", "client_method", "Client"),
     b("http.rs", "builder_method", "Builder"),
     b("http.rs", "response_method", "Response"),
-    b("http.rs", "header_map_method", "HeaderMap"),
+    b("http/headers.rs", "header_map_method", "HeaderMap"),
     // crates
     b("crates_bridge.rs", "base64_method", "Base64"),
     b("crates_bridge.rs", "rng_method", "Rng"),

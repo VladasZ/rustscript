@@ -97,8 +97,10 @@ Every feature has a working example under `crates/examples/examples`.
 - `static mut` is rejected. Plain statics behave like constants.
 - Lifetimes and generic bounds mean nothing at runtime.
 - Glob imports from script modules are not supported.
-- `HashMap` iterates in insertion order. Real Rust promises no order, so a
-  correct script cannot see the difference.
+- `HashMap` and `HeaderMap` iterate in insertion order. Real Rust promises no
+  order, so a correct script cannot see the difference.
+- `file!()` gives the script path as it was passed to `rust`, where a compiled
+  build stamps the path rustc was given.
 
 ## GitHub Actions
 

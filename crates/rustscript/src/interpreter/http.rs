@@ -13,6 +13,9 @@ use super::json_bridge::{json_to_pvalue, parse_json, pvalue_to_json};
 use super::native::Native;
 use super::std_bridge::duration_from_value;
 use super::value::{StructData, Value};
+use headers::{empty_map, header_map_method, header_value_call, header_value_method};
+
+mod headers;
 
 /// So many one off gets reuse 1 connection pool.
 fn default_client() -> Client {
@@ -83,6 +86,8 @@ pub(super) fn reqwest_call(id: PathId, args: &[Value]) -> Result<Value> {
                 ("n".into(), args.first().cloned().unwrap_or(Value::Int(10))),
             ],
         ),
+        PathId::HeaderMapNew => empty_map(),
+        PathId::HeaderValueFromStatic | PathId::HeaderValueFromStr => header_value_call(id, args)?,
         PathId::ReqwestBlockingClientNew => {
             blocking_client_value(build_blocking_client(false, None, None, None)?)
         }
@@ -191,8 +196,8 @@ pub(super) fn http_method(
             "ReqwestRequest" => Some(request_method(s, method, args)),
             "ReqwestResponse" => Some(response_method(s, method)),
             "StatusCode" => Some(Ok(status_method(s, method))),
-            "HeaderMap" => Some(Ok(header_map_method(s, method, args))),
-            "HeaderValue" => Some(Ok(header_value_method(s, method))),
+            "HeaderMap" => Some(header_map_method(s, method, args)),
+            "HeaderValue" => Some(header_value_method(s, method)),
             _ => None,
         },
         _ => None,
@@ -618,42 +623,6 @@ fn json_future(body: Vec<u8>) -> Value {
         }
     }))
     .wrap()
-}
-
-fn header_map_method(s: &StructData, method: &MethodName, args: &[Value]) -> Value {
-    match method.id {
-        BuiltinId::Get => {
-            let name = args
-                .first()
-                .map(Value::display)
-                .unwrap_or_default()
-                .to_lowercase();
-            if let Some(Value::Vec(h)) = s.get("map") {
-                for item in h.lock().iter() {
-                    if let Value::Tuple(pair) = item {
-                        let pair = pair.lock();
-                        if pair[0].display().to_lowercase() == name {
-                            return Value::some(Value::struct_of(
-                                "HeaderValue",
-                                [("text".into(), pair[1].clone())],
-                            ));
-                        }
-                    }
-                }
-            }
-            Value::none()
-        }
-        _ => Value::Unit,
-    }
-}
-
-fn header_value_method(s: &StructData, method: &MethodName) -> Value {
-    let text = s.get("text").map(|v| v.display()).unwrap_or_default();
-    match super::shared::header_value_core(method.id, text) {
-        Some(super::shared::HeaderOut::Ok(t)) => Value::ok(Value::str(t)),
-        Some(super::shared::HeaderOut::Text(t)) => Value::str(t),
-        None => Value::Unit,
-    }
 }
 
 fn status_method(s: &StructData, method: &MethodName) -> Value {

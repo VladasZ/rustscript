@@ -129,7 +129,10 @@ pub(super) fn bridge_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
         | PathId::ReqwestBlockingClientNew
         | PathId::ReqwestBlockingClientBuilder
         | PathId::RedirectPolicyNone
-        | PathId::RedirectPolicyLimited => {
+        | PathId::RedirectPolicyLimited
+        | PathId::HeaderMapNew
+        | PathId::HeaderValueFromStatic
+        | PathId::HeaderValueFromStr => {
             return crate::interpreter::http::reqwest_call(id, args).map(Some);
         }
         _ => {}

@@ -293,6 +293,14 @@ impl Infer<'_, '_> {
             ("Response", "json") => Ty::result(expected.payload(), Ty::named("reqwest::Error")),
             ("Response", "headers") => Ty::named("HeaderMap"),
             ("StatusCode", "as_u16") => Ty::Int(IntWidth::U16),
+            ("HeaderMap", "get" | "insert" | "remove") => Ty::option(Ty::named("HeaderValue")),
+            // the runtime hands back a real vec, so vec methods work on it like on a `GetAll`
+            ("HeaderMap", "get_all" | "values") => Ty::vec(Ty::named("HeaderValue")),
+            ("HeaderMap", "iter") => Ty::vec(Ty::Tuple(vec![Ty::Str, Ty::named("HeaderValue")])),
+            ("HeaderMap", "keys") => Ty::vec(Ty::Str),
+            ("HeaderMap", "append" | "contains_key" | "is_empty") => Ty::Bool,
+            ("HeaderMap", "len" | "keys_len") => Ty::usize(),
+            ("HeaderValue", "to_str") => Ty::result(Ty::Str, Ty::named("ToStrError")),
             (
                 "Client" | "ClientBuilder",
                 "get" | "post" | "put" | "delete" | "patch" | "head" | "request",

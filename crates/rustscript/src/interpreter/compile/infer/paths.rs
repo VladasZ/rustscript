@@ -659,6 +659,15 @@ impl Infer<'_, '_> {
                 self.walk_args(args);
                 Ty::result(Ty::named("Response"), Ty::named("reqwest::Error"))
             }
+            ("HeaderMap", "new") => Ty::named("HeaderMap"),
+            ("HeaderValue", "from_static") => {
+                self.walk_args(args);
+                Ty::named("HeaderValue")
+            }
+            ("HeaderValue", "from_str") => {
+                self.walk_args(args);
+                Ty::result(Ty::named("HeaderValue"), Ty::named("InvalidHeaderValue"))
+            }
             ("Client", "new") => Ty::named("Client"),
             ("Client", "builder") => Ty::named("ClientBuilder"),
             ("Local" | "Utc", "now") => Ty::named("DateTime"),

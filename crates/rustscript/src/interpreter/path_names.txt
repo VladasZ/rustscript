@@ -61,6 +61,9 @@ HashSet::new
 HashSet::with_capacity
 Header::default
 Header::new
+HeaderMap::new
+HeaderValue::from_static
+HeaderValue::from_str
 Instant::now
 KEY_ALL_ACCESS
 KEY_CREATE_SUB_KEY

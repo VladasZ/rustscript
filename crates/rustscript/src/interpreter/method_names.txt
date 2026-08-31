@@ -209,6 +209,7 @@ gen
 gen_bool
 gen_range
 get
+get_all
 get_mut mut
 get_or_insert mut
 get_or_insert_with mut
@@ -319,6 +320,7 @@ join
 json
 key
 keys
+keys_len
 kill
 kind
 last
