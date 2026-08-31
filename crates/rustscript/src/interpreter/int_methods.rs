@@ -137,6 +137,18 @@ fn from_raw(width: IntWidth, bits_value: u128) -> i128 {
     }
 }
 
+/// `None` when the answer leaves the receiver's width, which is the overflow both the plain and
+/// the checked form report.
+fn next_power_of_two(width: IntWidth, recv: i128) -> Option<i128> {
+    let value = raw(width, recv);
+    let next = if value <= 1 {
+        1
+    } else {
+        1u128 << (128 - (value - 1).leading_zeros())
+    };
+    in_range(width, AsPrimitive::<i128>::as_(next))
+}
+
 fn saturate(width: IntWidth, value: i128) -> i128 {
     value.clamp(width.min(), width.max())
 }
@@ -448,17 +460,15 @@ fn int_range_family(
             }
             Ok(IntOut::Bool(raw(width, recv).is_power_of_two()))
         }
-        BuiltinId::NextPowerOfTwo => {
+        BuiltinId::NextPowerOfTwo | BuiltinId::CheckedNextPowerOfTwo => {
             if width.is_signed() {
                 return None;
             }
-            let value = raw(width, recv);
-            let next = if value <= 1 {
-                1
-            } else {
-                1u128 << (128 - (value - 1).leading_zeros())
-            };
-            match in_range(width, AsPrimitive::<i128>::as_(next)) {
+            let fits = next_power_of_two(width, recv);
+            if name == BuiltinId::CheckedNextPowerOfTwo {
+                return Some(Ok(IntOut::Checked(fits)));
+            }
+            match fits {
                 Some(v) => Ok(IntOut::Same(v)),
                 None => Err(anyhow::anyhow!("attempt to add with overflow")),
             }

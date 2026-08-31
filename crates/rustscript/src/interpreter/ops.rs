@@ -250,6 +250,11 @@ pub(super) fn compare_values(l: &Value, r: &Value) -> Result<Ordering> {
     partial_compare(l, r)?.ok_or_else(|| anyhow!("cannot order NaN"))
 }
 
+/// Values of different shapes are never equal, which is what a constant pattern needs.
+pub(super) fn values_equal(l: &Value, r: &Value) -> bool {
+    matches!(partial_compare(l, r), Ok(Some(Ordering::Equal)))
+}
+
 /// `PartialOrd` semantics, NaN makes every comparison false. Sorting goes through
 /// `compare_values` and rejects NaN.
 fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {

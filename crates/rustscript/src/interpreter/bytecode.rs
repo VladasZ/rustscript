@@ -437,6 +437,8 @@ pub struct FmtSpec {
 pub struct PatInfo {
     pub pat: PPat,
     pub binds: Vec<(String, Reg)>,
+    /// The registers a `PPat::Const` reads, loaded right before the `TestBind` that uses them.
+    pub consts: Vec<Reg>,
 }
 
 /// `variant` is set when the path resolved to a definition. `name` is kept for the shapes that match
@@ -480,6 +482,8 @@ pub enum PPat {
         sub: Option<Box<PPat>>,
     },
     Lit(PLit),
+    /// A named constant, compared by value. The index picks the register in `PatInfo::consts`.
+    Const(u16),
     Tuple(Vec<PPat>),
     TupleStruct {
         tag: PTag,

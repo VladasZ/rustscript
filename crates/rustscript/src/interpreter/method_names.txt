@@ -91,6 +91,7 @@ checked_div
 checked_ilog2
 checked_mul
 checked_neg
+checked_next_power_of_two
 checked_pow
 checked_rem
 checked_rem_euclid

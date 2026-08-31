@@ -37,7 +37,7 @@ impl Compiler<'_> {
                     self.set_line(c.span());
                     let val = self.alloc();
                     self.compile_into(val, &c.expr)?;
-                    self.define(&c.ident.to_string(), val);
+                    self.define_block_const(&c.ident.to_string(), val);
                 }
                 syn::Item::Static(s) => {
                     if matches!(s.mutability, syn::StaticMutability::Mut(_)) {
@@ -46,7 +46,7 @@ impl Compiler<'_> {
                     self.set_line(s.span());
                     let val = self.alloc();
                     self.compile_into(val, &s.expr)?;
-                    self.define(&s.ident.to_string(), val);
+                    self.define_block_const(&s.ident.to_string(), val);
                 }
                 _ => {}
             }
