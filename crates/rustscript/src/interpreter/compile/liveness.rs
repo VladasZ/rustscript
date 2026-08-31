@@ -129,7 +129,9 @@ fn table_effects(f: &FnState, op: &Op, reads: &mut Vec<Reg>, writes: &mut Vec<Re
         Op::DropScope { list } => writes.extend(f.drop_lists[usize::from(*list)].iter()),
         Op::TestBind { val, pat, dst } => {
             reads.push(*val);
-            writes.extend(f.pats[usize::from(*pat)].binds.iter().map(|(_, reg)| *reg));
+            let info = &f.pats[usize::from(*pat)];
+            reads.extend(info.consts.iter());
+            writes.extend(info.binds.iter().map(|(_, reg)| *reg));
             writes.push(*dst);
         }
         Op::Fmt { dst, spec } | Op::MacroCall { dst, spec, .. } => {

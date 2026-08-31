@@ -86,17 +86,22 @@ pub(super) fn test_bind(ctx: &mut StepCtx, val: u16, pat: u16, dst: u16) -> Flow
         _ => (raw, false),
     };
     let binds = &info.binds;
+    let consts: Vec<Value> = info
+        .consts
+        .iter()
+        .map(|reg| ctx.get(*reg).clone())
+        .collect();
     let mut writes: Vec<(u16, Value)> = Vec::new();
     let matched = if by_ref {
         // match first, then anchor each binding to its payload storage
-        let matched = try_bind(&info.pat, &value, &mut |_, _| {});
+        let matched = try_bind(&info.pat, &value, &consts, &mut |_, _| {});
         if matched {
             let mut define = |name: &str, v: Value| {
                 if let Some((_, reg)) = binds.iter().find(|(n, _)| n == name) {
                     writes.push((*reg, v));
                 }
             };
-            bind_pattern_refs(&info.pat, &value, &mut define);
+            bind_pattern_refs(&info.pat, &value, &consts, &mut define);
         }
         matched
     } else {
@@ -105,7 +110,7 @@ pub(super) fn test_bind(ctx: &mut StepCtx, val: u16, pat: u16, dst: u16) -> Flow
                 writes.push((*reg, v));
             }
         };
-        try_bind(&info.pat, &value, &mut define)
+        try_bind(&info.pat, &value, &consts, &mut define)
     };
     for (reg, v) in writes {
         ctx.put(reg, v);

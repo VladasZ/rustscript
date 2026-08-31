@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use super::bytecode::{PLit, PPat};
 use super::enum_def::{EnumKind, NONE};
+use super::ops::values_equal;
 use super::resolver::bare;
 use super::value::{List, StructData, Value, ValueRef};
 
@@ -20,12 +21,18 @@ fn json_variant_kind_matches(name: Option<&str>, val: &Value) -> bool {
     )
 }
 
-pub(super) fn try_bind(pat: &PPat, val: &Value, define: &mut dyn FnMut(&str, Value)) -> bool {
+/// `consts` holds the value of every constant the pattern names, in `PatInfo::consts` order.
+pub(super) fn try_bind(
+    pat: &PPat,
+    val: &Value,
+    consts: &[Value],
+    define: &mut dyn FnMut(&str, Value),
+) -> bool {
     match pat {
         PPat::Wild | PPat::Rest => true,
         PPat::Ident { name, sub } => {
             if let Some(s) = sub
-                && !try_bind(s, val, define)
+                && !try_bind(s, val, consts, define)
             {
                 return false;
             }
@@ -33,8 +40,11 @@ pub(super) fn try_bind(pat: &PPat, val: &Value, define: &mut dyn FnMut(&str, Val
             true
         }
         PPat::Lit(l) => plit_eq(l, val),
+        PPat::Const(idx) => consts
+            .get(usize::from(*idx))
+            .is_some_and(|c| values_equal(c, val)),
         PPat::Tuple(elems) => match val {
-            Value::Tuple(items) => bind_seq(elems, &items.lock(), define),
+            Value::Tuple(items) => bind_seq(elems, &items.lock(), consts, define),
             Value::Unit if elems.is_empty() => true,
             _ => false,
         },
@@ -44,20 +54,20 @@ pub(super) fn try_bind(pat: &PPat, val: &Value, define: &mut dyn FnMut(&str, Val
                     return false;
                 }
                 let payload = data.lock().clone();
-                bind_seq(elems, &payload, define)
+                bind_seq(elems, &payload, consts, define)
             }
             Value::Struct(st) => {
                 let vals: Vec<Value> = st.values.lock().clone();
-                bind_seq(elems, &vals, define)
+                bind_seq(elems, &vals, consts, define)
             }
             // `Some(x)` still matches a pre unwrapped payload, a `Value::Unit` never does, that
             // is a real unit value
             Value::Unit => false,
             other => {
                 if json_variant_kind_matches(tag.name.as_deref(), other) {
-                    bind_seq(elems, from_ref(other), define)
+                    bind_seq(elems, from_ref(other), consts, define)
                 } else {
-                    tag.is_named("Some") && bind_seq(elems, from_ref(other), define)
+                    tag.is_named("Some") && bind_seq(elems, from_ref(other), consts, define)
                 }
             }
         },
@@ -81,7 +91,7 @@ pub(super) fn try_bind(pat: &PPat, val: &Value, define: &mut dyn FnMut(&str, Val
             for (key, fp) in fields {
                 match st.get(key) {
                     Some(v) => {
-                        if !try_bind(fp, &v, define) {
+                        if !try_bind(fp, &v, consts, define) {
                             return false;
                         }
                     }
@@ -90,9 +100,9 @@ pub(super) fn try_bind(pat: &PPat, val: &Value, define: &mut dyn FnMut(&str, Val
             }
             true
         }
-        PPat::Or(cases) => cases.iter().any(|c| try_bind(c, val, define)),
+        PPat::Or(cases) => cases.iter().any(|c| try_bind(c, val, consts, define)),
         PPat::Slice(elems) => match val {
-            Value::Vec(items) => bind_seq(elems, &items.lock(), define),
+            Value::Vec(items) => bind_seq(elems, &items.lock(), consts, define),
             _ => false,
         },
         PPat::Range { lo, hi, inclusive } => {
@@ -158,14 +168,19 @@ fn is_rest(pat: &PPat) -> bool {
     }
 }
 
-fn bind_seq(pats: &[PPat], vals: &[Value], define: &mut dyn FnMut(&str, Value)) -> bool {
+fn bind_seq(
+    pats: &[PPat],
+    vals: &[Value],
+    consts: &[Value],
+    define: &mut dyn FnMut(&str, Value),
+) -> bool {
     if let Some((head, rest_name, tail)) = split_rest(pats) {
         if vals.len() < head.len() + tail.len() {
             return false;
         }
         let tail_vals = &vals[vals.len() - tail.len()..];
         for (p, v) in head.iter().zip(vals).chain(tail.iter().zip(tail_vals)) {
-            if !try_bind(p, v, define) {
+            if !try_bind(p, v, consts, define) {
                 return false;
             }
         }
@@ -179,7 +194,7 @@ fn bind_seq(pats: &[PPat], vals: &[Value], define: &mut dyn FnMut(&str, Value)) 
         && pats
             .iter()
             .zip(vals.iter())
-            .all(|(p, v)| try_bind(p, v, define))
+            .all(|(p, v)| try_bind(p, v, consts, define))
 }
 
 fn plit_eq(l: &PLit, val: &Value) -> bool {
@@ -205,7 +220,13 @@ enum BindSlot {
 
 /// Every binding anchors to the matched storage, so `*x += 1` through it lands in the place. Runs
 /// after `try_bind` matched and must walk the same shapes.
-fn bind_refs(pat: &PPat, val: &Value, slot: BindSlot, define: &mut dyn FnMut(&str, Value)) {
+fn bind_refs(
+    pat: &PPat,
+    val: &Value,
+    slot: BindSlot,
+    consts: &[Value],
+    define: &mut dyn FnMut(&str, Value),
+) {
     match pat {
         PPat::Ident { name, sub } => {
             let bound = match &slot {
@@ -226,25 +247,25 @@ fn bind_refs(pat: &PPat, val: &Value, slot: BindSlot, define: &mut dyn FnMut(&st
             };
             define(name, bound);
             if let Some(s) = sub {
-                bind_refs(s, val, slot, define);
+                bind_refs(s, val, slot, consts, define);
             }
         }
         PPat::Tuple(elems) => {
             if let Value::Tuple(items) = val {
-                bind_refs_seq(elems, items, define);
+                bind_refs_seq(elems, items, consts, define);
             }
         }
         PPat::TupleStruct { elems, .. } => match val {
-            Value::Enum { data, .. } => bind_refs_seq(elems, data, define),
+            Value::Enum { data, .. } => bind_refs_seq(elems, data, consts, define),
             Value::Struct(st) => {
                 let vals: Vec<Value> = st.values.lock().clone();
                 for (i, (p, v)) in elems.iter().zip(vals.iter()).enumerate() {
-                    bind_refs(p, v, BindSlot::Field(st.clone(), i), define);
+                    bind_refs(p, v, BindSlot::Field(st.clone(), i), consts, define);
                 }
             }
             other => {
                 if let Some(p) = elems.first() {
-                    bind_refs(p, other, BindSlot::None, define);
+                    bind_refs(p, other, BindSlot::None, consts, define);
                 }
             }
         },
@@ -253,7 +274,7 @@ fn bind_refs(pat: &PPat, val: &Value, slot: BindSlot, define: &mut dyn FnMut(&st
                 let vals: Vec<Value> = st.values.lock().clone();
                 for (fname, p) in fields {
                     if let Some(i) = st.shape.slot(fname) {
-                        bind_refs(p, &vals[i], BindSlot::Field(st.clone(), i), define);
+                        bind_refs(p, &vals[i], BindSlot::Field(st.clone(), i), consts, define);
                     }
                 }
             }
@@ -261,20 +282,21 @@ fn bind_refs(pat: &PPat, val: &Value, slot: BindSlot, define: &mut dyn FnMut(&st
         PPat::Or(alts) => {
             // the first matching alternative, the same choice `try_bind` made
             for alt in alts {
-                if try_bind(alt, val, &mut |_, _| {}) {
-                    bind_refs(alt, val, slot, define);
+                if try_bind(alt, val, consts, &mut |_, _| {}) {
+                    bind_refs(alt, val, slot, consts, define);
                     return;
                 }
             }
         }
         PPat::Slice(elems) => {
             if let Value::Vec(items) = val {
-                bind_refs_seq(elems, items, define);
+                bind_refs_seq(elems, items, consts, define);
             }
         }
         PPat::Wild
         | PPat::Rest
         | PPat::Lit(_)
+        | PPat::Const(_)
         | PPat::Path { .. }
         | PPat::Range { .. }
         | PPat::Unsupported => {}
@@ -283,14 +305,19 @@ fn bind_refs(pat: &PPat, val: &Value, slot: BindSlot, define: &mut dyn FnMut(&st
 
 /// The element half of `bind_refs`. A named rest binds a copy, so writing through it doesn't
 /// reach the scrutinee. Element bindings still do.
-fn bind_refs_seq(pats: &[PPat], list: &List, define: &mut dyn FnMut(&str, Value)) {
+fn bind_refs_seq(
+    pats: &[PPat],
+    list: &List,
+    consts: &[Value],
+    define: &mut dyn FnMut(&str, Value),
+) {
     let vals: Vec<Value> = list.lock().clone();
     if let Some((head, rest_name, tail)) = split_rest(pats) {
         if vals.len() < head.len() + tail.len() {
             return;
         }
         for (i, p) in head.iter().enumerate() {
-            bind_refs(p, &vals[i], BindSlot::Elem(list.clone(), i), define);
+            bind_refs(p, &vals[i], BindSlot::Elem(list.clone(), i), consts, define);
         }
         let base = vals.len() - tail.len();
         for (j, p) in tail.iter().enumerate() {
@@ -298,6 +325,7 @@ fn bind_refs_seq(pats: &[PPat], list: &List, define: &mut dyn FnMut(&str, Value)
                 p,
                 &vals[base + j],
                 BindSlot::Elem(list.clone(), base + j),
+                consts,
                 define,
             );
         }
@@ -307,10 +335,15 @@ fn bind_refs_seq(pats: &[PPat], list: &List, define: &mut dyn FnMut(&str, Value)
         return;
     }
     for (i, (p, v)) in pats.iter().zip(vals.iter()).enumerate() {
-        bind_refs(p, v, BindSlot::Elem(list.clone(), i), define);
+        bind_refs(p, v, BindSlot::Elem(list.clone(), i), consts, define);
     }
 }
 
-pub(super) fn bind_pattern_refs(pat: &PPat, val: &Value, define: &mut dyn FnMut(&str, Value)) {
-    bind_refs(pat, val, BindSlot::None, define);
+pub(super) fn bind_pattern_refs(
+    pat: &PPat,
+    val: &Value,
+    consts: &[Value],
+    define: &mut dyn FnMut(&str, Value),
+) {
+    bind_refs(pat, val, BindSlot::None, consts, define);
 }

@@ -257,6 +257,13 @@ pub(super) const ROWS: &[Method] = &[
         Same,
         "{r}.next_power_of_two()",
     ),
+    m(
+        "checked_next_power_of_two",
+        UnsignedInt,
+        &[],
+        TyPat::Opt(SAME),
+        "{r}.checked_next_power_of_two()",
+    ),
     m("div_ceil", UnsignedInt, &[Same], Same, "{r}.div_ceil({0})"),
     m(
         "next_multiple_of",

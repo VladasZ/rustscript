@@ -97,6 +97,9 @@ struct FnState {
     drop_exempt: HashSet<Reg>,
     /// `let r = &mut v` aliases, access compiles as access to `v` itself
     aliases: HashMap<String, String>,
+    /// `const` and `static` items declared in a block. They are locals like a `let`, but a
+    /// pattern that names one tests against its value.
+    block_consts: HashSet<String>,
     scopes: Vec<HashMap<String, Reg>>,
     /// for scope end `Drop` runs
     scope_order: Vec<Vec<Reg>>,
@@ -146,6 +149,7 @@ impl FnState {
             ref_locals: HashSet::new(),
             drop_exempt: HashSet::new(),
             aliases: HashMap::default(),
+            block_consts: HashSet::new(),
             scopes: vec![HashMap::default()],
             scope_order: vec![Vec::new()],
             drop_lists: Vec::new(),
@@ -580,6 +584,16 @@ impl<'a> Compiler<'a> {
         f.scopes.last_mut().unwrap().insert(name.to_string(), reg);
         f.scope_order.last_mut().unwrap().push(reg);
         f.binding_sites.push((f.code.len(), reg));
+    }
+
+    fn define_block_const(&mut self, name: &str, reg: Reg) {
+        self.define(name, reg);
+        self.cur().block_consts.insert(name.to_string());
+    }
+
+    /// A closure body sees the constants of the function that holds it.
+    pub(super) fn block_const(&self, name: &str) -> bool {
+        self.frames.iter().any(|f| f.block_consts.contains(name))
     }
 
     /// `depth` 1 is the current scope alone, a `return` uses every open scope. Scopes are not popped.

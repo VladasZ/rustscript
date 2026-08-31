@@ -8,8 +8,17 @@ use syn::{Expr, Lit, Pat};
 use crate::interpreter::bytecode::{Op, PLit, PPat, PTag, PatInfo, Reg};
 use crate::interpreter::enum_def::{EnumDef, builtin_enum, prelude_variant};
 use crate::interpreter::numeric::IntWidth;
+use crate::interpreter::resolver::bare;
 
-use super::{Compiler, Res, collect_pattern_names};
+use super::{Compiler, NameLoc, Res, collect_pattern_names, idx16};
+
+/// Where the value of a constant used as a pattern comes from.
+enum ConstSource {
+    Local(Reg),
+    Cell(Reg),
+    Upvalue(u16),
+    Global(u32),
+}
 
 impl Compiler<'_> {
     pub(super) fn pattern_info(&mut self, pat: &Pat) -> Result<u16> {
@@ -21,11 +30,14 @@ impl Compiler<'_> {
             self.define(&n, reg);
             binds.push((n, reg));
         }
-        let lowered = self.lower_pattern(pat);
+        // The loads land right before the `TestBind` every caller emits next.
+        let mut consts = Vec::new();
+        let lowered = self.lower_pattern(pat, &mut consts);
         let f = self.cur();
         f.pats.push(PatInfo {
             pat: lowered,
             binds,
+            consts,
         });
         Ok(u16::try_from(f.pats.len() - 1)?)
     }
@@ -57,8 +69,7 @@ impl Compiler<'_> {
     /// User enums first, builtin tables second. An unresolved path keeps its last segment and the
     /// runtime test falls back to the name.
     pub(super) fn variant_tag(&self, path: &syn::Path) -> PTag {
-        let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
-        self.variant_tag_of(&segs)
+        self.variant_tag_of(&path_segments(path))
     }
 
     pub(super) fn variant_tag_of(&self, segs: &[String]) -> PTag {
@@ -86,34 +97,33 @@ impl Compiler<'_> {
         }
     }
 
-    pub(super) fn lower_pattern(&self, pattern: &Pat) -> PPat {
+    pub(super) fn lower_pattern(&mut self, pattern: &Pat, consts: &mut Vec<Reg>) -> PPat {
         match pattern {
             Pat::Wild(_) => PPat::Wild,
             Pat::Rest(_) => PPat::Rest,
-            Pat::Ident(ident) if is_unit_variant_ident(ident) => PPat::Path {
-                tag: self.variant_tag_of(&[ident.ident.to_string()]),
-            },
+            Pat::Ident(ident) if is_unit_variant_ident(ident) => {
+                self.path_pattern(&[ident.ident.to_string()], consts)
+            }
             Pat::Ident(ident) => PPat::Ident {
                 name: ident.ident.to_string(),
                 sub: ident
                     .subpat
                     .as_ref()
-                    .map(|subpattern| Box::new(self.lower_pattern(&subpattern.1))),
+                    .map(|subpattern| Box::new(self.lower_pattern(&subpattern.1, consts))),
             },
             Pat::Lit(literal) => lower_literal(&literal.lit),
-            Pat::Paren(paren) => self.lower_pattern(&paren.pat),
-            Pat::Reference(reference) => self.lower_pattern(&reference.pat),
-            Pat::Type(typed) => self.lower_pattern(&typed.pat),
-            Pat::Tuple(tuple) => {
-                PPat::Tuple(tuple.elems.iter().map(|p| self.lower_pattern(p)).collect())
-            }
+            Pat::Paren(paren) => self.lower_pattern(&paren.pat, consts),
+            Pat::Reference(reference) => self.lower_pattern(&reference.pat, consts),
+            Pat::Type(typed) => self.lower_pattern(&typed.pat, consts),
+            Pat::Tuple(tuple) => PPat::Tuple(self.lower_patterns(&tuple.elems, consts)),
             Pat::TupleStruct(tuple) => PPat::TupleStruct {
                 tag: self.variant_tag(&tuple.path),
-                elems: tuple.elems.iter().map(|p| self.lower_pattern(p)).collect(),
+                elems: self.lower_patterns(&tuple.elems, consts),
             },
-            Pat::Path(path) => PPat::Path {
-                tag: self.variant_tag(&path.path),
-            },
+            Pat::Path(path) => {
+                let segs = path_segments(&path.path);
+                self.path_pattern(&segs, consts)
+            }
             Pat::Struct(structure) => PPat::Struct {
                 name: structure
                     .path
@@ -128,16 +138,90 @@ impl Compiler<'_> {
                             syn::Member::Named(name) => name.to_string(),
                             syn::Member::Unnamed(index) => index.index.to_string(),
                         };
-                        (name, self.lower_pattern(&field.pat))
+                        (name, self.lower_pattern(&field.pat, consts))
                     })
                     .collect(),
             },
-            Pat::Or(or) => PPat::Or(or.cases.iter().map(|p| self.lower_pattern(p)).collect()),
-            Pat::Slice(slice) => {
-                PPat::Slice(slice.elems.iter().map(|p| self.lower_pattern(p)).collect())
-            }
+            Pat::Or(or) => PPat::Or(self.lower_patterns(&or.cases, consts)),
+            Pat::Slice(slice) => PPat::Slice(self.lower_patterns(&slice.elems, consts)),
             Pat::Range(range) => lower_range(range),
             _ => PPat::Unsupported,
+        }
+    }
+
+    fn lower_patterns<'p>(
+        &mut self,
+        pats: impl IntoIterator<Item = &'p Pat>,
+        consts: &mut Vec<Reg>,
+    ) -> Vec<PPat> {
+        pats.into_iter()
+            .map(|p| self.lower_pattern(p, consts))
+            .collect()
+    }
+
+    /// A variant wins over a constant of the same name, then a constant compiles to an equality
+    /// test like real Rust. An unresolved path stays a tag the runtime tests by name.
+    fn path_pattern(&mut self, segs: &[String], consts: &mut Vec<Reg>) -> PPat {
+        if self.resolve_variant(segs).is_none()
+            && let Some(pat) = self.const_pattern(segs, consts)
+        {
+            return pat;
+        }
+        PPat::Path {
+            tag: self.variant_tag_of(segs),
+        }
+    }
+
+    /// `None` when the path is no constant this compiler knows.
+    fn const_pattern(&mut self, segs: &[String], consts: &mut Vec<Reg>) -> Option<PPat> {
+        if let [ty, which] = segs
+            && let Some(bound) = int_type_bound(ty, which)
+        {
+            return Some(PPat::Lit(PLit::Int(bound)));
+        }
+        let source = self.const_source(segs)?;
+        let dst = self.alloc();
+        match source {
+            ConstSource::Local(src) => self.emit(Op::Move { dst, src }),
+            ConstSource::Cell(cell) => self.emit(Op::LoadCell { dst, cell }),
+            ConstSource::Upvalue(idx) => self.emit(Op::LoadUpvalue { dst, idx }),
+            ConstSource::Global(idx) => self.emit(Op::LoadGlobal { dst, idx }),
+        }
+        consts.push(dst);
+        Some(PPat::Const(idx16(consts.len() - 1)))
+    }
+
+    /// Block level `const` items are plain locals, module level ones are globals.
+    fn const_source(&mut self, segs: &[String]) -> Option<ConstSource> {
+        if let [name] = segs
+            && self.block_const(name)
+        {
+            return match self.resolve(name) {
+                NameLoc::Local(reg) => Some(ConstSource::Local(reg)),
+                NameLoc::Cell(cell) => Some(ConstSource::Cell(cell)),
+                NameLoc::Upvalue(idx) => Some(ConstSource::Upvalue(idx)),
+                NameLoc::None => None,
+            };
+        }
+        self.const_global(segs).map(ConstSource::Global)
+    }
+
+    /// The global slot of a module `const`, a `static`, or an impl `Type::NAME`.
+    fn const_global(&self, segs: &[String]) -> Option<u32> {
+        match self.resolve_path_res(segs).ok()? {
+            Res::Const(idx) => Some(idx),
+            Res::TypeMember(canon, rest) => {
+                let [name] = rest.as_slice() else {
+                    return None;
+                };
+                let key = format!("{}::{name}", bare(&canon));
+                self.ctx
+                    .resolver
+                    .modules
+                    .iter()
+                    .find_map(|syms| syms.consts.get(&key).copied())
+            }
+            _ => None,
         }
     }
 
@@ -170,6 +254,10 @@ impl Compiler<'_> {
 // Real Rust tells a unit variant from a binding by name resolution, which we don't have. So an
 // uppercase ident with no `ref`, `mut` or subpattern is a variant like `None`. Otherwise a bare
 // `None` arm matches a `Some`.
+pub(super) fn path_segments(path: &syn::Path) -> Vec<String> {
+    path.segments.iter().map(|s| s.ident.to_string()).collect()
+}
+
 pub(super) fn is_unit_variant_ident(id: &syn::PatIdent) -> bool {
     id.by_ref.is_none()
         && id.mutability.is_none()

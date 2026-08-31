@@ -179,6 +179,11 @@ pub fn big_int_method(
                     None => Err(anyhow::anyhow!("attempt to add with overflow")),
                 })
             }
+            BuiltinId::CheckedNextPowerOfTwo => Some(Ok(IntOut::Checked(
+                recv.cast_unsigned()
+                    .checked_next_power_of_two()
+                    .map(u128::cast_signed),
+            ))),
             BuiltinId::DivCeil => Some(arg(args, 0).and_then(|b| {
                 if b == 0 {
                     bail!("attempt to divide by zero");
