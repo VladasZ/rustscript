@@ -120,6 +120,10 @@ pub(super) fn bridge_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
                 Err(e) => Value::err(Value::str(e)),
             }));
         }
+        // an empty serde_json object is exactly an empty map, parsed json is held as maps
+        PathId::MapNew => return Ok(Some(Value::map())),
+        // `Value::from(x)` is its payload, like the `Value::String` constructor
+        PathId::ValueFrom => return Ok(Some(arg(args, 0)?)),
         PathId::TimeSleep => return Ok(Some(sleep_future(args))),
         PathId::TaskYieldNow => return Ok(Some(yield_future())),
         PathId::ReqwestGet
@@ -136,6 +140,9 @@ pub(super) fn bridge_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
             return crate::interpreter::http::reqwest_call(id, args).map(Some);
         }
         _ => {}
+    }
+    if let Some(v) = crate::interpreter::chrono_bridge::chrono_call(id, args)? {
+        return Ok(Some(v));
     }
     if let Some(v) = crate::interpreter::ratatui::ratatui_assoc(id, args) {
         return Ok(Some(v));
@@ -243,7 +250,10 @@ pub(super) fn datetime_method(
     match shared::datetime_core(m, secs, nanos, local, offset, &VArgs(args)) {
         Some(shared::DateOut::Int(i)) => Ok(Value::Int(i)),
         Some(shared::DateOut::Text(t)) => Ok(Value::str(t)),
-        None => bail!("unknown method `{}` on DateTime", name.text),
+        None => match crate::interpreter::chrono_bridge::datetime_extra(s, name, args)? {
+            Some(v) => Ok(v),
+            None => bail!("unknown method `{}` on DateTime", name.text),
+        },
     }
 }
 

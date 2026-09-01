@@ -19,6 +19,7 @@ BufReader::with_capacity
 BufWriter::new
 BufWriter::with_capacity
 Buffer::empty
+Builder::new
 CHANGE_CONFIG
 CONNECT
 CREATE_SERVICE
@@ -34,13 +35,22 @@ Constraint::Min
 Constraint::Percentage
 Constraint::Ratio
 DELETE
+DateTime::from_timestamp
 DateTime::parse_from_rfc3339
 Document::load
+Duration::days
 Duration::from_micros
 Duration::from_millis
 Duration::from_nanos
 Duration::from_secs
+Duration::hours
+Duration::microseconds
+Duration::milliseconds
+Duration::minutes
+Duration::nanoseconds
 Duration::new
+Duration::seconds
+Duration::weeks
 ENUMERATE_SERVICE
 Element::new
 Element::parse
@@ -77,7 +87,9 @@ KEY_WRITE
 Line::from
 Line::raw
 Line::styled
+Local
 Local::now
+Map::new
 Modifier::BOLD
 Modifier::CROSSED_OUT
 Modifier::DIM
@@ -88,6 +100,8 @@ Modifier::REVERSED
 Modifier::SLOW_BLINK
 Modifier::UNDERLINED
 Mutex::new
+NaiveDate::parse_from_str
+NaiveDateTime::parse_from_str
 NamedTempFile::new
 Ok
 OpenOptions::new
@@ -155,6 +169,7 @@ UNIX_EPOCH
 URL_SAFE
 URL_SAFE_NO_PAD
 UdpSocket::bind
+Utc
 Utc::now
 Value::Array
 Value::Bool
@@ -162,6 +177,7 @@ Value::Null
 Value::Number
 Value::Object
 Value::String
+Value::from
 Vec::from
 Vec::new
 Vec::with_capacity

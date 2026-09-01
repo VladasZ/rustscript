@@ -26,7 +26,7 @@ The `supported_page_is_current` test enforces it.
 
 ## Builder
 
-`blocking`, `build`, `cookie_store`, `redirect`, `timeout`, `user_agent`
+`blocking`, `build`, `cookie_store`, `prefix`, `redirect`, `suffix`, `tempfile_in`, `timeout`, `user_agent`
 
 ## Captures
 
@@ -54,7 +54,7 @@ The `supported_page_is_current` test enforces it.
 
 ## DateTime
 
-`day`, `format`, `hour`, `local`, `minute`, `month`, `nanos`, `offset`, `second`, `secs`, `timestamp`, `timestamp_millis`, `to_rfc3339`, `year`
+`day`, `format`, `hour`, `local`, `minute`, `month`, `nanos`, `offset`, `second`, `secs`, `timestamp`, `timestamp_millis`, `to_rfc3339`, `weekday`, `with_timezone`, `year`
 
 ## DirEntry
 
@@ -115,6 +115,14 @@ The `supported_page_is_current` test enforces it.
 ## Modifier
 
 `bits`, `contains`, `difference`, `intersects`, `is_empty`, `union`
+
+## NaiveDate
+
+`and_hms_opt`, `day`, `days`, `format`, `month`, `weekday`, `year`
+
+## NaiveDateTime
+
+`and_utc`, `hour`, `minute`, `nanos`, `second`, `secs`, `weekday`
 
 ## native handles (files, sockets, readers, processes)
 
@@ -216,6 +224,10 @@ The `supported_page_is_current` test enforces it.
 
 `block`, `column_spacing`, `style`, `widths`
 
+## TimeDelta
+
+`nanos`, `num_days`, `num_hours`, `num_milliseconds`, `num_minutes`, `num_nanoseconds`, `num_seconds`
+
 ## Vec
 
 `all`, `any`, `append`, `as_array`, `as_array_mut`, `as_object`, `as_object_mut`, `as_slice`, `back`, `back_mut`, `binary_search`, `by_ref`, `chunks`, `clear`, `clone`, `cloned`, `collect`, `collect_map`, `collect_set`, `collect_string`, `concat`, `contains`, `copied`, `copy_from_slice`, `count`, `dedup`, `enumerate`, `extend`, `extend_from_slice`, `filter`, `filter_map`, `find`, `find_map`, `first`, `first_mut`, `flat_map`, `flatten`, `fold`, `for_each`, `front`, `front_mut`, `get`, `get_mut`, `insert`, `into_iter`, `is_empty`, `iter`, `iter_mut`, `join`, `last`, `last_mut`, `len`, `make_contiguous`, `map`, `max`, `max_by_key`, `min`, `min_by_key`, `next`, `next_back`, `nth`, `partition`, `peekable`, `pop`, `pop_back`, `pop_front`, `position`, `product`, `push`, `push_back`, `push_front`, `reduce`, `remove`, `repeat`, `retain`, `rev`, `reverse`, `skip`, `skip_while`, `sort`, `sort_by`, `sort_by_cached_key`, `sort_by_key`, `sort_unstable`, `split_first`, `sum`, `swap`, `swap_remove`, `take`, `take_while`, `to_vec`, `truncate`, `windows`
@@ -224,10 +236,14 @@ The `supported_page_is_current` test enforces it.
 
 `as_bytes`, `to_bytes`, `verify`, `verify_strict`
 
+## Weekday
+
+`from_monday`, `num_days_from_monday`, `num_days_from_sunday`
+
 ## WmiConnection
 
 `namespace`, `query`, `raw_query`
 
 ## builtin (dispatched by id on matching receivers)
 
-`clear`, `clone`, `clone_from`, `cloned`, `cmp`, `contains_key`, `copied`, `get`, `insert`, `make_ascii_lowercase`, `make_ascii_uppercase`, `push`, `push_str`, `replace`, `take`, `to_string`, `unwrap`, `unwrap_or`, `write_all`, `write_fmt`, `write_str`
+`clear`, `clone`, `clone_from`, `cloned`, `cmp`, `contains_key`, `copied`, `get`, `get_or_insert`, `get_or_insert_with`, `insert`, `make_ascii_lowercase`, `make_ascii_uppercase`, `push`, `push_str`, `replace`, `take`, `to_string`, `unwrap`, `unwrap_or`, `write_all`, `write_fmt`, `write_str`

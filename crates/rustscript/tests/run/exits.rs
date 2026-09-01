@@ -42,8 +42,8 @@ fn a_path_call_the_interpreter_lacks_stops_the_script_before_it_runs() {
 fn main() {
     println!("side effect");
     if std::env::args().count() > 100 {
-        let d = chrono::Duration::hours(1);
-        println!("{d}");
+        let m = chrono::Months::new(3);
+        println!("{m:?}");
     }
 }
 "#,
@@ -57,7 +57,7 @@ fn main() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "the gate must fail the script");
     assert!(
-        err.contains("`chrono::Duration::hours` is not implemented by the interpreter"),
+        err.contains("`chrono::Months::new` is not implemented by the interpreter"),
         "stderr was: {err}"
     );
     assert!(!err.contains("panicked"), "stderr was: {err}");

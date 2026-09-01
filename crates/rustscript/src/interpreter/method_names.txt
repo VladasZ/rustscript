@@ -9,8 +9,10 @@ add_modifier
 all
 ancestors
 and
+and_hms_opt
 and_modify
 and_then
+and_utc
 any
 append mut
 area
@@ -368,6 +370,14 @@ next_multiple_of
 next_power_of_two
 normal
 nth
+num_days
+num_days_from_monday
+num_days_from_sunday
+num_hours
+num_milliseconds
+num_minutes
+num_nanoseconds
+num_seconds
 offset
 ok
 ok_or
@@ -411,6 +421,7 @@ post
 pow
 powf
 powi
+prefix
 product
 purple
 push mut
@@ -520,6 +531,7 @@ subsec_micros
 subsec_millis
 subsec_nanos
 success
+suffix
 sum
 supported_page_is_current
 swap mut
@@ -533,6 +545,7 @@ take mut
 take_while
 tan
 tanh
+tempfile_in
 text
 then
 then_some
@@ -596,12 +609,14 @@ verify_strict
 verifying_key
 wait
 wait_with_output
+weekday
 white
 width
 widths
 windows
 with_context
 with_extension
+with_timezone
 wrapping_abs
 wrapping_add
 wrapping_mul

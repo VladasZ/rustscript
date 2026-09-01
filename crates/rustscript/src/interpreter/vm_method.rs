@@ -3,7 +3,7 @@
 
 use std::mem::take;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 use super::bytecode::{BuiltinId, MethodName};
 use super::enum_def::{EnumKind, OK, SOME};
@@ -24,6 +24,14 @@ pub(super) fn method_op(
     let name = &cur.names[name as usize];
     let s = base + abase;
     if let Some(v) = builtin_fast(ctx, recv, name, s, argc, dst) {
+        return Ok(ctx.set_opt(dst, v));
+    }
+    // fallible in place forms, the closure can error
+    if let BuiltinId::GetOrInsert | BuiltinId::GetOrInsertWith = name.id
+        && argc == 1
+        && is_option(ctx, recv)
+    {
+        let v = option_get_or_insert(ctx, recv, name.id, s)?;
         return Ok(ctx.set_opt(dst, v));
     }
     // an integer method with integer arguments skips the whole dispatch walk
@@ -120,6 +128,34 @@ fn clone_from(ctx: &mut StepCtx, recv: usize, s: usize) -> Value {
 }
 
 /// `RefCell::take` and an iterator `take(n)` are kept out by the guard.
+/// Fills a `None` receiver in place, then hands out a reference into the payload slot, so a
+/// `push` through the returned binding lands in the option.
+fn option_get_or_insert(ctx: &mut StepCtx, recv: usize, id: BuiltinId, s: usize) -> Result<Value> {
+    let slot = ctx.base + recv;
+    let is_none = matches!(
+        &ctx.stack[slot],
+        Value::Enum { variant, .. } if *variant == super::enum_def::NONE
+    );
+    if is_none {
+        let filler = ctx.stack[s].clone();
+        let value = if id == BuiltinId::GetOrInsert {
+            filler
+        } else {
+            let Value::Closure(clo) = filler else {
+                bail!("get_or_insert_with takes a function");
+            };
+            ctx.vm.call_closure_data(&clo, &[])?
+        };
+        ctx.stack[slot] = Value::some(value);
+    }
+    match &ctx.stack[slot] {
+        Value::Enum { data, .. } => Ok(Value::Ref(std::sync::Arc::new(
+            super::value::ValueRef::vec_element(data.clone(), 0),
+        ))),
+        _ => bail!("get_or_insert needs an Option receiver"),
+    }
+}
+
 fn option_take(ctx: &mut StepCtx, recv: usize) -> Value {
     let old = take(&mut ctx.stack[ctx.base + recv]);
     ctx.stack[ctx.base + recv] = Value::none();
