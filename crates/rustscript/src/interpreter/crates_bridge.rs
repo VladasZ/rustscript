@@ -104,7 +104,14 @@ pub(super) fn crate_bridge(id: PathId, args: &[Value]) -> Result<Option<Value>> 
         // chrono is handled in `dispatch_call`
         // jsonwebtoken
         PathId::JsonwebtokenEncode => super::jwt_bridge::jwt_encode(args)?,
-        // tempfile
+        // tempfile. The builder holds its settings until `tempfile_in` builds the file.
+        PathId::BuilderNew => Value::struct_of(
+            "Builder",
+            [
+                ("prefix".into(), Value::str(".tmp")),
+                ("suffix".into(), Value::str("")),
+            ],
+        ),
         PathId::TempfileTempdir => match tempfile::tempdir() {
             Ok(d) => Value::ok(Native::TempDir(d).wrap()),
             Err(e) => Value::err(Value::str(e.to_string())),
@@ -191,6 +198,45 @@ pub(super) fn base64_method(s: &StructData, method: &MethodName, args: &[Value])
             }
         }
         _ => bail!("unknown method `{method}` on a base64 engine"),
+    })
+}
+
+/// `tempfile::Builder`. `prefix` and `suffix` hand back an updated builder, `tempfile_in`
+/// builds the named file.
+pub(super) fn builder_method(
+    st: &Arc<super::value::StructData>,
+    name: &MethodName,
+    args: &[Value],
+) -> Result<Value> {
+    let field = |key: &str| st.get(key).map(|v| v.display()).unwrap_or_default();
+    Ok(match name.id {
+        BuiltinId::Prefix | BuiltinId::Suffix => {
+            let value = super::bridge::arg(args, 0)?.display();
+            let (prefix, suffix) = if name.id == BuiltinId::Prefix {
+                (value, field("suffix"))
+            } else {
+                (field("prefix"), value)
+            };
+            Value::struct_of(
+                "Builder",
+                [
+                    ("prefix".into(), Value::str(prefix)),
+                    ("suffix".into(), Value::str(suffix)),
+                ],
+            )
+        }
+        BuiltinId::TempfileIn => {
+            let dir = super::std_bridge::path_like(&super::bridge::arg(args, 0)?);
+            let built = tempfile::Builder::new()
+                .prefix(&field("prefix"))
+                .suffix(&field("suffix"))
+                .tempfile_in(dir);
+            match built {
+                Ok(f) => Value::ok(Native::NamedTempFile(f).wrap()),
+                Err(e) => Value::err(Value::str(e.to_string())),
+            }
+        }
+        _ => bail!("unknown method `{name}` on Builder"),
     })
 }
 

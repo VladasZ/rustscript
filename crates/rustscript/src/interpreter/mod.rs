@@ -3,6 +3,7 @@ mod borrow;
 mod bridge;
 mod bytecode;
 mod cell;
+mod chrono_bridge;
 mod compile;
 mod console;
 pub mod coverage;

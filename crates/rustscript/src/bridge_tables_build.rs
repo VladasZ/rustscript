@@ -120,6 +120,12 @@ pub const BRIDGES: &[Bridge] = &[
     b("http/headers.rs", "header_map_method", "HeaderMap"),
     // crates
     b("crates_bridge.rs", "base64_method", "Base64"),
+    b("crates_bridge.rs", "builder_method", "Builder"),
+    b("chrono_bridge.rs", "naive_date_method", "NaiveDate"),
+    b("chrono_bridge.rs", "naive_datetime_method", "NaiveDateTime"),
+    b("chrono_bridge.rs", "weekday_method", "Weekday"),
+    b("chrono_bridge.rs", "timedelta_method", "TimeDelta"),
+    b("chrono_bridge.rs", "datetime_extra", "DateTime"),
     b("crates_bridge.rs", "rng_method", "Rng"),
     b("crates_bridge.rs", "sha256_method", "Sha256"),
     b("ed25519_bridge.rs", "signing_key_method", "SigningKey"),

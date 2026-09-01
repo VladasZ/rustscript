@@ -164,10 +164,13 @@ fn arith(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
         return Ok(Value::str(out));
     }
     // the discriminant check keeps the Duration probe off every numeric op
-    if matches!(l, Value::Struct(_))
-        && let (Some(a), Some(b)) = (duration_from_value(l), duration_from_value(r))
-    {
-        return Ok(make_duration(duration_arith(op, a, b)?));
+    if matches!(l, Value::Struct(_)) {
+        if let Some(out) = super::chrono_bridge::chrono_arith(op, l, r) {
+            return out;
+        }
+        if let (Some(a), Some(b)) = (duration_from_value(l), duration_from_value(r)) {
+            return Ok(make_duration(duration_arith(op, a, b)?));
+        }
     }
     if let Some(width) = big_operands(l, r) {
         let (a, b) = (big_bits(l), big_bits(r));

@@ -544,6 +544,10 @@ impl Vm {
         name: &MethodName,
         args: &mut [Value],
     ) -> Result<Value> {
+        // the bridge structs have no user impls, so `clone` is always the generic deep copy
+        if name.id == BuiltinId::Clone {
+            return Ok(recv.deep_clone());
+        }
         match &**st.name() {
             "Command" => super::process::command_method(recv, name, args),
             "Child" => super::process::child_method(recv, name, args),
@@ -564,6 +568,11 @@ impl Vm {
                 BuiltinId::SetReadonly => Ok(Value::Unit),
                 _ => bail!("unknown method `{name}` on Permissions"),
             },
+            "NaiveDate" => super::chrono_bridge::naive_date_method(st, name, args),
+            "NaiveDateTime" => super::chrono_bridge::naive_datetime_method(st, name),
+            "Weekday" => super::chrono_bridge::weekday_method(st, name),
+            "TimeDelta" => super::chrono_bridge::timedelta_method(st, name),
+            "Builder" => super::crates_bridge::builder_method(st, name, args),
             "Rng" => super::crates_bridge::rng_method(name, args),
             "Base64Engine" => super::crates_bridge::base64_method(st, name, args),
             "Element" => super::xmltree_bridge::element_method(st, name, args),
@@ -641,6 +650,7 @@ fn path_constant(id: PathId) -> Option<Value> {
         PathId::ConstsExeSuffix => std::env::consts::EXE_SUFFIX,
         _ => {
             return numeric_limit(id)
+                .or_else(|| super::chrono_bridge::chrono_const(id))
                 .or_else(|| super::crates_bridge::base64_engine(id))
                 .or_else(|| super::winreg_bridge::winreg_const(id))
                 .or_else(|| super::service_bridge::service_const(id))

@@ -422,7 +422,9 @@ pub(super) fn empty_container(id: PathId) -> Option<EmptyKind> {
         | PathId::VecDequeNew
         | PathId::VecDequeWithCapacity => EmptyKind::Vec,
         PathId::StringNew | PathId::StringWithCapacity => EmptyKind::Str,
-        PathId::HashMapNew | PathId::HashMapWithCapacity | PathId::BTreeMapNew => EmptyKind::Map,
+        PathId::HashMapNew | PathId::HashMapWithCapacity | PathId::BTreeMapNew | PathId::MapNew => {
+            EmptyKind::Map
+        }
         PathId::HashSetNew | PathId::HashSetWithCapacity | PathId::BTreeSetNew => EmptyKind::Set,
         _ => return None,
     })

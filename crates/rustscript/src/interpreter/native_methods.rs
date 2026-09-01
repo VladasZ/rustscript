@@ -332,7 +332,11 @@ fn writer_native_method(handle: &Handle, method: &MethodName, args: &mut [Value]
             let mut h = handle.lock();
             if !matches!(
                 &*h,
-                Native::File(_) | Native::Writer(_) | Native::ChildStdin(_) | Native::Stream(_)
+                Native::File(_)
+                    | Native::Writer(_)
+                    | Native::ChildStdin(_)
+                    | Native::Stream(_)
+                    | Native::NamedTempFile(_)
             ) {
                 return None;
             }
@@ -662,6 +666,7 @@ fn temp_native_method(handle: &Handle, method: &MethodName) -> Result<Option<Val
 fn write_bytes(h: &mut Native, bytes: &[u8]) -> std::io::Result<()> {
     match h {
         Native::File(r) => r.get_mut().write_all(bytes),
+        Native::NamedTempFile(f) => f.write_all(bytes),
         Native::Writer(w) => w.write_all(bytes),
         Native::ChildStdin(w) => w.write_all(bytes),
         Native::Stream(s) => s.write_all(bytes),
@@ -675,6 +680,7 @@ fn write_bytes(h: &mut Native, bytes: &[u8]) -> std::io::Result<()> {
 fn flush_writer(h: &mut Native) -> std::io::Result<()> {
     match h {
         Native::File(r) => r.get_mut().flush(),
+        Native::NamedTempFile(f) => f.flush(),
         Native::Writer(w) => w.flush(),
         Native::ChildStdin(w) => w.flush(),
         Native::Stream(s) => s.flush(),
