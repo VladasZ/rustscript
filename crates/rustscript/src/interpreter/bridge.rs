@@ -264,6 +264,9 @@ impl Vm {
                     Err(e) => Value::err(Value::str(e.to_string())),
                 });
             }
+            // lazy like every iterator, backed by a list of 0 or 1 elements
+            PathId::IterEmpty => return self.iterator_value(Value::vec(Vec::new())),
+            PathId::IterOnce => return self.iterator_value(Value::vec(vec![one(args)?])),
             // `sleep` is the 1 thread function that needs no threading
             PathId::ThreadSleep => {
                 let Some(d) = args

@@ -308,6 +308,8 @@ isize::from_le_bytes
 isize::from_ne_bytes
 isize::from_str_radix
 isize::try_from
+iter::empty
+iter::once
 jsonwebtoken::encode
 mem::replace
 mem::swap

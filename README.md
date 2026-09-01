@@ -60,6 +60,10 @@ rust --version       show version and build information
 
 Arguments after the file go to the script.
 
+`rust check` and `rust build` need cargo. Interpreting does not. Set
+`RUSTSCRIPT_SKIP_CHECK=1` to skip the cargo check gate, for example on a
+machine without a Rust toolchain.
+
 `./tool.rs cmp one two` does what `rust build` does and runs the binary with
 `one two`. So `cmp` is reserved as a script's first argument.
 
@@ -92,7 +96,8 @@ Every feature has a working example under `crates/examples/examples`.
 
 ## Limitations
 
-- Crates without a bridge stop with an `unsupported crate` error.
+- Crates without a bridge fail `rust check`. A function of a bridged crate
+  or of `std` that the interpreter lacks stops the script before it runs.
 - `std::thread` is not supported, use `tokio` tasks.
 - `static mut` is rejected. Plain statics behave like constants.
 - Lifetimes and generic bounds mean nothing at runtime.

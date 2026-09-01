@@ -39,6 +39,13 @@ Values are `Arc` with a `parking_lot` mutex, so they are `Send + Sync`. The VM
 runs on a multi thread `tokio` runtime, so `tokio::spawn` and `.await` behave
 like compiled Rust.
 
+Script frames live on the heap, so plain recursion is bounded only by the
+call depth cap. A closure called from a native like `map` or `sort_by` nests
+the whole VM on the host stack instead. Every thread that runs script code
+gets a 1 GiB stack for that, and each nesting counts toward the same cap, so
+a tree walk through iterator closures goes as deep as compiled Rust and the
+cap ends in the script's `stack overflow` panic, never in a process abort.
+
 Values move like compiled Rust. A move clears the source register, `clone`
 is a deep copy, and a `Copy` type copies. The compiler decides which one with
 a backward liveness pass over the bytecode, so a value whose last use is a
@@ -135,7 +142,10 @@ Same as compiled Rust.
 Dependencies are never compiled. `reqwest::get` or `Regex::new` dispatch to a
 native bridge compiled into the `rust` binary. Method cores are written once
 against plain Rust types, so a method cannot drift between call forms. A
-crate without a bridge stops with `unsupported crate`.
+crate without a bridge fails `rust check`, because the manifest the check
+compiles against lists only the bridged crates. That manifest is rendered by
+`build.rs` from the `[dependencies]` of `run-rs` itself, so the check and the
+bridges always agree on versions and features.
 
 ## What `rust check` adds
 
@@ -143,8 +153,9 @@ crate without a bridge stops with `unsupported crate`.
 every method the script calls, and running only proves the lines that run.
 So `interpreter/coverage.rs` walks the compiled bytecode. Every method call
 is one op with a name, so every call is visible on every branch. Where the
-receiver type is known the name is checked against that receiver. Path calls
-like `std::process::exit` are a known gap.
+receiver type is known the name is checked against that receiver. A path
+call is checked when its root is `std` or a bridged crate, so `chrono::Duration::hours`
+is reported before the script runs. Any other root is a user item.
 
 The same walk runs before every interpreted run, so a script cannot die on a
 cold branch after doing half its side effects. It costs less than

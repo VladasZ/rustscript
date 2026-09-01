@@ -2,8 +2,9 @@
 //! only proves the lines that run. So this walks the compiled bytecode, where every method call is
 //! visible on every branch.
 //!
-//! Known gap, path calls like `std::process::exit(1)` are not checked. A first attempt reported
-//! constructors as missing, and a noisy check is worse than none.
+//! A path call is checked when its root is `std` or a script crate. Those roots the interpreter
+//! owns, so a path the table does not list can only fail at runtime. Any other root is a user
+//! item the VM finds by name.
 //!
 //! Where the receiver type is knowable it is used. A `serde_json::Value` is checked against every
 //! shape it can be, a name only check would pass a `get` that aborts on a null. An unknown receiver
@@ -11,10 +12,11 @@
 
 use std::collections::BTreeSet;
 
-use super::bytecode::{BuiltinId, Chunk, Const, Op};
+use super::bytecode::{BuiltinId, Chunk, Const, Op, PathId};
 use super::numeric::IntWidth;
 
 include!(concat!(env!("OUT_DIR"), "/bridge_tables.rs"));
+include!(concat!(env!("OUT_DIR"), "/script_crates.rs"));
 
 pub struct BridgeTable {
     pub recv: &'static str,
@@ -202,8 +204,48 @@ pub fn surface() -> Vec<(&'static str, &'static str)> {
     merged.into_iter().collect()
 }
 
+/// `std` and the script crates are the interpreter's to judge.
+fn owned_root(segs: &[String]) -> bool {
+    let Some(root) = segs.first() else {
+        return false;
+    };
+    matches!(root.as_str(), "std" | "core" | "alloc") || SCRIPT_CRATES.contains(&root.as_str())
+}
+
+/// A primitive or a `CamelCase` type, the namespace of a UFCS call like `str::trim`.
+fn is_type_segment(seg: &str) -> bool {
+    matches!(seg, "str" | "bool" | "char" | "f32" | "f64")
+        || IntWidth::parse(seg).is_some()
+        || seg.starts_with(|c: char| c.is_ascii_uppercase())
+}
+
+/// A path call the table does not list. `str::trim` handed to `map` runs as a method on the
+/// first argument, so a method name on a type is fine.
+fn path_call_known(segs: &[String]) -> bool {
+    if !owned_root(segs) {
+        return true;
+    }
+    if let [.., ty, method] = segs
+        && is_type_segment(ty)
+        && any_name(method)
+    {
+        return true;
+    }
+    false
+}
+
 fn walk(chunk: &Chunk, user: &UserMethods, out: &mut Vec<Finding>) {
     for (index, op) in chunk.code.iter().enumerate() {
+        if let Op::CallPath { path, .. } = op {
+            let path = &chunk.paths[*path as usize];
+            if path.id == PathId::Other && !path_call_known(&path.segs) {
+                out.push(Finding {
+                    method: path.display(),
+                    recv: None,
+                    func: chunk.name.clone(),
+                });
+            }
+        }
         if let Op::Method { recv, name, .. } = op {
             let method = &chunk.names[*name as usize].text;
             if UNIVERSAL.contains(&method.as_str()) {
@@ -365,5 +407,21 @@ mod tests {
     #[test]
     fn a_json_method_needs_every_shape() {
         assert!(JSON_SHAPES.iter().all(|shape| on_recv(shape, "clone")));
+    }
+
+    fn segs(path: &str) -> Vec<String> {
+        path.split("::").map(str::to_string).collect()
+    }
+
+    /// Only `std` and the script crates are judged, a user path is the VM's by name.
+    #[test]
+    fn a_path_call_is_judged_by_its_root() {
+        assert!(!path_call_known(&segs("std::thread::spawn")));
+        assert!(!path_call_known(&segs("chrono::Duration::hours")));
+        assert!(path_call_known(&segs("my_module::helper")));
+        assert!(path_call_known(&segs("Point::new")));
+        // UFCS on a type, `str::trim` handed to `map`
+        assert!(path_call_known(&segs("std::primitive::str::trim")));
+        assert!(SCRIPT_CRATES.contains(&"serde_json"));
     }
 }

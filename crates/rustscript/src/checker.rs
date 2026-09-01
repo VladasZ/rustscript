@@ -255,40 +255,9 @@ pub fn build(
     Ok(bin)
 }
 
-/// Always there, a script can `use` them without declaring anything.
-const MANIFEST: &str = r#"[dependencies]
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-anyhow = "1"
-regex = "1"
-which = "8"
-rand = "0.10"
-glob = "0.3"
-chrono = "0.4"
-dirs = "6"
-toml = "1"
-serde_yaml = "0.9"
-colored = "3"
-base64 = "0.22"
-hex = "0.4"
-sha2 = "0.11"
-ed25519-dalek = "2"
-ctrlc = "3"
-tempfile = "3"
-jsonwebtoken = { version = "10", features = ["rust_crypto"] }
-lopdf = "0.44"
-xmltree = { version = "0.12", features = ["attribute-order"] }
-ratatui = { version = "0.30", default-features = false }
-crossterm = "0.29"
-terminal-light = "1.9"
-tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking", "cookies"], default-features = false }
-
-[target."cfg(windows)".dependencies]
-winreg = "0.56"
-windows-service = "0.8"
-wmi = "0.18"
-"#;
+/// Always there, a script can `use` them without declaring anything. Rendered by build.rs from
+/// the `[dependencies]` of this crate, so the versions match the bridges.
+const MANIFEST: &str = include_str!(concat!(env!("OUT_DIR"), "/script_manifest.toml"));
 
 /// The empty `[workspace]` detaches the project from any workspace above the cache dir.
 /// The bin is named after the script so diagnostics show the real name.
@@ -460,6 +429,36 @@ mod tests {
         assert!(root.join("target/debug").exists(), "target must never go");
         assert!(!bin.join("aaaa").exists(), "stale binary must go");
         assert!(bin.join("bbbb").exists(), "fresh binary must stay");
+    }
+
+    /// Every script crate is in the manifest, and the whole thing is one valid cargo manifest.
+    #[test]
+    fn the_manifest_lists_every_script_crate() {
+        let text = manifest(Some(Path::new("notes.rs")), &[]);
+        let value: toml::Value = toml::from_str(&text)
+            .unwrap_or_else(|e| panic!("manifest must be valid TOML: {e}\n{text}"));
+        let listed = |name: &str| {
+            let plain = value
+                .get("dependencies")
+                .and_then(|d| d.get(name))
+                .is_some();
+            let windows = value
+                .get("target")
+                .and_then(|t| t.get("cfg(windows)"))
+                .and_then(|c| c.get("dependencies"))
+                .and_then(|d| d.get(name))
+                .is_some();
+            plain || windows
+        };
+        for name in crate::interpreter::coverage::SCRIPT_CRATES {
+            let name = name.replace('_', "-");
+            // `serde_json` is spelled with an underscore on crates.io too
+            assert!(
+                listed(&name) || listed(&name.replace('-', "_")),
+                "`{name}` is missing from the script manifest:\n{text}"
+            );
+        }
+        assert!(listed("reqwest") && listed("winreg"));
     }
 
     /// The diagnostic must point at `notes.rs`, not `main.rs`.
