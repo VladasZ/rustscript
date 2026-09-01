@@ -23,6 +23,41 @@ regenerated, so replay cannot prove it.
 
 ## Fixed
 
+### `filter` over `Vec<u8>` bytes removes nothing
+
+`into_iter().filter(...).collect()` on a `Vec<u8>` returns every byte, the
+predicate is never applied. Hit in `shell/win/wsl.rs` in the thing repo,
+stripping zero bytes from UTF-16 `wsl.exe` output returned the input
+unchanged.
+
+Minimal script:
+
+```rust
+#!/usr/bin/env rust
+
+fn main() {
+    let bytes: Vec<u8> = vec![65, 0, 66, 0];
+    let kept: Vec<u8> = bytes.into_iter().filter(|b| *b != 0).collect();
+    println!("{}", kept.len());
+}
+```
+
+Compiled output:
+
+```
+2
+```
+
+Interpreted output:
+
+```
+4
+```
+
+Likely place. The iterator pipeline over byte vectors, wherever `filter` is
+lowered for the `Vec<u8>` element type, the closure is dropped instead of
+applied. Needs an equivalence example under `crates/examples/examples`.
+
 ### A `const` as a match pattern never matches
 
 A named constant used as a pattern in a `match` arm ran and never matched, the
