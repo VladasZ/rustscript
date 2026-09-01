@@ -2,7 +2,7 @@
 //! So the coverage checker always has the real list. Renaming a harvested function breaks the build.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write as _;
+use std::fmt::{Error, Write as _};
 use std::path::Path;
 
 use syn::visit::Visit;
@@ -26,14 +26,14 @@ pub const BRIDGES: &[Bridge] = &[
     b("shared.rs", "num_core", "*"),
     b("shared.rs", "float_extra", "*"),
     b("shared.rs", "char_method", "Char"),
-    b("shared.rs", "regex_core", "Regex"),
-    b("shared.rs", "match_core", "Match"),
-    b("shared.rs", "captures_core", "Captures"),
-    b("shared.rs", "duration_core", "Duration"),
-    b("shared.rs", "datetime_core", "DateTime"),
-    b("shared.rs", "status_core", "Status"),
-    b("shared.rs", "header_value_core", "HeaderValue"),
-    b("shared.rs", "exit_status_core", "ExitStatus"),
+    b("shared/patterns.rs", "regex_core", "Regex"),
+    b("shared/patterns.rs", "match_core", "Match"),
+    b("shared/patterns.rs", "captures_core", "Captures"),
+    b("shared/time.rs", "duration_core", "Duration"),
+    b("shared/time.rs", "datetime_core", "DateTime"),
+    b("shared/status.rs", "status_core", "Status"),
+    b("shared/status.rs", "header_value_core", "HeaderValue"),
+    b("shared/status.rs", "exit_status_core", "ExitStatus"),
     b("shared.rs", "json_type_test", "*"),
     b("int_methods.rs", "int_method", "*"),
     // `int_method` only routes, so every family has to be here.
@@ -280,7 +280,7 @@ fn harvest_file(dir: &Path, file: &str, variants: &Variants) -> BTreeSet<String>
     c.names
 }
 
-pub fn generate(interpreter_dir: &Path, rows: &[MethodRow]) -> String {
+pub fn generate(interpreter_dir: &Path, rows: &[MethodRow]) -> Result<String, Error> {
     let variants: Variants = rows
         .iter()
         .map(|row| (camel(&row.name), row.name.clone()))
@@ -309,20 +309,20 @@ pub fn generate(interpreter_dir: &Path, rows: &[MethodRow]) -> String {
         ));
     }
 
-    let _ = writeln!(
+    writeln!(
         out,
         "pub const BRIDGE_TABLES: &[BridgeTable] = &[\n{}\n];\n",
         rows.join("\n")
-    );
+    )?;
 
     // the VM handles some methods itself in `vm_method.rs`
     let builtin = harvest_file(interpreter_dir, "vm_method.rs", &variants);
     let list: Vec<String> = builtin.iter().map(|n| format!("{n:?}")).collect();
-    let _ = writeln!(
+    writeln!(
         out,
         "pub const BUILTIN_IDS: &[&str] = &[{}];\n",
         list.join(", ")
-    );
+    )?;
 
-    out
+    Ok(out)
 }

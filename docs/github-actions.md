@@ -9,8 +9,8 @@ Install only, then use `rust` from any later step in the job.
 
 ```yaml
 steps:
-  - uses: actions/checkout@v5
-  - uses: VladasZ/rustscript@v0.2
+  - uses: actions/checkout@v7
+  - uses: VladasZ/rustscript@v0.6
   - run: rust tools/report.rs
 ```
 
@@ -18,8 +18,8 @@ Install and run in one step.
 
 ```yaml
 steps:
-  - uses: actions/checkout@v5
-  - uses: VladasZ/rustscript@v0.2
+  - uses: actions/checkout@v7
+  - uses: VladasZ/rustscript@v0.6
     with:
       script: tools/release.rs
       args: --dry-run
@@ -28,16 +28,16 @@ steps:
 Pin the interpreter version independently of the action.
 
 ```yaml
-  - uses: VladasZ/rustscript@v0.2
+  - uses: VladasZ/rustscript@v0.6
     with:
-      version: v0.2.0
+      version: v0.6.23
 ```
 
 ## Inputs
 
 | input | default | meaning |
 | --- | --- | --- |
-| `version` | the calling tag, else newest | version to install, for example `v0.2.0` |
+| `version` | the calling tag, else newest | version to install, for example `v0.6.23` |
 | `script` | empty | script to execute, empty means install only |
 | `mode` | `run` | `run`, `build` or `check` |
 | `args` | empty | extra arguments passed to the script |
@@ -51,7 +51,7 @@ toolchain, which the GitHub hosted images have.
 
 | output | meaning |
 | --- | --- |
-| `version` | the version that was installed, for example `v0.2.0` |
+| `version` | the version that was installed, for example `v0.6.23` |
 | `bin-path` | directory holding the installed binary |
 
 ## How the version is resolved
@@ -60,8 +60,8 @@ The action checks 3 things in order.
 
 1. The `version` input.
 2. The tag the action was called with, when it is an exact version like
-   `v0.2.0`. So a pinned action installs a matching interpreter.
-3. The newest release otherwise. This is what `@v0.2` or `@main` get.
+   `v0.6.23`. So a pinned action installs a matching interpreter.
+3. The newest release otherwise. This is what `@v0.6` or `@main` get.
 
 A leading `v` is optional in the input.
 
@@ -101,19 +101,24 @@ release is not complete until crates.io has it.
 Pushing a tag by hand still works.
 
 ```
-git tag v0.2.0-rc.1
-git push origin v0.2.0-rc.1
+git tag v0.7.0-rc.1
+git push origin v0.7.0-rc.1
 ```
 
 That is also the only way to cut a prerelease. A tag with a hyphen is marked
 as a prerelease, does not move the minor tag and is never picked by a bare
-`rust update`. `rust update v0.2.0-rc.1` installs it.
+`rust update`. `rust update v0.7.0-rc.1` installs it.
 
 ## CI
 
 `ci.yml` runs on every push to `main` and every pull request. It checks
 formatting and spelling on `Linux` and runs clippy with `-D warnings` and the
 full test suite on `Linux`, `macOS` and `Windows`.
+
+The tests that run a real `cargo check` are ignored in the default suite,
+because the first one compiles every bridged crate. A separate check gate job
+runs them with `--ignored` on all 3 platforms, so `rust check` and
+`rust build` are covered end to end.
 
 Spelling uses `crate-ci/typos`. Words it does not know, like `ratatui`, go
 into `typos.toml`.

@@ -113,6 +113,8 @@ The rules are the ones `rustc` uses.
 - Both styles mix freely.
 - Inline `mod helpers { .. }` works at any depth.
 - Both `name.rs` and `name/mod.rs` present is an error, same as `rustc`.
+- `#[path = "dir/file.rs"]` on a `mod` picks the file. Its own `mod`
+  declarations resolve relative to that file's directory, same as `rustc`.
 
 Only the root file gets a shebang.
 
@@ -192,7 +194,6 @@ its files mean the same thing interpreted and compiled.
 
 ## Not supported
 
-- `#[path = "..."]` on a mod declaration.
 - Glob imports of script modules, `use util::*`.
 - `static mut`. A plain `static` behaves like a const.
 

@@ -2,6 +2,8 @@
 name = "run-rs"
 version = "0.6.23"
 edition = "2024"
+# The pinned toolchain is the only one CI proves, so the claim follows it. A test enforces that.
+rust-version = "1.98"
 description = "Run a subset of Rust as an interpreted script"
 repository = "https://github.com/VladasZ/rustscript"
 license = "MIT OR Apache-2.0"
@@ -66,8 +68,8 @@ pretty_assertions = { workspace = true }
 
 [build-dependencies]
 chrono = { workspace = true }
-proc-macro2 = "1.0"
-syn = { version = "2.0", features = ["full", "extra-traits", "visit"] }
+proc-macro2 = { workspace = true }
+syn = { workspace = true, features = ["visit"] }
 
 [target."cfg(windows)".dependencies]
 encoding_rs = { workspace = true }

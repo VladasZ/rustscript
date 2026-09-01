@@ -7,10 +7,12 @@
 //! closures and constructor arguments, and a literal nothing types ends as `i32` or `f64`.
 
 mod exprs;
+mod generics;
 mod macros;
 mod methods;
 mod methods_option;
 mod methods_scalar;
+mod numeric;
 mod paths;
 mod ty;
 

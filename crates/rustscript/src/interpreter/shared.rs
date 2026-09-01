@@ -4,12 +4,23 @@
 
 use num_traits::{AsPrimitive, PrimInt};
 use std::cmp::Ordering;
-use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 
-use super::bytecode::{BinKind, BuiltinId, ScalarTy};
+use super::bytecode::{BuiltinId, ScalarTy};
 use super::numeric::IntWidth;
+
+mod patterns;
+mod status;
+mod time;
+
+pub(super) use patterns::{CapturesOut, MatchOut, RegexOut, captures_core, match_core, regex_core};
+pub(super) use status::{
+    ExitOut, HeaderOut, StatusOut, exit_status_core, header_value_core, status_core,
+};
+pub(super) use time::{
+    DateOut, DurOut, datetime_core, duration_arith, duration_core, parse_rfc3339,
+};
 
 /// The cores monomorphize over this, the view is free.
 pub(super) trait Args {
@@ -631,238 +642,6 @@ pub(super) fn parse_core(text: &str, target: Option<&ScalarTy>) -> Parsed {
         | ScalarTy::Set(_)
         | ScalarTy::Other => Parsed::Fail(format!("cannot parse `{text}`")),
     }
-}
-
-// regex
-
-/// Spans index into the source the caller holds.
-pub(super) enum RegexOut {
-    Bool(bool),
-    Text(String),
-    Pattern,
-    OptSpan(Option<(usize, usize)>),
-    OptGroups(Option<Vec<Option<(usize, usize)>>>),
-    Pieces(Vec<String>),
-}
-
-/// The eager methods. `find_iter` and `captures_iter` are lazy and live elsewhere.
-pub(super) fn regex_core(
-    re: &regex::Regex,
-    name: BuiltinId,
-    source: &str,
-    args: &impl Args,
-) -> Result<Option<RegexOut>> {
-    Ok(Some(match name {
-        BuiltinId::IsMatch => RegexOut::Bool(re.is_match(source)),
-        BuiltinId::Find => RegexOut::OptSpan(re.find(source).map(|m| (m.start(), m.end()))),
-        BuiltinId::Captures => RegexOut::OptGroups(re.captures(source).map(|c| {
-            (0..c.len())
-                .map(|i| c.get(i).map(|g| (g.start(), g.end())))
-                .collect()
-        })),
-        BuiltinId::Replace => {
-            RegexOut::Text(re.replacen(source, 1, args.text(1).as_str()).into_owned())
-        }
-        BuiltinId::ReplaceAll => {
-            RegexOut::Text(re.replace_all(source, args.text(1).as_str()).into_owned())
-        }
-        // the limit comes before the replacement, unlike `str::replacen`
-        BuiltinId::Replacen => RegexOut::Text(
-            re.replacen(source, usize_arg(args, 1)?, args.text(2).as_str())
-                .into_owned(),
-        ),
-        BuiltinId::Split => RegexOut::Pieces(re.split(source).map(str::to_string).collect()),
-        BuiltinId::AsStr => RegexOut::Pattern,
-        _ => return Ok(None),
-    }))
-}
-
-pub(super) enum MatchOut {
-    Text(String),
-    Int(i64),
-}
-
-pub(super) fn match_core(
-    name: BuiltinId,
-    source: &str,
-    start: usize,
-    end: usize,
-) -> Option<MatchOut> {
-    Some(match name {
-        BuiltinId::AsStr => MatchOut::Text(source[start..end].to_string()),
-        BuiltinId::Start => MatchOut::Int(usize_i64(start)),
-        BuiltinId::End => MatchOut::Int(usize_i64(end)),
-        _ => return None,
-    })
-}
-
-pub(super) enum CapturesOut {
-    Int(i64),
-    OptSpan(Option<(usize, usize)>),
-}
-
-pub(super) fn captures_core<'n>(
-    name: BuiltinId,
-    groups: &[Option<(usize, usize)>],
-    mut names: impl Iterator<Item = (&'n str, usize)>,
-    args: &impl Args,
-) -> Result<Option<CapturesOut>> {
-    Ok(Some(match name {
-        BuiltinId::Get => {
-            let Some(index) = args.int(0).and_then(|i| usize::try_from(i).ok()) else {
-                bail!("captures get needs a non-negative index");
-            };
-            CapturesOut::OptSpan(groups.get(index).copied().flatten())
-        }
-        BuiltinId::Name => {
-            let wanted = args.text(0);
-            let index = names.find_map(|(n, i)| (n == wanted).then_some(i));
-            CapturesOut::OptSpan(index.and_then(|i| groups.get(i).copied().flatten()))
-        }
-        BuiltinId::Len => CapturesOut::Int(usize_i64(groups.len())),
-        _ => return Ok(None),
-    }))
-}
-
-// duration
-
-pub(super) enum DurOut {
-    Int(i64),
-    Float(f64),
-    Bool(bool),
-}
-
-/// The checked std ops with the real panic messages.
-pub(super) fn duration_arith(op: BinKind, a: Duration, b: Duration) -> Result<Duration> {
-    match op {
-        BinKind::Add => a
-            .checked_add(b)
-            .ok_or_else(|| anyhow!("overflow when adding durations")),
-        BinKind::Sub => a
-            .checked_sub(b)
-            .ok_or_else(|| anyhow!("overflow when subtracting durations")),
-        _ => bail!("cannot apply that operator to two durations"),
-    }
-}
-
-pub(super) fn duration_core(name: BuiltinId, secs: u64, nanos: u32) -> Option<DurOut> {
-    let total = u128::from(secs) * 1_000_000_000 + u128::from(nanos);
-    Some(match name {
-        BuiltinId::AsSecs => DurOut::Int(i64::try_from(secs).unwrap_or(i64::MAX)),
-        BuiltinId::AsMillis => DurOut::Int(i64::try_from(total / 1_000_000).unwrap_or(i64::MAX)),
-        BuiltinId::AsMicros => DurOut::Int(i64::try_from(total / 1_000).unwrap_or(i64::MAX)),
-        BuiltinId::AsNanos => DurOut::Int(i64::try_from(total).unwrap_or(i64::MAX)),
-        BuiltinId::SubsecNanos => DurOut::Int(i64::from(nanos)),
-        BuiltinId::SubsecMillis => DurOut::Int(i64::from(nanos / 1_000_000)),
-        BuiltinId::SubsecMicros => DurOut::Int(i64::from(nanos / 1_000)),
-        BuiltinId::AsSecsF64 => {
-            DurOut::Float(AsPrimitive::<f64>::as_(secs) + f64::from(nanos) / 1e9)
-        }
-        BuiltinId::IsZero => DurOut::Bool(total == 0),
-        _ => return None,
-    })
-}
-
-// datetime
-
-pub(super) enum DateOut {
-    Int(i64),
-    Text(String),
-}
-
-/// `parse_from_rfc3339` reduced to unix seconds, nanos and the offset. The error is the real
-/// chrono message.
-pub(super) fn parse_rfc3339(text: &str) -> Result<(i64, u32, i32), String> {
-    use chrono::{DateTime, Offset, Timelike};
-    match DateTime::parse_from_rfc3339(text) {
-        Ok(dt) => Ok((
-            dt.timestamp(),
-            dt.nanosecond(),
-            dt.offset().fix().local_minus_utc(),
-        )),
-        Err(e) => Err(e.to_string()),
-    }
-}
-
-/// `local` picks the machine timezone, otherwise the value is read through `offset`. A calendar field
-/// is read in the zone the value carries, like in real chrono.
-pub(super) fn datetime_core(
-    name: BuiltinId,
-    secs: i64,
-    nanos: u32,
-    local: bool,
-    offset: i32,
-    args: &impl Args,
-) -> Option<DateOut> {
-    use chrono::{DateTime, Datelike, FixedOffset, Local, Offset, Timelike, Utc};
-    let utc: DateTime<Utc> = DateTime::from_timestamp(secs, nanos).unwrap_or_default();
-    let view = if local {
-        utc.with_timezone(&Local).fixed_offset()
-    } else {
-        utc.with_timezone(&FixedOffset::east_opt(offset).unwrap_or(Utc.fix()))
-    };
-    Some(match name {
-        BuiltinId::Timestamp => DateOut::Int(secs),
-        BuiltinId::TimestampMillis => DateOut::Int(secs * 1000 + i64::from(nanos / 1_000_000)),
-        BuiltinId::ToRfc3339 => DateOut::Text(view.to_rfc3339()),
-        BuiltinId::Format => DateOut::Text(view.format(&args.text(0)).to_string()),
-        BuiltinId::Year => DateOut::Int(i64::from(view.year())),
-        BuiltinId::Month => DateOut::Int(i64::from(view.month())),
-        BuiltinId::Day => DateOut::Int(i64::from(view.day())),
-        BuiltinId::Hour => DateOut::Int(i64::from(view.hour())),
-        BuiltinId::Minute => DateOut::Int(i64::from(view.minute())),
-        BuiltinId::Second => DateOut::Int(i64::from(view.second())),
-        _ => return None,
-    })
-}
-
-// http and process scalars
-
-pub(super) enum StatusOut {
-    Int(i64),
-    Bool(bool),
-}
-
-pub(super) fn status_core(name: BuiltinId, code: i64) -> Option<StatusOut> {
-    Some(match name {
-        BuiltinId::AsU16 | BuiltinId::AsInt => StatusOut::Int(code),
-        BuiltinId::IsSuccess => StatusOut::Bool((200..300).contains(&code)),
-        BuiltinId::IsClientError => StatusOut::Bool((400..500).contains(&code)),
-        BuiltinId::IsServerError => StatusOut::Bool((500..600).contains(&code)),
-        _ => return None,
-    })
-}
-
-pub(super) enum HeaderOut {
-    /// `to_str` gives `Ok(text)` like the real fallible accessor
-    Ok(String),
-    Text(String),
-}
-
-pub(super) fn header_value_core(name: BuiltinId, text: String) -> Option<HeaderOut> {
-    Some(match name {
-        BuiltinId::ToStr => HeaderOut::Ok(text),
-        BuiltinId::AsStr | BuiltinId::AsString | BuiltinId::ToString => HeaderOut::Text(text),
-        _ => return None,
-    })
-}
-
-pub(super) enum ExitOut {
-    Bool(bool),
-    /// `None` after death by signal
-    OptInt(Option<i64>),
-}
-
-pub(super) fn exit_status_core(
-    name: BuiltinId,
-    success: bool,
-    code: Option<i64>,
-) -> Option<ExitOut> {
-    Some(match name {
-        BuiltinId::Success => ExitOut::Bool(success),
-        BuiltinId::Code => ExitOut::OptInt(code),
-        _ => return None,
-    })
 }
 
 /// The `colored` crate as string methods. Returns a plain string with ANSI codes so chaining

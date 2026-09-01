@@ -108,11 +108,16 @@ pub(super) fn native_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
             Err(e) => Value::err(super::native::io_error_value(&e)),
         },
         PathId::EnvSetVar => {
-            // Safety: scripts treat the environment as script wide state.
+            // Safety: the script wrote this call inside its own `unsafe` block. `rust check`
+            // runs under edition 2024, where a bare `set_var` is a compile error, so the script
+            // author took on the hazard, a concurrent `getenv` from another thread. The threads
+            // that can read the environment here, tokio workers and the reqwest pool, exist in
+            // the compiled binary too, so the interpreter adds no hazard of its own.
             unsafe { std::env::set_var(s(0)?, s(1)?) };
             Value::Unit
         }
         PathId::EnvRemoveVar => {
+            // Safety: same as `set_var` above.
             unsafe { std::env::remove_var(s(0)?) };
             Value::Unit
         }

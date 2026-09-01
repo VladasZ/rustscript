@@ -6,6 +6,8 @@ use std::sync::Arc;
 
 use syn::Expr;
 
+use super::generics::{bind_generic, erase, is_self_return, subst};
+use super::numeric::numeric_constant;
 use super::{Infer, Ty, type_arg};
 use crate::interpreter::numeric::IntWidth;
 use crate::interpreter::resolver::Res;
@@ -276,7 +278,7 @@ impl Infer<'_, '_> {
         self.external_call(&segs, path, &args, expected)
     }
 
-    fn walk_args(&mut self, args: &[&Expr]) -> Ty {
+    pub(super) fn walk_args(&mut self, args: &[&Expr]) -> Ty {
         for arg in args {
             self.expr(arg, &Ty::Unknown);
         }
@@ -351,69 +353,6 @@ impl Infer<'_, '_> {
             _ => erase(&ret),
         }
     }
-
-    /// `i64::from(x)`, `u8::try_from(x)`, `f64::max(a, b)` and the other numeric paths.
-    fn numeric_call(&mut self, owner: &str, last: &str, args: &[&Expr]) -> Option<Ty> {
-        Some(match (owner, last) {
-            ("char", "from") => {
-                self.walk_args(args);
-                Ty::Char
-            }
-            ("char", "from_u32" | "from_digit") => {
-                self.walk_args(args);
-                Ty::option(Ty::Char)
-            }
-            ("f64", "from") => {
-                self.walk_args(args);
-                Ty::F64
-            }
-            ("f32", "from") => {
-                self.walk_args(args);
-                Ty::F32
-            }
-            (w, "from") if IntWidth::parse(w).is_some() => {
-                self.walk_args(args);
-                Ty::Int(IntWidth::parse(w).expect("checked"))
-            }
-            (w, "try_from") if IntWidth::parse(w).is_some() => {
-                self.walk_args(args);
-                Ty::result(
-                    Ty::Int(IntWidth::parse(w).expect("checked")),
-                    Ty::named("TryFromIntError"),
-                )
-            }
-            (w, "from_str_radix") if IntWidth::parse(w).is_some() => {
-                self.walk_args(args);
-                Ty::result(
-                    Ty::Int(IntWidth::parse(w).expect("checked")),
-                    Ty::named("ParseIntError"),
-                )
-            }
-            (
-                w,
-                "max" | "min" | "pow" | "abs" | "saturating_sub" | "saturating_add"
-                | "wrapping_add" | "wrapping_sub",
-            ) if IntWidth::parse(w).is_some() => {
-                let ty = Ty::Int(IntWidth::parse(w).expect("checked"));
-                for arg in args {
-                    self.expr(arg, &ty);
-                }
-                ty
-            }
-            (
-                "f64" | "f32",
-                "max" | "min" | "sqrt" | "abs" | "powi" | "powf" | "floor" | "ceil" | "round",
-            ) => {
-                let ty = if owner == "f32" { Ty::F32 } else { Ty::F64 };
-                for arg in args {
-                    self.expr(arg, &ty);
-                }
-                ty
-            }
-            _ => return None,
-        })
-    }
-
     /// Constructors and the numeric conversions.
     fn ctor_call(
         &mut self,
@@ -674,136 +613,5 @@ impl Infer<'_, '_> {
             ("Uuid", "new_v4") => Ty::named("Uuid"),
             _ => self.walk_args(args),
         }
-    }
-}
-
-/// `i32::MAX`, `u8::MIN`, `f64::EPSILON`, `f64::consts::PI` and the like.
-fn numeric_constant(segs: &[String]) -> Option<Ty> {
-    let (owner, name) = match segs {
-        [.., owner, name] => (owner.as_str(), name.as_str()),
-        _ => return None,
-    };
-    let owner = if owner == "consts" {
-        match segs.len().checked_sub(3).and_then(|i| segs.get(i)) {
-            Some(o) => o.as_str(),
-            None => "f64",
-        }
-    } else {
-        owner
-    };
-    match owner {
-        "f64" => matches!(
-            name,
-            "MAX"
-                | "MIN"
-                | "EPSILON"
-                | "INFINITY"
-                | "NEG_INFINITY"
-                | "NAN"
-                | "PI"
-                | "E"
-                | "TAU"
-                | "SQRT_2"
-                | "LN_2"
-                | "LN_10"
-                | "FRAC_PI_2"
-                | "MIN_POSITIVE"
-        )
-        .then_some(Ty::F64),
-        "f32" => matches!(
-            name,
-            "MAX" | "MIN" | "EPSILON" | "INFINITY" | "NEG_INFINITY" | "NAN" | "PI" | "E" | "TAU"
-        )
-        .then_some(Ty::F32),
-        "char" => matches!(name, "MAX" | "REPLACEMENT_CHARACTER").then_some(Ty::Char),
-        other => {
-            let width = IntWidth::parse(other)?;
-            matches!(name, "MAX" | "MIN" | "BITS").then(|| {
-                if name == "BITS" {
-                    Ty::Int(IntWidth::U32)
-                } else {
-                    Ty::Int(width)
-                }
-            })
-        }
-    }
-}
-
-fn is_self_return(sig: &syn::Signature) -> bool {
-    matches!(&sig.output, syn::ReturnType::Type(_, ty)
-        if matches!(&**ty, syn::Type::Path(p) if p.path.is_ident("Self")))
-}
-
-/// Records what a generic parameter stands for, from a parameter type against an argument type.
-pub(super) fn bind_generic(param: &Ty, arg: &Ty, bound: &mut HashMap<Arc<str>, Ty>) {
-    match (param, arg) {
-        (Ty::Generic(name), got) if !got.is_unknown() && !matches!(got, Ty::Generic(_)) => {
-            bound.entry(name.clone()).or_insert_with(|| got.clone());
-        }
-        (Ty::Vec(p), Ty::Vec(a))
-        | (Ty::Set(p), Ty::Set(a))
-        | (Ty::Option(p), Ty::Option(a))
-        | (Ty::Iter(p), Ty::Iter(a) | Ty::Vec(a))
-        | (Ty::Range(p), Ty::Range(a)) => bind_generic(p, a, bound),
-        (Ty::Map(pk, pv), Ty::Map(ak, av)) | (Ty::Result(pk, pv), Ty::Result(ak, av)) => {
-            bind_generic(pk, ak, bound);
-            bind_generic(pv, av, bound);
-        }
-        (Ty::Tuple(ps), Ty::Tuple(xs)) if ps.len() == xs.len() => {
-            for (p, x) in ps.iter().zip(xs) {
-                bind_generic(p, x, bound);
-            }
-        }
-        (Ty::Closure(pp, pr), Ty::Closure(ap, ar)) if pp.len() == ap.len() => {
-            for (p, x) in pp.iter().zip(ap) {
-                bind_generic(p, x, bound);
-            }
-            bind_generic(pr, ar, bound);
-        }
-        _ => {}
-    }
-}
-
-pub(super) fn subst(ty: &Ty, bound: &HashMap<Arc<str>, Ty>) -> Ty {
-    match ty {
-        Ty::Generic(name) => bound.get(name).cloned().unwrap_or_else(|| ty.clone()),
-        Ty::Vec(t) => Ty::vec(subst(t, bound)),
-        Ty::Set(t) => Ty::Set(Box::new(subst(t, bound))),
-        Ty::Option(t) => Ty::option(subst(t, bound)),
-        Ty::Iter(t) => Ty::iter(subst(t, bound)),
-        Ty::Range(t) => Ty::Range(Box::new(subst(t, bound))),
-        Ty::Entry(t) => Ty::Entry(Box::new(subst(t, bound))),
-        Ty::Map(k, v) => Ty::Map(Box::new(subst(k, bound)), Box::new(subst(v, bound))),
-        Ty::Result(k, v) => Ty::result(subst(k, bound), subst(v, bound)),
-        Ty::Tuple(items) => Ty::Tuple(items.iter().map(|t| subst(t, bound)).collect()),
-        Ty::Closure(params, ret) => Ty::Closure(
-            params.iter().map(|t| subst(t, bound)).collect(),
-            Box::new(subst(ret, bound)),
-        ),
-        Ty::Named(name, args) => {
-            Ty::Named(name.clone(), args.iter().map(|t| subst(t, bound)).collect())
-        }
-        other => other.clone(),
-    }
-}
-
-/// An unbound generic is no information.
-pub(super) fn erase(ty: &Ty) -> Ty {
-    match ty {
-        Ty::Generic(_) => Ty::Unknown,
-        Ty::Vec(t) => Ty::vec(erase(t)),
-        Ty::Set(t) => Ty::Set(Box::new(erase(t))),
-        Ty::Option(t) => Ty::option(erase(t)),
-        Ty::Iter(t) => Ty::iter(erase(t)),
-        Ty::Range(t) => Ty::Range(Box::new(erase(t))),
-        Ty::Entry(t) => Ty::Entry(Box::new(erase(t))),
-        Ty::Map(k, v) => Ty::Map(Box::new(erase(k)), Box::new(erase(v))),
-        Ty::Result(k, v) => Ty::result(erase(k), erase(v)),
-        Ty::Tuple(items) => Ty::Tuple(items.iter().map(erase).collect()),
-        Ty::Closure(params, ret) => {
-            Ty::Closure(params.iter().map(erase).collect(), Box::new(erase(ret)))
-        }
-        Ty::Named(name, args) => Ty::Named(name.clone(), args.iter().map(erase).collect()),
-        other => other.clone(),
     }
 }

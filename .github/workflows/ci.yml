@@ -56,3 +56,20 @@ jobs:
       # so a lock cycle aborts the run with backtraces instead of hanging
       # until the harness timeout.
       - run: cargo test --workspace --features run-rs/deadlock-detection
+
+  check-gate:
+    name: Check gate ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      # These tests run a real `cargo check` on the manifest in checker.rs,
+      # which compiles every bridged crate once. Too slow for the default
+      # local loop, so they are ignored there and run only here. Without
+      # this job `rust check` and `rust build` have no end to end coverage.
+      - run: cargo test -p run-rs --features deadlock-detection --test check --test run -- --ignored

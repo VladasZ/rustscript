@@ -20,3 +20,35 @@ pub fn version() -> String {
         BUILD_PROFILE
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    struct ToolchainFile {
+        toolchain: Toolchain,
+    }
+
+    #[derive(Deserialize)]
+    struct Toolchain {
+        channel: String,
+    }
+
+    /// `cargo install run-rs` checks `rust-version` before it builds, so an old toolchain gets a
+    /// clear message instead of a compile error. Only the pinned toolchain is proven by CI, so
+    /// the claim must move with it.
+    #[test]
+    fn rust_version_matches_the_pinned_toolchain() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../rust-toolchain.toml");
+        let text = std::fs::read_to_string(path).unwrap();
+        let file: ToolchainFile = toml::from_str(&text).unwrap();
+        let (pinned, _) = file
+            .toolchain
+            .channel
+            .rsplit_once('.')
+            .expect("the channel is a full X.Y.Z version");
+        assert_eq!(env!("CARGO_PKG_RUST_VERSION"), pinned);
+    }
+}

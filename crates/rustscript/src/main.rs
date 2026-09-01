@@ -46,7 +46,44 @@ fn spawn_deadlock_watchdog() {
     });
 }
 
+/// A Rust panic here is never the script's fault. A script panic is a `ScriptPanic` error that
+/// never reaches this hook, and a task panic re-raises with `resume_unwind`, which skips it. The
+/// default hook prints an interpreter source path, which reads as if the script had crashed.
+fn install_bug_hook() {
+    use std::backtrace::{Backtrace, BacktraceStatus};
+    use std::panic::{PanicHookInfo, set_hook};
+    use std::thread::current;
+
+    set_hook(Box::new(|info: &PanicHookInfo<'_>| {
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic".to_string());
+        let thread = current();
+        let name = thread.name().unwrap_or("<unnamed>");
+        let location = info
+            .location()
+            .map_or_else(|| "unknown location".to_string(), ToString::to_string);
+        eprintln!("rust: internal error, this is a bug in the interpreter and not in the script");
+        // Same header shape as the default hook. The differential harness reads the reason from
+        // the line after `panicked at`, and the exit code stays 101 so it still counts as a panic.
+        eprintln!("thread '{name}' panicked at {location}:\n{message}");
+        let backtrace = Backtrace::capture();
+        if backtrace.status() == BacktraceStatus::Captured {
+            eprintln!("{backtrace}");
+        } else {
+            eprintln!("rust: set RUST_BACKTRACE=1 to see where it came from");
+        }
+        eprintln!(
+            "rust: please report it at https://github.com/VladasZ/rustscript/issues with the script that hit it"
+        );
+    }));
+}
+
 fn main() {
+    install_bug_hook();
     #[cfg(feature = "deadlock-detection")]
     spawn_deadlock_watchdog();
     if let Err(e) = real_main() {

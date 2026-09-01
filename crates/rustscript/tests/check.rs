@@ -69,3 +69,54 @@ fn diagnostics_name_the_real_script_file() {
         "diagnostic should not name main.rs, stderr was: {stderr}"
     );
 }
+
+fn build(src: &str, tag: &str, args: &[&str]) -> (std::path::PathBuf, std::process::Output) {
+    let path = temp_script(src, tag);
+    let out = Command::new(env!("CARGO_BIN_EXE_rust"))
+        .arg("build")
+        .arg(&path)
+        .args(args)
+        .output()
+        .expect("failed to launch rustscript");
+    (path, out)
+}
+
+#[test]
+#[ignore = "runs real cargo build, slow"]
+fn build_compiles_runs_and_then_hits_the_cache() {
+    let src = "fn main() {\n    let arg = std::env::args().nth(1).unwrap_or_default();\n    println!(\"built {arg}\");\n}\n";
+    let (path, first) = build(src, "build", &["one"]);
+    let stderr = String::from_utf8_lossy(&first.stderr);
+    assert!(first.status.success(), "build failed:\n{stderr}");
+    assert_eq!(String::from_utf8_lossy(&first.stdout), "built one\n");
+    assert!(
+        stderr.contains("rust: compiling"),
+        "first run must compile, stderr was: {stderr}"
+    );
+
+    // the same source again is a cache hit, so nothing compiles
+    let second = Command::new(env!("CARGO_BIN_EXE_rust"))
+        .args(["build", path.to_str().unwrap(), "two"])
+        .output()
+        .expect("failed to launch rustscript");
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(second.status.success(), "cached build failed:\n{stderr}");
+    assert_eq!(String::from_utf8_lossy(&second.stdout), "built two\n");
+    assert!(
+        !stderr.contains("rust: compiling"),
+        "second run must hit the cache, stderr was: {stderr}"
+    );
+
+    // `cmp` as the first script argument is the same path
+    let cmp = Command::new(env!("CARGO_BIN_EXE_rust"))
+        .args([path.to_str().unwrap(), "cmp", "three"])
+        .output()
+        .expect("failed to launch rustscript");
+    assert!(
+        cmp.status.success(),
+        "cmp run failed:\n{}",
+        String::from_utf8_lossy(&cmp.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&cmp.stdout), "built three\n");
+    std::fs::remove_file(&path).unwrap();
+}

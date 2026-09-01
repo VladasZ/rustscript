@@ -36,7 +36,7 @@ fn main() {
 #[test]
 #[ignore = "runs real cargo check, slow"]
 fn check_reports_a_method_the_interpreter_lacks() {
-    // valid Rust, but the interpreter has no `rposition`, so the coverage gate must catch it
+    // valid Rust, but the interpreter has no `partition_point`, so the coverage gate must catch it
     // before running
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("script.rs");
@@ -46,7 +46,7 @@ fn check_reports_a_method_the_interpreter_lacks() {
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     let v = vec![1, 2, 3];
-    println!("{:?}", v.iter().rposition(|x| *x == 2));
+    println!("{:?}", v.partition_point(|x| *x < 2));
 }
 "#,
     )
@@ -57,7 +57,7 @@ async fn main() {
         .unwrap();
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "check should fail, stderr: {err}");
-    assert!(err.contains("rposition"), "stderr was: {err}");
+    assert!(err.contains("partition_point"), "stderr was: {err}");
 }
 
 #[test]

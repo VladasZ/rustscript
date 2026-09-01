@@ -1,8 +1,11 @@
 //! Type directed generation. Every shape is chosen by type, so a catalog method appears at any
 //! depth at once.
 
+mod calls;
 mod exprs;
+mod literals;
 mod matches;
+mod mutations;
 mod pipes;
 mod stmts;
 mod users;

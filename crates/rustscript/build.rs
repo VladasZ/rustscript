@@ -6,6 +6,7 @@ mod builtin_id_build;
 mod path_id_build;
 
 use std::env;
+use std::error::Error;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -36,20 +37,20 @@ fn git_commit() -> String {
     }
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn Error>> {
     // harvested from the bridge sources so `rust check` can report a method the interpreter lacks
     let interpreter = std::path::Path::new("src/interpreter");
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let rows = builtin_id_build::read_table(&interpreter.join("method_names.txt"));
     std::fs::write(
         out_dir.join("builtin_id.rs"),
-        builtin_id_build::generate(&rows),
+        builtin_id_build::generate(&rows)?,
     )
     .expect("write builtin ids");
     let paths = path_id_build::read_paths(&interpreter.join("path_names.txt"));
     std::fs::write(out_dir.join("path_id.rs"), path_id_build::generate(&paths))
         .expect("write path ids");
-    let tables = bridge_tables_build::generate(interpreter, &rows);
+    let tables = bridge_tables_build::generate(interpreter, &rows)?;
     std::fs::write(out_dir.join("bridge_tables.rs"), tables).expect("write bridge tables");
     println!("cargo:rerun-if-changed=src/interpreter");
     println!("cargo:rerun-if-changed=src/bridge_tables_build.rs");
@@ -69,4 +70,5 @@ fn main() {
     println!("cargo:rustc-env=RUSTSCRIPT_GIT_COMMIT={commit}");
     println!("cargo:rustc-env=RUSTSCRIPT_BUILD_TIME={build_time}");
     println!("cargo:rustc-env=RUSTSCRIPT_BUILD_PROFILE={profile}");
+    Ok(())
 }
