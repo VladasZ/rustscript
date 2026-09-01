@@ -53,7 +53,7 @@ jobs:
           seed=$(( base + ${{ matrix.offset }} ))
           cases="${{ inputs.cases }}"
           echo "running ${cases:-20000} cases from seed $seed"
-          cargo run --release -p rustscript-differential -- run \
+          cargo run --release --locked -p rustscript-differential -- run \
             --seed "$seed" \
             --cases "${cases:-20000}" \
             --timeout-ms 10000
@@ -62,7 +62,7 @@ jobs:
       - name: Surface report
         if: always()
         shell: bash
-        run: cargo run --release -p rustscript-differential -- surface
+        run: cargo run --release --locked -p rustscript-differential -- surface
       # Always, not only on failure. A green run still saves one case per
       # distinct gap reason, and those are the input for closing the gaps.
       - name: Upload failure and gap artifacts

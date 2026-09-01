@@ -123,6 +123,12 @@ runs them with `--ignored` on all 3 platforms, so `rust check` and
 Spelling uses `crate-ci/typos`. Words it does not know, like `ratatui`, go
 into `typos.toml`.
 
+Every cargo call in CI and in the release build passes `--locked`, so a
+build never resolves past `Cargo.lock`. `audit.yml` runs `cargo audit` weekly
+and on every change to `Cargo.lock`, and `dependabot.yml` opens one weekly
+pull request for compatible dependency bumps and one per major bump, for
+cargo and for the actions the workflows use.
+
 Every job sets `timeout-minutes`. No job installs system packages. The bench
 crate embeds its font, so no platform needs system font libraries.
 

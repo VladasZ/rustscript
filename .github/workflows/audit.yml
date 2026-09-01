@@ -1,0 +1,33 @@
+name: Audit
+
+# Advisories land without a code change, so the weekly run is the one that
+# matters. The push and pull request triggers catch a bump that pulls in a
+# known bad version.
+
+on:
+  schedule:
+    - cron: "40 3 * * 1"
+  push:
+    branches: [main]
+    paths:
+      - Cargo.lock
+      - .github/workflows/audit.yml
+  pull_request:
+    paths:
+      - Cargo.lock
+      - .github/workflows/audit.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Cargo audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

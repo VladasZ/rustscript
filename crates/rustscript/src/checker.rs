@@ -255,34 +255,36 @@ pub fn build(
     Ok(bin)
 }
 
-/// Always there, a script can `use` them without declaring anything.
+/// Always there, a script can `use` them without declaring anything. Every entry mirrors the
+/// workspace, the examples build against those versions and prove the bridges. A test enforces
+/// it.
 const MANIFEST: &str = r#"[dependencies]
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-anyhow = "1"
-regex = "1"
-which = "8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+regex = "1.13"
+which = "8.0"
 rand = "0.10"
 glob = "0.3"
 chrono = "0.4"
-dirs = "6"
-toml = "1"
+dirs = "6.0"
+toml = "1.1"
 serde_yaml = "0.9"
-colored = "3"
-base64 = "0.22"
+colored = "3.1"
+base64 = "0.23"
 hex = "0.4"
 sha2 = "0.11"
 ed25519-dalek = "2"
-ctrlc = "3"
-tempfile = "3"
-jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+ctrlc = "3.5"
+tempfile = "3.27"
+jsonwebtoken = { version = "11.0", features = ["rust_crypto"] }
 lopdf = "0.44"
 xmltree = { version = "0.12", features = ["attribute-order"] }
 ratatui = { version = "0.30", default-features = false }
 crossterm = "0.29"
 terminal-light = "1.9"
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking", "cookies"], default-features = false }
+reqwest = { version = "0.13", features = ["blocking", "cookies", "json", "query", "rustls"], default-features = false }
 
 [target."cfg(windows)".dependencies]
 winreg = "0.56"
@@ -342,7 +344,92 @@ fn hash_files(files: &[(PathBuf, String)], crate_deps: &[CrateDep]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use serde::Deserialize;
+
     use super::*;
+
+    #[derive(Deserialize)]
+    struct RootManifest {
+        workspace: WorkspaceTable,
+    }
+
+    #[derive(Deserialize)]
+    struct WorkspaceTable {
+        dependencies: BTreeMap<String, Dep>,
+    }
+
+    #[derive(Deserialize)]
+    struct ScriptManifest {
+        dependencies: BTreeMap<String, Dep>,
+        target: BTreeMap<String, TargetTable>,
+    }
+
+    #[derive(Deserialize)]
+    struct TargetTable {
+        dependencies: BTreeMap<String, Dep>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Dep {
+        Version(String),
+        Table(DepTable),
+    }
+
+    #[derive(Deserialize)]
+    struct DepTable {
+        version: String,
+        #[serde(default)]
+        features: Vec<String>,
+        #[serde(default = "enabled", rename = "default-features")]
+        default_features: bool,
+    }
+
+    fn enabled() -> bool {
+        true
+    }
+
+    impl Dep {
+        fn spec(&self) -> (String, Vec<String>, bool) {
+            match self {
+                Dep::Version(version) => (version.clone(), Vec::new(), true),
+                Dep::Table(table) => {
+                    let mut features = table.features.clone();
+                    features.sort();
+                    (table.version.clone(), features, table.default_features)
+                }
+            }
+        }
+    }
+
+    /// The bridges emulate the crate versions the examples build against, which are the
+    /// workspace ones. `rust check` and `rust build` compile a script against `MANIFEST`, so an
+    /// entry that drifts lets a script pass the gate against an API the bridge does not have.
+    #[test]
+    fn the_script_manifest_matches_the_workspace_versions() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml");
+        let root: RootManifest = toml::from_str(&std::fs::read_to_string(root).unwrap()).unwrap();
+        let script: ScriptManifest = toml::from_str(&manifest(None, &[])).unwrap();
+        let mut deps: Vec<(&String, &Dep)> = script.dependencies.iter().collect();
+        for target in script.target.values() {
+            deps.extend(target.dependencies.iter());
+        }
+        assert!(deps.len() > 20, "the script manifest lost its dependencies");
+        for (name, dep) in deps {
+            let expected = root
+                .workspace
+                .dependencies
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} is not a workspace dependency"));
+            assert_eq!(
+                dep.spec(),
+                expected.spec(),
+                "{name} in the script manifest drifted from the workspace"
+            );
+        }
+    }
 
     /// The graft must not land after the `Windows` target table, `use shared::..` fails off
     /// `Windows` then.
