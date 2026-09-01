@@ -1,6 +1,7 @@
 //! The frame loop. `exec` owns the call frames and applies the `Flow` each op returns. The op
 //! bodies are in `vm_step`.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 
 use rustc_hash::FxHashMap;
@@ -22,6 +23,12 @@ use super::vm_support::{FrameSite, trace_error};
 
 pub(super) const MAX_CALL_DEPTH: usize = 100_000;
 
+/// The host stack of every thread that runs script code. A closure called from a native like
+/// `map` nests a whole `exec` on the host stack, so the depth a script can reach through iterator
+/// closures is bounded by this, not by `MAX_CALL_DEPTH` alone. Virtual memory, only the pages a
+/// deep run touches are ever committed.
+pub const SCRIPT_STACK_BYTES: usize = 1 << 30;
+
 /// Deeper nesting gives buffers back to the allocator, so a burst of recursion doesn't pin its
 /// memory forever.
 const MAX_POOLED_STACKS: usize = 32;
@@ -30,6 +37,40 @@ thread_local! {
     /// 1 popped per live call on this thread
     static STACK_POOL: std::cell::RefCell<Vec<Vec<Value>>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// Live `run_chunk` nestings on this thread. Each one is a native frame set on the host
+    /// stack, so they count toward the depth cap like VM frames do.
+    static NESTED: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Below this much host stack the next nesting stops with the script panic. Otherwise a debug
+/// build, whose native frames are several times larger, aborts the process before the depth cap.
+const STACK_RED_ZONE: usize = 256 * 1024;
+
+/// Holds one nesting level for the life of a `run_chunk` call.
+struct Nesting;
+
+impl Nesting {
+    fn enter() -> Result<Self> {
+        let depth = NESTED.with(Cell::get);
+        if depth >= MAX_CALL_DEPTH {
+            bail!("stack overflow: call depth exceeded {MAX_CALL_DEPTH}");
+        }
+        if stacker::remaining_stack().is_some_and(|left| left < STACK_RED_ZONE) {
+            bail!("stack overflow: host stack exhausted after {depth} nested calls");
+        }
+        NESTED.with(|n| n.set(depth + 1));
+        Ok(Self)
+    }
+
+    fn depth() -> usize {
+        NESTED.with(Cell::get)
+    }
+}
+
+impl Drop for Nesting {
+    fn drop(&mut self) {
+        NESTED.with(|n| n.set(n.get() - 1));
+    }
 }
 
 fn swap_option<T>(current: &mut Option<T>, next: Option<T>) -> Option<T> {
@@ -244,6 +285,7 @@ impl Vm {
                 args.len()
             );
         }
+        let nesting = Nesting::enter()?;
         // A fresh stack per call was the main cost in comparator sorts. Nested calls each pop
         // their own buffer.
         let mut stack = STACK_POOL
@@ -261,6 +303,7 @@ impl Vm {
             *slot = Value::Unit;
         }
         let result = self.exec(chunk, &mut stack, upvalues);
+        drop(nesting);
         for slot in &mut stack {
             slot.release();
         }
@@ -300,7 +343,7 @@ impl Vm {
                         leave(&mut at, &mut local_cells, stack, frame, v);
                     }
                     Exit::Call(req) => {
-                        if frames.len() >= MAX_CALL_DEPTH {
+                        if Nesting::depth() + frames.len() >= MAX_CALL_DEPTH {
                             bail!("stack overflow: call depth exceeded {MAX_CALL_DEPTH}");
                         }
                         frames.push(enter(&mut at, stack, req));

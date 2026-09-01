@@ -169,8 +169,9 @@ fn main() {
 }
 "#,
     );
+    // the coverage gate stops it before the script runs
     assert!(
-        err.contains("std::thread is not supported"),
+        err.contains("`std::thread::spawn` is not implemented by the interpreter"),
         "stderr was: {err}"
     );
 }

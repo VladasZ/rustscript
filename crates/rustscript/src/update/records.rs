@@ -1,12 +1,50 @@
-use std::fs::{read_to_string, write};
+use std::collections::BTreeMap;
+use std::fs::{read_to_string, rename, write};
 use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result};
-use serde_json::{Value, from_str, json, to_string};
-use toml::{Table, Value as Toml};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, from_str, from_value, to_string, to_value};
 
+use super::install::BINARY;
 use super::release::{PACKAGE, REPOSITORY};
+
+/// `.crates.toml`, the list `cargo install --list` prints.
+#[derive(Deserialize, Serialize, Default)]
+struct CratesToml {
+    #[serde(default)]
+    v1: BTreeMap<String, Vec<String>>,
+}
+
+/// `.crates2.json`, the record `cargo install` and `cargo install-update` read. The entry of any
+/// other package is carried over as it is, whatever fields its cargo wrote.
+#[derive(Deserialize, Serialize)]
+struct Crates2Json {
+    #[serde(default)]
+    installs: BTreeMap<String, Value>,
+    v: u32,
+}
+
+/// One install entry, the fields cargo writes for its own installs.
+#[derive(Deserialize, Serialize)]
+struct Install {
+    version_req: Option<String>,
+    bins: Vec<String>,
+    features: Vec<String>,
+    all_features: bool,
+    no_default_features: bool,
+    profile: String,
+    target: String,
+    rustc: String,
+}
+
+/// The one field of a stale entry worth carrying over.
+#[derive(Deserialize, Default)]
+struct PreviousInstall {
+    #[serde(default)]
+    rustc: String,
+}
 
 /// The `name version (source)` key cargo tracks an install under. A download
 /// is recorded as the git source of its tag so `cargo install-update` stays
@@ -31,87 +69,82 @@ fn package_of(key: &str) -> &str {
     key.split_whitespace().next().unwrap_or_default()
 }
 
+fn is_stale(key: &str) -> bool {
+    package_of(key) == PACKAGE
+}
+
+/// Both files are cargo's record of every installed tool, so neither is ever left half written.
+fn write_atomic(path: &Path, text: &str) -> Result<()> {
+    let staged = path.with_extension(format!("tmp.{}", std::process::id()));
+    write(&staged, text).with_context(|| format!("could not write {}", staged.display()))?;
+    rename(&staged, path).with_context(|| format!("could not replace {}", path.display()))
+}
+
 fn patch_crates_toml(path: &Path, key: &str) -> Result<()> {
-    let mut doc: Table = if path.exists() {
-        read_to_string(path)
-            .with_context(|| format!("could not read {}", path.display()))?
-            .parse()
-            .with_context(|| format!("could not parse {}", path.display()))?
+    let mut doc: CratesToml = if path.exists() {
+        let text =
+            read_to_string(path).with_context(|| format!("could not read {}", path.display()))?;
+        toml::from_str(&text).with_context(|| format!("could not parse {}", path.display()))?
     } else {
-        Table::new()
+        CratesToml::default()
     };
 
-    let installs = doc
-        .entry("v1")
-        .or_insert_with(|| Toml::Table(Table::new()))
-        .as_table_mut()
-        .with_context(|| format!("v1 in {} is not a table", path.display()))?;
-
-    for stale in stale_keys(installs.keys().map(String::as_str)) {
-        installs.remove(&stale);
-    }
-    installs.insert(
-        key.to_string(),
-        Toml::Array(vec![Toml::String("rust".to_string())]),
-    );
+    doc.v1.retain(|entry, _| !is_stale(entry));
+    doc.v1.insert(key.to_string(), vec![BINARY.to_string()]);
 
     let text = toml::to_string(&doc).context("could not serialize the cargo install list")?;
-    write(path, text).with_context(|| format!("could not write {}", path.display()))
+    write_atomic(path, &text)
 }
 
 fn patch_crates2_json(path: &Path, key: &str, target: &str, rustc: Option<&str>) -> Result<()> {
-    let mut doc: Value = if path.exists() {
+    let mut doc: Crates2Json = if path.exists() {
         let text =
             read_to_string(path).with_context(|| format!("could not read {}", path.display()))?;
         from_str(&text).with_context(|| format!("could not parse {}", path.display()))?
     } else {
-        json!({ "installs": {}, "v": 1 })
+        Crates2Json {
+            installs: BTreeMap::new(),
+            v: 1,
+        }
     };
+    doc.v = 1;
 
-    let root = doc
-        .as_object_mut()
-        .with_context(|| format!("{} is not a json object", path.display()))?;
-    root.insert("v".to_string(), json!(1));
-    let installs = root
-        .entry("installs")
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
-        .with_context(|| format!("installs in {} is not an object", path.display()))?;
-
+    let stale: Vec<String> = doc
+        .installs
+        .keys()
+        .filter(|k| is_stale(k))
+        .cloned()
+        .collect();
     let mut previous_rustc = String::new();
-    for stale in stale_keys(installs.keys().map(String::as_str)) {
-        if let Some(rustc) = installs
-            .remove(&stale)
-            .as_ref()
-            .and_then(|entry| entry.get("rustc"))
-            .and_then(Value::as_str)
-        {
-            previous_rustc = rustc.to_string();
+    for entry in stale {
+        if let Some(value) = doc.installs.remove(&entry) {
+            let previous: PreviousInstall = from_value(value).with_context(|| {
+                format!(
+                    "the entry of {entry} in {} is not an install record",
+                    path.display()
+                )
+            })?;
+            previous_rustc = previous.rustc;
         }
     }
 
-    installs.insert(
+    let install = Install {
+        version_req: None,
+        bins: vec![BINARY.to_string()],
+        features: Vec::new(),
+        all_features: false,
+        no_default_features: false,
+        profile: "release".to_string(),
+        target: target.to_string(),
+        rustc: rustc.map_or(previous_rustc, str::to_string),
+    };
+    doc.installs.insert(
         key.to_string(),
-        json!({
-            "version_req": Value::Null,
-            "bins": ["rust"],
-            "features": [],
-            "all_features": false,
-            "no_default_features": false,
-            "profile": "release",
-            "target": target,
-            "rustc": rustc.unwrap_or(&previous_rustc),
-        }),
+        to_value(install).context("could not serialize the install record")?,
     );
 
     let text = to_string(&doc).context("could not serialize the cargo install list")?;
-    write(path, text).with_context(|| format!("could not write {}", path.display()))
-}
-
-fn stale_keys<'a>(keys: impl Iterator<Item = &'a str>) -> Vec<String> {
-    keys.filter(|key| package_of(key) == PACKAGE)
-        .map(str::to_string)
-        .collect()
+    write_atomic(path, &text)
 }
 
 /// The building toolchain is unknowable, so the local one is recorded. Its
@@ -131,16 +164,41 @@ fn rustc_info() -> Option<(String, String)> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::{read_to_string, write};
+    use std::fs::{read_dir, read_to_string, write};
+    use std::path::Path;
 
     use pretty_assertions::assert_eq;
-    use serde_json::{Value, from_str};
+    use serde_json::{from_str, from_value};
     use tempfile::tempdir;
-    use toml::Table;
 
-    use super::{install_key, patch_crates_toml, patch_crates2_json};
+    use super::{
+        BINARY, Crates2Json, CratesToml, Install, install_key, patch_crates_toml,
+        patch_crates2_json,
+    };
 
     const KEY: &str = "run-rs 0.2.7 (git+https://github.com/VladasZ/rustscript?tag=v0.2.7#abc123)";
+    const RIPGREP: &str = "ripgrep 14.1.1 (registry+https://github.com/rust-lang/crates.io-index)";
+
+    fn read_toml(path: &Path) -> CratesToml {
+        toml::from_str(&read_to_string(path).unwrap()).unwrap()
+    }
+
+    fn read_json(path: &Path) -> Crates2Json {
+        from_str(&read_to_string(path).unwrap()).unwrap()
+    }
+
+    fn our_entry(doc: &Crates2Json) -> Install {
+        from_value(doc.installs[KEY].clone()).unwrap()
+    }
+
+    /// The staged file must be gone once the real one is in place.
+    fn only_file(dir: &Path, name: &str) {
+        let names: Vec<String> = read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec![name.to_string()]);
+    }
 
     #[test]
     fn the_install_key_matches_what_a_source_install_writes() {
@@ -165,13 +223,11 @@ mod tests {
 
         patch_crates_toml(&path, KEY).unwrap();
 
-        let doc: Table = read_to_string(&path).unwrap().parse().unwrap();
-        let installs = doc["v1"].as_table().unwrap();
-        assert_eq!(installs.len(), 2);
-        assert_eq!(installs[KEY].as_array().unwrap().len(), 1);
-        assert!(installs.contains_key(
-            "ripgrep 14.1.1 (registry+https://github.com/rust-lang/crates.io-index)"
-        ));
+        let doc = read_toml(&path);
+        assert_eq!(doc.v1.len(), 2);
+        assert_eq!(doc.v1[KEY], vec![BINARY.to_string()]);
+        assert_eq!(doc.v1[RIPGREP], vec!["rg".to_string()]);
+        only_file(dir.path(), ".crates.toml");
     }
 
     #[test]
@@ -181,10 +237,10 @@ mod tests {
 
         patch_crates_toml(&path, KEY).unwrap();
 
-        let doc: Table = read_to_string(&path).unwrap().parse().unwrap();
-        assert!(doc["v1"].as_table().unwrap().contains_key(KEY));
+        assert!(read_toml(&path).v1.contains_key(KEY));
     }
 
+    /// The ripgrep entry has fields this code never wrote, and keeps them byte for byte.
     #[test]
     fn the_json_entry_is_replaced_and_the_new_toolchain_recorded() {
         let dir = tempdir().unwrap();
@@ -192,26 +248,25 @@ mod tests {
         write(
             &path,
             r#"{"installs":{
-"ripgrep 14.1.1 (registry+https://github.com/rust-lang/crates.io-index)":{"bins":["rg"]},
+"ripgrep 14.1.1 (registry+https://github.com/rust-lang/crates.io-index)":{"bins":["rg"],"future_field":7},
 "run-rs 0.2.6 (git+https://github.com/VladasZ/rustscript?tag=v0.2.6#051dc69)":{"bins":["rust"],"rustc":"rustc 1.90.0","target":"aarch64-apple-darwin"}},"v":1}"#,
         )
         .unwrap();
 
         patch_crates2_json(&path, KEY, "aarch64-apple-darwin", Some("rustc 1.96.1")).unwrap();
 
-        let doc: Value = from_str(&read_to_string(&path).unwrap()).unwrap();
-        let installs = doc["installs"].as_object().unwrap();
-        assert_eq!(installs.len(), 2);
-        assert_eq!(installs[KEY]["rustc"], "rustc 1.96.1");
-        assert_eq!(installs[KEY]["target"], "aarch64-apple-darwin");
+        let doc = read_json(&path);
+        assert_eq!(doc.installs.len(), 2);
+        let ours = our_entry(&doc);
+        assert_eq!(ours.rustc, "rustc 1.96.1");
+        assert_eq!(ours.target, "aarch64-apple-darwin");
+        assert_eq!(ours.bins, vec![BINARY.to_string()]);
+        assert_eq!(ours.profile, "release");
         assert_eq!(
-            installs[KEY]["bins"],
-            from_str::<Value>(r#"["rust"]"#).unwrap()
+            doc.installs[RIPGREP].to_string(),
+            r#"{"bins":["rg"],"future_field":7}"#
         );
-        assert_eq!(installs[KEY]["profile"], "release");
-        assert!(installs.contains_key(
-            "ripgrep 14.1.1 (registry+https://github.com/rust-lang/crates.io-index)"
-        ));
+        only_file(dir.path(), ".crates2.json");
     }
 
     #[test]
@@ -226,8 +281,7 @@ mod tests {
 
         patch_crates2_json(&path, KEY, "x86_64-unknown-linux-musl", None).unwrap();
 
-        let doc: Value = from_str(&read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(doc["installs"][KEY]["rustc"], "rustc 1.90.0");
+        assert_eq!(our_entry(&read_json(&path)).rustc, "rustc 1.90.0");
     }
 
     #[test]
@@ -243,8 +297,8 @@ mod tests {
         )
         .unwrap();
 
-        let doc: Value = from_str(&read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(doc["v"], 1);
-        assert_eq!(doc["installs"][KEY]["target"], "x86_64-unknown-linux-musl");
+        let doc = read_json(&path);
+        assert_eq!(doc.v, 1);
+        assert_eq!(our_entry(&doc).target, "x86_64-unknown-linux-musl");
     }
 }

@@ -381,6 +381,7 @@ impl Interp {
     fn run(&self) -> Result<()> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
+            .thread_stack_size(vm::SCRIPT_STACK_BYTES)
             .build()
             .map_err(|e| anyhow!("cannot start tokio runtime: {e}"))?;
         let functions = self.functions.clone();
@@ -429,6 +430,7 @@ impl Interp {
         // `tokio::spawn` gets the same id as in a compiled binary.
         let joined = std::thread::Builder::new()
             .name("main".to_string())
+            .stack_size(vm::SCRIPT_STACK_BYTES)
             .spawn(move || runner.run_chunk(&main_chunk, &[], &[]))
             .map_err(|e| anyhow!("cannot start main thread: {e}"))?
             .join();

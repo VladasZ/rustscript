@@ -48,6 +48,15 @@ jobs:
 
           manifest=crates/rustscript/Cargo.toml
           current=$(grep -m1 '^version = ' "$manifest" | cut -d'"' -f2)
+
+          # `rust-version` is what `cargo install` reports to an old toolchain, so it must
+          # name the toolchain the code is built and tested with.
+          toolchain=$(grep -m1 '^channel = ' rust-toolchain.toml | cut -d'"' -f2 | cut -d. -f1,2)
+          msrv=$(grep -m1 '^rust-version = ' "$manifest" | cut -d'"' -f2)
+          if [ "$toolchain" != "$msrv" ]; then
+            echo "rust-version is $msrv but rust-toolchain.toml pins $toolchain" >&2
+            exit 1
+          fi
           IFS=. read -r major minor patch <<< "$current"
           case "$BUMP" in
             major) major=$((major + 1)); minor=0; patch=0 ;;

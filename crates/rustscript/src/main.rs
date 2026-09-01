@@ -222,6 +222,9 @@ usage:
   rust update [VER]    install a prebuilt release, the newest one by default,
                        --from-source builds it with cargo instead
   rust --version       show version and build information
-  rust help            show this help"
+  rust help            show this help
+
+RUSTSCRIPT_SKIP_CHECK=1 skips the cargo check gate, so a script runs
+on a machine without cargo"
     );
 }

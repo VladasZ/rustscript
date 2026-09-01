@@ -4,6 +4,8 @@ mod bridge_tables_build;
 mod builtin_id_build;
 #[path = "src/path_id_build.rs"]
 mod path_id_build;
+#[path = "src/script_manifest_build.rs"]
+mod script_manifest_build;
 
 use std::env;
 use std::path::PathBuf;
@@ -51,6 +53,17 @@ fn main() {
         .expect("write path ids");
     let tables = bridge_tables_build::generate(interpreter, &rows);
     std::fs::write(out_dir.join("bridge_tables.rs"), tables).expect("write bridge tables");
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let script = script_manifest_build::generate(&manifest_dir);
+    std::fs::write(out_dir.join("script_manifest.toml"), script.manifest)
+        .expect("write script manifest");
+    std::fs::write(out_dir.join("script_crates.rs"), script.crates_rs)
+        .expect("write script crates");
+    // the workspace manifest feeds the script manifest, the published crate has none
+    let workspace = manifest_dir.join("../../Cargo.toml");
+    if workspace.exists() {
+        println!("cargo:rerun-if-changed={}", workspace.display());
+    }
     println!("cargo:rerun-if-changed=src/interpreter");
     println!("cargo:rerun-if-changed=src/bridge_tables_build.rs");
     println!("cargo:rerun-if-changed=build.rs");
