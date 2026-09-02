@@ -144,8 +144,10 @@ pub(super) fn make_tuple(ctx: &mut StepCtx, dst: u16, first: u16, count: u16) ->
 pub(super) fn array_repeat(ctx: &mut StepCtx, dst: u16, val: u16, count: u16) -> Result<Flow> {
     let n = match ctx.get(count) {
         Value::Int(n) => usize::try_from(*n)?,
-        v if v.untag_int().is_some() => usize::try_from(v.untag_int().unwrap())?,
-        _ => bail!("array repeat length must be an integer"),
+        v => match v.untag_int() {
+            Some(n) => usize::try_from(n)?,
+            None => bail!("array repeat length must be an integer"),
+        },
     };
     // every element owns its own storage, `vec![vec![0; 3]; 2]` must not alias its rows
     let v = ctx.get(val).clone();

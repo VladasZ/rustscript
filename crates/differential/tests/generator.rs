@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::process::Command;
 
 use rustscript_differential::generator::generate;
+use rustscript_differential::lang::expr::Expr as MatchExpr;
 
 #[test]
 fn generation_includes_replayable_structured_mutations() {
@@ -111,4 +112,42 @@ fn splice_never_targets_a_small_count_argument() {
     };
     // the call, the receiver vec, its item, then the count
     assert_eq!(call.pinned_nodes(), vec![false, false, false, true]);
+}
+
+/// Seed 2852428022 bound a bare int scrutinee and called `saturating_pow` on the binding, which
+/// `rustc` rejects as an ambiguous numeric type. A match that binds must state its literal widths.
+#[test]
+fn bound_match_scrutinees_carry_their_widths() {
+    for seed in 0..1_000 {
+        let program = generate(seed);
+        for block in &program.blocks {
+            let stmt_exprs = block.statements.iter().flat_map(|s| s.exprs());
+            let fn_exprs = block.fns.iter().flat_map(|f| f.exprs());
+            for expr in stmt_exprs.chain(fn_exprs) {
+                for node in expr.nodes() {
+                    let MatchExpr::Match {
+                        scrutinee, arms, ..
+                    } = node
+                    else {
+                        continue;
+                    };
+                    let mut binds = Vec::new();
+                    for arm in arms {
+                        arm.pat.bindings(&mut binds);
+                    }
+                    if binds.is_empty() {
+                        continue;
+                    }
+                    let bare = scrutinee.nodes().into_iter().any(|n| {
+                        matches!(n, MatchExpr::BareInt { .. } | MatchExpr::BareFloat { .. })
+                    });
+                    assert!(
+                        !bare,
+                        "seed {seed} binds a bare match scrutinee:\n{}",
+                        node.render()
+                    );
+                }
+            }
+        }
+    }
 }

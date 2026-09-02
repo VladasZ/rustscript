@@ -152,7 +152,10 @@ impl Compiler<'_> {
                 to: u32::try_from(head)?,
             });
             let end = self.mark()?;
-            let lc = self.loops.pop().unwrap();
+            let lc = self
+                .loops
+                .pop()
+                .expect("the loop context was pushed at loop entry");
             for b in lc.breaks {
                 self.patch_jump(b, end);
             }
@@ -177,7 +180,10 @@ impl Compiler<'_> {
             to: u32::try_from(head)?,
         });
         let end = self.mark()?;
-        let lc = self.loops.pop().unwrap();
+        let lc = self
+            .loops
+            .pop()
+            .expect("the loop context was pushed at loop entry");
         for b in lc.breaks {
             self.patch_jump(b, end);
         }
@@ -205,7 +211,10 @@ impl Compiler<'_> {
             to: u32::try_from(head)?,
         });
         let end = self.mark()?;
-        let lc = self.loops.pop().unwrap();
+        let lc = self
+            .loops
+            .pop()
+            .expect("the loop context was pushed at loop entry");
         for b in lc.breaks {
             self.patch_jump(b, end);
         }
@@ -270,7 +279,11 @@ impl Compiler<'_> {
         // at scope end for a `return` out of the loop
         let drops_iter = owned && self.ctx.has_drop;
         if drops_iter {
-            self.cur().scope_order.last_mut().unwrap().push(iter);
+            self.cur()
+                .scope_order
+                .last_mut()
+                .expect("a scope is always open")
+                .push(iter);
         }
         let idx = self.alloc();
         self.emit(Op::LoadInt { dst: idx, v: 0 });
@@ -310,7 +323,10 @@ impl Compiler<'_> {
             to: u32::try_from(head)?,
         });
         let end = self.mark()?;
-        let lc = self.loops.pop().unwrap();
+        let lc = self
+            .loops
+            .pop()
+            .expect("the loop context was pushed at loop entry");
         for b in lc.breaks {
             self.patch_jump(b, end);
         }
@@ -336,7 +352,10 @@ impl Compiler<'_> {
         });
         self.compile_block(&b.block, dst)?;
         let end = self.mark()?;
-        let lc = self.loops.pop().unwrap();
+        let lc = self
+            .loops
+            .pop()
+            .expect("the loop context was pushed at loop entry");
         for jmp in lc.breaks {
             self.patch_jump(jmp, end);
         }

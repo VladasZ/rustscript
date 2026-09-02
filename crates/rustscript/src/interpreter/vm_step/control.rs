@@ -171,7 +171,7 @@ pub(super) fn eval_cast(target: &CastIr, v: Value) -> Result<Value> {
         CastIr::F64 => {
             return Ok(Value::Float(match v {
                 Value::Int(i) => AsPrimitive::<f64>::as_(i),
-                Value::IntW(..) => AsPrimitive::<f64>::as_(v.int_parts().unwrap().0),
+                Value::IntW(bits, w) => AsPrimitive::<f64>::as_(w.decode(bits)),
                 Value::Big(bits, w) => {
                     if w == crate::interpreter::numeric::IntWidth::U128 {
                         AsPrimitive::<f64>::as_(bits.cast_unsigned())
@@ -187,7 +187,7 @@ pub(super) fn eval_cast(target: &CastIr, v: Value) -> Result<Value> {
         CastIr::F32 => {
             return Ok(Value::F32(match v {
                 Value::Int(i) => AsPrimitive::<f32>::as_(i),
-                Value::IntW(..) => AsPrimitive::<f32>::as_(v.int_parts().unwrap().0),
+                Value::IntW(bits, w) => AsPrimitive::<f32>::as_(w.decode(bits)),
                 Value::Float(f) => AsPrimitive::<f32>::as_(f),
                 Value::F32(f) => f,
                 other => bail!("cannot cast {} to float", other.type_name()),
@@ -213,7 +213,7 @@ pub(super) fn eval_cast(target: &CastIr, v: Value) -> Result<Value> {
     };
     let value = match v {
         Value::Int(i) => truncate(i128::from(i), width),
-        Value::IntW(..) => truncate(v.int_parts().unwrap().0, width),
+        Value::IntW(bits, w) => truncate(w.decode(bits), width),
         // the stored i128 has the exact bits, so a narrowing cast keeps the low bits
         Value::Big(bits, _) => truncate(bits, width),
         Value::Float(f) => float_to_int(f, width),

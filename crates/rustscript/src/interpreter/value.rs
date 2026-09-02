@@ -1,7 +1,6 @@
 //! The value model. `Send + Sync`, every shared value sits behind `Arc` and `parking_lot::Mutex`.
 
 use num_traits::AsPrimitive;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
@@ -9,12 +8,18 @@ use indexmap::IndexMap;
 use parking_lot::Mutex;
 use rustc_hash::FxBuildHasher;
 
-use super::borrow::BorrowGuard;
 use super::bytecode::Const;
 use super::enum_def::{ERR, EnumDef, EnumKind, NONE, NOT_UNICODE, OK, OPTION, RESULT, SOME};
 use super::native::Native;
 use super::numeric::IntWidth;
 pub use super::rs_str::RsStr;
+
+mod map_key;
+mod value_ref;
+
+pub use map_key::MapKey;
+use map_key::keys_of;
+pub use value_ref::ValueRef;
 
 pub type List = Arc<Mutex<Vec<Value>>>;
 /// Insertion ordered like every script map, hashed with Fx, `SipHash` was the top of the
@@ -46,124 +51,6 @@ impl CellKind {
     /// `Rc` and `Arc` have no interior mutability on their own
     pub fn is_shared_pointer(self) -> bool {
         matches!(self, CellKind::Rc | CellKind::Arc)
-    }
-}
-
-pub enum ValueRef {
-    VecElement {
-        values: List,
-        index: usize,
-    },
-    MapEntry {
-        map: Map,
-        key: MapKey,
-    },
-    StructField {
-        data: Arc<StructData>,
-        slot: usize,
-    },
-    /// from `borrow`, `borrow_mut` and `lock`
-    CellSlot {
-        slot: Arc<Mutex<Value>>,
-        /// the live `RefCell` borrow, `None` for a `lock`
-        guard: Option<Arc<BorrowGuard>>,
-    },
-    /// From accessors like `as_object_mut`. No mutation split here, only in place mutation goes through.
-    Borrowed {
-        value: Value,
-    },
-}
-
-impl ValueRef {
-    pub fn vec_element(values: List, index: usize) -> Self {
-        Self::VecElement { values, index }
-    }
-
-    pub fn map_entry(map: Map, key: MapKey) -> Self {
-        Self::MapEntry { map, key }
-    }
-
-    pub fn struct_field(data: Arc<StructData>, slot: usize) -> Self {
-        Self::StructField { data, slot }
-    }
-
-    pub fn cell_slot(slot: Arc<Mutex<Value>>) -> Self {
-        Self::CellSlot { slot, guard: None }
-    }
-
-    pub fn borrowed_cell_slot(slot: Arc<Mutex<Value>>, guard: Arc<BorrowGuard>) -> Self {
-        Self::CellSlot {
-            slot,
-            guard: Some(guard),
-        }
-    }
-
-    pub fn borrowed(value: Value) -> Self {
-        Self::Borrowed { value }
-    }
-
-    pub fn get(&self) -> Option<Value> {
-        match self {
-            Self::VecElement { values, index } => values.lock().get(*index).cloned(),
-            Self::MapEntry { map, key } => map.lock().get(key).cloned(),
-            Self::StructField { data, slot } => data.values.lock().get(*slot).cloned(),
-            Self::CellSlot { slot, .. } => Some(slot.lock().clone()),
-            Self::Borrowed { value } => Some(value.clone()),
-        }
-    }
-
-    /// One atomic read-modify-write under the slot lock. `None` for a dangling reference or a
-    /// `Borrowed` view, then the caller runs the unfused sequence. `f` must not run user code or
-    /// lock other values.
-    pub fn update<T>(&self, f: impl FnOnce(&mut Value) -> T) -> Option<T> {
-        match self {
-            Self::VecElement { values, index } => values.lock().get_mut(*index).map(f),
-            Self::MapEntry { map, key } => map.lock().get_mut(key).map(f),
-            Self::StructField { data, slot } => data.values.lock().get_mut(*slot).map(f),
-            Self::CellSlot { slot, .. } => Some(f(&mut slot.lock())),
-            Self::Borrowed { .. } => None,
-        }
-    }
-
-    /// A shared `borrow()` cannot be written through. Valid Rust never tries, so this only
-    /// shows for a script that skipped `rust check`.
-    pub fn writable(&self) -> bool {
-        match self {
-            Self::CellSlot {
-                guard: Some(guard), ..
-            } => guard.is_exclusive(),
-            _ => true,
-        }
-    }
-
-    pub fn set(&self, value: Value) -> bool {
-        match self {
-            Self::VecElement { values, index } => {
-                let mut values = values.lock();
-                let Some(slot) = values.get_mut(*index) else {
-                    return false;
-                };
-                *slot = value;
-                true
-            }
-            Self::MapEntry { map, key } => {
-                map.lock().insert(key.clone(), value);
-                true
-            }
-            Self::StructField { data, slot } => {
-                let mut values = data.values.lock();
-                let Some(target) = values.get_mut(*slot) else {
-                    return false;
-                };
-                *target = value;
-                true
-            }
-            Self::CellSlot { slot, .. } => {
-                *slot.lock() = value;
-                true
-            }
-            Self::Borrowed { .. } => false,
-        }
     }
 }
 
@@ -260,96 +147,6 @@ pub enum Value {
     /// A real shared cell. Cloning shares on purpose.
     Cell(CellKind, Arc<Mutex<Value>>),
     Native(Arc<Mutex<Native>>),
-}
-
-/// Manual `Hash` so the exact bytes per variant are fixed.
-#[derive(Clone)]
-pub enum MapKey {
-    Bool(bool),
-    Int(i64),
-    /// hashes and compares like `Int`, 1 real map never mixes widths
-    Wide(i64, IntWidth),
-    Char(char),
-    Str(RsStr),
-    Unit,
-    Tuple(Vec<MapKey>),
-    Opt(Option<Box<MapKey>>),
-    Vec(Vec<MapKey>),
-    /// the shape is kept to rebuild the value
-    Struct(Arc<StructShape>, Vec<MapKey>),
-    Enum(Arc<EnumDef>, u16, Vec<MapKey>),
-}
-
-impl PartialEq for MapKey {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (MapKey::Bool(a), MapKey::Bool(b)) => a == b,
-            (MapKey::Int(a) | MapKey::Wide(a, _), MapKey::Int(b) | MapKey::Wide(b, _)) => a == b,
-            (MapKey::Char(a), MapKey::Char(b)) => a == b,
-            (MapKey::Str(a), MapKey::Str(b)) => a == b,
-            (MapKey::Unit, MapKey::Unit) => true,
-            (MapKey::Tuple(a), MapKey::Tuple(b)) | (MapKey::Vec(a), MapKey::Vec(b)) => a == b,
-            (MapKey::Opt(a), MapKey::Opt(b)) => a == b,
-            (MapKey::Struct(sa, a), MapKey::Struct(sb, b)) => sa.name == sb.name && a == b,
-            (MapKey::Enum(da, va, a), MapKey::Enum(db, vb, b)) => {
-                da.name == db.name && va == vb && a == b
-            }
-            _ => false,
-        }
-    }
-}
-
-impl Eq for MapKey {}
-
-impl Hash for MapKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        match self {
-            MapKey::Bool(b) => {
-                state.write_u8(0);
-                b.hash(state);
-            }
-            MapKey::Int(i) | MapKey::Wide(i, _) => {
-                state.write_u8(1);
-                i.hash(state);
-            }
-            MapKey::Char(c) => {
-                state.write_u8(2);
-                c.hash(state);
-            }
-            MapKey::Str(s) => {
-                state.write_u8(3);
-                (**s).hash(state);
-            }
-            MapKey::Unit => state.write_u8(4),
-            MapKey::Tuple(items) => {
-                state.write_u8(5);
-                items.hash(state);
-            }
-            MapKey::Opt(inner) => {
-                state.write_u8(6);
-                inner.hash(state);
-            }
-            MapKey::Vec(items) => {
-                state.write_u8(7);
-                items.hash(state);
-            }
-            MapKey::Struct(shape, fields) => {
-                state.write_u8(8);
-                shape.name.hash(state);
-                fields.hash(state);
-            }
-            MapKey::Enum(def, variant, payload) => {
-                state.write_u8(9);
-                def.name.hash(state);
-                variant.hash(state);
-                payload.hash(state);
-            }
-        }
-    }
-}
-
-fn keys_of(values: &[Value]) -> Option<Vec<MapKey>> {
-    values.iter().map(Value::as_key).collect()
 }
 
 impl Value {
@@ -824,31 +621,6 @@ pub(super) fn big_text(v: i128, w: IntWidth) -> String {
         v.cast_unsigned().to_string()
     } else {
         v.to_string()
-    }
-}
-
-impl MapKey {
-    pub fn to_value(&self) -> Value {
-        match self {
-            MapKey::Bool(b) => Value::Bool(*b),
-            MapKey::Int(i) => Value::Int(*i),
-            MapKey::Wide(v, w) => Value::IntW(*v, *w),
-            MapKey::Char(c) => Value::Char(*c),
-            MapKey::Str(s) => Value::Str(s.clone()),
-            MapKey::Unit => Value::Unit,
-            MapKey::Tuple(items) => Value::tuple(items.iter().map(MapKey::to_value).collect()),
-            MapKey::Vec(items) => Value::vec(items.iter().map(MapKey::to_value).collect()),
-            MapKey::Opt(None) => Value::none(),
-            MapKey::Opt(Some(inner)) => Value::some(inner.to_value()),
-            MapKey::Struct(shape, fields) => {
-                Value::structure(shape.clone(), fields.iter().map(MapKey::to_value).collect())
-            }
-            MapKey::Enum(def, variant, payload) => Value::Enum {
-                def: def.clone(),
-                variant: *variant,
-                data: Arc::new(Mutex::new(payload.iter().map(MapKey::to_value).collect())),
-            },
-        }
     }
 }
 

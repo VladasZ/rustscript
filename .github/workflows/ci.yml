@@ -40,6 +40,12 @@ jobs:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --features run-rs/deadlock-detection -- -D warnings
+      # unwrap is banned in project code. The script corpus keeps it because unwrap is a
+      # language feature under test there, and tests keep it too, so the deny pass covers
+      # only the lib and bin targets of the real crates. The bench crate mixes corpus bins
+      # with real ones, so its real targets are named one by one.
+      - run: cargo clippy --workspace --exclude rustscript-examples --exclude rustscript-conformance --exclude rustscript-bench --lib --bins --features run-rs/deadlock-detection -- -D warnings -D clippy::unwrap-used
+      - run: cargo clippy -p rustscript-bench --lib --bin bench --bin chart --bin gendata -- -D warnings -D clippy::unwrap-used
 
   test:
     name: Test ${{ matrix.os }}

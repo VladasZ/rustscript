@@ -277,8 +277,8 @@ fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
             }
         }
         (Value::IntW(..), Value::Int(_) | Value::IntW(..)) | (Value::Int(_), Value::IntW(..)) => {
-            let (a, _) = l.int_parts().unwrap();
-            let (b, _) = r.int_parts().unwrap();
+            let (a, _) = l.int_parts().expect("the arm matched an integer value");
+            let (b, _) = r.int_parts().expect("the arm matched an integer value");
             Some(a.cmp(&b))
         }
         (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
