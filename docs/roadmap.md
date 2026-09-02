@@ -13,6 +13,10 @@ workflow.
 
 Nothing open right now.
 
+The missing `std::cmp::Reverse` was fixed on 2026-09-02. It builds the
+`Reverse` newtype as a bridge struct, `sort_key` and value comparison flip
+around it, guarded by the `cmp_reverse` example.
+
 The missing `OsStr::to_str` was fixed on 2026-09-02. `Path::extension` and
 `Path::file_stem` hand back plain strings, so `to_str` and `to_string_lossy`
 went into the string method core, guarded by the `os_str_to_str` example.

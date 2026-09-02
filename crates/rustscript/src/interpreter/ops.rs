@@ -296,20 +296,7 @@ fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
             // own clone deadlocks
             let a = a.lock().clone();
             let b = b.lock().clone();
-            let mut order = None;
-            for (left, right) in a.iter().zip(b.iter()) {
-                match partial_compare(left, right)? {
-                    Some(Ordering::Equal) => {}
-                    other => {
-                        order = Some(other);
-                        break;
-                    }
-                }
-            }
-            match order {
-                Some(decided) => decided,
-                None => Some(a.len().cmp(&b.len())),
-            }
+            lexicographic(&a, &b)?
         }
         // `None` sorts before `Some` and `Ok` before `Err`
         (
@@ -329,45 +316,36 @@ fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
                     // snapshots, a value against its own clone sees the same storage on both sides
                     let left_data = left_data.lock().clone();
                     let right_data = right_data.lock().clone();
-                    let mut order = None;
-                    for (left, right) in left_data.iter().zip(right_data.iter()) {
-                        match partial_compare(left, right)? {
-                            Some(Ordering::Equal) => {}
-                            other => {
-                                order = Some(other);
-                                break;
-                            }
-                        }
-                    }
-                    match order {
-                        Some(decided) => decided,
-                        None => Some(left_data.len().cmp(&right_data.len())),
-                    }
+                    lexicographic(&left_data, &right_data)?
                 }
                 decided => Some(decided),
             }
+        }
+        // `std::cmp::Reverse` orders opposite to its payload
+        (Value::Struct(a), Value::Struct(b))
+            if let (Some(left), Some(right)) = (a.cmp_reverse_inner(), b.cmp_reverse_inner()) =>
+        {
+            partial_compare(&right, &left)?
         }
         // declaration order, see `compile_struct_literal`
         (Value::Struct(a), Value::Struct(b)) if a.name() == b.name() => {
             let a = a.values.lock().clone();
             let b = b.values.lock().clone();
-            let mut order = None;
-            for (left, right) in a.iter().zip(b.iter()) {
-                match partial_compare(left, right)? {
-                    Some(Ordering::Equal) => {}
-                    other => {
-                        order = Some(other);
-                        break;
-                    }
-                }
-            }
-            match order {
-                Some(decided) => decided,
-                None => Some(a.len().cmp(&b.len())),
-            }
+            lexicographic(&a, &b)?
         }
         (a, b) => bail!("cannot compare {} and {}", a.type_name(), b.type_name()),
     })
+}
+
+/// Element by element, a longer sequence past a common prefix is greater.
+fn lexicographic(a: &[Value], b: &[Value]) -> Result<Option<Ordering>> {
+    for (left, right) in a.iter().zip(b.iter()) {
+        match partial_compare(left, right)? {
+            Some(Ordering::Equal) => {}
+            other => return Ok(other),
+        }
+    }
+    Ok(Some(a.len().cmp(&b.len())))
 }
 
 fn to_float(v: &Value) -> Result<f64> {

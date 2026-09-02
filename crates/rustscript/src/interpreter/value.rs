@@ -82,6 +82,16 @@ impl StructData {
             None => false,
         }
     }
+
+    /// The payload when this is the `std::cmp::Reverse` newtype, whose order is the inner
+    /// order flipped.
+    pub fn cmp_reverse_inner(&self) -> Option<Value> {
+        if &**self.name() == "Reverse" {
+            self.values.lock().first().cloned()
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone)]

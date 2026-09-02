@@ -687,7 +687,10 @@ pub(super) fn sort_key(v: &Value) -> SortKey {
             keys.extend(data.lock().iter().map(sort_key));
             SortKey::List(keys)
         }
-        Value::Struct(s) => SortKey::List(s.values.lock().iter().map(sort_key).collect()),
+        Value::Struct(s) => match s.cmp_reverse_inner() {
+            Some(inner) => SortKey::Rev(Box::new(sort_key(&inner))),
+            None => SortKey::List(s.values.lock().iter().map(sort_key).collect()),
+        },
         other => SortKey::Str(other.display()),
     }
 }
@@ -698,6 +701,8 @@ pub(super) enum SortKey {
     Float(f64),
     Str(String),
     List(Vec<SortKey>),
+    /// `std::cmp::Reverse`, orders opposite to its inner key
+    Rev(Box<SortKey>),
 }
 
 impl Eq for SortKey {}
@@ -722,12 +727,13 @@ impl Ord for SortKey {
                 .unwrap_or(Ordering::Equal),
             (SortKey::Str(a), SortKey::Str(b)) => a.cmp(b),
             (SortKey::List(a), SortKey::List(b)) => a.cmp(b),
-            (SortKey::Int(_) | SortKey::Float(_), _) | (SortKey::Str(_), SortKey::List(_)) => {
-                Ordering::Less
-            }
-            (_, SortKey::Int(_) | SortKey::Float(_)) | (SortKey::List(_), SortKey::Str(_)) => {
-                Ordering::Greater
-            }
+            (SortKey::Rev(a), SortKey::Rev(b)) => b.cmp(a),
+            (SortKey::Int(_) | SortKey::Float(_), _)
+            | (SortKey::Str(_), SortKey::List(_) | SortKey::Rev(_))
+            | (SortKey::List(_), SortKey::Rev(_)) => Ordering::Less,
+            (_, SortKey::Int(_) | SortKey::Float(_))
+            | (SortKey::List(_) | SortKey::Rev(_), SortKey::Str(_))
+            | (SortKey::Rev(_), SortKey::List(_)) => Ordering::Greater,
         }
     }
 }

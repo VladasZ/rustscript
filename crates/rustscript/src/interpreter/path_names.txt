@@ -197,6 +197,7 @@ XMLNode::Text
 char::from
 char::from_digit
 char::from_u32
+cmp::Reverse
 consts::ARCH
 consts::E
 consts::EXE_EXTENSION

@@ -178,6 +178,8 @@ fn container_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
             Some(other) => Value::vec(vec![other.clone()]),
             None => Value::vec(vec![]),
         },
+        // `std::cmp::Reverse`, a newtype whose order is the inner order flipped
+        PathId::CmpReverse => Value::struct_of("Reverse", [(Arc::from("0"), arg(args, 0)?)]),
         PathId::HashMapNew | PathId::BTreeMapNew | PathId::HashMapWithCapacity => Value::map(),
         PathId::HashSetNew | PathId::BTreeSetNew | PathId::HashSetWithCapacity => Value::set(),
         // `Rc::clone(&x)` is `x.clone()`, and a cell clone shares its slot
