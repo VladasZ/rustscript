@@ -132,8 +132,10 @@ pub(crate) fn str_core(s: &str, name: BuiltinId, args: &impl Args) -> Result<Opt
         BuiltinId::Repeat => StrOut::Owned(str_repeat(s, args)?),
         // A json string is a plain Str, so `unwrap` and `expect` on a string are identity. Keeps
         // serde chains working. `as_ref` and `into_owned` are what the regex replace family needs,
-        // it hands back a `Cow<str>` in real Rust and a plain Str here.
-        BuiltinId::ToOwned
+        // it hands back a `Cow<str>` in real Rust and a plain Str here. `to_string_lossy` is the
+        // same, an OsStr out of the Path bridge is already valid text.
+        BuiltinId::ToStringLossy
+        | BuiltinId::ToOwned
         | BuiltinId::TrimString
         | BuiltinId::AsRef
         | BuiltinId::AsStr
@@ -145,6 +147,8 @@ pub(crate) fn str_core(s: &str, name: BuiltinId, args: &impl Args) -> Result<Opt
         | BuiltinId::UnwrapOrDefault
         | BuiltinId::IntoOwned
         | BuiltinId::IntoString => StrOut::Keep,
+        // an OsStr out of the Path bridge is a plain string, so its conversions land here
+        BuiltinId::ToStr => StrOut::OptOwned(Some(s.to_string())),
         // `Option::context` returns a Result, otherwise a following `?` has nothing to unwrap
         BuiltinId::Context | BuiltinId::WithContext => StrOut::OkKeep,
         BuiltinId::IsSome => StrOut::Bool(true),
