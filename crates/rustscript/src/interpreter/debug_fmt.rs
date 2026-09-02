@@ -1,7 +1,6 @@
 //! The `{:?}` rendering. The spec reaches every leaf, `{:>4?}` of `vec![1]` is `[   1]`, while
 //! `str` and `char` never pad.
 
-use std::fmt::Write as _;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -80,7 +79,7 @@ fn write_value(value: &Value, opts: &DebugOpts, indent: usize, out: &mut String)
             inclusive,
         } => {
             let sep = if *inclusive { "..=" } else { ".." };
-            write!(out, "{start}{sep}{end}").unwrap();
+            out.push_str(&format!("{start}{sep}{end}"));
         }
         Value::Vec(items) => {
             let items = items.lock().clone();
@@ -117,18 +116,16 @@ fn write_value(value: &Value, opts: &DebugOpts, indent: usize, out: &mut String)
             Native::ParseErr { debug, .. } if opts.pretty && debug.contains(" { ") => {
                 let (name, rest) = debug.split_once(" { ").unwrap_or((debug, ""));
                 let field = rest.trim_end_matches(" }");
-                write!(
-                    out,
+                out.push_str(&format!(
                     "{name} {{\n{}{field},\n{}}}",
                     pad(indent + 1),
                     pad(indent)
-                )
-                .unwrap();
+                ));
             }
             Native::IoErr { debug, .. }
             | Native::JoinErr { debug, .. }
             | Native::ParseErr { debug, .. } => out.push_str(debug),
-            other => write!(out, "<{}>", other.type_name()).unwrap(),
+            other => out.push_str(&format!("<{}>", other.type_name())),
         },
         Value::Enum { def, variant, data } => {
             out.push_str(def.variant_name(*variant));
@@ -177,8 +174,8 @@ fn write_leaf(value: &Value, opts: &DebugOpts, out: &mut String) {
         ),
         Value::Float(f) => leaf_number(float_text(*f, opts), SpecNumber::Float(*f), opts, out),
         Value::F32(f) => leaf_number(f32_text(*f, opts), SpecNumber::F32(*f), opts, out),
-        Value::Char(c) => write!(out, "{c:?}").unwrap(),
-        Value::Str(s) => write!(out, "{:?}", &**s).unwrap(),
+        Value::Char(c) => out.push_str(&format!("{c:?}")),
+        Value::Str(s) => out.push_str(&format!("{:?}", &**s)),
         _ => unreachable!("write_leaf handles the scalar leaves only"),
     }
 }
@@ -280,7 +277,7 @@ fn write_struct(s: &StructData, opts: &DebugOpts, indent: usize, out: &mut Strin
         out.push_str(" {\n");
         for (k, v) in s.shape.fields.iter().zip(values.iter()) {
             out.push_str(&pad(indent + 1));
-            write!(out, "{k}: ").unwrap();
+            out.push_str(&format!("{k}: "));
             write_value(v, opts, indent + 1, out);
             out.push_str(",\n");
         }
@@ -292,7 +289,7 @@ fn write_struct(s: &StructData, opts: &DebugOpts, indent: usize, out: &mut Strin
             if i > 0 {
                 out.push_str(", ");
             }
-            write!(out, "{k}: ").unwrap();
+            out.push_str(&format!("{k}: "));
             write_value(v, opts, indent, out);
         }
         out.push_str(" }");
@@ -319,22 +316,20 @@ fn write_cell(
     };
     let poisoned = kind == CellKind::Mutex;
     if opts.pretty {
-        write!(out, "{name} {{\n{}{field}: ", pad(indent + 1)).unwrap();
+        out.push_str(&format!("{name} {{\n{}{field}: ", pad(indent + 1)));
         write_value(&inner, opts, indent + 1, out);
         out.push_str(",\n");
         if poisoned {
-            write!(
-                out,
+            out.push_str(&format!(
                 "{}poisoned: false,\n{}..\n",
                 pad(indent + 1),
                 pad(indent + 1)
-            )
-            .unwrap();
+            ));
         }
         out.push_str(&pad(indent));
         out.push('}');
     } else {
-        write!(out, "{name} {{ {field}: ").unwrap();
+        out.push_str(&format!("{name} {{ {field}: "));
         write_value(&inner, opts, indent, out);
         out.push_str(if poisoned {
             ", poisoned: false, .. }"

@@ -546,8 +546,8 @@ pub(super) fn pvalue_to_json(v: &Value) -> Result<serde_json::Value> {
         Value::Unit => JsonValue::Null,
         Value::Bool(b) => JsonValue::Bool(*b),
         Value::Int(i) => JsonValue::Number(serde_json::Number::from(*i)),
-        Value::IntW(..) => {
-            let (value, _) = v.int_parts().unwrap();
+        Value::IntW(bits, w) => {
+            let value = w.decode(*bits);
             match i64::try_from(value) {
                 Ok(small) => JsonValue::Number(serde_json::Number::from(small)),
                 Err(_) => JsonValue::Number(serde_json::Number::from(

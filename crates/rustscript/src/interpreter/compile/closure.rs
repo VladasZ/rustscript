@@ -83,7 +83,10 @@ impl Compiler<'_> {
         let ret = self.alloc();
         self.compile_block(block, ret)?;
         self.emit(Op::Ret { src: ret });
-        let child = self.frames.pop().unwrap();
+        let child = self
+            .frames
+            .pop()
+            .expect("the closure frame was just pushed");
         let caps: Vec<CapSource> = child.upvalues.iter().map(|(_, s)| *s).collect();
         let mut chunk = child.into_chunk(self.ctx.file.clone())?;
         chunk.module = idx16(self.ctx.module);
@@ -157,7 +160,10 @@ impl Compiler<'_> {
             });
         }
         self.emit(Op::Ret { src: ret });
-        let child = self.frames.pop().unwrap();
+        let child = self
+            .frames
+            .pop()
+            .expect("the closure frame was just pushed");
         let caps: Vec<CapSource> = child.upvalues.iter().map(|(_, s)| *s).collect();
         let mut chunk = child.into_chunk(self.ctx.file.clone())?;
         chunk.module = idx16(self.ctx.module);

@@ -12,6 +12,7 @@ mod methods;
 mod methods_option;
 mod methods_scalar;
 mod paths;
+mod paths_builtin;
 mod ty;
 
 use std::collections::HashMap;

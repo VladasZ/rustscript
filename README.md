@@ -120,6 +120,20 @@ The repository is also a GitHub Action:
 It downloads a prebuilt binary for `Linux`, `macOS` and `Windows` on x86_64
 and arm64. Details: [docs/github-actions.md](docs/github-actions.md)
 
+## The crates
+
+- `crates/rustscript` is the interpreter, published as
+  [`run-rs`](https://crates.io/crates/run-rs).
+- `crates/examples` holds one runnable example per feature. The equivalence
+  suite runs each one compiled and interpreted and compares stdout byte for
+  byte.
+- `crates/differential` generates random programs and compares the compiled
+  and interpreted runs nightly. How it works:
+  [docs/differential.md](docs/differential.md)
+- `crates/conformance` is a multifile script the tests compile and interpret
+  the same way.
+- `bench` measures RustScript against native `rust`, `node` and `python`.
+
 ## Benchmarks
 
 RustScript is compared with native `rust`, `node` and `python` on the same

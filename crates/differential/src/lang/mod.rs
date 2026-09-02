@@ -4,11 +4,13 @@
 pub mod block;
 pub mod catalog;
 pub mod expr;
+mod expr_render;
 mod expr_walk;
 pub mod fmt;
 pub mod pat;
 pub mod pipe;
 pub mod stmt;
+mod stmt_render;
 pub mod synth;
 pub mod ty;
 pub mod user;

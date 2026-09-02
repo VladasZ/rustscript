@@ -13,10 +13,7 @@ workflow.
 
 Nothing open.
 
-## Skip unless it comes back
-
-Ambiguous numeric type, 17 cases. `.abs()`, `.log2()`, `.hypot()`,
-`.is_nan()`, `.rem_euclid()`, `.rotate_left()` and similar called on an
-unsuffixed literal. All from the 2026-08-20 and 2026-08-21 runs, none after
-2026-08-22, so it looks fixed in the generator. Old sources cannot be
-regenerated, so replay cannot prove it.
+The ambiguous numeric type family came back on 2026-09-02 as a `RustcRejected`
+at seed 2852428022, a match arm binding a bare int scrutinee and calling
+`saturating_pow` on it. Fixed at the root, a binding pattern now forces real
+suffixes on the scrutinee, guarded by `bound_match_scrutinees_carry_their_widths`.

@@ -113,8 +113,15 @@ impl Compiler<'_> {
         dst: Reg,
         is_last: bool,
     ) -> Result<()> {
-        let init = local.init.as_ref().unwrap();
-        let else_expr = &init.diverge.as_ref().unwrap().1;
+        let init = local
+            .init
+            .as_ref()
+            .expect("let-else always has an initializer");
+        let else_expr = &init
+            .diverge
+            .as_ref()
+            .expect("let-else always has an else block")
+            .1;
         let val = self.alloc();
         let owned = pattern_owns(&local.pat) && !pattern_borrows(&local.pat);
         if owned {

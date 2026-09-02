@@ -2,7 +2,7 @@
 
 use rand::RngExt;
 
-use crate::lang::expr::{Arm, Expr};
+use crate::lang::expr::{Arm, Expr, unbare_deep};
 use crate::lang::pat::Pat;
 use crate::lang::synth::Generator;
 use crate::lang::ty::{IntWidth, Ty};
@@ -31,6 +31,17 @@ impl Generator<'_> {
             Ty::Tuple(items) => self.tuple_arms(items, want, depth),
             Ty::Vec(elem) => self.slice_arms(elem, want, depth),
             _ => return None,
+        };
+        // An arm body may call a width specific method on a bound name, and `rustc` resolves the
+        // method before the scrutinee's bare literals default, so a binding forces real suffixes.
+        let mut binds = Vec::new();
+        for arm in &arms {
+            arm.pat.bindings(&mut binds);
+        }
+        let scrutinee = if binds.is_empty() {
+            scrutinee
+        } else {
+            unbare_deep(scrutinee)
         };
         Some(Expr::Match {
             scrutinee: Box::new(scrutinee),
