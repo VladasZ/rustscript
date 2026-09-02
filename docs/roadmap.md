@@ -11,7 +11,11 @@ workflow.
 
 ## Open
 
-Nothing open.
+Nothing open right now.
+
+The missing `OsStr::to_str` was fixed on 2026-09-02. `Path::extension` and
+`Path::file_stem` hand back plain strings, so `to_str` and `to_string_lossy`
+went into the string method core, guarded by the `os_str_to_str` example.
 
 The ambiguous numeric type family came back on 2026-09-02 as a `RustcRejected`
 at seed 2852428022, a match arm binding a bare int scrutinee and calling
