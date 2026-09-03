@@ -186,6 +186,7 @@ impl Infer<'_, '_> {
             | "starts_with"
             | "ends_with"
             | "is_ascii"
+            | "is_char_boundary"
             | "eq_ignore_ascii_case" => {
                 self.walk_all(args);
                 Ty::Bool
