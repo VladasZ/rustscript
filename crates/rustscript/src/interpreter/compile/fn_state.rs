@@ -67,6 +67,8 @@ pub(super) struct FnState {
     pub(super) ref_locals: HashSet<Reg>,
     /// Bindings that hold a borrowed handle, so scope end must not drop them.
     pub(super) drop_exempt: HashSet<Reg>,
+    /// Bindings that hold an iterator over items of its own, so what `next` hands out drops.
+    pub(super) owning_iters: HashSet<Reg>,
     /// `let r = &mut v` aliases, access compiles as access to `v` itself
     pub(super) aliases: HashMap<String, String>,
     /// `const` and `static` items declared in a block. They are locals like a `let`, but a
@@ -128,6 +130,7 @@ impl FnState {
             borrow_params: HashSet::new(),
             ref_locals: HashSet::new(),
             drop_exempt: HashSet::new(),
+            owning_iters: HashSet::new(),
             aliases: HashMap::default(),
             block_consts: HashSet::new(),
             scopes: vec![HashMap::default()],

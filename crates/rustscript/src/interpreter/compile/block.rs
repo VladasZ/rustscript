@@ -6,6 +6,7 @@ use syn::{Block, Expr, Pat, Stmt};
 
 use crate::interpreter::bytecode::{DISCARD, Op, Reg};
 
+use super::place::ShellHome;
 use super::support::{init_is_unique, pattern_borrows, pattern_owns};
 use super::walks::{from_str_root, unparen};
 use super::{Compiler, macro_yields_value, numeric_annotation};
@@ -134,9 +135,18 @@ impl Compiler<'_> {
         } else {
             self.compile_into(val, &init.expr)?;
         }
+        let takes = owned && self.init_owned(&init.expr);
+        let home = if takes {
+            self.shell_home(&init.expr)
+        } else {
+            ShellHome::None
+        };
+        if let ShellHome::Local { .. } = home {
+            self.hold_shell(val, home);
+        }
         let matched = self.alloc();
         let pidx = self.pattern_info(&local.pat)?;
-        if !owned || !self.init_owned(&init.expr) {
+        if !takes {
             self.exempt_pattern_binds(pidx);
         }
         self.emit(Op::TestBind {
@@ -149,10 +159,21 @@ impl Compiler<'_> {
             cond: matched,
             to: 0,
         });
+        // the `else` diverges, so a fresh scrutinee drops before it, whole
+        if let ShellHome::Scope = home {
+            self.drop_regs(vec![val]);
+        }
         let else_dst = self.alloc();
         self.compile_into(else_dst, else_expr)?;
         let ok_at = self.mark()?;
         self.patch_jump(jmp_ok, ok_at);
+        if takes {
+            self.take_pattern_binds(val, pidx);
+        }
+        // the bindings live on, the rest of a fresh scrutinee ends with the statement
+        if let ShellHome::Scope = home {
+            self.drop_regs(vec![val]);
+        }
         if is_last {
             self.emit(Op::LoadUnit { dst });
         }
@@ -230,6 +251,17 @@ impl Compiler<'_> {
         }
         if let Some(init) = &local.init {
             self.note_guard_binding(&init.expr, before);
+            // `let it = v.into_iter()` hands out items of its own on every later `it.next()`
+            if self.chain_owns(&init.expr) {
+                let bound: Vec<Reg> = self
+                    .cur()
+                    .scope_order
+                    .last()
+                    .map_or(Vec::new(), |regs| regs[before..].to_vec());
+                if let [reg] = bound.as_slice() {
+                    self.cur().owning_iters.insert(*reg);
+                }
+            }
         }
         let owned = local
             .init

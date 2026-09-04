@@ -66,6 +66,15 @@ impl Compiler<'_> {
         self.cur().drop_exempt.extend(regs);
     }
 
+    /// The bound parts of an owned scrutinee move to their bindings, so the shell drops
+    /// without them. Only a program with a `Drop` impl can tell.
+    pub(super) fn take_pattern_binds(&mut self, val: Reg, pat: u16) {
+        if !self.ctx.has_drop {
+            return;
+        }
+        self.emit(Op::TakeBinds { val, pat });
+    }
+
     /// User enums first, builtin tables second. An unresolved path keeps its last segment and the
     /// runtime test falls back to the name.
     pub(super) fn variant_tag(&self, path: &syn::Path) -> PTag {

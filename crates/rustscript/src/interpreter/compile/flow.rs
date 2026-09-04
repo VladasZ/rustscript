@@ -7,7 +7,8 @@ use syn::{Expr, Pat};
 
 use crate::interpreter::bytecode::{Op, PathRef, Reg};
 
-use super::support::{iterable_is_owned, pattern_borrows, pattern_owns};
+use super::place::ShellHome;
+use super::support::{pattern_borrows, pattern_owns};
 use super::walks::flatten_and;
 
 use super::{Compiler, LoopCtx, NameLoc, idx16};
@@ -52,12 +53,21 @@ impl Compiler<'_> {
                 if let Expr::Let(let_expr) = term {
                     let owned = pattern_owns(&let_expr.pat);
                     let scrut = self.compile_scrutinee(&let_expr.expr, owned)?;
+                    let takes = owned && self.scrutinee_owned(&let_expr.expr);
+                    let home = if takes {
+                        self.shell_home(&let_expr.expr)
+                    } else {
+                        ShellHome::None
+                    };
+                    // the shell sits before the bindings, so the reverse order drops it last
+                    self.hold_shell(scrut, home);
+                    if matches!(home, ShellHome::Scope) {
+                        shells.push(scrut);
+                    }
                     let matched = self.alloc();
                     let pat = self.pattern_info(&let_expr.pat)?;
-                    if !owned || !self.scrutinee_owned(&let_expr.expr) {
+                    if !takes {
                         self.exempt_pattern_binds(pat);
-                    } else if self.fresh_scrutinee(&let_expr.expr) {
-                        shells.push(scrut);
                     }
                     if self.init_holds_guard(&let_expr.expr) {
                         self.guard_pattern_binds(pat);
@@ -72,6 +82,9 @@ impl Compiler<'_> {
                         cond: matched,
                         to: 0,
                     });
+                    if takes {
+                        self.take_pattern_binds(scrut, pat);
+                    }
                 } else {
                     let cond = self.compile_expr(term)?;
                     else_jumps.push(self.here());
@@ -129,13 +142,22 @@ impl Compiler<'_> {
             let scrut = self.compile_scrutinee(&let_expr.expr, owned)?;
             let while_let_depth = self.cur().scope_order.len();
             self.push_scope();
+            let takes = owned && self.scrutinee_owned(&let_expr.expr);
+            let home = if takes {
+                self.shell_home(&let_expr.expr)
+            } else {
+                ShellHome::None
+            };
+            // the shell sits before the bindings, so each turn and a `break` drop it after them
+            self.hold_shell(scrut, home);
+            let mut shell = Vec::new();
+            if matches!(home, ShellHome::Scope) {
+                shell.push(scrut);
+            }
             let matched = self.alloc();
             let pat = self.pattern_info(&let_expr.pat)?;
-            let mut shell = Vec::new();
-            if !owned || !self.scrutinee_owned(&let_expr.expr) {
+            if !takes {
                 self.exempt_pattern_binds(pat);
-            } else if self.fresh_scrutinee(&let_expr.expr) {
-                shell.push(scrut);
             }
             if self.init_holds_guard(&let_expr.expr) {
                 self.guard_pattern_binds(pat);
@@ -150,6 +172,9 @@ impl Compiler<'_> {
                 cond: matched,
                 to: 0,
             });
+            if takes {
+                self.take_pattern_binds(scrut, pat);
+            }
             self.loops.push(LoopCtx {
                 breaks: Vec::new(),
                 continue_to: Some(head),
@@ -291,10 +316,10 @@ impl Compiler<'_> {
                 });
                 out
             }
-            e if iterable_is_owned(e) && !borrowed => self.compile_owned_expr(e)?,
+            e if self.iterable_owned(e) && !borrowed => self.compile_owned_expr(e)?,
             e => self.compile_expr(e)?,
         };
-        let owned = iterable_is_owned(&f.expr) && !borrowed;
+        let owned = self.iterable_owned(&f.expr) && !borrowed;
         let iter = self.alloc();
         self.emit(Op::IterInit {
             dst: iter,
@@ -451,10 +476,22 @@ impl Compiler<'_> {
                 .any(|arm| pattern_borrows(arm_pattern(&arm.pat)));
         let scrut = self.compile_scrutinee(&m.expr, owned)?;
         let holds_guard = self.init_holds_guard(&m.expr);
-        let lends = !self.scrutinee_owned(&m.expr);
+        let takes = owned && self.scrutinee_owned(&m.expr);
+        let home = if takes {
+            self.shell_home(&m.expr)
+        } else {
+            ShellHome::None
+        };
+        if let ShellHome::Local { .. } = home {
+            self.hold_shell(scrut, home);
+        }
         let mut end_jumps = Vec::new();
         for arm in &m.arms {
             self.push_scope();
+            // the arm that runs drops the shell after its bindings
+            if let ShellHome::Scope = home {
+                self.hold_shell(scrut, home);
+            }
             let matched = self.alloc();
             // syn 3 parses `pat if cond` as `Pat::Guard`
             let (arm_pat, arm_guard) = match &arm.pat {
@@ -462,7 +499,7 @@ impl Compiler<'_> {
                 p => (p, None),
             };
             let pat = self.pattern_info(arm_pat)?;
-            if !owned || lends {
+            if !takes {
                 self.exempt_pattern_binds(pat);
             }
             if holds_guard {
@@ -484,6 +521,10 @@ impl Compiler<'_> {
                 let gs = self.here();
                 self.emit(Op::JumpIfFalse { cond: g, to: 0 });
                 guard_skip = Some(gs);
+            }
+            // a guard reads the bindings by reference, the move happens once it passed
+            if takes {
+                self.take_pattern_binds(scrut, pat);
             }
             self.compile_owned_into(dst, &arm.body)?;
             self.emit_scope_drops(1);
