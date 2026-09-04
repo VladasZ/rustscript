@@ -390,6 +390,12 @@ pub enum Op {
         pat: u16,
         dst: Reg,
     },
+    /// After a `TestBind` matched an owned scrutinee. The parts the pattern bound leave unit
+    /// behind in `val`, so the shell drops without them. A whole value bound clears `val`.
+    TakeBinds {
+        val: Reg,
+        pat: u16,
+    },
 
     Fmt {
         dst: Reg,

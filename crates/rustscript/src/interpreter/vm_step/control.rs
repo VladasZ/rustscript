@@ -7,7 +7,7 @@ use super::{Flow, StepCtx};
 use crate::interpreter::bytecode::MacroKind;
 use crate::interpreter::numeric::{float_to_int, truncate};
 use crate::interpreter::ops::{self};
-use crate::interpreter::pattern::{bind_pattern_refs, try_bind};
+use crate::interpreter::pattern::{bind_pattern_refs, take_bound, try_bind};
 use crate::interpreter::typeir::CastIr;
 use crate::interpreter::value::Value;
 
@@ -116,6 +116,24 @@ pub(super) fn test_bind(ctx: &mut StepCtx, val: u16, pat: u16, dst: u16) -> Flow
         ctx.put(reg, v);
     }
     ctx.set(dst, Value::Bool(matched))
+}
+
+/// A reference scrutinee lent its parts, so it stays whole.
+pub(super) fn take_binds(ctx: &mut StepCtx, val: u16, pat: u16) -> Flow {
+    let info = &ctx.cur.pats[pat as usize];
+    let value = ctx.get(val).clone();
+    if matches!(value, Value::Ref(_)) {
+        return Flow::Next;
+    }
+    let consts: Vec<Value> = info
+        .consts
+        .iter()
+        .map(|reg| ctx.get(*reg).clone())
+        .collect();
+    if take_bound(&info.pat, &value, &consts) {
+        ctx.put(val, Value::Unit);
+    }
+    Flow::Next
 }
 
 pub(super) fn fmt_op(ctx: &mut StepCtx, dst: u16, spec: u16) -> Result<Flow> {

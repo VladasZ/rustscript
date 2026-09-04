@@ -3,6 +3,8 @@ use std::cmp::Ordering;
 use std::slice::from_ref;
 use std::sync::Arc;
 
+use parking_lot::Mutex;
+
 use super::bytecode::{PLit, PPat};
 use super::enum_def::{EnumKind, NONE};
 use super::ops::values_equal;
@@ -346,4 +348,111 @@ pub(super) fn bind_pattern_refs(
     define: &mut dyn FnMut(&str, Value),
 ) {
     bind_refs(pat, val, BindSlot::None, consts, define);
+}
+
+/// Moves the parts a matched pattern bound out of the value, leaving unit in their slots. Walks
+/// the same shapes as `try_bind`. `true` when the pattern bound the whole value, which the
+/// caller then clears.
+pub(super) fn take_bound(pat: &PPat, val: &Value, consts: &[Value]) -> bool {
+    match pat {
+        PPat::Ident { .. } => true,
+        PPat::Tuple(elems) => {
+            if let Value::Tuple(items) = val {
+                take_seq(elems, items, consts);
+            }
+            false
+        }
+        PPat::TupleStruct { elems, .. } => match val {
+            Value::Enum { data, .. } => {
+                take_seq(elems, data, consts);
+                false
+            }
+            Value::Struct(st) => {
+                let vals: Vec<Value> = st.values.lock().clone();
+                let taken: Vec<usize> = elems
+                    .iter()
+                    .zip(vals.iter())
+                    .enumerate()
+                    .filter(|(_, (p, v))| take_bound(p, v, consts))
+                    .map(|(i, _)| i)
+                    .collect();
+                clear_slots(&st.values, &taken);
+                false
+            }
+            // a pre unwrapped payload is the whole value
+            other => elems.first().is_some_and(|p| take_bound(p, other, consts)),
+        },
+        PPat::Struct { fields, .. } => {
+            if let Value::Struct(st) = val {
+                let vals: Vec<Value> = st.values.lock().clone();
+                let taken: Vec<usize> = fields
+                    .iter()
+                    .filter_map(|(fname, p)| st.shape.slot(fname).map(|i| (i, p)))
+                    .filter(|(i, p)| take_bound(p, &vals[*i], consts))
+                    .map(|(i, _)| i)
+                    .collect();
+                clear_slots(&st.values, &taken);
+            }
+            false
+        }
+        PPat::Or(alts) => alts
+            .iter()
+            .find(|alt| try_bind(alt, val, consts, &mut |_, _| {}))
+            .is_some_and(|alt| take_bound(alt, val, consts)),
+        PPat::Slice(elems) => {
+            if let Value::Vec(items) = val {
+                take_seq(elems, items, consts);
+            }
+            false
+        }
+        PPat::Wild
+        | PPat::Rest
+        | PPat::Lit(_)
+        | PPat::Const(_)
+        | PPat::Path { .. }
+        | PPat::Range { .. }
+        | PPat::Unsupported => false,
+    }
+}
+
+/// The element half of `take_bound`. A named rest bound a copy of the middle, so the middle
+/// moves out with it.
+fn take_seq(pats: &[PPat], list: &List, consts: &[Value]) {
+    let vals: Vec<Value> = list.lock().clone();
+    let mut taken = Vec::new();
+    if let Some((head, rest_name, tail)) = split_rest(pats) {
+        if vals.len() < head.len() + tail.len() {
+            return;
+        }
+        let base = vals.len() - tail.len();
+        for (i, p) in head.iter().enumerate() {
+            if take_bound(p, &vals[i], consts) {
+                taken.push(i);
+            }
+        }
+        for (j, p) in tail.iter().enumerate() {
+            if take_bound(p, &vals[base + j], consts) {
+                taken.push(base + j);
+            }
+        }
+        if rest_name.is_some() {
+            taken.extend(head.len()..base);
+        }
+    } else {
+        for (i, (p, v)) in pats.iter().zip(vals.iter()).enumerate() {
+            if take_bound(p, v, consts) {
+                taken.push(i);
+            }
+        }
+    }
+    clear_slots(list, &taken);
+}
+
+fn clear_slots(list: &Mutex<Vec<Value>>, taken: &[usize]) {
+    let mut vals = list.lock();
+    for i in taken {
+        if let Some(slot) = vals.get_mut(*i) {
+            *slot = Value::Unit;
+        }
+    }
 }

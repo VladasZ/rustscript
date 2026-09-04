@@ -136,6 +136,11 @@ fn table_effects(f: &FnState, op: &Op, reads: &mut Vec<Reg>, writes: &mut Vec<Re
             writes.extend(info.binds.iter().map(|(_, reg)| *reg));
             writes.push(*dst);
         }
+        Op::TakeBinds { val, pat } => {
+            reads.push(*val);
+            reads.extend(f.pats[usize::from(*pat)].consts.iter());
+            writes.push(*val);
+        }
         Op::Fmt { dst, spec } | Op::MacroCall { dst, spec, .. } => {
             let spec = &f.fmts[usize::from(*spec)];
             reads.extend(spec.positional.iter());

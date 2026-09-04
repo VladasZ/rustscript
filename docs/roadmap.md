@@ -12,18 +12,68 @@ Differential workflow.
 
 ## Open
 
-### An iterator held in a binding lends its items
+### A `ref mut` binding over a place scrutinee binds a copy
 
-`let mut it = v.into_iter(); let x = it.next();` never drops `x`, and
-`while let Some(x) = it.next()` never drops a turn's `x`. The compiler can
-not see what the binding holds, so `chain_owns_items` in
-`compile/support.rs` counts a path as lending and the binds are exempt. The
-same rule misses `v.iter().map(|x| x.clone()).last()`, a `map` over a lending
-receiver whose closure makes a fresh value. Fix by recording at the `let`
-whether the init chain owns its items, and reading that for a path receiver.
+`if let (ref mut x, _) = t { *x += 10 }` panics with `assignment through a
+non-reference value`. `pattern_owns` is false for a `ref` pattern, so
+`compile_scrutinee` in `compile/place.rs` reads `t` as a plain value and
+`test_bind` in `vm_step/control.rs` takes the value path, which binds `x` to a
+copy of the scalar. Fix by wrapping a place scrutinee in `MakeBorrow` when
+`pattern_borrows` holds, like `&mut place`, so the reference path anchors the
+bindings to the storage.
 
 ```rust
-#[derive(Debug)]
+fn main() {
+    let mut t = (1, 2);
+    if let (ref mut x, _) = t {
+        *x += 10;
+    }
+    println!("{t:?}");
+}
+```
+
+Compiled prints `(11, 2)`. Interpreted panics at `*x += 10`.
+
+### `?` on an owned temporary drops the payload it handed out
+
+With any `Drop` impl in the program, `Ok::<Result<bool, E>, E>(Ok(false))?`
+returns an `Ok` with no payload. The outer `Ok` is an owned temporary, so the
+statement end drops it, and `run_user_drop` in `bridge/fmt_drop.rs` takes the
+payload list out of its storage and drops through into the inner `Ok`, which
+`try_op` in `vm_step/control.rs` had handed out as a shared handle. Fix by
+taking the payload out of an owned receiver in `Try` and `TryJump`, leaving
+unit behind, the way `TakeBinds` does for a pattern.
+
+```rust
+struct T(i64);
+impl Drop for T {
+    fn drop(&mut self) {
+        println!("drop {}", self.0);
+    }
+}
+fn inner() -> Result<bool, String> {
+    Ok::<Result<bool, String>, String>(Ok(false))?
+}
+fn main() {
+    println!("{:?}", inner());
+    println!("{}", T(1).0);
+}
+```
+
+Compiled prints `Ok(false)`, `1`, `drop 1`. Interpreted prints `Ok`, `1`,
+`drop 1`. Found by a local campaign at seed 904174 with the generator of
+v0.6.30.
+
+### Temporaries alive at a panic do not drop during the unwind
+
+A method receiver that owns a value is not dropped when an argument panics.
+`unwind_temps` in `compile/calls.rs` only records owned call arguments, so
+the receiver and the other owned temporaries of the statement are not on
+the list the panic path drops. Fix by dropping the live `owned_temps` of the
+frame on the unwind path as well, newest first.
+
+```rust
+#[derive(Debug, Clone)]
 struct T(i64);
 impl Drop for T {
     fn drop(&mut self) {
@@ -31,45 +81,16 @@ impl Drop for T {
     }
 }
 fn main() {
-    let mut it = vec![T(1), T(2)].into_iter();
-    let x = it.next();
-    println!("{}", x.is_some());
+    let empty: Vec<T> = Vec::new();
+    println!("{:?}", Ok::<T, String>(T(0)).unwrap_or(empty[2].clone()));
 }
 ```
 
-Compiled prints `true`, `drop 1`, `drop 2`. Interpreted prints `true`,
-`drop 2`.
-
-### The unbound parts of a by value pattern leak
-
-`if let Some((a, _)) = pair()` and `match pair() { Some((a, _)) => .. }` drop
-`a` at the block end and never drop the part under `_`. `TestBind` in
-`vm_step/control.rs` shares the payload with the bindings, so dropping the
-scrutinee afterwards would drop `a` twice. Fix by taking the bound parts out
-of an owned scrutinee in `TestBind`, leaving unit behind, and dropping the
-scrutinee shell after the block like a statement temporary.
-
-```rust
-#[derive(Debug)]
-struct T(i64);
-impl Drop for T {
-    fn drop(&mut self) {
-        println!("drop {}", self.0);
-    }
-}
-fn pair() -> Option<(T, T)> {
-    Some((T(1), T(2)))
-}
-fn main() {
-    if let Some((a, _)) = pair() {
-        println!("{}", a.0);
-    }
-    println!("end");
-}
-```
-
-Compiled prints `1`, `drop 1`, `drop 2`, `end`. Interpreted prints `1`,
-`drop 1`, `end`.
+Both panic with `index out of bounds: the len is 0 but the index is 2`.
+Compiled prints `drop 0` during the unwind. Interpreted prints nothing. Found
+by a local campaign with the generator of v0.6.30, seeds 904025, 904057,
+904137, 904149, 904154, 904192, 904221 and 904256 from base seed 904000 are
+all this class.
 
 ## Generator plan
 

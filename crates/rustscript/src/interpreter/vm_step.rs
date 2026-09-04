@@ -201,6 +201,7 @@ pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
         Op::Cast { dst, src, ty } => cast_op(ctx, *dst, *src, *ty)?,
         Op::Coerce { dst, src, ty } => coerce_op(ctx, *dst, *src, *ty),
         Op::TestBind { val, pat, dst } => test_bind(ctx, *val, *pat, *dst),
+        Op::TakeBinds { val, pat } => take_binds(ctx, *val, *pat),
         Op::Fmt { dst, spec } => fmt_op(ctx, *dst, *spec)?,
         Op::MacroCall { kind, dst, spec } => macro_call(ctx, *kind, *dst, *spec)?,
         Op::Dbg { dst, base, argc } => dbg_op(ctx, *dst, *base, *argc),
@@ -602,7 +603,8 @@ use calls::{
     make_range, make_struct, make_tuple, make_vec, path_value, spawn_op,
 };
 use control::{
-    await_op, cast_op, coerce_op, dbg_op, fmt_op, macro_call, test_bind, try_jump, try_op,
+    await_op, cast_op, coerce_op, dbg_op, fmt_op, macro_call, take_binds, test_bind, try_jump,
+    try_op,
 };
 use places::{
     deref_bin_assign, deref_op, get_field_op, place_base, ref_field, ref_index, set_deref,

@@ -132,17 +132,22 @@ unwinding. A temporary that owns a value drops at the semicolon of its
 statement, one made for an `if` or `while` condition drops before the branch
 runs, an `if let` scrutinee nobody bound drops before the `else` block, a
 value a store overwrites drops before the store, and a field moved out of a
-struct leaves unit behind so the struct still drops its other fields. A
-closure drops its by value parameters at its end when the call handed them
+struct leaves unit behind so the struct still drops its other fields. A by
+value pattern moves only the parts it binds, so the rest of the scrutinee,
+the `_` in `Some((a, _))`, drops after the bindings when their block ends,
+and the rest of a partially moved local drops where the local was declared.
+A closure drops its by value parameters at its end when the call handed them
 over, an adapter over `iter()` only lends them. An iterator that owns its
 items drops what it throws away, a rejected `filter` item, a skipped one, the
 losers of `max`, a by value terminal like `collect` drops what it never
 pulled inside the call, and a combinator drops the side it does not keep, the
-fallback of `unwrap_or` on a `Some`. A payload a combinator rejects drops only
-when the receiver was the caller's own, `v.last().filter(..)` lends it. A
-struct literal with a `..base` drops the fields it did not take with the
-statement. A moved or shared value is dropped by its real owner, so an `Rc`
-cycle leaks like in real Rust.
+fallback of `unwrap_or` on a `Some`. An iterator held in a binding keeps
+owning its items, so what `it.next()` hands out drops, and a `map` whose
+closure builds a fresh value owns its output even over `iter()`. A payload a
+combinator rejects drops only when the receiver was the caller's own,
+`v.last().filter(..)` lends it. A struct literal with a `..base` drops the
+fields it did not take with the statement. A moved or shared value is dropped
+by its real owner, so an `Rc` cycle leaks like in real Rust.
 
 ## Panics and errors
 
