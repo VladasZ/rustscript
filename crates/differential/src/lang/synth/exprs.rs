@@ -5,9 +5,11 @@ use rand::RngExt;
 use crate::lang::catalog::{
     ElemReq, FishReq, METHODS, Method, RecvClass, Solved, TyPat, arg_ty, fish_allows, solve,
 };
-use crate::lang::expr::{BinOp, Expr, unbare_deep};
+use crate::lang::expr::{BinOp, Expr, MemKind, ReadMode, VecTakeKind, unbare_deep};
+use crate::lang::own::{BindKind, OwnState};
 use crate::lang::pipe::Site;
-use crate::lang::synth::{BindKind, Generator};
+use crate::lang::stmt::{Ann, Stmt};
+use crate::lang::synth::{Generator, MOVE_CHANCE};
 use crate::lang::ty::{FloatWidth, IntWidth, Ty};
 
 impl Generator<'_> {
@@ -23,12 +25,13 @@ impl Generator<'_> {
                 45..=56 => self.binary(want, depth),
                 57..=60 => self.cast(want, depth),
                 61..=63 => self.unary(want, depth),
-                64..=67 => Some(self.branch(want, depth)),
+                64..=67 => Some(self.if_expr(want, depth)),
                 68..=72 => self.match_expr(want, depth),
                 73..=78 => self.access(want, depth),
                 79..=85 => self.user_expr(want, depth),
-                86..=91 => self.call_named(want, depth),
-                92..=95 => self.try_expr(want, depth),
+                86..=90 => self.call_named(want, depth),
+                91..=92 => self.try_expr(want, depth),
+                93..=96 => self.take_expr(want, depth),
                 _ => self.bare_or_const(want),
             };
             if let Some(expr) = attempt {
@@ -39,29 +42,145 @@ impl Generator<'_> {
     }
 
     pub(super) fn leaf(&mut self, want: &Ty) -> Expr {
-        let matching: Vec<(String, BindKind)> = self
+        let matching: Vec<(String, bool)> = self
             .scope
-            .iter()
-            .filter(|binding| {
-                binding.ty == *want && matches!(binding.kind, BindKind::Local | BindKind::Const)
+            .visible()
+            .into_iter()
+            .filter(|slot| {
+                slot.ty == *want
+                    && match slot.kind {
+                        BindKind::Local => slot.state == OwnState::Owned,
+                        BindKind::Const => true,
+                        BindKind::Closure { .. } => false,
+                    }
             })
-            .map(|binding| (binding.name.clone(), binding.kind.clone()))
+            .map(|slot| (slot.name.clone(), matches!(slot.kind, BindKind::Const)))
             .collect();
         if !matching.is_empty() && self.chance(0.5) {
-            let (name, kind) = self.pick(&matching).clone();
-            return match kind {
-                BindKind::Const => Expr::ConstRef {
+            let (name, is_const) = self.pick(&matching).clone();
+            if is_const {
+                return Expr::ConstRef {
                     name,
                     ty: want.clone(),
                     opaque: false,
-                },
-                _ => Expr::Var {
-                    name,
-                    ty: want.clone(),
-                },
-            };
+                };
+            }
+            return self.read(name, want);
         }
         self.literal(want)
+    }
+
+    /// A read of a local, by move when the binding allows it and the draw says so.
+    pub(super) fn read(&mut self, name: String, ty: &Ty) -> Expr {
+        let mode = if self.scope.can_move(&name) && self.chance(MOVE_CHANCE) {
+            self.scope.note_move(&name);
+            ReadMode::Move
+        } else {
+            ReadMode::Clone
+        };
+        Expr::Var {
+            name,
+            ty: ty.clone(),
+            mode,
+        }
+    }
+
+    /// `let x = b.take();` and friends, the binding chosen first so the take always has a
+    /// source. A wanted type rarely meets a binding of the same type by chance.
+    pub(super) fn take_binding(&mut self) -> Option<Stmt> {
+        let sources: Vec<(String, Ty)> = self
+            .live_locals()
+            .into_iter()
+            .filter(|(name, _)| self.scope.can_mem(name))
+            .collect();
+        if sources.is_empty() {
+            return None;
+        }
+        let (_, ty) = self.pick(&sources).clone();
+        let want = match &ty {
+            Ty::Vec(elem) if self.chance(0.5) => Ty::opt_of((**elem).clone()),
+            Ty::Vec(elem) if self.chance(0.5) => (**elem).clone(),
+            _ => ty,
+        };
+        let expr = self.take_expr(&want, 1)?;
+        let name = self.fresh("v");
+        self.push_let(name.clone(), want.clone());
+        Some(Stmt::Let {
+            name,
+            ty: want,
+            expr,
+            ann: Ann::Typed,
+            mutable: false,
+        })
+    }
+
+    /// An in place take out of a binding, `std::mem::take`, `std::mem::replace`, `Option::take`,
+    /// `pop`, `remove` or `swap_remove`. The old value comes out, the binding keeps living.
+    pub(super) fn take_expr(&mut self, want: &Ty, depth: usize) -> Option<Expr> {
+        let mut options: Vec<Expr> = Vec::new();
+        for (name, ty) in self.live_locals() {
+            if !self.scope.can_mem(&name) {
+                continue;
+            }
+            if ty == *want && ty.has_default() {
+                options.push(Expr::Mem {
+                    name: name.clone(),
+                    ty: ty.clone(),
+                    kind: MemKind::Take,
+                });
+                options.push(Expr::Mem {
+                    name: name.clone(),
+                    ty: ty.clone(),
+                    kind: MemKind::Replace(Box::new(Expr::DefaultOf(ty.clone()))),
+                });
+            }
+            // `take` is the form scripts write, so it outweighs the `std::mem` pair
+            if ty == *want && matches!(ty, Ty::Opt(_)) {
+                for _ in 0..3 {
+                    options.push(Expr::Mem {
+                        name: name.clone(),
+                        ty: ty.clone(),
+                        kind: MemKind::OptTake,
+                    });
+                }
+            }
+            if let Ty::Vec(elem) = &ty {
+                if Ty::opt_of((**elem).clone()) == *want {
+                    options.push(Expr::VecTake {
+                        name: name.clone(),
+                        elem: (**elem).clone(),
+                        kind: VecTakeKind::Pop,
+                    });
+                }
+                if **elem == *want {
+                    let index = self.rng.random_range(0..=4);
+                    options.push(Expr::VecTake {
+                        name: name.clone(),
+                        elem: (**elem).clone(),
+                        kind: if self.chance(0.5) {
+                            VecTakeKind::Remove(index)
+                        } else {
+                            VecTakeKind::SwapRemove(index)
+                        },
+                    });
+                }
+            }
+        }
+        if options.is_empty() {
+            return None;
+        }
+        let mut chosen = self.pick(&options).clone();
+        // the binding is borrowed for the whole call, so the new value can't read it
+        if let Expr::Mem {
+            name,
+            ty,
+            kind: MemKind::Replace(value),
+        } = &mut chosen
+        {
+            let fresh = self.without_binding(&name.clone(), |inner| inner.expr(ty, depth - 1));
+            **value = fresh;
+        }
+        Some(chosen)
     }
 
     pub(super) fn literal(&mut self, want: &Ty) -> Expr {
@@ -145,6 +264,7 @@ impl Generator<'_> {
                 }
             }
             Ty::StdErr(err) => Expr::StdErrLit(*err),
+            Ty::Trace => Expr::TraceLit(self.trace_id()),
             Ty::User(shape) => self.user_literal(shape, 0),
         }
     }

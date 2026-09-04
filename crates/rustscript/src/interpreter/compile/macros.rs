@@ -275,7 +275,8 @@ impl Compiler<'_> {
         let body = self.macro_exprs(mac)?;
         let exprs = match &*body {
             MacroBody::Repeat(pair) => {
-                let val = self.compile_expr(&pair.0)?;
+                // the item moves into the last slot, the others are clones of it
+                let val = self.compile_owned_expr(&pair.0)?;
                 let count = self.compile_expr(&pair.1)?;
                 self.emit(Op::MakeArrayRepeat { dst, val, count });
                 return Ok(());

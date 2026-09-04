@@ -325,8 +325,9 @@ fn solve_pair(method: &Method, found: Found) -> Option<Solved> {
     })
 }
 
+/// See `Ty::is_hash` for why a trace never sits in a map.
 pub fn is_map_val(ty: &Ty) -> bool {
-    ty.is_ord() && ty.has_default()
+    ty.is_ord() && ty.has_default() && !ty.contains_trace()
 }
 
 pub fn fish_allows(req: FishReq, ty: &Ty) -> bool {

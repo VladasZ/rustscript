@@ -9,6 +9,7 @@ mod console;
 pub mod coverage;
 mod crates_bridge;
 mod debug_fmt;
+mod discard;
 mod ed25519_bridge;
 mod enum_def;
 mod format;
@@ -316,6 +317,7 @@ impl Interp {
             enums,
             unit_structs,
             struct_names,
+            has_drop: self.impls.any_drop(),
             rt: rt.handle().clone(),
         });
         let idx = self
@@ -328,7 +330,7 @@ impl Interp {
         let joined = std::thread::Builder::new()
             .name("main".to_string())
             .stack_size(vm::SCRIPT_STACK_BYTES)
-            .spawn(move || runner.run_chunk(&main_chunk, &[], &[]))
+            .spawn(move || runner.run_chunk(&main_chunk, &[], &[], true))
             .map_err(|e| anyhow!("cannot start main thread: {e}"))?
             .join();
         let ret = joined.map_err(|payload| {

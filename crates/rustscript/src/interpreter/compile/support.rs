@@ -310,7 +310,10 @@ pub(super) fn iterable_is_owned(expr: &Expr) -> bool {
     match expr {
         Expr::Paren(p) => iterable_is_owned(&p.expr),
         Expr::Group(g) => iterable_is_owned(&g.expr),
-        Expr::Reference(_) | Expr::MethodCall(_) | Expr::Range(_) => false,
+        Expr::Reference(_) | Expr::Range(_) => false,
+        // a fresh collection or an owning chain, `v.clone()` or `v.into_iter().rev()`, is the
+        // loop's own. Shared with a statement end temporary drop it would drop twice.
+        Expr::MethodCall(_) => init_is_owned(expr) || chain_owns_items(expr),
         _ => true,
     }
 }
@@ -369,6 +372,55 @@ pub(super) fn init_is_unique(expr: &Expr) -> bool {
     }
 }
 
+/// Whether a temporary made for the expression owns a fresh value, so the statement end drops
+/// it. A place read, a path, a reference and a closure hand out a handle into storage that
+/// lives on, and a guard is released by `release_guard_temps`.
+pub(super) fn temp_is_owned(expr: &Expr) -> bool {
+    match expr {
+        Expr::Paren(p) => temp_is_owned(&p.expr),
+        Expr::Group(g) => temp_is_owned(&g.expr),
+        Expr::Path(_)
+        | Expr::Field(_)
+        | Expr::Index(_)
+        | Expr::Reference(_)
+        | Expr::Closure(_)
+        | Expr::Lit(_)
+        | Expr::Range(_)
+        | Expr::Cast(_) => false,
+        Expr::Unary(u) => !matches!(u.op, syn::UnOp::Deref(_)) && temp_is_owned(&u.expr),
+        Expr::MethodCall(m) => match m.method.to_string().as_str() {
+            "borrow" | "borrow_mut" | "try_borrow" | "try_borrow_mut" | "lock" => false,
+            _ => init_is_owned(expr),
+        },
+        other => init_is_owned(other),
+    }
+}
+
+/// Whether an iterator chain hands out items of its own. `into_iter` and `drain` take them out
+/// of the collection, `cloned` makes fresh ones, `iter` lends handles into the collection.
+/// `map` hands out what its closure returns, a handle when the closure lends, so it owns only
+/// over an owning receiver. A collection receiver lends too, `vec![..].last()` is the slice
+/// method. An iterator held in a binding is unknown, so it counts as lending.
+fn chain_owns_items(expr: &Expr) -> bool {
+    match expr {
+        Expr::Paren(p) => chain_owns_items(&p.expr),
+        Expr::Group(g) => chain_owns_items(&g.expr),
+        Expr::MethodCall(m) => match m.method.to_string().as_str() {
+            "into_iter" | "into_keys" | "into_values" | "drain" | "cloned" | "copied" | "chars"
+            | "bytes" | "char_indices" | "lines" | "split" | "split_whitespace" => true,
+            "map" | "filter_map" | "flat_map" | "filter" | "take" | "skip" | "rev"
+            | "enumerate" | "step_by" | "take_while" | "skip_while" | "peekable" | "by_ref"
+            | "fuse" | "inspect" | "flatten" | "scan" | "map_while" => {
+                chain_owns_items(&m.receiver)
+            }
+            "zip" | "chain" => chain_owns_items(&m.receiver) && m.args.iter().all(chain_owns_items),
+            _ => false,
+        },
+        Expr::Range(_) => true,
+        _ => false,
+    }
+}
+
 /// Whether a `let` init hands the binding a value of its own, so scope end drops it. A borrow
 /// or an accessor that hands out a handle into other storage does not. An unknown method is
 /// treated as a borrow, a missed drop is safer than a drop of storage someone else owns.
@@ -383,9 +435,18 @@ pub(super) fn init_is_owned(expr: &Expr) -> bool {
             "clone" | "cloned" | "copied" | "to_vec" | "to_owned" | "to_string" | "collect"
             | "pop" | "remove" | "take" | "replace" | "swap_remove" | "split_off"
             | "into_inner" | "new" | "default" | "with_capacity" | "borrow" | "borrow_mut"
-            | "try_borrow" | "try_borrow_mut" | "lock" => true,
+            | "try_borrow" | "try_borrow_mut" | "lock" | "concat" | "repeat" | "join"
+            | "into_iter" | "into_keys" | "into_values" | "drain" | "split_at" | "insert"
+            | "then_some" | "then" | "into" => true,
             "unwrap" | "expect" | "unwrap_or" | "unwrap_or_else" | "unwrap_or_default" | "ok"
-            | "err" | "map" | "and_then" | "await" => init_is_owned(&m.receiver),
+            | "err" | "map" | "map_err" | "and_then" | "await" | "or" | "and" | "xor" | "zip"
+            | "ok_or" | "ok_or_else" | "map_or" | "map_or_else" | "or_else" | "filter"
+            | "flatten" | "take_if" | "transpose" => init_is_owned(&m.receiver),
+            // an iterator terminal hands out an item of the chain's own only when the chain
+            // owns its items
+            "last" | "nth" | "next" | "next_back" | "max" | "min" | "max_by" | "min_by"
+            | "max_by_key" | "min_by_key" | "fold" | "reduce" | "find" | "find_map"
+            | "partition" | "unzip" | "peek" => chain_owns_items(&m.receiver),
             _ => false,
         },
         Expr::Block(b) => b.block.stmts.last().is_some_and(|stmt| match stmt {

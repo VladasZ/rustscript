@@ -13,16 +13,59 @@ use super::{Compiler, NameLoc, Res, TypeIr, first_generic_type, idx16};
 
 impl Compiler<'_> {
     /// The window is reserved first so the temporaries of an argument can't break the packing.
+    /// Arguments for an op that takes the window, a call or a constructor. An owned value in
+    /// it is the panic unwinder's to drop, when a later argument panics before the op runs.
     pub(super) fn compile_args<'e>(&mut self, args: impl Iterator<Item = &'e Expr>) -> Result<Reg> {
+        let list: Vec<&Expr> = args.collect();
+        let base = self.compile_shared_args(list.iter().copied())?;
+        if self.ctx.has_drop {
+            for (i, a) in list.iter().enumerate() {
+                if self.arg_owned(a) {
+                    self.cur().unwind_temps.push(base + idx16(i));
+                }
+            }
+        }
+        Ok(base)
+    }
+
+    /// Arguments a native method reads in place and leaves in the window, so nothing may
+    /// drop them later.
+    pub(super) fn compile_shared_args<'e>(
+        &mut self,
+        args: impl Iterator<Item = &'e Expr>,
+    ) -> Result<Reg> {
         let list: Vec<&Expr> = args.collect();
         let base = self.cur().reg_top;
         for _ in 0..list.len() {
             self.alloc();
         }
         for (i, a) in list.iter().enumerate() {
-            self.compile_owned_into(base + idx16(i), a)?;
+            let reg = base + idx16(i);
+            self.compile_owned_into(reg, a)?;
+            // `f(&T::new())` lends a temporary that ends with the statement. A callee hands a
+            // lent argument back into the window on return, so the drop finds it there.
+            if self.ctx.has_drop
+                && let Expr::Reference(r) = a
+                && self.temp_owned(&r.expr)
+            {
+                self.cur().owned_temps.push(reg);
+            }
         }
         Ok(base)
+    }
+
+    /// Whether the window holds a value of its own for the argument. A local moves or copies
+    /// in, a fresh temporary is its own, a borrow or a lent handle is not.
+    fn arg_owned(&mut self, arg: &Expr) -> bool {
+        match arg {
+            Expr::Paren(p) => self.arg_owned(&p.expr),
+            Expr::Group(g) => self.arg_owned(&g.expr),
+            Expr::Path(p) if p.path.segments.len() == 1 && p.qself.is_none() => {
+                let name = p.path.segments[0].ident.to_string();
+                !self.cur().aliases.contains_key(&name) && self.scrutinee_owned(arg)
+            }
+            other => self.temp_owned(other),
+        }
     }
 
     /// The `AppList` in `get_json::<AppList>(..)`. An index into `call_type_args`, or `u32::MAX`

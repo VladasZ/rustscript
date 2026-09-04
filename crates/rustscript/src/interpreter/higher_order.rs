@@ -7,6 +7,7 @@ use anyhow::Result;
 
 use super::bridge::arg;
 use super::bytecode::BuiltinId;
+use super::discard::{discard, discard_payload};
 use super::enum_def::{EQUAL, EnumKind, OK, SOME};
 use super::iterator::{as_closure, option_inner};
 use super::methods::ordering_from_value;
@@ -17,11 +18,13 @@ use super::vecmap::{SortKey, sort_key};
 use super::vm::Vm;
 
 impl Vm {
-    /// None when the method is not one of these.
+    /// None when the method is not one of these. `owned` says the receiver is the caller's own,
+    /// so a closure taking its payload by value drops what it does not move out.
     pub(super) fn higher_order(
         self: &Arc<Self>,
         recv: &Value,
         name: BuiltinId,
+        owned: bool,
         args: &[Value],
     ) -> Result<Option<Value>> {
         match recv {
@@ -48,7 +51,7 @@ impl Vm {
                 self.iterator_higher_order(iterator, name, args)
             }
             Value::Enum { def, variant, data } if def.kind == EnumKind::Option => {
-                self.option_higher_order(*variant, data, name, args)
+                self.option_higher_order(*variant, data, name, owned, args)
             }
             Value::Enum { def, variant, data } if def.kind == EnumKind::Result => {
                 self.result_higher_order(*variant, data, name, args)
@@ -65,7 +68,7 @@ impl Vm {
             Value::Str(s) => {
                 let data: super::value::List =
                     Arc::new(parking_lot::Mutex::new(vec![Value::Str(s.clone())]));
-                self.option_higher_order(SOME, &data, name, args)
+                self.option_higher_order(SOME, &data, name, owned, args)
             }
             _ => Ok(None),
         }
@@ -405,35 +408,43 @@ impl Vm {
         variant: u16,
         data: &super::value::List,
         name: BuiltinId,
+        owned: bool,
         args: &[Value],
     ) -> Result<Option<Value>> {
         let is_some = variant == SOME;
         let inner = || Value::payload(data);
         let clo = |i: usize| as_closure(args.get(i));
+        // the payload goes to the closure by value, so it drops there unless moved out
+        let with_payload = |i: usize| self.call_closure_with(&clo(i)?, &[inner()?], owned);
         let out = match name {
-            BuiltinId::IsSomeAnd => {
-                Value::Bool(is_some && self.call_closure_data(&clo(0)?, &[inner()?])?.is_truthy())
-            }
-            BuiltinId::IsNoneOr => {
-                Value::Bool(!is_some || self.call_closure_data(&clo(0)?, &[inner()?])?.is_truthy())
-            }
+            BuiltinId::IsSomeAnd => Value::Bool(is_some && with_payload(0)?.is_truthy()),
+            BuiltinId::IsNoneOr => Value::Bool(!is_some || with_payload(0)?.is_truthy()),
             BuiltinId::Map => {
                 if is_some {
-                    Value::some(self.call_closure_data(&clo(0)?, &[inner()?])?)
+                    Value::some(with_payload(0)?)
                 } else {
                     Value::none()
                 }
             }
             BuiltinId::AndThen => {
                 if is_some {
-                    self.call_closure_data(&clo(0)?, &[inner()?])?
+                    with_payload(0)?
                 } else {
                     Value::none()
                 }
             }
             BuiltinId::Filter => {
-                if is_some && self.call_closure_data(&clo(0)?, &[inner()?])?.is_truthy() {
-                    Value::some(inner()?)
+                if is_some {
+                    let value = inner()?;
+                    if self
+                        .call_closure_data(&clo(0)?, from_ref(&value))?
+                        .is_truthy()
+                    {
+                        Value::some(value)
+                    } else {
+                        discard_payload(value);
+                        Value::none()
+                    }
                 } else {
                     Value::none()
                 }
@@ -441,14 +452,15 @@ impl Vm {
             BuiltinId::MapOr => {
                 let default = arg(args, 0)?;
                 if is_some {
-                    self.call_closure_data(&clo(1)?, &[inner()?])?
+                    discard(default);
+                    with_payload(1)?
                 } else {
                     default
                 }
             }
             BuiltinId::MapOrElse => {
                 if is_some {
-                    self.call_closure_data(&clo(1)?, &[inner()?])?
+                    with_payload(1)?
                 } else {
                     self.call_closure_data(&clo(0)?, &[])?
                 }
@@ -568,6 +580,7 @@ fn option_pair(
     let out = match name {
         BuiltinId::Or => {
             if is_some {
+                discard(other());
                 Value::some(Value::payload(data)?)
             } else {
                 other()
@@ -575,8 +588,10 @@ fn option_pair(
         }
         BuiltinId::And => {
             if is_some {
+                discard_payload(Value::payload(data)?);
                 other()
             } else {
+                discard(other());
                 Value::none()
             }
         }
@@ -584,7 +599,14 @@ fn option_pair(
             (true, Some(payload)) => {
                 Value::some(Value::tuple(vec![Value::payload(data)?, payload]))
             }
-            _ => Value::none(),
+            (true, None) => {
+                discard_payload(Value::payload(data)?);
+                Value::none()
+            }
+            (false, _) => {
+                discard(other());
+                Value::none()
+            }
         },
         BuiltinId::Xor => {
             let other = other();
@@ -593,7 +615,12 @@ fn option_pair(
             match (is_some, other_some) {
                 (true, false) => Value::some(Value::payload(data)?),
                 (false, true) => other,
-                _ => Value::none(),
+                (true, true) => {
+                    discard_payload(Value::payload(data)?);
+                    discard(other);
+                    Value::none()
+                }
+                (false, false) => Value::none(),
             }
         }
         _ => return Ok(None),

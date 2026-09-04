@@ -6,6 +6,7 @@ use anyhow::{Result, anyhow, bail};
 
 use super::bridge::{VArgs, arg};
 use super::bytecode::{BuiltinId, MethodName, ScalarTy};
+use super::discard::{discard, discard_payload};
 use super::enum_def::{EQUAL, EnumKind, GREATER, LESS, OK, ORDERING, SOME};
 use super::iterator;
 use super::native::Native;
@@ -162,6 +163,7 @@ pub(super) fn generic_method(recv: &Value, method: &MethodName, args: &[Value]) 
         (Value::Bool(b), BuiltinId::ThenSome) => Ok(if *b {
             Value::some(arg(args, 0)?)
         } else {
+            discard(arg(args, 0)?);
             Value::none()
         }),
         (Value::Vec(v), BuiltinId::AsArray) => Ok(Value::some(Value::vec(v.lock().clone()))),
@@ -399,7 +401,10 @@ pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
         }
         BuiltinId::UnwrapOr => {
             return Ok(match inner {
-                Some(v) => v,
+                Some(v) => {
+                    discard(arg(args, 0)?);
+                    v
+                }
                 None => arg(args, 0)?,
             });
         }
@@ -420,7 +425,12 @@ pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
         // a json null is None, so a serde lookup on it is None and not an unknown method error
         BuiltinId::Get => Value::none(),
         BuiltinId::OkOr | BuiltinId::Context => match inner {
-            Some(v) => Value::ok(v),
+            Some(v) => {
+                if let Some(unused) = args.first() {
+                    discard(unused.clone());
+                }
+                Value::ok(v)
+            }
             None => Value::err(arg(args, 0)?),
         },
         _ => return generic_method(recv, method, args),
@@ -431,6 +441,38 @@ fn borrow(recv: &Value) -> Value {
     Value::Ref(Arc::new(ValueRef::borrowed(recv.clone())))
 }
 
+/// `and` and `or`. What is not kept is thrown away, so it drops inside the call.
+fn res_switch(take_arg: bool, inner: Value, recv: &Value, args: &[Value]) -> Result<Value> {
+    if take_arg {
+        discard_payload(inner);
+        arg(args, 0)
+    } else {
+        discard(arg(args, 0)?);
+        Ok(recv.clone())
+    }
+}
+
+/// `unwrap_or`, the side not kept drops inside the call.
+fn res_unwrap_or(is_ok: bool, inner: Value, args: &[Value]) -> Result<Value> {
+    if is_ok {
+        discard(arg(args, 0)?);
+        Ok(inner)
+    } else {
+        discard_payload(inner);
+        arg(args, 0)
+    }
+}
+
+/// `ok` and `err`, the other side drops inside the call.
+fn res_side(keep: bool, inner: Value) -> Value {
+    if keep {
+        Value::some(inner)
+    } else {
+        discard_payload(inner);
+        Value::none()
+    }
+}
+
 pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> Result<Value> {
     let (is_ok, inner) = match recv {
         Value::Enum { variant, data, .. } => (*variant == OK, Value::payload(data)?),
@@ -439,22 +481,23 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
     Ok(match method.id {
         BuiltinId::IsOk => Value::Bool(is_ok),
         BuiltinId::IsErr => Value::Bool(!is_ok),
-        BuiltinId::And => {
+        BuiltinId::And => res_switch(is_ok, inner, recv, args)?,
+        BuiltinId::Or => res_switch(!is_ok, inner, recv, args)?,
+        BuiltinId::UnwrapOr => res_unwrap_or(is_ok, inner, args)?,
+        // same as `Option::unwrap_or_default` above
+        BuiltinId::UnwrapOrDefault => {
             if is_ok {
-                arg(args, 0)?
+                inner
             } else {
-                recv.clone()
+                discard_payload(inner);
+                payload_default(method)
             }
         }
-        BuiltinId::Or => {
-            if is_ok {
-                recv.clone()
-            } else {
-                arg(args, 0)?
-            }
-        }
-        // a reference view is the value
-        BuiltinId::Clone | BuiltinId::AsRef | BuiltinId::AsDeref => recv.clone(),
+        BuiltinId::Ok => res_side(is_ok, inner),
+        BuiltinId::Err => res_side(!is_ok, inner),
+        // a reference view is the value, a clone is its own
+        BuiltinId::Clone => recv.deep_clone(),
+        BuiltinId::AsRef | BuiltinId::AsDeref => recv.clone(),
         BuiltinId::AsMut | BuiltinId::AsDerefMut => borrow(recv),
         BuiltinId::Unwrap => {
             if is_ok {
@@ -480,35 +523,6 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
                 inner
             } else {
                 bail!("{}", args.first().map(Value::display).unwrap_or_default());
-            }
-        }
-        BuiltinId::UnwrapOr => {
-            if is_ok {
-                inner
-            } else {
-                arg(args, 0)?
-            }
-        }
-        // same as `Option::unwrap_or_default` above
-        BuiltinId::UnwrapOrDefault => {
-            if is_ok {
-                inner
-            } else {
-                payload_default(method)
-            }
-        }
-        BuiltinId::Ok => {
-            if is_ok {
-                Value::some(inner)
-            } else {
-                Value::none()
-            }
-        }
-        BuiltinId::Err => {
-            if is_ok {
-                Value::none()
-            } else {
-                Value::some(inner)
             }
         }
         BuiltinId::IntoIter | BuiltinId::Iter => {

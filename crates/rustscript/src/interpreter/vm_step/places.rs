@@ -53,8 +53,17 @@ pub(super) fn set_index(ctx: &mut StepCtx, base: u16, key: u16, val: u16) -> Res
         }
     }
     let target = place_base(ctx.get(base))?;
-    ops::set_index(&target, ctx.get(key), ctx.get(val).clone())?;
+    let old = ops::set_index(&target, ctx.get(key), ctx.get(val).clone())?;
+    drop_overwritten(ctx, old)?;
     Ok(Flow::Next)
+}
+
+/// The value a store replaced. Real Rust drops it right there.
+fn drop_overwritten(ctx: &StepCtx, old: Value) -> Result<()> {
+    if ctx.vm.has_drop {
+        ctx.vm.run_user_drop(old)?;
+    }
+    Ok(())
 }
 
 pub(super) fn deref_op(ctx: &mut StepCtx, dst: u16, src: u16) -> Result<Flow> {
@@ -80,9 +89,10 @@ pub(super) fn set_deref(ctx: &StepCtx, target: u16, val: u16) -> Result<Flow> {
     if !reference.writable() {
         bail!("assignment through a shared `RefCell` borrow");
     }
-    if !reference.set(ctx.get(val).clone()) {
+    let Some(old) = reference.swap(ctx.get(val).clone()) else {
         bail!("assignment through a dangling reference");
-    }
+    };
+    drop_overwritten(ctx, old)?;
     Ok(Flow::Next)
 }
 
@@ -140,12 +150,15 @@ pub(super) fn deref_bin_assign(
 /// caller's writeback.
 pub(super) fn set_deref_param(ctx: &mut StepCtx, target: u16, val: u16) -> Result<Flow> {
     if let Value::Ref(reference) = ctx.get(target) {
-        if !reference.set(ctx.get(val).clone()) {
+        let Some(old) = reference.swap(ctx.get(val).clone()) else {
             bail!("assignment through a dangling reference");
-        }
+        };
+        drop_overwritten(ctx, old)?;
         return Ok(Flow::Next);
     }
     let value = ctx.get(val).clone();
+    let old = ctx.take(target);
+    drop_overwritten(ctx, old)?;
     Ok(ctx.set(target, value))
 }
 
@@ -155,13 +168,21 @@ pub(super) fn get_field_op(ctx: &mut StepCtx, dst: u16, base: u16, member: u16) 
     Ok(ctx.set(dst, v))
 }
 
+/// See `Op::TakeField`.
+pub(super) fn take_field_op(ctx: &mut StepCtx, dst: u16, base: u16, member: u16) -> Result<Flow> {
+    let target = place_base(ctx.get(base))?;
+    let moved = Vm::set_field(&target, &ctx.cur.members[member as usize], Value::Unit)?;
+    Ok(ctx.set(dst, moved))
+}
+
 pub(super) fn set_field_op(ctx: &StepCtx, base: u16, member: u16, val: u16) -> Result<Flow> {
     let target = place_base(ctx.get(base))?;
-    Vm::set_field(
+    let old = Vm::set_field(
         &target,
         &ctx.cur.members[member as usize],
         ctx.get(val).clone(),
     )?;
+    drop_overwritten(ctx, old)?;
     Ok(Flow::Next)
 }
 

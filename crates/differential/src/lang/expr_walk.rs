@@ -4,7 +4,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::lang::catalog::TyPat;
-use crate::lang::expr::{Arm, BinOp, Expr, Helper, UnOp, lookup, minimal};
+use crate::lang::expr::{
+    Arm, BinOp, Expr, Helper, MemKind, ReadMode, UnOp, VecTakeKind, lookup, minimal,
+};
 use crate::lang::stmt::Stmt;
 use crate::lang::ty::FloatWidth;
 
@@ -21,7 +23,11 @@ impl Expr {
             | Self::Cast { value, .. }
             | Self::Try { value, .. }
             | Self::Into { value, .. }
-            | Self::ApplyCall { arg: value, .. } => vec![value],
+            | Self::ApplyCall { arg: value, .. }
+            | Self::Mem {
+                kind: MemKind::Replace(value),
+                ..
+            } => vec![value],
             Self::Call { recv, args, .. } => {
                 let mut out = vec![&**recv];
                 out.extend(args.iter());
@@ -80,9 +86,12 @@ impl Expr {
             | Self::CharLit { .. }
             | Self::StrLit(_)
             | Self::StdErrLit(_)
+            | Self::TraceLit(_)
             | Self::DefaultOf(_)
             | Self::Var { .. }
-            | Self::ConstRef { .. } => Vec::new(),
+            | Self::ConstRef { .. }
+            | Self::Mem { .. }
+            | Self::VecTake { .. } => Vec::new(),
         }
     }
 
@@ -93,7 +102,11 @@ impl Expr {
             | Self::Cast { value, .. }
             | Self::Try { value, .. }
             | Self::Into { value, .. }
-            | Self::ApplyCall { arg: value, .. } => vec![value],
+            | Self::ApplyCall { arg: value, .. }
+            | Self::Mem {
+                kind: MemKind::Replace(value),
+                ..
+            } => vec![value],
             Self::Call { recv, args, .. } => {
                 let mut out = vec![&mut **recv];
                 out.extend(args.iter_mut());
@@ -154,9 +167,12 @@ impl Expr {
             | Self::CharLit { .. }
             | Self::StrLit(_)
             | Self::StdErrLit(_)
+            | Self::TraceLit(_)
             | Self::DefaultOf(_)
             | Self::Var { .. }
-            | Self::ConstRef { .. } => Vec::new(),
+            | Self::ConstRef { .. }
+            | Self::Mem { .. }
+            | Self::VecTake { .. } => Vec::new(),
         }
     }
 
@@ -189,7 +205,10 @@ impl Expr {
 
     pub fn uses_any(&self, names: &BTreeSet<String>) -> bool {
         match self {
-            Self::Var { name, .. } => names.contains(name),
+            Self::Var { name, .. } | Self::VecTake { name, .. } => names.contains(name),
+            Self::Mem { name, .. } => {
+                names.contains(name) || self.children().iter().any(|child| child.uses_any(names))
+            }
             Self::ClosureCall { name, args, .. } => {
                 names.contains(name) || args.iter().any(|arg| arg.uses_any(names))
             }
@@ -214,11 +233,37 @@ impl Expr {
             | Self::ClosureCall { .. }
             | Self::ApplyCall { .. }
             | Self::Method { .. }
-            | Self::Index { .. } => true,
+            | Self::Index { .. }
+            | Self::VecTake {
+                kind: VecTakeKind::Remove(_) | VecTakeKind::SwapRemove(_),
+                ..
+            } => true,
             Self::Block { stmts, tail } => {
                 stmts.iter().any(Stmt::has_fallible_op) || tail.has_fallible_op()
             }
             _ => self.children().iter().any(|child| child.has_fallible_op()),
+        }
+    }
+
+    /// Whether running this expression prints a drop line, through a value it holds or one it
+    /// makes. Such a body is as order sensitive as a panicking one, see the panic reach rule.
+    pub fn mentions_trace(&self) -> bool {
+        self.nodes().iter().any(|node| node.ty().contains_trace())
+    }
+
+    /// The bindings an in place operation writes, so the renderer marks them `mut`.
+    pub fn written_names(&self, out: &mut BTreeSet<String>) {
+        for node in self.nodes() {
+            match node {
+                Self::Mem { name, .. } | Self::VecTake { name, .. } => {
+                    out.insert(name.clone());
+                }
+                // the apply helper takes the closure by `&mut`
+                Self::ApplyCall { closure, .. } => {
+                    out.insert(closure.clone());
+                }
+                _ => {}
+            }
         }
     }
 
@@ -304,6 +349,21 @@ impl Expr {
             Self::If { .. } => Some("lang-if"),
             Self::FnCall { .. } => Some("lang-fn-call"),
             Self::ClosureCall { .. } => Some("lang-closure-call"),
+            Self::Var {
+                mode: ReadMode::Move,
+                ..
+            } => Some("lang-move"),
+            Self::TraceLit(_) => Some("lang-trace-lit"),
+            Self::Mem { kind, .. } => Some(match kind {
+                MemKind::Take => "lang-mem-take",
+                MemKind::Replace(_) => "lang-mem-replace",
+                MemKind::OptTake => "lang-opt-take-expr",
+            }),
+            Self::VecTake { kind, .. } => Some(match kind {
+                VecTakeKind::Pop => "lang-vec-pop-expr",
+                VecTakeKind::Remove(_) => "lang-vec-remove",
+                VecTakeKind::SwapRemove(_) => "lang-vec-swap-remove",
+            }),
             Self::BareInt { .. } => Some("lang-bare-int"),
             Self::BareFloat { .. } => Some("lang-bare-float"),
             Self::ConstRef { .. } => Some("lang-const"),
@@ -314,6 +374,14 @@ impl Expr {
             Self::StructLit { .. } => Some("lang-struct-lit"),
             Self::EnumLit { .. } => Some("lang-enum-lit"),
             Self::DefaultOf(_) => Some("lang-default"),
+            Self::Field {
+                mode: ReadMode::Move,
+                ..
+            }
+            | Self::TupleField {
+                mode: ReadMode::Move,
+                ..
+            } => Some("lang-move-field"),
             Self::Field { .. } => Some("lang-field"),
             Self::TupleField { .. } => Some("lang-tuple-field"),
             Self::Index { .. } => Some("lang-index"),

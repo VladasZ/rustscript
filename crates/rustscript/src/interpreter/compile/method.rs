@@ -11,6 +11,16 @@ use super::walks::unparen;
 use super::{CollectTarget, Compiler, NameLoc, idx16};
 
 impl Compiler<'_> {
+    /// `last` is the consuming terminal on an iterator and the slice method on a collection,
+    /// which lends, so a collection temporary still drops at the statement end.
+    fn lends_receiver(&self, m: &syn::ExprMethodCall, name: &str) -> bool {
+        name == "last"
+            && matches!(
+                self.types.of(&m.receiver),
+                Ty::Vec(_) | Ty::Str | Ty::Tuple(_)
+            )
+    }
+
     /// Whether a by value `self` call owns its receiver. A local that is not a borrow, a place
     /// rooted in one, or a temporary. A borrow parameter forwards a handle it does not own.
     fn consumes_receiver(&mut self, expr: &Expr) -> bool {
@@ -34,21 +44,28 @@ impl Compiler<'_> {
         }
     }
 
-    /// `v.into_iter()` consumes `v`, so the iterator takes the items like a `for` over `v`.
+    /// `v.into_iter()` consumes `v`, so the iterator takes the items like a `for` over `v`. A
+    /// borrow parameter or a `&v` only lends them, and a receiver the compiler can not place,
+    /// the result of a lending method, goes through the native and lends too.
     fn compile_into_iter(&mut self, dst: Reg, m: &syn::ExprMethodCall) -> Result<bool> {
-        if m.method != "into_iter"
-            || !m.args.is_empty()
-            || m.turbofish.is_some()
-            || !self.consumes_receiver(&m.receiver)
-        {
+        if m.method != "into_iter" || !m.args.is_empty() || m.turbofish.is_some() {
             return Ok(false);
         }
-        let src = self.compile_owned_expr(&m.receiver)?;
-        self.emit(Op::IterInit {
-            dst,
-            src,
-            owned: true,
-        });
+        let receiver = unparen(&m.receiver);
+        let owned = match receiver {
+            Expr::Path(_) | Expr::Field(_) | Expr::Index(_) => self.consumes_receiver(receiver),
+            Expr::Reference(_) => false,
+            other => self.temp_owned(other),
+        };
+        if !owned && !matches!(receiver, Expr::Path(_) | Expr::Reference(_)) {
+            return Ok(false);
+        }
+        let src = if owned {
+            self.compile_owned_expr(receiver)?
+        } else {
+            self.compile_expr(receiver)?
+        };
+        self.emit(Op::IterInit { dst, src, owned });
         Ok(true)
     }
 
@@ -73,7 +90,8 @@ impl Compiler<'_> {
         {
             let recv = self.compile_expr(&g.receiver)?;
             let key = self.compile_expr(&g.args[0])?;
-            let default = self.compile_expr(&m.args[0])?;
+            // the default moves into the result, a shared handle would be dropped twice
+            let default = self.compile_owned_expr(&m.args[0])?;
             self.emit(Op::GetOrDefault {
                 dst,
                 recv,
@@ -106,14 +124,19 @@ impl Compiler<'_> {
             // an integer receiver would undo the assignment
             && !(matches!(method_text.as_str(), "rotate_left" | "rotate_right")
                 && matches!(self.types.of(&m.receiver), Ty::Int(_)));
+        let owned = self.scrutinee_owned(&m.receiver);
         let (recv, receiver_place) = if mutating {
             let p = self.compile_mut_receiver(&m.receiver)?;
             (p.reg, Some(p))
+        } else if consumes_receiver(&method_text) && !self.lends_receiver(m, &method_text) {
+            // a method that takes `self` owns the receiver now, so a local moves in and a
+            // temporary is not dropped again at the statement end
+            (self.compile_owned_expr(&m.receiver)?, None)
         } else {
             (self.compile_expr(&m.receiver)?, None)
         };
         let place = mutating && place::is_place_expr(&m.receiver);
-        let base = self.compile_args(m.args.iter())?;
+        let base = self.compile_shared_args(m.args.iter())?;
         let (method, scalar) = self.method_name_and_scalar(m);
         let default = if method == "unwrap_or_default" {
             let ty = self.types.of_node(m);
@@ -121,7 +144,7 @@ impl Compiler<'_> {
         } else {
             None
         };
-        let name = self.add_name_full(method, scalar, default, place);
+        let name = self.add_name_full(method, scalar, default, place, owned);
         // restamp with the method's own line, the one `rustc` names for a multiline chain
         self.set_line(m.method.span());
         self.emit(Op::Method {
@@ -239,4 +262,92 @@ pub(super) fn turbofish_scalar(
             _ => None,
         })
         .and_then(ScalarTy::lower)
+}
+
+/// Methods that take `self` by value. The receiver temporary is theirs, so its drop, if any, is
+/// on them and not on the statement end. A borrowing method leaves the temporary behind to
+/// drop at the semicolon.
+pub(super) fn consumes_receiver(name: &str) -> bool {
+    matches!(
+        name,
+        "unwrap"
+            | "expect"
+            | "unwrap_or"
+            | "unwrap_or_else"
+            | "unwrap_or_default"
+            | "unwrap_err"
+            | "expect_err"
+            | "ok"
+            | "err"
+            | "ok_or"
+            | "ok_or_else"
+            | "map"
+            | "map_err"
+            | "map_or"
+            | "map_or_else"
+            | "and_then"
+            | "and"
+            | "or"
+            | "or_else"
+            | "xor"
+            | "zip"
+            | "flatten"
+            | "filter"
+            | "into"
+            | "into_iter"
+            | "into_keys"
+            | "into_values"
+            | "into_inner"
+            | "into_boxed_slice"
+            | "into_bytes"
+            | "into_string"
+            | "collect"
+            | "sum"
+            | "product"
+            | "count"
+            | "fold"
+            | "reduce"
+            | "min"
+            | "max"
+            | "min_by"
+            | "max_by"
+            | "min_by_key"
+            | "max_by_key"
+            | "last"
+            | "any"
+            | "all"
+            | "position"
+            | "rposition"
+            | "find"
+            | "find_map"
+            | "for_each"
+            | "rev"
+            | "take"
+            | "skip"
+            | "step_by"
+            | "enumerate"
+            | "chain"
+            | "flat_map"
+            | "filter_map"
+            | "take_while"
+            | "skip_while"
+            | "map_while"
+            | "scan"
+            | "inspect"
+            | "peekable"
+            | "cycle"
+            | "fuse"
+            | "unzip"
+            | "partition"
+            | "cloned"
+            | "copied"
+            | "then"
+            | "then_some"
+            | "is_some_and"
+            | "is_none_or"
+            | "is_ok_and"
+            | "is_err_and"
+            | "transpose"
+            | "unwrap_unchecked"
+    )
 }

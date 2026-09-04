@@ -76,8 +76,16 @@ pub(super) struct FnState {
     /// for scope end `Drop` runs
     pub(super) scope_order: Vec<Vec<Reg>>,
     pub(super) drop_lists: Vec<std::sync::Arc<[Reg]>>,
+    /// see `Chunk::lent_params`
+    pub(super) lent_params: Vec<Reg>,
     /// `borrow` results not yet released, see `release_guard_temps`
     pub(super) guard_temps: Vec<Reg>,
+    /// Temporaries that own a fresh value, dropped at the end of their statement, see
+    /// `drop_temps`. Only kept when the program has a `Drop` impl.
+    pub(super) owned_temps: Vec<Reg>,
+    /// Owned call arguments, taken by the call and so only dropped by a panic before it, see
+    /// `compile_args`. Only kept when the program has a `Drop` impl.
+    pub(super) unwind_temps: Vec<Reg>,
     /// named bindings that hold a `RefCell` guard, released at scope end even without `Drop` impls
     pub(super) guard_regs: HashSet<Reg>,
     pub(super) has_guards: bool,
@@ -125,6 +133,7 @@ impl FnState {
             scopes: vec![HashMap::default()],
             scope_order: vec![Vec::new()],
             drop_lists: Vec::new(),
+            lent_params: Vec::new(),
             reg_top: 0,
             max_reg: 0,
             num_params: 0,
@@ -134,6 +143,8 @@ impl FnState {
             call_type_args: Vec::new(),
             ret_cast: None,
             guard_temps: Vec::new(),
+            owned_temps: Vec::new(),
+            unwind_temps: Vec::new(),
             guard_regs: HashSet::new(),
             has_guards: false,
         }
@@ -237,6 +248,7 @@ impl FnState {
             .drop_lists
             .iter()
             .flat_map(|list| list.iter().copied())
+            .chain(self.unwind_temps.iter().copied())
             .collect();
         droppable.sort_unstable_by(|a, b| b.cmp(a));
         droppable.dedup();
@@ -269,6 +281,7 @@ impl FnState {
             generics: self.generics,
             drop_lists: self.drop_lists,
             droppable: droppable.into(),
+            lent_params: self.lent_params.into(),
             call_type_args: self.call_type_args,
             path_forwarder: false,
             clears_frame: self.has_guards,

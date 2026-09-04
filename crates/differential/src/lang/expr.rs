@@ -110,6 +110,37 @@ impl UnOp {
     }
 }
 
+/// How a binding or a field of one is read. A move retires the source, so the generator tracks
+/// it, and the reducer checks every candidate with `own::check`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ReadMode {
+    #[default]
+    Clone,
+    Move,
+}
+
+/// `std::mem` operations and `Option::take` on a binding. Each writes the binding in place and
+/// hands the old value out, so the binding must be `mut` and nothing else may hold it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum MemKind {
+    /// `std::mem::take(&mut name)`, the binding is left at its default
+    Take,
+    /// `std::mem::replace(&mut name, value)`
+    Replace(Box<Expr>),
+    /// `name.take()` on an option, the binding is left as `None`
+    OptTake,
+}
+
+/// Moves an element out of a vec binding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum VecTakeKind {
+    Pop,
+    /// panics out of bounds
+    Remove(u8),
+    /// panics out of bounds
+    SwapRemove(u8),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Arm {
     pub pat: Pat,
@@ -185,6 +216,20 @@ pub enum Expr {
     },
     /// made by a parse that fails
     StdErrLit(StdErr),
+    /// `DiffTrace(id)`
+    TraceLit(i64),
+    /// see `MemKind`
+    Mem {
+        name: String,
+        ty: Ty,
+        kind: MemKind,
+    },
+    /// see `VecTakeKind`, `elem` is the element type of the binding
+    VecTake {
+        name: String,
+        elem: Ty,
+        kind: VecTakeKind,
+    },
     /// `Name { a: .., b: .. }`, or with `update` the first `fields.len()` fields written and
     /// `..Default::default()` for the rest
     StructLit {
@@ -217,6 +262,8 @@ pub enum Expr {
     Var {
         name: String,
         ty: Ty,
+        #[serde(default)]
+        mode: ReadMode,
     },
     /// `opaque` shields it from the overflow lint like a bare literal
     ConstRef {
@@ -253,15 +300,20 @@ pub enum Expr {
         else_expr: Box<Expr>,
         ty: Ty,
     },
+    /// A move out of a binding leaves it partially moved, the other fields stay usable.
     Field {
         base: Box<Expr>,
         index: usize,
         ty: Ty,
+        #[serde(default)]
+        mode: ReadMode,
     },
     TupleField {
         base: Box<Expr>,
         index: usize,
         ty: Ty,
+        #[serde(default)]
+        mode: ReadMode,
     },
     /// `v[i]`, panics out of bounds
     Index {
@@ -430,6 +482,7 @@ pub fn minimal(ty: &Ty) -> Expr {
             value: Ok(Box::new(minimal(ok))),
         },
         Ty::StdErr(err) => Expr::StdErrLit(*err),
+        Ty::Trace => Expr::TraceLit(0),
         Ty::User(shape) => {
             if shape.is_enum() {
                 let variant = &shape.variants()[0];

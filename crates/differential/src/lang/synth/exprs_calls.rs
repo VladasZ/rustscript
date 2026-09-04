@@ -3,8 +3,9 @@
 use rand::RngExt;
 
 use crate::lang::block::{Param, ParamMode};
-use crate::lang::expr::{BinOp, Expr, UnOp, unbare_deep};
-use crate::lang::synth::{BindKind, Generator, MAX_EXPR_DEPTH, is_partial_ord};
+use crate::lang::expr::{BinOp, Expr, ReadMode, UnOp, unbare_deep};
+use crate::lang::own::{BindKind, OwnState};
+use crate::lang::synth::{Generator, MAX_EXPR_DEPTH, MOVE_CHANCE, is_partial_ord};
 use crate::lang::ty::{FloatWidth, IntWidth, Ty};
 use crate::lang::user::{MethodKind, UserShape};
 
@@ -28,8 +29,12 @@ impl Generator<'_> {
             &[BinOp::Eq, BinOp::Ne]
         };
         let op = *self.pick(ops);
-        let left = self.expr(&operand, depth - 1);
-        let right = self.expr(&operand, depth - 1);
+        // a comparison takes both sides by reference
+        let (left, right) = self.borrowing(|inner| {
+            let left = inner.expr(&operand, depth - 1);
+            let right = inner.expr(&operand, depth - 1);
+            (left, right)
+        });
         Expr::Bin {
             op,
             left: Box::new(left),
@@ -83,10 +88,12 @@ impl Generator<'_> {
         })
     }
 
-    pub(super) fn branch(&mut self, want: &Ty, depth: usize) -> Expr {
+    pub(super) fn if_expr(&mut self, want: &Ty, depth: usize) -> Expr {
         let condition = self.expr(&Ty::Bool, depth - 1);
-        let then_expr = self.expr(want, depth - 1);
-        let else_expr = self.expr(want, depth - 1);
+        self.begin_branches();
+        let then_expr = self.branch(|inner| inner.expr(want, depth - 1));
+        let else_expr = self.branch(|inner| inner.expr(want, depth - 1));
+        self.end_branches();
         Expr::If {
             condition: Box::new(condition),
             then_expr: Box::new(then_expr),
@@ -99,9 +106,10 @@ impl Generator<'_> {
     pub(super) fn bare_or_const(&mut self, want: &Ty) -> Option<Expr> {
         let consts: Vec<String> = self
             .scope
-            .iter()
-            .filter(|binding| matches!(binding.kind, BindKind::Const) && binding.ty == *want)
-            .map(|binding| binding.name.clone())
+            .visible()
+            .into_iter()
+            .filter(|slot| matches!(slot.kind, BindKind::Const) && slot.ty == *want)
+            .map(|slot| slot.name.clone())
             .collect();
         if !consts.is_empty() && self.chance(0.5) {
             return Some(Expr::ConstRef {
@@ -129,42 +137,106 @@ impl Generator<'_> {
     // accesses
 
     pub(super) fn access(&mut self, want: &Ty, depth: usize) -> Option<Expr> {
+        let mut options = self.binding_accesses(want, depth);
+        // a field read off a fresh struct value
+        if options.is_empty() || self.chance(0.2) {
+            let shapes: Vec<UserShape> = self
+                .types
+                .iter()
+                .filter(|def| def.shape.fields().iter().any(|field| field.ty == *want))
+                .map(|def| def.shape.clone())
+                .collect();
+            if let Some(shape) = shapes.first() {
+                let shape = shape.clone();
+                let index = shape.fields().iter().position(|field| field.ty == *want)?;
+                let base = self.expr(&Ty::user(shape), depth - 1);
+                // a field moved out of a temporary drops the rest of it at the semicolon, a
+                // field moved out of a binding leaves it partially moved
+                let mode = match &base {
+                    Expr::Var { name, .. } => {
+                        let mode = self.field_mode(&name.clone(), index, want);
+                        if mode == ReadMode::Move {
+                            self.scope.note_field_move(name, index);
+                        }
+                        mode
+                    }
+                    _ if !want.is_copy() && self.chance(0.5) => ReadMode::Move,
+                    _ => ReadMode::Clone,
+                };
+                return Some(Expr::Field {
+                    base: Box::new(base),
+                    index,
+                    ty: want.clone(),
+                    mode,
+                });
+            }
+        }
+        if options.is_empty() {
+            return None;
+        }
+        let chosen = options.swap_remove(self.rng.random_range(0..options.len()));
+        if let Expr::Field {
+            base,
+            index,
+            mode: ReadMode::Move,
+            ..
+        }
+        | Expr::TupleField {
+            base,
+            index,
+            mode: ReadMode::Move,
+            ..
+        } = &chosen
+            && let Expr::Var { name, .. } = &**base
+        {
+            self.scope.note_field_move(name, *index);
+        }
+        Some(chosen)
+    }
+
+    /// Every field, tuple slot and vec index of a binding that gives `want`.
+    fn binding_accesses(&mut self, want: &Ty, depth: usize) -> Vec<Expr> {
         let mut options: Vec<Expr> = Vec::new();
-        let locals: Vec<(String, Ty)> = self
+        // a partially moved binding still offers its other fields
+        let locals: Vec<(String, Ty, OwnState)> = self
             .scope
-            .iter()
-            .filter(|binding| matches!(binding.kind, BindKind::Local))
-            .map(|binding| (binding.name.clone(), binding.ty.clone()))
+            .visible()
+            .into_iter()
+            .filter(|slot| matches!(slot.kind, BindKind::Local) && slot.state != OwnState::Moved)
+            .map(|slot| (slot.name.clone(), slot.ty.clone(), slot.state.clone()))
             .collect();
-        for (name, ty) in &locals {
+        for (name, ty, state) in &locals {
             let base = Expr::Var {
                 name: name.clone(),
                 ty: ty.clone(),
+                mode: ReadMode::Clone,
             };
             match ty {
                 Ty::User(shape) => {
                     for (index, field) in shape.fields().iter().enumerate() {
-                        if field.ty == *want {
+                        if field.ty == *want && self.scope.can_read_field(name, index) {
                             options.push(Expr::Field {
                                 base: Box::new(base.clone()),
                                 index,
                                 ty: want.clone(),
+                                mode: self.field_mode(name, index, want),
                             });
                         }
                     }
                 }
                 Ty::Tuple(items) => {
                     for (index, item) in items.iter().enumerate() {
-                        if item == want {
+                        if item == want && self.scope.can_read_field(name, index) {
                             options.push(Expr::TupleField {
                                 base: Box::new(base.clone()),
                                 index,
                                 ty: want.clone(),
+                                mode: self.field_mode(name, index, want),
                             });
                         }
                     }
                 }
-                Ty::Vec(elem) if **elem == *want => {
+                Ty::Vec(elem) if **elem == *want && *state == OwnState::Owned => {
                     let index = if self.chance(0.7) {
                         Expr::IntLit {
                             width: IntWidth::USize,
@@ -183,29 +255,16 @@ impl Generator<'_> {
                 _ => {}
             }
         }
-        // a field read off a fresh struct value
-        if options.is_empty() || self.chance(0.2) {
-            let shapes: Vec<UserShape> = self
-                .types
-                .iter()
-                .filter(|def| def.shape.fields().iter().any(|field| field.ty == *want))
-                .map(|def| def.shape.clone())
-                .collect();
-            if let Some(shape) = shapes.first() {
-                let shape = shape.clone();
-                let index = shape.fields().iter().position(|field| field.ty == *want)?;
-                let base = self.expr(&Ty::user(shape), depth - 1);
-                return Some(Expr::Field {
-                    base: Box::new(base),
-                    index,
-                    ty: want.clone(),
-                });
-            }
+        options
+    }
+
+    /// The draw for one field read, a move when the field can leave the binding.
+    fn field_mode(&mut self, name: &str, index: usize, field: &Ty) -> ReadMode {
+        if self.scope.can_move_field(name, index, field) && self.chance(MOVE_CHANCE) {
+            ReadMode::Move
+        } else {
+            ReadMode::Clone
         }
-        if options.is_empty() {
-            return None;
-        }
-        Some(self.pick(&options).clone())
     }
 
     // user types
@@ -308,7 +367,18 @@ impl Generator<'_> {
         let (shape, sig) = self.pick(&options).clone();
         let owner = Ty::user(shape.clone());
         let base = self.expr(&owner, depth - 1);
+        // a binding receiver is borrowed while the arguments run
+        let held = match &base {
+            Expr::Var { name, .. } => Some(name.clone()),
+            _ => None,
+        };
+        if let Some(name) = &held {
+            self.scope.freeze(name);
+        }
         let args = sig.args.iter().map(|ty| self.expr(ty, depth - 1)).collect();
+        if held.is_some() {
+            self.scope.unfreeze();
+        }
         Some(Expr::Method {
             owner: Box::new(shape),
             name: sig.name,
@@ -355,10 +425,12 @@ impl Generator<'_> {
     pub(super) fn closure_call(&mut self, want: &Ty, depth: usize) -> Option<Expr> {
         let closures: Vec<(String, Vec<Ty>)> = self
             .scope
-            .iter()
-            .filter_map(|binding| match &binding.kind {
+            .visible()
+            .into_iter()
+            .filter(|slot| slot.state == OwnState::Owned)
+            .filter_map(|slot| match &slot.kind {
                 BindKind::Closure { params, ret } if ret == want => {
-                    Some((binding.name.clone(), params.clone()))
+                    Some((slot.name.clone(), params.clone()))
                 }
                 _ => None,
             })
@@ -425,9 +497,13 @@ impl Generator<'_> {
         ret: &Ty,
         depth: usize,
     ) -> Expr {
+        // a `&T` parameter only borrows its argument
         let args = params
             .iter()
-            .map(|param| self.expr(&param.ty, depth))
+            .map(|param| match param.mode {
+                ParamMode::Owned => self.expr(&param.ty, depth),
+                ParamMode::Ref => self.borrowing(|inner| inner.expr(&param.ty, depth)),
+            })
             .collect();
         Expr::FnCall {
             name,

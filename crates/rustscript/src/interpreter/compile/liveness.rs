@@ -126,7 +126,9 @@ fn table_effects(f: &FnState, op: &Op, reads: &mut Vec<Reg>, writes: &mut Vec<Re
             }
             writes.push(*dst);
         }
-        Op::DropScope { list } => writes.extend(f.drop_lists[usize::from(*list)].iter()),
+        Op::DropScope { list } | Op::DropParams { list } => {
+            writes.extend(f.drop_lists[usize::from(*list)].iter());
+        }
         Op::TestBind { val, pat, dst } => {
             reads.push(*val);
             let info = &f.pats[usize::from(*pat)];
@@ -166,7 +168,9 @@ fn place_effects(op: &Op, reads: &mut Vec<Reg>, writes: &mut Vec<Reg>) {
             reads.push(*val);
             writes.push(*target);
         }
-        Op::GetField { dst, base, .. } | Op::RefField { dst, base, .. } => {
+        Op::GetField { dst, base, .. }
+        | Op::RefField { dst, base, .. }
+        | Op::TakeField { dst, base, .. } => {
             reads.push(*base);
             writes.push(*dst);
         }
@@ -295,6 +299,7 @@ fn effects(f: &FnState, op: &Op, reads: &mut Vec<Reg>, writes: &mut Vec<Reg>) {
         | Op::SetDerefParam { .. }
         | Op::GetField { .. }
         | Op::RefField { .. }
+        | Op::TakeField { .. }
         | Op::SetField { .. } => place_effects(op, reads, writes),
         _ => unreachable!("handled by `table_effects`"),
     }
@@ -416,9 +421,16 @@ impl FnState {
             self.code[at] = if root == NO_ROOT || live_out(at, root) {
                 Op::Copy { dst, src }
             } else if dst == src {
-                // a field or element moved out of a dead local, the local is cleared so its
-                // scope end can't drop the moved part again
-                Op::LoadUnit { dst: root }
+                if self.mutable_locals.contains(&root) {
+                    // a value moved out of a capture cell, the cell is cleared so the closure
+                    // can't drop the moved part again
+                    Op::LoadUnit { dst: root }
+                } else {
+                    // A field or element read out of a dead local. A move of a non copy field
+                    // left a tombstone in the local already, see `compile_owned_into`, so what
+                    // reaches here copies and the local drops its rest at scope end.
+                    Op::Copy { dst, src }
+                }
             } else {
                 Op::Take { dst, src }
             };

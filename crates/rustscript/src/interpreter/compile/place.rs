@@ -6,7 +6,9 @@ use anyhow::Result;
 use syn::Expr;
 
 use super::super::bytecode::{NO_ROOT, Op, PathId, Reg};
-use super::{Compiler, NameLoc};
+use super::infer::Ty;
+use super::support::{init_is_owned, temp_is_owned};
+use super::{Compiler, NameLoc, idx16};
 
 /// Composite storage is shared with the place, so the store is a handle move. A string splits inside
 /// its methods and only the store brings the new buffer home.
@@ -273,6 +275,69 @@ impl Compiler<'_> {
 
     /// A `&mut place` scrutinee wraps the place as a borrow, so bindings write through. A
     /// scrutinee whose pattern binds by value is moved out of, or copied when it stays live.
+    /// Whether a pattern over the expression takes its bindings out of a value of its own. A
+    /// borrow parameter, `self` in a `&self` method, a reference or an accessor only lends its
+    /// parts, so the bindings must not drop at the arm's end.
+    pub(super) fn scrutinee_owned(&mut self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Paren(p) => self.scrutinee_owned(&p.expr),
+            Expr::Group(g) => self.scrutinee_owned(&g.expr),
+            Expr::Reference(_) => false,
+            Expr::Path(p) if p.path.segments.len() == 1 && p.qself.is_none() => {
+                let name = p.path.segments[0].ident.to_string();
+                match self.resolve(&name) {
+                    NameLoc::Local(reg) => {
+                        let f = self.cur();
+                        !f.shares_only(reg) && !f.drop_exempt.contains(&reg)
+                    }
+                    _ => true,
+                }
+            }
+            other => self.init_owned(other),
+        }
+    }
+
+    /// An owned scrutinee nobody else holds, a call or a constructor. A local read by `Own` may
+    /// be a copy when it lives on, so only a fresh value drops on the path that binds nothing.
+    pub(super) fn fresh_scrutinee(&mut self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Paren(p) => self.fresh_scrutinee(&p.expr),
+            Expr::Group(g) => self.fresh_scrutinee(&g.expr),
+            Expr::Path(_)
+            | Expr::Field(_)
+            | Expr::Index(_)
+            | Expr::Reference(_)
+            | Expr::Unary(_) => false,
+            other => self.scrutinee_owned(other),
+        }
+    }
+
+    /// `init_is_owned` plus the script's own methods, which always hand back a value of the
+    /// caller's own.
+    pub(super) fn init_owned(&self, expr: &Expr) -> bool {
+        init_is_owned(expr) || self.user_method_call(expr)
+    }
+
+    /// `temp_is_owned` plus the script's own methods.
+    pub(super) fn temp_owned(&self, expr: &Expr) -> bool {
+        temp_is_owned(expr) || self.user_method_call(expr)
+    }
+
+    fn user_method_call(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Paren(p) => self.user_method_call(&p.expr),
+            Expr::Group(g) => self.user_method_call(&g.expr),
+            Expr::MethodCall(m) => {
+                let name = m.method.to_string();
+                self.ctx
+                    .impl_methods
+                    .iter()
+                    .any(|(_, method)| *method == name)
+            }
+            _ => false,
+        }
+    }
+
     pub(super) fn compile_scrutinee(&mut self, expr: &Expr, binds_by_value: bool) -> Result<Reg> {
         if let Expr::Reference(r) = expr
             && r.mutability.is_some()
@@ -349,6 +414,15 @@ impl Compiler<'_> {
                     NameLoc::None => {}
                 }
             }
+            // A field of a type that can't be `Copy` moves out and leaves unit behind, so the
+            // struct still drops its other fields at its own end. `rustc` accepted the program,
+            // so nothing reads the moved field again.
+            Expr::Field(f) if self.ctx.has_drop && self.moves_out(expr) => {
+                let base = self.compile_expr(&f.base)?;
+                let member = self.member_of(&f.member);
+                self.emit(Op::TakeField { dst, base, member });
+                return Ok(());
+            }
             Expr::Field(_) | Expr::Index(_) => {
                 self.compile_into(dst, expr)?;
                 let root = self.place_root(expr).unwrap_or(NO_ROOT);
@@ -379,6 +453,23 @@ impl Compiler<'_> {
             });
         }
         Ok(())
+    }
+
+    /// Whether an owned read of the expression is a move, its inferred type rules `Copy` out.
+    fn moves_out(&self, expr: &Expr) -> bool {
+        let ty = self.types.of(expr);
+        matches!(
+            ty,
+            Ty::Str
+                | Ty::Vec(_)
+                | Ty::Set(_)
+                | Ty::Map(..)
+                | Ty::Struct(_)
+                | Ty::Enum(_)
+                | Ty::Option(_)
+                | Ty::Result(..)
+                | Ty::Tuple(_)
+        ) && !copies(&ty)
     }
 
     pub(super) fn compile_owned_expr(&mut self, expr: &Expr) -> Result<Reg> {
@@ -458,10 +549,24 @@ impl Compiler<'_> {
                     dst: old,
                     src: pa.reg,
                 });
-                self.emit(Op::DefaultOf {
-                    dst: pa.reg,
-                    src: old,
-                });
+                // a user type's default is built from its declaration, the value alone can't
+                // say what the empty variant or the field defaults are
+                let ty = match self.types.of(&c.args[0]) {
+                    Ty::Unknown => self.types.of(&a),
+                    ty => ty,
+                };
+                match self.default_ir_of(&ty) {
+                    Some(ir) => {
+                        let f = self.cur();
+                        f.defaults.push(ir);
+                        let ir = idx16(f.defaults.len() - 1);
+                        self.emit(Op::BuildDefault { dst: pa.reg, ir });
+                    }
+                    None => self.emit(Op::DefaultOf {
+                        dst: pa.reg,
+                        src: old,
+                    }),
+                }
                 self.emit_place_writeback(&pa);
                 self.emit(Op::Move { dst, src: old });
                 Ok(true)
@@ -511,4 +616,21 @@ pub(super) fn single_path_name(expr: &Expr) -> Option<String> {
         return Some(p.path.segments[0].ident.to_string());
     }
     None
+}
+
+/// `Option` and tuples copy when everything inside does.
+fn copies(ty: &Ty) -> bool {
+    match ty {
+        Ty::Unit
+        | Ty::Bool
+        | Ty::Char
+        | Ty::Int(_)
+        | Ty::IntVar(_)
+        | Ty::F32
+        | Ty::F64
+        | Ty::FloatVar(_) => true,
+        Ty::Option(inner) => copies(inner),
+        Ty::Tuple(items) => items.iter().all(copies),
+        _ => false,
+    }
 }

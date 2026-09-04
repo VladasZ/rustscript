@@ -7,7 +7,7 @@ use syn::{Expr, UnOp};
 use crate::interpreter::bytecode::{BinKind, FieldName, Member, Op, Reg};
 
 use super::place;
-use super::{Compiler, NameLoc, int_literal};
+use super::{Compiler, NameLoc, idx16, int_literal};
 
 impl Compiler<'_> {
     /// `*seq` for a `seq: &mut usize` parameter. A cell promoted or captured name keeps the strict op.
@@ -243,7 +243,17 @@ impl Compiler<'_> {
         name: &str,
     ) -> Result<()> {
         match location {
-            NameLoc::Local(dst) if dst != src => self.emit(Op::Move { dst, src }),
+            NameLoc::Local(dst) if dst != src => {
+                // the old value drops before the store, unless the binding only lent it
+                let has_drop = self.ctx.has_drop;
+                let f = self.cur();
+                if has_drop && !f.shares_only(dst) && !f.drop_exempt.contains(&dst) {
+                    f.drop_lists.push(vec![dst].into());
+                    let list = idx16(f.drop_lists.len() - 1);
+                    self.emit(Op::DropScope { list });
+                }
+                self.emit(Op::Move { dst, src });
+            }
             NameLoc::Local(_) => {}
             NameLoc::Cell(cell) => self.emit(Op::StoreCell { cell, src }),
             NameLoc::Upvalue(idx) => self.emit(Op::StoreUpvalue { idx, src }),

@@ -33,8 +33,8 @@ fn fits(source: Layout, dest: Layout) -> bool {
     source.0 > 0 && dest.0 > 0 && source.1 == dest.1 && source.0 >= dest.0
 }
 
-/// The size the chain reports and the layout of the source element, `None` for the first
-/// element of an empty source.
+/// The size the chain reports and the layout of the source element, `None` for an empty source.
+/// An element with no known layout, a struct with a `Drop` impl to run, is no candidate at all.
 fn probe(iterator: &Handle) -> Option<(usize, Option<Layout>)> {
     let guard = iterator.lock();
     let Native::Iterator(state) = &*guard else {
@@ -48,15 +48,13 @@ fn probe(iterator: &Handle) -> Option<(usize, Option<Layout>)> {
             back,
         } => {
             let items = values.lock();
-            Some(rest_of(
-                items.get(*index..items.len().saturating_sub(*back))?,
-            ))
+            rest_of(items.get(*index..items.len().saturating_sub(*back))?)
         }
         IteratorState::Owned {
             values,
             index,
             vec: true,
-        } => Some(rest_of(values.get(*index..)?)),
+        } => rest_of(values.get(*index..)?),
         // `Rev` is not random access in std, a `skip` after it drains lazily
         IteratorState::Map { source, .. } | IteratorState::Cloned { source } => probe(source),
         IteratorState::Skip { source, remaining } => {
@@ -106,6 +104,9 @@ fn int_layout(bits: u32) -> Layout {
     (bytes, bytes)
 }
 
-fn rest_of(rest: &[Value]) -> (usize, Option<Layout>) {
-    (rest.len(), rest.first().and_then(layout_of_value))
+fn rest_of(rest: &[Value]) -> Option<(usize, Option<Layout>)> {
+    match rest.first() {
+        None => Some((0, None)),
+        Some(first) => Some((rest.len(), Some(layout_of_value(first)?))),
+    }
 }

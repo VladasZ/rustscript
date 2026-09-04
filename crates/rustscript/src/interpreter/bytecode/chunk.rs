@@ -293,6 +293,13 @@ pub enum Op {
         member: u16,
         val: Reg,
     },
+    /// A move out of a field. The field is left as unit, so the owner's drop skips it, and
+    /// nothing drops here.
+    TakeField {
+        dst: Reg,
+        base: Reg,
+        member: u16,
+    },
 
     /// A value flowing into an owned position, a `let`, a by value argument, a constructor field,
     /// a return. Compile time only. The liveness pass turns it into `Take` when `root` is dead
@@ -342,6 +349,11 @@ pub enum Op {
     },
     /// `list` indexes `drop_lists`. Only emitted when the program has a `Drop` impl.
     DropScope {
+        list: u16,
+    },
+    /// The by value parameters of a closure at its end. Whether they are the closure's own is
+    /// only known at the call, an adapter over `iter()` lends them, so the frame decides.
+    DropParams {
         list: u16,
     },
 
@@ -449,6 +461,8 @@ pub struct Chunk {
     /// Every register a `DropScope` can drop, highest first. Unwinding drops these and nothing
     /// else, a temporary may hold a borrowed handle.
     pub droppable: Arc<[Reg]>,
+    /// the registers a `DropParams` covers, skipped by an unwind of a frame that borrowed them
+    pub lent_params: Arc<[Reg]>,
     pub call_type_args: Vec<Arc<[TypeIr]>>,
     /// A forwarder's arity is a guess, a call with a different count rebuilds it.
     pub path_forwarder: bool,
@@ -488,6 +502,7 @@ impl Chunk {
             generics: Vec::new(),
             drop_lists: Vec::new(),
             droppable: Arc::from(Vec::new()),
+            lent_params: Arc::from(Vec::new()),
             call_type_args: Vec::new(),
             path_forwarder: false,
             clears_frame: false,

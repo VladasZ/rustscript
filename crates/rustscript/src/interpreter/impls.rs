@@ -67,6 +67,10 @@ fn bin_slot(op: BinKind) -> Option<usize> {
 }
 
 impl TypeMethods {
+    pub fn has_drop(&self) -> bool {
+        self.drop.is_some()
+    }
+
     pub fn get(&self, name: &MethodName) -> Option<&Arc<Chunk>> {
         if name.id == BuiltinId::Other {
             if name.atom == NO_ATOM {
@@ -125,6 +129,11 @@ pub struct ImplTable {
 }
 
 impl ImplTable {
+    /// Whether any script type has a `Drop` impl, so a store must drop what it overwrites.
+    pub fn any_drop(&self) -> bool {
+        self.types.iter().any(TypeMethods::has_drop)
+    }
+
     pub fn build(
         methods: Vec<(String, String, Arc<Chunk>)>,
         type_ids: HashMap<Arc<str>, u16>,
@@ -270,6 +279,7 @@ impl ImplTable {
             scalar: None,
             default: None,
             place: false,
+            owned: false,
         }
     }
 }

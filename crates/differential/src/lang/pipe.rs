@@ -43,6 +43,13 @@ impl Item {
             Self::Pair(key, value) => key.contains_float() || value.contains_float(),
         }
     }
+
+    pub(crate) fn contains_trace(&self) -> bool {
+        match self {
+            Self::Scalar(ty) => ty.contains_trace(),
+            Self::Pair(key, value) => key.contains_trace() || value.contains_trace(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -180,7 +187,7 @@ pub enum Stage {
 }
 
 impl Stage {
-    fn out(&self, item: &Item) -> Item {
+    pub(crate) fn out(&self, item: &Item) -> Item {
         match self {
             Self::Map { body, .. } => Item::Scalar(body.ty()),
             Self::PairWith { body, .. } => match item {
@@ -207,15 +214,28 @@ impl Stage {
         )
     }
 
-    /// A panicking body observes arrival order, the first item to panic decides the message.
-    fn fallible(&self) -> bool {
+    /// A body that prints as it runs, by a panic or by a trace it drops. Its lines come out in
+    /// arrival order, so it needs a defined one.
+    fn leaks_order(&self, item: &Item) -> bool {
         match self {
-            Self::Map { body, .. } | Self::PairWith { body, .. } => body.has_fallible_op(),
-            Self::Filter { pred, .. } => pred.has_fallible_op(),
+            Self::Map { body, .. } | Self::PairWith { body, .. } => {
+                body.has_fallible_op() || item.contains_trace()
+            }
+            Self::Filter { pred, .. } => pred.has_fallible_op() || item.contains_trace(),
             // a zero step panics before any item flows
             Self::StepBy(step) => *step == 0,
             Self::Rev | Self::Take(_) | Self::Skip(_) | Self::Enumerate | Self::Sorted => false,
         }
+    }
+
+    /// A body whose run shows in the output at all, a trace it makes is dropped later. Whether
+    /// such a body ran is what the panic reach rule guards.
+    fn observable(&self, item: &Item) -> bool {
+        self.leaks_order(item)
+            || match self {
+                Self::Map { body, .. } | Self::PairWith { body, .. } => body.ty().contains_trace(),
+                _ => false,
+            }
     }
 
     fn render(&self, item: &Item) -> String {
@@ -266,16 +286,22 @@ impl Stage {
 }
 
 /// A `Sorted` runs every body before it, so it clears the flag.
-fn carries_panic(pending: bool, stage: &Stage) -> bool {
+fn carries_panic(pending: bool, stage: &Stage, item: &Item) -> bool {
     match stage {
         Stage::Sorted => false,
-        _ => pending || stage.fallible(),
+        _ => pending || stage.observable(item),
     }
 }
 
-/// A `Skip` appended here would hide the panic, see the panic reach rule.
-pub fn fallible_pending(stages: &[Stage]) -> bool {
-    stages.iter().fold(false, carries_panic)
+/// A `Skip` appended here would hide a body's run, see the panic reach rule.
+pub fn fallible_pending(source: &Item, stages: &[Stage]) -> bool {
+    let mut pending = false;
+    let mut item = source.clone();
+    for stage in stages {
+        pending = carries_panic(pending, stage, &item);
+        item = stage.out(&item);
+    }
+    pending
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -363,13 +389,18 @@ impl Term {
         }
     }
 
-    /// The same arrival order leak as `Stage::fallible`.
-    fn fallible(&self) -> bool {
+    /// The same arrival order leak as `Stage::leaks_order`.
+    fn leaks_order(&self, item: &Item) -> bool {
         match self {
             Self::Any { pred, .. } | Self::All { pred, .. } | Self::Position { pred, .. } => {
-                pred.has_fallible_op()
+                pred.has_fallible_op() || item.contains_trace()
             }
-            Self::Fold { init, body, .. } => init.has_fallible_op() || body.has_fallible_op(),
+            Self::Fold { init, body, .. } => {
+                init.has_fallible_op()
+                    || body.has_fallible_op()
+                    || item.contains_trace()
+                    || init.ty().contains_trace()
+            }
             Self::Collect { .. }
             | Self::Sum { .. }
             | Self::Product { .. }
@@ -500,11 +531,13 @@ impl Pipe {
     /// The panic reach rule.
     pub fn panics_reach_output(&self) -> bool {
         let mut pending = false;
+        let mut item = self.source.item();
         for stage in &self.stages {
             if matches!(stage, Stage::Skip(_)) && pending {
                 return false;
             }
-            pending = carries_panic(pending, stage);
+            pending = carries_panic(pending, stage, &item);
+            item = stage.out(&item);
         }
         true
     }
@@ -520,7 +553,7 @@ impl Pipe {
                 }
                 ordered = true;
             }
-            if !ordered && (stage.order_sensitive() || stage.fallible()) {
+            if !ordered && (stage.order_sensitive() || stage.leaks_order(&item)) {
                 return false;
             }
             if matches!(stage, Stage::Map { .. }) {
@@ -533,7 +566,7 @@ impl Pipe {
             }
             item = stage.out(&item);
         }
-        if !ordered && (self.term.order_sensitive(&item) || self.term.fallible()) {
+        if !ordered && (self.term.order_sensitive(&item) || self.term.leaks_order(&item)) {
             return false;
         }
         true

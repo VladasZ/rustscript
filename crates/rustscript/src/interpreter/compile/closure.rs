@@ -150,7 +150,10 @@ impl Compiler<'_> {
             self.cur().ret_cast = Some(idx);
         }
         let ret = self.alloc();
-        self.compile_into(ret, &c.body)?;
+        // the body value leaves the closure, so a returned parameter moves out before the
+        // parameters drop
+        self.compile_owned_into(ret, &c.body)?;
+        self.drop_temps(0, Some(ret));
         self.release_guard_temps(0, Some(ret));
         if let Some(idx) = self.cur().ret_cast {
             self.emit(Op::Cast {
@@ -159,6 +162,8 @@ impl Compiler<'_> {
                 ty: idx,
             });
         }
+        // the parameters drop before the closure returns when the call handed them over
+        self.emit_param_drops();
         self.emit(Op::Ret { src: ret });
         let child = self
             .frames

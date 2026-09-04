@@ -2,17 +2,19 @@
 
 use rand::RngExt;
 
-use crate::lang::expr::Expr;
+use crate::lang::expr::{Expr, ReadMode};
 use crate::lang::fmt::{Align, FmtSpec, FmtTrait};
 use crate::lang::stmt::{MutOp, PrintForm, Stmt};
-use crate::lang::synth::{BindKind, Generator};
+use crate::lang::synth::Generator;
 use crate::lang::ty::Ty;
 
 impl Generator<'_> {
     pub(super) fn if_stmt(&mut self) -> Stmt {
         let condition = self.expr(&Ty::Bool, 2);
-        let then_body = self.nested_body();
-        let else_body = self.nested_body();
+        self.begin_branches();
+        let then_body = self.branch(Self::nested_body);
+        let else_body = self.branch(Self::nested_body);
+        self.end_branches();
         Stmt::If {
             condition,
             then_body,
@@ -76,12 +78,13 @@ impl Generator<'_> {
         Stmt::Return { condition, value }
     }
 
-    /// A nested block declares nothing, so the reducer never has to reason about shadowing.
+    /// A nested block. Its own `let`s shadow and drop at its end, so the caller opens a scope
+    /// around it, see `scoped`.
     pub(super) fn nested_body(&mut self) -> Vec<Stmt> {
-        let count = self.rng.random_range(1..=2);
+        let count = self.rng.random_range(1..=3);
         let mut body = Vec::new();
         for _ in 0..count {
-            let stmt = self.statement(|inner| match inner.rng.random_range(0..6) {
+            let stmt = self.statement(|inner| match inner.rng.random_range(0..8) {
                 0 => inner.assign_stmt(),
                 1 => inner.compound_stmt().unwrap_or_else(|| inner.observation()),
                 2 => inner
@@ -89,6 +92,7 @@ impl Generator<'_> {
                     .unwrap_or_else(|| inner.observation()),
                 3 if inner.in_loop => inner.break_or_continue(),
                 4 if inner.fn_ret.is_some() => inner.return_stmt(),
+                5 | 6 => inner.binding_stmt(),
                 _ => inner.observation(),
             });
             body.push(stmt);
@@ -103,7 +107,7 @@ impl Generator<'_> {
         if let Some(label) = &label {
             self.loop_labels.push(label.clone());
         }
-        let body = self.nested_body();
+        let body = self.looping(Self::nested_body);
         if label.is_some() {
             self.loop_labels.pop();
         }
@@ -114,18 +118,19 @@ impl Generator<'_> {
 
     /// `name` is hidden because an `entry()` chain holds the map while its arguments evaluate.
     fn op_without(&mut self, name: &str, build: impl FnOnce(&mut Self) -> MutOp) -> MutOp {
-        let index = self.scope.iter().position(|binding| binding.name == name);
-        let removed = index.map(|found| self.scope.remove(found));
-        let op = build(self);
-        if let Some(binding) = removed {
-            self.scope.push(binding);
-        }
-        op
+        self.without_binding(name, build)
     }
 
+    /// The binding is borrowed for the whole call, so the arguments may read it but not take
+    /// it. That is the two phase borrow `rustc` allows a `push` of `v[0].clone()`.
     pub(super) fn collection_mutation(&mut self) -> Option<Stmt> {
         let (name, ty) = self.pick_mutable()?;
-        let op = match &ty {
+        let op = self.holding(&name.clone(), |inner| inner.collection_op(&name, &ty));
+        Some(Stmt::Mutate { name, op })
+    }
+
+    fn collection_op(&mut self, name: &str, ty: &Ty) -> MutOp {
+        match ty {
             Ty::Vec(elem) => {
                 let elem = (**elem).clone();
                 match self.rng.random_range(0..11) {
@@ -150,7 +155,7 @@ impl Generator<'_> {
                         let bind = self.fresh("diff_r");
                         let locals = [(bind.clone(), elem.clone())];
                         // `retain` holds the vec, so the predicate must not read it
-                        let pred = self.without_binding(&name, |inner| {
+                        let pred = self.without_binding(name, |inner| {
                             inner.closure_body(|inner| {
                                 inner.with_locals(&locals, |inner| inner.expr(&Ty::Bool, 1))
                             })
@@ -177,14 +182,14 @@ impl Generator<'_> {
                 let key_ty = (**key).clone();
                 let val_ty = (**value).clone();
                 match (&val_ty, self.rng.random_range(0..4)) {
-                    (Ty::Int(_), 0) => self.op_without(&name, |inner| MutOp::MapEntryAdd {
+                    (Ty::Int(_), 0) => self.op_without(name, |inner| MutOp::MapEntryAdd {
                         key: inner.expr(&key_ty, 1),
                         default: inner.expr(&val_ty, 1),
                         add: inner.expr(&val_ty, 1),
                     }),
                     (Ty::Vec(elem), 0) => {
                         let elem = (**elem).clone();
-                        self.op_without(&name, |inner| MutOp::MapEntryPush {
+                        self.op_without(name, |inner| MutOp::MapEntryPush {
                             key: inner.expr(&key_ty, 1),
                             value: inner.expr(&elem, 1),
                         })
@@ -206,66 +211,39 @@ impl Generator<'_> {
                     MutOp::SetRemove(self.expr(&elem, 1))
                 }
             }
-            _ => return None,
-        };
-        Some(Stmt::Mutate { name, op })
+            _ => unreachable!("pick_mutable offers only the types above"),
+        }
     }
 
-    /// `for item in vec { accumulate into collection }`. The source is a vec, so order is defined.
+    /// `for item in vec { accumulate into collection }`. The source is a vec, so order is
+    /// defined. The item is moved into the target, it is the loop's own binding.
     pub(super) fn accumulation_loop(&mut self) -> Option<Stmt> {
         let (target, ty) = self.pick_collection()?;
         let var = self.fresh("diff_item");
-        let (source_elem, op) = match &ty {
-            Ty::Vec(elem) => {
-                let elem = (**elem).clone();
-                (
-                    elem.clone(),
-                    MutOp::VecPush(Expr::Var {
-                        name: var.clone(),
-                        ty: elem,
-                    }),
-                )
-            }
-            Ty::Set(elem) => {
-                let elem = (**elem).clone();
-                (
-                    elem.clone(),
-                    MutOp::SetInsert(Expr::Var {
-                        name: var.clone(),
-                        ty: elem,
-                    }),
-                )
-            }
-            Ty::Map(key, value) => {
-                let key_ty = (**key).clone();
-                let val_ty = (**value).clone();
-                let key_expr = Expr::Var {
-                    name: var.clone(),
-                    ty: key_ty.clone(),
-                };
-                let op = match &val_ty {
-                    Ty::Int(_) => self.op_without(&target, |inner| MutOp::MapEntryAdd {
-                        key: key_expr,
-                        default: inner.expr(&val_ty, 1),
-                        add: inner.expr(&val_ty, 1),
-                    }),
-                    Ty::Vec(elem) => {
-                        let elem = (**elem).clone();
-                        self.op_without(&target, |inner| MutOp::MapEntryPush {
-                            key: key_expr,
-                            value: inner.expr(&elem, 1),
-                        })
-                    }
-                    _ => MutOp::MapInsert {
-                        key: key_expr,
-                        value: self.expr(&val_ty, 1),
-                    },
-                };
-                (key_ty, op)
-            }
+        let source_elem = match &ty {
+            Ty::Vec(elem) | Ty::Set(elem) => (**elem).clone(),
+            Ty::Map(key, _) => (**key).clone(),
             _ => return None,
         };
-        let source = self.expr(&Ty::vec_of(source_elem), 2);
+        // the target is held by the loop, so the source can't take it
+        let source = self.holding(&target, |inner| {
+            inner.expr(&Ty::vec_of(source_elem.clone()), 2)
+        });
+        let item = Expr::Var {
+            name: var.clone(),
+            ty: source_elem.clone(),
+            mode: ReadMode::Move,
+        };
+        let op = self.holding(&target.clone(), |inner| {
+            inner.looping(|inner| {
+                inner.push_local(var.clone(), source_elem.clone());
+                // the item goes first into the op, so the other arguments can't read it
+                if !source_elem.is_copy() {
+                    inner.scope.note_move(&var);
+                }
+                inner.accumulate_op(&target, &ty, item)
+            })
+        });
         Some(Stmt::ForAccum {
             var,
             source,
@@ -274,14 +252,42 @@ impl Generator<'_> {
         })
     }
 
+    fn accumulate_op(&mut self, target: &str, ty: &Ty, item: Expr) -> MutOp {
+        match ty {
+            Ty::Vec(_) => MutOp::VecPush(item),
+            Ty::Set(_) => MutOp::SetInsert(item),
+            Ty::Map(_, value) => {
+                let val_ty = (**value).clone();
+                match &val_ty {
+                    Ty::Int(_) => self.op_without(target, |inner| MutOp::MapEntryAdd {
+                        key: item,
+                        default: inner.expr(&val_ty, 1),
+                        add: inner.expr(&val_ty, 1),
+                    }),
+                    Ty::Vec(elem) => {
+                        let elem = (**elem).clone();
+                        self.op_without(target, |inner| MutOp::MapEntryPush {
+                            key: item,
+                            value: inner.expr(&elem, 1),
+                        })
+                    }
+                    _ => MutOp::MapInsert {
+                        key: item,
+                        value: self.expr(&val_ty, 1),
+                    },
+                }
+            }
+            _ => unreachable!("pick_collection offers only the types above"),
+        }
+    }
+
     /// `for r in vec.iter_mut() { *r = expr(r) }` on a vec binding.
     pub(super) fn for_mut_stmt(&mut self) -> Option<Stmt> {
         let vecs: Vec<(String, Ty)> = self
-            .scope
-            .iter()
-            .filter(|binding| matches!(binding.kind, BindKind::Local))
-            .filter_map(|binding| match &binding.ty {
-                Ty::Vec(elem) => Some((binding.name.clone(), (**elem).clone())),
+            .live_locals()
+            .into_iter()
+            .filter_map(|(name, ty)| match ty {
+                Ty::Vec(elem) => Some((name, *elem)),
                 _ => None,
             })
             .collect();
@@ -291,13 +297,12 @@ impl Generator<'_> {
         let (name, elem) = self.pick(&vecs).clone();
         let var = self.fresh("diff_e");
         // the vec is borrowed for the loop, so its name is hidden
-        let index = self.scope.iter().position(|binding| binding.name == name);
-        let removed = index.map(|found| self.scope.remove(found));
-        let locals = [(var.clone(), elem.clone())];
-        let expr = self.with_locals(&locals, |inner| inner.expr(&elem, 2));
-        if let Some(binding) = removed {
-            self.scope.push(binding);
-        }
+        let expr = self.without_binding(&name, |inner| {
+            inner.looping(|inner| {
+                inner.push_local(var.clone(), elem.clone());
+                inner.expr(&elem, 2)
+            })
+        });
         Some(Stmt::ForMut {
             name,
             var,
@@ -311,12 +316,9 @@ impl Generator<'_> {
         let (name, ty) = self.pick_local()?;
         let (fn_name, params) = self.writer_fn(&ty);
         // the target is borrowed for the call, so the arguments can't read it
-        let index = self.scope.iter().position(|binding| binding.name == name);
-        let removed = index.map(|found| self.scope.remove(found));
-        let args = params.iter().map(|param| self.expr(param, 1)).collect();
-        if let Some(binding) = removed {
-            self.scope.push(binding);
-        }
+        let args = self.without_binding(&name, |inner| {
+            params.iter().map(|param| inner.expr(param, 1)).collect()
+        });
         Some(Stmt::CallMut {
             name,
             fn_name,
@@ -326,16 +328,14 @@ impl Generator<'_> {
 
     fn pick_mutable(&mut self) -> Option<(String, Ty)> {
         let matching: Vec<(String, Ty)> = self
-            .scope
-            .iter()
-            .filter(|binding| {
-                matches!(binding.kind, BindKind::Local)
-                    && matches!(
-                        binding.ty,
-                        Ty::Vec(_) | Ty::Map(..) | Ty::Set(_) | Ty::Str | Ty::Opt(_)
-                    )
+            .live_locals()
+            .into_iter()
+            .filter(|(_, ty)| {
+                matches!(
+                    ty,
+                    Ty::Vec(_) | Ty::Map(..) | Ty::Set(_) | Ty::Str | Ty::Opt(_)
+                )
             })
-            .map(|binding| (binding.name.clone(), binding.ty.clone()))
             .collect();
         if matching.is_empty() {
             return None;
@@ -345,13 +345,9 @@ impl Generator<'_> {
 
     fn pick_collection(&mut self) -> Option<(String, Ty)> {
         let matching: Vec<(String, Ty)> = self
-            .scope
-            .iter()
-            .filter(|binding| {
-                matches!(binding.kind, BindKind::Local)
-                    && matches!(binding.ty, Ty::Vec(_) | Ty::Map(..) | Ty::Set(_))
-            })
-            .map(|binding| (binding.name.clone(), binding.ty.clone()))
+            .live_locals()
+            .into_iter()
+            .filter(|(_, ty)| matches!(ty, Ty::Vec(_) | Ty::Map(..) | Ty::Set(_)))
             .collect();
         if matching.is_empty() {
             return None;

@@ -5,8 +5,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+use super::drive::consumes_iterator;
 use super::{
-    Handle, IteratorState, Reducer, as_closure, option_inner, product_reducer, sum_reducer, wrap,
+    Handle, IteratorState, Reducer, as_closure, option_inner, owns_items, product_reducer,
+    sum_reducer, wrap,
 };
 use crate::interpreter::bridge::arg;
 use crate::interpreter::bytecode::{BuiltinId, ScalarTy};
@@ -47,8 +49,9 @@ impl Vm {
             }),
             BuiltinId::ForEach => {
                 let closure = closure(0)?;
+                let owned = owns_items(iterator);
                 while let Some(value) = self.iterator_next(iterator)? {
-                    self.call_closure_data(&closure, &[value])?;
+                    self.call_closure_with(&closure, &[value], owned)?;
                 }
                 Value::Unit
             }
@@ -74,6 +77,9 @@ impl Vm {
             }
             _ => return self.iterator_reduce_ho(iterator, name, args),
         };
+        if consumes_iterator(name) {
+            self.drop_leftovers(iterator)?;
+        }
         Ok(Some(value))
     }
 
@@ -87,27 +93,30 @@ impl Vm {
         let value = match name {
             BuiltinId::Fold => {
                 let closure = closure(1)?;
+                let owned = owns_items(iterator);
                 let mut accumulator = arg(args, 0)?;
                 while let Some(value) = self.iterator_next(iterator)? {
-                    accumulator = self.call_closure_data(&closure, &[accumulator, value])?;
+                    accumulator = self.call_closure_with(&closure, &[accumulator, value], owned)?;
                 }
                 accumulator
             }
             BuiltinId::Reduce => {
                 let closure = closure(0)?;
+                let owned = owns_items(iterator);
                 let Some(mut accumulator) = self.iterator_next(iterator)? else {
                     return Ok(Some(Value::none()));
                 };
                 while let Some(value) = self.iterator_next(iterator)? {
-                    accumulator = self.call_closure_data(&closure, &[accumulator, value])?;
+                    accumulator = self.call_closure_with(&closure, &[accumulator, value], owned)?;
                 }
                 Value::some(accumulator)
             }
             BuiltinId::FlatMap => {
                 let closure = closure(0)?;
+                let owned = owns_items(iterator);
                 let mut output = Vec::new();
                 while let Some(value) = self.iterator_next(iterator)? {
-                    let mapped = self.call_closure_data(&closure, &[value])?;
+                    let mapped = self.call_closure_with(&closure, &[value], owned)?;
                     output.extend(self.drain_items(mapped)?);
                 }
                 Value::vec(output)
@@ -158,6 +167,9 @@ impl Vm {
             }
             _ => return Ok(None),
         };
+        if consumes_iterator(name) {
+            self.drop_leftovers(iterator)?;
+        }
         Ok(Some(value))
     }
 
@@ -210,15 +222,20 @@ impl Vm {
                 None => true,
                 Some(current) => {
                     let order = compare_values(&value, current)?;
+                    // std keeps the last of equal maxima and the first of equal minima
                     if name == BuiltinId::Max {
-                        order.is_gt()
+                        order.is_ge()
                     } else {
                         order.is_lt()
                     }
                 }
             };
             if take {
-                best = Some(value);
+                if let Some(loser) = best.replace(value) {
+                    self.discard(iterator, loser)?;
+                }
+            } else {
+                self.discard(iterator, value)?;
             }
         }
         Ok(best.map_or_else(Value::none, Value::some))
@@ -234,12 +251,15 @@ impl Vm {
         // `rposition` walks to the end and keeps the last match, same index without a reversible
         // iterator
         let mut last_match = None;
+        // `find` looks at each item and keeps the match, the others take theirs by value
+        let by_value = name != BuiltinId::Find && owns_items(iterator);
         while let Some(value) = self.iterator_next(iterator)? {
             let matches = self
-                .call_closure_data(closure, from_ref(&value))?
+                .call_closure_with(closure, from_ref(&value), by_value)?
                 .is_truthy();
             match name {
                 BuiltinId::Find if matches => return Ok(Value::some(value)),
+                BuiltinId::Find => self.discard(iterator, value)?,
                 BuiltinId::Position if matches => return Ok(Value::some(Value::Int(index))),
                 BuiltinId::Rposition if matches => last_match = Some(index),
                 BuiltinId::Any if matches => return Ok(Value::Bool(true)),

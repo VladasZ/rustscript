@@ -108,12 +108,12 @@ impl Upvalue {
         }
     }
 
-    pub fn set(&self, value: Value) -> bool {
+    /// Stores the value and hands the old one back, `None` for an immutable capture.
+    pub fn swap(&self, value: Value) -> Option<Value> {
         let Self::Mutable(cell) = self else {
-            return false;
+            return None;
         };
-        *cell.lock() = value;
-        true
+        Some(std::mem::replace(&mut *cell.lock(), value))
     }
 }
 

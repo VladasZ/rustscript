@@ -128,7 +128,20 @@ impl on a builtin type is keyed by the written type, so `Vec<u8>` and
 
 `Drop` runs where real Rust runs it. Scope end in reverse order, explicit
 `drop`, each loop iteration, `break`, `continue`, `return`, `?` and panic
-unwinding. A moved or shared value is dropped by its real owner, so an `Rc`
+unwinding. A temporary that owns a value drops at the semicolon of its
+statement, one made for an `if` or `while` condition drops before the branch
+runs, an `if let` scrutinee nobody bound drops before the `else` block, a
+value a store overwrites drops before the store, and a field moved out of a
+struct leaves unit behind so the struct still drops its other fields. A
+closure drops its by value parameters at its end when the call handed them
+over, an adapter over `iter()` only lends them. An iterator that owns its
+items drops what it throws away, a rejected `filter` item, a skipped one, the
+losers of `max`, a by value terminal like `collect` drops what it never
+pulled inside the call, and a combinator drops the side it does not keep, the
+fallback of `unwrap_or` on a `Some`. A payload a combinator rejects drops only
+when the receiver was the caller's own, `v.last().filter(..)` lends it. A
+struct literal with a `..base` drops the fields it did not take with the
+statement. A moved or shared value is dropped by its real owner, so an `Rc`
 cycle leaks like in real Rust.
 
 ## Panics and errors

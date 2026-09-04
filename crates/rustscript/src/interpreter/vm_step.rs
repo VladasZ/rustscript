@@ -34,6 +34,8 @@ pub(super) struct CallReq {
     pub abase: usize,
     pub argc: usize,
     pub type_env: TypeEnv,
+    /// see `Op::DropParams`
+    pub owned_args: bool,
 }
 
 pub(super) struct StepCtx<'a> {
@@ -50,6 +52,8 @@ pub(super) struct StepCtx<'a> {
     pub ret: Value,
     /// what `Flow::Call` enters
     pub call: Option<CallReq>,
+    /// whether the frame owns its by value parameters, see `Op::DropParams`
+    pub owned_args: bool,
 }
 
 impl StepCtx<'_> {
@@ -173,6 +177,7 @@ pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
         | Op::SetDeref { .. }
         | Op::SetDerefParam { .. }
         | Op::GetField { .. }
+        | Op::TakeField { .. }
         | Op::SetField { .. } => access_step(ctx, op)?,
         Op::DerefBinAssign { target, val, op } => deref_bin_assign(ctx, *target, *val, *op)?,
         Op::Take { dst, src } => {
@@ -187,6 +192,7 @@ pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
         Op::RefIndex { .. }
         | Op::RefField { .. }
         | Op::DropScope { .. }
+        | Op::DropParams { .. }
         | Op::DefaultOf { .. }
         | Op::BuildDefault { .. }
         | Op::MakeBorrow { .. } => place_step(ctx, op)?,
@@ -239,12 +245,14 @@ fn user_bin(
             &chunk,
             &[a.clone(), b.clone()],
             &[],
+            false,
         )?));
     }
     if let Some(chunk) = methods.bin_assign(op) {
         let chunk = chunk.clone();
         // the mutated receiver is the store back result of `a = a + b`
-        ctx.vm.run_chunk(&chunk, &[a.clone(), b.clone()], &[])?;
+        ctx.vm
+            .run_chunk(&chunk, &[a.clone(), b.clone()], &[], false)?;
         return Ok(Some(a.clone()));
     }
     Ok(None)
@@ -259,7 +267,7 @@ fn user_un(ctx: &StepCtx, op: super::bytecode::UnKind, a: &Value) -> Result<Opti
         return Ok(None);
     };
     let chunk = chunk.clone();
-    Ok(Some(ctx.vm.run_chunk(&chunk, from_ref(a), &[])?))
+    Ok(Some(ctx.vm.run_chunk(&chunk, from_ref(a), &[], false)?))
 }
 
 /// Split out of `step` to keep the dispatch match readable.
@@ -308,7 +316,7 @@ fn load_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
         Op::LoadGlobal { dst, idx } => ctx.set(*dst, ctx.vm.global(*idx as usize)?),
         Op::LoadUpvalue { dst, idx } => ctx.set(*dst, ctx.upvalues()[*idx as usize].get()),
         Op::LoadCell { dst, cell } => load_cell(ctx, *dst, *cell),
-        Op::StoreCell { cell, src } => store_cell(ctx, *cell, *src),
+        Op::StoreCell { cell, src } => store_cell(ctx, *cell, *src)?,
         Op::DropCell { cell } => drop_cell(ctx, *cell),
         Op::StoreUpvalue { idx, src } => store_upvalue(ctx, *idx, *src)?,
         Op::Move { dst, src } => ctx.set(*dst, ctx.get(*src).clone()),
@@ -371,6 +379,7 @@ fn access_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
         Op::SetDerefParam { target, val } => set_deref_param(ctx, *target, *val),
         Op::GetField { dst, base, member } => get_field_op(ctx, *dst, *base, *member),
         Op::SetField { base, member, val } => set_field_op(ctx, *base, *member, *val),
+        Op::TakeField { dst, base, member } => take_field_op(ctx, *dst, *base, *member),
         _ => unreachable!("access_step handles only the access ops"),
     }
 }
@@ -382,6 +391,12 @@ fn place_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
         Op::RefField { dst, base, member } => ref_field(ctx, *dst, *base, *member)?,
         Op::DropScope { list } => {
             drop_scope(ctx, *list)?;
+            Flow::Next
+        }
+        Op::DropParams { list } => {
+            if ctx.owned_args {
+                drop_scope(ctx, *list)?;
+            }
             Flow::Next
         }
         Op::DefaultOf { dst, src } => default_of(ctx, *dst, *src),
@@ -552,10 +567,13 @@ fn load_cell(ctx: &mut StepCtx, dst: u16, cell: u16) -> Flow {
     ctx.set(dst, v)
 }
 
-fn store_cell(ctx: &mut StepCtx, cell: u16, src: u16) -> Flow {
+fn store_cell(ctx: &mut StepCtx, cell: u16, src: u16) -> Result<Flow> {
     let v = ctx.get(src).clone();
-    *ctx.cell(cell).lock() = v;
-    Flow::Next
+    let old = std::mem::replace(&mut *ctx.cell(cell).lock(), v);
+    if ctx.vm.has_drop {
+        ctx.vm.run_user_drop(old)?;
+    }
+    Ok(Flow::Next)
 }
 
 /// A binding starts a new variable, so the last cell is forgotten and the next use builds one
@@ -566,8 +584,11 @@ fn drop_cell(ctx: &mut StepCtx, cell: u16) -> Flow {
 }
 
 fn store_upvalue(ctx: &StepCtx, idx: u16, src: u16) -> Result<Flow> {
-    if !ctx.upvalues()[idx as usize].set(ctx.get(src).clone()) {
+    let Some(old) = ctx.upvalues()[idx as usize].swap(ctx.get(src).clone()) else {
         bail!("cannot assign to immutable capture");
+    };
+    if ctx.vm.has_drop {
+        ctx.vm.run_user_drop(old)?;
     }
     Ok(Flow::Next)
 }
@@ -585,5 +606,5 @@ use control::{
 };
 use places::{
     deref_bin_assign, deref_op, get_field_op, place_base, ref_field, ref_index, set_deref,
-    set_deref_param, set_field_op, set_index,
+    set_deref_param, set_field_op, set_index, take_field_op,
 };

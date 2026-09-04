@@ -13,7 +13,8 @@ use rand::RngExt;
 use rand::rngs::StdRng;
 
 use crate::lang::block::{Block, ConstDef, FnDef};
-use crate::lang::expr::Expr;
+use crate::lang::expr::{Expr, ReadMode};
+use crate::lang::own::{BindKind, OwnState, Scope, Snapshot};
 use crate::lang::ty::{
     FLOAT_WIDTHS, FloatWidth, INT_WIDTHS, IntWidth, MAX_TY_DEPTH, SCALAR_TYPES, StdErr, Ty,
 };
@@ -22,23 +23,23 @@ use crate::lang::user::UserDef;
 /// Enough for a call whose receiver is a call whose argument is an operator.
 pub(super) const MAX_EXPR_DEPTH: usize = 3;
 
-#[derive(Clone, Debug)]
-pub(super) enum BindKind {
-    Local,
-    Const,
-    Closure { params: Vec<Ty>, ret: Ty },
-}
+/// How often a read that may move does. The rest clone, so a binding usually survives to the
+/// prints at the end of the block.
+pub(super) const MOVE_CHANCE: f64 = 0.35;
 
-#[derive(Clone, Debug)]
-pub(super) struct Binding {
-    pub(super) name: String,
-    pub(super) ty: Ty,
-    pub(super) kind: BindKind,
+/// The arms of one `match` or the 2 sides of one `if`. Each starts from `before`, the states at
+/// the end of every arm merge after the last.
+pub(super) struct BranchFrame {
+    before: Snapshot,
+    ends: Vec<Snapshot>,
 }
 
 pub struct Generator<'a> {
     pub(super) rng: &'a mut StdRng,
-    pub(super) scope: Vec<Binding>,
+    pub(super) scope: Scope,
+    pub(super) branches: Vec<BranchFrame>,
+    /// every trace literal gets its own id, so a drop line names the value
+    pub(super) traces: i64,
     pub(super) labels: usize,
     /// baked into every item name so 2 blocks never collide
     pub(super) tag: usize,
@@ -64,7 +65,9 @@ impl<'a> Generator<'a> {
     pub fn new(rng: &'a mut StdRng, tag: usize) -> Self {
         Self {
             rng,
-            scope: Vec::new(),
+            scope: Scope::default(),
+            branches: Vec::new(),
+            traces: 0,
             labels: 0,
             tag,
             types: Vec::new(),
@@ -87,14 +90,78 @@ impl<'a> Generator<'a> {
         out
     }
 
-    /// `?`, `break`, `continue` and `return` would apply to the closure, so none is offered.
+    /// `?`, `break`, `continue` and `return` would apply to the closure, so none is offered. A
+    /// binding from outside can't be moved inside, the closure only borrows it.
     pub(super) fn closure_body<T>(&mut self, build: impl FnOnce(&mut Self) -> T) -> T {
         let saved_ret = self.fn_ret.take();
         let saved_loop = std::mem::replace(&mut self.in_loop, false);
+        self.scope.enter_closure();
         let out = build(self);
+        self.scope.leave_closure();
         self.fn_ret = saved_ret;
         self.in_loop = saved_loop;
         out
+    }
+
+    /// A print or a comparison only borrows, so a move there would retire a binding for nothing.
+    pub(super) fn borrowing<T>(&mut self, build: impl FnOnce(&mut Self) -> T) -> T {
+        self.scope.forbid_moves();
+        let out = build(self);
+        self.scope.allow_moves();
+        out
+    }
+
+    /// A statement list with a scope of its own, the bindings it declares are gone after it.
+    pub(super) fn scoped<T>(&mut self, build: impl FnOnce(&mut Self) -> T) -> T {
+        let mark = self.scope.len();
+        let out = build(self);
+        self.scope.truncate(mark);
+        out
+    }
+
+    /// A loop body. What it revives does not count after it, the loop may run zero times.
+    pub(super) fn looping<T>(&mut self, build: impl FnOnce(&mut Self) -> T) -> T {
+        let before = self.scope.snapshot();
+        self.scope.enter_loop();
+        let out = self.scoped(build);
+        self.scope.leave_loop();
+        self.scope.restore(&before);
+        out
+    }
+
+    pub(super) fn begin_branches(&mut self) {
+        self.branches.push(BranchFrame {
+            before: self.scope.snapshot(),
+            ends: Vec::new(),
+        });
+    }
+
+    /// One arm or side, started from the state before the branches.
+    pub(super) fn branch<T>(&mut self, build: impl FnOnce(&mut Self) -> T) -> T {
+        let before = self
+            .branches
+            .last()
+            .map(|frame| frame.before.clone())
+            .unwrap_or_default();
+        self.scope.restore(&before);
+        let out = self.scoped(build);
+        let end = self.scope.snapshot();
+        if let Some(frame) = self.branches.last_mut() {
+            frame.ends.push(end);
+        }
+        out
+    }
+
+    pub(super) fn end_branches(&mut self) {
+        if let Some(frame) = self.branches.pop() {
+            self.scope.merge(&frame.before, &frame.ends);
+        }
+    }
+
+    pub(super) fn trace_id(&mut self) -> i64 {
+        self.traces += 1;
+        i64::try_from(self.tag * 1000 + usize::try_from(self.traces).unwrap_or(0))
+            .unwrap_or(self.traces)
     }
 
     pub(super) fn typed_only<T>(&mut self, build: impl FnOnce(&mut Self) -> T) -> T {
@@ -117,20 +184,16 @@ impl<'a> Generator<'a> {
         for _ in 0..extras {
             statements.push(self.statement(Self::mutation));
         }
-        // a few free standing expressions, so a value that was never stored still shows up
-        let observed: Vec<(String, Ty)> = self
-            .scope
-            .iter()
-            .filter(|binding| matches!(binding.kind, BindKind::Local))
-            .map(|binding| (binding.name.clone(), binding.ty.clone()))
-            .collect();
-        for (name, ty) in observed {
-            statements.push(self.print_stmt(Expr::Var { name, ty }));
+        // every binding still alive, and the fields left in a partially moved one
+        for expr in self.observed_locals() {
+            statements.push(self.print_stmt(expr));
         }
+        // a few free standing expressions, so a value that was never stored still shows up
         let observations = self.rng.random_range(2..=4);
         for _ in 0..observations {
             let ty = self.any_ty();
-            let expr = self.statement(|inner| inner.expr(&ty, MAX_EXPR_DEPTH));
+            let expr =
+                self.statement(|inner| inner.borrowing(|inner| inner.expr(&ty, MAX_EXPR_DEPTH)));
             statements.push(self.print_stmt(expr));
         }
         let mut block = Block {
@@ -142,6 +205,13 @@ impl<'a> Generator<'a> {
         };
         block.fix_apply_borrows();
         block.seal();
+        if let Err(fault) = crate::lang::own::check_block(&block) {
+            panic!(
+                "generated a block that breaks an ownership rule, {fault}:\n{}{}",
+                block.render_items(),
+                block.render()
+            );
+        }
         block
     }
 
@@ -165,20 +235,80 @@ impl<'a> Generator<'a> {
         &items[self.rng.random_range(0..items.len())]
     }
 
-    pub(super) fn locals_of(&self, want: &Ty) -> Vec<String> {
+    /// The owned locals a name resolves to, with their types.
+    pub(super) fn live_locals(&self) -> Vec<(String, Ty)> {
         self.scope
-            .iter()
-            .filter(|binding| matches!(binding.kind, BindKind::Local) && binding.ty == *want)
-            .map(|binding| binding.name.clone())
+            .visible()
+            .into_iter()
+            .filter(|slot| matches!(slot.kind, BindKind::Local) && slot.state == OwnState::Owned)
+            .map(|slot| (slot.name.clone(), slot.ty.clone()))
             .collect()
     }
 
+    pub(super) fn locals_of(&self, want: &Ty) -> Vec<String> {
+        self.live_locals()
+            .into_iter()
+            .filter(|(_, ty)| ty == want)
+            .map(|(name, _)| name)
+            .collect()
+    }
+
+    /// What the end of the block prints, every live binding and the fields left in a partially
+    /// moved one.
+    fn observed_locals(&self) -> Vec<Expr> {
+        let mut out = Vec::new();
+        for slot in self.scope.visible() {
+            if !matches!(slot.kind, BindKind::Local) {
+                continue;
+            }
+            let base = Expr::Var {
+                name: slot.name.clone(),
+                ty: slot.ty.clone(),
+                mode: ReadMode::Clone,
+            };
+            match &slot.state {
+                OwnState::Owned => out.push(base),
+                OwnState::Moved => {}
+                OwnState::Partial(gone) => match &slot.ty {
+                    Ty::User(shape) => {
+                        for (index, field) in shape.fields().iter().enumerate() {
+                            if !gone.contains(&index) {
+                                out.push(Expr::Field {
+                                    base: Box::new(base.clone()),
+                                    index,
+                                    ty: field.ty.clone(),
+                                    mode: ReadMode::Clone,
+                                });
+                            }
+                        }
+                    }
+                    Ty::Tuple(items) => {
+                        for (index, item) in items.iter().enumerate() {
+                            if !gone.contains(&index) {
+                                out.push(Expr::TupleField {
+                                    base: Box::new(base.clone()),
+                                    index,
+                                    ty: item.clone(),
+                                    mode: ReadMode::Clone,
+                                });
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+            }
+        }
+        out
+    }
+
+    /// A parameter or a pattern binding, never written.
     pub(super) fn push_local(&mut self, name: String, ty: Ty) {
-        self.scope.push(Binding {
-            name,
-            ty,
-            kind: BindKind::Local,
-        });
+        self.scope.push(name, ty, BindKind::Local);
+    }
+
+    /// A `let` binding, which later writes may make `mut`.
+    pub(super) fn push_let(&mut self, name: String, ty: Ty) {
+        self.scope.push_let(name, ty);
     }
 
     pub(super) fn with_locals<T>(
@@ -186,14 +316,27 @@ impl<'a> Generator<'a> {
         locals: &[(String, Ty)],
         build: impl FnOnce(&mut Self) -> T,
     ) -> T {
-        for (name, ty) in locals {
-            self.push_local(name.clone(), ty.clone());
-        }
-        let out = build(self);
-        for _ in locals {
-            self.scope.pop();
-        }
-        out
+        self.scoped(|inner| {
+            for (name, ty) in locals {
+                inner.push_local(name.clone(), ty.clone());
+            }
+            build(inner)
+        })
+    }
+
+    /// Names that stand for places behind a reference, `self.f0` in a method. Readable by
+    /// clone, never moved.
+    pub(super) fn with_borrowed<T>(
+        &mut self,
+        locals: &[(String, Ty)],
+        build: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        self.scoped(|inner| {
+            for (name, ty) in locals {
+                inner.scope.push_borrowed(name.clone(), ty.clone());
+            }
+            build(inner)
+        })
     }
 
     /// For the argument of a call that already borrows the binding.
@@ -202,14 +345,19 @@ impl<'a> Generator<'a> {
         name: &str,
         build: impl FnOnce(&mut Self) -> T,
     ) -> T {
-        let index = self
-            .scope
-            .iter()
-            .position(|binding| binding.name == name)
-            .expect("the hidden binding is in scope");
-        let hidden = self.scope.remove(index);
+        let hidden = self.scope.hide(name);
         let out = build(self);
-        self.scope.insert(index, hidden);
+        if let Some(hidden) = hidden {
+            self.scope.unhide(hidden);
+        }
+        out
+    }
+
+    /// The binding is held by the statement around it, so its parts may read it but not take it.
+    pub(super) fn holding<T>(&mut self, name: &str, build: impl FnOnce(&mut Self) -> T) -> T {
+        self.scope.freeze(name);
+        let out = build(self);
+        self.scope.unfreeze();
         out
     }
 
@@ -234,6 +382,7 @@ impl<'a> Generator<'a> {
             5 => self.tuple_ty(),
             6 => self.res_ty(),
             7 | 8 => self.user_ty().unwrap_or_else(|| self.scalar_ty()),
+            9 => Ty::Trace,
             _ => self.scalar_ty(),
         }
     }
@@ -244,6 +393,7 @@ impl<'a> Generator<'a> {
             1 => self.user_ty().unwrap_or_else(|| self.scalar_ty()),
             2 => Ty::vec_of(self.scalar_ty()),
             3 => Ty::opt_of(self.scalar_ty()),
+            4 => Ty::Trace,
             _ => self.scalar_ty(),
         }
     }
@@ -299,12 +449,10 @@ impl<'a> Generator<'a> {
     pub(super) fn tuple_ty(&mut self) -> Ty {
         let count = self.rng.random_range(1..=3);
         let items = (0..count)
-            .map(|_| {
-                if self.chance(0.2) {
-                    Ty::opt_of(self.scalar_ty())
-                } else {
-                    self.scalar_ty()
-                }
+            .map(|_| match self.rng.random_range(0..10) {
+                0 | 1 => Ty::opt_of(self.scalar_ty()),
+                2 => Ty::Trace,
+                _ => self.scalar_ty(),
             })
             .collect();
         Ty::Tuple(items)

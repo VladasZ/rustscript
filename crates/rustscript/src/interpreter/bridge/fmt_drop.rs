@@ -66,7 +66,7 @@ impl Vm {
             padded: false,
         }));
         let args = vec![v.clone(), Value::Native(handle.clone())];
-        self.run_chunk(&chunk, &args, &[])?;
+        self.run_chunk(&chunk, &args, &[], false)?;
         let out = match &*handle.lock() {
             Native::Fmt { text, padded } => (text.clone(), *padded),
             _ => (String::new(), false),
@@ -144,7 +144,7 @@ impl Vm {
         else {
             return Ok(());
         };
-        self.run_chunk(&chunk, &[value], &[])?;
+        self.run_chunk(&chunk, &[value], &[], false)?;
         Ok(())
     }
 

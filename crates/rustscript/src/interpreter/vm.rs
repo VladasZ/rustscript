@@ -109,6 +109,9 @@ pub struct Vm {
     pub unit_structs: Vec<Arc<str>>,
     /// for tuple struct calls
     pub struct_names: std::collections::HashSet<String>,
+    /// Some script type has a `Drop` impl, so a store drops what it overwrites. Without one no
+    /// drop can print, and the containers can just be released.
+    pub has_drop: bool,
     pub rt: Handle,
 }
 
@@ -189,6 +192,8 @@ struct Cursor {
     type_env: TypeEnv,
     base: usize,
     ip: usize,
+    /// see `Op::DropParams`
+    owned_args: bool,
 }
 
 /// Sets up the callee's registers and returns the caller's frame to come back to.
@@ -213,6 +218,7 @@ fn enter(at: &mut Cursor, stack: &mut Vec<Value>, req: CallReq) -> Frame {
         abase: u16::try_from(req.abase).expect("register index fits u16"),
         argc: u16::try_from(req.argc).expect("argument count fits u16"),
         type_env: replace(&mut at.type_env, req.type_env),
+        owned_args: replace(&mut at.owned_args, req.owned_args),
     };
     at.base = nbase;
     at.ip = 0;
@@ -236,6 +242,7 @@ fn leave(
     at.type_env = frame.type_env;
     at.ip = frame.ip;
     at.base = frame.base;
+    at.owned_args = frame.owned_args;
     // the `&mut` argument writeback picks these up from the caller's arg window
     for i in 0..frame.argc as usize {
         stack[at.base + frame.abase as usize + i] = take(&mut stack[callee_base + i]);
@@ -259,14 +266,19 @@ struct Frame {
     abase: u16,
     argc: u16,
     type_env: TypeEnv,
+    /// see `Op::DropParams`
+    owned_args: bool,
 }
 
 impl Vm {
+    /// `owned_args` says whether the callee may drop its by value parameters at its end, see
+    /// `Op::DropParams`. A native adapter over a borrowing iterator passes false.
     pub fn run_chunk(
         self: &Arc<Self>,
         chunk: &Arc<Chunk>,
         args: &[Value],
         upvalues: &[Upvalue],
+        owned_args: bool,
     ) -> Result<Value> {
         // A forwarder's arity is a guess. `u8::saturating_add` handed to `fold` takes 2 where the
         // guess was 1.
@@ -302,7 +314,7 @@ impl Vm {
         for slot in &mut stack[args.len()..regs] {
             *slot = Value::Unit;
         }
-        let result = self.exec(chunk, &mut stack, upvalues);
+        let result = self.exec(chunk, &mut stack, upvalues, owned_args);
         drop(nesting);
         for slot in &mut stack {
             slot.release();
@@ -321,6 +333,7 @@ impl Vm {
         entry: &Arc<Chunk>,
         stack: &mut Vec<Value>,
         entry_upvalues: &[Upvalue],
+        owned_args: bool,
     ) -> Result<Value> {
         let mut frames: Vec<Frame> = Vec::new();
         let mut local_cells: FxHashMap<usize, Arc<Mutex<Value>>> = FxHashMap::default();
@@ -330,6 +343,7 @@ impl Vm {
             type_env: empty_type_env(),
             base: 0,
             ip: 0,
+            owned_args,
         };
         // One immediately called closure, so an error can be annotated with the call chain still in
         // `frames` and the failing op in `at`.
@@ -352,7 +366,7 @@ impl Vm {
             }
         })();
         result.map_err(|e| {
-            self.unwind_drops(&at.chunk, at.base, &frames, stack);
+            self.unwind_drops(&at.chunk, at.base, at.owned_args, &frames, stack);
             let trace = std::iter::once(frame_line(&at.chunk, at.ip)).chain(
                 frames
                     .iter()
@@ -384,6 +398,7 @@ impl Vm {
             ip: at.ip,
             ret: Value::Unit,
             call: None,
+            owned_args: at.owned_args,
         };
         let exit = loop {
             let Some(op) = ctx.cur.code.get(ctx.ip) else {
@@ -411,13 +426,22 @@ impl Vm {
         self: &Arc<Self>,
         cur: &Arc<Chunk>,
         base: usize,
+        owned_args: bool,
         frames: &[Frame],
         stack: &mut [Value],
     ) {
-        let spans =
-            std::iter::once((base, cur)).chain(frames.iter().rev().map(|f| (f.base, &f.chunk)));
-        for (base, chunk) in spans {
+        let spans = std::iter::once((base, cur, owned_args)).chain(
+            frames
+                .iter()
+                .rev()
+                .map(|f| (f.base, &f.chunk, f.owned_args)),
+        );
+        for (base, chunk, owned) in spans {
             for &reg in chunk.droppable.iter() {
+                // a lent parameter belongs to the caller
+                if !owned && chunk.lent_params.contains(&reg) {
+                    continue;
+                }
                 let Some(slot) = stack.get_mut(base + usize::from(reg)) else {
                     continue;
                 };
@@ -504,7 +528,7 @@ impl Vm {
                 }
             }
         };
-        let v = self.run_chunk(&chunk, &[], &[])?;
+        let v = self.run_chunk(&chunk, &[], &[], true)?;
         *self.globals[idx].lock() = GlobalSlot::Ready(v.clone());
         Ok(v)
     }
@@ -532,24 +556,33 @@ impl Vm {
         }
     }
 
-    pub(super) fn set_field(recv: &Value, member: &Member, v: Value) -> Result<()> {
-        match (recv, member) {
+    /// Stores the field and hands the old value back for its drop.
+    pub(super) fn set_field(recv: &Value, member: &Member, v: Value) -> Result<Value> {
+        let old = match (recv, member) {
             (Value::Struct(s), Member::Named(n)) => {
                 let Some(i) = n.slot_in(&s.shape) else {
                     bail!("no field `{n}`");
                 };
-                s.values.lock()[i] = v;
+                std::mem::replace(&mut s.values.lock()[i], v)
             }
             (Value::Tuple(t), Member::Indexed(i)) => {
                 let mut t = t.lock();
                 if *i >= t.len() {
                     bail!("no tuple index {i}");
                 }
-                t[*i] = v;
+                std::mem::replace(&mut t[*i], v)
+            }
+            // a tuple struct names its fields by position
+            (Value::Struct(s), Member::Indexed(i)) => {
+                let mut values = s.values.lock();
+                if *i >= values.len() {
+                    bail!("no field {i}");
+                }
+                std::mem::replace(&mut values[*i], v)
             }
             _ => bail!("cannot set a field of {}", recv.type_name()),
-        }
-        Ok(())
+        };
+        Ok(old)
     }
 }
 

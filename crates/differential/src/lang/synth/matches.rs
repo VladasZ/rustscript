@@ -21,6 +21,7 @@ impl Generator<'_> {
         };
         let scrutinee = self.expr(&scrutinee_ty, depth - 1);
         let by_ref = matches!(scrutinee_ty, Ty::Vec(_));
+        self.begin_branches();
         let arms = match &scrutinee_ty {
             Ty::Opt(inner) => self.option_arms(inner, want, depth),
             Ty::Res(ok, err) => self.result_arms(ok, err, want, depth),
@@ -30,8 +31,12 @@ impl Generator<'_> {
             Ty::Bool => self.bool_arms(want, depth),
             Ty::Tuple(items) => self.tuple_arms(items, want, depth),
             Ty::Vec(elem) => self.slice_arms(elem, want, depth),
-            _ => return None,
+            _ => {
+                self.end_branches();
+                return None;
+            }
         };
+        self.end_branches();
         // An arm body may call a width specific method on a bound name, and `rustc` resolves the
         // method before the scrutinee's bare literals default, so a binding forces real suffixes.
         let mut binds = Vec::new();
@@ -54,19 +59,21 @@ impl Generator<'_> {
     fn arm(&mut self, pat: Pat, guard: bool, want: &Ty, depth: usize) -> Arm {
         let mut binds = Vec::new();
         pat.bindings(&mut binds);
-        self.with_locals(&binds, |inner| {
-            let guard = guard.then(|| inner.expr(&Ty::Bool, depth - 1));
-            let body = inner.expr(want, depth - 1);
-            Arm { pat, guard, body }
+        self.branch(|inner| {
+            inner.with_locals(&binds, |inner| {
+                let guard = guard.then(|| inner.expr(&Ty::Bool, depth - 1));
+                let body = inner.expr(want, depth - 1);
+                Arm { pat, guard, body }
+            })
         })
     }
 
     fn wild_arm(&mut self, want: &Ty, depth: usize) -> Arm {
-        Arm {
+        self.branch(|inner| Arm {
             pat: Pat::Wild,
             guard: None,
-            body: self.expr(want, depth - 1),
-        }
+            body: inner.expr(want, depth - 1),
+        })
     }
 
     fn bind(&mut self, ty: &Ty) -> Pat {

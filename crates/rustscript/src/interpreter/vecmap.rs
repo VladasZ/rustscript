@@ -26,8 +26,9 @@ pub(super) fn vec_method(v: &List, method: &MethodName, args: &mut [Value]) -> R
         BuiltinId::Len | BuiltinId::Count => super::shared::usize_value(v.lock().len()),
         BuiltinId::IsEmpty => Value::Bool(v.lock().is_empty()),
         BuiltinId::Clone => Value::Vec(v.clone()).deep_clone(),
-        BuiltinId::Iter => iterator::value_iter(v.clone()),
-        BuiltinId::IntoIter => iterator::owned_iter(v.clone()),
+        // an owning `into_iter` is an `IterInit` from the compiler, what reaches here shares
+        // the vec with a live owner
+        BuiltinId::Iter | BuiltinId::IntoIter => iterator::value_iter(v.clone()),
         BuiltinId::IterMut => iterator::value_iter_mut(v.clone()),
         BuiltinId::Push | BuiltinId::PushBack => {
             v.lock().push(args.first_mut().map_or(Value::Unit, take));
@@ -204,11 +205,12 @@ fn vec_concat(v: &List, element: Option<&ScalarTy>) -> Value {
         return Value::vec(Vec::new());
     }
     match items.first() {
+        // the rows are borrowed, so the flat vec clones what it copies out of them
         Some(Value::Vec(_)) => {
             let mut out = Vec::new();
             for x in items.iter() {
                 if let Value::Vec(inner) = x {
-                    out.extend(inner.lock().iter().cloned());
+                    out.extend(inner.lock().iter().map(Value::deep_clone));
                 }
             }
             Value::vec(out)
@@ -288,8 +290,13 @@ fn vec_method_by_name(v: &List, method: &MethodName, args: &mut [Value]) -> Resu
             let Some(Value::Vec(other)) = args.first() else {
                 bail!("`{}` needs something iterable", method.text);
             };
-            // cloned first, so extending a vec with itself doesn't deadlock
-            let appended: Vec<Value> = other.lock().clone();
+            // Copied first, so extending a vec with itself doesn't deadlock. `append` moves
+            // the other vec's items out, the rest copy from a borrow.
+            let appended: Vec<Value> = if method.id == BuiltinId::Append {
+                std::mem::take(&mut *other.lock())
+            } else {
+                other.lock().iter().map(Value::deep_clone).collect()
+            };
             v.lock().extend(appended);
             Value::Unit
         }
