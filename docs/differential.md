@@ -18,6 +18,30 @@ The native binary runs twice, and a run where the 2 native runs disagree
 means the grammar let nondeterminism through. It is counted and never
 reported as a bug.
 
+## Ownership and drops
+
+A read of a non copy binding is a clone or a move, chosen by the generator
+from the ownership state it keeps per binding in `lang/own.rs`. A moved
+binding is gone until an assignment brings it back, a field moved out of a
+struct or a tuple leaves the rest usable, and a move is offered only at the
+loop and closure depth the binding was declared at. Nested bodies declare
+their own `let`s, shadow outer names and drop them at the closing brace, a
+bare `{ }` block does the same, and `std::mem::take`, `replace`, `swap`,
+`Option::take`, `pop`, `remove` and `swap_remove` take values out in place.
+
+`DiffTrace` is a program local struct whose `Drop` prints its id. It sits in
+locals, vec items, struct fields, option payloads, tuples, closure captures
+and temporaries, so every move, scope end, loop iteration, `break`, `?` and
+unwind becomes a line of output. Its `Clone` is derived and silent. It never
+hashes, a hashed container would clone and drop it in an order real Rust
+randomizes per process.
+
+`own::check_block` replays the finished tree with the same rules. The
+generator asserts it on every block it builds, the reducer drops every
+candidate that fails it, and the mutator undoes a splice that fails it. The
+rules are a subset of what `rustc` accepts, a scrutinee or a receiver read by
+move counts as moved even where `rustc` would only borrow it.
+
 ## Commands
 
 ```text

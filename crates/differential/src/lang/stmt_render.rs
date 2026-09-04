@@ -2,367 +2,13 @@
 
 use std::collections::BTreeSet;
 
-use crate::lang::expr::{Expr, Helper};
+use crate::lang::expr::Expr;
 use crate::lang::fmt::FmtSpec;
 use crate::lang::ty::Ty;
 
 use super::stmt::{Ann, ClosureParam, ClosureSource, PrintForm, Stmt};
 
 impl Stmt {
-    /// Whether a `break` or `continue` in here, at any depth, names `label`.
-    pub fn targets_label(&self, label: &str) -> bool {
-        match self {
-            Self::Break { label: Some(l), .. } | Self::Continue { label: Some(l), .. } => {
-                l == label
-            }
-            _ => self
-                .bodies()
-                .iter()
-                .any(|body| body.iter().any(|stmt| stmt.targets_label(label))),
-        }
-    }
-
-    pub fn bodies(&self) -> Vec<&Vec<Stmt>> {
-        match self {
-            Self::If {
-                then_body,
-                else_body,
-                ..
-            } => vec![then_body, else_body],
-            Self::ForRange { body, .. } | Self::While { body, .. } | Self::Loop { body, .. } => {
-                vec![body]
-            }
-            _ => Vec::new(),
-        }
-    }
-
-    fn bodies_mut(&mut self) -> Vec<&mut Vec<Stmt>> {
-        match self {
-            Self::If {
-                then_body,
-                else_body,
-                ..
-            } => vec![then_body, else_body],
-            Self::ForRange { body, .. } | Self::While { body, .. } | Self::Loop { body, .. } => {
-                vec![body]
-            }
-            _ => Vec::new(),
-        }
-    }
-
-    /// Every expression, in a fixed order shared with `exprs_mut`.
-    pub fn exprs(&self) -> Vec<&Expr> {
-        let mut out = Vec::new();
-        match self {
-            Self::Let { expr, .. }
-            | Self::LetTuple { expr, .. }
-            | Self::Assign { expr, .. }
-            | Self::Compound { expr, .. }
-            | Self::Print { expr, .. }
-            | Self::ForMut { expr, .. } => out.push(expr),
-            Self::LetClosure { source, calls, .. } => {
-                match source {
-                    ClosureSource::Literal { body, .. } => out.push(body),
-                    ClosureSource::Factory { arg, .. } => out.push(arg),
-                }
-                out.extend(calls.iter());
-            }
-            Self::If { condition, .. }
-            | Self::Break { condition, .. }
-            | Self::Continue { condition, .. } => out.push(condition),
-            Self::Return { condition, value } => {
-                out.push(condition);
-                out.push(value);
-            }
-            Self::Mutate { op, .. } => out.extend(op.exprs()),
-            Self::ForAccum { source, op, .. } => {
-                out.push(source);
-                out.extend(op.exprs());
-            }
-            Self::CallMut { args, .. } => out.extend(args.iter()),
-            Self::ForRange { .. } | Self::While { .. } | Self::Loop { .. } => {}
-        }
-        for body in self.bodies() {
-            for stmt in body {
-                out.extend(stmt.exprs());
-            }
-        }
-        out
-    }
-
-    pub fn exprs_mut(&mut self) -> Vec<&mut Expr> {
-        let mut out = Vec::new();
-        match self {
-            Self::Let { expr, .. }
-            | Self::LetTuple { expr, .. }
-            | Self::Assign { expr, .. }
-            | Self::Compound { expr, .. }
-            | Self::Print { expr, .. }
-            | Self::ForMut { expr, .. } => out.push(expr),
-            Self::LetClosure { source, calls, .. } => {
-                match source {
-                    ClosureSource::Literal { body, .. } => out.push(body),
-                    ClosureSource::Factory { arg, .. } => out.push(arg),
-                }
-                out.extend(calls.iter_mut());
-            }
-            Self::If {
-                condition,
-                then_body,
-                else_body,
-            } => {
-                out.push(condition);
-                for stmt in then_body.iter_mut().chain(else_body.iter_mut()) {
-                    out.extend(stmt.exprs_mut());
-                }
-            }
-            Self::Break { condition, .. } | Self::Continue { condition, .. } => {
-                out.push(condition);
-            }
-            Self::Return { condition, value } => {
-                out.push(condition);
-                out.push(value);
-            }
-            Self::Mutate { op, .. } => out.extend(op.exprs_mut()),
-            Self::ForAccum { source, op, .. } => {
-                out.push(source);
-                out.extend(op.exprs_mut());
-            }
-            Self::CallMut { args, .. } => out.extend(args.iter_mut()),
-            Self::ForRange { body, .. } | Self::While { body, .. } | Self::Loop { body, .. } => {
-                for stmt in body {
-                    out.extend(stmt.exprs_mut());
-                }
-            }
-        }
-        out
-    }
-
-    /// Names this statement writes to, so the renderer knows which bindings need `mut`.
-    pub fn assigned(&self, out: &mut BTreeSet<String>) {
-        match self {
-            Self::Assign { name, .. }
-            | Self::Compound { name, .. }
-            | Self::Mutate { name, .. }
-            | Self::ForMut { name, .. }
-            | Self::CallMut { name, .. }
-            | Self::ForAccum { target: name, .. }
-            | Self::LetClosure {
-                name,
-                source: ClosureSource::Literal { mutates: true, .. },
-                ..
-            } => {
-                out.insert(name.clone());
-            }
-            _ => {}
-        }
-        for body in self.bodies() {
-            for stmt in body {
-                stmt.assigned(out);
-            }
-        }
-        for expr in self.exprs() {
-            for node in expr.nodes() {
-                match node {
-                    Expr::Block { stmts, .. } => {
-                        for stmt in stmts {
-                            stmt.assigned(out);
-                        }
-                    }
-                    // the apply helper takes the closure by `&mut`
-                    Expr::ApplyCall { closure, .. } => {
-                        out.insert(closure.clone());
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    /// The binding a compound assignment writes.
-    pub fn declared_targets(&self) -> Vec<String> {
-        match self {
-            Self::Compound { name, .. } | Self::Assign { name, .. } => vec![name.clone()],
-            _ => Vec::new(),
-        }
-    }
-
-    pub fn declared(&self) -> Vec<String> {
-        match self {
-            Self::Let { name, .. } | Self::LetClosure { name, .. } => vec![name.clone()],
-            Self::LetTuple { names, .. } => names.iter().map(|(n, _)| n.clone()).collect(),
-            _ => Vec::new(),
-        }
-    }
-
-    pub fn uses_any(&self, names: &BTreeSet<String>) -> bool {
-        let direct = match self {
-            Self::LetClosure {
-                source: ClosureSource::Factory { fn_name, .. },
-                ..
-            } => names.contains(fn_name),
-            _ => false,
-        };
-        direct || self.exprs().iter().any(|expr| expr.uses_any(names))
-    }
-
-    /// Whether this statement assigns to a name it doesn't own, so the reducer can't drop that binding.
-    pub fn writes_any(&self, names: &BTreeSet<String>) -> bool {
-        let mut written = BTreeSet::new();
-        self.assigned(&mut written);
-        written.iter().any(|name| names.contains(name))
-    }
-
-    pub fn has_fallible_op(&self) -> bool {
-        let own = match self {
-            Self::Compound { op, .. } => op.is_fallible(),
-            Self::Mutate { op, .. } | Self::ForAccum { op, .. } => op.has_fallible_op(),
-            _ => false,
-        };
-        own || self.exprs().iter().any(|expr| expr.has_fallible_op())
-    }
-
-    pub fn make_opaque(&mut self) {
-        for expr in self.exprs_mut() {
-            expr.make_opaque();
-        }
-    }
-
-    pub fn helpers(&self, out: &mut BTreeSet<Helper>) {
-        for expr in self.exprs() {
-            expr.helpers(out);
-        }
-    }
-
-    pub fn features(&self, out: &mut BTreeSet<&'static str>) {
-        let own: &[&'static str] = match self {
-            Self::Let {
-                ann: Ann::Typed, ..
-            } => &["lang-let"],
-            Self::Let {
-                ann: Ann::Inferred, ..
-            } => &["lang-let", "lang-let-inferred"],
-            Self::LetTuple { .. } => &["lang-let-tuple"],
-            Self::LetClosure { source, .. } => match source {
-                ClosureSource::Literal {
-                    capture_move: true,
-                    mutates: true,
-                    ..
-                } => &["lang-closure", "lang-closure-move", "lang-closure-mut"],
-                ClosureSource::Literal {
-                    capture_move: true, ..
-                } => &["lang-closure", "lang-closure-move"],
-                ClosureSource::Literal { mutates: true, .. } => {
-                    &["lang-closure", "lang-closure-mut"]
-                }
-                ClosureSource::Literal { .. } => &["lang-closure"],
-                ClosureSource::Factory { .. } => &["lang-closure", "lang-closure-factory"],
-            },
-            Self::Assign { .. } => &["lang-assign"],
-            Self::Compound { .. } => &["lang-compound"],
-            Self::Print { .. } | Self::Mutate { .. } => &[],
-            Self::If { .. } => &["lang-if-stmt"],
-            Self::ForRange { label: Some(_), .. } => &["lang-for", "lang-loop-label"],
-            Self::ForRange { .. } => &["lang-for"],
-            Self::While { label: Some(_), .. } => &["lang-while", "lang-loop-label"],
-            Self::While { .. } => &["lang-while"],
-            Self::Loop { label: Some(_), .. } => &["lang-loop", "lang-loop-label"],
-            Self::Loop { .. } => &["lang-loop"],
-            Self::Break { label: Some(_), .. } => &["lang-break", "lang-break-label"],
-            Self::Break { .. } => &["lang-break"],
-            Self::Continue { label: Some(_), .. } => &["lang-continue", "lang-continue-label"],
-            Self::Continue { .. } => &["lang-continue"],
-            Self::Return { .. } => &["lang-early-return"],
-            Self::ForAccum { .. } => &["lang-for-accum"],
-            Self::ForMut { .. } => &["lang-iter-mut"],
-            Self::CallMut { .. } => &["lang-borrow-mut"],
-        };
-        out.extend(own.iter().copied());
-        if let Self::LetClosure {
-            source: ClosureSource::Literal { params, .. },
-            ..
-        } = self
-            && params
-                .iter()
-                .any(|param| matches!(param, ClosureParam::Pair { .. }))
-        {
-            out.insert("lang-closure-tuple-param");
-        }
-        match self {
-            Self::Print { spec, form, .. } => {
-                spec.features(out);
-                out.insert(form.feature());
-            }
-            Self::Compound { op, .. } => {
-                out.insert(op.feature());
-            }
-            Self::Mutate { op, .. } | Self::ForAccum { op, .. } => {
-                out.insert(op.feature());
-            }
-            _ => {}
-        }
-        for body in self.bodies() {
-            for stmt in body {
-                stmt.features(out);
-            }
-        }
-        for expr in self.exprs() {
-            expr.features(out);
-        }
-    }
-
-    pub fn shape(&self, out: &mut String) {
-        match self {
-            Self::Let { .. } => out.push_str("let,"),
-            Self::LetTuple { .. } => out.push_str("let-tuple,"),
-            Self::LetClosure { .. } => out.push_str("closure,"),
-            Self::Assign { .. } => out.push_str("assign,"),
-            Self::Compound { .. } => out.push_str("compound,"),
-            Self::Print { .. } => out.push_str("print,"),
-            Self::If {
-                then_body,
-                else_body,
-                ..
-            } => {
-                out.push_str("if(");
-                for stmt in then_body {
-                    stmt.shape(out);
-                }
-                out.push('|');
-                for stmt in else_body {
-                    stmt.shape(out);
-                }
-                out.push_str("),");
-            }
-            Self::ForRange { body, .. } | Self::While { body, .. } | Self::Loop { body, .. } => {
-                out.push_str(match self {
-                    Self::ForRange { .. } => "for(",
-                    Self::While { .. } => "while(",
-                    _ => "loop(",
-                });
-                for stmt in body {
-                    stmt.shape(out);
-                }
-                out.push_str("),");
-            }
-            Self::Break { .. } => out.push_str("break,"),
-            Self::Continue { .. } => out.push_str("continue,"),
-            Self::Return { .. } => out.push_str("return,"),
-            Self::Mutate { op, .. } => {
-                out.push_str("mutate:");
-                out.push_str(op.feature());
-                out.push(',');
-            }
-            Self::ForAccum { op, .. } => {
-                out.push_str("for-accum:");
-                out.push_str(op.feature());
-                out.push(',');
-            }
-            Self::ForMut { .. } => out.push_str("for-mut,"),
-            Self::CallMut { .. } => out.push_str("call-mut,"),
-        }
-    }
-
     pub fn render(&self, mutable: &BTreeSet<String>, indent: usize) -> String {
         let pad = "    ".repeat(indent);
         match self {
@@ -373,6 +19,9 @@ impl Stmt {
                 calls,
             } => render_closure(&pad, name, source, calls, mutable.contains(name)),
             Self::Assign { name, expr } => format!("{pad}{name} = {};\n", expr.render()),
+            Self::AssignField { .. } | Self::Swap { .. } | Self::Scope { .. } => {
+                self.render_place_write(mutable, indent, &pad)
+            }
             Self::Compound { name, op, expr } => {
                 // `String += &str`, every other compound takes the value
                 let rhs = if matches!(expr.ty(), Ty::Str) {
@@ -459,6 +108,31 @@ impl Stmt {
         }
     }
 
+    fn render_place_write(&self, mutable: &BTreeSet<String>, indent: usize, pad: &str) -> String {
+        match self {
+            Self::AssignField {
+                name,
+                base,
+                index,
+                expr,
+            } => format!(
+                "{pad}{name}.{} = {};\n",
+                field_name(base, *index),
+                expr.render()
+            ),
+            Self::Swap { a, b } => format!("{pad}std::mem::swap(&mut {a}, &mut {b});\n"),
+            Self::Scope { body } => {
+                let mut out = format!("{pad}{{\n");
+                for stmt in body {
+                    out.push_str(&stmt.render(mutable, indent + 1));
+                }
+                out.push_str(&format!("{pad}}}\n"));
+                out
+            }
+            _ => unreachable!("render_place_write handles the place writes only"),
+        }
+    }
+
     fn render_loop(&self, mutable: &BTreeSet<String>, indent: usize, pad: &str) -> String {
         match self {
             Self::ForRange {
@@ -517,8 +191,9 @@ impl Stmt {
                 ty,
                 expr,
                 ann,
+                mutable: own_mutable,
             } => {
-                let mutability = if mutable.contains(name) { "mut " } else { "" };
+                let mutability = if *own_mutable { "mut " } else { "" };
                 let annotation = match ann {
                     Ann::Typed => format!(": {}", ty.rust()),
                     Ann::Inferred => String::new(),
@@ -562,7 +237,7 @@ impl Stmt {
             for index in 0..body.len() {
                 let mut candidate = self.clone();
                 if let Some(target) = candidate.bodies_mut().into_iter().nth(body_index) {
-                    target.remove(index);
+                    *target = crate::lang::block::remove_with_dependents(body, index);
                 }
                 candidates.push(candidate);
             }
@@ -597,6 +272,83 @@ impl Stmt {
         }
         candidates
     }
+}
+
+/// `f0` on a struct, `0` on a tuple.
+pub fn field_name(base: &Ty, index: usize) -> String {
+    match base {
+        Ty::User(shape) => shape.fields()[index].name.clone(),
+        _ => index.to_string(),
+    }
+}
+
+/// Sets `mutable` on every `let` that a later write resolves to. A shadowed name may be written
+/// in one scope and not in another, so a flat name set would mark both. `tail` is the value
+/// expression after the statements, a fn body's last line.
+pub fn mark_mutable(stmts: &mut [Stmt], tail: Option<&Expr>) {
+    let mut written: Vec<Vec<usize>> = Vec::new();
+    let mut scope: Vec<(String, Vec<usize>)> = Vec::new();
+    collect_written(stmts, &mut Vec::new(), &mut scope, &mut written);
+    if let Some(tail) = tail {
+        let mut names = BTreeSet::new();
+        tail.written_names(&mut names);
+        for node in tail.nodes() {
+            if let Expr::Block { stmts, .. } = node {
+                for stmt in stmts {
+                    stmt.assigned(&mut names);
+                }
+            }
+        }
+        for name in names {
+            if let Some((_, let_path)) = scope.iter().rev().find(|(bound, _)| *bound == name) {
+                written.push(let_path.clone());
+            }
+        }
+    }
+    for path in written {
+        if let Some(Stmt::Let { mutable, .. }) = stmt_at_mut(stmts, &path) {
+            *mutable = true;
+        }
+    }
+}
+
+fn collect_written(
+    stmts: &[Stmt],
+    path: &mut Vec<usize>,
+    scope: &mut Vec<(String, Vec<usize>)>,
+    written: &mut Vec<Vec<usize>>,
+) {
+    for (index, stmt) in stmts.iter().enumerate() {
+        path.push(index);
+        for name in stmt.own_writes() {
+            if let Some((_, let_path)) = scope.iter().rev().find(|(bound, _)| *bound == name) {
+                written.push(let_path.clone());
+            }
+        }
+        for (body_index, body) in stmt.bodies().iter().enumerate() {
+            path.push(body_index);
+            let mark = scope.len();
+            collect_written(body, path, scope, written);
+            scope.truncate(mark);
+            path.pop();
+        }
+        if let Stmt::Let { name, .. } = stmt {
+            scope.push((name.clone(), path.clone()));
+        }
+        path.pop();
+    }
+}
+
+/// `path` alternates a statement index and a body index, see `collect_written`.
+fn stmt_at_mut<'a>(stmts: &'a mut [Stmt], path: &[usize]) -> Option<&'a mut Stmt> {
+    let (&index, rest) = path.split_first()?;
+    let stmt = stmts.get_mut(index)?;
+    if rest.is_empty() {
+        return Some(stmt);
+    }
+    let (&body_index, rest) = rest.split_first()?;
+    let body = stmt.bodies_mut().into_iter().nth(body_index)?;
+    stmt_at_mut(body, rest)
 }
 
 fn label_prefix(label: Option<&str>) -> String {
@@ -652,8 +404,14 @@ fn render_closure(
     out
 }
 
-/// A map or set prints through a sorted vec, real Rust randomizes its order per process.
+/// A map or set prints through a sorted vec, real Rust randomizes its order per process. A plain
+/// binding is printed by reference, `println!` never takes its argument.
 fn observed(expr: &Expr) -> String {
+    if let Expr::Var { name, ty, .. } = expr
+        && !matches!(ty, Ty::Map(..) | Ty::Set(_))
+    {
+        return name.clone();
+    }
     match expr.ty() {
         Ty::Map(key, value) => format!(
             "({{ let mut diff_obs: Vec<({}, {})> = {}.into_iter().collect(); diff_obs.sort(); diff_obs }})",

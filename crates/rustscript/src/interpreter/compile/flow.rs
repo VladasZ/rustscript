@@ -45,15 +45,19 @@ impl Compiler<'_> {
         let terms = flatten_and(&if_expr.cond);
         if terms.iter().any(|t| matches!(t, Expr::Let(_))) {
             self.push_scope();
+            let temp_mark = self.cur().owned_temps.len();
             let mut else_jumps = Vec::new();
+            let mut shells = Vec::new();
             for term in &terms {
                 if let Expr::Let(let_expr) = term {
                     let owned = pattern_owns(&let_expr.pat);
                     let scrut = self.compile_scrutinee(&let_expr.expr, owned)?;
                     let matched = self.alloc();
                     let pat = self.pattern_info(&let_expr.pat)?;
-                    if !owned {
+                    if !owned || !self.scrutinee_owned(&let_expr.expr) {
                         self.exempt_pattern_binds(pat);
+                    } else if self.fresh_scrutinee(&let_expr.expr) {
+                        shells.push(scrut);
                     }
                     if self.init_holds_guard(&let_expr.expr) {
                         self.guard_pattern_binds(pat);
@@ -77,12 +81,17 @@ impl Compiler<'_> {
             self.compile_block_inner(&if_expr.then_branch, dst)?;
             self.emit_scope_drops(1);
             self.pop_scope();
+            // the scrutinee temporaries end with the `if let`, before an `else` block runs
+            let temps = self.drop_temps(temp_mark, Some(dst));
             let jmp_end = self.here();
             self.emit(Op::Jump { to: 0 });
             let else_at = self.mark()?;
             for j in else_jumps {
                 self.patch_jump(j, else_at);
             }
+            // this path bound nothing, so a fresh scrutinee drops whole
+            self.drop_regs(shells);
+            self.emit_drop_lists(&[temps]);
             match &if_expr.else_branch {
                 Some((_, e)) => self.compile_into(dst, e)?,
                 None => self.emit(Op::LoadUnit { dst }),
@@ -92,17 +101,17 @@ impl Compiler<'_> {
             return Ok(());
         }
         let guard_mark = self.cur().guard_temps.len();
+        let temp_mark = self.cur().owned_temps.len();
         let jmp_else = self.emit_cond_jump(&if_expr.cond)?;
-        // the condition's borrows end before either branch runs, on both paths
+        // the condition's borrows and temporaries end before either branch runs, on both paths
         let released = self.release_guard_temps(guard_mark, None);
+        let temps = self.drop_temps(temp_mark, None);
         self.compile_block(&if_expr.then_branch, dst)?;
         let jmp_end = self.here();
         self.emit(Op::Jump { to: 0 });
         let else_at = self.mark()?;
         self.patch_jump(jmp_else, else_at);
-        if let Some(list) = released {
-            self.emit(Op::DropScope { list });
-        }
+        self.emit_drop_lists(&[released, temps]);
         match &if_expr.else_branch {
             Some((_, e)) => self.compile_into(dst, e)?,
             None => self.emit(Op::LoadUnit { dst }),
@@ -115,14 +124,18 @@ impl Compiler<'_> {
     pub(super) fn compile_while(&mut self, dst: Reg, w: &syn::ExprWhile) -> Result<()> {
         let head = self.here();
         if let Expr::Let(let_expr) = &*w.cond {
+            let temp_mark = self.cur().owned_temps.len();
             let owned = pattern_owns(&let_expr.pat);
             let scrut = self.compile_scrutinee(&let_expr.expr, owned)?;
             let while_let_depth = self.cur().scope_order.len();
             self.push_scope();
             let matched = self.alloc();
             let pat = self.pattern_info(&let_expr.pat)?;
-            if !owned {
+            let mut shell = Vec::new();
+            if !owned || !self.scrutinee_owned(&let_expr.expr) {
                 self.exempt_pattern_binds(pat);
+            } else if self.fresh_scrutinee(&let_expr.expr) {
+                shell.push(scrut);
             }
             if self.init_holds_guard(&let_expr.expr) {
                 self.guard_pattern_binds(pat);
@@ -138,7 +151,7 @@ impl Compiler<'_> {
                 to: 0,
             });
             self.loops.push(LoopCtx {
-                breaks: vec![exit],
+                breaks: Vec::new(),
                 continue_to: Some(head),
                 result: dst,
                 scope_depth: while_let_depth,
@@ -148,9 +161,16 @@ impl Compiler<'_> {
             self.compile_block_inner(&w.body, body)?;
             self.emit_scope_drops(1);
             self.pop_scope();
+            // the scrutinee temporaries end with each turn
+            let temps = self.drop_temps(temp_mark, None);
             self.emit(Op::Jump {
                 to: u32::try_from(head)?,
             });
+            // the turn that binds nothing drops its fresh scrutinee whole. A `break` leaves a
+            // turn that bound, its bindings dropped on the way out, so it lands past this.
+            let no_match = self.mark()?;
+            self.patch_jump(exit, no_match);
+            self.drop_regs(shell);
             let end = self.mark()?;
             let lc = self
                 .loops
@@ -159,13 +179,17 @@ impl Compiler<'_> {
             for b in lc.breaks {
                 self.patch_jump(b, end);
             }
+            self.emit_drop_lists(&[temps]);
             self.emit(Op::LoadUnit { dst });
             return Ok(());
         }
         let guard_mark = self.cur().guard_temps.len();
+        let temp_mark = self.cur().owned_temps.len();
         let exit = self.emit_cond_jump(&w.cond)?;
-        // the condition's borrows end before the body runs, and again on the way out
+        // the condition's borrows and temporaries end before the body runs, and again on the
+        // way out
         let released = self.release_guard_temps(guard_mark, None);
+        let temps = self.drop_temps(temp_mark, None);
         let scope_depth = self.cur().scope_order.len();
         self.loops.push(LoopCtx {
             breaks: vec![exit],
@@ -187,9 +211,7 @@ impl Compiler<'_> {
         for b in lc.breaks {
             self.patch_jump(b, end);
         }
-        if let Some(list) = released {
-            self.emit(Op::DropScope { list });
-        }
+        self.emit_drop_lists(&[released, temps]);
         self.emit(Op::LoadUnit { dst });
         Ok(())
     }
@@ -230,6 +252,10 @@ impl Compiler<'_> {
             match inner {
                 Expr::Paren(p) => inner = &p.expr,
                 Expr::Group(g) => inner = &g.expr,
+                // `param.into_iter()` on a borrow is `iter()`
+                Expr::MethodCall(m) if m.method == "into_iter" && m.args.is_empty() => {
+                    inner = &m.receiver;
+                }
                 _ => break,
             }
         }
@@ -425,6 +451,7 @@ impl Compiler<'_> {
                 .any(|arm| pattern_borrows(arm_pattern(&arm.pat)));
         let scrut = self.compile_scrutinee(&m.expr, owned)?;
         let holds_guard = self.init_holds_guard(&m.expr);
+        let lends = !self.scrutinee_owned(&m.expr);
         let mut end_jumps = Vec::new();
         for arm in &m.arms {
             self.push_scope();
@@ -435,7 +462,7 @@ impl Compiler<'_> {
                 p => (p, None),
             };
             let pat = self.pattern_info(arm_pat)?;
-            if !owned {
+            if !owned || lends {
                 self.exempt_pattern_binds(pat);
             }
             if holds_guard {

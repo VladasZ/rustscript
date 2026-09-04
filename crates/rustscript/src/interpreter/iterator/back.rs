@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 
-use super::{Handle, IteratorState, option_inner};
+use super::{Handle, IteratorState, option_inner, owns_items};
 use crate::interpreter::native::Native;
 use crate::interpreter::shared::usize_i64;
 use crate::interpreter::value::{ClosureData, Value};
@@ -163,7 +163,10 @@ impl Vm {
         match back {
             Back::Ready(value) => Ok(value),
             Back::Map(source, closure) => match self.iterator_next_back(&source)? {
-                Some(value) => Ok(Some(self.call_closure_data(&closure, &[value])?)),
+                Some(value) => {
+                    let owned = owns_items(&source);
+                    Ok(Some(self.call_closure_with(&closure, &[value], owned)?))
+                }
                 None => Ok(None),
             },
             Back::Filter(source, closure) => loop {
@@ -176,12 +179,16 @@ impl Vm {
                 {
                     return Ok(Some(value));
                 }
+                self.discard(&source, value)?;
             },
             Back::FilterMap(source, closure) => loop {
                 let Some(value) = self.iterator_next_back(&source)? else {
                     return Ok(None);
                 };
-                if let Some(inner) = option_inner(&self.call_closure_data(&closure, &[value])?) {
+                let owned = owns_items(&source);
+                if let Some(inner) =
+                    option_inner(&self.call_closure_with(&closure, &[value], owned)?)
+                {
                     return Ok(Some(inner));
                 }
             },

@@ -4,7 +4,7 @@ use crate::lang::pat::Pat;
 use crate::lang::ty::{IntWidth, StdErr, Ty};
 use crate::lang::user::MethodKind;
 
-use super::expr::{Arm, Expr, lookup, minimal};
+use super::expr::{Arm, Expr, MemKind, ReadMode, VecTakeKind, lookup, minimal};
 
 impl Expr {
     pub fn ty(&self) -> Ty {
@@ -23,6 +23,11 @@ impl Expr {
             Self::TupleLit(items) => Ty::Tuple(items.iter().map(Expr::ty).collect()),
             Self::ResLit { ok, err, .. } => Ty::res_of(ok.clone(), err.clone()),
             Self::StdErrLit(err) => Ty::StdErr(*err),
+            Self::TraceLit(_) => Ty::Trace,
+            Self::VecTake { elem, kind, .. } => match kind {
+                VecTakeKind::Pop => Ty::opt_of(elem.clone()),
+                VecTakeKind::Remove(_) | VecTakeKind::SwapRemove(_) => elem.clone(),
+            },
             Self::StructLit { shape, .. } | Self::EnumLit { shape, .. } => Ty::User(shape.clone()),
             Self::DefaultOf(ty) | Self::Cast { to: ty, .. } | Self::Into { to: ty, .. } => {
                 ty.clone()
@@ -43,6 +48,7 @@ impl Expr {
             | Self::Method { ty, .. }
             | Self::ApplyCall { ty, .. }
             | Self::Try { ty, .. }
+            | Self::Mem { ty, .. }
             | Self::Match { ty, .. } => ty.clone(),
         }
     }
@@ -81,9 +87,7 @@ impl Expr {
                 let rendered: Vec<String> = args.iter().map(Expr::render).collect();
                 format!("{name}({})", rendered.join(", "))
             }
-            // a non copy binding is read through a clone, so the generator never has to track liveness
-            Self::Var { name, ty } if !ty.is_copy() => format!("{name}.clone()"),
-            Self::Var { name, .. } => name.clone(),
+            Self::Var { name, ty, mode } => owned(name.clone(), ty, *mode),
             Self::ConstRef {
                 name, ty, opaque, ..
             } => shield(name, &minimal(ty).render(), *opaque),
@@ -123,26 +127,51 @@ impl Expr {
             | Self::Try { .. }
             | Self::Into { .. }
             | Self::Match { .. }
-            | Self::Block { .. } => self.render_access(),
+            | Self::Block { .. }
+            | Self::Mem { .. }
+            | Self::VecTake { .. } => self.render_access(),
             _ => unreachable!("every literal renders through render_literal"),
         }
     }
 
     fn render_access(&self) -> String {
         match self {
-            Self::Field { base, index, ty } => {
+            Self::Field {
+                base,
+                index,
+                ty,
+                mode,
+            } => {
                 let Ty::User(shape) = base.ty() else {
                     return base.render();
                 };
                 let name = &shape.fields()[*index].name;
-                owned(format!("{}.{name}", base.render_place()), ty)
+                owned(format!("{}.{name}", base.render_place()), ty, *mode)
             }
-            Self::TupleField { base, index, ty } => {
-                owned(format!("{}.{index}", base.render_place()), ty)
-            }
-            Self::Index { base, index, ty } => {
-                owned(format!("{}[{}]", base.render_place(), index.render()), ty)
-            }
+            Self::TupleField {
+                base,
+                index,
+                ty,
+                mode,
+            } => owned(format!("{}.{index}", base.render_place()), ty, *mode),
+            // an index can't be moved out of, so it always clones
+            Self::Index { base, index, ty } => owned(
+                format!("{}[{}]", base.render_place(), index.render()),
+                ty,
+                ReadMode::Clone,
+            ),
+            Self::Mem { name, kind, .. } => match kind {
+                MemKind::Take => format!("std::mem::take(&mut {name})"),
+                MemKind::Replace(value) => {
+                    format!("std::mem::replace(&mut {name}, {})", value.render())
+                }
+                MemKind::OptTake => format!("{name}.take()"),
+            },
+            Self::VecTake { name, kind, .. } => match kind {
+                VecTakeKind::Pop => format!("{name}.pop()"),
+                VecTakeKind::Remove(index) => format!("{name}.remove({index}usize)"),
+                VecTakeKind::SwapRemove(index) => format!("{name}.swap_remove({index}usize)"),
+            },
             Self::Method {
                 owner,
                 name,
@@ -234,6 +263,7 @@ impl Expr {
             } => format!("diff_opaque_char({value:?})"),
             Self::CharLit { value, .. } => format!("{value:?}"),
             Self::StrLit(value) => format!("String::from({value:?})"),
+            Self::TraceLit(id) => format!("DiffTrace({id})"),
             _ => return self.render_collection_literal(),
         })
     }
@@ -339,8 +369,8 @@ impl Expr {
     }
 }
 
-fn owned(place: String, ty: &Ty) -> String {
-    if ty.is_copy() {
+fn owned(place: String, ty: &Ty, mode: ReadMode) -> String {
+    if ty.is_copy() || mode == ReadMode::Move {
         place
     } else {
         format!("{place}.clone()")

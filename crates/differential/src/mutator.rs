@@ -9,7 +9,7 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 
 use crate::generator::generate_base;
-use crate::lang::expr::{Expr, minimal};
+use crate::lang::expr::{Expr, ReadMode, minimal};
 use crate::lang::pat::Pat;
 use crate::lang::pipe::{Bind, Stage, Term};
 use crate::lang::stmt::{Ann, Stmt};
@@ -77,6 +77,8 @@ fn is_portable(expr: &Expr) -> bool {
                 | Expr::EnumLit { .. }
                 | Expr::Field { .. }
                 | Expr::Block { .. }
+                | Expr::Mem { .. }
+                | Expr::VecTake { .. }
         );
         let pats = match node {
             Expr::Match { arms, .. } => arms
@@ -149,16 +151,21 @@ fn bind_names(bind: &Bind, out: &mut BTreeSet<String>) {
 }
 
 /// A free variable with no same typed binding in scope becomes the minimal literal of its type.
+/// A rebound read clones, a move of a binding the target program still needs would break it.
 fn rebind(
     expr: &mut Expr,
     environment: &[(String, Ty)],
     bound: &BTreeSet<String>,
     rng: &mut StdRng,
 ) {
-    if let Expr::Var { name, ty } = expr {
+    if let Expr::Field { mode, .. } | Expr::TupleField { mode, .. } = expr {
+        *mode = ReadMode::Clone;
+    }
+    if let Expr::Var { name, ty, mode } = expr {
         if bound.contains(name) {
             return;
         }
+        *mode = ReadMode::Clone;
         let candidates: Vec<&(String, Ty)> = environment
             .iter()
             .filter(|(_, env_ty)| env_ty == ty)
@@ -181,6 +188,7 @@ fn splice(program: &mut Program, donor: &Program, rng: &mut StdRng) -> bool {
         return false;
     }
     let block_index = rng.random_range(0..program.blocks.len());
+    let untouched = program.blocks[block_index].clone();
     let block = &mut program.blocks[block_index];
     let targets: Vec<usize> = block
         .statements
@@ -259,5 +267,10 @@ fn splice(program: &mut Program, donor: &Program, rng: &mut StdRng) -> bool {
         *ann = Ann::Typed;
     }
     block.seal();
+    // the graft may read a binding the target moved before this statement
+    if !block.owns_soundly() {
+        *block = untouched;
+        return false;
+    }
     true
 }

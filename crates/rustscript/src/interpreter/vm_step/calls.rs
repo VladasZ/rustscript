@@ -77,6 +77,7 @@ pub(super) fn request_call(
             argc
         );
     }
+    // the arguments were moved out of the caller's window, so the callee owns them
     ctx.call = Some(CallReq {
         chunk,
         closure,
@@ -84,6 +85,7 @@ pub(super) fn request_call(
         abase: abase as usize,
         argc: argc as usize,
         type_env,
+        owned_args: true,
     });
     Ok(Flow::Call)
 }
@@ -149,9 +151,15 @@ pub(super) fn array_repeat(ctx: &mut StepCtx, dst: u16, val: u16, count: u16) ->
             None => bail!("array repeat length must be an integer"),
         },
     };
-    // every element owns its own storage, `vec![vec![0; 3]; 2]` must not alias its rows
-    let v = ctx.get(val).clone();
-    let items = (0..n).map(|_| v.deep_clone()).collect();
+    // Every element owns its own storage, `vec![vec![0; 3]; 2]` must not alias its rows. Like
+    // std, the item itself lands in the last slot and a count of zero drops it.
+    let v = ctx.take(val);
+    let mut items: Vec<Value> = (1..n).map(|_| v.deep_clone()).collect();
+    if n == 0 {
+        ctx.vm.run_user_drop(v)?;
+    } else {
+        items.push(v);
+    }
     Ok(ctx.set(dst, Value::vec(items)))
 }
 
@@ -214,17 +222,19 @@ pub(super) fn make_struct(ctx: &mut StepCtx, dst: u16, info: u16, first: u16) ->
         let mut renames = lit.shape.renames.clone();
         let mut skip_none = lit.shape.skip_none.clone();
         if let Value::Struct(r) = rest {
-            let rvals = r.values.lock();
-            for (slot, (k, v)) in r.shape.fields.iter().zip(rvals.iter()).enumerate() {
+            // the base is the literal's own, a moved local or a fresh value, so the fields it
+            // takes leave unit behind and the rest drops only what stayed
+            let mut rvals = r.values.lock();
+            for (slot, (k, v)) in r.shape.fields.iter().zip(rvals.iter_mut()).enumerate() {
                 match lit.shape.slot(k) {
                     Some(index) if !lit.filled.get(index).copied().unwrap_or(true) => {
-                        values[index] = v.clone();
+                        values[index] = take(v);
                     }
                     Some(_) => {}
                     // the struct definition was out of reach at compile time
                     None => {
                         fields.push(k.clone());
-                        values.push(v.clone());
+                        values.push(take(v));
                         if !renames.is_empty() {
                             renames.push(r.shape.renames.get(slot).cloned().flatten());
                         }
@@ -283,7 +293,7 @@ pub(super) fn spawn_op(ctx: &mut StepCtx, dst: u16, child: u16) -> Flow {
     let clo = make_closure(ctx, child);
     let interp = ctx.vm.clone();
     let handle = ctx.vm.rt.spawn_blocking(move || {
-        match interp.run_chunk(&clo.chunk, &[], &clo.captured) {
+        match interp.run_chunk(&clo.chunk, &[], &clo.captured, true) {
             Ok(v) => v,
             // A task panic prints and the join handle gives `Err(JoinError)`, like real tokio.
             // `resume_unwind` skips the hook so the header is not printed twice.

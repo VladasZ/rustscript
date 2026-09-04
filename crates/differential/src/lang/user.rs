@@ -97,7 +97,16 @@ pub struct UserShape {
     /// source types of the `From` impls
     pub froms: Vec<Ty>,
     pub depth: usize,
-    pub has_float: bool,
+    pub holds: Holds,
+}
+
+/// What the members carry, so a container of the type answers the same questions.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct Holds {
+    /// a float has no total order and rounds per operation order
+    pub float: bool,
+    /// a trace prints when it drops, see `Ty::Trace`
+    pub trace: bool,
 }
 
 impl UserShape {

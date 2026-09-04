@@ -99,11 +99,15 @@ pub enum ClosureSource {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Stmt {
+    /// `mutable` is set by `mark_mutable` from the writes that resolve to this binding, a
+    /// shadowed name may be written in one scope and not another.
     Let {
         name: String,
         ty: Ty,
         expr: Expr,
         ann: Ann,
+        #[serde(default)]
+        mutable: bool,
     },
     /// `let (a, b) = tuple;`
     LetTuple {
@@ -122,6 +126,23 @@ pub enum Stmt {
     Assign {
         name: String,
         expr: Expr,
+    },
+    /// `name.field = expr;`, which also puts a moved out field back. `base` is the type of the
+    /// binding, it names the field.
+    AssignField {
+        name: String,
+        base: Ty,
+        index: usize,
+        expr: Expr,
+    },
+    /// `std::mem::swap(&mut a, &mut b);`
+    Swap {
+        a: String,
+        b: String,
+    },
+    /// `{ body }`, a scope of its own so its bindings drop at the closing brace
+    Scope {
+        body: Vec<Stmt>,
     },
     /// `name op= expr;`
     Compound {

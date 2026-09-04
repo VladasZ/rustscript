@@ -6,7 +6,7 @@ use syn::{Block, Expr, Pat, Stmt};
 
 use crate::interpreter::bytecode::{DISCARD, Op, Reg};
 
-use super::support::{init_is_owned, init_is_unique, pattern_borrows, pattern_owns};
+use super::support::{init_is_unique, pattern_borrows, pattern_owns};
 use super::walks::{from_str_root, unparen};
 use super::{Compiler, macro_yields_value, numeric_annotation};
 
@@ -56,6 +56,7 @@ impl Compiler<'_> {
             let is_last = i == last;
             self.set_line(stmt.span());
             let guard_mark = self.cur().guard_temps.len();
+            let temp_mark = self.cur().owned_temps.len();
             match stmt {
                 Stmt::Local(local)
                     if local
@@ -73,12 +74,14 @@ impl Compiler<'_> {
                     if is_last && semi.is_none() {
                         self.compile_owned_into(dst, expr)?;
                     } else {
-                        // a statement position call discards its result
-                        if let Expr::MethodCall(m) = expr {
+                        // A statement position call discards its result. With `Drop` impls
+                        // around, what it hands back still drops at the semicolon.
+                        if let Expr::MethodCall(m) = expr
+                            && !self.ctx.has_drop
+                        {
                             self.compile_method(DISCARD, m)?;
                         } else {
-                            let tmp = self.alloc();
-                            self.compile_into(tmp, expr)?;
+                            self.compile_expr(expr)?;
                         }
                         if is_last {
                             self.emit(Op::LoadUnit { dst });
@@ -101,6 +104,8 @@ impl Compiler<'_> {
                     }
                 }
             }
+            // the tail's temporaries go before the scope's own bindings, the 2024 rule
+            self.drop_temps(temp_mark, is_last.then_some(dst));
             self.release_guard_temps(guard_mark, is_last.then_some(dst));
         }
         Ok(())
@@ -131,7 +136,7 @@ impl Compiler<'_> {
         }
         let matched = self.alloc();
         let pidx = self.pattern_info(&local.pat)?;
-        if !owned || !init_is_owned(&init.expr) {
+        if !owned || !self.init_owned(&init.expr) {
             self.exempt_pattern_binds(pidx);
         }
         self.emit(Op::TestBind {
@@ -229,7 +234,7 @@ impl Compiler<'_> {
         let owned = local
             .init
             .as_ref()
-            .is_none_or(|init| init_is_owned(&init.expr));
+            .is_none_or(|init| self.init_owned(&init.expr));
         let borrowed = local
             .init
             .as_ref()

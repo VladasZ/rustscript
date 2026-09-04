@@ -96,32 +96,27 @@ impl ValueRef {
     }
 
     pub fn set(&self, value: Value) -> bool {
+        self.swap(value).is_some()
+    }
+
+    /// Stores the value and hands the old one back, `None` for a dangling reference.
+    pub fn swap(&self, value: Value) -> Option<Value> {
         match self {
             Self::VecElement { values, index } => {
                 let mut values = values.lock();
-                let Some(slot) = values.get_mut(*index) else {
-                    return false;
-                };
-                *slot = value;
-                true
+                let slot = values.get_mut(*index)?;
+                Some(std::mem::replace(slot, value))
             }
             Self::MapEntry { map, key } => {
-                map.lock().insert(key.clone(), value);
-                true
+                Some(map.lock().insert(key.clone(), value).unwrap_or_default())
             }
             Self::StructField { data, slot } => {
                 let mut values = data.values.lock();
-                let Some(target) = values.get_mut(*slot) else {
-                    return false;
-                };
-                *target = value;
-                true
+                let target = values.get_mut(*slot)?;
+                Some(std::mem::replace(target, value))
             }
-            Self::CellSlot { slot, .. } => {
-                *slot.lock() = value;
-                true
-            }
-            Self::Borrowed { .. } => false,
+            Self::CellSlot { slot, .. } => Some(std::mem::replace(&mut *slot.lock(), value)),
+            Self::Borrowed { .. } => None,
         }
     }
 }

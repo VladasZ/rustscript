@@ -3,13 +3,14 @@
 use rand::RngExt;
 
 use crate::lang::block::{ConstDef, FnDef, FnKind, Param, ParamMode};
-use crate::lang::expr::{Arm, BinOp, Expr};
+use crate::lang::expr::{Arm, BinOp, Expr, ReadMode};
+use crate::lang::own::BindKind;
 use crate::lang::pat::Pat;
 use crate::lang::stmt::{Ann, Stmt};
-use crate::lang::synth::{BindKind, Binding, Generator};
+use crate::lang::synth::Generator;
 use crate::lang::ty::{MAX_TY_DEPTH, StdErr, Ty};
 use crate::lang::user::{
-    Compare, Derives, DisplayForm, DisplayImpl, DisplayPiece, Field, FromImpl, MethodKind,
+    Compare, Derives, DisplayForm, DisplayImpl, DisplayPiece, Field, FromImpl, Holds, MethodKind,
     MethodSig, Ret, UserDef, UserKind, UserMethod, UserShape, Variant,
 };
 
@@ -46,6 +47,7 @@ impl Generator<'_> {
                     Some(ty) => ty,
                     None => self.scalar_ty(),
                 },
+                4 => Ty::Trace,
                 _ => self.scalar_ty(),
             };
             if candidate.depth() < MAX_TY_DEPTH {
@@ -84,7 +86,10 @@ impl Generator<'_> {
         let display = self.chance(0.5);
         let describe = self.chance(0.3);
         let depth = members.iter().map(Ty::depth).max().unwrap_or(0);
-        let has_float = members.iter().any(Ty::contains_float);
+        let holds = Holds {
+            float: members.iter().any(Ty::contains_float),
+            trace: members.iter().any(Ty::contains_trace),
+        };
         let mut shape = UserShape {
             name,
             kind: UserKind::Struct(fields.clone()),
@@ -94,7 +99,7 @@ impl Generator<'_> {
             methods: Vec::new(),
             froms: Vec::new(),
             depth,
-            has_float,
+            holds,
         };
         // From<the first scalar field>
         let from_slot = fields
@@ -146,7 +151,8 @@ impl Generator<'_> {
     fn struct_methods(&mut self, shape: &mut UserShape, fields: &[Field]) -> Vec<UserMethod> {
         let owner = Ty::user(shape.clone());
         let mut methods = Vec::new();
-        // a local named `self.f0` renders exactly like a field read
+        // a local named `self.f0` renders exactly like a field read, and stays behind the
+        // `&self` so it can only be cloned
         let self_locals: Vec<(String, Ty)> = fields
             .iter()
             .map(|field| (format!("self.{}", field.name), field.ty.clone()))
@@ -167,7 +173,7 @@ impl Generator<'_> {
                 Ret::Ty(ty) => ty.clone(),
             };
             let body = self.without_scope(|inner| {
-                inner.with_locals(&self_locals, |inner| {
+                inner.with_borrowed(&self_locals, |inner| {
                     inner.with_locals(&params, |inner| inner.expr(&ret_ty, 2))
                 })
             });
@@ -196,10 +202,14 @@ impl Generator<'_> {
                         .iter()
                         .enumerate()
                         .map(|(index, field)| match params.get(index) {
-                            Some((name, ty)) => Expr::Var {
-                                name: name.clone(),
-                                ty: ty.clone(),
-                            },
+                            Some((name, ty)) => {
+                                inner.scope.note_move(name);
+                                Expr::Var {
+                                    name: name.clone(),
+                                    ty: ty.clone(),
+                                    mode: ReadMode::Move,
+                                }
+                            }
                             None => inner.expr(&field.ty, 1),
                         })
                         .collect();
@@ -263,7 +273,10 @@ impl Generator<'_> {
         let display = self.chance(0.5) || error;
         let describe = self.chance(0.3);
         let depth = members.iter().map(Ty::depth).max().unwrap_or(0);
-        let has_float = members.iter().any(Ty::contains_float);
+        let holds = Holds {
+            float: members.iter().any(Ty::contains_float),
+            trace: members.iter().any(Ty::contains_trace),
+        };
         let mut shape = UserShape {
             name,
             kind: UserKind::Enum(variants.clone()),
@@ -273,7 +286,7 @@ impl Generator<'_> {
             methods: Vec::new(),
             froms: Vec::new(),
             depth,
-            has_float,
+            holds,
         };
         // `From<payload>` for every single payload variant, so `?` has conversions to go through
         let mut froms = Vec::new();
@@ -361,6 +374,7 @@ impl Generator<'_> {
             scrutinee: Box::new(Expr::Var {
                 name: "self".to_string(),
                 ty: owner,
+                mode: ReadMode::Clone,
             }),
             by_ref: false,
             arms,
@@ -398,11 +412,7 @@ impl Generator<'_> {
                 ty: ty.clone(),
                 expr,
             });
-            self.scope.push(Binding {
-                name,
-                ty,
-                kind: BindKind::Const,
-            });
+            self.scope.push(name, ty, BindKind::Const);
         }
     }
 
@@ -467,6 +477,7 @@ impl Generator<'_> {
     /// A couple of lets, maybe an early return, and a tail that may be a bare pipe.
     fn fn_body(&mut self, ret: &Ty) -> Expr {
         let mut stmts = Vec::new();
+        let mark = self.scope.len();
         let lets = self.rng.random_range(0..=2);
         for _ in 0..lets {
             let ty = self.any_ty();
@@ -477,12 +488,13 @@ impl Generator<'_> {
             } else {
                 Ann::Typed
             };
-            self.push_local(name.clone(), ty.clone());
+            self.push_let(name.clone(), ty.clone());
             stmts.push(Stmt::Let {
                 name,
                 ty,
                 expr,
                 ann,
+                mutable: false,
             });
         }
         if self.chance(0.4) {
@@ -494,9 +506,7 @@ impl Generator<'_> {
         } else {
             self.expr(ret, 2)
         };
-        for _ in 0..lets {
-            self.scope.pop();
-        }
+        self.scope.truncate(mark);
         if stmts.is_empty() {
             tail
         } else {

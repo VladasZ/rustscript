@@ -13,7 +13,7 @@ use super::walks::qualified_method_ref;
 
 use super::infer::Ty;
 use super::{
-    Compiler, FloatTy, NameLoc, NumericTy, bin_kind, expr_kind, int_literal, is_assign_op,
+    Compiler, FloatTy, NameLoc, NumericTy, bin_kind, expr_kind, idx16, int_literal, is_assign_op,
 };
 
 /// The operand type a typed op carries.
@@ -36,7 +36,46 @@ impl Compiler<'_> {
         }
         let dst = self.alloc();
         self.compile_into(dst, expr)?;
+        if self.ctx.has_drop && self.temp_owned(expr) {
+            self.cur().owned_temps.push(dst);
+        }
         Ok(dst)
+    }
+
+    /// Drops the owned temporaries recorded since `mark`, oldest last like real Rust drops the
+    /// temporaries of a statement at its semicolon. `keep` is the value that leaves.
+    pub(super) fn drop_temps(&mut self, mark: usize, keep: Option<Reg>) -> Option<u16> {
+        let f = self.cur();
+        if f.owned_temps.len() <= mark {
+            return None;
+        }
+        let regs: Vec<Reg> = f
+            .owned_temps
+            .split_off(mark)
+            .into_iter()
+            .filter(|reg| Some(*reg) != keep)
+            .collect();
+        self.drop_regs(regs)
+    }
+
+    /// Drops the registers here, as a list a second path can emit again.
+    pub(super) fn drop_regs(&mut self, regs: Vec<Reg>) -> Option<u16> {
+        if regs.is_empty() || !self.ctx.has_drop {
+            return None;
+        }
+        let f = self.cur();
+        f.drop_lists.push(regs.into());
+        let list = idx16(f.drop_lists.len() - 1);
+        self.emit(Op::DropScope { list });
+        Some(list)
+    }
+
+    /// The registers a second path drops as well. A dropped register holds unit, so a list
+    /// emitted on two paths that both run is still one drop.
+    pub(super) fn emit_drop_lists(&mut self, lists: &[Option<u16>]) {
+        for list in lists.iter().flatten() {
+            self.emit(Op::DropScope { list: *list });
+        }
     }
 
     pub(super) fn compile_into(&mut self, dst: Reg, expr: &Expr) -> Result<()> {
@@ -92,7 +131,8 @@ impl Compiler<'_> {
                 });
             }
             Expr::Repeat(r) => {
-                let val = self.compile_expr(&r.expr)?;
+                // the item moves into the last slot, the others are clones of it
+                let val = self.compile_owned_expr(&r.expr)?;
                 let count = self.compile_expr(&r.len)?;
                 self.emit(Op::MakeArrayRepeat { dst, val, count });
             }

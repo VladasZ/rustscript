@@ -5,7 +5,9 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::lang::expr::{BinOp, Expr, Helper};
+use crate::lang::own::check_block;
 use crate::lang::stmt::{ClosureSource, Stmt};
+use crate::lang::stmt_render::mark_mutable;
 use crate::lang::ty::Ty;
 use crate::lang::user::UserDef;
 
@@ -59,8 +61,10 @@ impl FnDef {
                 let (sig, prologue) = render_params(params);
                 let body_text = match body {
                     Expr::Block { stmts, tail } => {
+                        let mut marked = stmts.clone();
+                        mark_mutable(&mut marked, Some(tail));
                         let mut out = String::new();
-                        for stmt in stmts {
+                        for stmt in &marked {
                             out.push_str(&stmt.render(&block_mutable(stmts), 1));
                         }
                         out.push_str(&format!("    {}\n", tail.render()));
@@ -208,11 +212,18 @@ impl Block {
 
     pub fn render(&self) -> String {
         let mutable = self.mutable_names();
+        let mut marked = self.statements.clone();
+        mark_mutable(&mut marked, None);
         let mut out = String::new();
-        for stmt in &self.statements {
+        for stmt in &marked {
             out.push_str(&stmt.render(&mutable, 1));
         }
         out
+    }
+
+    /// Every read resolves to a binding it may read, see `own::check_block`.
+    pub fn owns_soundly(&self) -> bool {
+        check_block(self).is_ok()
     }
 
     /// The describe impls on builtin types are rendered by the program, once across every block,
@@ -416,6 +427,8 @@ impl Block {
         }
     }
 
+    /// Every candidate still owns soundly. Dropping a statement never adds a read, but dropping
+    /// the assignment that revived a moved binding leaves the reads after it dangling.
     pub fn shrinks(&self) -> Vec<Self> {
         let mut candidates = Vec::new();
         for index in 0..self.statements.len() {
@@ -440,25 +453,14 @@ impl Block {
                 }
             }
         }
+        candidates.retain(Self::owns_soundly);
         candidates
     }
 
     /// Drop 1 statement and everything that depended on it.
     fn without(&self, index: usize) -> Self {
-        let mut dropped: BTreeSet<String> = self.statements[index].declared().into_iter().collect();
-        let mut statements = Vec::new();
-        for (position, stmt) in self.statements.iter().enumerate() {
-            if position == index {
-                continue;
-            }
-            if stmt.uses_any(&dropped) || stmt.writes_any(&dropped) {
-                dropped.extend(stmt.declared());
-                continue;
-            }
-            statements.push(stmt.clone());
-        }
         let mut candidate = Self {
-            statements,
+            statements: remove_with_dependents(&self.statements, index),
             fns: self.fns.clone(),
             consts: self.consts.clone(),
             types: self.types.clone(),
@@ -468,6 +470,26 @@ impl Block {
         candidate.seal();
         candidate
     }
+}
+
+/// The list without statement `index` and without every later statement that read, wrote or
+/// revived a binding it declared. A shadowing `let` counts as a use of the name, so its whole
+/// tail goes too, which over drops but never leaves a read dangling.
+pub fn remove_with_dependents(stmts: &[Stmt], index: usize) -> Vec<Stmt> {
+    let mut dropped: BTreeSet<String> = stmts[index].declared().into_iter().collect();
+    let mut out = Vec::new();
+    for (position, stmt) in stmts.iter().enumerate() {
+        if position == index {
+            continue;
+        }
+        let revives = stmt.revives().iter().any(|name| dropped.contains(name));
+        if stmt.uses_any(&dropped) || stmt.writes_any(&dropped) || revives {
+            dropped.extend(stmt.declared());
+            continue;
+        }
+        out.push(stmt.clone());
+    }
+    out
 }
 
 /// The declaration line and each impl header must not count as a use by another type.

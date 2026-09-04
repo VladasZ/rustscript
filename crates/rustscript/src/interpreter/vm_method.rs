@@ -6,12 +6,36 @@ use std::mem::take;
 use anyhow::{Result, bail};
 
 use super::bytecode::{BuiltinId, MethodName};
+use super::discard::{discard, take_discarded};
 use super::enum_def::{EnumKind, OK, SOME};
 use super::methods::{make_ordering, str_grow};
 use super::value::{MapKind, Value};
 use super::vm_step::{Flow, StepCtx};
 
+/// A native parks what it throws away, see `discard`, and it drops here right after the call.
 pub(super) fn method_op(
+    ctx: &mut StepCtx,
+    dst: u16,
+    recv: u16,
+    name: u16,
+    abase: u16,
+    argc: u16,
+) -> Result<Flow> {
+    let flow = method_call(ctx, dst, recv, name, abase, argc)?;
+    // drained either way, or a script without a `Drop` impl parks values forever
+    let parked = take_discarded();
+    if ctx.vm.has_drop {
+        let owned = ctx.cur.names[name as usize].owned;
+        for parked in parked {
+            if owned || !parked.payload {
+                ctx.vm.run_user_drop(parked.value)?;
+            }
+        }
+    }
+    Ok(flow)
+}
+
+fn method_call(
     ctx: &mut StepCtx,
     dst: u16,
     recv: u16,
@@ -235,7 +259,12 @@ fn option_fast(
             let Value::Enum { data, .. } = &ctx.stack[ctx.base + recv] else {
                 return None;
             };
-            data.lock().first().cloned()
+            let payload = data.lock().first().cloned();
+            // the fallback goes unused
+            if id == BuiltinId::UnwrapOr && argc == 1 {
+                discard(take(&mut ctx.stack[s]));
+            }
+            payload
         }
         BuiltinId::UnwrapOr if argc == 1 => Some(take(&mut ctx.stack[s])),
         _ => None,
@@ -299,8 +328,16 @@ pub(super) fn get_or_default(
     let key_v = ctx.get(key).clone();
     let get = MethodName::builtin(BuiltinId::Get);
     let opt = ctx.vm.eval_method(&recv_v, &get, &mut [key_v])?;
-    let v = opt
-        .some_payload()
-        .unwrap_or_else(|| ctx.get(default).clone());
+    let v = match opt.some_payload() {
+        Some(found) => {
+            // the fallback goes unused
+            let unused = ctx.take(default);
+            if ctx.vm.has_drop {
+                ctx.vm.run_user_drop(unused)?;
+            }
+            found
+        }
+        None => ctx.get(default).clone(),
+    };
     Ok(ctx.set(dst, v))
 }

@@ -44,6 +44,9 @@ pub enum Ty {
     StdErr(StdErr),
     /// the shape carries what typing needs, the bodies live on the block
     User(Box<UserShape>),
+    /// `DiffTrace`, a program local struct whose `Drop` prints. Every move, copy, scope end and
+    /// unwind of one becomes a line of output.
+    Trace,
 }
 
 impl Ty {
@@ -68,20 +71,23 @@ impl Ty {
             Self::Res(ok, err) => format!("Result<{}, {}>", ok.rust(), err.rust()),
             Self::StdErr(err) => err.rust().to_string(),
             Self::User(shape) => shape.name.clone(),
+            Self::Trace => TRACE_NAME.to_string(),
         }
     }
 
-    /// A non copy read renders with `.clone()`, which keeps programs free of borrow errors.
+    /// A non copy read renders with `.clone()` unless the generator chose a move.
     pub fn is_copy(&self) -> bool {
         match self {
             Self::Int(_) | Self::Float(_) | Self::Bool | Self::Char => true,
-            // user types never derive Copy, so every read clones and exercises the value model
+            // user types never derive Copy, so every read clones or moves and exercises the
+            // value model
             Self::Str
             | Self::Vec(_)
             | Self::Map(..)
             | Self::Set(_)
             | Self::StdErr(_)
-            | Self::User(_) => false,
+            | Self::User(_)
+            | Self::Trace => false,
             Self::Opt(inner) => inner.is_copy(),
             Self::Tuple(items) => items.iter().all(Ty::is_copy),
             Self::Res(ok, err) => ok.is_copy() && err.is_copy(),
@@ -100,7 +106,7 @@ impl Ty {
     pub fn is_ord(&self) -> bool {
         match self {
             Self::Float(_) | Self::Map(..) | Self::Set(_) | Self::StdErr(_) => false,
-            Self::Int(_) | Self::Bool | Self::Char | Self::Str => true,
+            Self::Int(_) | Self::Bool | Self::Char | Self::Str | Self::Trace => true,
             Self::Vec(inner) | Self::Opt(inner) => inner.is_ord(),
             Self::Tuple(items) => items.iter().all(Ty::is_ord),
             Self::Res(ok, err) => ok.is_ord() && err.is_ord(),
@@ -112,7 +118,9 @@ impl Ty {
     pub fn is_eq(&self) -> bool {
         match self {
             Self::Float(_) => false,
-            Self::Int(_) | Self::Bool | Self::Char | Self::Str | Self::StdErr(_) => true,
+            Self::Int(_) | Self::Bool | Self::Char | Self::Str | Self::StdErr(_) | Self::Trace => {
+                true
+            }
             Self::Vec(inner) | Self::Opt(inner) | Self::Set(inner) => inner.is_eq(),
             Self::Map(key, value) | Self::Res(key, value) => key.is_eq() && value.is_eq(),
             Self::Tuple(items) => items.iter().all(Ty::is_eq),
@@ -120,9 +128,11 @@ impl Ty {
         }
     }
 
+    /// A trace never hashes. A hashed container clones, iterates and drops its entries in an
+    /// order real Rust randomizes per process, and every one of those prints.
     pub fn is_hash(&self) -> bool {
         match self {
-            Self::Float(_) | Self::Map(..) | Self::Set(_) | Self::StdErr(_) => false,
+            Self::Float(_) | Self::Map(..) | Self::Set(_) | Self::StdErr(_) | Self::Trace => false,
             Self::Int(_) | Self::Bool | Self::Char | Self::Str => true,
             Self::Vec(inner) | Self::Opt(inner) => inner.is_hash(),
             Self::Tuple(items) => items.iter().all(Ty::is_hash),
@@ -147,7 +157,8 @@ impl Ty {
             | Self::Vec(_)
             | Self::Opt(_)
             | Self::Map(..)
-            | Self::Set(_) => true,
+            | Self::Set(_)
+            | Self::Trace => true,
             Self::Tuple(items) => items.iter().all(Ty::has_default),
             Self::User(shape) => shape.derives.default,
         }
@@ -207,7 +218,22 @@ impl Ty {
                 key.contains_float() || value.contains_float()
             }
             Self::Tuple(items) => items.iter().any(Ty::contains_float),
-            Self::User(shape) => shape.has_float,
+            Self::User(shape) => shape.holds.float,
+            _ => false,
+        }
+    }
+
+    /// Whether a value of this type prints when it drops or moves. See `is_hash` for why a map
+    /// or a set never holds one.
+    pub fn contains_trace(&self) -> bool {
+        match self {
+            Self::Trace => true,
+            Self::Vec(inner) | Self::Opt(inner) | Self::Set(inner) => inner.contains_trace(),
+            Self::Map(key, value) | Self::Res(key, value) => {
+                key.contains_trace() || value.contains_trace()
+            }
+            Self::Tuple(items) => items.iter().any(Ty::contains_trace),
+            Self::User(shape) => shape.holds.trace,
             _ => false,
         }
     }
@@ -238,6 +264,7 @@ impl Ty {
             Self::StdErr(_) => "lang-ty-stderr",
             Self::User(shape) if shape.is_enum() => "lang-ty-enum",
             Self::User(_) => "lang-ty-struct",
+            Self::Trace => "lang-ty-trace",
         }
     }
 
@@ -275,6 +302,21 @@ impl Ty {
     pub const I64: Ty = Ty::Int(IntWidth::I64);
     pub const F64: Ty = Ty::Float(FloatWidth::F64);
 }
+
+pub const TRACE_NAME: &str = "DiffTrace";
+
+/// Emitted once per program that names the type. `Clone` is derived so a clone stays silent and
+/// only drops print, otherwise every observation would drown in clone lines.
+pub const TRACE_DEF: &str = r#"#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Default)]
+struct DiffTrace(i64);
+
+impl Drop for DiffTrace {
+    fn drop(&mut self) {
+        println!("drop {}", self.0);
+    }
+}
+
+"#;
 
 /// Fixed order so generation stays deterministic per seed.
 pub const SCALAR_TYPES: &[Ty] = &[

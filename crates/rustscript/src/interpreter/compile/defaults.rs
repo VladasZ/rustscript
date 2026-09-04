@@ -93,8 +93,12 @@ impl Compiler<'_> {
         let mut renames = Vec::new();
         let mut skip_none = Vec::new();
         let mut fields = Vec::new();
-        for field in &ast.fields {
-            let name = field.ident.as_ref()?.to_string();
+        for (index, field) in ast.fields.iter().enumerate() {
+            // a tuple struct names its fields by position, like `make_tuple_struct`
+            let name = field
+                .ident
+                .as_ref()
+                .map_or_else(|| index.to_string(), ToString::to_string);
             names.push(Arc::<str>::from(name));
             renames
                 .push(crate::interpreter::serde_attrs::serde_rename(field).map(Arc::<str>::from));

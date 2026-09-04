@@ -62,7 +62,12 @@ impl Compiler<'_> {
             }
         }
         if let Some(rest) = &s.rest {
-            self.compile_owned_into(base + idx16(order.len()), rest)?;
+            let reg = base + idx16(order.len());
+            self.compile_owned_into(reg, rest)?;
+            // the fields the literal wrote stay in a fresh base and drop with the statement
+            if self.ctx.has_drop && self.temp_owned(rest) {
+                self.cur().owned_temps.push(reg);
+            }
         }
         let filled: Vec<bool> = order
             .iter()

@@ -569,8 +569,9 @@ pub(super) fn splice_str(
     Ok(out)
 }
 
-pub(super) fn set_index(recv: &Value, key: &Value, v: Value) -> Result<()> {
-    match recv {
+/// Stores the element and hands the old value back for its drop.
+pub(super) fn set_index(recv: &Value, key: &Value, v: Value) -> Result<Value> {
+    let old = match recv {
         Value::Vec(items) => {
             let i = usize::try_from(int_of(key)?)?;
             let mut items = items.lock();
@@ -580,17 +581,17 @@ pub(super) fn set_index(recv: &Value, key: &Value, v: Value) -> Result<()> {
                     items.len()
                 );
             }
-            items[i] = v;
+            std::mem::replace(&mut items[i], v)
         }
         Value::Map(m, _) => {
             let k = key
                 .as_key()
                 .ok_or_else(|| anyhow::anyhow!("invalid map key"))?;
-            m.lock().insert(k, v);
+            m.lock().insert(k, v).unwrap_or_default()
         }
         _ => bail!("cannot index {}", recv.type_name()),
-    }
-    Ok(())
+    };
+    Ok(old)
 }
 
 pub(super) fn eval_try(v: Value) -> Result<Result<Value, Value>> {

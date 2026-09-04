@@ -8,7 +8,8 @@ use anyhow::{Result, anyhow, bail};
 use super::back::supports_back;
 use super::in_place;
 use super::{
-    Handle, IteratorState, Step, chars, int_arg, lines_next, option_inner, value_iter, wrap,
+    Handle, IteratorState, Step, chars, int_arg, lines_next, option_inner, owns_items, value_iter,
+    wrap,
 };
 use crate::interpreter::bytecode::{BuiltinId, MethodName};
 use crate::interpreter::native::Native;
@@ -26,7 +27,7 @@ impl Vm {
         else {
             bail!("{} is not an iterator", value.type_name());
         };
-        self.run_chunk(&chunk, from_ref(value), &[])
+        self.run_chunk(&chunk, from_ref(value), &[], false)
     }
 
     pub(in crate::interpreter) fn has_user_next(&self, value: &Value) -> bool {
@@ -113,15 +114,39 @@ impl Vm {
         })
     }
 
+    /// The first failing item ends the run, `take_while` consumes and drops it.
+    fn take_while_next(
+        self: &Arc<Self>,
+        iterator: &Handle,
+        source: &Handle,
+        closure: &Arc<ClosureData>,
+    ) -> Result<Option<Value>> {
+        let Some(value) = self.iterator_next(source)? else {
+            return Ok(None);
+        };
+        if self
+            .call_closure_data(closure, from_ref(&value))?
+            .is_truthy()
+        {
+            return Ok(Some(value));
+        }
+        self.discard(source, value)?;
+        if let Native::Iterator(IteratorState::TakeWhile { done, .. }) = &mut *iterator.lock() {
+            *done = true;
+        }
+        Ok(None)
+    }
+
     pub(super) fn skip_then_next(
         self: &Arc<Self>,
         source: &Handle,
         count: usize,
     ) -> Result<Option<Value>> {
         for _ in 0..count {
-            if self.iterator_next(source)?.is_none() {
+            let Some(skipped) = self.iterator_next(source)? else {
                 return Ok(None);
-            }
+            };
+            self.discard(source, skipped)?;
         }
         self.iterator_next(source)
     }
@@ -180,7 +205,10 @@ impl Vm {
                 Ok(out.some_payload())
             }
             Step::Map(source, closure) => match self.iterator_next(&source)? {
-                Some(value) => Ok(Some(self.call_closure_data(&closure, &[value])?)),
+                Some(value) => {
+                    let owned = owns_items(&source);
+                    Ok(Some(self.call_closure_with(&closure, &[value], owned)?))
+                }
                 None => Ok(None),
             },
             Step::Filter(source, closure) => loop {
@@ -193,12 +221,16 @@ impl Vm {
                 {
                     return Ok(Some(value));
                 }
+                self.discard(&source, value)?;
             },
             Step::FilterMap(source, closure) => loop {
                 let Some(value) = self.iterator_next(&source)? else {
                     return Ok(None);
                 };
-                if let Some(inner) = option_inner(&self.call_closure_data(&closure, &[value])?) {
+                let owned = owns_items(&source);
+                if let Some(inner) =
+                    option_inner(&self.call_closure_with(&closure, &[value], owned)?)
+                {
                     return Ok(Some(inner));
                 }
             },
@@ -215,24 +247,7 @@ impl Vm {
             Step::Stride(source, count) | Step::Skip(source, count) => {
                 self.skip_then_next(&source, count)
             }
-            Step::TakeWhile(source, closure) => {
-                let Some(value) = self.iterator_next(&source)? else {
-                    return Ok(None);
-                };
-                if self
-                    .call_closure_data(&closure, from_ref(&value))?
-                    .is_truthy()
-                {
-                    Ok(Some(value))
-                } else {
-                    if let Native::Iterator(IteratorState::TakeWhile { done, .. }) =
-                        &mut *iterator.lock()
-                    {
-                        *done = true;
-                    }
-                    Ok(None)
-                }
-            }
+            Step::TakeWhile(source, closure) => self.take_while_next(iterator, &source, &closure),
             Step::SkipWhile(source, closure, skipping) => {
                 let mut still_skipping = skipping;
                 loop {
@@ -258,12 +273,46 @@ impl Vm {
         }
     }
 
+    /// The closure borrows its arguments, so its parameters are not dropped at its end.
     pub(in crate::interpreter) fn call_closure_data(
         self: &Arc<Self>,
         clo: &Arc<ClosureData>,
         args: &[Value],
     ) -> Result<Value> {
-        self.run_chunk(&clo.chunk, args, &clo.captured)
+        self.run_chunk(&clo.chunk, args, &clo.captured, false)
+    }
+
+    /// The closure takes its arguments by value when `owned`, so what it does not hand back
+    /// drops at its end.
+    pub(in crate::interpreter) fn call_closure_with(
+        self: &Arc<Self>,
+        clo: &Arc<ClosureData>,
+        args: &[Value],
+        owned: bool,
+    ) -> Result<Value> {
+        self.run_chunk(&clo.chunk, args, &clo.captured, owned)
+    }
+
+    /// A by value terminal consumes the iterator, so what it never pulled drops inside the
+    /// call, before the statement goes on. `take(0).collect()` drops the source's items there.
+    pub(super) fn drop_leftovers(self: &Arc<Self>, iterator: &Handle) -> Result<()> {
+        let leftover = match &mut *iterator.lock() {
+            Native::Iterator(state) => state.take_remaining(),
+            _ => Vec::new(),
+        };
+        for item in leftover {
+            self.run_user_drop(item)?;
+        }
+        Ok(())
+    }
+
+    /// An item an adapter or a terminal throws away. Real Rust drops it there when the
+    /// iterator owns it.
+    pub(super) fn discard(self: &Arc<Self>, source: &Handle, item: Value) -> Result<()> {
+        if owns_items(source) {
+            self.run_user_drop(item)?;
+        }
+        Ok(())
     }
 
     pub(in crate::interpreter) fn drain_items(
@@ -303,7 +352,8 @@ impl Vm {
 
     pub(super) fn iterator_count(self: &Arc<Self>, iterator: &Handle) -> Result<Value> {
         let mut count: usize = 0;
-        while self.iterator_next(iterator)?.is_some() {
+        while let Some(item) = self.iterator_next(iterator)? {
+            self.discard(iterator, item)?;
             count += 1;
         }
         Ok(crate::interpreter::shared::usize_value(count))
@@ -312,7 +362,9 @@ impl Vm {
     pub(super) fn iterator_last(self: &Arc<Self>, iterator: &Handle) -> Result<Value> {
         let mut last = None;
         while let Some(item) = self.iterator_next(iterator)? {
-            last = Some(item);
+            if let Some(before) = last.replace(item) {
+                self.discard(iterator, before)?;
+            }
         }
         Ok(last.map_or_else(Value::none, Value::some))
     }
@@ -391,14 +443,8 @@ impl Vm {
                 .map_or_else(Value::none, Value::some),
             BuiltinId::Nth => {
                 let index = usize::try_from(int_arg(args)?)?;
-                let mut item = None;
-                for _ in 0..=index {
-                    item = self.iterator_next(iterator)?;
-                    if item.is_none() {
-                        break;
-                    }
-                }
-                item.map_or_else(Value::none, Value::some)
+                self.skip_then_next(iterator, index)?
+                    .map_or_else(Value::none, Value::some)
             }
             BuiltinId::Peek => match self.peek(iterator)? {
                 Some(v) => v,
@@ -450,6 +496,33 @@ impl Vm {
             },
             _ => return Ok(None),
         };
+        if consumes_iterator(method.id) {
+            self.drop_leftovers(iterator)?;
+        }
         Ok(Some(value))
     }
+}
+
+/// The terminals that take the iterator by value, see `drop_leftovers`.
+pub(super) fn consumes_iterator(id: BuiltinId) -> bool {
+    matches!(
+        id,
+        BuiltinId::Count
+            | BuiltinId::Last
+            | BuiltinId::Sum
+            | BuiltinId::Product
+            | BuiltinId::Max
+            | BuiltinId::Min
+            | BuiltinId::MaxByKey
+            | BuiltinId::MinByKey
+            | BuiltinId::Collect
+            | BuiltinId::ToVec
+            | BuiltinId::CollectString
+            | BuiltinId::CollectMap
+            | BuiltinId::CollectSet
+            | BuiltinId::Fold
+            | BuiltinId::Reduce
+            | BuiltinId::ForEach
+            | BuiltinId::Partition
+    )
 }

@@ -378,6 +378,28 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// The parameter scope of a closure. A reference parameter never drops, the rest drop when
+    /// the call handed them over, see `Op::DropParams`.
+    fn emit_param_drops(&mut self) {
+        if !self.ctx.has_drop {
+            return;
+        }
+        let f = self.cur();
+        let regs: Vec<Reg> = f.scope_order.first().map_or(Vec::new(), |regs| {
+            regs.iter()
+                .copied()
+                .filter(|r| !f.borrow_params.contains(r) && !f.drop_exempt.contains(r))
+                .collect()
+        });
+        if regs.is_empty() {
+            return;
+        }
+        f.lent_params.extend(regs.iter().copied());
+        f.drop_lists.push(regs.into());
+        let list = idx16(f.drop_lists.len() - 1);
+        self.emit(Op::DropParams { list });
+    }
+
     fn add_const(&mut self, c: Const) -> u16 {
         let f = self.cur();
         f.consts.push(c);
@@ -417,7 +439,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn add_name_with(&mut self, name: String, scalar: Option<ScalarTy>) -> u16 {
-        self.add_name_full(name, scalar, None, false)
+        self.add_name_full(name, scalar, None, false, false)
     }
 
     fn add_name_full(
@@ -426,6 +448,7 @@ impl<'a> Compiler<'a> {
         scalar: Option<ScalarTy>,
         default: Option<DefaultIr>,
         place: bool,
+        owned: bool,
     ) -> u16 {
         let bare = name.strip_prefix("r#").unwrap_or(&name);
         let id = BuiltinId::resolve(bare);
@@ -438,6 +461,7 @@ impl<'a> Compiler<'a> {
             scalar,
             default: default.map(Arc::new),
             place,
+            owned,
         });
         idx16(f.names.len() - 1)
     }

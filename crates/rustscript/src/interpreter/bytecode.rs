@@ -196,6 +196,9 @@ pub struct MethodName {
     /// Whether the receiver is a writable place. `String::clear` vs the colored `clear`, the
     /// mutating one only on a place.
     pub place: bool,
+    /// Whether the receiver is the caller's own value, so a payload the method throws away
+    /// drops, see `discard_payload`.
+    pub owned: bool,
 }
 
 impl MethodName {
@@ -208,6 +211,7 @@ impl MethodName {
             scalar: None,
             default: None,
             place: false,
+            owned: false,
         }
     }
 }

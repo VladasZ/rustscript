@@ -158,6 +158,28 @@ pub(super) const ROWS: &[Method] = &[
         Same,
         "[{r}, {0}].concat()",
     ),
+    // the iterator is a temporary, what it did not hand out drops at the semicolon
+    m(
+        "vec_into_next",
+        VecRecv,
+        &[],
+        TyPat::Opt(ELEM),
+        "{r}.into_iter().next()",
+    ),
+    m(
+        "vec_into_nth",
+        VecRecv,
+        &[SmallUsize],
+        TyPat::Opt(ELEM),
+        "{r}.into_iter().nth({0})",
+    ),
+    m(
+        "vec_into_last",
+        VecRecv,
+        &[],
+        TyPat::Opt(ELEM),
+        "{r}.into_iter().last()",
+    ),
     // panics when the split point passes the end
     m(
         "vec_split_at",

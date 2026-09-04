@@ -169,15 +169,6 @@ pub(super) fn value_iter(items: List) -> Value {
     })
 }
 
-pub(super) fn owned_iter(items: List) -> Value {
-    wrap(IteratorState::Values {
-        values: items,
-        index: 0,
-        owned: true,
-        back: 0,
-    })
-}
-
 pub(super) fn value_iter_mut(items: List) -> Value {
     wrap(IteratorState::MutableValues {
         values: items,
@@ -289,13 +280,95 @@ pub(super) enum FastNext {
     NotSimple,
 }
 
+/// Whether the iterator hands out items of its own, see `IteratorState::owns_items`.
+pub(super) fn owns_items(handle: &Handle) -> bool {
+    match &*handle.lock() {
+        Native::Iterator(state) => state.owns_items(),
+        _ => false,
+    }
+}
+
+fn take_remaining_of(handle: &Handle) -> Vec<Value> {
+    match &mut *handle.lock() {
+        Native::Iterator(state) => state.take_remaining(),
+        _ => Vec::new(),
+    }
+}
+
 impl IteratorState {
+    /// Whether the items are the iterator's own, so what it hands out or discards is dropped
+    /// by whoever gets it. A borrowing iterator lends handles into a live collection. A map
+    /// or set iterates pairs of shared handles either way, so it never owns.
+    pub(super) fn owns_items(&self) -> bool {
+        match self {
+            IteratorState::Values { owned, .. } => *owned,
+            IteratorState::Owned { vec, .. } => *vec,
+            IteratorState::MutableValues { .. } | IteratorState::DrainingValues { .. } => false,
+            // a fresh value per pull
+            IteratorState::UserNext { .. }
+            | IteratorState::Range { .. }
+            | IteratorState::Bytes { .. }
+            | IteratorState::Chars { .. }
+            | IteratorState::Lines { .. }
+            | IteratorState::SplitWhitespace { .. }
+            | IteratorState::RegexFind { .. }
+            | IteratorState::RegexCaptures { .. }
+            | IteratorState::Map { .. }
+            | IteratorState::FilterMap { .. }
+            | IteratorState::Cloned { .. } => true,
+            IteratorState::Zip { left, right } | IteratorState::Chain { left, right, .. } => {
+                owns_items(left) && owns_items(right)
+            }
+            IteratorState::Filter { source, .. }
+            | IteratorState::Enumerate { source, .. }
+            | IteratorState::Take { source, .. }
+            | IteratorState::Skip { source, .. }
+            | IteratorState::Rev { source }
+            | IteratorState::StepBy { source, .. }
+            | IteratorState::TakeWhile { source, .. }
+            | IteratorState::SkipWhile { source, .. }
+            | IteratorState::Peekable { source, .. } => owns_items(source),
+        }
+    }
+
     /// Produced in place for the simple sources, so a tight loop skips the full `iterator_next`
     /// machinery.
-    /// The items an owning iterator still holds, for its drop. A borrowing iterator holds nothing.
+    /// The items an owning iterator still holds, for its drop. A borrowing iterator holds
+    /// nothing, and an adapter holds what its source still holds.
     pub(super) fn take_remaining(&mut self) -> Vec<Value> {
         match self {
             IteratorState::Owned { values, index, .. } => values.drain(*index..).collect(),
+            IteratorState::Values {
+                values,
+                index,
+                owned: true,
+                back,
+            } => {
+                let mut items = values.lock();
+                let end = items.len().saturating_sub(*back);
+                items.drain(*index..end).collect()
+            }
+            IteratorState::Zip { left, right } | IteratorState::Chain { left, right, .. } => {
+                let mut items = take_remaining_of(left);
+                items.extend(take_remaining_of(right));
+                items
+            }
+            // std declares the source before the peeked slot, so it drops first
+            IteratorState::Peekable { source, buffered } => {
+                let mut items = take_remaining_of(source);
+                items.extend(buffered.take());
+                items
+            }
+            IteratorState::Map { source, .. }
+            | IteratorState::Filter { source, .. }
+            | IteratorState::FilterMap { source, .. }
+            | IteratorState::Enumerate { source, .. }
+            | IteratorState::Take { source, .. }
+            | IteratorState::Skip { source, .. }
+            | IteratorState::Rev { source }
+            | IteratorState::StepBy { source, .. }
+            | IteratorState::TakeWhile { source, .. }
+            | IteratorState::SkipWhile { source, .. } => take_remaining_of(source),
             _ => Vec::new(),
         }
     }

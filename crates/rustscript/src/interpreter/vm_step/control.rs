@@ -57,7 +57,7 @@ pub(super) fn convert_early(ctx: &StepCtx, early: Value, conv: u16) -> Result<Va
     let Some(chunk) = ctx.vm.conversion_impl(target, &payload) else {
         return Ok(early);
     };
-    let converted = ctx.vm.run_chunk(&chunk, &[payload], &[])?;
+    let converted = ctx.vm.run_chunk(&chunk, &[payload], &[], true)?;
     Ok(Value::err(converted))
 }
 

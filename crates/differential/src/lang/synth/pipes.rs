@@ -1,8 +1,11 @@
 //! Every pipe built here passes `is_valid`, asserted not assumed.
 
+use std::collections::BTreeSet;
+
 use rand::RngExt;
 
 use crate::lang::expr::Expr;
+use crate::lang::own::referenced;
 use crate::lang::pipe::{
     Access, Bind, Item, ParamAnn, Pipe, Site, Source, Stage, Term, fallible_pending,
 };
@@ -151,7 +154,11 @@ impl Generator<'_> {
             }
             if self.chance(0.3) {
                 // see the panic reach rule in `pipe`
-                let choices = if fallible_pending(&stages) { 3 } else { 4 };
+                let choices = if fallible_pending(&source.item(), &stages) {
+                    3
+                } else {
+                    4
+                };
                 stages.push(match self.rng.random_range(0..choices) {
                     0 => Stage::Rev,
                     1 => Stage::Take(self.rng.random_range(0..=5)),
@@ -276,39 +283,11 @@ impl Generator<'_> {
             item = want.clone();
         }
         if ordered && self.chance(0.3) {
-            // a pair accumulator is taken apart in the parameter list, `|(lo, hi), x|`
-            let (acc, mut locals) = match want {
-                Ty::Tuple(parts) if parts.len() == 2 && self.chance(0.5) => {
-                    let first = self.fresh_bind();
-                    let second = self.fresh_bind();
-                    let locals = vec![
-                        (first.clone(), parts[0].clone()),
-                        (second.clone(), parts[1].clone()),
-                    ];
-                    (Bind::Pair(first, second), locals)
-                }
-                _ => {
-                    let acc = self.fresh_bind();
-                    let locals = vec![(acc.clone(), want.clone())];
-                    (Bind::One(acc), locals)
-                }
-            };
-            let bind = self.fresh_bind();
-            locals.push((bind.clone(), item));
-            // a bare literal init leaves a `{float}` no method can be called on
-            let init = self.typed_only(|inner| inner.expr(want, depth - 1));
-            let body = self.closure_body(|inner| {
-                inner.with_locals(&locals, |inner| inner.expr(want, depth - 1))
-            });
+            let term = self.fold_term(want, &item, &stages, depth);
             return Some(Pipe {
                 source,
                 stages,
-                term: Term::Fold {
-                    acc,
-                    bind: Bind::One(bind),
-                    init,
-                    body,
-                },
+                term,
             });
         }
         let product = self.chance(0.3);
@@ -337,6 +316,54 @@ impl Generator<'_> {
             stages,
             term,
         })
+    }
+
+    /// `.fold(init, |acc, x| body)`. A pair accumulator is taken apart in the parameter list,
+    /// `|(lo, hi), x|`.
+    fn fold_term(&mut self, want: &Ty, item: &Ty, stages: &[Stage], depth: usize) -> Term {
+        let (acc, mut locals) = match want {
+            Ty::Tuple(parts) if parts.len() == 2 && self.chance(0.5) => {
+                let first = self.fresh_bind();
+                let second = self.fresh_bind();
+                let locals = vec![
+                    (first.clone(), parts[0].clone()),
+                    (second.clone(), parts[1].clone()),
+                ];
+                (Bind::Pair(first, second), locals)
+            }
+            _ => {
+                let acc = self.fresh_bind();
+                let locals = vec![(acc.clone(), want.clone())];
+                (Bind::One(acc), locals)
+            }
+        };
+        let bind = self.fresh_bind();
+        locals.push((bind.clone(), item.clone()));
+        // the stage closures hold what they name until the fold runs, so the init can't
+        // take any of it. A bare literal init leaves a `{float}` no method can be called on.
+        let held: Vec<String> = stages
+            .iter()
+            .flat_map(|stage| match stage {
+                Stage::Map { body, .. } | Stage::PairWith { body, .. } => referenced(body),
+                Stage::Filter { pred, .. } => referenced(pred),
+                _ => BTreeSet::new(),
+            })
+            .collect();
+        for name in &held {
+            self.scope.freeze(name);
+        }
+        let init = self.typed_only(|inner| inner.expr(want, depth - 1));
+        for _ in &held {
+            self.scope.unfreeze();
+        }
+        let body = self
+            .closure_body(|inner| inner.with_locals(&locals, |inner| inner.expr(want, depth - 1)));
+        Term::Fold {
+            acc,
+            bind: Bind::One(bind),
+            init,
+            body,
+        }
     }
 
     fn pipe_to_bool(&mut self, depth: usize) -> Option<Pipe> {
@@ -432,15 +459,15 @@ impl Generator<'_> {
     }
 }
 
-/// A fallible body on unordered items sorts first. When the items can't sort, report false so the
-/// caller gives the pipe up.
+/// A body that panics or drops a trace on unordered items sorts first. When the items can't
+/// sort, report false so the caller gives the pipe up.
 fn sort_before_fallible(
     stages: &mut Vec<Stage>,
     ordered: &mut bool,
     item: &Item,
     body: &Expr,
 ) -> bool {
-    if *ordered || !body.has_fallible_op() {
+    if *ordered || !(body.has_fallible_op() || item.contains_trace()) {
         return true;
     }
     if !item.is_ord() {

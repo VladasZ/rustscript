@@ -175,7 +175,7 @@ impl Vm {
         let [.., namespace, last] = path.segs.as_slice() else {
             let name = path.segs.first().map_or("", String::as_str);
             if let Some(chunk) = self.user_function(name) {
-                return self.run_chunk(&chunk, &args, &[]);
+                return self.run_chunk(&chunk, &args, &[], true);
             }
             if self.struct_names.contains(name) {
                 return Ok(self.make_tuple_struct(name, args));
@@ -189,17 +189,17 @@ impl Vm {
             bail!("std::thread is not supported beyond sleep, use tokio::spawn");
         }
         if let Some(chunk) = self.user_function(&path.display()) {
-            return self.run_chunk(&chunk, &args, &[]);
+            return self.run_chunk(&chunk, &args, &[], true);
         }
         if last == "from"
             && args.len() == 1
             && let Some(chunk) = self.conversion_impl(namespace, &args[0])
         {
-            return self.run_chunk(&chunk, &args, &[]);
+            return self.run_chunk(&chunk, &args, &[], true);
         }
         // the receiver, if any, is the first argument
         if let Some(chunk) = self.user_method(namespace, last) {
-            return self.run_chunk(&chunk, &args, &[]);
+            return self.run_chunk(&chunk, &args, &[], true);
         }
         if let Some(v) = self.make_tuple_variant(Some(namespace), last, &args) {
             return Ok(v);
@@ -285,7 +285,7 @@ impl Vm {
             _ => recv,
         };
         if name.id.is_higher_order()
-            && let Some(v) = self.higher_order(recv, name.id, &*args)?
+            && let Some(v) = self.higher_order(recv, name.id, name.owned, &*args)?
         {
             return Ok(v);
         }
@@ -310,7 +310,7 @@ impl Vm {
         let mut full = Vec::with_capacity(args.len() + 1);
         full.push(recv.clone());
         full.extend(args.iter().cloned());
-        self.run_chunk(&chunk, &full, &[]).map(Some)
+        self.run_chunk(&chunk, &full, &[], true).map(Some)
     }
 
     /// The any receiver methods. They run before `bridge_image`, a u64 past `i64::MAX` saturates
