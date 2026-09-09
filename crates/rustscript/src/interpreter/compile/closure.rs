@@ -117,7 +117,10 @@ impl Compiler<'_> {
             }
             match p {
                 Pat::Ident(id) if id.subpat.is_none() => self.define(&id.ident.to_string(), reg),
-                _ => self.bind_pattern_irrefutable(p, reg)?,
+                _ => {
+                    self.bind_pattern_irrefutable(p, reg)?;
+                    self.hold_wild_param(p, reg);
+                }
             }
             // a `mut` parameter owns a copy unless its type rules `Copy` out, see `compile_fn`
             let (binding, annotation) = match p {

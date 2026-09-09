@@ -415,11 +415,28 @@ impl Compiler<'_> {
         }
     }
 
-    pub(super) fn compile_scrutinee(&mut self, expr: &Expr, binds_by_value: bool) -> Result<Reg> {
-        if let Expr::Reference(r) = expr
-            && r.mutability.is_some()
-        {
-            let place = self.compile_mut_receiver(&r.expr)?;
+    /// `binds_by_ref` is a `ref` or `ref mut` binding in the pattern. Over a place it borrows
+    /// like `&mut place`, so the bindings sit in the storage and a write through one lands. A
+    /// scalar local stays a value read, its register has no reference form.
+    pub(super) fn compile_scrutinee(
+        &mut self,
+        expr: &Expr,
+        binds_by_value: bool,
+        binds_by_ref: bool,
+    ) -> Result<Reg> {
+        let borrowed = match expr {
+            Expr::Reference(r) if r.mutability.is_some() => Some(&*r.expr),
+            place
+                if binds_by_ref
+                    && is_place_expr(place)
+                    && (single_path_name(place).is_none() || self.has_storage(place)) =>
+            {
+                Some(place)
+            }
+            _ => None,
+        };
+        if let Some(target) = borrowed {
+            let place = self.compile_mut_receiver(target)?;
             let dst = self.alloc();
             self.emit(Op::MakeBorrow {
                 dst,
@@ -431,6 +448,23 @@ impl Compiler<'_> {
             return self.compile_owned_expr(expr);
         }
         self.compile_expr(expr)
+    }
+
+    /// Whether the value sits behind a shared handle a borrow can anchor into. A scalar or a
+    /// string is the register's own.
+    fn has_storage(&self, expr: &Expr) -> bool {
+        matches!(
+            self.types.of(expr),
+            Ty::Vec(_)
+                | Ty::Set(_)
+                | Ty::Map(..)
+                | Ty::Option(_)
+                | Ty::Result(..)
+                | Ty::Tuple(_)
+                | Ty::Struct(_)
+                | Ty::Enum(_)
+                | Ty::Json
+        )
     }
 
     /// The place, or the plain expression.

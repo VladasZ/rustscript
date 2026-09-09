@@ -56,7 +56,7 @@ impl Compiler<'_> {
 
     /// Whether the window holds a value of its own for the argument. A local moves or copies
     /// in, a fresh temporary is its own, a borrow or a lent handle is not.
-    fn arg_owned(&mut self, arg: &Expr) -> bool {
+    pub(super) fn arg_owned(&mut self, arg: &Expr) -> bool {
         match arg {
             Expr::Paren(p) => self.arg_owned(&p.expr),
             Expr::Group(g) => self.arg_owned(&g.expr),

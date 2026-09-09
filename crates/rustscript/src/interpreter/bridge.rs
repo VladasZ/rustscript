@@ -368,6 +368,14 @@ impl Vm {
                 if super::ratatui::is_ratatui_struct(st.name()) {
                     return super::ratatui::struct_method(st, name, args);
                 }
+                // a lazy `envs` argument is drained here, like `extend` above
+                if name.id == BuiltinId::Envs
+                    && let Some(first) = args.first()
+                    && !matches!(first, Value::Vec(_) | Value::Map(..) | Value::Ref(_))
+                {
+                    let items = self.drain_items(first.clone())?;
+                    args[0] = Value::vec(items);
+                }
                 Self::bridge_struct_method(recv, st, name, args)
             }
             Value::Native(native) => {

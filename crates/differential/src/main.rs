@@ -593,14 +593,11 @@ fn promote(args: &[String]) -> Result<()> {
             current.classification
         );
     }
-    // a panicking case can't live under examples, the equivalence suite requires a clean exit there
-    let destination = if current.native.status == Some(0) {
-        root.join("crates/examples/examples")
-            .join(format!("{name}.rs"))
-    } else {
-        root.join("crates/differential/regressions")
-            .join(format!("{name}.rs"))
-    };
+    // never under examples, generated code fails the lint gate there and a panicking case would
+    // fail the equivalence suite
+    let destination = root
+        .join("crates/differential/regressions")
+        .join(format!("{name}.rs"));
     if destination.exists() {
         anyhow::bail!("{} already exists", destination.display());
     }

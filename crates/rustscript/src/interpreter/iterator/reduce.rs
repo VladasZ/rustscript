@@ -160,7 +160,11 @@ impl Vm {
                         }
                     };
                     if take {
-                        best = Some((key, value));
+                        if let Some((_, loser)) = best.replace((key, value)) {
+                            self.discard(iterator, loser)?;
+                        }
+                    } else {
+                        self.discard(iterator, value)?;
                     }
                 }
                 best.map_or_else(Value::none, |(_, value)| Value::some(value))

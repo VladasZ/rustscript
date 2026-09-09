@@ -208,7 +208,10 @@ impl<'a> Compiler<'a> {
                 Some(Pat::Ident(id)) if id.subpat.is_none() => {
                     self.define(&id.ident.to_string(), reg);
                 }
-                Some(pat) => self.bind_pattern_irrefutable(pat, reg)?,
+                Some(pat) => {
+                    self.bind_pattern_irrefutable(pat, reg)?;
+                    self.hold_wild_param(pat, reg);
+                }
             }
             // A `mut` by value parameter may be a `Copy` of a caller value that stays live, so it
             // owns a copy unless its type rules `Copy` out.

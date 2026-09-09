@@ -571,7 +571,7 @@ fn load_cell(ctx: &mut StepCtx, dst: u16, cell: u16) -> Flow {
 fn store_cell(ctx: &mut StepCtx, cell: u16, src: u16) -> Result<Flow> {
     let v = ctx.get(src).clone();
     let old = std::mem::replace(&mut *ctx.cell(cell).lock(), v);
-    if ctx.vm.has_drop {
+    if ctx.vm.has_drop && !old.shares_storage(ctx.get(src)) {
         ctx.vm.run_user_drop(old)?;
     }
     Ok(Flow::Next)
@@ -588,7 +588,7 @@ fn store_upvalue(ctx: &StepCtx, idx: u16, src: u16) -> Result<Flow> {
     let Some(old) = ctx.upvalues()[idx as usize].swap(ctx.get(src).clone()) else {
         bail!("cannot assign to immutable capture");
     };
-    if ctx.vm.has_drop {
+    if ctx.vm.has_drop && !old.shares_storage(ctx.get(src)) {
         ctx.vm.run_user_drop(old)?;
     }
     Ok(Flow::Next)
