@@ -51,8 +51,9 @@ impl Compiler<'_> {
             let mut shells = Vec::new();
             for term in &terms {
                 if let Expr::Let(let_expr) = term {
-                    let owned = pattern_owns(&let_expr.pat);
-                    let scrut = self.compile_scrutinee(&let_expr.expr, owned)?;
+                    let by_ref = pattern_borrows(&let_expr.pat);
+                    let owned = pattern_owns(&let_expr.pat) && !by_ref;
+                    let scrut = self.compile_scrutinee(&let_expr.expr, owned, by_ref)?;
                     let takes = owned && self.scrutinee_owned(&let_expr.expr);
                     let home = if takes {
                         self.shell_home(&let_expr.expr)
@@ -138,8 +139,9 @@ impl Compiler<'_> {
         let head = self.here();
         if let Expr::Let(let_expr) = &*w.cond {
             let temp_mark = self.cur().owned_temps.len();
-            let owned = pattern_owns(&let_expr.pat);
-            let scrut = self.compile_scrutinee(&let_expr.expr, owned)?;
+            let by_ref = pattern_borrows(&let_expr.pat);
+            let owned = pattern_owns(&let_expr.pat) && !by_ref;
+            let scrut = self.compile_scrutinee(&let_expr.expr, owned, by_ref)?;
             let while_let_depth = self.cur().scope_order.len();
             self.push_scope();
             let takes = owned && self.scrutinee_owned(&let_expr.expr);
@@ -469,12 +471,12 @@ impl Compiler<'_> {
                 p => p,
             }
         }
-        let owned = m.arms.iter().any(|arm| pattern_owns(arm_pattern(&arm.pat)))
-            && !m
-                .arms
-                .iter()
-                .any(|arm| pattern_borrows(arm_pattern(&arm.pat)));
-        let scrut = self.compile_scrutinee(&m.expr, owned)?;
+        let by_ref = m
+            .arms
+            .iter()
+            .any(|arm| pattern_borrows(arm_pattern(&arm.pat)));
+        let owned = m.arms.iter().any(|arm| pattern_owns(arm_pattern(&arm.pat))) && !by_ref;
+        let scrut = self.compile_scrutinee(&m.expr, owned, by_ref)?;
         let holds_guard = self.init_holds_guard(&m.expr);
         let takes = owned && self.scrutinee_owned(&m.expr);
         let home = if takes {
@@ -482,16 +484,16 @@ impl Compiler<'_> {
         } else {
             ShellHome::None
         };
-        if let ShellHome::Local { .. } = home {
-            self.hold_shell(scrut, home);
+        match home {
+            ShellHome::Local { .. } => self.hold_shell(scrut, home),
+            // a fresh scrutinee is a temporary of the statement around the match, so its shell
+            // drops at that semicolon, after the arm ran and its bindings dropped
+            ShellHome::Scope => self.cur().owned_temps.push(scrut),
+            ShellHome::None => {}
         }
         let mut end_jumps = Vec::new();
         for arm in &m.arms {
             self.push_scope();
-            // the arm that runs drops the shell after its bindings
-            if let ShellHome::Scope = home {
-                self.hold_shell(scrut, home);
-            }
             let matched = self.alloc();
             // syn 3 parses `pat if cond` as `Pat::Guard`
             let (arm_pat, arm_guard) = match &arm.pat {
@@ -526,7 +528,10 @@ impl Compiler<'_> {
             if takes {
                 self.take_pattern_binds(scrut, pat);
             }
+            // an arm body is a temporary scope of its own, its temporaries end with the arm
+            let arm_temps = self.cur().owned_temps.len();
             self.compile_owned_into(dst, &arm.body)?;
+            self.drop_temps(arm_temps, Some(dst));
             self.emit_scope_drops(1);
             let je = self.here();
             self.emit(Op::Jump { to: 0 });

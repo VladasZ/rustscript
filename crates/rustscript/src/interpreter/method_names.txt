@@ -171,6 +171,7 @@ enum_values
 enumerate
 env
 env_remove
+envs
 eq_ignore_ascii_case
 err
 error_control

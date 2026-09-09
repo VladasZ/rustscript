@@ -234,6 +234,17 @@ impl Compiler<'_> {
         }
     }
 
+    /// A `_` parameter still owns its argument, which drops with the body like a named one.
+    pub(super) fn hold_wild_param(&mut self, pat: &Pat, reg: Reg) {
+        if is_wild(pat) {
+            self.cur()
+                .scope_order
+                .last_mut()
+                .expect("a scope is always open")
+                .push(reg);
+        }
+    }
+
     pub(super) fn bind_pattern_irrefutable(&mut self, pat: &Pat, reg: Reg) -> Result<()> {
         match pat {
             Pat::Ident(id) if id.subpat.is_none() => {
@@ -344,5 +355,15 @@ pub(super) fn lower_literal(literal: &Lit) -> PPat {
         Lit::Char(value) => PPat::Lit(PLit::Char(value.value())),
         Lit::Byte(value) => PPat::Lit(PLit::Int(i128::from(value.value()))),
         _ => PPat::Unsupported,
+    }
+}
+
+/// `_`, through a type ascription or parentheses.
+pub(super) fn is_wild(pat: &Pat) -> bool {
+    match pat {
+        Pat::Type(t) => is_wild(&t.pat),
+        Pat::Paren(p) => is_wild(&p.pat),
+        Pat::Wild(_) => true,
+        _ => false,
     }
 }

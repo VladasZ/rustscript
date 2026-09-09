@@ -134,10 +134,13 @@ runs, an `if let` scrutinee nobody bound drops before the `else` block, a
 value a store overwrites drops before the store, and a field moved out of a
 struct leaves unit behind so the struct still drops its other fields. A by
 value pattern moves only the parts it binds, so the rest of the scrutinee,
-the `_` in `Some((a, _))`, drops after the bindings when their block ends,
-and the rest of a partially moved local drops where the local was declared.
-A closure drops its by value parameters at its end when the call handed them
-over, an adapter over `iter()` only lends them. An iterator that owns its
+the `_` in `Some((a, _))`, drops after the bindings, with the `if let` or at
+the semicolon of the statement around a `match`, and the rest of a partially
+moved local drops where the local was declared. A match arm body is a
+temporary scope of its own, so its temporaries end with the arm. A closure or
+a function drops its by value parameters at its end when the call handed them
+over, a `_` parameter like a named one, and `let _ = make()` drops the value
+at once. An adapter over `iter()` only lends its items. An iterator that owns its
 items drops what it throws away, a rejected `filter` item, a skipped one, the
 losers of `max`, a by value terminal like `collect` drops what it never
 pulled inside the call, and a combinator drops the side it does not keep, the

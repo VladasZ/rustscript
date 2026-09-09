@@ -160,6 +160,15 @@ pub(super) fn wrap(state: IteratorState) -> Value {
     Native::Iterator(state).wrap()
 }
 
+/// Items taken out of their collection, so the iterator owns them and drops what it discards.
+pub(super) fn owned_iterator(values: Vec<Value>) -> Value {
+    wrap(IteratorState::Owned {
+        values,
+        index: 0,
+        vec: true,
+    })
+}
+
 pub(super) fn value_iter(items: List) -> Value {
     wrap(IteratorState::Values {
         values: items,

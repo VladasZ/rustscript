@@ -493,10 +493,10 @@ pub(super) fn map_method(
                 None => Value::none(),
             }
         }
-        BuiltinId::Keys | BuiltinId::IntoKeys => {
-            Value::vec(m.lock().keys().map(MapKey::to_value).collect())
-        }
-        BuiltinId::Values | BuiltinId::IntoValues | BuiltinId::ValuesMut => {
+        BuiltinId::IntoKeys => map_into_iterator(m, true),
+        BuiltinId::IntoValues => map_into_iterator(m, false),
+        BuiltinId::Keys => Value::vec(m.lock().keys().map(MapKey::to_value).collect()),
+        BuiltinId::Values | BuiltinId::ValuesMut => {
             Value::vec(m.lock().values().cloned().collect())
         }
         BuiltinId::Entry => {
@@ -563,9 +563,10 @@ fn vec_slice_view(v: &List, id: BuiltinId, args: &[Value]) -> Result<Value> {
             }
             let mut out = Vec::with_capacity(total);
             // repeating nothing is nothing, the loop would run for the whole count
+            // every copy owns its storage, a shared one would empty its siblings when dropped
             if !items.is_empty() {
                 for _ in 0..n {
-                    out.extend(items.iter().cloned());
+                    out.extend(items.iter().map(Value::deep_clone));
                 }
             }
             Value::vec(out)
@@ -632,6 +633,18 @@ pub(super) fn map_pairs(m: &Arc<Mutex<MapStore>>) -> Value {
             .map(|(k, v)| Value::tuple(vec![k.to_value(), v.clone()]))
             .collect(),
     )
+}
+
+/// `into_keys` and `into_values` consume the map, so its entries move into an iterator that
+/// owns and drops them.
+fn map_into_iterator(m: &Arc<Mutex<MapStore>>, keys: bool) -> Value {
+    let store = take(&mut *m.lock());
+    let items: Vec<Value> = if keys {
+        store.keys().map(MapKey::to_value).collect()
+    } else {
+        store.into_values().collect()
+    };
+    super::iterator::owned_iterator(items)
 }
 
 pub(super) fn collect_map(items: Vec<Value>) -> Result<Value> {

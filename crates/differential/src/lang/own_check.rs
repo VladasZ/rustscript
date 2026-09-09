@@ -154,7 +154,7 @@ impl Checker {
             Stmt::Mutate { name, op } => {
                 self.require(self.scope.can_read(name), || format!("mutate `{name}`"));
                 self.scope.freeze(name);
-                self.mut_op(op);
+                self.mut_op(name, op);
                 self.scope.unfreeze();
             }
             Stmt::ForAccum {
@@ -172,7 +172,7 @@ impl Checker {
                     Ty::Vec(elem) => *elem,
                     other => other,
                 };
-                self.loop_with(var, &elem, |inner| inner.mut_op(op));
+                self.loop_with(var, &elem, |inner| inner.mut_op(target, op));
                 self.scope.unfreeze();
             }
             Stmt::ForMut {
@@ -273,11 +273,19 @@ impl Checker {
         self.scope.restore(&before);
     }
 
-    fn mut_op(&mut self, op: &MutOp) {
+    /// `target` is the binding the op writes, the retain binding takes its element type.
+    fn mut_op(&mut self, target: &str, op: &MutOp) {
         if let MutOp::VecRetain { bind, pred } = op {
+            let elem = match self.scope.slot(target).map(|slot| slot.ty.clone()) {
+                Some(Ty::Vec(elem)) => *elem,
+                other => {
+                    self.require(false, || format!("retain on `{target}` of type {other:?}"));
+                    return;
+                }
+            };
             self.scope.enter_closure();
             let mark = self.scope.len();
-            self.push_local(bind, &pred.ty());
+            self.push_local(bind, &elem);
             self.expr(pred);
             self.scope.truncate(mark);
             self.scope.leave_closure();

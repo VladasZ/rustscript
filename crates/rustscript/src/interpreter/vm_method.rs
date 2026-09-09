@@ -329,13 +329,14 @@ pub(super) fn get_or_default(
     let get = MethodName::builtin(BuiltinId::Get);
     let opt = ctx.vm.eval_method(&recv_v, &get, &mut [key_v])?;
     let v = match opt.some_payload() {
+        // a copy of the entry, the map's own drop empties a shared handle
         Some(found) => {
             // the fallback goes unused
             let unused = ctx.take(default);
             if ctx.vm.has_drop {
                 ctx.vm.run_user_drop(unused)?;
             }
-            found
+            found.deep_clone()
         }
         None => ctx.get(default).clone(),
     };

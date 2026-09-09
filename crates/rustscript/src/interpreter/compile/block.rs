@@ -6,7 +6,8 @@ use syn::{Block, Expr, Pat, Stmt};
 
 use crate::interpreter::bytecode::{DISCARD, Op, Reg};
 
-use super::place::ShellHome;
+use super::pattern::is_wild;
+use super::place::{ShellHome, is_place_expr};
 use super::support::{init_is_unique, pattern_borrows, pattern_owns};
 use super::walks::{from_str_root, unparen};
 use super::{Compiler, macro_yields_value, numeric_annotation};
@@ -191,10 +192,15 @@ impl Compiler<'_> {
         if self.compile_let_borrow(local, dst, is_last)? {
             return Ok(());
         }
+        let by_ref = pattern_borrows(&local.pat);
         let val = match &local.init {
-            // `let (a, b) = &mut place` destructures a borrow, so the bindings write into it
-            Some(init) if matches!(&*init.expr, Expr::Reference(r) if r.mutability.is_some()) => {
-                self.compile_scrutinee(&init.expr, false)?
+            // `let (a, b) = &mut place` destructures a borrow, so the bindings write into it,
+            // and so does `let (ref mut a, _) = place`
+            Some(init)
+                if matches!(&*init.expr, Expr::Reference(r) if r.mutability.is_some())
+                    || (by_ref && is_place_expr(&init.expr)) =>
+            {
+                self.compile_scrutinee(&init.expr, false, by_ref)?
             }
             Some(init) => {
                 let val = self.alloc();
@@ -214,6 +220,14 @@ impl Compiler<'_> {
             .as_ref()
             .is_some_and(|init| from_str_root(&init.expr).is_some());
         self.bind_let(local, val, parsed)?;
+        // `let _ = make();` binds nothing, so a fresh value drops right here like real Rust
+        if self.ctx.has_drop
+            && is_wild(&local.pat)
+            && let Some(init) = &local.init
+            && self.fresh_scrutinee(&init.expr)
+        {
+            self.drop_regs(vec![val]);
+        }
         if is_last {
             self.emit(Op::LoadUnit { dst });
         }

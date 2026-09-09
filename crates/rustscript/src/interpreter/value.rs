@@ -328,6 +328,21 @@ impl Value {
         }
     }
 
+    /// Whether both handles are one storage, so a drop of one would empty the other.
+    pub fn shares_storage(&self, other: &Value) -> bool {
+        match (self, other) {
+            (
+                Value::Vec(a) | Value::Tuple(a) | Value::Enum { data: a, .. },
+                Value::Vec(b) | Value::Tuple(b) | Value::Enum { data: b, .. },
+            ) => Arc::ptr_eq(a, b),
+            (Value::Map(a, _), Value::Map(b, _)) => Arc::ptr_eq(a, b),
+            (Value::Struct(a), Value::Struct(b)) => Arc::ptr_eq(a, b),
+            (Value::Cell(_, a), Value::Cell(_, b)) => Arc::ptr_eq(a, b),
+            (Value::Native(a), Value::Native(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+
     pub fn from_const(c: &Const) -> Value {
         match c {
             Const::Big(v, w) => Value::Big(*v, *w),

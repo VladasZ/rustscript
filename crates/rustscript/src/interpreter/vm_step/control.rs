@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow, bail};
 use num_traits::AsPrimitive;
 
 use super::{Flow, StepCtx};
-use crate::interpreter::bytecode::MacroKind;
+use crate::interpreter::bytecode::{MacroKind, PPat};
 use crate::interpreter::numeric::{float_to_int, truncate};
 use crate::interpreter::ops::{self};
 use crate::interpreter::pattern::{bind_pattern_refs, take_bound, try_bind};
@@ -12,7 +12,7 @@ use crate::interpreter::typeir::CastIr;
 use crate::interpreter::value::Value;
 
 pub(super) fn try_op(ctx: &mut StepCtx, dst: u16, src: u16, conv: u16) -> Result<Flow> {
-    Ok(match ops::eval_try(ctx.get(src).clone())? {
+    Ok(match ops::eval_try(ctx.take(src))? {
         Ok(v) => ctx.set(dst, v),
         Err(early) => {
             ctx.ret = convert_early(ctx, early, conv)?;
@@ -22,7 +22,7 @@ pub(super) fn try_op(ctx: &mut StepCtx, dst: u16, src: u16, conv: u16) -> Result
 }
 
 pub(super) fn try_jump(ctx: &mut StepCtx, dst: u16, src: u16, to: u32, conv: u16) -> Result<Flow> {
-    Ok(match ops::eval_try(ctx.get(src).clone())? {
+    Ok(match ops::eval_try(ctx.take(src))? {
         Ok(v) => {
             ctx.put(dst, v);
             Flow::Jump(to as usize)
@@ -83,7 +83,7 @@ pub(super) fn test_bind(ctx: &mut StepCtx, val: u16, pat: u16, dst: u16) -> Flow
             Some(inner) => (inner, true),
             None => (Value::Unit, false),
         },
-        _ => (raw, false),
+        other => (other.clone(), false),
     };
     let binds = &info.binds;
     let consts: Vec<Value> = info
@@ -101,7 +101,12 @@ pub(super) fn test_bind(ctx: &mut StepCtx, val: u16, pat: u16, dst: u16) -> Flow
                     writes.push((*reg, v));
                 }
             };
-            bind_pattern_refs(&info.pat, &value, &consts, &mut define);
+            // a bare name over `&mut place` or `ref mut m = place` is the reference itself
+            if let PPat::Ident { name, sub: None } = &info.pat {
+                define(name, raw.clone());
+            } else {
+                bind_pattern_refs(&info.pat, &value, &consts, &mut define);
+            }
         }
         matched
     } else {

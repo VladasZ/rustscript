@@ -219,6 +219,15 @@ pub(super) fn command_method(recv: &Value, name: &MethodName, args: &[Value]) ->
             }
             cmd_value()
         }
+        BuiltinId::Envs => {
+            let envs = command_envs(s);
+            for (key, val) in env_pairs(&arg(args, 0)?)? {
+                if let Some(k) = Value::str(key).as_key() {
+                    envs.lock().insert(k, val);
+                }
+            }
+            cmd_value()
+        }
         // a non Stdio value must be an error, not silently ignored
         BuiltinId::Stdin | BuiltinId::Stdout | BuiltinId::Stderr => {
             let target = arg(args, 0)?;
@@ -246,6 +255,39 @@ fn command_envs(s: &StructData) -> super::value::Map {
         let envs: super::value::Map = Arc::new(Mutex::new(indexmap::IndexMap::default()));
         s.set("envs", Value::Map(envs.clone(), super::value::MapKind::Map));
         envs
+    }
+}
+
+/// A `HashMap` arrives as a map, an array or a drained iterator of pairs as a vec of tuples.
+fn env_pairs(pairs: &Value) -> Result<Vec<(String, Value)>> {
+    match pairs {
+        Value::Ref(reference) => match reference.get() {
+            Some(inner) => env_pairs(&inner),
+            None => bail!("Command::envs got a dangling reference"),
+        },
+        Value::Map(map, _) => Ok(map
+            .lock()
+            .iter()
+            .map(|(k, v)| (k.to_value().display(), v.clone()))
+            .collect()),
+        Value::Vec(list) => list
+            .lock()
+            .iter()
+            .map(|pair| match pair {
+                Value::Tuple(kv) if kv.lock().len() == 2 => {
+                    let kv = kv.lock();
+                    Ok((kv[0].display(), kv[1].clone()))
+                }
+                other => bail!(
+                    "Command::envs needs (key, value) pairs, got {}",
+                    other.type_name()
+                ),
+            })
+            .collect(),
+        other => bail!(
+            "Command::envs needs an iterable of pairs, got {}",
+            other.type_name()
+        ),
     }
 }
 

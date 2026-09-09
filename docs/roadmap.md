@@ -12,65 +12,15 @@ Differential workflow.
 
 ## Open
 
-### A `ref mut` binding over a place scrutinee binds a copy
+### An earlier call argument unwinds after a later temporary
 
-`if let (ref mut x, _) = t { *x += 10 }` panics with `assignment through a
-non-reference value`. `pattern_owns` is false for a `ref` pattern, so
-`compile_scrutinee` in `compile/place.rs` reads `t` as a plain value and
-`test_bind` in `vm_step/control.rs` takes the value path, which binds `x` to a
-copy of the scalar. Fix by wrapping a place scrutinee in `MakeBorrow` when
-`pattern_borrows` holds, like `&mut place`, so the reference path anchors the
-bindings to the storage.
-
-```rust
-fn main() {
-    let mut t = (1, 2);
-    if let (ref mut x, _) = t {
-        *x += 10;
-    }
-    println!("{t:?}");
-}
-```
-
-Compiled prints `(11, 2)`. Interpreted panics at `*x += 10`.
-
-### `?` on an owned temporary drops the payload it handed out
-
-With any `Drop` impl in the program, `Ok::<Result<bool, E>, E>(Ok(false))?`
-returns an `Ok` with no payload. The outer `Ok` is an owned temporary, so the
-statement end drops it, and `run_user_drop` in `bridge/fmt_drop.rs` takes the
-payload list out of its storage and drops through into the inner `Ok`, which
-`try_op` in `vm_step/control.rs` had handed out as a shared handle. Fix by
-taking the payload out of an owned receiver in `Try` and `TryJump`, leaving
-unit behind, the way `TakeBinds` does for a pattern.
-
-```rust
-struct T(i64);
-impl Drop for T {
-    fn drop(&mut self) {
-        println!("drop {}", self.0);
-    }
-}
-fn inner() -> Result<bool, String> {
-    Ok::<Result<bool, String>, String>(Ok(false))?
-}
-fn main() {
-    println!("{:?}", inner());
-    println!("{}", T(1).0);
-}
-```
-
-Compiled prints `Ok(false)`, `1`, `drop 1`. Interpreted prints `Ok`, `1`,
-`drop 1`. Found by a local campaign at seed 904174 with the generator of
-v0.6.30.
-
-### Temporaries alive at a panic do not drop during the unwind
-
-A method receiver that owns a value is not dropped when an argument panics.
-`unwind_temps` in `compile/calls.rs` only records owned call arguments, so
-the receiver and the other owned temporaries of the statement are not on
-the list the panic path drops. Fix by dropping the live `owned_temps` of the
-frame on the unwind path as well, newest first.
+When an argument panics, real Rust drops the arguments already evaluated
+before it drops the temporaries made inside the panicking argument. The
+interpreter drops the whole frame highest register first in `unwind_drops` in
+`vm.rs`, so the later temporary goes first. Fix by keeping the owned call
+arguments of the window, `unwind_temps` in `compile/calls.rs`, ahead of the
+other droppable registers of their statement, or by recording the order the
+compiler wants on the chunk instead of sorting by register.
 
 ```rust
 #[derive(Debug, Clone)]
@@ -80,17 +30,105 @@ impl Drop for T {
         println!("drop {}", self.0);
     }
 }
+fn take(_a: T, _b: &T) -> i64 {
+    0
+}
 fn main() {
-    let empty: Vec<T> = Vec::new();
-    println!("{:?}", Ok::<T, String>(T(0)).unwrap_or(empty[2].clone()));
+    let v = take(T(1), &vec![T(2)][2].clone());
+    println!("{v}");
 }
 ```
 
-Both panic with `index out of bounds: the len is 0 but the index is 2`.
-Compiled prints `drop 0` during the unwind. Interpreted prints nothing. Found
-by a local campaign with the generator of v0.6.30, seeds 904025, 904057,
-904137, 904149, 904154, 904192, 904221 and 904256 from base seed 904000 are
-all this class.
+Both panic with `index out of bounds: the len is 1 but the index is 2`.
+Compiled prints `drop 1` then `drop 2` during the unwind. Interpreted prints
+`drop 2` then `drop 1`. Found by a local campaign at seed 20705000113 with the
+generator of v0.6.31.
+
+### A value lent to a panicking call never drops
+
+`enter` in `vm.rs` moves every argument out of the caller's window into the
+callee's registers, and the caller's local was cleared by `emit_borrow_takes`
+so `Rc::strong_count` stays right. A `&T` or `&mut T` parameter is not in the
+callee's `droppable` list, and the writeback that would return the value to
+the caller's local only runs on a normal return. So when the callee panics,
+the lent value is in no list and never drops. Fix by giving the unwind the
+call site's writeback map, window slot to local register, and restoring the
+lent values into the caller's locals before the caller's frame drops them,
+so they drop at their declaration position like in real Rust.
+
+```rust
+#[derive(Debug, Clone)]
+struct T(i64);
+impl Drop for T {
+    fn drop(&mut self) {
+        println!("drop {}", self.0);
+    }
+}
+fn write(t: &mut T) {
+    let cur = T(t.0 + 10);
+    *t = vec![T(5)][2].clone();
+    println!("{}", cur.0);
+}
+fn main() {
+    let mut a = T(1);
+    let keep = T(9);
+    write(&mut a);
+    println!("{}", keep.0);
+}
+```
+
+Both panic with `index out of bounds: the len is 1 but the index is 2`.
+Compiled prints `drop 5`, `drop 11`, `drop 9`, `drop 1`. Interpreted stops
+after `drop 9`. A `&a` argument and a `&T::new()` argument lose their drop the
+same way. Found by a local campaign at seed 20705000321 with the generator of
+v0.6.31, and most of the `drop N` findings left after v0.6.32 are this class
+or the unwind order above.
+
+### A bare `ref mut` binding over a scalar local binds a copy
+
+`if let ref mut m = n { *m += 1 }` panics with `assignment through a
+non-reference value`. A `ref mut` pattern over a tuple, a struct or an element
+borrows the place since v0.6.32, see `compile_scrutinee` in
+`compile/place.rs`, but a scalar local is its register and a register has no
+reference form, so that path is skipped for it. Fix by aliasing the binding to
+the local at compile time, the way `compile_let_borrow` handles
+`let r = &mut n`.
+
+```rust
+fn main() {
+    let mut n = 5;
+    if let ref mut m = n {
+        *m += 1;
+    }
+    println!("{n}");
+}
+```
+
+Compiled prints `6`. Interpreted panics at `*m += 1`.
+
+### The generator writes programs rustc rejects
+
+About 5 of every 20000 cases fail to compile, so the runner counts them as
+`RustcRejected` and learns nothing from them. The 4 shapes seen in the
+Differential runs of 2026-09-09, run 34323849776, all with the generator of
+v0.6.31:
+
+- A match arm yields a local of the wrong type, `expected bool, found usize`
+  from an arm that reads a `usize` binding where the match is typed `bool`.
+  Seed 20705102828.
+- A `String` binding of a pattern is moved inside the pattern guard,
+  `cannot move out of ... in pattern guard`, when the guard builds a map or
+  matches on the binding by value. Seeds 20705109085 and 20705201571.
+- A rebinding `let mut v: char = v;` reads the outer `v` whose type is
+  `Vec<i32>`. The shadowing `let` takes its annotation from the new type but
+  its init from the old binding. Seed 20705204644.
+- A map insert keys with a binding of another width, `expected i8, found i16`
+  from `diff_map.insert(v_0_0, ..)` where the map is keyed by `i8`. Seed
+  20705111020.
+
+The sources are in the `differential-failures-*` artifacts of that run. Each
+shape needs a typing rule in `lang/synth`, and the guard case needs
+`own_check` to treat a guard as a borrow of its bindings.
 
 ## Generator plan
 

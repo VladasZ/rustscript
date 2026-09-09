@@ -1,6 +1,8 @@
 //! Method calls, the `collect`, `sum` and `unwrap_or_default` type hints they read, and fold closures.
 
 use anyhow::{Result, bail};
+use proc_macro2::{TokenStream, TokenTree};
+use quote::ToTokens;
 use syn::Expr;
 
 use crate::interpreter::bytecode::{BinKind, BuiltinId, DISCARD, Op, PathRef, Reg, ScalarTy};
@@ -125,15 +127,23 @@ impl Compiler<'_> {
             && !(matches!(method_text.as_str(), "rotate_left" | "rotate_right")
                 && matches!(self.types.of(&m.receiver), Ty::Int(_)));
         let owned = self.scrutinee_owned(&m.receiver);
+        let mut unwinds_receiver = false;
         let (recv, receiver_place) = if mutating {
             let p = self.compile_mut_receiver(&m.receiver)?;
             (p.reg, Some(p))
         } else if consumes_receiver(&method_text) && !self.lends_receiver(m, &method_text) {
             // a method that takes `self` owns the receiver now, so a local moves in and a
             // temporary is not dropped again at the statement end
-            (self.compile_owned_expr(&m.receiver)?, None)
+            let reg = self.compile_owned_expr(&m.receiver)?;
+            // until the call runs, a panic in an argument is the only thing that drops it
+            if self.ctx.has_drop && self.arg_owned(&m.receiver) {
+                self.cur().unwind_temps.push(reg);
+                unwinds_receiver = true;
+            }
+            (reg, None)
         } else {
-            (self.compile_expr(&m.receiver)?, None)
+            let reg = self.compile_expr(&m.receiver)?;
+            (self.read_before_args(reg, m), None)
         };
         let place = mutating && place::is_place_expr(&m.receiver);
         let base = self.compile_shared_args(m.args.iter())?;
@@ -154,6 +164,10 @@ impl Compiler<'_> {
             base,
             argc: idx16(m.args.len()),
         });
+        // the call took it, so a later panic in this frame must not drop it again
+        if unwinds_receiver {
+            self.emit(Op::LoadUnit { dst: recv });
+        }
         if let Some(p) = &receiver_place {
             self.emit_place_writeback(p);
         }
@@ -161,6 +175,32 @@ impl Compiler<'_> {
         // the variable
         self.emit_mut_arg_writebacks(m.args.iter(), base)?;
         Ok(())
+    }
+
+    /// `v.rem_euclid(replace(&mut v, 1))` reads `v` before the argument writes it. A scalar
+    /// local is its register, so an argument that names it gets a copy to work against.
+    fn read_before_args(&mut self, recv: Reg, m: &syn::ExprMethodCall) -> Reg {
+        let Some(name) = place::single_path_name(&m.receiver) else {
+            return recv;
+        };
+        let scalar = matches!(
+            self.types.of(&m.receiver),
+            Ty::Int(_) | Ty::IntVar(_) | Ty::F32 | Ty::F64 | Ty::FloatVar(_) | Ty::Bool | Ty::Char
+        );
+        if !scalar
+            || !m
+                .args
+                .iter()
+                .any(|arg| mentions_ident(arg.to_token_stream(), &name))
+        {
+            return recv;
+        }
+        let copy = self.alloc();
+        self.emit(Op::Copy {
+            dst: copy,
+            src: recv,
+        });
+        copy
     }
 
     /// `v[a..b].copy_from_slice(src)` must write through to `v`, and a range index builds a copy. So
@@ -314,12 +354,6 @@ pub(super) fn consumes_receiver(name: &str) -> bool {
             | "min_by_key"
             | "max_by_key"
             | "last"
-            | "any"
-            | "all"
-            | "position"
-            | "rposition"
-            | "find"
-            | "find_map"
             | "for_each"
             | "rev"
             | "take"
@@ -350,4 +384,13 @@ pub(super) fn consumes_receiver(name: &str) -> bool {
             | "transpose"
             | "unwrap_unchecked"
     )
+}
+
+/// Whether the tokens name the identifier anywhere, inside nested groups too.
+fn mentions_ident(tokens: TokenStream, name: &str) -> bool {
+    tokens.into_iter().any(|tree| match tree {
+        TokenTree::Ident(ident) => ident == name,
+        TokenTree::Group(group) => mentions_ident(group.stream(), name),
+        _ => false,
+    })
 }

@@ -54,13 +54,14 @@ pub(super) fn set_index(ctx: &mut StepCtx, base: u16, key: u16, val: u16) -> Res
     }
     let target = place_base(ctx.get(base))?;
     let old = ops::set_index(&target, ctx.get(key), ctx.get(val).clone())?;
-    drop_overwritten(ctx, old)?;
+    drop_overwritten(ctx, old, ctx.get(val))?;
     Ok(Flow::Next)
 }
 
-/// The value a store replaced. Real Rust drops it right there.
-fn drop_overwritten(ctx: &StepCtx, old: Value) -> Result<()> {
-    if ctx.vm.has_drop {
+/// The value a store replaced. Real Rust drops it right there. A method writeback stores the
+/// handle it read, and dropping that would empty the live value.
+fn drop_overwritten(ctx: &StepCtx, old: Value, new: &Value) -> Result<()> {
+    if ctx.vm.has_drop && !old.shares_storage(new) {
         ctx.vm.run_user_drop(old)?;
     }
     Ok(())
@@ -92,7 +93,7 @@ pub(super) fn set_deref(ctx: &StepCtx, target: u16, val: u16) -> Result<Flow> {
     let Some(old) = reference.swap(ctx.get(val).clone()) else {
         bail!("assignment through a dangling reference");
     };
-    drop_overwritten(ctx, old)?;
+    drop_overwritten(ctx, old, ctx.get(val))?;
     Ok(Flow::Next)
 }
 
@@ -153,12 +154,12 @@ pub(super) fn set_deref_param(ctx: &mut StepCtx, target: u16, val: u16) -> Resul
         let Some(old) = reference.swap(ctx.get(val).clone()) else {
             bail!("assignment through a dangling reference");
         };
-        drop_overwritten(ctx, old)?;
+        drop_overwritten(ctx, old, ctx.get(val))?;
         return Ok(Flow::Next);
     }
     let value = ctx.get(val).clone();
     let old = ctx.take(target);
-    drop_overwritten(ctx, old)?;
+    drop_overwritten(ctx, old, &value)?;
     Ok(ctx.set(target, value))
 }
 
@@ -182,7 +183,7 @@ pub(super) fn set_field_op(ctx: &StepCtx, base: u16, member: u16, val: u16) -> R
         &ctx.cur.members[member as usize],
         ctx.get(val).clone(),
     )?;
-    drop_overwritten(ctx, old)?;
+    drop_overwritten(ctx, old, ctx.get(val))?;
     Ok(Flow::Next)
 }
 
