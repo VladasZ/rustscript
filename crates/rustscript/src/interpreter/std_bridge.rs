@@ -9,7 +9,7 @@ use super::crates_bridge::crate_bridge;
 use super::enum_def::{NOT_PRESENT, NOT_UNICODE, VAR_ERROR};
 use super::json_bridge::bridge_serde_json;
 use super::native::Native;
-use super::native_methods;
+use super::native_methods::{self, value_to_bytes};
 use super::value::{StructData, Value};
 
 fn fs_native_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
@@ -22,7 +22,12 @@ fn fs_native_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     Ok(Some(match id {
         PathId::FsReadToString => wrap_io(std::fs::read_to_string(s(0)?)),
         PathId::FsRead => wrap_bytes(std::fs::read(s(0)?)),
-        PathId::FsWrite => wrap_unit(std::fs::write(s(0)?, s(1)?)),
+        PathId::FsWrite => {
+            let Some(contents) = args.get(1) else {
+                bail!("missing argument 1 for {id}");
+            };
+            wrap_unit(std::fs::write(s(0)?, value_to_bytes(Some(contents))))
+        }
         PathId::FsCreateDirAll => wrap_unit(std::fs::create_dir_all(s(0)?)),
         PathId::FsCreateDir => wrap_unit(std::fs::create_dir(s(0)?)),
         PathId::FsRemoveFile => wrap_unit(std::fs::remove_file(s(0)?)),
