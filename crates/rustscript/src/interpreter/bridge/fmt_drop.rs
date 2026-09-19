@@ -7,7 +7,7 @@ use anyhow::Result;
 
 use crate::interpreter::bytecode::Chunk;
 use crate::interpreter::native::Native;
-use crate::interpreter::value::Value;
+use crate::interpreter::value::{Upvalue, Value};
 use crate::interpreter::vm::Vm;
 
 use super::template::render_template;
@@ -129,6 +129,24 @@ impl Vm {
                 };
                 for item in leftover {
                     self.run_user_drop(item)?;
+                }
+                Ok(())
+            }
+            // A `move` closure owns the captures it took, so they drop with it in capture
+            // order. A taken capture sits in its own cell, emptied here, so a second handle to
+            // the closure, the frame of a call still running at a panic, finds nothing left.
+            Value::Closure(clo) if clo.chunk.moves => {
+                for (captured, owned) in clo.captured.iter().zip(clo.owned.iter()) {
+                    if !owned {
+                        continue;
+                    }
+                    match captured {
+                        Upvalue::Value(v) => self.run_user_drop(v.clone())?,
+                        Upvalue::Mutable(cell) => {
+                            let inner = take(&mut *cell.lock());
+                            self.run_user_drop(inner)?;
+                        }
+                    }
                 }
                 Ok(())
             }

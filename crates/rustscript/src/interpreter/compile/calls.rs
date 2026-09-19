@@ -16,16 +16,11 @@ impl Compiler<'_> {
     /// Arguments for an op that takes the window, a call or a constructor. An owned value in
     /// it is the panic unwinder's to drop, when a later argument panics before the op runs.
     pub(super) fn compile_args<'e>(&mut self, args: impl Iterator<Item = &'e Expr>) -> Result<Reg> {
+        // the tail call of a block unwinds its operands like the temporaries around them, in
+        // reverse order of creation, any other call unwinds them first
+        let tail = std::mem::take(&mut self.cur().tail_call);
         let list: Vec<&Expr> = args.collect();
-        let base = self.compile_shared_args(list.iter().copied())?;
-        if self.ctx.has_drop {
-            for (i, a) in list.iter().enumerate() {
-                if self.arg_owned(a) {
-                    self.cur().unwind_temps.push(base + idx16(i));
-                }
-            }
-        }
-        Ok(base)
+        self.compile_window(&list, Some(tail))
     }
 
     /// Arguments a native method reads in place and leaves in the window, so nothing may
@@ -35,6 +30,12 @@ impl Compiler<'_> {
         args: impl Iterator<Item = &'e Expr>,
     ) -> Result<Reg> {
         let list: Vec<&Expr> = args.collect();
+        self.compile_window(&list, None)
+    }
+
+    /// The window itself. `taken` is `Some` when the op takes the owned values out of it, and
+    /// says whether the call is a block's tail, see `compile_args`.
+    fn compile_window(&mut self, list: &[&Expr], taken: Option<bool>) -> Result<Reg> {
         let base = self.cur().reg_top;
         for _ in 0..list.len() {
             self.alloc();
@@ -42,13 +43,24 @@ impl Compiler<'_> {
         for (i, a) in list.iter().enumerate() {
             let reg = base + idx16(i);
             self.compile_owned_into(reg, a)?;
+            if !self.ctx.has_drop {
+                continue;
+            }
             // `f(&T::new())` lends a temporary that ends with the statement. A callee hands a
             // lent argument back into the window on return, so the drop finds it there.
-            if self.ctx.has_drop
-                && let Expr::Reference(r) = a
+            if let Expr::Reference(r) = a
                 && self.temp_owned(&r.expr)
             {
                 self.cur().owned_temps.push(reg);
+            }
+            if let Some(tail) = taken
+                && self.arg_owned(a)
+            {
+                if tail {
+                    self.cur().owned_temps.push(reg);
+                } else {
+                    self.cur().unwind_temps.push(reg);
+                }
             }
         }
         Ok(base)

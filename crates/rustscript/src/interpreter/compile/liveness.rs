@@ -4,8 +4,6 @@
 //!
 //! The same pass decides which captures a `move` closure takes instead of copies.
 
-use std::collections::HashSet;
-
 use super::FnState;
 use crate::interpreter::bytecode::{CapSource, NO_ROOT, Op, Reg};
 
@@ -237,7 +235,13 @@ fn effects(f: &FnState, op: &Op, reads: &mut Vec<Reg>, writes: &mut Vec<Reg>) {
             reads.push(*src);
             writes.push(*cell);
         }
-        Op::DropCell { .. } | Op::Jump { .. } => {}
+        // the register's value moves into the cell, the binding lives on under the same number
+        Op::MakeCell { cell } => {
+            reads.push(*cell);
+            writes.push(*cell);
+        }
+        Op::ClearCell { cell } => writes.push(*cell),
+        Op::DropCell { .. } | Op::ClearUpvalue { .. } | Op::Jump { .. } => {}
         Op::StoreUpvalue { src, .. } | Op::Ret { src } => reads.push(*src),
         Op::Move { dst, src }
         | Op::Copy { dst, src }
@@ -334,24 +338,12 @@ struct Liveness {
     succ: Vec<Vec<usize>>,
     writes: Vec<Vec<Reg>>,
     live_in: Vec<Bits>,
-    /// never dead, see `Liveness::of`
-    pinned: HashSet<Reg>,
 }
 
 impl Liveness {
     fn of(func: &FnState) -> Liveness {
         let regs = usize::from(func.max_reg).max(1);
         let count = func.code.len();
-        // A register a closure captured is read by every later call of that closure, so it is
-        // never dead. A cell promoted local is shared the same way.
-        let mut pinned: HashSet<Reg> = func.mutable_locals.iter().copied().collect();
-        for caps in &func.child_caps {
-            for cap in caps {
-                if let CapSource::Local(reg) | CapSource::MutableLocal(reg) = cap {
-                    pinned.insert(*reg);
-                }
-            }
-        }
         let mut reads: Vec<Vec<Reg>> = Vec::with_capacity(count);
         let mut writes: Vec<Vec<Reg>> = Vec::with_capacity(count);
         let mut succ: Vec<Vec<usize>> = Vec::with_capacity(count);
@@ -387,15 +379,16 @@ impl Liveness {
             succ,
             writes,
             live_in,
-            pinned,
         }
     }
 
+    /// A register a closure captured shares its value with the closure, but `rustc` accepted
+    /// the program, so no call of that closure follows a move out of the register. A move out
+    /// of a cell promoted local clears the cell the same way, see `Op::ClearCell`.
     fn live_out(&self, at: usize, reg: Reg) -> bool {
-        self.pinned.contains(&reg)
-            || self.succ[at]
-                .iter()
-                .any(|&s| s < self.live_in.len() && self.live_in[s].get(reg))
+        self.succ[at]
+            .iter()
+            .any(|&s| s < self.live_in.len() && self.live_in[s].get(reg))
     }
 }
 
@@ -410,11 +403,15 @@ impl FnState {
                 if let Op::MakeClosure { child, .. } | Op::Spawn { child, .. } = self.code[at] {
                     let child = usize::from(child);
                     let moves = self.children[child].moves;
+                    let partial = &self.child_partial[child];
                     let takes: Vec<bool> = self.child_caps[child]
                         .iter()
-                        .map(|cap| match cap {
+                        .enumerate()
+                        .map(|(i, cap)| match cap {
                             CapSource::Local(reg) | CapSource::MutableLocal(reg) => {
-                                moves && !live_out(at, *reg)
+                                moves
+                                    && !live_out(at, *reg)
+                                    && !partial.get(i).copied().unwrap_or(false)
                             }
                             CapSource::Upvalue(_) | CapSource::MutableUpvalue(_) => false,
                         })
@@ -427,9 +424,9 @@ impl FnState {
                 Op::Copy { dst, src }
             } else if dst == src {
                 if self.mutable_locals.contains(&root) {
-                    // a value moved out of a capture cell, the cell is cleared so the closure
-                    // can't drop the moved part again
-                    Op::LoadUnit { dst: root }
+                    // a value moved out of a capture cell, the cell is cleared so the scope end
+                    // and the closure can't drop the moved value again
+                    Op::ClearCell { cell: root }
                 } else {
                     // A field or element read out of a dead local. A move of a non copy field
                     // left a tombstone in the local already, see `compile_owned_into`, so what

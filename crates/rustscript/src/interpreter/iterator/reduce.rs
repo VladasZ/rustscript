@@ -121,12 +121,19 @@ impl Vm {
                 }
                 Value::vec(output)
             }
+            // the flattened items stay the iterator's own when the source owned them, so a
+            // `count` drops what it throws away
             BuiltinId::Flatten => {
+                let owned = owns_items(iterator);
                 let mut output = Vec::new();
                 while let Some(value) = self.iterator_next(iterator)? {
                     output.extend(self.drain_items(value)?);
                 }
-                Value::vec(output)
+                wrap(IteratorState::Owned {
+                    values: output,
+                    index: 0,
+                    vec: owned,
+                })
             }
             BuiltinId::Partition => {
                 let closure = closure(0)?;

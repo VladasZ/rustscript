@@ -12,78 +12,6 @@ Differential workflow.
 
 ## Open
 
-### An earlier call argument unwinds after a later temporary
-
-When an argument panics, real Rust drops the arguments already evaluated
-before it drops the temporaries made inside the panicking argument. The
-interpreter drops the whole frame highest register first in `unwind_drops` in
-`vm.rs`, so the later temporary goes first. Fix by keeping the owned call
-arguments of the window, `unwind_temps` in `compile/calls.rs`, ahead of the
-other droppable registers of their statement, or by recording the order the
-compiler wants on the chunk instead of sorting by register.
-
-```rust
-#[derive(Debug, Clone)]
-struct T(i64);
-impl Drop for T {
-    fn drop(&mut self) {
-        println!("drop {}", self.0);
-    }
-}
-fn take(_a: T, _b: &T) -> i64 {
-    0
-}
-fn main() {
-    let v = take(T(1), &vec![T(2)][2].clone());
-    println!("{v}");
-}
-```
-
-Both panic with `index out of bounds: the len is 1 but the index is 2`.
-Compiled prints `drop 1` then `drop 2` during the unwind. Interpreted prints
-`drop 2` then `drop 1`. Found by a local campaign at seed 20705000113 with the
-generator of v0.6.31.
-
-### A value lent to a panicking call never drops
-
-`enter` in `vm.rs` moves every argument out of the caller's window into the
-callee's registers, and the caller's local was cleared by `emit_borrow_takes`
-so `Rc::strong_count` stays right. A `&T` or `&mut T` parameter is not in the
-callee's `droppable` list, and the writeback that would return the value to
-the caller's local only runs on a normal return. So when the callee panics,
-the lent value is in no list and never drops. Fix by giving the unwind the
-call site's writeback map, window slot to local register, and restoring the
-lent values into the caller's locals before the caller's frame drops them,
-so they drop at their declaration position like in real Rust.
-
-```rust
-#[derive(Debug, Clone)]
-struct T(i64);
-impl Drop for T {
-    fn drop(&mut self) {
-        println!("drop {}", self.0);
-    }
-}
-fn write(t: &mut T) {
-    let cur = T(t.0 + 10);
-    *t = vec![T(5)][2].clone();
-    println!("{}", cur.0);
-}
-fn main() {
-    let mut a = T(1);
-    let keep = T(9);
-    write(&mut a);
-    println!("{}", keep.0);
-}
-```
-
-Both panic with `index out of bounds: the len is 1 but the index is 2`.
-Compiled prints `drop 5`, `drop 11`, `drop 9`, `drop 1`. Interpreted stops
-after `drop 9`. A `&a` argument and a `&T::new()` argument lose their drop the
-same way. Found by a local campaign at seed 20705000321 with the generator of
-v0.6.31, and most of the `drop N` findings left after v0.6.32 are this class
-or the unwind order above.
-
 ### A bare `ref mut` binding over a scalar local binds a copy
 
 `if let ref mut m = n { *m += 1 }` panics with `assignment through a
@@ -106,29 +34,72 @@ fn main() {
 
 Compiled prints `6`. Interpreted panics at `*m += 1`.
 
+### A closure writes through a `&mut` scalar parameter
+
+`*n += 1` inside a closure, where `n: &mut i64` is a parameter of the
+enclosing function, panics with `assignment through a non-reference value`.
+The parameter arrives as a plain copy of the caller's value, the closure sees
+it as an upvalue and `compile_compound_deref_assign` in `compile/assign.rs`
+has no deref form for an upvalue. Fix by giving the closure the parameter's
+capture cell to write, the way `deref_param_cell` does for the function body,
+and letting the return hand the cell back.
+
+```rust
+fn bump(n: &mut i64) {
+    let mut inc = || *n += 1;
+    inc();
+    inc();
+}
+fn main() {
+    let mut n = 5;
+    bump(&mut n);
+    println!("{n}");
+}
+```
+
+Compiled prints `7`. Interpreted panics inside `inc`.
+
+### `write!` into a captured `String` writes a stale copy
+
+A closure that does `write!(buf, "{i},")` on a `String` it captures leaves
+`buf` empty afterwards. The macro compiles its target through a fresh
+upvalue load and never stores the grown buffer back, see `compile_macro` in
+`compile/macros.rs`. Fix by compiling the target as a place with a writeback,
+like a `push_str` call does.
+
+```rust
+use std::fmt::Write;
+fn main() {
+    let mut buf = String::new();
+    let mut wr = |i: i32| write!(buf, "{i},").unwrap();
+    wr(1);
+    wr(2);
+    println!("{buf}");
+}
+```
+
+Compiled prints `1,2,`. Interpreted prints an empty line.
+
 ### The generator writes programs rustc rejects
 
-About 5 of every 20000 cases fail to compile, so the runner counts them as
-`RustcRejected` and learns nothing from them. The 4 shapes seen in the
-Differential runs of 2026-09-09, run 34323849776, all with the generator of
-v0.6.31:
+The runner counts these as `RustcRejected` and learns nothing from them. The
+shapes left after the guard, closure, index and splice fixes of v0.6.33,
+seen in the Differential runs of 2026-09-05 to 2026-09-18:
 
-- A match arm yields a local of the wrong type, `expected bool, found usize`
-  from an arm that reads a `usize` binding where the match is typed `bool`.
-  Seed 20705102828.
-- A `String` binding of a pattern is moved inside the pattern guard,
-  `cannot move out of ... in pattern guard`, when the guard builds a map or
-  matches on the binding by value. Seeds 20705109085 and 20705201571.
 - A rebinding `let mut v: char = v;` reads the outer `v` whose type is
   `Vec<i32>`. The shadowing `let` takes its annotation from the new type but
-  its init from the old binding. Seed 20705204644.
+  its init from the old binding. Seed 20705204644 of run 34323849776.
 - A map insert keys with a binding of another width, `expected i8, found i16`
   from `diff_map.insert(v_0_0, ..)` where the map is keyed by `i8`. Seed
-  20705111020.
+  20705111020 of the same run.
+- A catalog call on a by reference receiver mutates the receiver in an
+  argument, `x.eq_ignore_ascii_case(&std::mem::replace(&mut x, 'a'))`, so
+  the shared borrow of the receiver conflicts with the `&mut`. `call` in
+  `lang/synth/exprs.rs` must freeze the receiver binding while it builds the
+  arguments, as `method_call` already does, once the catalog says which
+  receivers are taken by reference.
 
-The sources are in the `differential-failures-*` artifacts of that run. Each
-shape needs a typing rule in `lang/synth`, and the guard case needs
-`own_check` to treat a guard as a borrow of its bindings.
+The sources are in the `differential-failures-*` artifacts of those runs.
 
 ## Generator plan
 

@@ -206,13 +206,24 @@ fn splice(program: &mut Program, donor: &Program, rng: &mut StdRng) -> bool {
         return false;
     }
     let stmt_index = targets[rng.random_range(0..targets.len())];
-    let environment: Vec<(String, Ty)> = block.statements[..stmt_index]
-        .iter()
-        .filter_map(|stmt| match stmt {
-            Stmt::Let { name, ty, .. } => Some((name.clone(), ty.clone())),
-            _ => None,
-        })
-        .collect();
+    // a later `let` shadows an earlier one of the same name, so only the binding the target
+    // statement sees stays, or a graft would name a type the shadowed binding no longer has
+    let mut environment: Vec<(String, Ty)> = Vec::new();
+    for stmt in &block.statements[..stmt_index] {
+        match stmt {
+            Stmt::Let { name, ty, .. } => {
+                environment.retain(|(seen, _)| seen != name);
+                environment.push((name.clone(), ty.clone()));
+            }
+            Stmt::LetTuple { names, .. } => {
+                for (name, ty) in names {
+                    environment.retain(|(seen, _)| seen != name);
+                    environment.push((name.clone(), ty.clone()));
+                }
+            }
+            _ => {}
+        }
+    }
     let donor_nodes: Vec<&Expr> = donor
         .blocks
         .iter()
@@ -259,11 +270,9 @@ fn splice(program: &mut Program, donor: &Program, rng: &mut StdRng) -> bool {
     binders(&graft, &mut bound);
     rebind(&mut graft, &environment, &bound, rng);
     *target = graft;
-    // a graft whose terminal states no type can't initialize an unannotated binding
-    if let Stmt::Let { expr, ann, .. } = stmt
-        && let Expr::Pipe(pipe) = expr
-        && !pipe.states_type()
-    {
+    // A graft may state no type of its own, a pipe without a typed terminal or a bare float
+    // literal a rebound variable became, so a spliced binding is always annotated.
+    if let Stmt::Let { ann, .. } = stmt {
         *ann = Ann::Typed;
     }
     block.seal();

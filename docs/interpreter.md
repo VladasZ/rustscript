@@ -53,6 +53,17 @@ move is never copied. A `&mut` borrow works on the place itself. `Rc`, `Arc`,
 `RefCell`, `Cell` and `Mutex` are real shared cells. `*guard += n` is one
 fused op that holds the lock across the read-modify-write.
 
+A binding a closure writes lives in a capture cell from its `let` on. The
+compiler scans the body for the names its closures assign, borrow mutably,
+call a mutating method on or `write!` into, before it compiles a statement,
+so a store before the closure and a read after it reach the same cell, and a
+closure made again in a loop sees the assignment of that iteration. A move
+out of the cell empties it, the scope end drops what it holds, and a
+parameter's cell hands its value back to the caller on return. A `move`
+closure takes a value the frame never reads again and drops it at its own
+end, and one that reads only fields that copy takes those fields and leaves
+the value with the frame, like the edition 2021 disjoint capture.
+
 A `RefCell` borrow is a guard value, and the live borrows of every cell sit in
 one table, so a second `borrow_mut` panics with the std message. The compiler
 releases a guard where Rust would, a temporary with its statement, a binding at
@@ -130,9 +141,19 @@ impl on a builtin type is keyed by the written type, so `Vec<u8>` and
 `drop`, each loop iteration, `break`, `continue`, `return`, `?` and panic
 unwinding. A temporary that owns a value drops at the semicolon of its
 statement, one made for an `if` or `while` condition drops before the branch
-runs, an `if let` scrutinee nobody bound drops before the `else` block, a
-value a store overwrites drops before the store, and a field moved out of a
-struct leaves unit behind so the struct still drops its other fields. A by
+runs, each operand of `&&` and `||` and a match guard drop their temporaries
+before the branch on them, a `return` drops the temporaries of its expression
+before the scopes it leaves, an `if let` scrutinee nobody bound drops before
+the `else` block, a value a store overwrites drops before the store, and a
+field moved out of a struct leaves unit behind so the struct still drops its
+other fields. A panic drops the owned arguments of the call being built and
+the value of a store whose place panicked first, in reverse order, then the
+other temporaries of the statement newest first, then the locals, and a value
+lent to the callee by reference goes back to the caller first, into the
+local or the temporary it came from, so it drops where the caller declared or
+made it. `clear`, `dedup` and
+`truncate` drop the items they remove inside the call, and `flatten` keeps
+owning the items its source owned, so a `count` over it drops them. A by
 value pattern moves only the parts it binds, so the rest of the scrutinee,
 the `_` in `Some((a, _))`, drops after the bindings, with the `if let` or at
 the semicolon of the statement around a `match`, and the rest of a partially

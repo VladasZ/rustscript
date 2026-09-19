@@ -10,6 +10,7 @@ use parking_lot::Mutex;
 
 use super::bridge::arg;
 use super::bytecode::{BuiltinId, MethodName, ScalarTy};
+use super::discard::discard;
 use super::enum_def::EnumKind;
 use super::iterator;
 use super::native::Native;
@@ -230,8 +231,45 @@ fn vec_join(v: &List, args: &[Value]) -> Value {
     Value::str(joined)
 }
 
+/// The mutations that throw items away. The removed items are the vec's own, so they drop
+/// inside the call like in real Rust, whether the vec was reached through a local or a `&mut`.
+fn vec_removal(v: &List, id: BuiltinId, args: &[Value]) -> Result<Option<Value>> {
+    match id {
+        BuiltinId::Dedup => {
+            let mut items = v.lock();
+            let mut kept: Vec<Value> = Vec::with_capacity(items.len());
+            for item in take(&mut *items) {
+                match kept.last() {
+                    Some(last) if last.eq_value(&item) => discard(item),
+                    _ => kept.push(item),
+                }
+            }
+            *items = kept;
+        }
+        BuiltinId::Clear => {
+            for item in take(&mut *v.lock()) {
+                discard(item);
+            }
+        }
+        BuiltinId::Truncate => {
+            let n = usize::try_from(int_arg(args, 0)?)?;
+            let mut items = v.lock();
+            if n < items.len() {
+                for item in items.drain(n..) {
+                    discard(item);
+                }
+            }
+        }
+        _ => return Ok(None),
+    }
+    Ok(Some(Value::Unit))
+}
+
 /// Everything without a builtin id.
 fn vec_method_by_name(v: &List, method: &MethodName, args: &mut [Value]) -> Result<Value> {
+    if let Some(out) = vec_removal(v, method.id, args)? {
+        return Ok(out);
+    }
     Ok(match method.id {
         BuiltinId::ToVec | BuiltinId::Collect | BuiltinId::Cloned | BuiltinId::Copied => {
             Value::Vec(v.clone()).deep_clone()
@@ -258,15 +296,6 @@ fn vec_method_by_name(v: &List, method: &MethodName, args: &mut [Value]) -> Resu
             v.lock().reverse();
             Value::Unit
         }
-        BuiltinId::Dedup => {
-            let mut items = v.lock();
-            items.dedup_by(|a, b| a.eq_value(b));
-            Value::Unit
-        }
-        BuiltinId::Clear => {
-            v.lock().clear();
-            Value::Unit
-        }
         BuiltinId::CopyFromSlice => return vec_copy_from_slice(v, args),
         BuiltinId::SwapRemove => {
             let i = usize::try_from(int_arg(args, 0)?)?;
@@ -278,11 +307,6 @@ fn vec_method_by_name(v: &List, method: &MethodName, args: &mut [Value]) -> Resu
                 );
             }
             items.swap_remove(i)
-        }
-        BuiltinId::Truncate => {
-            let n = usize::try_from(int_arg(args, 0)?)?;
-            v.lock().truncate(n);
-            Value::Unit
         }
         // A lazy argument is drained in `eval_method` first. Anything else is an error, a silent
         // no-op would hide the bug.

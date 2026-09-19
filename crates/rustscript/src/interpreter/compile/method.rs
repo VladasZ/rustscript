@@ -102,21 +102,7 @@ impl Compiler<'_> {
             });
             return Ok(());
         }
-        // `v.into()` into a script type is `T::from(v)`, anything else is identity
-        if m.method == "into"
-            && m.args.is_empty()
-            && let Ty::Struct(canon) | Ty::Enum(canon) = self.types.of_node(m)
-        {
-            let source = self.types.of(&m.receiver);
-            let path = PathRef::user(self.impl_path_for_from(&canon, &source), None);
-            let p = self.add_path(path);
-            let base = self.compile_args(std::iter::once(&*m.receiver))?;
-            self.emit(Op::CallPath {
-                dst,
-                path: p,
-                base,
-                argc: 1,
-            });
+        if self.compile_into_conversion(dst, m)? {
             return Ok(());
         }
         let method_text = m.method.to_string();
@@ -128,6 +114,9 @@ impl Compiler<'_> {
                 && matches!(self.types.of(&m.receiver), Ty::Int(_)));
         let owned = self.scrutinee_owned(&m.receiver);
         let mut unwinds_receiver = false;
+        // the tail call of a block unwinds its receiver like the temporaries around it, in
+        // reverse order of creation, any other call unwinds it first
+        let tail = std::mem::take(&mut self.cur().tail_call);
         let (recv, receiver_place) = if mutating {
             let p = self.compile_mut_receiver(&m.receiver)?;
             (p.reg, Some(p))
@@ -137,7 +126,11 @@ impl Compiler<'_> {
             let reg = self.compile_owned_expr(&m.receiver)?;
             // until the call runs, a panic in an argument is the only thing that drops it
             if self.ctx.has_drop && self.arg_owned(&m.receiver) {
-                self.cur().unwind_temps.push(reg);
+                if tail {
+                    self.cur().owned_temps.push(reg);
+                } else {
+                    self.cur().unwind_temps.push(reg);
+                }
                 unwinds_receiver = true;
             }
             (reg, None)
@@ -169,6 +162,13 @@ impl Compiler<'_> {
             self.emit(Op::LoadUnit { dst: recv });
         }
         if let Some(p) = &receiver_place {
+            // `opt.take()` on a captured variable hands the payload out, so the store back
+            // must not drop the old value as overwritten, see `emit_place_take`
+            if matches!(method_text.as_str(), "take" | "replace")
+                && matches!(self.types.of(&m.receiver), Ty::Option(_))
+            {
+                self.emit_place_take(p);
+            }
             self.emit_place_writeback(p);
         }
         // `read_line` and friends write into the arg window copy, so move the result back into
@@ -177,28 +177,57 @@ impl Compiler<'_> {
         Ok(())
     }
 
+    /// `v.into()` into a script type is `T::from(v)`, anything else is identity and stays a
+    /// method call. True when the conversion was emitted here.
+    fn compile_into_conversion(&mut self, dst: Reg, m: &syn::ExprMethodCall) -> Result<bool> {
+        if m.method != "into" || !m.args.is_empty() {
+            return Ok(false);
+        }
+        let (Ty::Struct(canon) | Ty::Enum(canon)) = self.types.of_node(m) else {
+            return Ok(false);
+        };
+        let source = self.types.of(&m.receiver);
+        let path = PathRef::user(self.impl_path_for_from(&canon, &source), None);
+        let p = self.add_path(path);
+        let base = self.compile_args(std::iter::once(&*m.receiver))?;
+        self.emit(Op::CallPath {
+            dst,
+            path: p,
+            base,
+            argc: 1,
+        });
+        Ok(true)
+    }
+
     /// `v.rem_euclid(replace(&mut v, 1))` reads `v` before the argument writes it. A scalar
     /// local is its register, so an argument that names it gets a copy to work against.
     fn read_before_args(&mut self, recv: Reg, m: &syn::ExprMethodCall) -> Reg {
-        let Some(name) = place::single_path_name(&m.receiver) else {
-            return recv;
+        self.read_before_writes(recv, &m.receiver, m.args.iter())
+    }
+
+    /// `v / replace(&mut v, 2)` reads the left operand before the right one runs, like the
+    /// receiver above. `reg` is the compiled `expr`, a copy when a later expression names it.
+    pub(super) fn read_before_writes<'e>(
+        &mut self,
+        reg: Reg,
+        expr: &Expr,
+        later: impl Iterator<Item = &'e Expr>,
+    ) -> Reg {
+        let Some(name) = place::single_path_name(expr) else {
+            return reg;
         };
         let scalar = matches!(
-            self.types.of(&m.receiver),
+            self.types.of(expr),
             Ty::Int(_) | Ty::IntVar(_) | Ty::F32 | Ty::F64 | Ty::FloatVar(_) | Ty::Bool | Ty::Char
         );
-        if !scalar
-            || !m
-                .args
-                .iter()
-                .any(|arg| mentions_ident(arg.to_token_stream(), &name))
-        {
-            return recv;
+        let mut later = later;
+        if !scalar || !later.any(|e| mentions_ident(e.to_token_stream(), &name)) {
+            return reg;
         }
         let copy = self.alloc();
         self.emit(Op::Copy {
             dst: copy,
-            src: recv,
+            src: reg,
         });
         copy
     }

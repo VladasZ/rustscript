@@ -17,6 +17,7 @@ impl Compiler<'_> {
     /// The value moves to a fresh register first, so the retag doesn't touch a local's own slot
     /// and the value stays shared past the drops.
     pub(super) fn compile_return(&mut self, r: &syn::ExprReturn) -> Result<()> {
+        let temp_mark = self.cur().owned_temps.len();
         let mut src = if let Some(e) = &r.expr {
             self.compile_owned_expr(e)?
         } else {
@@ -34,6 +35,9 @@ impl Compiler<'_> {
             src = out;
         }
         if self.ctx.has_drop {
+            // the temporaries of the returned expression end with it, the base of a
+            // `S { f0: x, ..Default::default() }` drops its fields the literal did not take
+            self.drop_temps(temp_mark, Some(src));
             let depth = self.cur().scope_order.len();
             self.emit_scope_drops(depth);
         }
@@ -519,7 +523,11 @@ impl Compiler<'_> {
             });
             let mut guard_skip = None;
             if let Some(guard) = arm_guard {
+                // a guard is a temporary scope of its own, its temporaries end before the
+                // branch on it, whichever way it goes
+                let guard_temps = self.cur().owned_temps.len();
                 let g = self.compile_expr(guard)?;
+                self.drop_temps(guard_temps, Some(g));
                 let gs = self.here();
                 self.emit(Op::JumpIfFalse { cond: g, to: 0 });
                 guard_skip = Some(gs);

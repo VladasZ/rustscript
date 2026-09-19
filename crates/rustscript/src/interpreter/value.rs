@@ -120,6 +120,9 @@ impl Upvalue {
 pub struct ClosureData {
     pub chunk: Arc<super::bytecode::Chunk>,
     pub captured: Vec<Upvalue>,
+    /// Per capture, whether the closure took the value out of the frame, so its drop is the
+    /// closure's. A copied or shared capture drops with its owner.
+    pub owned: Vec<bool>,
 }
 
 #[derive(Clone, Default)]

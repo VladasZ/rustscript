@@ -584,6 +584,7 @@ fn path_closure(path: PathRef, num_params: usize) -> Value {
     Value::Closure(Arc::new(ClosureData {
         chunk: super::bytecode::path_call_chunk(path, num_params),
         captured: Vec::new(),
+        owned: Vec::new(),
     }))
 }
 

@@ -7,8 +7,8 @@ use syn::{Expr, Pat};
 
 use crate::interpreter::bytecode::{CapSource, Op, Reg};
 
-use super::place;
-use super::{Compiler, FnState, NameLoc, idx16, numeric_annotation};
+use super::place::{self, copies};
+use super::{Compiler, FnState, NameLoc, captures, idx16, numeric_annotation};
 
 impl Compiler<'_> {
     /// The callee worked on the arg window copy and the VM hands it back on return. Only for calls
@@ -63,11 +63,22 @@ impl Compiler<'_> {
     }
 
     /// The callee then holds the only live handle, so `Rc::strong_count` reads the same at any
-    /// depth. The writebacks restore the registers.
+    /// depth. The writebacks restore the registers, and a panic in the callee restores them
+    /// through `Chunk::lent_writebacks`. Always right before the call op.
     pub(super) fn emit_borrow_takes<'e>(&mut self, args: impl Iterator<Item = &'e Expr>) {
-        let regs: Vec<Reg> = args.filter_map(|arg| self.borrowed_local(arg)).collect();
-        for reg in regs {
+        let regs: Vec<(usize, Reg)> = args
+            .enumerate()
+            .filter_map(|(i, arg)| self.borrowed_local(arg).map(|reg| (i, reg)))
+            .collect();
+        for &(_, reg) in &regs {
             self.emit(Op::LoadUnit { dst: reg });
+        }
+        if self.ctx.has_drop && !regs.is_empty() {
+            let call_ip = u32::try_from(self.here()).unwrap_or(u32::MAX);
+            let f = self.cur();
+            for (i, reg) in regs {
+                f.lent_writebacks.push((call_ip, idx16(i), reg));
+            }
         }
     }
 
@@ -80,6 +91,7 @@ impl Compiler<'_> {
     ) -> Result<()> {
         self.frames.push(FnState::new("<task>".to_string()));
         self.cur().num_params = 0;
+        self.scan_captures(block);
         let ret = self.alloc();
         self.compile_block(block, ret)?;
         self.emit(Op::Ret { src: ret });
@@ -88,6 +100,7 @@ impl Compiler<'_> {
             .pop()
             .expect("the closure frame was just pushed");
         let caps: Vec<CapSource> = child.upvalues.iter().map(|(_, s)| *s).collect();
+        let partial = vec![false; caps.len()];
         let mut chunk = child.into_chunk(self.ctx.file.clone())?;
         chunk.module = idx16(self.ctx.module);
         chunk.moves = moves;
@@ -95,6 +108,7 @@ impl Compiler<'_> {
         let child_idx = idx16(parent.children.len());
         parent.children.push(Arc::new(chunk));
         parent.child_caps.push(caps);
+        parent.child_partial.push(partial);
         self.emit(Op::Spawn {
             dst,
             child: child_idx,
@@ -108,19 +122,13 @@ impl Compiler<'_> {
         self.cur().num_params = params.len();
         // a pattern param binds more registers, so every param slot is claimed before any binding
         let regs: Vec<Reg> = params.iter().map(|_| self.alloc()).collect();
+        self.scan_captures_expr(&c.body);
         for (p, reg) in params.iter().zip(regs) {
             // a reference param shares the caller's storage, so it never splits
             if let Pat::Type(t) = p
                 && matches!(&*t.ty, syn::Type::Reference(_))
             {
                 self.cur().borrow_params.insert(reg);
-            }
-            match p {
-                Pat::Ident(id) if id.subpat.is_none() => self.define(&id.ident.to_string(), reg),
-                _ => {
-                    self.bind_pattern_irrefutable(p, reg)?;
-                    self.hold_wild_param(p, reg);
-                }
             }
             // a `mut` parameter owns a copy unless its type rules `Copy` out, see `compile_fn`
             let (binding, annotation) = match p {
@@ -144,6 +152,14 @@ impl Compiler<'_> {
                     src: reg,
                     ty: idx,
                 });
+            }
+            // the binding comes last, a capture cell made at it must hold the retagged copy
+            match p {
+                Pat::Ident(id) if id.subpat.is_none() => self.define(&id.ident.to_string(), reg),
+                _ => {
+                    self.bind_pattern_irrefutable(p, reg)?;
+                    self.hold_wild_param(p, reg);
+                }
             }
         }
         if let syn::ReturnType::Type(_, ty) = &c.output
@@ -173,6 +189,14 @@ impl Compiler<'_> {
             .pop()
             .expect("the closure frame was just pushed");
         let caps: Vec<CapSource> = child.upvalues.iter().map(|(_, s)| *s).collect();
+        // a `move` closure that reads only fields that copy takes those fields, not the value
+        let partial: Vec<bool> = child
+            .upvalues
+            .iter()
+            .map(|(name, _)| {
+                captures::captures_only_copy_fields(&c.body, name, &|e| copies(&self.types.of(e)))
+            })
+            .collect();
         let mut chunk = child.into_chunk(self.ctx.file.clone())?;
         chunk.module = idx16(self.ctx.module);
         chunk.moves = c.capture.is_some();
@@ -181,6 +205,7 @@ impl Compiler<'_> {
         let child_idx = idx16(parent.children.len());
         parent.children.push(chunk);
         parent.child_caps.push(caps);
+        parent.child_partial.push(partial);
         self.emit(Op::MakeClosure {
             dst,
             child: child_idx,

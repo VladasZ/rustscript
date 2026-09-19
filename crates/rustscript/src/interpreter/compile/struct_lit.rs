@@ -57,6 +57,11 @@ impl Compiler<'_> {
             match written.iter().find(|(k, _)| k == fname) {
                 Some((_, e)) => {
                     self.compile_owned_into(dstf, e)?;
+                    // a field already built drops when a later field panics, the struct op
+                    // takes it out of the window once it runs
+                    if self.ctx.has_drop && self.arg_owned(e) {
+                        self.cur().unwind_temps.push(dstf);
+                    }
                 }
                 None => self.emit(Op::LoadUnit { dst: dstf }),
             }

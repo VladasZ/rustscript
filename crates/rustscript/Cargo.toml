@@ -52,7 +52,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = { workspace = true }
-syn = { workspace = true }
+syn = { workspace = true, features = ["visit"] }
 proc-macro2 = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order"] }
 reqwest = { workspace = true }

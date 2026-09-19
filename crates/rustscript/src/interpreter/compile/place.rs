@@ -182,6 +182,19 @@ impl Compiler<'_> {
         self.emit_back(place.reg, &place.back);
     }
 
+    /// `mem::take` and friends moved the value of a captured variable out into a register, so
+    /// the place is emptied before the store, or the store would drop the value as overwritten.
+    pub(super) fn emit_place_take(&mut self, place: &Place) {
+        if !self.ctx.has_drop {
+            return;
+        }
+        match place.back {
+            PlaceBack::Cell(cell) => self.emit(Op::ClearCell { cell }),
+            PlaceBack::Upvalue(idx) => self.emit(Op::ClearUpvalue { idx }),
+            PlaceBack::None | PlaceBack::Field { .. } | PlaceBack::Index { .. } => {}
+        }
+    }
+
     /// 1 level, then the base's own. A string projection replaces its base buffer and only the
     /// parent chain lands that.
     fn emit_back(&mut self, reg: Reg, back: &PlaceBack) {
@@ -630,6 +643,8 @@ impl Compiler<'_> {
                 else {
                     return Ok(false);
                 };
+                self.emit_place_take(&pa);
+                self.emit_place_take(&pb);
                 let tmp = self.alloc();
                 self.emit(Op::Move {
                     dst: tmp,
@@ -655,6 +670,7 @@ impl Compiler<'_> {
                 let Some(pa) = self.compile_place(&a)? else {
                     return Ok(false);
                 };
+                self.emit_place_take(&pa);
                 let old = self.alloc();
                 self.emit(Op::Move {
                     dst: old,
@@ -690,6 +706,7 @@ impl Compiler<'_> {
                     return Ok(false);
                 };
                 let new = self.compile_owned_expr(&c.args[1])?;
+                self.emit_place_take(&pa);
                 let old = self.alloc();
                 self.emit(Op::Move {
                     dst: old,
@@ -730,7 +747,7 @@ pub(super) fn single_path_name(expr: &Expr) -> Option<String> {
 }
 
 /// `Option` and tuples copy when everything inside does.
-fn copies(ty: &Ty) -> bool {
+pub(super) fn copies(ty: &Ty) -> bool {
     match ty {
         Ty::Unit
         | Ty::Bool

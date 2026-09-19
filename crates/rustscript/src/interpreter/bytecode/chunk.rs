@@ -45,9 +45,23 @@ pub enum Op {
         src: Reg,
     },
     /// Forget the capture cell at a binding site, so a `let` inside a loop binds a new variable
-    /// each iteration.
+    /// each iteration. Only for a binding the capture scan missed, see `MakeCell`.
     DropCell {
         cell: Reg,
+    },
+    /// Move the register's value into a fresh capture cell at its binding site. The register
+    /// stays empty from here on, every read and write of the binding goes through the cell.
+    MakeCell {
+        cell: Reg,
+    },
+    /// Leave unit in the cell after its value moved out, so the drop at scope end finds
+    /// nothing. The moved value was loaded by the `LoadCell` before.
+    ClearCell {
+        cell: Reg,
+    },
+    /// `ClearCell` for a captured variable, after `mem::take` and friends moved its value out.
+    ClearUpvalue {
+        idx: u16,
     },
     StoreUpvalue {
         idx: u16,
@@ -469,6 +483,10 @@ pub struct Chunk {
     pub droppable: Arc<[Reg]>,
     /// the registers a `DropParams` covers, skipped by an unwind of a frame that borrowed them
     pub lent_params: Arc<[Reg]>,
+    /// Per call op, the argument windows that lent a local by `&mut`, as (call op index, argument
+    /// index, local register). An unwind through the callee hands the value back to the local
+    /// before the caller frame drops, so it drops where it was declared.
+    pub lent_writebacks: Arc<[(u32, u16, Reg)]>,
     pub call_type_args: Vec<Arc<[TypeIr]>>,
     /// A forwarder's arity is a guess, a call with a different count rebuilds it.
     pub path_forwarder: bool,
@@ -509,6 +527,7 @@ impl Chunk {
             drop_lists: Vec::new(),
             droppable: Arc::from(Vec::new()),
             lent_params: Arc::from(Vec::new()),
+            lent_writebacks: Arc::from(Vec::new()),
             call_type_args: Vec::new(),
             path_forwarder: false,
             clears_frame: false,

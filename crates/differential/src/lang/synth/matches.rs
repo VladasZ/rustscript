@@ -61,7 +61,10 @@ impl Generator<'_> {
         pat.bindings(&mut binds);
         self.branch(|inner| {
             inner.with_locals(&binds, |inner| {
-                let guard = guard.then(|| inner.expr(&Ty::Bool, depth - 1));
+                // a guard runs with the scrutinee borrowed and may run for several arms, so
+                // `rustc` lets it move nothing, a binding or an outer local alike
+                let guard =
+                    guard.then(|| inner.borrowing(|inner| inner.expr(&Ty::Bool, depth - 1)));
                 let body = inner.expr(want, depth - 1);
                 Arm { pat, guard, body }
             })
