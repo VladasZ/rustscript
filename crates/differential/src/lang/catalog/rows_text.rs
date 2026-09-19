@@ -2,7 +2,7 @@
 
 use super::{
     CHAR_PAT, Char, Exact, FBool, FChar, FStr, FU64, FUSize, Fish, FishReq, Method, RecvClass,
-    STR_PAT, Same, SmallUsize, Str, TyPat, U32_PAT, USIZE_PAT, VecRecv, m, with_fish,
+    STR_PAT, Same, SmallUsize, Str, TyPat, U32_PAT, USIZE_PAT, VecRecv, borrowing, m, with_fish,
 };
 
 pub(super) const ROWS: &[Method] = &[
@@ -31,70 +31,76 @@ pub(super) const ROWS: &[Method] = &[
         Exact(FStr),
         "{r}.trim_end().to_string()",
     ),
-    m(
+    borrowing(m(
         "trim_matches",
         Str,
         &[Exact(FChar)],
         Exact(FStr),
         "{r}.trim_matches({0}).to_string()",
-    ),
-    m(
+    )),
+    borrowing(m(
         "contains",
         Str,
         &[Exact(FStr)],
         Exact(FBool),
         "{r}.contains({0}.as_str())",
-    ),
-    m(
+    )),
+    borrowing(m(
         "contains_char",
         Str,
         &[Exact(FChar)],
         Exact(FBool),
         "{r}.contains({0})",
-    ),
-    m(
+    )),
+    borrowing(m(
         "starts_with",
         Str,
         &[Exact(FStr)],
         Exact(FBool),
         "{r}.starts_with({0}.as_str())",
-    ),
-    m(
+    )),
+    borrowing(m(
         "ends_with",
         Str,
         &[Exact(FStr)],
         Exact(FBool),
         "{r}.ends_with({0}.as_str())",
-    ),
-    m(
+    )),
+    borrowing(m(
         "find",
         Str,
         &[Exact(FStr)],
         TyPat::Opt(USIZE_PAT),
         "{r}.find({0}.as_str())",
-    ),
-    m(
+    )),
+    borrowing(m(
         "rfind",
         Str,
         &[Exact(FStr)],
         TyPat::Opt(USIZE_PAT),
         "{r}.rfind({0}.as_str())",
-    ),
-    m(
+    )),
+    borrowing(m(
         "replace",
         Str,
         &[Exact(FStr), Exact(FStr)],
         Exact(FStr),
         "{r}.replace({0}.as_str(), {1}.as_str())",
-    ),
-    m(
+    )),
+    borrowing(m(
         "replacen",
         Str,
         &[Exact(FStr), Exact(FStr), SmallUsize],
         Exact(FStr),
         "{r}.replacen({0}.as_str(), {1}.as_str(), {2})",
-    ),
-    m("repeat", Str, &[SmallUsize], Exact(FStr), "{r}.repeat({0})"),
+    )),
+    borrowing(m(
+        "repeat",
+        Str,
+        &[SmallUsize],
+        Exact(FStr),
+        "{r}.repeat({0})",
+    )),
     m(
         "chars_count",
         Str,
@@ -109,13 +115,13 @@ pub(super) const ROWS: &[Method] = &[
         Exact(FStr),
         "{r}.chars().rev().collect::<String>()",
     ),
-    m(
+    borrowing(m(
         "chars_nth",
         Str,
         &[SmallUsize],
         TyPat::Opt(CHAR_PAT),
         "{r}.chars().nth({0})",
-    ),
+    )),
     m(
         "chars_collect",
         Str,
@@ -130,20 +136,20 @@ pub(super) const ROWS: &[Method] = &[
         Exact(FU64),
         "{r}.bytes().map(u64::from).sum::<u64>()",
     ),
-    m(
+    borrowing(m(
         "split_count",
         Str,
         &[Exact(FStr)],
         Exact(FUSize),
         "{r}.split({0}.as_str()).count()",
-    ),
-    m(
+    )),
+    borrowing(m(
         "split_collect",
         Str,
         &[Exact(FStr)],
         TyPat::Vec(STR_PAT),
         "{r}.split({0}.as_str()).map(String::from).collect::<Vec<String>>()",
-    ),
+    )),
     m(
         "split_whitespace_collect",
         Str,
@@ -165,48 +171,48 @@ pub(super) const ROWS: &[Method] = &[
         TyPat::Opt(&TyPat::Tuple2(STR_PAT, STR_PAT)),
         "{r}.split_once({0}.as_str()).map(|(a, b)| (a.to_string(), b.to_string()))",
     ),
-    m(
+    borrowing(m(
         "strip_prefix",
         Str,
         &[Exact(FStr)],
         TyPat::Opt(STR_PAT),
         "{r}.strip_prefix({0}.as_str()).map(String::from)",
-    ),
-    m(
+    )),
+    borrowing(m(
         "strip_suffix",
         Str,
         &[Exact(FStr)],
         TyPat::Opt(STR_PAT),
         "{r}.strip_suffix({0}.as_str()).map(String::from)",
-    ),
-    m(
+    )),
+    borrowing(m(
         "str_get",
         Str,
         &[SmallUsize],
         TyPat::Opt(STR_PAT),
         "{r}.get(0..{0}).map(String::from)",
-    ),
-    m(
+    )),
+    borrowing(m(
         "is_char_boundary",
         Str,
         &[SmallUsize],
         Exact(FBool),
         "{r}.is_char_boundary({0})",
-    ),
-    m(
+    )),
+    borrowing(m(
         "matches_count",
         Str,
         &[Exact(FStr)],
         Exact(FUSize),
         "{r}.matches({0}.as_str()).count()",
-    ),
-    m(
+    )),
+    borrowing(m(
         "eq_ignore_ascii_case",
         Str,
         &[Exact(FStr)],
         Exact(FBool),
         "{r}.eq_ignore_ascii_case({0}.as_str())",
-    ),
+    )),
     m("is_ascii_str", Str, &[], Exact(FBool), "{r}.is_ascii()"),
     // the parse family is why the turbofish exists, the caller chooses the result type
     with_fish(
@@ -347,13 +353,13 @@ pub(super) const ROWS: &[Method] = &[
         TyPat::Opt(U32_PAT),
         "{r}.to_digit(16)",
     ),
-    m(
+    borrowing(m(
         "char_eq_ignore_ascii_case",
         Char,
         &[Same],
         Exact(FBool),
         "{r}.eq_ignore_ascii_case(&{0})",
-    ),
+    )),
     // Vec
     m("vec_len", VecRecv, &[], Exact(FUSize), "{r}.len()"),
     m("vec_is_empty", VecRecv, &[], Exact(FBool), "{r}.is_empty()"),

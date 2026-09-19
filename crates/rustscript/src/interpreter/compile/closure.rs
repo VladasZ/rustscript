@@ -8,6 +8,7 @@ use syn::{Expr, Pat};
 use crate::interpreter::bytecode::{CapSource, Op, Reg};
 
 use super::place::{self, copies};
+use super::walks::unparen;
 use super::{Compiler, FnState, NameLoc, captures, idx16, numeric_annotation};
 
 impl Compiler<'_> {
@@ -169,9 +170,13 @@ impl Compiler<'_> {
             self.cur().ret_cast = Some(idx);
         }
         let ret = self.alloc();
+        // a bare call body is the closure's tail call, so its owned operands unwind after the
+        // temporaries of its arguments like a block's tail, see `compile_block_inner`
+        self.cur().tail_call = matches!(unparen(&c.body), Expr::Call(_) | Expr::MethodCall(_));
         // the body value leaves the closure, so a returned parameter moves out before the
         // parameters drop
         self.compile_owned_into(ret, &c.body)?;
+        self.cur().tail_call = false;
         self.drop_temps(0, Some(ret));
         self.release_guard_temps(0, Some(ret));
         if let Some(idx) = self.cur().ret_cast {

@@ -70,7 +70,7 @@ impl Compiler<'_> {
                         shells.push(scrut);
                     }
                     let matched = self.alloc();
-                    let pat = self.pattern_info(&let_expr.pat)?;
+                    let pat = self.pattern_info_over(&let_expr.pat, &let_expr.expr)?;
                     if !takes {
                         self.exempt_pattern_binds(pat);
                     }
@@ -161,7 +161,7 @@ impl Compiler<'_> {
                 shell.push(scrut);
             }
             let matched = self.alloc();
-            let pat = self.pattern_info(&let_expr.pat)?;
+            let pat = self.pattern_info_over(&let_expr.pat, &let_expr.expr)?;
             if !takes {
                 self.exempt_pattern_binds(pat);
             }
@@ -504,7 +504,7 @@ impl Compiler<'_> {
                 Pat::Guard(g) => (&*g.pat, Some(&*g.guard)),
                 p => (p, None),
             };
-            let pat = self.pattern_info(arm_pat)?;
+            let pat = self.pattern_info_over(arm_pat, &m.expr)?;
             if !takes {
                 self.exempt_pattern_binds(pat);
             }

@@ -151,7 +151,7 @@ impl Compiler<'_> {
             self.hold_shell(val, home);
         }
         let matched = self.alloc();
-        let pidx = self.pattern_info(&local.pat)?;
+        let pidx = self.pattern_info_over(&local.pat, &init.expr)?;
         if !takes {
             self.exempt_pattern_binds(pidx);
         }

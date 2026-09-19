@@ -1,12 +1,79 @@
 //! Name resolution inside a function, locals, captures, aliases and consts.
 
 use anyhow::{Result, bail};
+use syn::{Expr, Pat};
 
+use super::place::single_path_name;
+use super::walks::unparen;
 use super::{Compiler, NameLoc, idx16};
 use crate::interpreter::bytecode::{CapSource, EnumVariant, Op, PathRef, Reg};
 use crate::interpreter::resolver::Res;
 
 impl Compiler<'_> {
+    /// Every alias change goes through here, so the scope that made it can undo it.
+    pub(super) fn set_alias(&mut self, name: &str, target: Option<String>) {
+        let f = self.cur();
+        let previous = match target {
+            Some(target) => f.aliases.insert(name.to_string(), target),
+            None => match f.aliases.remove(name) {
+                Some(previous) => Some(previous),
+                // nothing changed, so there is nothing to undo
+                None => return,
+            },
+        };
+        f.alias_log.push((name.to_string(), previous));
+    }
+
+    /// `ref mut m = n` over a variable. A scalar or a string register has no reference form,
+    /// so the binding becomes an alias of the variable like `let m = &mut n`, and the pattern
+    /// lowers as `_`. True when the alias was made.
+    pub(super) fn alias_ref_binding(&mut self, pat: &Pat, scrutinee: &Expr) -> bool {
+        let mut binding = pat;
+        while let Pat::Type(syn::PatType { pat, .. }) | Pat::Paren(syn::PatParen { pat, .. }) =
+            binding
+        {
+            binding = pat;
+        }
+        let Pat::Ident(id) = binding else {
+            return false;
+        };
+        if id.by_ref.is_none() || id.subpat.is_some() {
+            return false;
+        }
+        let Some(var) = single_path_name(unparen(scrutinee)) else {
+            return false;
+        };
+        let target = self.unalias(&var);
+        if matches!(self.resolve(&target), NameLoc::None) {
+            return false;
+        }
+        self.set_alias(&id.ident.to_string(), Some(target));
+        true
+    }
+
+    /// `*n` inside a closure for a `&mut` parameter `n` of an enclosing function. The
+    /// parameter lives in its capture cell and the closure sees the cell as an upvalue, so
+    /// the write goes to the upvalue and the function's return hands the cell back to the
+    /// caller, like `deref_param_cell` does for the function body.
+    pub(super) fn deref_param_upvalue(&self, name: &str) -> bool {
+        let mut frames = self.frames.iter().rev();
+        let Some(cur) = frames.next() else {
+            return false;
+        };
+        if cur.aliases.contains_key(name) || cur.local_reg(name).is_some() {
+            return false;
+        }
+        for frame in frames {
+            if frame.aliases.contains_key(name) {
+                return false;
+            }
+            if let Some(reg) = frame.local_reg(name) {
+                return frame.borrow_params.contains(&reg) && (reg as usize) < frame.num_params;
+            }
+        }
+        false
+    }
+
     pub(super) fn resolve(&mut self, name: &str) -> NameLoc {
         let name = &self.unalias(name);
         let depth = self.frames.len() - 1;

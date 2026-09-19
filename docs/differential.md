@@ -28,6 +28,8 @@ loop and closure depth the binding was declared at. Nested bodies declare
 their own `let`s, shadow outer names and drop them at the closing brace, a
 bare `{ }` block does the same, and `std::mem::take`, `replace`, `swap`,
 `Option::take`, `pop`, `remove` and `swap_remove` take values out in place.
+A receiver a catalog method borrows is held while its arguments run, so no argument
+writes its binding.
 
 `DiffTrace` is a program local struct whose `Drop` prints its id. It sits in
 locals, vec items, struct fields, option payloads, tuples, closure captures

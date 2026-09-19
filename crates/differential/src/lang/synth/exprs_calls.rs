@@ -4,7 +4,7 @@ use rand::RngExt;
 
 use crate::lang::block::{Param, ParamMode};
 use crate::lang::expr::{BinOp, Expr, ReadMode, UnOp, unbare_deep};
-use crate::lang::own::{BindKind, OwnState};
+use crate::lang::own::{BindKind, OwnState, root_binding};
 use crate::lang::synth::{Generator, MAX_EXPR_DEPTH, MOVE_CHANCE, is_partial_ord};
 use crate::lang::ty::{FloatWidth, IntWidth, Ty};
 use crate::lang::user::{MethodKind, UserShape};
@@ -372,11 +372,8 @@ impl Generator<'_> {
         let (shape, sig) = self.pick(&options).clone();
         let owner = Ty::user(shape.clone());
         let base = self.expr(&owner, depth - 1);
-        // a binding receiver is borrowed while the arguments run
-        let held = match &base {
-            Expr::Var { name, .. } => Some(name.clone()),
-            _ => None,
-        };
+        // a receiver rooted in a binding borrows it while the arguments run
+        let held = root_binding(&base).map(str::to_string);
         if let Some(name) = &held {
             self.scope.freeze(name);
         }

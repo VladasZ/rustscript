@@ -371,3 +371,15 @@ pub fn referenced(expr: &Expr) -> BTreeSet<String> {
     }
     out
 }
+
+/// The binding a place expression reads, through fields and indexes. A receiver rooted in
+/// one is borrowed while the arguments run, see `Method::borrows_recv`.
+pub fn root_binding(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Var { name, .. } => Some(name),
+        Expr::Field { base, .. } | Expr::TupleField { base, .. } | Expr::Index { base, .. } => {
+            root_binding(base)
+        }
+        _ => None,
+    }
+}

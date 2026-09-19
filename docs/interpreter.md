@@ -63,6 +63,10 @@ parameter's cell hands its value back to the caller on return. A `move`
 closure takes a value the frame never reads again and drops it at its own
 end, and one that reads only fields that copy takes those fields and leaves
 the value with the frame, like the edition 2021 disjoint capture.
+A `let r = &mut n` and a bare `ref mut r` binding over a variable are aliases of the
+variable for their scope, so a write through them lands in it, and a closure that
+writes through a `&mut` scalar parameter of its function writes the parameter's cell.
+A closure whose body is a bare call unwinds it like a block's tail call.
 
 A `RefCell` borrow is a guard value, and the live borrows of every cell sit in
 one table, so a second `borrow_mut` panics with the std message. The compiler
