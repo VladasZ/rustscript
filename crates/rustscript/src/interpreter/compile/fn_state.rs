@@ -32,6 +32,16 @@ pub(super) fn retarget_jumps(code: &mut [Op], moved: &[u32]) {
     }
 }
 
+/// Where a name was bound, so the binding can get its capture cell op.
+#[derive(Clone, Copy)]
+pub(super) struct BindingSite {
+    /// the op index right after the binding
+    pub(super) at: usize,
+    pub(super) reg: Reg,
+    /// the capture scan knew the binding needs a cell, so every access compiled as a cell access
+    pub(super) cell: bool,
+}
+
 /// A stack of these supports nested closures.
 pub(super) struct FnState {
     pub(super) code: Vec<Op>,
@@ -53,13 +63,18 @@ pub(super) struct FnState {
     pub(super) names: Vec<MethodName>,
     pub(super) children: Vec<Arc<Chunk>>,
     pub(super) child_caps: Vec<Vec<CapSource>>,
+    /// Per capture of each child, whether the body reads only fields that copy, see
+    /// `captures::captures_only_copy_fields`. A `move` closure then never takes the value.
+    pub(super) child_partial: Vec<Vec<bool>>,
     /// filled by the liveness pass, see `liveness.rs`
     pub(super) child_moves: Vec<Arc<[bool]>>,
     pub(super) upvalues: Vec<(String, CapSource)>,
     pub(super) mutable_locals: HashSet<Reg>,
-    /// Whether a register needs a capture cell is only known once the frame is compiled, so
-    /// `into_chunk` turns these into `DropCell` ops later.
-    pub(super) binding_sites: Vec<(usize, Reg)>,
+    /// The names the closures of the body write, see `captures`. Their bindings are cells.
+    pub(super) cell_names: HashSet<String>,
+    /// Every binding, so `into_chunk` can give the cell promoted ones their cell op once the
+    /// frame is compiled.
+    pub(super) binding_sites: Vec<BindingSite>,
     /// Reference parameters. They forward the caller's handle, so they are never moved, copied
     /// or dropped here.
     pub(super) borrow_params: HashSet<Reg>,
@@ -80,6 +95,8 @@ pub(super) struct FnState {
     pub(super) drop_lists: Vec<std::sync::Arc<[Reg]>>,
     /// see `Chunk::lent_params`
     pub(super) lent_params: Vec<Reg>,
+    /// see `Chunk::lent_writebacks`, the op index is remapped with every insertion
+    pub(super) lent_writebacks: Vec<(u32, u16, Reg)>,
     /// `borrow` results not yet released, see `release_guard_temps`
     pub(super) guard_temps: Vec<Reg>,
     /// Temporaries that own a fresh value, dropped at the end of their statement, see
@@ -88,6 +105,9 @@ pub(super) struct FnState {
     /// Owned call arguments, taken by the call and so only dropped by a panic before it, see
     /// `compile_args`. Only kept when the program has a `Drop` impl.
     pub(super) unwind_temps: Vec<Reg>,
+    /// The next call compiled is the tail expression of a block. Its owned operands then
+    /// unwind after the temporaries its arguments made, not before, see `compile_args`.
+    pub(super) tail_call: bool,
     /// named bindings that hold a `RefCell` guard, released at scope end even without `Drop` impls
     pub(super) guard_regs: HashSet<Reg>,
     pub(super) has_guards: bool,
@@ -123,9 +143,11 @@ impl FnState {
             names: Vec::new(),
             children: Vec::new(),
             child_caps: Vec::new(),
+            child_partial: Vec::new(),
             child_moves: Vec::new(),
             upvalues: Vec::new(),
             mutable_locals: HashSet::new(),
+            cell_names: HashSet::new(),
             binding_sites: Vec::new(),
             borrow_params: HashSet::new(),
             ref_locals: HashSet::new(),
@@ -137,6 +159,7 @@ impl FnState {
             scope_order: vec![Vec::new()],
             drop_lists: Vec::new(),
             lent_params: Vec::new(),
+            lent_writebacks: Vec::new(),
             reg_top: 0,
             max_reg: 0,
             num_params: 0,
@@ -148,6 +171,7 @@ impl FnState {
             guard_temps: Vec::new(),
             owned_temps: Vec::new(),
             unwind_temps: Vec::new(),
+            tail_call: false,
             guard_regs: HashSet::new(),
             has_guards: false,
         }
@@ -161,20 +185,21 @@ impl FnState {
         self.upvalues.iter().position(|(n, _)| n == name).map(idx16)
     }
 
-    /// Inserted rather than reserved, because the binding compiles long before the closure that makes
-    /// the capture mutable. Jump targets past an insertion shift with it and never point at the
-    /// inserted op.
+    /// Inserted rather than reserved, because a binding the capture scan missed compiles long
+    /// before the closure that makes its capture mutable. Jump targets past an insertion shift
+    /// with it and never point at the inserted op. A binding the scan found moves its value
+    /// into a fresh cell, one found late only forgets the old cell and keeps the register.
     pub(super) fn insert_cell_drops(&mut self) -> Result<()> {
-        let mut sites: Vec<(usize, Reg)> = self
+        let mut sites: Vec<BindingSite> = self
             .binding_sites
             .iter()
             .copied()
-            .filter(|(_, reg)| self.mutable_locals.contains(reg))
+            .filter(|site| self.mutable_locals.contains(&site.reg))
             .collect();
         if sites.is_empty() {
             return Ok(());
         }
-        sites.sort_unstable();
+        sites.sort_unstable_by_key(|site| (site.at, site.reg));
         let mut code = Vec::with_capacity(self.code.len() + sites.len());
         let mut lines = Vec::with_capacity(self.lines.len() + sites.len());
         let mut cols = Vec::with_capacity(self.cols.len() + sites.len());
@@ -182,9 +207,12 @@ impl FnState {
         let mut moved = Vec::with_capacity(self.code.len() + 1);
         let mut next = 0;
         for (at, op) in take(&mut self.code).into_iter().enumerate() {
-            while sites.get(next).is_some_and(|(site, _)| *site == at) {
-                code.push(Op::DropCell {
-                    cell: sites[next].1,
+            while sites.get(next).is_some_and(|site| site.at == at) {
+                let cell = sites[next].reg;
+                code.push(if sites[next].cell {
+                    Op::MakeCell { cell }
+                } else {
+                    Op::DropCell { cell }
                 });
                 lines.push(self.lines[at]);
                 cols.push(self.cols[at]);
@@ -197,6 +225,9 @@ impl FnState {
         }
         moved.push(u32::try_from(code.len())?);
         retarget_jumps(&mut code, &moved);
+        for (ip, _, _) in &mut self.lent_writebacks {
+            *ip = moved[*ip as usize];
+        }
         self.code = code;
         self.lines = lines;
         self.cols = cols;
@@ -224,6 +255,9 @@ impl FnState {
         }
         moved.push(u32::try_from(code.len())?);
         retarget_jumps(&mut code, &moved);
+        for (ip, _, _) in &mut self.lent_writebacks {
+            *ip = moved[*ip as usize];
+        }
         self.code = code;
         self.lines = lines;
         self.cols = cols;
@@ -247,14 +281,27 @@ impl FnState {
         self.remove_ops(&dead)?;
         let dead = self.dead_jumps();
         self.remove_ops(&dead)?;
-        let mut droppable: Vec<Reg> = self
-            .drop_lists
-            .iter()
-            .flat_map(|list| list.iter().copied())
-            .chain(self.unwind_temps.iter().copied())
-            .collect();
+        // An unwind drops the owned arguments of a call first, the order real Rust drops the
+        // operands it moved into a call before the temporaries the later arguments made. Then
+        // every drop list in the order it was made, each backwards like `DropScope` runs it. An
+        // inner statement or scope ends before the one around it, so its list comes first, and
+        // a temporary made later sits later in its statement's list.
+        let mut droppable: Vec<Reg> = self.unwind_temps.clone();
         droppable.sort_unstable_by(|a, b| b.cmp(a));
         droppable.dedup();
+        let args = droppable.len();
+        for list in &self.drop_lists {
+            for &reg in list.iter().rev() {
+                // a local sits in the list of every early `return` before its scope's own
+                // list, and the scope end is the place that orders it after the later temporaries
+                if let Some(seen) = droppable[args..].iter().position(|r| *r == reg) {
+                    droppable.remove(args + seen);
+                } else if droppable[..args].contains(&reg) {
+                    continue;
+                }
+                droppable.push(reg);
+            }
+        }
         Ok(Chunk {
             code: self.code,
             lines: self.lines,
@@ -285,6 +332,7 @@ impl FnState {
             drop_lists: self.drop_lists,
             droppable: droppable.into(),
             lent_params: self.lent_params.into(),
+            lent_writebacks: self.lent_writebacks.into(),
             call_type_args: self.call_type_args,
             path_forwarder: false,
             clears_frame: self.has_guards,

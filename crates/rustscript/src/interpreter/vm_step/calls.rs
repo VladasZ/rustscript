@@ -326,19 +326,27 @@ pub(super) fn make_closure(ctx: &mut StepCtx, child: u16) -> Arc<ClosureData> {
     // one is `Copy` and copies. A plain closure shares.
     let moves = child_chunk.moves;
     let own = |value: Value| Upvalue::Mutable(Arc::new(Mutex::new(value)));
+    // a taken capture is the closure's to drop, a copied or shared one stays its owner's
+    let owned: Vec<bool> = caps
+        .iter()
+        .zip(takes.iter())
+        .map(|(c, &taken)| taken && matches!(c, CapSource::Local(_) | CapSource::MutableLocal(_)))
+        .collect();
     let captured: Vec<Upvalue> = caps
         .iter()
         .zip(takes.iter())
         .map(|(c, &taken)| match c {
             CapSource::Local(reg) => {
                 let slot = ctx.base + *reg as usize;
-                Upvalue::Value(if taken {
-                    take(&mut ctx.stack[slot])
+                // a taken value sits in a cell of its own, so the closure's drop can take it
+                // out once, however many handles to the closure are live at that point
+                if taken {
+                    own(take(&mut ctx.stack[slot]))
                 } else if moves {
-                    ctx.stack[slot].deep_clone()
+                    Upvalue::Value(ctx.stack[slot].deep_clone())
                 } else {
-                    ctx.stack[slot].clone()
-                })
+                    Upvalue::Value(ctx.stack[slot].clone())
+                }
             }
             CapSource::Upvalue(idx) => ctx.upvalues()[*idx as usize].clone(),
             CapSource::MutableUpvalue(idx) => {
@@ -365,5 +373,6 @@ pub(super) fn make_closure(ctx: &mut StepCtx, child: u16) -> Arc<ClosureData> {
     Arc::new(ClosureData {
         chunk: child_chunk,
         captured,
+        owned,
     })
 }

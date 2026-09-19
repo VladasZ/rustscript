@@ -66,6 +66,11 @@ impl StepCtx<'_> {
         take(&mut self.stack[self.base + reg as usize])
     }
 
+    /// The value of a binding, out of its capture cell when it has one, see `Op::MakeCell`.
+    pub(super) fn take_local(&mut self, reg: u16) -> Value {
+        take_local(self.local_cells, self.stack, self.base + reg as usize)
+    }
+
     #[inline]
     pub(super) fn put(&mut self, reg: u16, v: Value) {
         let old = replace(&mut self.stack[self.base + reg as usize], v);
@@ -126,6 +131,9 @@ pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
         | Op::LoadCell { .. }
         | Op::StoreCell { .. }
         | Op::DropCell { .. }
+        | Op::MakeCell { .. }
+        | Op::ClearCell { .. }
+        | Op::ClearUpvalue { .. }
         | Op::StoreUpvalue { .. }
         | Op::Move { .. } => load_step(ctx, op)?,
         Op::Bin { .. }
@@ -214,7 +222,7 @@ pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
 fn drop_scope(ctx: &mut StepCtx, list: u16) -> Result<()> {
     let regs = ctx.cur.drop_lists[list as usize].clone();
     for reg in regs.iter().rev() {
-        let value = ctx.take(*reg);
+        let value = ctx.take_local(*reg);
         ctx.vm.run_user_drop(value)?;
     }
     Ok(())
@@ -319,7 +327,10 @@ fn load_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
         Op::LoadCell { dst, cell } => load_cell(ctx, *dst, *cell),
         Op::StoreCell { cell, src } => store_cell(ctx, *cell, *src)?,
         Op::DropCell { cell } => drop_cell(ctx, *cell),
+        Op::MakeCell { cell } => make_cell(ctx, *cell),
+        Op::ClearCell { cell } => clear_cell(ctx, *cell),
         Op::StoreUpvalue { idx, src } => store_upvalue(ctx, *idx, *src)?,
+        Op::ClearUpvalue { idx } => clear_upvalue(ctx, *idx)?,
         Op::Move { dst, src } => ctx.set(*dst, ctx.get(*src).clone()),
         _ => unreachable!("load_step handles only the load and store ops"),
     })
@@ -582,6 +593,41 @@ fn store_cell(ctx: &mut StepCtx, cell: u16, src: u16) -> Result<Flow> {
 fn drop_cell(ctx: &mut StepCtx, cell: u16) -> Flow {
     ctx.local_cells.remove(&(ctx.base + cell as usize));
     Flow::Next
+}
+
+/// A binding the capture scan found. The value moves into a fresh cell and the register stays
+/// empty, so a closure and the frame share one place.
+fn make_cell(ctx: &mut StepCtx, cell: u16) -> Flow {
+    let slot = ctx.base + cell as usize;
+    let value = take(&mut ctx.stack[slot]);
+    ctx.local_cells.insert(slot, Arc::new(Mutex::new(value)));
+    Flow::Next
+}
+
+fn clear_cell(ctx: &mut StepCtx, cell: u16) -> Flow {
+    *ctx.cell(cell).lock() = Value::Unit;
+    Flow::Next
+}
+
+/// A binding's value for its drop. A cell promoted binding keeps it in the cell and the
+/// register is empty, so the cell is emptied instead and a closure still holding it sees unit.
+pub(super) fn take_local(
+    cells: &FxHashMap<usize, Arc<Mutex<Value>>>,
+    stack: &mut [Value],
+    slot: usize,
+) -> Value {
+    match cells.get(&slot) {
+        Some(cell) => take(&mut *cell.lock()),
+        None => take(&mut stack[slot]),
+    }
+}
+
+/// The value moved out through a `mem::take`, so the store that follows finds nothing to drop.
+fn clear_upvalue(ctx: &StepCtx, idx: u16) -> Result<Flow> {
+    if ctx.upvalues()[idx as usize].swap(Value::Unit).is_none() {
+        bail!("cannot move out of an immutable capture");
+    }
+    Ok(Flow::Next)
 }
 
 fn store_upvalue(ctx: &StepCtx, idx: u16, src: u16) -> Result<Flow> {

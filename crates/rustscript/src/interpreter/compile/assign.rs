@@ -25,10 +25,36 @@ impl Compiler<'_> {
         ((reg as usize) < frame.num_params).then_some(reg)
     }
 
+    /// `deref_param_reg` for a `&mut` parameter a closure also writes. It lives in its capture
+    /// cell, so `*x = v` stores into the cell and the return hands the cell's value back.
+    pub(super) fn deref_param_cell(&self, expr: &Expr) -> Option<Reg> {
+        let name = place::single_path_name(expr)?;
+        let frame = self.frames.last()?;
+        if frame.aliases.contains_key(&name) {
+            return None;
+        }
+        let reg = frame.local_reg(&name)?;
+        (frame.mutable_locals.contains(&reg) && (reg as usize) < frame.num_params).then_some(reg)
+    }
+
     /// The value stored into a local, owned. Its literals carry the local's width from the
     /// inference pass.
     pub(super) fn compile_stored_value(&mut self, value: &Expr) -> Result<Reg> {
         self.compile_owned_expr(value)
+    }
+
+    /// An owned value a store is about to take. A panic before the store drops it.
+    fn hold_for_unwind(&mut self, val: Reg) {
+        if self.ctx.has_drop {
+            self.cur().unwind_temps.push(val);
+        }
+    }
+
+    /// The store cloned the value into its place, so the register must not hold it any more.
+    fn release_from_unwind(&mut self, val: Reg) {
+        if self.ctx.has_drop {
+            self.emit(Op::LoadUnit { dst: val });
+        }
     }
 
     pub(super) fn compile_assign(&mut self, target: &Expr, value: &Expr) -> Result<()> {
@@ -39,18 +65,25 @@ impl Compiler<'_> {
                 let value = self.compile_stored_value(value)?;
                 self.emit_name_store(location, value, &name)?;
             }
+            // The value is evaluated before the place, so a panic in the index or the base
+            // drops it like an argument the call never took. The store clones it into the
+            // container, so the register is cleared after, or a later panic would drop it twice.
             Expr::Index(idx) => {
-                let val = self.compile_owned_expr(value)?;
+                let val = self.compile_stored_value(value)?;
+                self.hold_for_unwind(val);
                 let base = self.compile_place_base(&idx.expr)?;
                 let key = self.compile_expr(&idx.index)?;
                 self.set_line(idx.bracket_token.span.open());
                 self.emit(Op::SetIndex { base, key, val });
+                self.release_from_unwind(val);
             }
             Expr::Field(f) => {
-                let val = self.compile_owned_expr(value)?;
+                let val = self.compile_stored_value(value)?;
+                self.hold_for_unwind(val);
                 let base = self.compile_place_base(&f.base)?;
                 let member = self.member_of(&f.member);
                 self.emit(Op::SetField { base, member, val });
+                self.release_from_unwind(val);
             }
             Expr::Unary(u) if matches!(u.op, UnOp::Deref(_)) => {
                 // `*r = v` on a `&mut variable` alias writes the variable, which may live in an
@@ -68,7 +101,9 @@ impl Compiler<'_> {
                     }
                 }
                 let val = self.compile_owned_expr(value)?;
-                if let Some(target) = self.deref_param_reg(&u.expr) {
+                if let Some(cell) = self.deref_param_cell(&u.expr) {
+                    self.emit(Op::StoreCell { cell, src: val });
+                } else if let Some(target) = self.deref_param_reg(&u.expr) {
                     self.emit(Op::SetDerefParam { target, val });
                 } else {
                     let target = self.compile_expr(&u.expr)?;
@@ -191,6 +226,19 @@ impl Compiler<'_> {
             }
         }
         let b = self.compile_expr(rhs)?;
+        if let Some(cell) = self.deref_param_cell(&u.expr) {
+            let current = self.load_name_location(NameLoc::Cell(cell), "")?;
+            let result = self.alloc();
+            self.set_line(u.span());
+            self.emit(Op::Bin {
+                dst: result,
+                a: current,
+                b,
+                op,
+            });
+            self.emit(Op::StoreCell { cell, src: result });
+            return Ok(());
+        }
         let param = self.deref_param_reg(&u.expr);
         let target = self.compile_expr(&u.expr)?;
         self.set_line(u.span());

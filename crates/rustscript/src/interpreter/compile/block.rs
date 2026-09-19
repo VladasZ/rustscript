@@ -74,7 +74,12 @@ impl Compiler<'_> {
                 }
                 Stmt::Expr(expr, semi) => {
                     if is_last && semi.is_none() {
+                        // real Rust unwinds the owned operands of a tail call after the
+                        // temporaries of its arguments, the reverse of any other call
+                        self.cur().tail_call =
+                            matches!(unparen(expr), Expr::Call(_) | Expr::MethodCall(_));
                         self.compile_owned_into(dst, expr)?;
+                        self.cur().tail_call = false;
                     } else {
                         // A statement position call discards its result. With `Drop` impls
                         // around, what it hands back still drops at the semicolon.

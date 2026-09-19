@@ -61,6 +61,7 @@ pub const BRIDGES: &[Bridge] = &[
     b("vecmap.rs", "vec_get", "Vec"),
     b("vecmap.rs", "edge_element_ref", "Vec"),
     b("vecmap.rs", "vec_method_by_name", "Vec"),
+    b("vecmap.rs", "vec_removal", "Vec"),
     b("vecmap.rs", "vec_copy_from_slice", "Vec"),
     b("vecmap.rs", "vec_min_max", "Vec"),
     b("vecmap.rs", "map_method", "Map"),

@@ -244,7 +244,12 @@ impl Generator<'_> {
                             opaque: false,
                         }
                     } else {
-                        self.expr(&Ty::USIZE, depth - 1)
+                        // `v[v.remove(0)]` borrows `v` for the index while it is read, so the
+                        // index expression must not write the vec
+                        self.scope.freeze(name);
+                        let index = self.expr(&Ty::USIZE, depth - 1);
+                        self.scope.unfreeze();
+                        index
                     };
                     options.push(Expr::Index {
                         base: Box::new(base.clone()),

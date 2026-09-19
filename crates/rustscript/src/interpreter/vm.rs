@@ -18,7 +18,7 @@ use super::impls::ImplTable;
 use super::native::Native;
 use super::typeir::TypeIr;
 use super::value::{ClosureData, StructShape, Upvalue, Value};
-use super::vm_step::{CallReq, Flow, StepCtx, step};
+use super::vm_step::{CallReq, Flow, StepCtx, step, take_local};
 use super::vm_support::{FrameSite, trace_error};
 
 pub(super) const MAX_CALL_DEPTH: usize = 100_000;
@@ -236,6 +236,12 @@ fn leave(
     let callee_base = at.base;
     let callee_end = callee_base + at.chunk.num_regs;
     let clears_frame = at.chunk.clears_frame;
+    // a parameter a closure wrote lives in its cell, the writeback below reads the register
+    for i in 0..frame.argc as usize {
+        if let Some(cell) = local_cells.remove(&(callee_base + i)) {
+            stack[callee_base + i] = take(&mut *cell.lock());
+        }
+    }
     local_cells.retain(|slot, _| *slot < callee_base || *slot >= callee_end);
     at.chunk = frame.chunk;
     at.closure = frame.closure;
@@ -366,7 +372,14 @@ impl Vm {
             }
         })();
         result.map_err(|e| {
-            self.unwind_drops(&at.chunk, at.base, at.owned_args, &frames, stack);
+            self.unwind_drops(
+                &at.chunk,
+                at.base,
+                at.owned_args,
+                &frames,
+                &local_cells,
+                stack,
+            );
             let trace = std::iter::once(frame_line(&at.chunk, at.ip)).chain(
                 frames
                     .iter()
@@ -420,34 +433,64 @@ impl Vm {
         exit
     }
 
-    /// Innermost frame first and highest register first, like real unwinding. A panic inside a drop is
-    /// reported and the original panic keeps going. Real Rust would abort there.
+    /// Innermost frame first and in the chunk's `droppable` order, like real unwinding. A panic
+    /// inside a drop is reported and the original panic keeps going. Real Rust would abort there.
     fn unwind_drops(
         self: &Arc<Self>,
         cur: &Arc<Chunk>,
         base: usize,
         owned_args: bool,
         frames: &[Frame],
+        local_cells: &FxHashMap<usize, Arc<Mutex<Value>>>,
         stack: &mut [Value],
     ) {
-        let spans = std::iter::once((base, cur, owned_args)).chain(
-            frames
-                .iter()
-                .rev()
-                .map(|f| (f.base, &f.chunk, f.owned_args)),
-        );
-        for (base, chunk, owned) in spans {
+        let spans: Vec<(usize, &Arc<Chunk>, bool)> = std::iter::once((base, cur, owned_args))
+            .chain(
+                frames
+                    .iter()
+                    .rev()
+                    .map(|f| (f.base, &f.chunk, f.owned_args)),
+            )
+            .collect();
+        for (depth, &(base, chunk, owned)) in spans.iter().enumerate() {
             for &reg in chunk.droppable.iter() {
                 // a lent parameter belongs to the caller
                 if !owned && chunk.lent_params.contains(&reg) {
                     continue;
                 }
-                let Some(slot) = stack.get_mut(base + usize::from(reg)) else {
+                let slot = base + usize::from(reg);
+                if slot >= stack.len() {
                     continue;
-                };
-                let value = take(slot);
+                }
+                let value = take_local(local_cells, stack, slot);
                 if let Err(e) = self.run_user_drop(value) {
                     eprintln!("panic in drop during unwinding: {e:#}");
+                }
+            }
+            // A borrowed parameter holds a value the caller lent, a `&mut` local or a
+            // `&T::new()` temporary, and the caller's slot was cleared for it. It goes home
+            // before the caller frame drops, into the local or the argument window, so it drops
+            // where the caller declared or made it like in real Rust. A by value parameter is
+            // the callee's own and dropped above.
+            let Some(caller) = frames.len().checked_sub(depth + 1).map(|i| &frames[i]) else {
+                continue;
+            };
+            let call_ip = u32::try_from(caller.ip.saturating_sub(1)).unwrap_or(u32::MAX);
+            for arg in 0..caller.argc {
+                if chunk.droppable.contains(&arg) {
+                    continue;
+                }
+                let value = take_local(local_cells, stack, base + usize::from(arg));
+                let local = caller
+                    .chunk
+                    .lent_writebacks
+                    .iter()
+                    .find(|(ip, index, _)| *ip == call_ip && *index == arg)
+                    .map(|(_, _, local)| usize::from(*local));
+                let home =
+                    caller.base + local.unwrap_or(usize::from(caller.abase) + usize::from(arg));
+                if let Some(slot) = stack.get_mut(home) {
+                    *slot = value;
                 }
             }
         }

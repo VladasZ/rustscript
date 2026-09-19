@@ -14,7 +14,7 @@ use super::enum_def::EnumDef;
 use super::resolver::{Res, Resolver};
 use super::typeir::{TypeIr, lower_cast, lower_type};
 
-use fn_state::FnState;
+use fn_state::{BindingSite, FnState};
 
 /// Filled before any body is compiled.
 pub struct Ctx<'r> {
@@ -164,6 +164,7 @@ impl<'a> Compiler<'a> {
         }
         self.cur().num_params = params.len();
         self.cur().param_types = types;
+        self.scan_captures(block);
         self.bind_params(sig, &params, &annotations, &borrows)?;
         // the return type retags the tail and every early `return`
         if let syn::ReturnType::Type(_, ty) = &sig.output
@@ -203,16 +204,6 @@ impl<'a> Compiler<'a> {
             if borrows[i] {
                 self.cur().borrow_params.insert(reg);
             }
-            match p {
-                None => self.define("self", reg),
-                Some(Pat::Ident(id)) if id.subpat.is_none() => {
-                    self.define(&id.ident.to_string(), reg);
-                }
-                Some(pat) => {
-                    self.bind_pattern_irrefutable(pat, reg)?;
-                    self.hold_wild_param(pat, reg);
-                }
-            }
             // A `mut` by value parameter may be a `Copy` of a caller value that stays live, so it
             // owns a copy unless its type rules `Copy` out.
             let mutable = match (p, &sig.inputs[i]) {
@@ -244,6 +235,17 @@ impl<'a> Compiler<'a> {
                     src: reg,
                     ty: idx,
                 });
+            }
+            // the binding comes last, a capture cell made at it must hold the retagged copy
+            match p {
+                None => self.define("self", reg),
+                Some(Pat::Ident(id)) if id.subpat.is_none() => {
+                    self.define(&id.ident.to_string(), reg);
+                }
+                Some(pat) => {
+                    self.bind_pattern_irrefutable(pat, reg)?;
+                    self.hold_wild_param(pat, reg);
+                }
             }
         }
         Ok(())
@@ -286,9 +288,29 @@ impl<'a> Compiler<'a> {
             f.guard_temps.push(*dst);
             f.has_guards = true;
         }
+        // a pattern defines its names before the op that fills their registers, so their
+        // binding sites move past it, a capture cell made there must hold the bound value
+        let bound: Option<Vec<Reg>> = match &op {
+            Op::TestBind { pat, .. } | Op::TakeBinds { pat, .. } => Some(
+                f.pats[usize::from(*pat)]
+                    .binds
+                    .iter()
+                    .map(|(_, reg)| *reg)
+                    .collect(),
+            ),
+            _ => None,
+        };
         f.code.push(op);
         f.lines.push(line);
         f.cols.push(col);
+        if let Some(bound) = bound {
+            let at = f.code.len();
+            for site in f.binding_sites.iter_mut().rev() {
+                if bound.contains(&site.reg) {
+                    site.at = at;
+                }
+            }
+        }
     }
 
     fn here(&mut self) -> usize {
@@ -322,6 +344,8 @@ impl<'a> Compiler<'a> {
         f.scope_order.pop();
     }
 
+    /// A name a closure of this body writes lives in a capture cell from this binding on, see
+    /// `captures::closure_written_names`.
     fn define(&mut self, name: &str, reg: Reg) {
         let f = self.cur();
         f.aliases.remove(name);
@@ -333,7 +357,33 @@ impl<'a> Compiler<'a> {
             .last_mut()
             .expect("a scope is always open")
             .push(reg);
-        f.binding_sites.push((f.code.len(), reg));
+        let cell = f.cell_names.contains(name);
+        if cell {
+            f.mutable_locals.insert(reg);
+        }
+        f.binding_sites.push(BindingSite {
+            at: f.code.len(),
+            reg,
+            cell,
+        });
+    }
+
+    /// The closures of `body` decide which of its bindings need a capture cell.
+    fn scan_captures(&mut self, body: &Block) {
+        let mut_methods = self.ctx.mut_methods;
+        let names = captures::closure_written_names(body, &|name| {
+            BuiltinId::resolve(name).mutates() || mut_methods.contains(name)
+        });
+        self.cur().cell_names = names;
+    }
+
+    /// `scan_captures` for a closure body.
+    fn scan_captures_expr(&mut self, body: &Expr) {
+        let mut_methods = self.ctx.mut_methods;
+        let names = captures::closure_written_names_expr(body, &|name| {
+            BuiltinId::resolve(name).mutates() || mut_methods.contains(name)
+        });
+        self.cur().cell_names = names;
     }
 
     fn define_block_const(&mut self, name: &str, reg: Reg) {
@@ -538,6 +588,7 @@ impl<'a> Compiler<'a> {
 mod assign;
 mod block;
 mod calls;
+mod captures;
 mod closure;
 mod defaults;
 mod expr;

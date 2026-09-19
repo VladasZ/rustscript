@@ -460,21 +460,23 @@ impl Compiler<'_> {
             self.emit(Op::LoadUnit { dst });
             return Ok(());
         }
+        // each operand of `&&` and `||` is a temporary scope of its own, so what an operand
+        // made drops before the next one runs
         match b.op {
             BinOp::And(_) => {
-                self.compile_into(dst, &b.left)?;
+                self.compile_lazy_operand(dst, &b.left)?;
                 let jmp = self.here();
                 self.emit(Op::JumpIfFalse { cond: dst, to: 0 });
-                self.compile_into(dst, &b.right)?;
+                self.compile_lazy_operand(dst, &b.right)?;
                 let end = self.mark()?;
                 self.patch_jump(jmp, end);
                 return Ok(());
             }
             BinOp::Or(_) => {
-                self.compile_into(dst, &b.left)?;
+                self.compile_lazy_operand(dst, &b.left)?;
                 let jmp = self.here();
                 self.emit(Op::JumpIfTrue { cond: dst, to: 0 });
-                self.compile_into(dst, &b.right)?;
+                self.compile_lazy_operand(dst, &b.right)?;
                 let end = self.mark()?;
                 self.patch_jump(jmp, end);
                 return Ok(());
@@ -483,6 +485,7 @@ impl Compiler<'_> {
         }
         let op = bin_kind(&b.op).ok_or_else(|| anyhow!("unsupported operator {:?}", b.op))?;
         let a = self.compile_expr(&b.left)?;
+        let a = self.read_before_writes(a, &b.left, std::iter::once(&*b.right));
         let typed = self.typed_operands(&b.left, &b.right, op);
         // a literal immediate adopts the width of the left side like a bare literal
         if let Some(imm) = int_literal(&b.right) {
@@ -493,6 +496,14 @@ impl Compiler<'_> {
         let c = self.compile_expr(&b.right)?;
         self.set_line(b.left.span());
         self.emit_bin(dst, a, c, op, typed);
+        Ok(())
+    }
+
+    /// One operand of `&&` or `||`, its temporaries dropped before the next operand runs.
+    fn compile_lazy_operand(&mut self, dst: Reg, operand: &Expr) -> Result<()> {
+        let mark = self.cur().owned_temps.len();
+        self.compile_into(dst, operand)?;
+        self.drop_temps(mark, None);
         Ok(())
     }
 
@@ -509,6 +520,7 @@ impl Compiler<'_> {
             )
         {
             let a = self.compile_expr(&b.left)?;
+            let a = self.read_before_writes(a, &b.left, std::iter::once(&*b.right));
             let typed = self.typed_operands(&b.left, &b.right, op);
             if let Some(imm) = int_literal(&b.right) {
                 let at = self.here();

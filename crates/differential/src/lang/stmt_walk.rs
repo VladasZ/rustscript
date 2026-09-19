@@ -166,6 +166,19 @@ impl Stmt {
             } => {
                 out.insert(name.clone());
             }
+            // a body that hands a captured closure to the apply helper borrows it by `&mut`,
+            // so the closure is `FnMut` and its binding needs `mut` to be called
+            Self::LetClosure {
+                name,
+                source: ClosureSource::Literal { body, .. },
+                ..
+            } if body
+                .nodes()
+                .iter()
+                .any(|node| matches!(node, Expr::ApplyCall { .. })) =>
+            {
+                out.insert(name.clone());
+            }
             Self::Swap { a, b } => {
                 out.insert(a.clone());
                 out.insert(b.clone());

@@ -329,12 +329,15 @@ impl Vm {
         let clo = |i: usize| as_closure(args.get(i));
         let list = items.lock().clone();
         let out = match name {
+            // an item the predicate rejects is the vec's own and drops right there, like in std
             BuiltinId::Retain => {
                 let f = clo(0)?;
                 let mut kept = Vec::new();
                 for x in list {
                     if self.call_closure_data(&f, from_ref(&x))?.is_truthy() {
                         kept.push(x);
+                    } else if self.has_drop {
+                        self.run_user_drop(x)?;
                     }
                 }
                 *items.lock() = kept;
