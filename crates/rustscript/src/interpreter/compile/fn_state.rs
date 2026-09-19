@@ -86,6 +86,11 @@ pub(super) struct FnState {
     pub(super) owning_iters: HashSet<Reg>,
     /// `let r = &mut v` aliases, access compiles as access to `v` itself
     pub(super) aliases: HashMap<String, String>,
+    /// Every change to `aliases` with the entry it replaced, so a scope end puts back what
+    /// its aliases shadowed, see `Compiler::set_alias`.
+    pub(super) alias_log: Vec<(String, Option<String>)>,
+    /// The length of `alias_log` when each open scope began.
+    pub(super) alias_marks: Vec<usize>,
     /// `const` and `static` items declared in a block. They are locals like a `let`, but a
     /// pattern that names one tests against its value.
     pub(super) block_consts: HashSet<String>,
@@ -154,6 +159,8 @@ impl FnState {
             drop_exempt: HashSet::new(),
             owning_iters: HashSet::new(),
             aliases: HashMap::default(),
+            alias_log: Vec::new(),
+            alias_marks: Vec::new(),
             block_consts: HashSet::new(),
             scopes: vec![HashMap::default()],
             scope_order: vec![Vec::new()],

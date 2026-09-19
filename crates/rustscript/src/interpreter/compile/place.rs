@@ -245,6 +245,13 @@ impl Compiler<'_> {
         if init.diverge.is_some() {
             return Ok(false);
         }
+        // `let ref mut m = n` borrows `n` like `let m = &mut n` does
+        if self.alias_ref_binding(&local.pat, &init.expr) {
+            if is_last {
+                self.emit(Op::LoadUnit { dst });
+            }
+            return Ok(true);
+        }
         let name = match &local.pat {
             syn::Pat::Ident(id) if id.subpat.is_none() => id.ident.to_string(),
             syn::Pat::Type(t) => match &*t.pat {
@@ -264,7 +271,7 @@ impl Compiler<'_> {
             if matches!(self.resolve(&target), NameLoc::None) {
                 return Ok(false);
             }
-            self.cur().aliases.insert(name, target);
+            self.set_alias(&name, Some(target));
             if is_last {
                 self.emit(Op::LoadUnit { dst });
             }

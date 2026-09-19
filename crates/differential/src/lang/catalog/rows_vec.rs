@@ -2,7 +2,7 @@
 
 use super::{
     ELEM, Elem, ElemReq, Exact, FBool, FStr, FUSize, KeyElem, Method, Num, Opt, OrdElem, SAME,
-    Same, SmallUsize, StrElem, TyPat, USIZE_PAT, VecOfVec, VecRecv, m, with_elem,
+    Same, SmallUsize, StrElem, TyPat, USIZE_PAT, VecOfVec, VecRecv, borrowing, m, with_elem,
 };
 
 pub(super) const ROWS: &[Method] = &[
@@ -20,28 +20,28 @@ pub(super) const ROWS: &[Method] = &[
         TyPat::Opt(ELEM),
         "{r}.last().cloned()",
     ),
-    m(
+    borrowing(m(
         "get",
         VecRecv,
         &[SmallUsize],
         TyPat::Opt(ELEM),
         "{r}.get({0}).cloned()",
-    ),
+    )),
     // panics out of bounds
-    m(
+    borrowing(m(
         "vec_index",
         VecRecv,
         &[SmallUsize],
         Elem,
         "{r}[{0}].clone()",
-    ),
-    m(
+    )),
+    borrowing(m(
         "vec_contains",
         VecRecv,
         &[Elem],
         Exact(FBool),
         "{r}.contains(&{0})",
-    ),
+    )),
     with_elem(
         m(
             "vec_max",
@@ -142,13 +142,13 @@ pub(super) const ROWS: &[Method] = &[
         "{r}.into_iter().step_by({0}).collect::<Vec<{E}>>()",
     ),
     with_elem(
-        m(
+        borrowing(m(
             "vec_repeat",
             VecRecv,
             &[SmallUsize],
             Same,
             "{r}.repeat({0})",
-        ),
+        )),
         ElemReq::Copy,
     ),
     m(
@@ -203,20 +203,20 @@ pub(super) const ROWS: &[Method] = &[
         "{r}.split_last().map(|(a, b)| (a.clone(), b.to_vec()))",
     ),
     // panics on a zero chunk size
-    m(
+    borrowing(m(
         "vec_chunk_lens",
         VecRecv,
         &[SmallUsize],
         TyPat::Vec(USIZE_PAT),
         "{r}.chunks({0}).map(<[{E}]>::len).collect::<Vec<usize>>()",
-    ),
-    m(
+    )),
+    borrowing(m(
         "vec_window_count",
         VecRecv,
         &[SmallUsize],
         Exact(FUSize),
         "{r}.windows({0}).count()",
-    ),
+    )),
     with_elem(
         m(
             "vec_window_sums",
@@ -252,13 +252,13 @@ pub(super) const ROWS: &[Method] = &[
         KeyElem,
     ),
     with_elem(
-        m(
+        borrowing(m(
             "vec_join",
             VecRecv,
             &[Exact(FStr)],
             Exact(FStr),
             "{r}.join({0}.as_str())",
-        ),
+        )),
         StrElem,
     ),
     with_elem(

@@ -37,6 +37,20 @@ impl Compiler<'_> {
         (frame.mutable_locals.contains(&reg) && (reg as usize) < frame.num_params).then_some(reg)
     }
 
+    /// The variable a `*name` store writes directly. A `&mut variable` alias names the
+    /// variable, which may live in an enclosing frame, and a `&mut` parameter of an enclosing
+    /// function names its capture cell, see `deref_param_upvalue`.
+    fn deref_write_target(&mut self, name: &str) -> Option<String> {
+        let target = self.unalias(name);
+        if target != name {
+            return Some(target);
+        }
+        if let Some(target) = self.enclosing_alias_target(name) {
+            return Some(target);
+        }
+        self.deref_param_upvalue(name).then(|| name.to_string())
+    }
+
     /// The value stored into a local, owned. Its literals carry the local's width from the
     /// inference pass.
     pub(super) fn compile_stored_value(&mut self, value: &Expr) -> Result<Reg> {
@@ -88,17 +102,13 @@ impl Compiler<'_> {
             Expr::Unary(u) if matches!(u.op, UnOp::Deref(_)) => {
                 // `*r = v` on a `&mut variable` alias writes the variable, which may live in an
                 // enclosing frame
-                if let Some(name) = place::single_path_name(&u.expr) {
-                    let target = match self.unalias(&name) {
-                        same if same == name => self.enclosing_alias_target(&name),
-                        target => Some(target),
-                    };
-                    if let Some(target) = target {
-                        let location = self.resolve_for_write(&target);
-                        let val = self.compile_stored_value(value)?;
-                        self.emit_name_store(location, val, &target)?;
-                        return Ok(());
-                    }
+                if let Some(name) = place::single_path_name(&u.expr)
+                    && let Some(target) = self.deref_write_target(&name)
+                {
+                    let location = self.resolve_for_write(&target);
+                    let val = self.compile_stored_value(value)?;
+                    self.emit_name_store(location, val, &target)?;
+                    return Ok(());
                 }
                 let val = self.compile_owned_expr(value)?;
                 if let Some(cell) = self.deref_param_cell(&u.expr) {
@@ -203,27 +213,22 @@ impl Compiler<'_> {
         rhs: &Expr,
     ) -> Result<()> {
         // a `&mut variable` alias reads and writes the variable itself
-        if let Some(name) = place::single_path_name(&u.expr) {
-            let target = match self.unalias(&name) {
-                // a captured alias lives in an enclosing frame
-                same if same == name => self.enclosing_alias_target(&name),
-                target => Some(target),
-            };
-            if let Some(target) = target {
-                let b = self.compile_expr(rhs)?;
-                let location = self.resolve_for_write(&target);
-                let current = self.load_name_location(location, &target)?;
-                let result = self.alloc();
-                self.set_line(u.span());
-                self.emit(Op::Bin {
-                    dst: result,
-                    a: current,
-                    b,
-                    op,
-                });
-                self.emit_name_store(location, result, &target)?;
-                return Ok(());
-            }
+        if let Some(name) = place::single_path_name(&u.expr)
+            && let Some(target) = self.deref_write_target(&name)
+        {
+            let b = self.compile_expr(rhs)?;
+            let location = self.resolve_for_write(&target);
+            let current = self.load_name_location(location, &target)?;
+            let result = self.alloc();
+            self.set_line(u.span());
+            self.emit(Op::Bin {
+                dst: result,
+                a: current,
+                b,
+                op,
+            });
+            self.emit_name_store(location, result, &target)?;
+            return Ok(());
         }
         let b = self.compile_expr(rhs)?;
         if let Some(cell) = self.deref_param_cell(&u.expr) {

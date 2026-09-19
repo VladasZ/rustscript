@@ -153,6 +153,10 @@ pub enum FishReq {
 pub struct Method {
     pub name: &'static str,
     pub recv: RecvClass,
+    /// The receiver is borrowed while the arguments run, so no argument may write its binding.
+    /// Set on the rows with arguments whose method takes `&self`. A by value method copies
+    /// or moves the receiver before the arguments run.
+    pub borrows_recv: bool,
     pub args: &'static [TyPat],
     pub ret: TyPat,
     pub elem: ElemReq,
@@ -172,11 +176,19 @@ const fn m(
     Method {
         name,
         recv,
+        borrows_recv: false,
         args,
         ret,
         elem: ElemReq::Any,
         fish: FishReq::None,
         template,
+    }
+}
+
+const fn borrowing(method: Method) -> Method {
+    Method {
+        borrows_recv: true,
+        ..method
     }
 }
 

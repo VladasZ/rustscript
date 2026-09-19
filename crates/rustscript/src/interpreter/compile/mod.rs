@@ -336,19 +336,32 @@ impl<'a> Compiler<'a> {
         let f = self.cur();
         f.scopes.push(HashMap::default());
         f.scope_order.push(Vec::new());
+        f.alias_marks.push(f.alias_log.len());
     }
 
+    /// The aliases the scope made go, and what they shadowed comes back, so `let m = &mut n`
+    /// in a block leaves an outer `m` as it was.
     fn pop_scope(&mut self) {
         let f = self.cur();
         f.scopes.pop();
         f.scope_order.pop();
+        let mark = f.alias_marks.pop().unwrap_or(0);
+        while f.alias_log.len() > mark {
+            let Some((name, previous)) = f.alias_log.pop() else {
+                break;
+            };
+            match previous {
+                Some(target) => f.aliases.insert(name, target),
+                None => f.aliases.remove(&name),
+            };
+        }
     }
 
     /// A name a closure of this body writes lives in a capture cell from this binding on, see
     /// `captures::closure_written_names`.
     fn define(&mut self, name: &str, reg: Reg) {
+        self.set_alias(name, None);
         let f = self.cur();
-        f.aliases.remove(name);
         f.scopes
             .last_mut()
             .expect("a scope is always open")

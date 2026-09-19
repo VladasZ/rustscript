@@ -42,6 +42,19 @@ impl Compiler<'_> {
         Ok(u16::try_from(f.pats.len() - 1)?)
     }
 
+    /// `pattern_info` over a known scrutinee. A bare `ref` binding over a variable aliases the
+    /// variable and lowers as `_`, see `alias_ref_binding`.
+    pub(super) fn pattern_info_over(&mut self, pat: &Pat, scrutinee: &Expr) -> Result<u16> {
+        if self.alias_ref_binding(pat, scrutinee) {
+            let wild = Pat::Wild(syn::PatWild {
+                attrs: Vec::new(),
+                underscore_token: syn::Token![_](proc_macro2::Span::call_site()),
+            });
+            return self.pattern_info(&wild);
+        }
+        self.pattern_info(pat)
+    }
+
     /// The bindings of a pattern over a borrowed scrutinee hold borrowed handles, so scope end
     /// must not drop them.
     /// Bindings out of a scrutinee that holds a `RefCell` guard keep the borrow alive until

@@ -6,7 +6,7 @@ use crate::lang::catalog::{
     ElemReq, FishReq, METHODS, Method, RecvClass, Solved, TyPat, arg_ty, fish_allows, solve,
 };
 use crate::lang::expr::{BinOp, Expr, MemKind, ReadMode, VecTakeKind, unbare_deep};
-use crate::lang::own::{BindKind, OwnState};
+use crate::lang::own::{BindKind, OwnState, root_binding};
 use crate::lang::pipe::Site;
 use crate::lang::stmt::{Ann, Stmt};
 use crate::lang::synth::{Generator, MOVE_CHANCE};
@@ -408,6 +408,16 @@ impl Generator<'_> {
                 }
             }
             let recv = unbare_deep(self.typed_only(|inner| inner.expr(&recv_ty, depth - 1)));
+            // `x.eq_ignore_ascii_case(&replace(&mut x, 'a'))` writes the binding the receiver
+            // borrows, so a borrowed receiver binding is held while the arguments run
+            let held = if method.borrows_recv {
+                root_binding(&recv).map(str::to_string)
+            } else {
+                None
+            };
+            if let Some(name) = &held {
+                self.scope.freeze(name);
+            }
             let mut args = Vec::with_capacity(method.args.len());
             let mut usable = true;
             for pattern in method.args {
@@ -419,6 +429,9 @@ impl Generator<'_> {
                     usable = false;
                     break;
                 }
+            }
+            if held.is_some() {
+                self.scope.unfreeze();
             }
             if !usable {
                 continue;

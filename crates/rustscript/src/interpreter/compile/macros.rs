@@ -64,18 +64,21 @@ impl Compiler<'_> {
                 while let Expr::Reference(r) = target {
                     target = &r.expr;
                 }
-                let recv = self.compile_expr(target)?;
+                // a captured string or a field is read into a register that shares nothing
+                // with the place, so the grown buffer stores back like after a `push_str`
+                let place = self.compile_mut_receiver(target)?;
                 let spec = self.build_fmt_spec_from(iter, name == "writeln")?;
                 let text = self.alloc();
                 self.emit(Op::Fmt { dst: text, spec });
                 let write_all = self.add_name("write_all".to_string());
                 self.emit(Op::Method {
                     dst,
-                    recv,
+                    recv: place.reg,
                     name: write_all,
                     base: text,
                     argc: 1,
                 });
+                self.emit_place_writeback(&place);
             }
             "vec" => self.compile_vec_macro(dst, mac)?,
             "assert" => self.compile_assert_macro(dst, mac)?,
