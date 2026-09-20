@@ -97,6 +97,7 @@ pub(super) struct FnState {
     pub(super) scopes: Vec<HashMap<String, Reg>>,
     /// for scope end `Drop` runs
     pub(super) scope_order: Vec<Vec<Reg>>,
+    pub(super) scope_temps: Vec<usize>,
     pub(super) drop_lists: Vec<std::sync::Arc<[Reg]>>,
     /// see `Chunk::lent_params`
     pub(super) lent_params: Vec<Reg>,
@@ -182,6 +183,7 @@ impl FnState {
             block_consts: HashSet::new(),
             scopes: vec![HashMap::default()],
             scope_order: vec![Vec::new()],
+            scope_temps: vec![0],
             drop_lists: Vec::new(),
             lent_params: Vec::new(),
             lent_writebacks: Vec::new(),

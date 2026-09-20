@@ -52,6 +52,7 @@ struct LoopCtx {
     result: Reg,
     /// a `break` or `continue` ends every scope deeper than this first
     scope_depth: usize,
+    temp_depth: usize,
     /// `'name` on the loop
     label: Option<String>,
 }
@@ -336,6 +337,7 @@ impl<'a> Compiler<'a> {
         let f = self.cur();
         f.scopes.push(HashMap::default());
         f.scope_order.push(Vec::new());
+        f.scope_temps.push(f.owned_temps.len());
         f.alias_marks.push(f.alias_log.len());
     }
 
@@ -345,6 +347,7 @@ impl<'a> Compiler<'a> {
         let f = self.cur();
         f.scopes.pop();
         f.scope_order.pop();
+        f.scope_temps.pop();
         let mark = f.alias_marks.pop().unwrap_or(0);
         while f.alias_log.len() > mark {
             let Some((name, previous)) = f.alias_log.pop() else {

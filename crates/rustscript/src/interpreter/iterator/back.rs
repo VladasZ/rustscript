@@ -24,6 +24,7 @@ enum Back {
     Chain(Handle, Handle),
     Zip(Handle, Handle),
     Forward(Handle),
+    StepBy(Handle, usize, bool),
 }
 
 /// Whether every layer down to the source has a back step.
@@ -44,7 +45,8 @@ pub(super) fn supports_back(iterator: &Handle) -> bool {
         // these need the exact length of what is left
         IteratorState::Enumerate { source, .. }
         | IteratorState::Skip { source, .. }
-        | IteratorState::Take { source, .. } => {
+        | IteratorState::Take { source, .. }
+        | IteratorState::StepBy { source, .. } => {
             supports_back(source) && iterator_len(source).is_some()
         }
         IteratorState::Chain { left, right, .. } => supports_back(left) && supports_back(right),
@@ -88,6 +90,18 @@ pub(super) fn iterator_len(iterator: &Handle) -> Option<usize> {
             Some(iterator_len(source)?.saturating_sub(*remaining))
         }
         IteratorState::Take { source, remaining } => Some(iterator_len(source)?.min(*remaining)),
+        IteratorState::StepBy {
+            source,
+            step,
+            first,
+        } => {
+            let len = iterator_len(source)?;
+            Some(if *first {
+                len.div_ceil(*step)
+            } else {
+                len / *step
+            })
+        }
         IteratorState::Zip { left, right } => Some(iterator_len(left)?.min(iterator_len(right)?)),
         IteratorState::Chain { left, right, .. } => {
             Some(iterator_len(left)? + iterator_len(right)?)
@@ -139,6 +153,11 @@ fn back_step(state: &mut IteratorState) -> Result<Back> {
         IteratorState::Chain { left, right, .. } => Back::Chain(left.clone(), right.clone()),
         IteratorState::Zip { left, right } => Back::Zip(left.clone(), right.clone()),
         IteratorState::Rev { source } => Back::Forward(source.clone()),
+        IteratorState::StepBy {
+            source,
+            step,
+            first,
+        } => Back::StepBy(source.clone(), *step, *first),
         _ => bail!("this iterator cannot be reversed"),
     })
 }
@@ -198,6 +217,19 @@ impl Vm {
             Back::Skip(source, remaining) => self.skip_back(&source, remaining),
             Back::Take(source, count) => self.take_back(&source, count),
             Back::Zip(left, right) => self.zip_back(&left, &right),
+            Back::StepBy(source, step, first) => {
+                let len = sized(&source, "step_by")?;
+                if len == 0 {
+                    return Ok(None);
+                }
+                let skip = if first { (len - 1) % step } else { len % step };
+                for _ in 0..skip {
+                    if let Some(value) = self.iterator_next_back(&source)? {
+                        self.discard(&source, value)?;
+                    }
+                }
+                self.iterator_next_back(&source)
+            }
         }
     }
 

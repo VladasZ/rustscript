@@ -135,46 +135,9 @@ impl Vm {
                     vec: owned,
                 })
             }
-            BuiltinId::Partition => {
-                let closure = closure(0)?;
-                let (mut yes, mut no) = (Vec::new(), Vec::new());
-                while let Some(value) = self.iterator_next(iterator)? {
-                    if self
-                        .call_closure_data(&closure, from_ref(&value))?
-                        .is_truthy()
-                    {
-                        yes.push(value);
-                    } else {
-                        no.push(value);
-                    }
-                }
-                Value::tuple(vec![Value::vec(yes), Value::vec(no)])
-            }
+            BuiltinId::Partition => self.partition(iterator, &closure(0)?)?,
             BuiltinId::MaxByKey | BuiltinId::MinByKey => {
-                let closure = closure(0)?;
-                let mut best: Option<(Value, Value)> = None;
-                while let Some(value) = self.iterator_next(iterator)? {
-                    let key = self.call_closure_data(&closure, from_ref(&value))?;
-                    let take = match &best {
-                        None => true,
-                        Some((best_key, _)) => {
-                            let order = compare_values(&key, best_key)?;
-                            if name == BuiltinId::MaxByKey {
-                                order.is_ge()
-                            } else {
-                                order.is_lt()
-                            }
-                        }
-                    };
-                    if take {
-                        if let Some((_, loser)) = best.replace((key, value)) {
-                            self.discard(iterator, loser)?;
-                        }
-                    } else {
-                        self.discard(iterator, value)?;
-                    }
-                }
-                best.map_or_else(Value::none, |(_, value)| Value::some(value))
+                self.extreme_by_key(iterator, name, &closure(0)?)?
             }
             _ => return Ok(None),
         };
@@ -182,6 +145,88 @@ impl Vm {
             self.drop_leftovers(iterator)?;
         }
         Ok(Some(value))
+    }
+
+    fn partition(self: &Arc<Self>, iterator: &Handle, closure: &Arc<ClosureData>) -> Result<Value> {
+        let (mut yes, mut no) = (Vec::new(), Vec::new());
+        let result = (|| -> Result<()> {
+            while let Some(value) = self.iterator_next(iterator)? {
+                if self.call_lending(iterator, closure, &value)?.is_truthy() {
+                    yes.push(value);
+                } else {
+                    no.push(value);
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            // The fold unwinds first, then the two output locals in reverse order.
+            if let Err(error) = self.drop_leftovers(iterator) {
+                eprintln!("panic in drop during unwinding: {error:#}");
+            }
+            for value in no.into_iter().chain(yes) {
+                self.unwind_discard(iterator, value);
+            }
+            return Err(error);
+        }
+        Ok(Value::tuple(vec![Value::vec(yes), Value::vec(no)]))
+    }
+
+    fn extreme_by_key(
+        self: &Arc<Self>,
+        iterator: &Handle,
+        name: BuiltinId,
+        closure: &Arc<ClosureData>,
+    ) -> Result<Value> {
+        let mut best: Option<(Value, Value)> = None;
+        let result = (|| -> Result<()> {
+            while let Some(value) = self.iterator_next(iterator)? {
+                let key = self.call_lending(iterator, closure, &value)?;
+                let take = match &best {
+                    None => true,
+                    Some((best_key, _)) => {
+                        let order = compare_values(&key, best_key)?;
+                        if name == BuiltinId::MaxByKey {
+                            order.is_ge()
+                        } else {
+                            order.is_lt()
+                        }
+                    }
+                };
+                let loser = if take {
+                    best.replace((key, value))
+                } else {
+                    Some((key, value))
+                };
+                if let Some((key, value)) = loser {
+                    self.run_user_drop(key)?;
+                    self.discard(iterator, value)?;
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            if let Some((key, value)) = best {
+                if let Err(error) = self.run_user_drop(key) {
+                    eprintln!("panic in drop during unwinding: {error:#}");
+                }
+                self.unwind_discard(iterator, value);
+            }
+            return Err(error);
+        }
+        Ok(match best {
+            Some((key, value)) => {
+                self.run_user_drop(key)?;
+                Value::some(value)
+            }
+            None => Value::none(),
+        })
+    }
+
+    fn unwind_discard(self: &Arc<Self>, iterator: &Handle, value: Value) {
+        if let Err(error) = self.discard(iterator, value) {
+            eprintln!("panic in drop during unwinding: {error:#}");
+        }
     }
 
     pub(super) fn drain_iterator(self: &Arc<Self>, iterator: &Handle) -> Result<Vec<Value>> {
