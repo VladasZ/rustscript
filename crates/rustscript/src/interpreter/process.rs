@@ -1,5 +1,7 @@
 //! The `Command` and `Child` bridge.
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
@@ -20,6 +22,11 @@ pub(super) fn build_command(s: &StructData) -> std::process::Command {
     let mut cmd = std::process::Command::new(&program);
     if let Some(Value::Vec(a)) = s.get("args") {
         for item in a.lock().iter() {
+            #[cfg(windows)]
+            if let Some(text) = raw_arg_text(item) {
+                cmd.raw_arg(text);
+                continue;
+            }
             cmd.arg(path_like(item));
         }
     }
@@ -40,6 +47,22 @@ pub(super) fn build_command(s: &StructData) -> std::process::Command {
         }
     }
     cmd
+}
+
+/// A raw argument sits in the same list as the escaped ones, so the order of `arg` and `raw_arg`
+/// calls is kept.
+const RAW_ARG: &str = "RawArg";
+
+/// A constant and not a literal, so the surface harvest doesn't list it as a method.
+const RAW_ARG_TEXT: &str = "text";
+
+/// Windows only, `raw_arg` refuses to run anywhere else, so no raw argument reaches the list there.
+#[cfg(windows)]
+fn raw_arg_text(item: &Value) -> Option<String> {
+    match item {
+        Value::Struct(m) if &**m.name() == RAW_ARG => m.get(RAW_ARG_TEXT).map(|v| path_like(&v)),
+        _ => None,
+    }
 }
 
 pub(super) fn run_command(s: &StructData) -> Value {
@@ -187,6 +210,21 @@ pub(super) fn command_method(recv: &Value, name: &MethodName, args: &[Value]) ->
         BuiltinId::Arg => {
             if let Some(Value::Vec(list)) = s.get("args") {
                 list.lock().push(arg(args, 0)?);
+            }
+            cmd_value()
+        }
+        // `std::os::windows::process::CommandExt`, the text reaches the child with no escaping
+        BuiltinId::RawArg => {
+            if !cfg!(windows) {
+                bail!(
+                    "Command::raw_arg exists on Windows only, put the call behind #[cfg(windows)]"
+                );
+            }
+            if let Some(Value::Vec(list)) = s.get("args") {
+                list.lock().push(Value::struct_of(
+                    RAW_ARG,
+                    [(RAW_ARG_TEXT.into(), arg(args, 0)?)],
+                ));
             }
             cmd_value()
         }
