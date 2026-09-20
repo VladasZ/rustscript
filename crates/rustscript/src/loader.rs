@@ -110,14 +110,6 @@ fn detect_tokio_main(items: &[Item]) -> Result<bool> {
     Ok(false)
 }
 
-/// Narrow on purpose, `#[cfg(not(test))]` has to stay.
-fn is_cfg_test(attrs: &[syn::Attribute]) -> bool {
-    attrs.iter().any(|a| {
-        a.path().is_ident("cfg")
-            && matches!(&a.meta, syn::Meta::List(list) if list.tokens.to_string().replace(' ', "") == "test")
-    })
-}
-
 fn item_attrs(item: &Item) -> &[syn::Attribute] {
     match item {
         Item::Const(i) => &i.attrs,
@@ -158,8 +150,8 @@ fn collect(
     let mut kept = Vec::with_capacity(items.len());
     let mut seen: Vec<String> = Vec::new();
     for item in items {
-        // `#[cfg(test)]` items never run here, skip them
-        if is_cfg_test(item_attrs(&item)) {
+        // An item behind a false `#[cfg(..)]` is not part of the program. `test` is always false here.
+        if !crate::cfg_eval::enabled(item_attrs(&item))? {
             continue;
         }
         let Item::Mod(m) = item else {

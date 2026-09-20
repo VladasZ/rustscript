@@ -1,4 +1,5 @@
 mod build_info;
+mod cfg_eval;
 mod checker;
 mod interpreter;
 mod loader;

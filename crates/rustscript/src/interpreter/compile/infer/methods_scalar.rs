@@ -270,7 +270,7 @@ impl Infer<'_, '_> {
             (
                 "Command",
                 "arg" | "args" | "current_dir" | "env" | "envs" | "stdin" | "stdout" | "stderr"
-                | "env_remove" | "env_clear",
+                | "env_remove" | "env_clear" | "raw_arg",
             ) => Ty::named("Command"),
             ("Command", "output") | ("Child", "wait_with_output") => io(Ty::named("Output")),
             ("Command", "status") | ("Child", "wait") => io(Ty::named("ExitStatus")),

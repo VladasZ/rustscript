@@ -50,7 +50,7 @@ The `supported_page_is_current` test enforces it.
 
 ## Command
 
-`arg`, `args`, `current_dir`, `cwd`, `env`, `env_remove`, `envs`, `output`, `spawn`, `status`, `stderr`, `stdin`, `stdout`
+`arg`, `args`, `current_dir`, `cwd`, `env`, `env_remove`, `envs`, `output`, `raw_arg`, `spawn`, `status`, `stderr`, `stdin`, `stdout`
 
 ## DateTime
 

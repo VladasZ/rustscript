@@ -436,6 +436,7 @@ query_status
 random
 random_bool
 random_range
+raw_arg
 raw_os_error
 raw_query
 read
