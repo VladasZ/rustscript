@@ -152,7 +152,7 @@ impl FmtSpec {
         if self.precision.is_some() {
             let ok = match self.fmt {
                 // precision on an integer is legal but observes nothing
-                FmtTrait::Display => matches!(ty, Ty::Float(_) | Ty::Str),
+                FmtTrait::Display => matches!(ty, Ty::Float(_) | Ty::Str | Ty::StrRef),
                 FmtTrait::Debug | FmtTrait::LowerExp | FmtTrait::UpperExp => {
                     matches!(ty, Ty::Float(_))
                 }

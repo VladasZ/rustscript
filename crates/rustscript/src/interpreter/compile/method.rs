@@ -117,6 +117,7 @@ impl Compiler<'_> {
         // the tail call of a block unwinds its receiver like the temporaries around it, in
         // reverse order of creation, any other call unwinds it first
         let tail = std::mem::take(&mut self.cur().tail_call);
+        let held = self.cur().unwind_temps.len();
         let (recv, receiver_place) = if mutating {
             let p = self.compile_mut_receiver(&m.receiver)?;
             (p.reg, Some(p))
@@ -129,7 +130,7 @@ impl Compiler<'_> {
                 if tail {
                     self.cur().owned_temps.push(reg);
                 } else {
-                    self.cur().unwind_temps.push(reg);
+                    self.cur().hold_operand(reg);
                 }
                 unwinds_receiver = true;
             }
@@ -140,6 +141,7 @@ impl Compiler<'_> {
         };
         let place = mutating && place::is_place_expr(&m.receiver);
         let base = self.compile_shared_args(m.args.iter())?;
+        self.cur().close_operands(held);
         let (method, scalar) = self.method_name_and_scalar(m);
         let default = if method == "unwrap_or_default" {
             let ty = self.types.of_node(m);

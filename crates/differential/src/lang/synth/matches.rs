@@ -5,38 +5,21 @@ use rand::RngExt;
 use crate::lang::expr::{Arm, Expr, unbare_deep};
 use crate::lang::pat::Pat;
 use crate::lang::synth::Generator;
+use crate::lang::synth::pats::MAX_PAT_DEPTH;
 use crate::lang::ty::{IntWidth, Ty};
 use crate::lang::user::UserShape;
 
 impl Generator<'_> {
     pub(super) fn match_expr(&mut self, want: &Ty, depth: usize) -> Option<Expr> {
-        let scrutinee_ty = match self.rng.random_range(0..8) {
-            0 => Ty::opt_of(self.elem_ty()),
-            1 => self.res_ty(),
-            2 | 3 => self.user_ty()?,
-            4 => Ty::Int(self.int_width()),
-            5 => Ty::Bool,
-            6 => Ty::Tuple(vec![self.scalar_ty(), self.scalar_ty()]),
-            _ => Ty::vec_of(self.elem_ty()),
-        };
+        let scrutinee_ty = self.scrutinee_ty()?;
         let scrutinee = self.expr(&scrutinee_ty, depth - 1);
         let by_ref = matches!(scrutinee_ty, Ty::Vec(_));
         self.begin_branches();
-        let arms = match &scrutinee_ty {
-            Ty::Opt(inner) => self.option_arms(inner, want, depth),
-            Ty::Res(ok, err) => self.result_arms(ok, err, want, depth),
-            Ty::User(shape) if shape.is_enum() => self.enum_arms(shape, want, depth),
-            Ty::User(shape) => self.struct_arms(shape, want, depth),
-            Ty::Int(width) => self.int_arms(*width, want, depth),
-            Ty::Bool => self.bool_arms(want, depth),
-            Ty::Tuple(items) => self.tuple_arms(items, want, depth),
-            Ty::Vec(elem) => self.slice_arms(elem, want, depth),
-            _ => {
-                self.end_branches();
-                return None;
-            }
-        };
+        let arms = self.arms_for(&scrutinee_ty, &mut |inner, pat, guard| {
+            inner.arm(pat, guard, want, depth)
+        });
         self.end_branches();
+        let arms = arms?;
         // An arm body may call a width specific method on a bound name, and `rustc` resolves the
         // method before the scrutinee's bare literals default, so a binding forces real suffixes.
         let mut binds = Vec::new();
@@ -56,11 +39,185 @@ impl Generator<'_> {
         })
     }
 
-    fn arm(&mut self, pat: Pat, guard: bool, want: &Ty, depth: usize) -> Arm {
+    /// `matches!` over a refutable pattern. A guard is the only reader of the bindings, and it
+    /// moves nothing, like a match guard.
+    pub(super) fn matches_expr(&mut self, depth: usize) -> Option<Expr> {
+        let ty = self.refutable_ty();
+        let pat = self.refutable_value_pat(&ty)?;
+        let scrutinee = unbare_deep(self.expr(&ty, depth - 1));
         let mut binds = Vec::new();
         pat.bindings(&mut binds);
+        let guard = (!binds.is_empty() && self.chance(0.6)).then(|| {
+            Box::new(self.with_pat(&pat.clone(), |inner| {
+                inner.borrowing(|inner| inner.expr(&Ty::Bool, depth - 1))
+            }))
+        });
+        Some(Expr::Matches {
+            scrutinee: Box::new(scrutinee),
+            pat,
+            guard,
+        })
+    }
+
+    /// A type some arm list below covers.
+    pub(super) fn scrutinee_ty(&mut self) -> Option<Ty> {
+        Some(match self.rng.random_range(0..9) {
+            0 => Ty::opt_of(self.elem_ty()),
+            1 => self.res_ty(),
+            2 | 3 => self.user_ty()?,
+            4 => Ty::Int(self.int_width()),
+            5 => Ty::Bool,
+            6 => Ty::Tuple(vec![self.scalar_ty(), self.scalar_ty()]),
+            7 => Ty::Char,
+            _ => Ty::vec_of(self.elem_ty()),
+        })
+    }
+
+    /// The patterns of a `match` over `ty`, in order and exhaustive. `make` builds one arm
+    /// from a pattern and whether it carries a guard, so a `match` expression and a `match`
+    /// statement share the patterns.
+    pub(super) fn arms_for<A>(
+        &mut self,
+        ty: &Ty,
+        make: &mut impl FnMut(&mut Self, Pat, bool) -> A,
+    ) -> Option<Vec<A>> {
+        let mut arms = Vec::new();
+        // set when the arms so far may all miss
+        let mut open = false;
+        match ty {
+            Ty::Opt(inner) => {
+                let guarded = self.chance(0.3);
+                let payload = self.sub_pat(inner, MAX_PAT_DEPTH - 1, false);
+                open = guarded || !payload.is_irrefutable();
+                arms.push(make(self, Pat::Some(Box::new(payload)), guarded));
+                arms.push(make(self, Pat::None, false));
+            }
+            Ty::Res(ok, err) => {
+                let ok_pat = self.sub_pat(ok, MAX_PAT_DEPTH - 1, false);
+                let err_pat = self.sub_pat(err, MAX_PAT_DEPTH - 1, false);
+                open = !ok_pat.is_irrefutable() || !err_pat.is_irrefutable();
+                arms.push(make(self, Pat::Ok(Box::new(ok_pat)), false));
+                arms.push(make(self, Pat::Err(Box::new(err_pat)), false));
+            }
+            Ty::User(shape) if shape.is_enum() => {
+                open = self.enum_pats(shape, &mut arms, make);
+            }
+            Ty::User(shape) => {
+                let pat = self.struct_pat(shape, MAX_PAT_DEPTH - 1, false);
+                open = !pat.is_irrefutable();
+                arms.push(make(self, pat, false));
+            }
+            Ty::Int(width) => {
+                self.int_pats(*width, &mut arms, make);
+                open = true;
+            }
+            Ty::Char => {
+                let count = self.rng.random_range(1..=3);
+                for _ in 0..count {
+                    let pat = self.char_pat();
+                    arms.push(make(self, pat, false));
+                }
+                open = true;
+            }
+            Ty::Bool => {
+                arms.push(make(self, Pat::BoolLit(true), false));
+                arms.push(make(self, Pat::BoolLit(false), false));
+            }
+            Ty::Tuple(items) => {
+                if self.chance(0.5) {
+                    // a literal in 1 slot, so the arm can miss
+                    let pats: Vec<Pat> = items
+                        .iter()
+                        .enumerate()
+                        .map(|(index, item)| match item {
+                            Ty::Int(width) if index == 0 => self.int_pat(*width),
+                            Ty::Bool if index == 0 => Pat::BoolLit(self.chance(0.5)),
+                            _ => self.sub_pat(item, MAX_PAT_DEPTH - 1, false),
+                        })
+                        .collect();
+                    arms.push(make(self, Pat::Tuple(pats), false));
+                }
+                let pats: Vec<Pat> = items.iter().map(|item| self.bind(item)).collect();
+                arms.push(make(self, Pat::Tuple(pats), false));
+            }
+            Ty::Vec(elem) => {
+                for pat in self.slice_pats(elem) {
+                    // a guard would see `&T`, the arm body clones later
+                    arms.push(make(self, pat, false));
+                }
+                open = true;
+            }
+            _ => return None,
+        }
+        if open {
+            arms.push(make(self, Pat::Wild, false));
+        }
+        Some(arms)
+    }
+
+    /// Whether some variant is left uncovered.
+    fn enum_pats<A>(
+        &mut self,
+        shape: &UserShape,
+        arms: &mut Vec<A>,
+        make: &mut impl FnMut(&mut Self, Pat, bool) -> A,
+    ) -> bool {
+        let skip_some = self.chance(0.3);
+        let mut open = false;
+        let mut index = 0;
+        let count = shape.variants().len();
+        while index < count {
+            if skip_some && index > 0 && self.chance(0.4) {
+                open = true;
+                index += 1;
+                continue;
+            }
+            // 2 neighbours share an arm through an or pattern that binds nothing
+            if index + 1 < count && self.chance(0.2) {
+                let alternatives = (index..=index + 1)
+                    .map(|variant| Pat::Variant {
+                        shape: Box::new(shape.clone()),
+                        variant,
+                        payload: shape.variants()[variant]
+                            .payload
+                            .iter()
+                            .map(|_| Pat::Wild)
+                            .collect(),
+                    })
+                    .collect();
+                arms.push(make(self, Pat::Or(alternatives), false));
+                index += 2;
+                continue;
+            }
+            let pat = self.variant_pat(shape, index, MAX_PAT_DEPTH - 1, false);
+            open |= !pat.is_irrefutable_payload();
+            arms.push(make(self, pat, false));
+            index += 1;
+        }
+        open || arms.is_empty()
+    }
+
+    fn int_pats<A>(
+        &mut self,
+        width: IntWidth,
+        arms: &mut Vec<A>,
+        make: &mut impl FnMut(&mut Self, Pat, bool) -> A,
+    ) {
+        let count = self.rng.random_range(1..=3);
+        for _ in 0..count {
+            let pat = if self.chance(0.3) {
+                self.bind(&Ty::Int(width))
+            } else {
+                self.int_pat(width)
+            };
+            let guarded = matches!(pat, Pat::Bind { .. }) || self.chance(0.2);
+            arms.push(make(self, pat, guarded));
+        }
+    }
+
+    fn arm(&mut self, pat: Pat, guard: bool, want: &Ty, depth: usize) -> Arm {
         self.branch(|inner| {
-            inner.with_locals(&binds, |inner| {
+            inner.with_pat(&pat.clone(), |inner| {
                 // a guard runs with the scrutinee borrowed and may run for several arms, so
                 // `rustc` lets it move nothing, a binding or an outer local alike
                 let guard =
@@ -71,155 +228,7 @@ impl Generator<'_> {
         })
     }
 
-    fn wild_arm(&mut self, want: &Ty, depth: usize) -> Arm {
-        self.branch(|inner| Arm {
-            pat: Pat::Wild,
-            guard: None,
-            body: inner.expr(want, depth - 1),
-        })
-    }
-
-    fn bind(&mut self, ty: &Ty) -> Pat {
-        Pat::Bind {
-            name: self.fresh("diff_b"),
-            ty: ty.clone(),
-        }
-    }
-
-    fn option_arms(&mut self, inner: &Ty, want: &Ty, depth: usize) -> Vec<Arm> {
-        let guarded = self.chance(0.3);
-        let some_pat = Pat::Some(Box::new(self.bind(inner)));
-        let mut arms = vec![self.arm(some_pat, guarded, want, depth)];
-        arms.push(self.arm(Pat::None, false, want, depth));
-        if guarded {
-            arms.push(self.wild_arm(want, depth));
-        }
-        arms
-    }
-
-    fn result_arms(&mut self, ok: &Ty, err: &Ty, want: &Ty, depth: usize) -> Vec<Arm> {
-        let ok_pat = Pat::Ok(Box::new(self.bind(ok)));
-        let err_pat = Pat::Err(Box::new(self.bind(err)));
-        vec![
-            self.arm(ok_pat, false, want, depth),
-            self.arm(err_pat, false, want, depth),
-        ]
-    }
-
-    fn enum_arms(&mut self, shape: &UserShape, want: &Ty, depth: usize) -> Vec<Arm> {
-        let mut arms = Vec::new();
-        let skip_some = self.chance(0.3);
-        let mut skipped = false;
-        for (index, variant) in shape.variants().iter().enumerate() {
-            if skip_some && index > 0 && self.chance(0.4) {
-                skipped = true;
-                continue;
-            }
-            let payload = variant
-                .payload
-                .iter()
-                .map(|ty| {
-                    if self.chance(0.2) {
-                        Pat::Wild
-                    } else {
-                        self.bind(ty)
-                    }
-                })
-                .collect();
-            let pat = Pat::Variant {
-                shape: Box::new(shape.clone()),
-                variant: index,
-                payload,
-            };
-            arms.push(self.arm(pat, false, want, depth));
-        }
-        if skipped || arms.is_empty() {
-            arms.push(self.wild_arm(want, depth));
-        }
-        arms
-    }
-
-    fn struct_arms(&mut self, shape: &UserShape, want: &Ty, depth: usize) -> Vec<Arm> {
-        let mut fields: Vec<(usize, Pat)> = Vec::new();
-        for (index, field) in shape.fields().iter().enumerate() {
-            if self.chance(0.6) {
-                let pat = self.bind(&field.ty);
-                fields.push((index, pat));
-            }
-        }
-        let pat = Pat::Struct {
-            shape: Box::new(shape.clone()),
-            fields,
-        };
-        vec![self.arm(pat, false, want, depth)]
-    }
-
-    fn int_arms(&mut self, width: IntWidth, want: &Ty, depth: usize) -> Vec<Arm> {
-        let mut arms = Vec::new();
-        let count = self.rng.random_range(1..=3);
-        for _ in 0..count {
-            let pat = match self.rng.random_range(0..3) {
-                0 => Pat::IntLit {
-                    width,
-                    value: self.int_value(width),
-                },
-                1 => {
-                    let a = self.int_value(width);
-                    let b = self.int_value(width);
-                    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-                    // an empty half open range is a compile error
-                    let inclusive = lo == hi || self.chance(0.5);
-                    Pat::IntRange {
-                        width,
-                        lo,
-                        hi,
-                        inclusive,
-                    }
-                }
-                _ => self.bind(&Ty::Int(width)),
-            };
-            let guarded = matches!(pat, Pat::Bind { .. }) || self.chance(0.2);
-            arms.push(self.arm(pat, guarded, want, depth));
-        }
-        arms.push(self.wild_arm(want, depth));
-        arms
-    }
-
-    fn bool_arms(&mut self, want: &Ty, depth: usize) -> Vec<Arm> {
-        vec![
-            self.arm(Pat::BoolLit(true), false, want, depth),
-            self.arm(Pat::BoolLit(false), false, want, depth),
-        ]
-    }
-
-    fn tuple_arms(&mut self, items: &[Ty], want: &Ty, depth: usize) -> Vec<Arm> {
-        let mut arms = Vec::new();
-        if self.chance(0.5) {
-            // a literal in 1 slot, so the arm can miss
-            let pats: Vec<Pat> = items
-                .iter()
-                .enumerate()
-                .map(|(index, ty)| match ty {
-                    Ty::Int(width) if index == 0 => Pat::IntLit {
-                        width: *width,
-                        value: self.int_value(*width),
-                    },
-                    Ty::Bool if index == 0 => Pat::BoolLit(self.chance(0.5)),
-                    _ => self.bind(ty),
-                })
-                .collect();
-            let refutable = !pats.iter().all(Pat::is_irrefutable);
-            arms.push(self.arm(Pat::Tuple(pats), false, want, depth));
-            if !refutable {
-                return arms;
-            }
-        }
-        let pats: Vec<Pat> = items.iter().map(|ty| self.bind(ty)).collect();
-        arms.push(self.arm(Pat::Tuple(pats), false, want, depth));
-        arms
-    }
-
-    fn slice_arms(&mut self, elem: &Ty, want: &Ty, depth: usize) -> Vec<Arm> {
+    fn slice_pats(&mut self, elem: &Ty) -> Vec<Pat> {
         let mut arms = Vec::new();
         let shapes = self.rng.random_range(1..=3);
         for _ in 0..shapes {
@@ -261,10 +270,8 @@ impl Generator<'_> {
                     suffix: Vec::new(),
                 },
             };
-            // a guard would see `&T`, the arm body clones later
-            arms.push(self.arm(pat, false, want, depth));
+            arms.push(pat);
         }
-        arms.push(self.wild_arm(want, depth));
         arms
     }
 }

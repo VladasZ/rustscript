@@ -420,7 +420,13 @@ impl Compiler<'_> {
         }
     }
 
+    /// A call of one of the script's own methods, also as the value a block, an `if` or a
+    /// `match` arm hands out, the shapes `init_is_owned` looks through.
     fn user_method_call(&self, expr: &Expr) -> bool {
+        let tail = |block: &syn::Block| match block.stmts.last() {
+            Some(syn::Stmt::Expr(e, None)) => self.user_method_call(e),
+            _ => false,
+        };
         match expr {
             Expr::Paren(p) => self.user_method_call(&p.expr),
             Expr::Group(g) => self.user_method_call(&g.expr),
@@ -431,6 +437,14 @@ impl Compiler<'_> {
                     .iter()
                     .any(|(_, method)| *method == name)
             }
+            Expr::Block(b) => tail(&b.block),
+            Expr::If(i) => {
+                tail(&i.then_branch)
+                    || i.else_branch
+                        .as_ref()
+                        .is_some_and(|(_, other)| self.user_method_call(other))
+            }
+            Expr::Match(m) => m.arms.iter().any(|arm| self.user_method_call(&arm.body)),
             _ => false,
         }
     }

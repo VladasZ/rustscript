@@ -503,10 +503,13 @@ pub(super) fn init_is_owned(expr: &Expr, binding_owns: BindingOwns) -> bool {
             | "try_borrow" | "try_borrow_mut" | "lock" | "concat" | "repeat" | "join"
             | "into_iter" | "into_keys" | "into_values" | "drain" | "split_at" | "insert"
             | "then_some" | "then" | "into" => true,
+            // an adapter wraps the iterator it consumes, so it owns what that one owned
             "unwrap" | "expect" | "unwrap_or" | "unwrap_or_else" | "unwrap_or_default" | "ok"
             | "err" | "map" | "map_err" | "and_then" | "await" | "or" | "and" | "xor" | "zip"
             | "ok_or" | "ok_or_else" | "map_or" | "map_or_else" | "or_else" | "filter"
-            | "flatten" | "take_if" | "transpose" => init_is_owned(&m.receiver, binding_owns),
+            | "flatten" | "take_if" | "transpose" | "skip" | "step_by" | "rev" | "enumerate"
+            | "chain" | "take_while" | "skip_while" | "map_while" | "filter_map" | "flat_map"
+            | "peekable" | "fuse" | "inspect" | "scan" => init_is_owned(&m.receiver, binding_owns),
             // an iterator terminal hands out an item of the chain's own only when the chain
             // owns its items
             "last" | "nth" | "next" | "next_back" | "max" | "min" | "max_by" | "min_by"

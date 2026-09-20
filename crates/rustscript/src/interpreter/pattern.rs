@@ -32,7 +32,7 @@ pub(super) fn try_bind(
 ) -> bool {
     match pat {
         PPat::Wild | PPat::Rest => true,
-        PPat::Ident { name, sub } => {
+        PPat::Ident { name, sub, .. } => {
             if let Some(s) = sub
                 && !try_bind(s, val, consts, define)
             {
@@ -230,7 +230,7 @@ fn bind_refs(
     define: &mut dyn FnMut(&str, Value),
 ) {
     match pat {
-        PPat::Ident { name, sub } => {
+        PPat::Ident { name, sub, .. } => {
             let bound = match &slot {
                 BindSlot::Elem(list, i) => {
                     Value::Ref(Arc::new(ValueRef::vec_element(list.clone(), *i)))
@@ -355,7 +355,8 @@ pub(super) fn bind_pattern_refs(
 /// caller then clears.
 pub(super) fn take_bound(pat: &PPat, val: &Value, consts: &[Value]) -> bool {
     match pat {
-        PPat::Ident { .. } => true,
+        // a `ref` binding lends its part, the shell keeps it
+        PPat::Ident { by_ref, .. } => !by_ref,
         PPat::Tuple(elems) => {
             if let Value::Tuple(items) = val {
                 take_seq(elems, items, consts);

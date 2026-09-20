@@ -141,6 +141,19 @@ pub enum VecTakeKind {
     SwapRemove(u8),
 }
 
+/// How a reference is taken out of a `String`, a `Vec` or another reference.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum BorrowKind {
+    /// `base.as_str()` or `base.as_slice()`, on an owned base only
+    Whole,
+    /// `(&base[lo..hi])`, a missing bound is open. Panics past the end, on `lo > hi`, and on a
+    /// `String` off a char boundary.
+    Range { lo: Option<u8>, hi: Option<u8> },
+    /// `(&base)`, a `&String` or a `&Vec<T>`. It only becomes a `&str` or a `&[T]` where the
+    /// compiler coerces, so it is built as a call argument and never travels.
+    Amp,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Arm {
     pub pat: Pat,
@@ -364,6 +377,25 @@ pub enum Expr {
         stmts: Vec<Stmt>,
         tail: Box<Expr>,
     },
+    /// `"text"`, a `&'static str`
+    StrRefLit(String),
+    /// `(&[] as &[T])`, the empty slice, which borrows nothing
+    SliceLit {
+        elem: Ty,
+    },
+    /// A `&str` or a `&[T]` out of `base`. A base that is a binding is borrowed in place and
+    /// held for as long as the reference lives, see `Scope::can_borrow`. Any other owned base
+    /// is a temporary that ends with its statement.
+    Borrow {
+        base: Box<Expr>,
+        kind: BorrowKind,
+    },
+    /// `matches!(scrutinee, pat if guard)`, the guard alone reads the bindings
+    Matches {
+        scrutinee: Box<Expr>,
+        pat: Pat,
+        guard: Option<Box<Expr>>,
+    },
 }
 
 /// Emitted only when used.
@@ -483,6 +515,10 @@ pub fn minimal(ty: &Ty) -> Expr {
         },
         Ty::StdErr(err) => Expr::StdErrLit(*err),
         Ty::Trace => Expr::TraceLit(0),
+        Ty::StrRef => Expr::StrRefLit(String::new()),
+        Ty::Slice(elem) => Expr::SliceLit {
+            elem: (**elem).clone(),
+        },
         Ty::User(shape) => {
             if shape.is_enum() {
                 let variant = &shape.variants()[0];

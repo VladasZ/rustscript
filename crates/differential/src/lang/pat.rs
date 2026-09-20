@@ -7,12 +7,42 @@ use serde::{Deserialize, Serialize};
 use crate::lang::ty::{IntWidth, Ty};
 use crate::lang::user::UserShape;
 
+/// How a binding takes its value.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub enum BindBy {
+    #[default]
+    Value,
+    /// `ref name`, the arm sees the value through `(*name)` and can only clone it
+    Ref,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Pat {
     Wild,
     Bind {
         name: String,
         ty: Ty,
+        #[serde(default)]
+        by: BindBy,
+    },
+    /// `name @ pat`, the inner pattern binds nothing
+    At {
+        name: String,
+        ty: Ty,
+        pat: Box<Pat>,
+    },
+    /// `a | b | c`, no alternative binds
+    Or(Vec<Pat>),
+    /// a `const` item named as a pattern
+    Const {
+        name: String,
+    },
+    /// `"text"`, against a `&str` scrutinee
+    StrLit(String),
+    /// `'a'..='z'`
+    CharRange {
+        lo: char,
+        hi: char,
     },
     IntLit {
         width: IntWidth,
@@ -56,7 +86,24 @@ impl Pat {
     pub fn render(&self) -> String {
         match self {
             Self::Wild => "_".to_string(),
-            Self::Bind { name, .. } => name.clone(),
+            Self::Bind {
+                name,
+                by: BindBy::Value,
+                ..
+            }
+            | Self::Const { name } => name.clone(),
+            Self::Bind {
+                name,
+                by: BindBy::Ref,
+                ..
+            } => format!("ref {name}"),
+            Self::At { name, pat, .. } => format!("{name} @ {}", pat.render_grouped()),
+            Self::Or(items) => {
+                let rendered: Vec<String> = items.iter().map(Pat::render).collect();
+                rendered.join(" | ")
+            }
+            Self::StrLit(value) => format!("{value:?}"),
+            Self::CharRange { lo, hi } => format!("{lo:?}..={hi:?}"),
             Self::IntLit { width, value } => render_int(*width, *value),
             Self::IntRange {
                 width,
@@ -123,9 +170,29 @@ impl Pat {
         }
     }
 
+    /// An or pattern under `@` or at the top of a `let` needs its own parentheses.
+    pub fn render_grouped(&self) -> String {
+        match self {
+            Self::Or(_) => format!("({})", self.render()),
+            other => other.render(),
+        }
+    }
+
+    /// The names an arm body reads, with their types. A `ref` binding is read through a
+    /// deref, so its name is `(*name)`.
     pub fn bindings(&self, out: &mut Vec<(String, Ty)>) {
         match self {
-            Self::Bind { name, ty } => out.push((name.clone(), ty.clone())),
+            Self::Bind {
+                name,
+                ty,
+                by: BindBy::Value,
+            }
+            | Self::At { name, ty, .. } => out.push((name.clone(), ty.clone())),
+            Self::Bind {
+                name,
+                ty,
+                by: BindBy::Ref,
+            } => out.push((format!("(*{name})"), ty.clone())),
             Self::Some(inner) | Self::Ok(inner) | Self::Err(inner) => inner.bindings(out),
             Self::Tuple(items) => {
                 for item in items {
@@ -159,22 +226,121 @@ impl Pat {
         }
     }
 
+    /// The bindings that stand behind a reference, so the body may only clone them.
+    pub fn borrowed(&self) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        self.walk(&mut |pat| {
+            if let Self::Bind {
+                name,
+                by: BindBy::Ref,
+                ..
+            } = pat
+            {
+                out.insert(format!("(*{name})"));
+            }
+        });
+        out
+    }
+
+    /// Every pattern in the tree, this one first.
+    pub fn walk(&self, visit: &mut impl FnMut(&Pat)) {
+        visit(self);
+        match self {
+            Self::Some(inner)
+            | Self::Ok(inner)
+            | Self::Err(inner)
+            | Self::At { pat: inner, .. } => {
+                inner.walk(visit);
+            }
+            Self::Tuple(items) | Self::Or(items) => {
+                for item in items {
+                    item.walk(visit);
+                }
+            }
+            Self::Variant { payload, .. } => {
+                for pat in payload {
+                    pat.walk(visit);
+                }
+            }
+            Self::Struct { fields, .. } => {
+                for (_, pat) in fields {
+                    pat.walk(visit);
+                }
+            }
+            Self::Slice { prefix, suffix, .. } => {
+                for pat in prefix.iter().chain(suffix) {
+                    pat.walk(visit);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether the pattern names an item of its own program, a user type or a const. Such a
+    /// pattern can't travel to another program.
+    pub fn names_item(&self) -> bool {
+        let mut found = false;
+        self.walk(&mut |pat| {
+            if matches!(
+                pat,
+                Self::Variant { .. } | Self::Struct { .. } | Self::Const { .. }
+            ) {
+                found = true;
+            }
+        });
+        found
+    }
+
+    /// A variant pattern whose payload can't miss, so the variant itself is covered.
+    pub fn is_irrefutable_payload(&self) -> bool {
+        match self {
+            Self::Variant { payload, .. } => payload.iter().all(Pat::is_irrefutable),
+            _ => false,
+        }
+    }
+
     /// Whether no `_` arm is needed after it.
     pub fn is_irrefutable(&self) -> bool {
         match self {
             Self::Wild | Self::Bind { .. } => true,
+            Self::At { pat, .. } => pat.is_irrefutable(),
             Self::Tuple(items) => items.iter().all(Pat::is_irrefutable),
+            Self::Struct { fields, .. } => fields.iter().all(|(_, pat)| pat.is_irrefutable()),
             _ => false,
         }
     }
 
     pub fn features(&self, out: &mut BTreeSet<&'static str>) {
         match self {
-            Self::Wild | Self::Bind { .. } => {}
+            Self::Wild
+            | Self::Bind {
+                by: BindBy::Value, ..
+            } => {}
+            Self::Bind {
+                by: BindBy::Ref, ..
+            } => {
+                out.insert("lang-pat-ref");
+            }
+            Self::At { pat, .. } => {
+                out.insert("lang-pat-at");
+                pat.features(out);
+            }
+            Self::Or(items) => {
+                out.insert("lang-pat-or");
+                for item in items {
+                    item.features(out);
+                }
+            }
+            Self::Const { .. } => {
+                out.insert("lang-pat-const");
+            }
+            Self::StrLit(_) => {
+                out.insert("lang-pat-str");
+            }
             Self::IntLit { .. } | Self::BoolLit(_) | Self::CharLit(_) => {
                 out.insert("lang-pat-literal");
             }
-            Self::IntRange { .. } => {
+            Self::IntRange { .. } | Self::CharRange { .. } => {
                 out.insert("lang-pat-range");
             }
             Self::Some(inner) | Self::Ok(inner) | Self::Err(inner) => {
@@ -183,6 +349,9 @@ impl Pat {
                 } else {
                     "lang-pat-result"
                 });
+                if !matches!(**inner, Self::Wild | Self::Bind { .. }) {
+                    out.insert("lang-pat-nested");
+                }
                 inner.features(out);
             }
             Self::None => {

@@ -10,6 +10,7 @@ use crate::interpreter::enum_def::{EnumDef, builtin_enum, prelude_variant};
 use crate::interpreter::numeric::IntWidth;
 use crate::interpreter::resolver::bare;
 
+use super::support::{pattern_borrows, pattern_owns};
 use super::{Compiler, NameLoc, Res, collect_pattern_names, idx16};
 
 /// Where the value of a constant used as a pattern comes from.
@@ -68,6 +69,53 @@ impl Compiler<'_> {
         let f = self.cur();
         f.guard_regs.extend(regs);
         f.has_guards = true;
+    }
+
+    /// `scrutinee_mode` for one pattern.
+    pub(super) fn pattern_mode(&mut self, pat: &Pat, expr: &Expr) -> (bool, bool) {
+        self.scrutinee_mode(pattern_owns(pat), pattern_borrows(pat), expr)
+    }
+
+    /// The bindings that must not drop with their scope. A scrutinee that only lends keeps
+    /// all of them, an owned one keeps the `ref` bindings.
+    pub(super) fn exempt_binds(&mut self, pat: u16, takes: bool) {
+        if takes {
+            self.exempt_ref_binds(pat);
+        } else {
+            self.exempt_pattern_binds(pat);
+        }
+    }
+
+    /// How a pattern reads its scrutinee, `(owned, by_ref)`. A `ref` binding wants the
+    /// scrutinee's own storage. Next to a by value binding over a fresh value nobody else can
+    /// see, the value moves like any owned scrutinee instead, the by value bindings take
+    /// their parts and drop with the arm, and the `ref` ones lend theirs from the shell. Only
+    /// a program with a `Drop` impl can tell, so only such a program takes this road.
+    pub(super) fn scrutinee_mode(
+        &mut self,
+        owns: bool,
+        borrows: bool,
+        expr: &Expr,
+    ) -> (bool, bool) {
+        if owns && borrows && self.ctx.has_drop && self.fresh_scrutinee(expr) {
+            return (true, false);
+        }
+        (owns && !borrows, borrows)
+    }
+
+    /// The `ref` bindings of a pattern over an owned scrutinee share what the shell still
+    /// holds, so the shell alone drops it.
+    fn exempt_ref_binds(&mut self, pat: u16) {
+        let info = &self.cur().pats[usize::from(pat)];
+        let mut names = Vec::new();
+        ref_bind_names(&info.pat, &mut names);
+        let regs: Vec<Reg> = info
+            .binds
+            .iter()
+            .filter(|(name, _)| names.contains(name))
+            .map(|(_, reg)| *reg)
+            .collect();
+        self.cur().drop_exempt.extend(regs);
     }
 
     pub(super) fn exempt_pattern_binds(&mut self, pat: u16) {
@@ -132,6 +180,7 @@ impl Compiler<'_> {
                     .subpat
                     .as_ref()
                     .map(|subpattern| Box::new(self.lower_pattern(&subpattern.1, consts))),
+                by_ref: ident.by_ref.is_some(),
             },
             Pat::Lit(literal) => lower_literal(&literal.lit),
             Pat::Paren(paren) => self.lower_pattern(&paren.pat, consts),
@@ -378,5 +427,34 @@ pub(super) fn is_wild(pat: &Pat) -> bool {
         Pat::Paren(p) => is_wild(&p.pat),
         Pat::Wild(_) => true,
         _ => false,
+    }
+}
+
+fn ref_bind_names(pat: &PPat, out: &mut Vec<String>) {
+    match pat {
+        PPat::Ident { name, sub, by_ref } => {
+            if *by_ref {
+                out.push(name.clone());
+            }
+            if let Some(sub) = sub {
+                ref_bind_names(sub, out);
+            }
+        }
+        PPat::Tuple(items) | PPat::Or(items) | PPat::Slice(items) => {
+            for item in items {
+                ref_bind_names(item, out);
+            }
+        }
+        PPat::TupleStruct { elems, .. } => {
+            for item in elems {
+                ref_bind_names(item, out);
+            }
+        }
+        PPat::Struct { fields, .. } => {
+            for (_, item) in fields {
+                ref_bind_names(item, out);
+            }
+        }
+        _ => {}
     }
 }

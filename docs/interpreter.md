@@ -68,6 +68,18 @@ variable for their scope, so a write through them lands in it, and a closure tha
 writes through a `&mut` scalar parameter of its function writes the parameter's cell.
 A closure whose body is a bare call unwinds it like a block's tail call.
 
+Drops follow the scopes of real Rust on every path. A let chain that misses
+drops what its earlier links bound, in reverse, before the `else` runs. The
+temporaries of a `break value` end at the `break`. A `let else` whose pattern
+binds nothing drops its scrutinee before the `else`. A pattern that mixes a by
+value binding with a `ref` binding over a fresh value moves the first and
+lends the second. On a panic the owned operands of a call unwind between the
+drop lists, after the scopes that opened and closed while the later operands
+were built, a match arm or a block, and before the temporaries of the
+statement. A closure that only borrows the item of an adapter, `filter`,
+`take_while`, `skip_while`, drops that item when it panics, and every adapter
+passes on the ownership of the iterator it wraps.
+
 A `RefCell` borrow is a guard value, and the live borrows of every cell sit in
 one table, so a second `borrow_mut` panics with the std message. The compiler
 releases a guard where Rust would, a temporary with its statement, a binding at

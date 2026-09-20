@@ -346,14 +346,8 @@ impl Generator<'_> {
                 .iter()
                 .enumerate()
                 .map(|(index, variant)| {
-                    let payload: Vec<Pat> = variant
-                        .payload
-                        .iter()
-                        .map(|ty| Pat::Bind {
-                            name: inner.fresh("diff_b"),
-                            ty: ty.clone(),
-                        })
-                        .collect();
+                    let payload: Vec<Pat> =
+                        variant.payload.iter().map(|ty| inner.bind(ty)).collect();
                     let pat = Pat::Variant {
                         shape: Box::new(shape.clone()),
                         variant: index,
@@ -477,7 +471,7 @@ impl Generator<'_> {
     /// A couple of lets, maybe an early return, and a tail that may be a bare pipe.
     fn fn_body(&mut self, ret: &Ty) -> Expr {
         let mut stmts = Vec::new();
-        let mark = self.scope.len();
+        let mark = self.scope.enter_scope();
         let lets = self.rng.random_range(0..=2);
         for _ in 0..lets {
             let ty = self.any_ty();
@@ -506,7 +500,7 @@ impl Generator<'_> {
         } else {
             self.expr(ret, 2)
         };
-        self.scope.truncate(mark);
+        self.scope.exit_scope(mark);
         if stmts.is_empty() {
             tail
         } else {

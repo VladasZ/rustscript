@@ -5,10 +5,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::lang::catalog::TyPat;
 use crate::lang::expr::{
-    Arm, BinOp, Expr, Helper, MemKind, ReadMode, UnOp, VecTakeKind, lookup, minimal,
+    Arm, BinOp, BorrowKind, Expr, Helper, MemKind, ReadMode, UnOp, VecTakeKind, lookup, minimal,
 };
 use crate::lang::stmt::Stmt;
-use crate::lang::ty::FloatWidth;
+use crate::lang::ty::{FloatWidth, Ty};
 
 /// The reducer takes the first improvement, so a short list keeps each round cheap. The next
 /// round reaches the deep ones.
@@ -23,6 +23,7 @@ impl Expr {
             | Self::Cast { value, .. }
             | Self::Try { value, .. }
             | Self::Into { value, .. }
+            | Self::Borrow { base: value, .. }
             | Self::ApplyCall { arg: value, .. }
             | Self::Mem {
                 kind: MemKind::Replace(value),
@@ -78,6 +79,13 @@ impl Expr {
                 out.push(tail);
                 out
             }
+            Self::Matches {
+                scrutinee, guard, ..
+            } => {
+                let mut out = vec![&**scrutinee];
+                out.extend(guard.iter().map(|guard| &**guard));
+                out
+            }
             Self::IntLit { .. }
             | Self::BareInt { .. }
             | Self::FloatLit { .. }
@@ -85,6 +93,8 @@ impl Expr {
             | Self::BoolLit { .. }
             | Self::CharLit { .. }
             | Self::StrLit(_)
+            | Self::StrRefLit(_)
+            | Self::SliceLit { .. }
             | Self::StdErrLit(_)
             | Self::TraceLit(_)
             | Self::DefaultOf(_)
@@ -102,6 +112,7 @@ impl Expr {
             | Self::Cast { value, .. }
             | Self::Try { value, .. }
             | Self::Into { value, .. }
+            | Self::Borrow { base: value, .. }
             | Self::ApplyCall { arg: value, .. }
             | Self::Mem {
                 kind: MemKind::Replace(value),
@@ -159,6 +170,13 @@ impl Expr {
                 out.push(tail);
                 out
             }
+            Self::Matches {
+                scrutinee, guard, ..
+            } => {
+                let mut out = vec![&mut **scrutinee];
+                out.extend(guard.iter_mut().map(|guard| &mut **guard));
+                out
+            }
             Self::IntLit { .. }
             | Self::BareInt { .. }
             | Self::FloatLit { .. }
@@ -166,6 +184,8 @@ impl Expr {
             | Self::BoolLit { .. }
             | Self::CharLit { .. }
             | Self::StrLit(_)
+            | Self::StrRefLit(_)
+            | Self::SliceLit { .. }
             | Self::StdErrLit(_)
             | Self::TraceLit(_)
             | Self::DefaultOf(_)
@@ -234,6 +254,10 @@ impl Expr {
             | Self::ApplyCall { .. }
             | Self::Method { .. }
             | Self::Index { .. }
+            | Self::Borrow {
+                kind: BorrowKind::Range { .. },
+                ..
+            }
             | Self::VecTake {
                 kind: VecTakeKind::Remove(_) | VecTakeKind::SwapRemove(_),
                 ..
@@ -397,6 +421,9 @@ impl Expr {
             Self::Into { bare: true, .. } => Some("lang-into"),
             Self::Into { .. } => Some("lang-from"),
             Self::Match { .. } => Some("lang-match"),
+            Self::Matches { .. } => Some("lang-matches"),
+            Self::StrRefLit(_) => Some("lang-str-ref-lit"),
+            Self::Borrow { base, kind } => Some(borrow_feature(*kind, &base.ty())),
             Self::Block { .. } => Some("lang-block"),
             Self::Pipe(pipe) => {
                 pipe.features(out);
@@ -413,6 +440,12 @@ impl Expr {
                 if arm.guard.is_some() {
                     out.insert("lang-pat-guard");
                 }
+            }
+        }
+        if let Self::Matches { pat, guard, .. } = self {
+            pat.features(out);
+            if guard.is_some() {
+                out.insert("lang-pat-guard");
             }
         }
         if let Self::Block { stmts, .. } = self {
@@ -576,6 +609,16 @@ impl Expr {
             _ => return None,
         }
         Some(shorter)
+    }
+}
+
+fn borrow_feature(kind: BorrowKind, base: &Ty) -> &'static str {
+    match (kind, base) {
+        (BorrowKind::Whole, Ty::Vec(_)) => "lang-borrow-as-slice",
+        (BorrowKind::Whole, _) => "lang-borrow-as-str",
+        (BorrowKind::Range { .. }, Ty::Vec(_) | Ty::Slice(_)) => "lang-borrow-slice-range",
+        (BorrowKind::Range { .. }, _) => "lang-borrow-str-range",
+        (BorrowKind::Amp, _) => "lang-borrow-amp",
     }
 }
 

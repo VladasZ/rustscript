@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use crate::lang::block::{Block, FnKind};
 use crate::lang::expr::{Expr, MemKind, ReadMode};
 use crate::lang::own::{BindKind, Scope, referenced};
+use crate::lang::pat::Pat;
 use crate::lang::pipe::{Bind, Item, Pipe, Source, Stage, Term};
 use crate::lang::stmt::{ClosureSource, MutOp, Stmt};
 use crate::lang::ty::Ty;
@@ -61,40 +62,71 @@ pub fn check_block(block: &Block) -> Result<(), String> {
     }
 }
 
-#[derive(Default)]
-struct Checker {
-    scope: Scope,
+pub(super) struct Checker {
+    pub(super) scope: Scope,
     /// the first rule broken
     fault: Option<String>,
+    /// The reference being checked is kept by a `let`, so the binding it borrows is held to
+    /// the end of the scope and no temporary may stand behind it.
+    pub(super) bound: bool,
+    /// A temporary may be borrowed, the reference is used up before the temporary ends. It
+    /// is not once the reference leaves a closure body, a match arm, an `if` branch or a
+    /// block, each ends its own temporaries.
+    temps_ok: bool,
+}
+
+impl Default for Checker {
+    fn default() -> Self {
+        Self {
+            scope: Scope::default(),
+            fault: None,
+            bound: false,
+            temps_ok: true,
+        }
+    }
 }
 
 impl Checker {
-    fn push_local(&mut self, name: &str, ty: &Ty) {
+    pub(super) fn push_local(&mut self, name: &str, ty: &Ty) {
         self.scope
             .push(name.to_string(), ty.clone(), BindKind::Local);
     }
 
-    fn push_let(&mut self, name: &str, ty: &Ty) {
+    /// The bindings of a pattern. A `ref` one stands behind a reference.
+    pub(super) fn push_pat(&mut self, pat: &Pat) {
+        let mut binds = Vec::new();
+        pat.bindings(&mut binds);
+        let borrowed = pat.borrowed();
+        for (name, ty) in binds {
+            if borrowed.contains(&name) {
+                self.scope.push_borrowed(name, ty);
+            } else {
+                self.scope.push(name, ty, BindKind::Local);
+            }
+        }
+    }
+
+    pub(super) fn push_let(&mut self, name: &str, ty: &Ty) {
         self.scope.push_let(name.to_string(), ty.clone());
     }
 
-    fn require(&mut self, condition: bool, what: impl FnOnce() -> String) {
+    pub(super) fn require(&mut self, condition: bool, what: impl FnOnce() -> String) {
         if !condition && self.fault.is_none() {
             self.fault = Some(what());
         }
     }
 
-    fn stmts(&mut self, stmts: &[Stmt]) {
+    pub(super) fn stmts(&mut self, stmts: &[Stmt]) {
         for stmt in stmts {
             self.stmt(stmt);
         }
     }
 
     /// A body of its own scope, its bindings gone at the end.
-    fn body(&mut self, stmts: &[Stmt]) {
-        let mark = self.scope.len();
+    pub(super) fn body(&mut self, stmts: &[Stmt]) {
+        let mark = self.scope.enter_scope();
         self.stmts(stmts);
-        self.scope.truncate(mark);
+        self.scope.exit_scope(mark);
     }
 
     /// A loop body. Nothing it revives counts after it, the loop may run zero times.
@@ -106,20 +138,73 @@ impl Checker {
         self.scope.restore(&before);
     }
 
-    fn branches(&mut self, count: usize, mut build: impl FnMut(&mut Self, usize)) {
+    pub(super) fn branches(&mut self, count: usize, mut build: impl FnMut(&mut Self, usize)) {
         let before = self.scope.snapshot();
         let mut ends = Vec::with_capacity(count);
         for index in 0..count {
             self.scope.restore(&before);
-            let mark = self.scope.len();
+            let mark = self.scope.enter_scope();
             build(self, index);
-            self.scope.truncate(mark);
+            self.scope.exit_scope(mark);
             ends.push(self.scope.snapshot());
         }
         self.scope.merge(&before, &ends);
     }
 
+    /// A reference an expression takes lives until its statement ends.
     fn stmt(&mut self, stmt: &Stmt) {
+        let mark = self.scope.stmt_mark();
+        let saved = (self.bound, self.temps_ok);
+        (self.bound, self.temps_ok) = (false, true);
+        self.stmt_inner(stmt);
+        (self.bound, self.temps_ok) = saved;
+        self.scope.stmt_release(mark);
+    }
+
+    /// An expression whose value a `let` keeps. With a reference in its type it runs bound,
+    /// see `Checker::bound`.
+    pub(super) fn kept_expr(&mut self, expr: &Expr, ty: &Ty) {
+        if !ty.contains_ref() {
+            self.expr(expr);
+            return;
+        }
+        let saved = (self.bound, self.temps_ok);
+        (self.bound, self.temps_ok) = (true, false);
+        self.expr(expr);
+        (self.bound, self.temps_ok) = saved;
+    }
+
+    /// The value leaves a scope that ends its own temporaries.
+    fn crossing(&mut self, build: impl FnOnce(&mut Self)) {
+        let saved = std::mem::replace(&mut self.temps_ok, false);
+        build(self);
+        self.temps_ok = saved;
+    }
+
+    /// A reference out of `base`, see `Expr::Borrow`.
+    fn borrow(&mut self, base: &Expr) {
+        match base {
+            Expr::Var { name, ty, .. } if !ty.contains_ref() => {
+                self.require(self.scope.can_borrow(name), || {
+                    format!("borrow of `{name}`")
+                });
+                if self.bound {
+                    self.scope.pin(name);
+                } else {
+                    self.scope.borrow_for_stmt(name);
+                }
+            }
+            other => {
+                let lends = other.ty().contains_ref();
+                self.require(lends || self.temps_ok, || {
+                    "a reference outlives the temporary it borrows".to_string()
+                });
+                self.expr(other);
+            }
+        }
+    }
+
+    fn stmt_inner(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Let { .. }
             | Stmt::LetTuple { .. }
@@ -152,7 +237,7 @@ impl Checker {
                 self.scope.restore(&before);
             }
             Stmt::Mutate { name, op } => {
-                self.require(self.scope.can_read(name), || format!("mutate `{name}`"));
+                self.require(self.scope.can_write(name), || format!("mutate `{name}`"));
                 self.scope.freeze(name);
                 self.mut_op(name, op);
                 self.scope.unfreeze();
@@ -163,7 +248,7 @@ impl Checker {
                 target,
                 op,
             } => {
-                self.require(self.scope.can_read(target), || {
+                self.require(self.scope.can_write(target), || {
                     format!("accumulate into `{target}`")
                 });
                 self.scope.freeze(target);
@@ -181,7 +266,7 @@ impl Checker {
                 elem,
                 expr,
             } => {
-                self.require(self.scope.can_read(name), || {
+                self.require(self.scope.can_write(name), || {
                     format!("iter_mut over `{name}`")
                 });
                 let hidden = self.scope.hide(name);
@@ -191,7 +276,7 @@ impl Checker {
                 }
             }
             Stmt::CallMut { name, args, .. } => {
-                self.require(self.scope.can_read(name), || format!("&mut of `{name}`"));
+                self.require(self.scope.can_write(name), || format!("&mut of `{name}`"));
                 let hidden = self.scope.hide(name);
                 for arg in args {
                     self.expr(arg);
@@ -207,6 +292,11 @@ impl Checker {
                 );
             }
             Stmt::Scope { body } => self.body(body),
+            Stmt::IfLet { .. }
+            | Stmt::WhileLet { .. }
+            | Stmt::LetElse { .. }
+            | Stmt::Match { .. }
+            | Stmt::LetLoop { .. } => self.binding_form(stmt),
         }
     }
 
@@ -214,8 +304,14 @@ impl Checker {
     fn binding_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Let { name, ty, expr, .. } => {
-                self.expr(expr);
-                self.push_let(name, ty);
+                self.kept_expr(expr, ty);
+                // a binding that holds a reference is never written, so what it borrows
+                // stays the same for its whole life
+                if ty.contains_ref() {
+                    self.push_local(name, ty);
+                } else {
+                    self.push_let(name, ty);
+                }
             }
             Stmt::LetTuple { names, expr, .. } => {
                 self.expr(expr);
@@ -229,8 +325,11 @@ impl Checker {
                 calls,
             } => {
                 self.closure(name, source);
+                // each call is a statement of its own
                 for call in calls {
+                    let mark = self.scope.stmt_mark();
                     self.expr(call);
+                    self.scope.stmt_release(mark);
                 }
             }
             Stmt::Assign { name, expr } => {
@@ -250,12 +349,12 @@ impl Checker {
                 self.scope.revive_field(name, *index);
             }
             Stmt::Compound { name, expr, .. } => {
+                self.require(self.scope.can_compound(name), || {
+                    format!("compound on `{name}`")
+                });
                 self.scope.freeze(name);
                 self.expr(expr);
                 self.scope.unfreeze();
-                self.require(self.scope.can_read(name), || {
-                    format!("compound on `{name}`")
-                });
             }
             _ => unreachable!("binding_stmt handles the binding statements only"),
         }
@@ -265,10 +364,10 @@ impl Checker {
     fn loop_with(&mut self, var: &str, elem: &Ty, build: impl FnOnce(&mut Self)) {
         let before = self.scope.snapshot();
         self.scope.enter_loop();
-        let mark = self.scope.len();
+        let mark = self.scope.enter_scope();
         self.push_local(var, elem);
         build(self);
-        self.scope.truncate(mark);
+        self.scope.exit_scope(mark);
         self.scope.leave_loop();
         self.scope.restore(&before);
     }
@@ -284,10 +383,10 @@ impl Checker {
                 }
             };
             self.scope.enter_closure();
-            let mark = self.scope.len();
+            let mark = self.scope.enter_scope();
             self.push_local(bind, &elem);
             self.expr(pred);
-            self.scope.truncate(mark);
+            self.scope.exit_scope(mark);
             self.scope.leave_closure();
             return;
         }
@@ -322,7 +421,7 @@ impl Checker {
                     });
                 }
                 self.scope.enter_closure();
-                let mark = self.scope.len();
+                let mark = self.scope.enter_scope();
                 // the closure owns its captures, so inside they are fresh locals
                 for (used, ty) in &captured {
                     self.push_local(used, ty);
@@ -332,8 +431,8 @@ impl Checker {
                         self.push_local(&local, &ty);
                     }
                 }
-                self.expr(body);
-                self.scope.truncate(mark);
+                self.crossing(|inner| inner.expr(body));
+                self.scope.exit_scope(mark);
                 self.scope.leave_closure();
                 for (used, _) in &captured {
                     self.scope.note_move(used);
@@ -396,8 +495,23 @@ impl Checker {
         }
     }
 
-    fn expr(&mut self, expr: &Expr) {
+    /// A value with no reference in its type uses up every reference below it, so the rules
+    /// for a kept or a leaving reference end there.
+    pub(super) fn expr(&mut self, expr: &Expr) {
+        let strict = self.bound || !self.temps_ok;
+        if strict && !expr.ty().contains_ref() {
+            let saved = (self.bound, self.temps_ok);
+            (self.bound, self.temps_ok) = (false, true);
+            self.expr_inner(expr);
+            (self.bound, self.temps_ok) = saved;
+        } else {
+            self.expr_inner(expr);
+        }
+    }
+
+    fn expr_inner(&mut self, expr: &Expr) {
         match expr {
+            Expr::Borrow { base, .. } => self.borrow(base),
             Expr::Var { name, ty, mode } => self.read_var(name, ty, *mode),
             Expr::Field {
                 base,
@@ -453,15 +567,11 @@ impl Checker {
                 self.expr(scrutinee);
                 self.branches(arms.len(), |inner, index| {
                     let arm = &arms[index];
-                    let mut binds = Vec::new();
-                    arm.pat.bindings(&mut binds);
-                    for (name, ty) in &binds {
-                        inner.push_local(name, ty);
-                    }
+                    inner.push_pat(&arm.pat);
                     if let Some(guard) = &arm.guard {
                         inner.expr(guard);
                     }
-                    inner.expr(&arm.body);
+                    inner.crossing(|inner| inner.expr(&arm.body));
                 });
             }
             Expr::If {
@@ -472,14 +582,20 @@ impl Checker {
             } => {
                 self.expr(condition);
                 self.branches(2, |inner, index| {
-                    inner.expr(if index == 0 { then_expr } else { else_expr });
+                    let side = if index == 0 { then_expr } else { else_expr };
+                    inner.crossing(|inner| inner.expr(side));
                 });
             }
+            Expr::Matches {
+                scrutinee,
+                pat,
+                guard,
+            } => self.matches(scrutinee, pat, guard.as_deref()),
             Expr::Block { stmts, tail } => {
-                let mark = self.scope.len();
+                let mark = self.scope.enter_scope();
                 self.stmts(stmts);
-                self.expr(tail);
-                self.scope.truncate(mark);
+                self.crossing(|inner| inner.expr(tail));
+                self.scope.exit_scope(mark);
             }
             Expr::Pipe(pipe) => self.pipe(pipe),
             _ => {
@@ -488,6 +604,17 @@ impl Checker {
                 }
             }
         }
+    }
+
+    /// `matches!`, the guard alone sees the bindings.
+    fn matches(&mut self, scrutinee: &Expr, pat: &Pat, guard: Option<&Expr>) {
+        self.expr(scrutinee);
+        let mark = self.scope.enter_scope();
+        self.push_pat(pat);
+        if let Some(guard) = guard {
+            self.expr(guard);
+        }
+        self.scope.exit_scope(mark);
     }
 
     /// A binding receiver is borrowed while the arguments run.
@@ -561,11 +688,11 @@ impl Checker {
                     other => Item::Scalar(other),
                 };
                 self.scope.enter_closure();
-                let mark = self.scope.len();
+                let mark = self.scope.enter_scope();
                 self.push_bind(acc, &acc_item);
                 self.push_bind(bind, &item);
-                self.expr(body);
-                self.scope.truncate(mark);
+                self.crossing(|inner| inner.expr(body));
+                self.scope.exit_scope(mark);
                 self.scope.leave_closure();
             }
             _ => {}
@@ -574,10 +701,10 @@ impl Checker {
 
     fn pipe_body(&mut self, bind: &Bind, item: &Item, body: &Expr) {
         self.scope.enter_closure();
-        let mark = self.scope.len();
+        let mark = self.scope.enter_scope();
         self.push_bind(bind, item);
-        self.expr(body);
-        self.scope.truncate(mark);
+        self.crossing(|inner| inner.expr(body));
+        self.scope.exit_scope(mark);
         self.scope.leave_closure();
     }
 

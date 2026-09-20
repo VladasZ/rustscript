@@ -124,10 +124,7 @@ impl Vm {
         let Some(value) = self.iterator_next(source)? else {
             return Ok(None);
         };
-        if self
-            .call_closure_data(closure, from_ref(&value))?
-            .is_truthy()
-        {
+        if self.call_lending(source, closure, &value)?.is_truthy() {
             return Ok(Some(value));
         }
         self.discard(source, value)?;
@@ -215,10 +212,7 @@ impl Vm {
                 let Some(value) = self.iterator_next(&source)? else {
                     return Ok(None);
                 };
-                if self
-                    .call_closure_data(&closure, from_ref(&value))?
-                    .is_truthy()
-                {
+                if self.call_lending(&source, &closure, &value)?.is_truthy() {
                     return Ok(Some(value));
                 }
                 self.discard(&source, value)?;
@@ -254,10 +248,7 @@ impl Vm {
                     let Some(value) = self.iterator_next(&source)? else {
                         return Ok(None);
                     };
-                    if !still_skipping
-                        || !self
-                            .call_closure_data(&closure, from_ref(&value))?
-                            .is_truthy()
+                    if !still_skipping || !self.call_lending(&source, &closure, &value)?.is_truthy()
                     {
                         if still_skipping
                             && let Native::Iterator(IteratorState::SkipWhile { skipping, .. }) =
@@ -304,6 +295,23 @@ impl Vm {
             self.run_user_drop(item)?;
         }
         Ok(())
+    }
+
+    /// Calls a closure that only borrows the item in flight. When it panics the item is still
+    /// the iterator's, and real Rust drops it as the adapter unwinds, right after the frame
+    /// of the closure.
+    pub(super) fn call_lending(
+        self: &Arc<Self>,
+        source: &Handle,
+        closure: &Arc<ClosureData>,
+        value: &Value,
+    ) -> Result<Value> {
+        self.call_closure_data(closure, from_ref(value))
+            .inspect_err(|_| {
+                if let Err(e) = self.discard(source, value.clone()) {
+                    eprintln!("panic in drop during unwinding: {e:#}");
+                }
+            })
     }
 
     /// An item an adapter or a terminal throws away. Real Rust drops it there when the

@@ -1,10 +1,10 @@
 //! Renders an `Expr` tree to Rust source text.
 
-use crate::lang::pat::Pat;
+use crate::lang::stmt_bind::is_rest;
 use crate::lang::ty::{IntWidth, StdErr, Ty};
 use crate::lang::user::MethodKind;
 
-use super::expr::{Arm, Expr, MemKind, ReadMode, VecTakeKind, lookup, minimal};
+use super::expr::{Arm, BorrowKind, Expr, MemKind, ReadMode, VecTakeKind, lookup, minimal};
 
 impl Expr {
     pub fn ty(&self) -> Ty {
@@ -13,7 +13,7 @@ impl Expr {
             Self::BareInt { .. } => Ty::I32,
             Self::FloatLit { width, .. } => Ty::Float(*width),
             Self::BareFloat { .. } => Ty::F64,
-            Self::BoolLit { .. } => Ty::Bool,
+            Self::BoolLit { .. } | Self::Matches { .. } => Ty::Bool,
             Self::CharLit { .. } => Ty::Char,
             Self::StrLit(_) | Self::TraitCall { .. } => Ty::Str,
             Self::VecLit { elem, .. } | Self::VecRepeat { elem, .. } => Ty::vec_of(elem.clone()),
@@ -24,6 +24,12 @@ impl Expr {
             Self::ResLit { ok, err, .. } => Ty::res_of(ok.clone(), err.clone()),
             Self::StdErrLit(err) => Ty::StdErr(*err),
             Self::TraceLit(_) => Ty::Trace,
+            Self::StrRefLit(_) => Ty::StrRef,
+            Self::SliceLit { elem } => Ty::slice_of(elem.clone()),
+            Self::Borrow { base, .. } => match base.ty() {
+                Ty::Vec(elem) | Ty::Slice(elem) => Ty::Slice(elem),
+                _ => Ty::StrRef,
+            },
             Self::VecTake { elem, kind, .. } => match kind {
                 VecTakeKind::Pop => Ty::opt_of(elem.clone()),
                 VecTakeKind::Remove(_) | VecTakeKind::SwapRemove(_) => elem.clone(),
@@ -75,7 +81,13 @@ impl Expr {
                     .enumerate()
                     .map(|(index, arg)| {
                         if by_ref.get(index).copied().unwrap_or(false) {
-                            format!("&({})", arg.render())
+                            // a `Copy` read renders as the bare place, and `&(v)` would hold
+                            // `v` while a later argument writes it, the block copies it out
+                            if arg.ty().is_copy() {
+                                format!("&{{ {} }}", arg.render())
+                            } else {
+                                format!("&({})", arg.render())
+                            }
                         } else {
                             arg.render()
                         }
@@ -130,6 +142,33 @@ impl Expr {
             | Self::Block { .. }
             | Self::Mem { .. }
             | Self::VecTake { .. } => self.render_access(),
+            Self::Borrow { base, kind } => {
+                let place = base.render_place();
+                match kind {
+                    BorrowKind::Whole if matches!(base.ty(), Ty::Vec(_)) => {
+                        format!("{place}.as_slice()")
+                    }
+                    BorrowKind::Whole => format!("{place}.as_str()"),
+                    BorrowKind::Range { lo, hi } => {
+                        let bound = |value: &Option<u8>| {
+                            value.map(|n| format!("{n}usize")).unwrap_or_default()
+                        };
+                        format!("(&{place}[{}..{}])", bound(lo), bound(hi))
+                    }
+                    BorrowKind::Amp => format!("(&{place})"),
+                }
+            }
+            Self::Matches {
+                scrutinee,
+                pat,
+                guard,
+            } => {
+                let guard = guard
+                    .as_ref()
+                    .map(|guard| format!(" if {}", guard.render()))
+                    .unwrap_or_default();
+                format!("matches!({}, {}{guard})", scrutinee.render(), pat.render())
+            }
             _ => unreachable!("every literal renders through render_literal"),
         }
     }
@@ -263,6 +302,8 @@ impl Expr {
             } => format!("diff_opaque_char({value:?})"),
             Self::CharLit { value, .. } => format!("{value:?}"),
             Self::StrLit(value) => format!("String::from({value:?})"),
+            Self::StrRefLit(value) => format!("{value:?}"),
+            Self::SliceLit { elem } => format!("(&[] as &[{}])", elem.rust()),
             Self::TraceLit(id) => format!("DiffTrace({id})"),
             _ => return self.render_collection_literal(),
         })
@@ -419,13 +460,6 @@ fn render_match(scrutinee: &Expr, by_ref: bool, arms: &[Arm]) -> String {
     }
     out.push_str("})");
     out
-}
-
-fn is_rest(pat: &Pat, name: &str) -> bool {
-    match pat {
-        Pat::Slice { rest, .. } => matches!(rest, Some(Some(rest)) if rest == name),
-        _ => false,
-    }
 }
 
 fn render_int_lit(width: IntWidth, value: i128, opaque: bool) -> String {

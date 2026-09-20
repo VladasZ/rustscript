@@ -102,7 +102,10 @@ pub(super) fn test_bind(ctx: &mut StepCtx, val: u16, pat: u16, dst: u16) -> Flow
                 }
             };
             // a bare name over `&mut place` or `ref mut m = place` is the reference itself
-            if let PPat::Ident { name, sub: None } = &info.pat {
+            if let PPat::Ident {
+                name, sub: None, ..
+            } = &info.pat
+            {
                 define(name, raw.clone());
             } else {
                 bind_pattern_refs(&info.pat, &value, &consts, &mut define);

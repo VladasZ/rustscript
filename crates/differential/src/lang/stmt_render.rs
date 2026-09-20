@@ -105,6 +105,11 @@ impl Stmt {
                 condition.render(),
                 value.render()
             ),
+            Self::IfLet { .. }
+            | Self::WhileLet { .. }
+            | Self::LetElse { .. }
+            | Self::Match { .. }
+            | Self::LetLoop { .. } => self.render_binding_form(mutable, indent),
         }
     }
 
@@ -233,6 +238,13 @@ impl Stmt {
 
     pub fn shrinks(&self) -> Vec<Self> {
         let mut candidates = Vec::new();
+        // one body alone in a bare block. A body that reads a pattern binding or leaves a loop
+        // fails the ownership check or `rustc`, and the reducer drops it.
+        if !matches!(self, Self::Scope { .. }) {
+            for body in self.bodies() {
+                candidates.push(Self::Scope { body: body.clone() });
+            }
+        }
         for (body_index, body) in self.bodies().iter().enumerate() {
             for index in 0..body.len() {
                 let mut candidate = self.clone();
@@ -320,15 +332,19 @@ fn collect_written(
 ) {
     for (index, stmt) in stmts.iter().enumerate() {
         path.push(index);
-        for name in stmt.own_writes() {
-            if let Some((_, let_path)) = scope.iter().rev().find(|(bound, _)| *bound == name) {
-                written.push(let_path.clone());
-            }
+        // the exit and the value of a `loop` that breaks with one run after its body and see
+        // the body's bindings, so they resolve inside it
+        let late = matches!(stmt, Stmt::LetLoop { .. });
+        if !late {
+            resolve_writes(stmt, scope, written);
         }
         for (body_index, body) in stmt.bodies().iter().enumerate() {
             path.push(body_index);
             let mark = scope.len();
             collect_written(body, path, scope, written);
+            if late {
+                resolve_writes(stmt, scope, written);
+            }
             scope.truncate(mark);
             path.pop();
         }
@@ -336,6 +352,14 @@ fn collect_written(
             scope.push((name.clone(), path.clone()));
         }
         path.pop();
+    }
+}
+
+fn resolve_writes(stmt: &Stmt, scope: &[(String, Vec<usize>)], written: &mut Vec<Vec<usize>>) {
+    for name in stmt.own_writes() {
+        if let Some((_, let_path)) = scope.iter().rev().find(|(bound, _)| *bound == name) {
+            written.push(let_path.clone());
+        }
     }
 }
 

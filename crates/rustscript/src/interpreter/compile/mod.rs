@@ -426,14 +426,7 @@ impl<'a> Compiler<'a> {
             .cloned()
             .collect();
         for regs in lists {
-            let regs: Vec<Reg> = regs
-                .into_iter()
-                .filter(|r| {
-                    let f = self.cur();
-                    !f.borrow_params.contains(r)
-                        && (f.guard_regs.contains(r) || (has_drop && !f.drop_exempt.contains(r)))
-                })
-                .collect();
+            let regs = self.droppable(regs);
             if regs.is_empty() {
                 continue;
             }
@@ -442,6 +435,19 @@ impl<'a> Compiler<'a> {
             let list = idx16(f.drop_lists.len() - 1);
             self.emit(Op::DropScope { list });
         }
+    }
+
+    /// The registers of `regs` a scope end drops, a borrowed parameter and an exempt binding
+    /// stay with their owner.
+    fn droppable(&mut self, regs: Vec<Reg>) -> Vec<Reg> {
+        let has_drop = self.ctx.has_drop;
+        let f = self.cur();
+        regs.into_iter()
+            .filter(|r| {
+                !f.borrow_params.contains(r)
+                    && (f.guard_regs.contains(r) || (has_drop && !f.drop_exempt.contains(r)))
+            })
+            .collect()
     }
 
     /// The parameter scope of a closure. A reference parameter never drops, the rest drop when

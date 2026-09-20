@@ -265,6 +265,10 @@ impl Generator<'_> {
             }
             Ty::StdErr(err) => Expr::StdErrLit(*err),
             Ty::Trace => Expr::TraceLit(self.trace_id()),
+            Ty::StrRef => Expr::StrRefLit(self.string_value()),
+            Ty::Slice(elem) => Expr::SliceLit {
+                elem: (**elem).clone(),
+            },
             Ty::User(shape) => self.user_literal(shape, 0),
         }
     }
@@ -598,6 +602,7 @@ impl Generator<'_> {
                 let ops = [BinOp::Add, BinOp::Sub, BinOp::Mul, BinOp::Div, BinOp::Rem];
                 (*self.pick(&ops), want.clone())
             }
+            Ty::Bool if self.chance(0.15) => return self.matches_expr(depth),
             Ty::Bool => {
                 if self.chance(0.4) {
                     let ops = [

@@ -4,8 +4,9 @@
 use std::collections::BTreeSet;
 
 use crate::lang::expr::{Expr, Helper};
+use crate::lang::pat::Pat;
 
-use super::stmt::{Ann, ClosureParam, ClosureSource, Stmt};
+use super::stmt::{Ann, ChainLink, ClosureParam, ClosureSource, Exit, Stmt};
 
 impl Stmt {
     /// Whether a `break` or `continue` in here, at any depth, names `label`.
@@ -14,6 +15,10 @@ impl Stmt {
             Self::Break { label: Some(l), .. } | Self::Continue { label: Some(l), .. } => {
                 l == label
             }
+            Self::LetElse {
+                exit: Exit::Break(Some(l)) | Exit::Continue(Some(l)),
+                ..
+            } if l == label => true,
             _ => self
                 .bodies()
                 .iter()
@@ -31,7 +36,22 @@ impl Stmt {
             Self::ForRange { body, .. }
             | Self::While { body, .. }
             | Self::Loop { body, .. }
-            | Self::Scope { body } => vec![body],
+            | Self::Scope { body }
+            | Self::WhileLet { body, .. }
+            | Self::LetLoop { body, .. }
+            | Self::LetElse {
+                else_body: body, ..
+            } => vec![body],
+            Self::IfLet {
+                then_body,
+                else_body,
+                ..
+            } => {
+                let mut out = vec![then_body];
+                out.extend(else_body.iter());
+                out
+            }
+            Self::Match { arms, .. } => arms.iter().map(|arm| &arm.body).collect(),
             _ => Vec::new(),
         }
     }
@@ -46,13 +66,28 @@ impl Stmt {
             Self::ForRange { body, .. }
             | Self::While { body, .. }
             | Self::Loop { body, .. }
-            | Self::Scope { body } => vec![body],
+            | Self::Scope { body }
+            | Self::WhileLet { body, .. }
+            | Self::LetLoop { body, .. }
+            | Self::LetElse {
+                else_body: body, ..
+            } => vec![body],
+            Self::IfLet {
+                then_body,
+                else_body,
+                ..
+            } => {
+                let mut out = vec![then_body];
+                out.extend(else_body.iter_mut());
+                out
+            }
+            Self::Match { arms, .. } => arms.iter_mut().map(|arm| &mut arm.body).collect(),
             _ => Vec::new(),
         }
     }
 
-    /// Every expression, in a fixed order shared with `exprs_mut`.
-    pub fn exprs(&self) -> Vec<&Expr> {
+    /// The expressions of this statement alone, nested bodies excluded.
+    pub fn own_exprs(&self) -> Vec<&Expr> {
         let mut out = Vec::new();
         match self {
             Self::Let { expr, .. }
@@ -82,12 +117,39 @@ impl Stmt {
                 out.extend(op.exprs());
             }
             Self::CallMut { args, .. } => out.extend(args.iter()),
+            Self::IfLet { links, .. } => out.extend(links.iter().map(ChainLink::expr)),
+            Self::LetElse { expr, exit, .. } => {
+                out.push(expr);
+                if let Exit::Return(Some(value)) = exit {
+                    out.push(value);
+                }
+            }
+            Self::Match {
+                scrutinee, arms, ..
+            } => {
+                out.push(scrutinee);
+                out.extend(arms.iter().filter_map(|arm| arm.guard.as_ref()));
+            }
+            Self::LetLoop {
+                exit,
+                value,
+                fallback,
+                ..
+            } => out.extend([exit, value, fallback]),
             Self::ForRange { .. }
             | Self::While { .. }
             | Self::Loop { .. }
             | Self::Swap { .. }
-            | Self::Scope { .. } => {}
+            | Self::Scope { .. }
+            | Self::WhileLet { .. } => {}
         }
+        out
+    }
+
+    /// Every expression, in a fixed order shared with `exprs_mut`, the statement's own first
+    /// and then each body in `bodies` order.
+    pub fn exprs(&self) -> Vec<&Expr> {
+        let mut out = self.own_exprs();
         for body in self.bodies() {
             for stmt in body {
                 out.extend(stmt.exprs());
@@ -140,7 +202,57 @@ impl Stmt {
             Self::ForRange { body, .. }
             | Self::While { body, .. }
             | Self::Loop { body, .. }
-            | Self::Scope { body } => {
+            | Self::Scope { body }
+            | Self::WhileLet { body, .. } => {
+                for stmt in body {
+                    out.extend(stmt.exprs_mut());
+                }
+            }
+            Self::IfLet {
+                links,
+                then_body,
+                else_body,
+            } => {
+                out.extend(links.iter_mut().map(ChainLink::expr_mut));
+                for stmt in then_body.iter_mut().chain(else_body.iter_mut().flatten()) {
+                    out.extend(stmt.exprs_mut());
+                }
+            }
+            Self::LetElse {
+                expr,
+                exit,
+                else_body,
+                ..
+            } => {
+                out.push(expr);
+                if let Exit::Return(Some(value)) = exit {
+                    out.push(value);
+                }
+                for stmt in else_body {
+                    out.extend(stmt.exprs_mut());
+                }
+            }
+            Self::Match {
+                scrutinee, arms, ..
+            } => {
+                out.push(scrutinee);
+                let mut bodies = Vec::new();
+                for arm in arms {
+                    out.extend(arm.guard.iter_mut());
+                    bodies.push(&mut arm.body);
+                }
+                for stmt in bodies.into_iter().flatten() {
+                    out.extend(stmt.exprs_mut());
+                }
+            }
+            Self::LetLoop {
+                exit,
+                value,
+                fallback,
+                body,
+                ..
+            } => {
+                out.extend([exit, value, fallback]);
                 for stmt in body {
                     out.extend(stmt.exprs_mut());
                 }
@@ -158,6 +270,7 @@ impl Stmt {
             | Self::Mutate { name, .. }
             | Self::ForMut { name, .. }
             | Self::CallMut { name, .. }
+            | Self::WhileLet { name, .. }
             | Self::ForAccum { target: name, .. }
             | Self::LetClosure {
                 name,
@@ -213,6 +326,7 @@ impl Stmt {
             | Self::Mutate { name, .. }
             | Self::ForMut { name, .. }
             | Self::CallMut { name, .. }
+            | Self::WhileLet { name, .. }
             | Self::ForAccum { target: name, .. } => {
                 out.insert(name.clone());
             }
@@ -222,40 +336,7 @@ impl Stmt {
             }
             _ => {}
         }
-        let own_exprs: Vec<&Expr> = match self {
-            Self::Let { expr, .. }
-            | Self::LetTuple { expr, .. }
-            | Self::Assign { expr, .. }
-            | Self::AssignField { expr, .. }
-            | Self::Compound { expr, .. }
-            | Self::Print { expr, .. }
-            | Self::ForMut { expr, .. } => vec![expr],
-            Self::LetClosure { source, calls, .. } => {
-                let mut list = match source {
-                    ClosureSource::Literal { body, .. } => vec![body],
-                    ClosureSource::Factory { arg, .. } => vec![arg],
-                };
-                list.extend(calls.iter());
-                list
-            }
-            Self::If { condition, .. }
-            | Self::Break { condition, .. }
-            | Self::Continue { condition, .. } => vec![condition],
-            Self::Return { condition, value } => vec![condition, value],
-            Self::Mutate { op, .. } => op.exprs(),
-            Self::ForAccum { source, op, .. } => {
-                let mut list = vec![source];
-                list.extend(op.exprs());
-                list
-            }
-            Self::CallMut { args, .. } => args.iter().collect(),
-            Self::ForRange { .. }
-            | Self::While { .. }
-            | Self::Loop { .. }
-            | Self::Swap { .. }
-            | Self::Scope { .. } => Vec::new(),
-        };
-        for expr in own_exprs {
+        for expr in self.own_exprs() {
             expr.written_names(&mut out);
             for node in expr.nodes() {
                 if let Expr::Block { stmts, .. } = node {
@@ -278,8 +359,15 @@ impl Stmt {
 
     pub fn declared(&self) -> Vec<String> {
         match self {
-            Self::Let { name, .. } | Self::LetClosure { name, .. } => vec![name.clone()],
+            Self::Let { name, .. } | Self::LetClosure { name, .. } | Self::LetLoop { name, .. } => {
+                vec![name.clone()]
+            }
             Self::LetTuple { names, .. } => names.iter().map(|(n, _)| n.clone()).collect(),
+            Self::LetElse { pat, .. } => {
+                let mut binds = Vec::new();
+                pat.bindings(&mut binds);
+                binds.into_iter().map(|(name, _)| name).collect()
+            }
             _ => Vec::new(),
         }
     }
@@ -317,7 +405,11 @@ impl Stmt {
             Self::Mutate { op, .. } | Self::ForAccum { op, .. } => op.has_fallible_op(),
             _ => false,
         };
-        own || self.exprs().iter().any(|expr| expr.has_fallible_op())
+        own || self.own_exprs().iter().any(|expr| expr.has_fallible_op())
+            || self
+                .bodies()
+                .iter()
+                .any(|body| body.iter().any(Stmt::has_fallible_op))
     }
 
     pub fn make_opaque(&mut self) {
@@ -377,6 +469,20 @@ impl Stmt {
             Self::ForAccum { .. } => &["lang-for-accum"],
             Self::ForMut { .. } => &["lang-iter-mut"],
             Self::CallMut { .. } => &["lang-borrow-mut"],
+            Self::IfLet {
+                links,
+                else_body: Some(_),
+                ..
+            } if links.len() > 1 => &["lang-if-let", "lang-if-let-else", "lang-let-chain"],
+            Self::IfLet { links, .. } if links.len() > 1 => &["lang-if-let", "lang-let-chain"],
+            Self::IfLet {
+                else_body: Some(_), ..
+            } => &["lang-if-let", "lang-if-let-else"],
+            Self::IfLet { .. } => &["lang-if-let"],
+            Self::WhileLet { .. } => &["lang-while-let"],
+            Self::LetElse { .. } => &["lang-let-else"],
+            Self::Match { .. } => &["lang-match-stmt"],
+            Self::LetLoop { .. } => &["lang-loop-break-value"],
         };
         out.extend(own.iter().copied());
         if let Self::LetClosure {
@@ -388,6 +494,14 @@ impl Stmt {
                 .any(|param| matches!(param, ClosureParam::Pair { .. }))
         {
             out.insert("lang-closure-tuple-param");
+        }
+        for pat in self.pats() {
+            pat.features(out);
+        }
+        if let Self::Match { arms, .. } = self
+            && arms.iter().any(|arm| arm.guard.is_some())
+        {
+            out.insert("lang-pat-guard");
         }
         match self {
             Self::Print { spec, form, .. } => {
@@ -470,6 +584,42 @@ impl Stmt {
             }
             Self::ForMut { .. } => out.push_str("for-mut,"),
             Self::CallMut { .. } => out.push_str("call-mut,"),
+            Self::IfLet { .. }
+            | Self::WhileLet { .. }
+            | Self::LetElse { .. }
+            | Self::Match { .. }
+            | Self::LetLoop { .. } => {
+                out.push_str(match self {
+                    Self::IfLet { .. } => "if-let(",
+                    Self::WhileLet { .. } => "while-let(",
+                    Self::LetElse { .. } => "let-else(",
+                    Self::Match { .. } => "match(",
+                    _ => "let-loop(",
+                });
+                for body in self.bodies() {
+                    for stmt in body {
+                        stmt.shape(out);
+                    }
+                    out.push('|');
+                }
+                out.push_str("),");
+            }
+        }
+    }
+
+    /// The patterns this statement matches against, nested bodies excluded.
+    pub fn pats(&self) -> Vec<&Pat> {
+        match self {
+            Self::IfLet { links, .. } => links
+                .iter()
+                .filter_map(|link| match link {
+                    ChainLink::Let { pat, .. } => Some(pat),
+                    ChainLink::Cond(_) => None,
+                })
+                .collect(),
+            Self::WhileLet { pat, .. } | Self::LetElse { pat, .. } => vec![pat],
+            Self::Match { arms, .. } => arms.iter().map(|arm| &arm.pat).collect(),
+            _ => Vec::new(),
         }
     }
 }

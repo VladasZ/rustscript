@@ -58,15 +58,19 @@ impl Compiler<'_> {
     }
 
     /// An owned value a store is about to take. A panic before the store drops it.
-    fn hold_for_unwind(&mut self, val: Reg) {
+    /// The mark goes back to `release_from_unwind`.
+    fn hold_for_unwind(&mut self, val: Reg) -> usize {
+        let held = self.cur().unwind_temps.len();
         if self.ctx.has_drop {
-            self.cur().unwind_temps.push(val);
+            self.cur().hold_operand(val);
         }
+        held
     }
 
     /// The store cloned the value into its place, so the register must not hold it any more.
-    fn release_from_unwind(&mut self, val: Reg) {
+    fn release_from_unwind(&mut self, val: Reg, held: usize) {
         if self.ctx.has_drop {
+            self.cur().close_operands(held);
             self.emit(Op::LoadUnit { dst: val });
         }
     }
@@ -84,20 +88,20 @@ impl Compiler<'_> {
             // container, so the register is cleared after, or a later panic would drop it twice.
             Expr::Index(idx) => {
                 let val = self.compile_stored_value(value)?;
-                self.hold_for_unwind(val);
+                let held = self.hold_for_unwind(val);
                 let base = self.compile_place_base(&idx.expr)?;
                 let key = self.compile_expr(&idx.index)?;
                 self.set_line(idx.bracket_token.span.open());
                 self.emit(Op::SetIndex { base, key, val });
-                self.release_from_unwind(val);
+                self.release_from_unwind(val, held);
             }
             Expr::Field(f) => {
                 let val = self.compile_stored_value(value)?;
-                self.hold_for_unwind(val);
+                let held = self.hold_for_unwind(val);
                 let base = self.compile_place_base(&f.base)?;
                 let member = self.member_of(&f.member);
                 self.emit(Op::SetField { base, member, val });
-                self.release_from_unwind(val);
+                self.release_from_unwind(val, held);
             }
             Expr::Unary(u) if matches!(u.op, UnOp::Deref(_)) => {
                 // `*r = v` on a `&mut variable` alias writes the variable, which may live in an
