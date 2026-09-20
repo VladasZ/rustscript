@@ -70,7 +70,9 @@ A closure whose body is a bare call unwinds it like a block's tail call.
 
 Drops follow the scopes of real Rust on every path. A let chain that misses
 drops what its earlier links bound, in reverse, before the `else` runs. The
-temporaries of a `break value` end at the `break`. A `let else` whose pattern
+temporaries of a `break value` end at the `break`. A `break`, `continue` or
+`return` also drops the statement temporaries it leaves, between the inner
+and outer scope drops. A `let else` whose pattern
 binds nothing drops its scrutinee before the `else`. A pattern that mixes a by
 value binding with a `ref` binding over a fresh value moves the first and
 lends the second. On a panic the owned operands of a call unwind between the
@@ -78,7 +80,9 @@ drop lists, after the scopes that opened and closed while the later operands
 were built, a match arm or a block, and before the temporaries of the
 statement. A closure that only borrows the item of an adapter, `filter`,
 `take_while`, `skip_while`, drops that item when it panics, and every adapter
-passes on the ownership of the iterator it wraps.
+passes on the ownership of the iterator it wraps. `partition`, `max_by_key`
+and `min_by_key` also drop the items they already kept when a closure or the
+source iterator panics.
 
 A `RefCell` borrow is a guard value, and the live borrows of every cell sit in
 one table, so a second `borrow_mut` panics with the std message. The compiler
@@ -91,7 +95,8 @@ buffer is not shared, so a build up loop stays linear.
 
 Iterators are lazy native resources, so `by_ref`, `peekable` and open ranges
 keep their real semantics. `rev` is lazy too, each pull is a `next_back` of
-the source, so a `map` closure runs from the back. A `vec.into_iter()` chain
+the source, so a `map` closure runs from the back, including through
+`step_by`. A `vec.into_iter()` chain
 of `map`, `skip` and `cloned` collected into a `Vec` of a compatible layout
 follows the in place collect of std, the size is read first and a `skip` past
 the end never runs the closure. `sum` and `product` fold one element at a

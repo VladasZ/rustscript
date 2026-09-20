@@ -60,8 +60,7 @@ impl Compiler<'_> {
             // the temporaries of the returned expression end with it, the base of a
             // `S { f0: x, ..Default::default() }` drops its fields the literal did not take
             self.drop_temps(temp_mark, Some(src));
-            let depth = self.cur().scope_order.len();
-            self.emit_scope_drops(depth);
+            self.emit_exit_drops(0, 0, Some(src));
         }
         self.emit(Op::Ret { src });
         Ok(())
@@ -235,6 +234,7 @@ impl Compiler<'_> {
                 continue_to: Some(head),
                 result: dst,
                 scope_depth: while_let_depth,
+                temp_depth: temp_mark,
                 label: label_name(w.label.as_ref()),
             });
             let body = self.alloc();
@@ -271,11 +271,13 @@ impl Compiler<'_> {
         let released = self.release_guard_temps(guard_mark, None);
         let temps = self.drop_temps(temp_mark, None);
         let scope_depth = self.cur().scope_order.len();
+        let temp_depth = self.cur().owned_temps.len();
         self.loops.push(LoopCtx {
             breaks: vec![exit],
             continue_to: Some(head),
             result: dst,
             scope_depth,
+            temp_depth,
             label: label_name(w.label.as_ref()),
         });
         let body = self.alloc();
@@ -300,11 +302,13 @@ impl Compiler<'_> {
         self.emit(Op::LoadUnit { dst });
         let head = self.here();
         let scope_depth = self.cur().scope_order.len();
+        let temp_depth = self.cur().owned_temps.len();
         self.loops.push(LoopCtx {
             breaks: Vec::new(),
             continue_to: Some(head),
             result: dst,
             scope_depth,
+            temp_depth,
             label: label_name(l.label.as_ref()),
         });
         let body = self.alloc();
@@ -414,11 +418,13 @@ impl Compiler<'_> {
                 .map_or(Vec::new(), |regs| regs[before..].to_vec());
             self.cur().drop_exempt.extend(bound);
         }
+        let temp_depth = self.cur().owned_temps.len();
         self.loops.push(LoopCtx {
             breaks: vec![next],
             continue_to: Some(head),
             result: dst,
             scope_depth,
+            temp_depth,
             label: label_name(f.label.as_ref()),
         });
         let body = self.alloc();
@@ -449,11 +455,13 @@ impl Compiler<'_> {
     /// `'a: { .. break 'a v .. }`, a loop that runs once, so `break` shares the loop machinery.
     pub(super) fn compile_labeled_block(&mut self, dst: Reg, b: &syn::ExprBlock) -> Result<()> {
         let scope_depth = self.cur().scope_order.len();
+        let temp_depth = self.cur().owned_temps.len();
         self.loops.push(LoopCtx {
             breaks: Vec::new(),
             continue_to: None,
             result: dst,
             scope_depth,
+            temp_depth,
             label: label_name(b.label.as_ref()),
         });
         self.compile_block(&b.block, dst)?;
@@ -517,8 +525,33 @@ impl Compiler<'_> {
     /// The scopes a `break` or `continue` leaves drop first.
     pub(super) fn emit_loop_exit_drops(&mut self, target: usize) {
         let entry = self.loops[target].scope_depth;
-        let depth = self.cur().scope_order.len().saturating_sub(entry);
-        self.emit_scope_drops(depth);
+        let temps = self.loops[target].temp_depth;
+        let result = self.loops[target].result;
+        self.emit_exit_drops(entry, temps, Some(result));
+    }
+
+    /// Emit cleanup without changing the compile-time lists: other branches still need them.
+    fn emit_exit_drops(&mut self, entry: usize, temps: usize, keep: Option<Reg>) {
+        let f = self.cur();
+        let mut end = f.owned_temps.len();
+        let mut lists = Vec::new();
+        for index in (entry..f.scope_order.len()).rev() {
+            let start = f.scope_temps[index].min(end).max(temps);
+            lists.push(f.owned_temps[start..end].to_vec());
+            lists.push(f.scope_order[index].clone());
+            end = start;
+        }
+        lists.push(f.owned_temps[temps..end].to_vec());
+        for regs in lists {
+            let regs = self.droppable(regs);
+            let regs: Vec<Reg> = regs.into_iter().filter(|reg| Some(*reg) != keep).collect();
+            if !regs.is_empty() {
+                let f = self.cur();
+                f.drop_lists.push(regs.into());
+                let list = idx16(f.drop_lists.len() - 1);
+                self.emit(Op::DropScope { list });
+            }
+        }
     }
 
     pub(super) fn compile_match(&mut self, dst: Reg, m: &syn::ExprMatch) -> Result<()> {

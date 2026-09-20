@@ -5,7 +5,7 @@
 //! The same pass decides which captures a `move` closure takes instead of copies.
 
 use super::FnState;
-use crate::interpreter::bytecode::{CapSource, NO_ROOT, Op, Reg};
+use crate::interpreter::bytecode::{CapSource, NO_ROOT, Op, PathId, Reg};
 
 struct Bits {
     words: Vec<u64>,
@@ -314,10 +314,12 @@ fn effects(f: &FnState, op: &Op, reads: &mut Vec<Reg>, writes: &mut Vec<Reg>) {
     }
 }
 
-fn successors(op: &Op, at: usize, out: &mut Vec<usize>) {
+fn successors(f: &FnState, op: &Op, at: usize, out: &mut Vec<usize>) {
     match op {
         Op::Jump { to } => out.push(*to as usize),
         Op::Ret { .. } => {}
+        Op::CallPath { path, .. } if f.paths[usize::from(*path)].id == PathId::UnreachableMatch => {
+        }
         Op::JumpIfFalse { to, .. }
         | Op::JumpIfTrue { to, .. }
         | Op::CmpJump { to, .. }
@@ -350,7 +352,7 @@ impl Liveness {
         for (at, op) in func.code.iter().enumerate() {
             let (mut op_reads, mut op_writes, mut op_succ) = (Vec::new(), Vec::new(), Vec::new());
             effects(func, op, &mut op_reads, &mut op_writes);
-            successors(op, at, &mut op_succ);
+            successors(func, op, at, &mut op_succ);
             reads.push(op_reads);
             writes.push(op_writes);
             succ.push(op_succ);
