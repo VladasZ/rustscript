@@ -52,6 +52,7 @@ impl Compiler<'_> {
         for _ in 0..slots {
             self.alloc();
         }
+        let held = self.cur().unwind_temps.len();
         for (i, fname) in order.iter().enumerate() {
             let dstf = base + idx16(i);
             match written.iter().find(|(k, _)| k == fname) {
@@ -60,7 +61,7 @@ impl Compiler<'_> {
                     // a field already built drops when a later field panics, the struct op
                     // takes it out of the window once it runs
                     if self.ctx.has_drop && self.arg_owned(e) {
-                        self.cur().unwind_temps.push(dstf);
+                        self.cur().hold_operand(dstf);
                     }
                 }
                 None => self.emit(Op::LoadUnit { dst: dstf }),
@@ -74,6 +75,7 @@ impl Compiler<'_> {
                 self.cur().owned_temps.push(reg);
             }
         }
+        self.cur().close_operands(held);
         let filled: Vec<bool> = order
             .iter()
             .map(|k| written.iter().any(|(w, _)| w == k))

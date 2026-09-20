@@ -40,6 +40,7 @@ impl Compiler<'_> {
         for _ in 0..list.len() {
             self.alloc();
         }
+        let held = self.cur().unwind_temps.len();
         for (i, a) in list.iter().enumerate() {
             let reg = base + idx16(i);
             self.compile_owned_into(reg, a)?;
@@ -59,10 +60,11 @@ impl Compiler<'_> {
                 if tail {
                     self.cur().owned_temps.push(reg);
                 } else {
-                    self.cur().unwind_temps.push(reg);
+                    self.cur().hold_operand(reg);
                 }
             }
         }
+        self.cur().close_operands(held);
         Ok(base)
     }
 

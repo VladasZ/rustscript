@@ -108,8 +108,10 @@ pub(super) struct FnState {
     /// `drop_temps`. Only kept when the program has a `Drop` impl.
     pub(super) owned_temps: Vec<Reg>,
     /// Owned call arguments, taken by the call and so only dropped by a panic before it, see
-    /// `compile_args`. Only kept when the program has a `Drop` impl.
-    pub(super) unwind_temps: Vec<Reg>,
+    /// `compile_args`. Only kept when the program has a `Drop` impl. Each comes with the
+    /// number of drop lists made when its op ran, `usize::MAX` while the op is still ahead,
+    /// see `hold_operand`.
+    pub(super) unwind_temps: Vec<(Reg, usize)>,
     /// The next call compiled is the tail expression of a block. Its owned operands then
     /// unwind after the temporaries its arguments made, not before, see `compile_args`.
     pub(super) tail_call: bool,
@@ -128,6 +130,22 @@ pub(super) struct FnState {
 }
 
 impl FnState {
+    /// Holds an owned operand for the unwinder until `close_operands` says its op runs.
+    pub(super) fn hold_operand(&mut self, reg: Reg) {
+        self.unwind_temps.push((reg, usize::MAX));
+    }
+
+    /// The op that takes the operands held since `from` comes next. The drop lists made from
+    /// here on belong to the code around the op.
+    pub(super) fn close_operands(&mut self, from: usize) {
+        let until = self.drop_lists.len();
+        for (_, open) in self.unwind_temps.iter_mut().skip(from) {
+            if *open == usize::MAX {
+                *open = until;
+            }
+        }
+    }
+
     pub(super) fn new(name: String) -> FnState {
         FnState {
             code: Vec::new(),
@@ -288,27 +306,46 @@ impl FnState {
         self.remove_ops(&dead)?;
         let dead = self.dead_jumps();
         self.remove_ops(&dead)?;
-        // An unwind drops the owned arguments of a call first, the order real Rust drops the
-        // operands it moved into a call before the temporaries the later arguments made. Then
-        // every drop list in the order it was made, each backwards like `DropScope` runs it. An
-        // inner statement or scope ends before the one around it, so its list comes first, and
-        // a temporary made later sits later in its statement's list.
-        let mut droppable: Vec<Reg> = self.unwind_temps.clone();
-        droppable.sort_unstable_by(|a, b| b.cmp(a));
-        droppable.dedup();
-        let args = droppable.len();
-        for list in &self.drop_lists {
+        // An unwind runs every drop list in the order it was made, each backwards like
+        // `DropScope` runs it. An inner statement or scope ends before the one around it, so
+        // its list comes first, and a temporary made later sits later in its statement's list.
+        // The owned operands of a call sit between the lists. A scope that opened and closed
+        // while the later operands were built, a match arm or a block, is inside the call and
+        // unwinds before the operand, so its lists stay ahead of it. Every list made after the
+        // op ran is outside, the temporaries of the statement included, and real Rust drops
+        // the operand it moved into the call before those.
+        let lists = self.drop_lists.len();
+        let mut operands: Vec<(Reg, usize)> = Vec::new();
+        for &(reg, until) in &self.unwind_temps {
+            let until = until.min(lists);
+            match operands.iter_mut().find(|(seen, _)| *seen == reg) {
+                // a register serves one call at a time, and the lists before the later call
+                // hold unit by then, so the later place is right for both
+                Some(entry) => entry.1 = entry.1.max(until),
+                None => operands.push((reg, until)),
+            }
+        }
+        operands.sort_unstable_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)));
+        let held: HashSet<Reg> = operands.iter().map(|(reg, _)| *reg).collect();
+        let mut pending = operands.into_iter().peekable();
+        let mut droppable: Vec<Reg> = Vec::new();
+        for (index, list) in self.drop_lists.iter().enumerate() {
+            while let Some((reg, _)) = pending.next_if(|(_, until)| *until <= index) {
+                droppable.push(reg);
+            }
             for &reg in list.iter().rev() {
+                if held.contains(&reg) {
+                    continue;
+                }
                 // a local sits in the list of every early `return` before its scope's own
                 // list, and the scope end is the place that orders it after the later temporaries
-                if let Some(seen) = droppable[args..].iter().position(|r| *r == reg) {
-                    droppable.remove(args + seen);
-                } else if droppable[..args].contains(&reg) {
-                    continue;
+                if let Some(seen) = droppable.iter().position(|r| *r == reg) {
+                    droppable.remove(seen);
                 }
                 droppable.push(reg);
             }
         }
+        droppable.extend(pending.map(|(reg, _)| reg));
         Ok(Chunk {
             code: self.code,
             lines: self.lines,

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::lang::expr::{BinOp, Expr};
 use crate::lang::fmt::FmtSpec;
+use crate::lang::pat::Pat;
 use crate::lang::ty::Ty;
 
 /// An inferred binding is where the interpreter must learn a type from the initializer alone.
@@ -95,6 +96,44 @@ pub enum ClosureSource {
     },
     /// `diff_factory(arg)`, a helper returning `impl Fn(T) -> T`
     Factory { fn_name: String, arg: Expr, ty: Ty },
+}
+
+/// One link of an `if let` chain, joined by `&&`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ChainLink {
+    Cond(Expr),
+    Let { pat: Pat, expr: Expr },
+}
+
+impl ChainLink {
+    pub fn expr(&self) -> &Expr {
+        match self {
+            Self::Cond(expr) | Self::Let { expr, .. } => expr,
+        }
+    }
+
+    pub fn expr_mut(&mut self) -> &mut Expr {
+        match self {
+            Self::Cond(expr) | Self::Let { expr, .. } => expr,
+        }
+    }
+}
+
+/// One arm of a `match` statement.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct StmtArm {
+    pub pat: Pat,
+    pub guard: Option<Expr>,
+    pub body: Vec<Stmt>,
+}
+
+/// How the `else` of a `let else` leaves.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum Exit {
+    Break(Option<String>),
+    Continue(Option<String>),
+    /// `return value;` in a function, a bare `return;` in `main`
+    Return(Option<Expr>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -225,6 +264,48 @@ pub enum Stmt {
         name: String,
         fn_name: String,
         args: Vec<Expr>,
+    },
+    /// `if let pat = expr && cond && let pat = expr { .. } else { .. }`. The first link is
+    /// always a `let`.
+    IfLet {
+        links: Vec<ChainLink>,
+        then_body: Vec<Stmt>,
+        else_body: Option<Vec<Stmt>>,
+    },
+    /// `while let pat = name.pop() { body }`. The body never sees `name`, so the vec only
+    /// shrinks and the loop ends.
+    WhileLet {
+        name: String,
+        pat: Pat,
+        body: Vec<Stmt>,
+        #[serde(default)]
+        label: Option<String>,
+    },
+    /// `let pat = expr else { else_body; exit };`
+    LetElse {
+        pat: Pat,
+        expr: Expr,
+        else_body: Vec<Stmt>,
+        exit: Exit,
+    },
+    /// `match scrutinee { pat if guard => { body } .. }`
+    Match {
+        scrutinee: Expr,
+        /// a slice view, see `Expr::Match`
+        by_ref: bool,
+        arms: Vec<StmtArm>,
+    },
+    /// `let name: ty = loop { .. break value; };`. The counter breaks with `fallback` when
+    /// `exit` never holds.
+    LetLoop {
+        name: String,
+        ty: Ty,
+        counter: String,
+        limit: u8,
+        body: Vec<Stmt>,
+        exit: Expr,
+        value: Expr,
+        fallback: Expr,
     },
 }
 

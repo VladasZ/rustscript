@@ -38,6 +38,24 @@ unwind becomes a line of output. Its `Clone` is derived and silent. It never
 hashes, a hashed container would clone and drop it in an order real Rust
 randomizes per process.
 
+A shared borrow holds a binding without taking it. `for x in &v` holds `v` for
+the loop, a reference an expression takes holds its binding to the end of the
+statement, and a reference a `let` keeps holds it to the end of the scope. A
+held binding is still read and borrowed again, it is never moved or written.
+Only a `let` is written in place, a pattern binding or a parameter has no
+`mut`.
+
+## Binding forms
+
+Patterns nest by type, `Some((a, 1u8..=5u8))`, and come with or patterns, `@`
+bindings, `ref` bindings, const patterns and char ranges. A `ref` binding is
+read through `(*name)` and only cloned. The statements that bind through a
+pattern are `if let` with let chains and an `else`, `while let Some(x) =
+v.pop()` with the vec hidden from its body, `let else`, a `match` whose arms
+are statement lists, and `let x = loop { .. break value; }`. `matches!` is an
+expression. A nested body holds at most 2 more levels of these, so a program
+stays finite. The reducer also tries each nested body alone in a bare block.
+
 `own::check_block` replays the finished tree with the same rules. The
 generator asserts it on every block it builds, the reducer drops every
 candidate that fails it, and the mutator undoes a splice that fails it. The

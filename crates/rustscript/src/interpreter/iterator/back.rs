@@ -2,7 +2,6 @@
 //! `skip` after a `rev` never touches what it skips. A source without a back step, a `filter_map`
 //! over a regex say, still drains eagerly.
 
-use std::slice::from_ref;
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
@@ -173,10 +172,7 @@ impl Vm {
                 let Some(value) = self.iterator_next_back(&source)? else {
                     return Ok(None);
                 };
-                if self
-                    .call_closure_data(&closure, from_ref(&value))?
-                    .is_truthy()
-                {
+                if self.call_lending(&source, &closure, &value)?.is_truthy() {
                     return Ok(Some(value));
                 }
                 self.discard(&source, value)?;

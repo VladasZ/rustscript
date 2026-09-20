@@ -116,7 +116,12 @@ impl Generator<'_> {
     /// A fresh name, or now and then the name of a live local, which the new binding shadows.
     /// The old one stays alive under it until the scope ends.
     fn binding_name(&mut self) -> String {
-        let locals = self.live_locals();
+        // a binding behind a reference is named `(*x)`, which no `let` can declare
+        let locals: Vec<(String, Ty)> = self
+            .live_locals()
+            .into_iter()
+            .filter(|(name, _)| !name.starts_with('('))
+            .collect();
         if !locals.is_empty() && self.chance(0.15) {
             return self.pick(&locals).0.clone();
         }
@@ -200,7 +205,7 @@ impl Generator<'_> {
         let ints: Vec<String> = self
             .live_locals()
             .into_iter()
-            .filter(|(_, ty)| matches!(ty, Ty::Int(_)))
+            .filter(|(name, ty)| matches!(ty, Ty::Int(_)) && self.scope.can_compound(name))
             .map(|(name, _)| name)
             .collect();
         let mutates = !ints.is_empty() && self.chance(0.4);
@@ -417,7 +422,7 @@ impl Generator<'_> {
     // mutations
 
     pub(super) fn mutation(&mut self) -> Stmt {
-        match self.rng.random_range(0..16) {
+        match self.rng.random_range(0..22) {
             0 => self.assign_stmt(),
             1 => self.compound_stmt().unwrap_or_else(|| self.assign_stmt()),
             2 => self
@@ -438,6 +443,14 @@ impl Generator<'_> {
                 .unwrap_or_else(|| self.assign_stmt()),
             12 => self.swap_stmt().unwrap_or_else(|| self.observation()),
             13 => self.scope_stmt(),
+            14 => self.if_let_stmt().unwrap_or_else(|| self.observation()),
+            15 => self.while_let_stmt().unwrap_or_else(|| self.observation()),
+            16 => self.match_stmt().unwrap_or_else(|| self.observation()),
+            17 => self.let_loop_stmt(),
+            // in `main` the `else` ends the program, so it stays rare there
+            18 if self.in_loop || self.fn_ret.is_some() || self.chance(0.3) => {
+                self.let_else_stmt().unwrap_or_else(|| self.observation())
+            }
             _ => self.observation(),
         }
     }
@@ -448,8 +461,13 @@ impl Generator<'_> {
         self.print_stmt(expr)
     }
 
-    pub(super) fn pick_local(&mut self) -> Option<(String, Ty)> {
-        let locals = self.live_locals();
+    /// A live `let` nothing else holds, so a statement may write it in place.
+    pub(super) fn pick_writable(&mut self) -> Option<(String, Ty)> {
+        let locals: Vec<(String, Ty)> = self
+            .live_locals()
+            .into_iter()
+            .filter(|(name, _)| self.scope.can_write(name))
+            .collect();
         if locals.is_empty() {
             return None;
         }
@@ -546,7 +564,7 @@ impl Generator<'_> {
     }
 
     pub(super) fn compound_stmt(&mut self) -> Option<Stmt> {
-        let (name, ty) = self.pick_local()?;
+        let (name, ty) = self.pick_writable()?;
         let op = match &ty {
             Ty::Int(_) => *self.pick(&[
                 BinOp::Add,

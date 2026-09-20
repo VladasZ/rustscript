@@ -13,7 +13,29 @@ use super::walks::flatten_and;
 
 use super::{Compiler, LoopCtx, NameLoc, idx16};
 
+/// How much of the temporaries and of the chain's scope `chain_made` has listed already.
+struct ChainSeen {
+    temps: usize,
+    scope: usize,
+}
+
 impl Compiler<'_> {
+    /// Appends what a let chain made since the last call, the temporaries first and then the
+    /// scope's new registers, which is the order one term makes them in.
+    fn chain_made(&mut self, made: &mut Vec<Reg>, seen: &mut ChainSeen) {
+        let f = self.cur();
+        let temps: Vec<Reg> = f.owned_temps.iter().skip(seen.temps).copied().collect();
+        seen.temps = f.owned_temps.len();
+        let scope: Vec<Reg> = f
+            .scope_order
+            .last()
+            .map(|regs| regs.iter().skip(seen.scope).copied().collect())
+            .unwrap_or_default();
+        seen.scope += scope.len();
+        made.extend(temps);
+        made.extend(self.droppable(scope));
+    }
+
     /// The value moves to a fresh register first, so the retag doesn't touch a local's own slot
     /// and the value stays shared past the drops.
     pub(super) fn compile_return(&mut self, r: &syn::ExprReturn) -> Result<()> {
@@ -49,74 +71,7 @@ impl Compiler<'_> {
         // `if let` and let chains, earlier bindings are in scope for later terms and the body
         let terms = flatten_and(&if_expr.cond);
         if terms.iter().any(|t| matches!(t, Expr::Let(_))) {
-            self.push_scope();
-            let temp_mark = self.cur().owned_temps.len();
-            let mut else_jumps = Vec::new();
-            let mut shells = Vec::new();
-            for term in &terms {
-                if let Expr::Let(let_expr) = term {
-                    let by_ref = pattern_borrows(&let_expr.pat);
-                    let owned = pattern_owns(&let_expr.pat) && !by_ref;
-                    let scrut = self.compile_scrutinee(&let_expr.expr, owned, by_ref)?;
-                    let takes = owned && self.scrutinee_owned(&let_expr.expr);
-                    let home = if takes {
-                        self.shell_home(&let_expr.expr)
-                    } else {
-                        ShellHome::None
-                    };
-                    // the shell sits before the bindings, so the reverse order drops it last
-                    self.hold_shell(scrut, home);
-                    if matches!(home, ShellHome::Scope) {
-                        shells.push(scrut);
-                    }
-                    let matched = self.alloc();
-                    let pat = self.pattern_info_over(&let_expr.pat, &let_expr.expr)?;
-                    if !takes {
-                        self.exempt_pattern_binds(pat);
-                    }
-                    if self.init_holds_guard(&let_expr.expr) {
-                        self.guard_pattern_binds(pat);
-                    }
-                    self.emit(Op::TestBind {
-                        val: scrut,
-                        pat,
-                        dst: matched,
-                    });
-                    else_jumps.push(self.here());
-                    self.emit(Op::JumpIfFalse {
-                        cond: matched,
-                        to: 0,
-                    });
-                    if takes {
-                        self.take_pattern_binds(scrut, pat);
-                    }
-                } else {
-                    let cond = self.compile_expr(term)?;
-                    else_jumps.push(self.here());
-                    self.emit(Op::JumpIfFalse { cond, to: 0 });
-                }
-            }
-            self.compile_block_inner(&if_expr.then_branch, dst)?;
-            self.emit_scope_drops(1);
-            self.pop_scope();
-            // the scrutinee temporaries end with the `if let`, before an `else` block runs
-            let temps = self.drop_temps(temp_mark, Some(dst));
-            let jmp_end = self.here();
-            self.emit(Op::Jump { to: 0 });
-            let else_at = self.mark()?;
-            for j in else_jumps {
-                self.patch_jump(j, else_at);
-            }
-            // this path bound nothing, so a fresh scrutinee drops whole
-            self.drop_regs(shells);
-            self.emit_drop_lists(&[temps]);
-            match &if_expr.else_branch {
-                Some((_, e)) => self.compile_into(dst, e)?,
-                None => self.emit(Op::LoadUnit { dst }),
-            }
-            let end = self.mark()?;
-            self.patch_jump(jmp_end, end);
-            return Ok(());
+            return self.compile_let_chain(dst, if_expr, &terms);
         }
         let guard_mark = self.cur().guard_temps.len();
         let temp_mark = self.cur().owned_temps.len();
@@ -139,12 +94,108 @@ impl Compiler<'_> {
         Ok(())
     }
 
+    /// `if let` and let chains, earlier bindings are in scope for later terms and the body.
+    fn compile_let_chain(
+        &mut self,
+        dst: Reg,
+        if_expr: &syn::ExprIf,
+        terms: &[&Expr],
+    ) -> Result<()> {
+        self.push_scope();
+        let temp_mark = self.cur().owned_temps.len();
+        // Each jump to the `else` carries what the chain made up to its term, in the order
+        // it was made, temporaries, fresh scrutinees and bindings alike. That all drops in
+        // reverse before the `else` runs. The failing link bound nothing for good, a
+        // `TestBind` that misses may still have written a binding, so its registers stay
+        // out and its fresh scrutinee drops whole.
+        let mut else_jumps: Vec<(usize, Vec<Reg>)> = Vec::new();
+        let mut made: Vec<Reg> = Vec::new();
+        let mut seen = ChainSeen {
+            temps: temp_mark,
+            scope: 0,
+        };
+        for term in terms {
+            if let Expr::Let(let_expr) = term {
+                let (owned, by_ref) = self.pattern_mode(&let_expr.pat, &let_expr.expr);
+                let scrut = self.compile_scrutinee(&let_expr.expr, owned, by_ref)?;
+                let takes = owned && self.scrutinee_owned(&let_expr.expr);
+                let home = if takes {
+                    self.shell_home(&let_expr.expr)
+                } else {
+                    ShellHome::None
+                };
+                // the shell sits before the bindings, so the reverse order drops it last
+                self.hold_shell(scrut, home);
+                self.chain_made(&mut made, &mut seen);
+                let held = made.clone();
+                let matched = self.alloc();
+                let pat = self.pattern_info_over(&let_expr.pat, &let_expr.expr)?;
+                self.exempt_binds(pat, takes);
+                if self.init_holds_guard(&let_expr.expr) {
+                    self.guard_pattern_binds(pat);
+                }
+                self.emit(Op::TestBind {
+                    val: scrut,
+                    pat,
+                    dst: matched,
+                });
+                else_jumps.push((self.here(), held));
+                self.emit(Op::JumpIfFalse {
+                    cond: matched,
+                    to: 0,
+                });
+                if takes {
+                    self.take_pattern_binds(scrut, pat);
+                }
+                self.chain_made(&mut made, &mut seen);
+            } else {
+                let cond = self.compile_expr(term)?;
+                self.chain_made(&mut made, &mut seen);
+                else_jumps.push((self.here(), made.clone()));
+                self.emit(Op::JumpIfFalse { cond, to: 0 });
+            }
+        }
+        self.compile_block_inner(&if_expr.then_branch, dst)?;
+        self.emit_scope_drops(1);
+        self.pop_scope();
+        // the scrutinee temporaries end with the `if let`, before an `else` block runs
+        let temps = self.drop_temps(temp_mark, Some(dst));
+        let jmp_end = self.here();
+        self.emit(Op::Jump { to: 0 });
+        // one landing pad per term, each drops its own list and joins the shared `else`
+        let mut to_else = Vec::new();
+        for (jump, held) in else_jumps {
+            let pad = self.mark()?;
+            self.patch_jump(jump, pad);
+            // a guard an earlier link holds is released here too, with or without a `Drop`
+            if !held.is_empty() {
+                let f = self.cur();
+                f.drop_lists.push(held.into());
+                let list = idx16(f.drop_lists.len() - 1);
+                self.emit(Op::DropScope { list });
+            }
+            to_else.push(self.here());
+            self.emit(Op::Jump { to: 0 });
+        }
+        let else_at = self.mark()?;
+        for jump in to_else {
+            self.patch_jump(jump, else_at);
+        }
+        self.emit_drop_lists(&[temps]);
+        match &if_expr.else_branch {
+            Some((_, e)) => self.compile_into(dst, e)?,
+            None => self.emit(Op::LoadUnit { dst }),
+        }
+        let end = self.mark()?;
+        self.patch_jump(jmp_end, end);
+        Ok(())
+    }
+
     pub(super) fn compile_while(&mut self, dst: Reg, w: &syn::ExprWhile) -> Result<()> {
         let head = self.here();
         if let Expr::Let(let_expr) = &*w.cond {
             let temp_mark = self.cur().owned_temps.len();
-            let by_ref = pattern_borrows(&let_expr.pat);
-            let owned = pattern_owns(&let_expr.pat) && !by_ref;
+            let (owned, by_ref) = self.pattern_mode(&let_expr.pat, &let_expr.expr);
             let scrut = self.compile_scrutinee(&let_expr.expr, owned, by_ref)?;
             let while_let_depth = self.cur().scope_order.len();
             self.push_scope();
@@ -162,9 +213,7 @@ impl Compiler<'_> {
             }
             let matched = self.alloc();
             let pat = self.pattern_info_over(&let_expr.pat, &let_expr.expr)?;
-            if !takes {
-                self.exempt_pattern_binds(pat);
-            }
+            self.exempt_binds(pat, takes);
             if self.init_holds_guard(&let_expr.expr) {
                 self.guard_pattern_binds(pat);
             }
@@ -440,7 +489,11 @@ impl Compiler<'_> {
         let target = self.loop_target(b.label.as_ref(), "break")?;
         if let Some(e) = &b.expr {
             let result = self.loops[target].result;
+            let temp_mark = self.cur().owned_temps.len();
             self.compile_into(result, e)?;
+            // the jump skips the semicolon of the statement around it, so the temporaries of
+            // the value end here, before the scopes the `break` leaves
+            self.drop_temps(temp_mark, Some(result));
         }
         self.emit_loop_exit_drops(target);
         let jmp = self.here();
@@ -475,11 +528,12 @@ impl Compiler<'_> {
                 p => p,
             }
         }
-        let by_ref = m
+        let borrows = m
             .arms
             .iter()
             .any(|arm| pattern_borrows(arm_pattern(&arm.pat)));
-        let owned = m.arms.iter().any(|arm| pattern_owns(arm_pattern(&arm.pat))) && !by_ref;
+        let owns = m.arms.iter().any(|arm| pattern_owns(arm_pattern(&arm.pat)));
+        let (owned, by_ref) = self.scrutinee_mode(owns, borrows, &m.expr);
         let scrut = self.compile_scrutinee(&m.expr, owned, by_ref)?;
         let holds_guard = self.init_holds_guard(&m.expr);
         let takes = owned && self.scrutinee_owned(&m.expr);
@@ -505,9 +559,7 @@ impl Compiler<'_> {
                 p => (p, None),
             };
             let pat = self.pattern_info_over(arm_pat, &m.expr)?;
-            if !takes {
-                self.exempt_pattern_binds(pat);
-            }
+            self.exempt_binds(pat, takes);
             if holds_guard {
                 self.guard_pattern_binds(pat);
             }

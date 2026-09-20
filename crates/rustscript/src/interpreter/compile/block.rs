@@ -135,13 +135,18 @@ impl Compiler<'_> {
             .expect("let-else always has an else block")
             .1;
         let val = self.alloc();
-        let owned = pattern_owns(&local.pat) && !pattern_borrows(&local.pat);
+        let borrows = pattern_borrows(&local.pat);
+        let owned = pattern_owns(&local.pat) && !borrows;
+        let temp_mark = self.cur().owned_temps.len();
         if owned {
             self.compile_owned_into(val, &init.expr)?;
         } else {
             self.compile_into(val, &init.expr)?;
         }
         let takes = owned && self.init_owned(&init.expr);
+        // A pattern that binds nothing, `None` or `Some(_)`, leaves a fresh scrutinee a
+        // temporary of the statement, nobody else drops it.
+        let bare = !owned && !borrows && self.ctx.has_drop && self.fresh_scrutinee(&init.expr);
         let home = if takes {
             self.shell_home(&init.expr)
         } else {
@@ -169,6 +174,18 @@ impl Compiler<'_> {
         if let ShellHome::Scope = home {
             self.drop_regs(vec![val]);
         }
+        // The `else` never reaches the semicolon, so the temporaries of the scrutinee end
+        // here. A `ref` binding keeps its temporary for the block.
+        let whole = if bare {
+            self.drop_regs(vec![val])
+        } else {
+            None
+        };
+        let temps = if borrows {
+            None
+        } else {
+            self.drop_temps(temp_mark, None)
+        };
         let else_dst = self.alloc();
         self.compile_into(else_dst, else_expr)?;
         let ok_at = self.mark()?;
@@ -180,6 +197,7 @@ impl Compiler<'_> {
         if let ShellHome::Scope = home {
             self.drop_regs(vec![val]);
         }
+        self.emit_drop_lists(&[whole, temps]);
         if is_last {
             self.emit(Op::LoadUnit { dst });
         }

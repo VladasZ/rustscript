@@ -10,7 +10,6 @@ use rand::rngs::StdRng;
 
 use crate::generator::generate_base;
 use crate::lang::expr::{Expr, ReadMode, minimal};
-use crate::lang::pat::Pat;
 use crate::lang::pipe::{Bind, Stage, Term};
 use crate::lang::stmt::{Ann, Stmt};
 use crate::lang::ty::Ty;
@@ -81,9 +80,8 @@ fn is_portable(expr: &Expr) -> bool {
                 | Expr::VecTake { .. }
         );
         let pats = match node {
-            Expr::Match { arms, .. } => arms
-                .iter()
-                .all(|arm| !matches!(arm.pat, Pat::Variant { .. } | Pat::Struct { .. })),
+            Expr::Match { arms, .. } => arms.iter().all(|arm| !arm.pat.names_item()),
+            Expr::Matches { pat, .. } => !pat.names_item(),
             _ => true,
         };
         own && pats && !mentions_user(&node.ty())
@@ -132,6 +130,11 @@ fn binders(expr: &Expr, out: &mut BTreeSet<String>) {
                     arm.pat.bindings(&mut binds);
                     out.extend(binds.into_iter().map(|(name, _)| name));
                 }
+            }
+            Expr::Matches { pat, .. } => {
+                let mut binds = Vec::new();
+                pat.bindings(&mut binds);
+                out.extend(binds.into_iter().map(|(name, _)| name));
             }
             _ => {}
         }

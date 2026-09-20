@@ -4,8 +4,10 @@
 mod exprs;
 mod exprs_calls;
 mod matches;
+mod pats;
 mod pipes;
 mod stmts;
+mod stmts_bind;
 mod stmts_loops;
 mod users;
 
@@ -55,6 +57,8 @@ pub struct Generator<'a> {
     pub(super) loop_labels: Vec<String>,
     /// a bare literal here would be an ambiguous `{integer}`
     pub(super) forbid_bare: bool,
+    /// how many statement bodies surround the one being built, a deep one nests no further
+    pub(super) nesting: usize,
     /// closures already called in the statement being built. A closure literal that names one
     /// holds it borrowed for as long as the literal lives, so a second mention in the same
     /// statement is 2 mutable borrows at once and rustc rejects it.
@@ -78,6 +82,7 @@ impl<'a> Generator<'a> {
             in_loop: false,
             loop_labels: Vec::new(),
             forbid_bare: false,
+            nesting: 0,
             called_closures: Vec::new(),
         }
     }
@@ -85,7 +90,9 @@ impl<'a> Generator<'a> {
     /// Wraps one statement, so the closures called inside it are forgotten again at its end.
     pub(super) fn statement<T>(&mut self, build: impl FnOnce(&mut Self) -> T) -> T {
         let saved = std::mem::take(&mut self.called_closures);
+        let mark = self.scope.stmt_mark();
         let out = build(self);
+        self.scope.stmt_release(mark);
         self.called_closures = saved;
         out
     }
@@ -113,9 +120,9 @@ impl<'a> Generator<'a> {
 
     /// A statement list with a scope of its own, the bindings it declares are gone after it.
     pub(super) fn scoped<T>(&mut self, build: impl FnOnce(&mut Self) -> T) -> T {
-        let mark = self.scope.len();
+        let mark = self.scope.enter_scope();
         let out = build(self);
-        self.scope.truncate(mark);
+        self.scope.exit_scope(mark);
         out
     }
 

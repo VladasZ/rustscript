@@ -484,6 +484,8 @@ pub enum PPat {
     Ident {
         name: String,
         sub: Option<Box<PPat>>,
+        /// a `ref` binding, which lends its part of an owned scrutinee and never takes it
+        by_ref: bool,
     },
     Lit(PLit),
     /// A named constant, compared by value. The index picks the register in `PatInfo::consts`.

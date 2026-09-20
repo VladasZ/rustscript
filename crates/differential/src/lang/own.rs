@@ -66,6 +66,15 @@ pub struct Scope {
     /// names a statement holds while its parts run, a move or an in place write of one would
     /// be a second borrow
     frozen: Vec<String>,
+    /// names a construct reads through a shared reference for its whole body, `for x in &v`.
+    /// A second shared borrow is fine, a move or a write is not.
+    shared: Vec<String>,
+    /// names borrowed by a reference that lives to the end of the statement, see `stmt_mark`
+    stmt_shared: Vec<String>,
+    /// names borrowed by a reference a `let` keeps, with the scope depth the `let` sits at.
+    /// The borrow ends when that scope does.
+    pinned: Vec<(String, usize)>,
+    scope_depth: usize,
     loop_depth: usize,
     closure_depth: usize,
     /// contexts that only borrow, a print or a comparison, so a move there is wasted
@@ -109,8 +118,19 @@ impl Scope {
         self.slots.is_empty()
     }
 
-    pub fn truncate(&mut self, len: usize) {
-        self.slots.truncate(len);
+    /// Opens a block scope. The mark goes back to `exit_scope`.
+    pub fn enter_scope(&mut self) -> usize {
+        self.scope_depth += 1;
+        self.slots.len()
+    }
+
+    /// The bindings declared since the mark are gone, and so is every borrow a `let` of this
+    /// scope kept.
+    pub fn exit_scope(&mut self, mark: usize) {
+        self.slots.truncate(mark);
+        let depth = self.scope_depth;
+        self.pinned.retain(|(_, pinned_at)| *pinned_at < depth);
+        self.scope_depth -= 1;
     }
 
     pub fn take_slots(&mut self) -> Vec<Slot> {
@@ -172,8 +192,42 @@ impl Scope {
         self.frozen.pop();
     }
 
-    fn is_frozen(&self, name: &str) -> bool {
+    pub fn hold_shared(&mut self, name: &str) {
+        self.shared.push(name.to_string());
+    }
+
+    pub fn release_shared(&mut self) {
+        self.shared.pop();
+    }
+
+    /// A reference to the binding lives until the statement ends.
+    pub fn borrow_for_stmt(&mut self, name: &str) {
+        self.stmt_shared.push(name.to_string());
+    }
+
+    /// Taken when a statement starts, `stmt_release` ends the borrows made since.
+    pub fn stmt_mark(&self) -> usize {
+        self.stmt_shared.len()
+    }
+
+    pub fn stmt_release(&mut self, mark: usize) {
+        self.stmt_shared.truncate(mark);
+    }
+
+    /// A `let` keeps a reference to the binding, so it is borrowed until the scope ends.
+    pub fn pin(&mut self, name: &str) {
+        self.pinned.push((name.to_string(), self.scope_depth));
+    }
+
+    fn is_held(&self, name: &str) -> bool {
         self.frozen.iter().any(|frozen| frozen == name)
+    }
+
+    fn is_frozen(&self, name: &str) -> bool {
+        self.is_held(name)
+            || self.shared.iter().any(|held| held == name)
+            || self.stmt_shared.iter().any(|held| held == name)
+            || self.pinned.iter().any(|(held, _)| held == name)
     }
 
     pub fn enter_loop(&mut self) {
@@ -243,6 +297,36 @@ impl Scope {
         !self.is_frozen(name)
             && self.slot(name).is_some_and(|slot| {
                 slot.place
+                    && slot.state == OwnState::Owned
+                    && slot.closure_depth == self.closure_depth
+            })
+    }
+
+    /// A write in place, `push`, `+=`, `&mut name`. The binding must be a `let` so it can be
+    /// `mut`, and nothing else may hold it.
+    pub fn can_write(&self, name: &str) -> bool {
+        self.can_compound(name)
+            && self
+                .slot(name)
+                .is_some_and(|slot| slot.closure_depth == self.closure_depth)
+    }
+
+    /// `name op= value`. A closure body may write a captured counter, so the closure depth
+    /// is not checked.
+    pub fn can_compound(&self, name: &str) -> bool {
+        !self.is_frozen(name)
+            && self
+                .slot(name)
+                .is_some_and(|slot| slot.place && slot.state == OwnState::Owned)
+    }
+
+    /// A shared reference to the binding, `name.as_str()`. A pattern binding or a parameter
+    /// may die before the reference does, so only a `let` is offered.
+    pub fn can_borrow(&self, name: &str) -> bool {
+        !self.is_held(name)
+            && self.slot(name).is_some_and(|slot| {
+                slot.place
+                    && !slot.borrowed
                     && slot.state == OwnState::Owned
                     && slot.closure_depth == self.closure_depth
             })
@@ -377,9 +461,10 @@ pub fn referenced(expr: &Expr) -> BTreeSet<String> {
 pub fn root_binding(expr: &Expr) -> Option<&str> {
     match expr {
         Expr::Var { name, .. } => Some(name),
-        Expr::Field { base, .. } | Expr::TupleField { base, .. } | Expr::Index { base, .. } => {
-            root_binding(base)
-        }
+        Expr::Field { base, .. }
+        | Expr::TupleField { base, .. }
+        | Expr::Index { base, .. }
+        | Expr::Borrow { base, .. } => root_binding(base),
         _ => None,
     }
 }

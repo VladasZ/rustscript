@@ -4,6 +4,7 @@ use rand::RngExt;
 
 use crate::lang::expr::{Expr, ReadMode};
 use crate::lang::fmt::{Align, FmtSpec, FmtTrait};
+use crate::lang::pat::Pat;
 use crate::lang::stmt::{MutOp, PrintForm, Stmt};
 use crate::lang::synth::Generator;
 use crate::lang::ty::Ty;
@@ -83,8 +84,11 @@ impl Generator<'_> {
     pub(super) fn nested_body(&mut self) -> Vec<Stmt> {
         let count = self.rng.random_range(1..=3);
         let mut body = Vec::new();
+        self.nesting += 1;
+        // every nesting form holds more bodies, so a deep body holds none
+        let draws = if self.nesting < 3 { 11 } else { 8 };
         for _ in 0..count {
-            let stmt = self.statement(|inner| match inner.rng.random_range(0..8) {
+            let stmt = self.statement(|inner| match inner.rng.random_range(0..draws) {
                 0 => inner.assign_stmt(),
                 1 => inner.compound_stmt().unwrap_or_else(|| inner.observation()),
                 2 => inner
@@ -93,21 +97,37 @@ impl Generator<'_> {
                 3 if inner.in_loop => inner.break_or_continue(),
                 4 if inner.fn_ret.is_some() => inner.return_stmt(),
                 5 | 6 => inner.binding_stmt(),
+                8 => inner.if_let_stmt().unwrap_or_else(|| inner.observation()),
+                9 => inner.match_stmt().unwrap_or_else(|| inner.observation()),
+                10 if inner.in_loop || inner.fn_ret.is_some() => {
+                    inner.let_else_stmt().unwrap_or_else(|| inner.observation())
+                }
                 _ => inner.observation(),
             });
             body.push(stmt);
         }
+        self.nesting -= 1;
         body
     }
 
     /// The body and the loop's label. A label nobody names is dropped, it would only warn.
     fn loop_body(&mut self) -> (Vec<Stmt>, Option<String>) {
+        self.loop_body_with(None)
+    }
+
+    /// `pat` binds the item of each round, `while let`.
+    pub(super) fn loop_body_with(&mut self, pat: Option<&Pat>) -> (Vec<Stmt>, Option<String>) {
         let was = std::mem::replace(&mut self.in_loop, true);
         let label = self.chance(0.5).then(|| self.fresh("diff_l"));
         if let Some(label) = &label {
             self.loop_labels.push(label.clone());
         }
-        let body = self.looping(Self::nested_body);
+        let body = self.looping(|inner| {
+            if let Some(pat) = pat {
+                inner.push_pat(pat);
+            }
+            inner.nested_body()
+        });
         if label.is_some() {
             self.loop_labels.pop();
         }
@@ -286,6 +306,7 @@ impl Generator<'_> {
         let vecs: Vec<(String, Ty)> = self
             .live_locals()
             .into_iter()
+            .filter(|(name, _)| self.scope.can_write(name))
             .filter_map(|(name, ty)| match ty {
                 Ty::Vec(elem) => Some((name, *elem)),
                 _ => None,
@@ -313,7 +334,7 @@ impl Generator<'_> {
 
     /// `helper(&mut binding, args)`
     pub(super) fn call_mut_stmt(&mut self) -> Option<Stmt> {
-        let (name, ty) = self.pick_local()?;
+        let (name, ty) = self.pick_writable()?;
         let (fn_name, params) = self.writer_fn(&ty);
         // the target is borrowed for the call, so the arguments can't read it
         let args = self.without_binding(&name, |inner| {
@@ -330,11 +351,12 @@ impl Generator<'_> {
         let matching: Vec<(String, Ty)> = self
             .live_locals()
             .into_iter()
-            .filter(|(_, ty)| {
-                matches!(
-                    ty,
-                    Ty::Vec(_) | Ty::Map(..) | Ty::Set(_) | Ty::Str | Ty::Opt(_)
-                )
+            .filter(|(name, ty)| {
+                self.scope.can_write(name)
+                    && matches!(
+                        ty,
+                        Ty::Vec(_) | Ty::Map(..) | Ty::Set(_) | Ty::Str | Ty::Opt(_)
+                    )
             })
             .collect();
         if matching.is_empty() {
@@ -347,7 +369,9 @@ impl Generator<'_> {
         let matching: Vec<(String, Ty)> = self
             .live_locals()
             .into_iter()
-            .filter(|(_, ty)| matches!(ty, Ty::Vec(_) | Ty::Map(..) | Ty::Set(_)))
+            .filter(|(name, ty)| {
+                self.scope.can_write(name) && matches!(ty, Ty::Vec(_) | Ty::Map(..) | Ty::Set(_))
+            })
             .collect();
         if matching.is_empty() {
             return None;

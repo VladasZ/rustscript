@@ -47,6 +47,11 @@ pub enum Ty {
     /// `DiffTrace`, a program local struct whose `Drop` prints. Every move, copy, scope end and
     /// unwind of one becomes a line of output.
     Trace,
+    /// `&str`. A value of it borrows a `String` binding, a temporary or nothing, see
+    /// `Expr::Borrow`. It never sits in a struct field, a closure signature or a key.
+    StrRef,
+    /// `&[T]`, under the same rules as `StrRef`
+    Slice(Box<Ty>),
 }
 
 impl Ty {
@@ -72,13 +77,20 @@ impl Ty {
             Self::StdErr(err) => err.rust().to_string(),
             Self::User(shape) => shape.name.clone(),
             Self::Trace => TRACE_NAME.to_string(),
+            Self::StrRef => "&str".to_string(),
+            Self::Slice(elem) => format!("&[{}]", elem.rust()),
         }
     }
 
     /// A non copy read renders with `.clone()` unless the generator chose a move.
     pub fn is_copy(&self) -> bool {
         match self {
-            Self::Int(_) | Self::Float(_) | Self::Bool | Self::Char => true,
+            Self::Int(_)
+            | Self::Float(_)
+            | Self::Bool
+            | Self::Char
+            | Self::StrRef
+            | Self::Slice(_) => true,
             // user types never derive Copy, so every read clones or moves and exercises the
             // value model
             Self::Str
@@ -106,8 +118,8 @@ impl Ty {
     pub fn is_ord(&self) -> bool {
         match self {
             Self::Float(_) | Self::Map(..) | Self::Set(_) | Self::StdErr(_) => false,
-            Self::Int(_) | Self::Bool | Self::Char | Self::Str | Self::Trace => true,
-            Self::Vec(inner) | Self::Opt(inner) => inner.is_ord(),
+            Self::Int(_) | Self::Bool | Self::Char | Self::Str | Self::Trace | Self::StrRef => true,
+            Self::Vec(inner) | Self::Opt(inner) | Self::Slice(inner) => inner.is_ord(),
             Self::Tuple(items) => items.iter().all(Ty::is_ord),
             Self::Res(ok, err) => ok.is_ord() && err.is_ord(),
             Self::User(shape) => shape.derives.is_ord(),
@@ -118,10 +130,16 @@ impl Ty {
     pub fn is_eq(&self) -> bool {
         match self {
             Self::Float(_) => false,
-            Self::Int(_) | Self::Bool | Self::Char | Self::Str | Self::StdErr(_) | Self::Trace => {
-                true
+            Self::Int(_)
+            | Self::Bool
+            | Self::Char
+            | Self::Str
+            | Self::StdErr(_)
+            | Self::Trace
+            | Self::StrRef => true,
+            Self::Vec(inner) | Self::Opt(inner) | Self::Set(inner) | Self::Slice(inner) => {
+                inner.is_eq()
             }
-            Self::Vec(inner) | Self::Opt(inner) | Self::Set(inner) => inner.is_eq(),
             Self::Map(key, value) | Self::Res(key, value) => key.is_eq() && value.is_eq(),
             Self::Tuple(items) => items.iter().all(Ty::is_eq),
             Self::User(shape) => shape.derives.is_eq(),
@@ -129,10 +147,17 @@ impl Ty {
     }
 
     /// A trace never hashes. A hashed container clones, iterates and drops its entries in an
-    /// order real Rust randomizes per process, and every one of those prints.
+    /// order real Rust randomizes per process, and every one of those prints. A reference
+    /// never hashes either, a key that borrows would outlive nothing the generator tracks.
     pub fn is_hash(&self) -> bool {
         match self {
-            Self::Float(_) | Self::Map(..) | Self::Set(_) | Self::StdErr(_) | Self::Trace => false,
+            Self::Float(_)
+            | Self::Map(..)
+            | Self::Set(_)
+            | Self::StdErr(_)
+            | Self::Trace
+            | Self::StrRef
+            | Self::Slice(_) => false,
             Self::Int(_) | Self::Bool | Self::Char | Self::Str => true,
             Self::Vec(inner) | Self::Opt(inner) => inner.is_hash(),
             Self::Tuple(items) => items.iter().all(Ty::is_hash),
@@ -148,7 +173,8 @@ impl Ty {
 
     pub fn has_default(&self) -> bool {
         match self {
-            Self::Res(..) | Self::StdErr(_) => false,
+            // `&str` has a default in real Rust, but a defaulted reference tests nothing
+            Self::Res(..) | Self::StdErr(_) | Self::StrRef | Self::Slice(_) => false,
             Self::Int(_)
             | Self::Float(_)
             | Self::Bool
@@ -172,6 +198,7 @@ impl Ty {
             | Self::Bool
             | Self::Char
             | Self::Str
+            | Self::StrRef
             | Self::StdErr(_) => true,
             Self::User(shape) => shape.display,
             _ => false,
@@ -180,7 +207,9 @@ impl Ty {
 
     pub fn elem(&self) -> Option<&Ty> {
         match self {
-            Self::Vec(inner) | Self::Opt(inner) | Self::Set(inner) => Some(inner),
+            Self::Vec(inner) | Self::Opt(inner) | Self::Set(inner) | Self::Slice(inner) => {
+                Some(inner)
+            }
             _ => None,
         }
     }
@@ -201,7 +230,9 @@ impl Ty {
 
     pub fn depth(&self) -> usize {
         match self {
-            Self::Vec(inner) | Self::Opt(inner) | Self::Set(inner) => 1 + inner.depth(),
+            Self::Vec(inner) | Self::Opt(inner) | Self::Set(inner) | Self::Slice(inner) => {
+                1 + inner.depth()
+            }
             Self::Map(key, value) | Self::Res(key, value) => 1 + key.depth().max(value.depth()),
             Self::Tuple(items) => 1 + items.iter().map(Ty::depth).max().unwrap_or(0),
             Self::User(shape) => 1 + shape.depth,
@@ -213,7 +244,9 @@ impl Ty {
     pub fn contains_float(&self) -> bool {
         match self {
             Self::Float(_) => true,
-            Self::Vec(inner) | Self::Opt(inner) | Self::Set(inner) => inner.contains_float(),
+            Self::Vec(inner) | Self::Opt(inner) | Self::Set(inner) | Self::Slice(inner) => {
+                inner.contains_float()
+            }
             Self::Map(key, value) | Self::Res(key, value) => {
                 key.contains_float() || value.contains_float()
             }
@@ -228,12 +261,27 @@ impl Ty {
     pub fn contains_trace(&self) -> bool {
         match self {
             Self::Trace => true,
-            Self::Vec(inner) | Self::Opt(inner) | Self::Set(inner) => inner.contains_trace(),
+            Self::Vec(inner) | Self::Opt(inner) | Self::Set(inner) | Self::Slice(inner) => {
+                inner.contains_trace()
+            }
             Self::Map(key, value) | Self::Res(key, value) => {
                 key.contains_trace() || value.contains_trace()
             }
             Self::Tuple(items) => items.iter().any(Ty::contains_trace),
             Self::User(shape) => shape.holds.trace,
+            _ => false,
+        }
+    }
+
+    /// Whether a value of this type may borrow a binding, so it must not outlive it.
+    pub fn contains_ref(&self) -> bool {
+        match self {
+            Self::StrRef | Self::Slice(_) => true,
+            Self::Vec(inner) | Self::Opt(inner) | Self::Set(inner) => inner.contains_ref(),
+            Self::Map(key, value) | Self::Res(key, value) => {
+                key.contains_ref() || value.contains_ref()
+            }
+            Self::Tuple(items) => items.iter().any(Ty::contains_ref),
             _ => false,
         }
     }
@@ -265,6 +313,8 @@ impl Ty {
             Self::User(shape) if shape.is_enum() => "lang-ty-enum",
             Self::User(_) => "lang-ty-struct",
             Self::Trace => "lang-ty-trace",
+            Self::StrRef => "lang-ty-str-ref",
+            Self::Slice(_) => "lang-ty-slice",
         }
     }
 
@@ -286,6 +336,10 @@ impl Ty {
 
     pub fn set_of(elem: Ty) -> Self {
         Self::Set(Box::new(elem))
+    }
+
+    pub fn slice_of(elem: Ty) -> Self {
+        Self::Slice(Box::new(elem))
     }
 
     pub fn res_of(ok: Ty, err: Ty) -> Self {
