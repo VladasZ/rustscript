@@ -228,6 +228,13 @@ impl Vm {
                     return Ok(Some(inner));
                 }
             },
+            Step::Inspect(source, closure) => match self.iterator_next(&source)? {
+                Some(value) => {
+                    self.call_lending(&source, &closure, &value)?;
+                    Ok(Some(value))
+                }
+                None => Ok(None),
+            },
             Step::Enumerate(source, index) => Ok(self
                 .iterator_next(&source)?
                 .map(|value| Value::tuple(vec![Value::Int(usize_i64(index)), value]))),

@@ -498,7 +498,9 @@ impl Compiler<'_> {
         if let Some(e) = &b.expr {
             let result = self.loops[target].result;
             let temp_mark = self.cur().owned_temps.len();
-            self.compile_into(result, e)?;
+            // `break value` moves the value out of the loop, so a field read moves the field
+            // rather than sharing it with the temporary that is about to drop
+            self.compile_owned_into(result, e)?;
             // the jump skips the semicolon of the statement around it, so the temporaries of
             // the value end here, before the scopes the `break` leaves
             self.drop_temps(temp_mark, Some(result));
