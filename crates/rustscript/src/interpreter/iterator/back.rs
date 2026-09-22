@@ -17,6 +17,7 @@ enum Back {
     Map(Handle, Arc<ClosureData>),
     Filter(Handle, Arc<ClosureData>),
     FilterMap(Handle, Arc<ClosureData>),
+    Inspect(Handle, Arc<ClosureData>),
     Cloned(Handle),
     Enumerate(Handle, usize),
     Skip(Handle, usize),
@@ -40,6 +41,7 @@ pub(super) fn supports_back(iterator: &Handle) -> bool {
         IteratorState::Map { source, .. }
         | IteratorState::Filter { source, .. }
         | IteratorState::FilterMap { source, .. }
+        | IteratorState::Inspect { source, .. }
         | IteratorState::Cloned { source }
         | IteratorState::Rev { source } => supports_back(source),
         // these need the exact length of what is left
@@ -83,6 +85,7 @@ pub(super) fn iterator_len(iterator: &Handle) -> Option<usize> {
             usize::try_from(span.max(0)).ok()
         }
         IteratorState::Map { source, .. }
+        | IteratorState::Inspect { source, .. }
         | IteratorState::Cloned { source }
         | IteratorState::Enumerate { source, .. }
         | IteratorState::Rev { source } => iterator_len(source),
@@ -137,6 +140,9 @@ fn back_step(state: &mut IteratorState) -> Result<Back> {
         IteratorState::Filter { source, closure } => Back::Filter(source.clone(), closure.clone()),
         IteratorState::FilterMap { source, closure } => {
             Back::FilterMap(source.clone(), closure.clone())
+        }
+        IteratorState::Inspect { source, closure } => {
+            Back::Inspect(source.clone(), closure.clone())
         }
         IteratorState::Cloned { source } => Back::Cloned(source.clone()),
         IteratorState::Enumerate { source, index } => Back::Enumerate(source.clone(), *index),
@@ -206,6 +212,13 @@ impl Vm {
                 {
                     return Ok(Some(inner));
                 }
+            },
+            Back::Inspect(source, closure) => match self.iterator_next_back(&source)? {
+                Some(value) => {
+                    self.call_lending(&source, &closure, &value)?;
+                    Ok(Some(value))
+                }
+                None => Ok(None),
             },
             Back::Cloned(source) => Ok(self.iterator_next_back(&source)?.map(|v| v.deep_clone())),
             Back::Forward(source) => self.iterator_next(&source),

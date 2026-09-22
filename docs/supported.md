@@ -94,7 +94,7 @@ The `supported_page_is_current` test enforces it.
 
 ## Iterator
 
-`all`, `any`, `as_str`, `by_ref`, `chain`, `cloned`, `collect`, `collect_map`, `collect_set`, `collect_string`, `copied`, `count`, `enumerate`, `filter`, `filter_map`, `find`, `find_map`, `for_each`, `last`, `map`, `max`, `min`, `next`, `next_back`, `nth`, `peek`, `peekable`, `position`, `product`, `rev`, `rposition`, `skip`, `skip_while`, `step_by`, `sum`, `take`, `take_while`, `to_vec`, `zip`
+`all`, `any`, `as_str`, `by_ref`, `chain`, `cloned`, `collect`, `collect_map`, `collect_set`, `collect_string`, `copied`, `count`, `enumerate`, `filter`, `filter_map`, `find`, `find_map`, `for_each`, `inspect`, `last`, `map`, `max`, `min`, `next`, `next_back`, `nth`, `peek`, `peekable`, `position`, `product`, `rev`, `rposition`, `skip`, `skip_while`, `step_by`, `sum`, `take`, `take_while`, `to_vec`, `zip`
 
 ## Line
 

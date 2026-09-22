@@ -37,6 +37,10 @@ impl Vm {
                 source: iterator.clone(),
                 closure: closure(0)?,
             }),
+            BuiltinId::Inspect => wrap(IteratorState::Inspect {
+                source: iterator.clone(),
+                closure: closure(0)?,
+            }),
             BuiltinId::TakeWhile => wrap(IteratorState::TakeWhile {
                 source: iterator.clone(),
                 closure: closure(0)?,

@@ -94,6 +94,11 @@ pub enum IteratorState {
         source: Handle,
         closure: Arc<ClosureData>,
     },
+    /// `inspect`, the closure borrows each item for its side effect and the item passes through
+    Inspect {
+        source: Handle,
+        closure: Arc<ClosureData>,
+    },
     Enumerate {
         source: Handle,
         index: usize,
@@ -143,6 +148,7 @@ enum Step {
     Map(Handle, Arc<ClosureData>),
     Filter(Handle, Arc<ClosureData>),
     FilterMap(Handle, Arc<ClosureData>),
+    Inspect(Handle, Arc<ClosureData>),
     Enumerate(Handle, usize),
     Zip(Handle, Handle),
     /// the bool remembers that the left side returned `None`, so it is never asked again
@@ -329,6 +335,7 @@ impl IteratorState {
                 owns_items(left) && owns_items(right)
             }
             IteratorState::Filter { source, .. }
+            | IteratorState::Inspect { source, .. }
             | IteratorState::Enumerate { source, .. }
             | IteratorState::Take { source, .. }
             | IteratorState::Skip { source, .. }
@@ -371,6 +378,7 @@ impl IteratorState {
             IteratorState::Map { source, .. }
             | IteratorState::Filter { source, .. }
             | IteratorState::FilterMap { source, .. }
+            | IteratorState::Inspect { source, .. }
             | IteratorState::Enumerate { source, .. }
             | IteratorState::Take { source, .. }
             | IteratorState::Skip { source, .. }
@@ -493,6 +501,9 @@ impl IteratorState {
             }
             IteratorState::FilterMap { source, closure } => {
                 Step::FilterMap(source.clone(), closure.clone())
+            }
+            IteratorState::Inspect { source, closure } => {
+                Step::Inspect(source.clone(), closure.clone())
             }
             IteratorState::Enumerate { source, index } => {
                 let current = *index;

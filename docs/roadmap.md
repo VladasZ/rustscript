@@ -12,11 +12,63 @@ Differential workflow.
 
 ## Open
 
-### `inspect` is not implemented
+### A labeled block `break` value is never dropped
 
-`vec![1, 2].into_iter().inspect(|n| println!("{n}")).count()` stops with
-`inspect is not implemented by the interpreter`. Phase 2 of the generator plan
-needs it.
+```rust
+struct Trace(i64);
+impl Drop for Trace {
+    fn drop(&mut self) {
+        println!("drop {}", self.0);
+    }
+}
+fn main() {
+    let got = 'b: {
+        break 'b Trace(9);
+    };
+    println!("got: {got:?}");
+}
+```
+
+Compiled prints `got: Trace(9)` then `drop 9`. Interpreted prints `got:
+Trace(9)` and never drops it. A `loop { break Trace(9); }` result drops fine, so
+this is specific to the labeled block. Likely place: `compile_labeled_block` in
+`compile/flow.rs` does not register its result register as an owned local for the
+scope end drop, unlike `compile_loop`.
+
+### Drops during a panic unwind miss the method receiver temporary
+
+```rust
+#[derive(Clone)]
+struct T(i64);
+impl Drop for T {
+    fn drop(&mut self) {
+        println!("drop {}", self.0);
+    }
+}
+fn main() {
+    let v = vec![T(1); 3].get(1).cloned().unwrap_or(vec![T(2), T(3)][4].clone());
+    println!("{}", v.0);
+}
+```
+
+The `unwrap_or` argument `vec![T(2), T(3)][4]` panics with an index out of
+bounds. Compiled drops during the unwind are `1, 2, 3, 1, 1, 1`. Interpreted
+drops are `2, 3, 1, 1, 1`, missing the `.cloned()` receiver `Some(T(1))` and in
+the wrong order. When a method argument panics, the already evaluated receiver
+temporary is not on the unwind drop list, and the order of the remaining temps
+does not match. Seeds 20718002141, 20718003167, 20718003168, 20718103155,
+20718103156, 20718103305, 20718200322, 20718205510, 20718207034 are this class.
+
+### An early spurious panic on a closure eval order divergence
+
+Seeds 20718007971, 20718007972, 20718201125, 20718219778 and the
+`InterpreterUnsupported` seed 20718106939. The programs build closures as
+`impl Fn` and call them through a `&mut F` helper. Compiled runs to a later
+index out of bounds panic. Interpreted panics early inside a closure body with
+an empty message, so the two diverge before the real panic. Needs reduction with
+`rustscript-differential replay` and `reduce` on one of the seeds to find the
+eval order or closure dispatch difference. The failure artifacts are in the
+Differential run artifacts.
 
 ## Generator plan
 
