@@ -20,6 +20,7 @@ use super::value::{StructData, Value};
 pub(super) fn build_command(s: &StructData) -> std::process::Command {
     let program = s.get("program").map(|v| path_like(&v)).unwrap_or_default();
     let mut cmd = std::process::Command::new(&program);
+    super::env_overlay::apply(&mut cmd);
     if let Some(Value::Vec(a)) = s.get("args") {
         for item in a.lock().iter() {
             #[cfg(windows)]
@@ -290,7 +291,7 @@ fn command_envs(s: &StructData) -> super::value::Map {
     if let Some(Value::Map(envs, _)) = s.get("envs") {
         envs
     } else {
-        let envs: super::value::Map = Arc::new(Mutex::new(indexmap::IndexMap::default()));
+        let envs: super::value::Map = Arc::new(Mutex::new(super::value::MapStore::default()));
         s.set("envs", Value::Map(envs.clone(), super::value::MapKind::Map));
         envs
     }

@@ -29,7 +29,6 @@ mod imp {
     use std::collections::HashMap;
 
     use anyhow::{Result, bail};
-    use indexmap::IndexMap;
     use wmi::{Variant, WMIConnection};
 
     use super::super::numeric::IntWidth;
@@ -73,7 +72,7 @@ mod imp {
         let mut names: Vec<&String> = row.keys().collect();
         // sorted for a stable result
         names.sort();
-        let mut map = IndexMap::default();
+        let mut map = crate::interpreter::value::MapStore::default();
         for name in names {
             let Some(v) = row.get(name) else { continue };
             map.insert(MapKey::Str(name.as_str().into()), from_variant(v));

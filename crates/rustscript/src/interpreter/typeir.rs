@@ -44,12 +44,15 @@ pub enum TypeIr {
     /// a type coercion can't change
     Dynamic,
     Vec(Arc<TypeIr>),
-    /// coercion leaves maps untouched, typed json uses the value type
-    MapValue(Arc<TypeIr>),
-    /// coercion turns a collected Vec into a set
-    Set(Arc<TypeIr>),
+    /// coercion leaves a hash map untouched, typed json uses the value type. The flag is a
+    /// `BTreeMap`, which coercion puts in key order.
+    MapValue(Arc<TypeIr>, bool),
+    /// coercion turns a collected Vec into a set, the flag is a `BTreeSet`
+    Set(Arc<TypeIr>, bool),
     Option(Arc<TypeIr>),
     Struct(Arc<str>),
+    /// a script enum, read and written in its serde representation
+    Enum(Arc<str>),
     /// bound by the caller's turbofish through the type environment
     Generic(Arc<str>),
 }
@@ -57,8 +60,10 @@ pub enum TypeIr {
 impl TypeIr {
     pub fn is_active(&self) -> bool {
         match self {
-            TypeIr::Dynamic | TypeIr::Generic(_) | TypeIr::MapValue(_) => false,
-            TypeIr::Struct(_) | TypeIr::Set(_) => true,
+            TypeIr::Dynamic | TypeIr::Generic(_) | TypeIr::MapValue(_, false) => false,
+            TypeIr::Struct(_) | TypeIr::Enum(_) | TypeIr::Set(..) | TypeIr::MapValue(_, true) => {
+                true
+            }
             TypeIr::Vec(inner) | TypeIr::Option(inner) => inner.is_active(),
         }
     }
@@ -111,8 +116,12 @@ fn lower(
             Some(t) => lower(t, resolver, module, generics, depth + 1),
             None => TypeIr::Dynamic,
         },
-        "HashMap" | "BTreeMap" => arg(1).map_or(TypeIr::Dynamic, TypeIr::MapValue),
-        "HashSet" | "BTreeSet" => arg(0).map_or(TypeIr::Dynamic, TypeIr::Set),
+        "HashMap" | "BTreeMap" => {
+            arg(1).map_or(TypeIr::Dynamic, |v| TypeIr::MapValue(v, name == "BTreeMap"))
+        }
+        "HashSet" | "BTreeSet" => {
+            arg(0).map_or(TypeIr::Dynamic, |t| TypeIr::Set(t, name == "BTreeSet"))
+        }
         _ => {
             if let Some(canon) = resolver.resolve_struct_key(module, &p.path) {
                 return TypeIr::Struct(Arc::from(&*canon));
@@ -124,6 +133,7 @@ fn lower(
                 .map(|s| s.ident.to_string())
                 .collect();
             match resolver.resolve(module, &segs) {
+                Ok(Res::Enum(canon)) => TypeIr::Enum(canon),
                 // an alias target resolves in its own module, where no function generics apply
                 Ok(Res::Alias(m, target)) => lower(&target, resolver, m, &[], depth + 1),
                 _ => TypeIr::Dynamic,

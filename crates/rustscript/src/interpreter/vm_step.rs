@@ -207,7 +207,7 @@ pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
         Op::Try { dst, src, conv } => try_op(ctx, *dst, *src, *conv)?,
         Op::TryJump { dst, src, to, conv } => try_jump(ctx, *dst, *src, *to, *conv)?,
         Op::Cast { dst, src, ty } => cast_op(ctx, *dst, *src, *ty)?,
-        Op::Coerce { dst, src, ty } => coerce_op(ctx, *dst, *src, *ty),
+        Op::Coerce { dst, src, ty } => coerce_op(ctx, *dst, *src, *ty)?,
         Op::TestBind { val, pat, dst } => test_bind(ctx, *val, *pat, *dst),
         Op::TakeBinds { val, pat } => take_binds(ctx, *val, *pat),
         Op::Fmt { dst, spec } => fmt_op(ctx, *dst, *spec)?,
@@ -283,7 +283,15 @@ fn user_un(ctx: &StepCtx, op: super::bytecode::UnKind, a: &Value) -> Result<Opti
 fn build_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
     Ok(match op {
         Op::MakeVec { dst, base, count } => make_vec(ctx, *dst, *base, *count),
-        Op::MakeMap { dst, set } => ctx.set(*dst, if *set { Value::set() } else { Value::map() }),
+        Op::MakeMap { dst, set, sorted } => ctx.set(
+            *dst,
+            match (*set, *sorted) {
+                (false, false) => Value::map(),
+                (true, false) => Value::set(),
+                (false, true) => Value::sorted_map(),
+                (true, true) => Value::sorted_set(),
+            },
+        ),
         Op::MakeTuple { dst, base, count } => make_tuple(ctx, *dst, *base, *count),
         Op::MakeArrayRepeat { dst, val, count } => array_repeat(ctx, *dst, *val, *count)?,
         Op::MakeRange {
@@ -521,8 +529,10 @@ pub(super) fn build_default(ir: &DefaultIr) -> Value {
         DefaultIr::Str => Value::str(String::new()),
         DefaultIr::Unit => Value::Unit,
         DefaultIr::Vec => Value::vec(Vec::new()),
-        DefaultIr::Map => Value::map(),
-        DefaultIr::Set => Value::set(),
+        DefaultIr::Map(false) => Value::map(),
+        DefaultIr::Map(true) => Value::sorted_map(),
+        DefaultIr::Set(false) => Value::set(),
+        DefaultIr::Set(true) => Value::sorted_set(),
         DefaultIr::Opt => Value::none(),
         DefaultIr::Tuple(items) => Value::tuple(items.iter().map(build_default).collect()),
         DefaultIr::Struct { shape, fields } => {

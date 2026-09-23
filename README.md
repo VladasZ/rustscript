@@ -69,9 +69,10 @@ machine without a Rust toolchain.
 
 ## What works
 
-Functions, closures, structs, enums, patterns, loops with labels, iterators,
-`Vec`, `VecDeque`, strings, maps, sets, `Option`, `Result`, `?`, formatting,
-modules and local path crates. Async with `#[tokio::main]`, spawned tasks, timers and HTTP.
+Functions, nested functions, closures, structs, enums, patterns, loops with
+labels, iterators, `Vec`, `VecDeque`, strings, maps, sets, `BTreeMap` and
+`BTreeSet` in key order, `Option`, `Result`, `?`, formatting, modules and
+local path crates. Async with `#[tokio::main]`, spawned tasks, timers and HTTP.
 Traits with default methods, user `Display`, `Debug`, `Drop`, operator and
 `Iterator` impls, associated consts, `u128` and `i128`. Real sharing through
 `Rc`, `Arc`, `RefCell`, `Cell` and `Mutex`, and a conflicting `RefCell`
@@ -85,7 +86,9 @@ collections. Bridged crates include
 [`reqwest`](https://github.com/seanmonstar/reqwest),
 [`regex`](https://github.com/rust-lang/regex), [`tokio`](https://tokio.rs),
 [`chrono`](https://github.com/chronotope/chrono),
-[`rand`](https://github.com/rust-random/rand), and more. Windows builds also
+[`rand`](https://github.com/rust-random/rand), and more. Serde covers
+`rename`, `rename_all`, `default` and all 4 enum forms, and `json!` builds
+json values. Windows builds also
 bridge [`winreg`](https://github.com/gentoo90/winreg-rs),
 [`windows-service`](https://github.com/mullvad/windows-service-rs), and
 [`wmi`](https://github.com/ohadravid/wmi-rs).
@@ -99,7 +102,16 @@ Every feature has a working example under `crates/examples/examples`.
 - Crates without a bridge fail `rust check`. A function of a bridged crate
   or of `std` that the interpreter lacks stops the script before it runs.
 - `std::thread` is not supported, use `tokio` tasks.
+- A `collect`, `parse`, `or_default`, `into` or `Default::default` whose
+  target type the interpreter can't tell stops the script before it runs.
+  Name the type with a turbofish or a `let` annotation.
 - `static mut` is rejected. Plain statics behave like constants.
+- `env::set_var` and `env::remove_var` change the environment the script and
+  its child processes see, not the real process environment. `which`,
+  `dirs::home_dir`, `env::temp_dir` and `tempfile` read the changed values.
+  Crates that read the environment on their own see the environment the
+  script started with, like the proxy variables of `reqwest`, `NO_COLOR` for
+  `colored` and `TZ` for `chrono`.
 - Lifetimes and generic bounds mean nothing at runtime.
 - Glob imports from script modules are not supported.
 - `HashMap` and `HeaderMap` iterate in insertion order. Real Rust promises no

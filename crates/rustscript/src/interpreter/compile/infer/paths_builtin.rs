@@ -100,27 +100,37 @@ impl Infer<'_, '_> {
             }
             ("HashSet" | "BTreeSet", "new" | "with_capacity") => {
                 self.walk_args(args);
-                Ty::Set(Box::new(item_want))
+                Ty::Set(Box::new(item_want), owner == "BTreeSet")
             }
             ("HashSet" | "BTreeSet", "from") => {
                 let got = self.arg(args, 0, &Ty::Unknown);
-                Ty::Set(Box::new(got.item()))
+                Ty::Set(Box::new(got.item()), owner == "BTreeSet")
             }
             ("HashMap" | "BTreeMap" | "IndexMap", "new" | "with_capacity") => {
                 self.walk_args(args);
                 match (turbofish, turbofish2, expected) {
-                    (Some(k), Some(v), _) => Ty::Map(Box::new(k), Box::new(v)),
-                    (_, _, Ty::Map(..)) => expected.clone(),
-                    _ => Ty::Map(Box::new(Ty::Unknown), Box::new(Ty::Unknown)),
+                    (Some(k), Some(v), _) => Ty::Map(Box::new(k), Box::new(v), owner == "BTreeMap"),
+                    (_, _, Ty::Map(k, v, _)) => Ty::Map(k.clone(), v.clone(), owner == "BTreeMap"),
+                    _ => Ty::Map(
+                        Box::new(Ty::Unknown),
+                        Box::new(Ty::Unknown),
+                        owner == "BTreeMap",
+                    ),
                 }
             }
             ("HashMap" | "BTreeMap", "from") => {
                 let got = self.arg(args, 0, &Ty::Unknown);
                 match got.item() {
-                    Ty::Tuple(kv) if kv.len() == 2 => {
-                        Ty::Map(Box::new(kv[0].clone()), Box::new(kv[1].clone()))
-                    }
-                    _ => Ty::Map(Box::new(Ty::Unknown), Box::new(Ty::Unknown)),
+                    Ty::Tuple(kv) if kv.len() == 2 => Ty::Map(
+                        Box::new(kv[0].clone()),
+                        Box::new(kv[1].clone()),
+                        owner == "BTreeMap",
+                    ),
+                    _ => Ty::Map(
+                        Box::new(Ty::Unknown),
+                        Box::new(Ty::Unknown),
+                        owner == "BTreeMap",
+                    ),
                 }
             }
             ("String", "new" | "with_capacity" | "from" | "from_utf8_lossy") => {

@@ -104,13 +104,26 @@ pub(super) fn call_path(
     match path.id {
         PathId::UnreachableMatch => bail!("no match arm matched the value"),
         PathId::AssertFailed => bail!("assertion failed"),
+        PathId::JsonNull => return Ok(ctx.set(dst, Value::none())),
+        PathId::JsonValue | PathId::JsonArray | PathId::JsonObject => {
+            let parts = ctx.take_range(abase, argc);
+            return Ok(ctx.set(
+                dst,
+                crate::interpreter::serde_types::json_part(path.id, parts)?,
+            ));
+        }
         PathId::EnsureFail => {
             let message = if argc > 0 {
                 ctx.stack[ctx.base + abase].display()
             } else {
                 "condition failed".to_string()
             };
-            return Ok(ctx.set(dst, Value::err(Value::str(message))));
+            return Ok(ctx.set(
+                dst,
+                Value::err(crate::interpreter::anyhow_bridge::anyhow_value(vec![
+                    message,
+                ])),
+            ));
         }
         _ => {}
     }
@@ -123,7 +136,7 @@ pub(super) fn call_path(
     }
     let mut v = vm.dispatch_call(path, call_args)?;
     if let Some(ty) = &path.coerce {
-        v = vm.coerce_result(v, ty);
+        v = vm.coerce_result(v, ty)?;
     }
     Ok(ctx.set(dst, v))
 }

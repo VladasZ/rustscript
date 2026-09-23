@@ -55,13 +55,17 @@ pub(super) fn entry_method(
     Ok(match method.id {
         BuiltinId::OrInsert => {
             let default = arg(args, 0)?;
-            m.lock().entry(key.clone()).or_insert(default);
+            m.lock().get_or_insert_with(key.clone(), || default);
             Value::Ref(Arc::new(ValueRef::map_entry(m.clone(), key.clone())))
         }
+        // the compiler lowers the map's value type into `method.default`, strict inference
+        // refuses a script where it could not
         BuiltinId::OrDefault => {
+            let Some(ir) = method.default.as_deref() else {
+                bail!("`or_default` needs the map's value type");
+            };
             m.lock()
-                .entry(key.clone())
-                .or_insert_with(|| Value::vec(Vec::new()));
+                .get_or_insert_with(key.clone(), || super::vm_step::build_default(ir));
             Value::Ref(Arc::new(ValueRef::map_entry(m.clone(), key.clone())))
         }
         BuiltinId::Key => key.to_value(),
@@ -431,6 +435,12 @@ pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
                 }
                 Value::ok(v)
             }
+            // `Option::context` makes an anyhow error of the message
+            None if method.id == BuiltinId::Context => {
+                Value::err(super::anyhow_bridge::anyhow_value(vec![
+                    arg(args, 0)?.display(),
+                ]))
+            }
             None => Value::err(arg(args, 0)?),
         },
         _ => return generic_method(recv, method, args),
@@ -537,8 +547,7 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
                 Value::ok(inner)
             } else {
                 let ctx = args.first().map(Value::display).unwrap_or_default();
-                let cause = inner.display();
-                Value::err(Value::str(format!("{ctx}\nCaused by: {cause}")))
+                Value::err(super::anyhow_bridge::with_context(ctx, &inner))
             }
         }
         _ => return generic_method(recv, method, args),

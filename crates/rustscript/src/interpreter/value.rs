@@ -4,9 +4,7 @@ use num_traits::AsPrimitive;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
-use indexmap::IndexMap;
 use parking_lot::Mutex;
-use rustc_hash::FxBuildHasher;
 
 use super::bytecode::Const;
 use super::enum_def::{ERR, EnumDef, EnumKind, NONE, NOT_UNICODE, OK, OPTION, RESULT, SOME};
@@ -15,16 +13,15 @@ use super::numeric::IntWidth;
 pub use super::rs_str::RsStr;
 
 mod map_key;
+mod map_store;
 mod value_ref;
 
 pub use map_key::MapKey;
 use map_key::keys_of;
+pub use map_store::MapStore;
 pub use value_ref::ValueRef;
 
 pub type List = Arc<Mutex<Vec<Value>>>;
-/// Insertion ordered like every script map, hashed with Fx, `SipHash` was the top of the
-/// `word_count` profile.
-pub type MapStore = IndexMap<MapKey, Value, FxBuildHasher>;
 pub type Map = Arc<Mutex<MapStore>>;
 
 /// A set is a map with Unit values. The kind makes iteration yield elements and picks the set
@@ -176,7 +173,12 @@ impl Value {
     }
 
     pub fn map() -> Value {
-        Value::Map(Arc::new(Mutex::new(IndexMap::default())), MapKind::Map)
+        Value::Map(Arc::new(Mutex::new(MapStore::default())), MapKind::Map)
+    }
+
+    /// a `BTreeMap`, kept in key order
+    pub fn sorted_map() -> Value {
+        Value::Map(Arc::new(Mutex::new(MapStore::sorted())), MapKind::Map)
     }
 
     pub fn map_of(map: MapStore) -> Value {
@@ -184,7 +186,12 @@ impl Value {
     }
 
     pub fn set() -> Value {
-        Value::Map(Arc::new(Mutex::new(IndexMap::default())), MapKind::Set)
+        Value::Map(Arc::new(Mutex::new(MapStore::default())), MapKind::Set)
+    }
+
+    /// a `BTreeSet`, kept in key order
+    pub fn sorted_set() -> Value {
+        Value::Map(Arc::new(Mutex::new(MapStore::sorted())), MapKind::Set)
     }
 
     pub fn set_of(map: MapStore) -> Value {
@@ -297,8 +304,7 @@ impl Value {
             Value::Char(_) => Value::Char('\0'),
             Value::Str(_) => Value::str(""),
             Value::Vec(_) => Value::vec(Vec::new()),
-            Value::Map(_, MapKind::Map) => Value::map(),
-            Value::Map(_, MapKind::Set) => Value::set(),
+            Value::Map(m, kind) => Value::Map(Arc::new(Mutex::new(m.lock().empty_like())), *kind),
             Value::Enum { def, .. } if def.kind == EnumKind::Option => Value::none(),
             _ => Value::Unit,
         }
@@ -342,6 +348,9 @@ impl Value {
             (Value::Struct(a), Value::Struct(b)) => Arc::ptr_eq(a, b),
             (Value::Cell(_, a), Value::Cell(_, b)) => Arc::ptr_eq(a, b),
             (Value::Native(a), Value::Native(b)) => Arc::ptr_eq(a, b),
+            // a closure lent through `&mut` comes back as the same closure, dropping the old one
+            // would clear the captures the new one still uses
+            (Value::Closure(a), Value::Closure(b)) => Arc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -432,8 +441,12 @@ impl Value {
             Value::Char(_) => "char",
             Value::Str(_) => "String",
             Value::Vec(_) => "Vec",
-            Value::Map(_, MapKind::Map) => "HashMap",
-            Value::Map(_, MapKind::Set) => "HashSet",
+            Value::Map(m, kind) => match (*kind, m.lock().is_sorted()) {
+                (MapKind::Map, false) => "HashMap",
+                (MapKind::Set, false) => "HashSet",
+                (MapKind::Map, true) => "BTreeMap",
+                (MapKind::Set, true) => "BTreeSet",
+            },
             Value::Tuple(_) => "tuple",
             Value::Struct(_) => "struct",
             Value::Enum { .. } => "enum",
@@ -624,6 +637,8 @@ impl Value {
                 Native::IoErr { display, .. }
                 | Native::JoinErr { display, .. }
                 | Native::ParseErr { display, .. } => display.clone(),
+                // `{}` of an anyhow error is its outermost message
+                Native::Anyhow(chain) => chain.first().cloned().unwrap_or_default(),
                 other => format!("<{}>", other.type_name()),
             },
             // `VarError` implements `Display`, scripts print it with `{e}`

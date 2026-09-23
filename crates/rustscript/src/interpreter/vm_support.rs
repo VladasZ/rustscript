@@ -25,7 +25,7 @@ impl ScriptPanic {
                 self.file, self.line, self.col, self.message
             )
         };
-        if std::env::var_os("RUST_BACKTRACE").is_some_and(|v| v != "0") {
+        if super::env_overlay::var_os("RUST_BACKTRACE").is_some_and(|v| v != "0") {
             out.push_str("stack backtrace:\n");
             out.push_str(&self.trace);
             out.push('\n');

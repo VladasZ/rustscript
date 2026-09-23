@@ -52,7 +52,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = { workspace = true }
-syn = { workspace = true, features = ["visit"] }
+syn = { workspace = true, features = ["visit", "visit-mut"] }
 proc-macro2 = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order"] }
 reqwest = { workspace = true }
@@ -105,7 +105,7 @@ pretty_assertions = { workspace = true }
 chrono = { workspace = true }
 proc-macro2 = { workspace = true }
 serde = { workspace = true }
-syn = { workspace = true, features = ["visit"] }
+syn = { workspace = true, features = ["visit", "visit-mut"] }
 toml = { workspace = true }
 
 [target."cfg(windows)".dependencies]

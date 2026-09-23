@@ -22,6 +22,9 @@ impl Infer<'_, '_> {
             .map(|s| s.ident.to_string())
             .collect();
         if let [name] = segs.as_slice() {
+            if self.lookup(name).is_some() {
+                self.refine_local(name, expected);
+            }
             if let Some(ty) = self.lookup(name) {
                 return ty;
             }
@@ -365,11 +368,11 @@ pub(super) fn bind_generic(param: &Ty, arg: &Ty, bound: &mut HashMap<Arc<str>, T
             bound.entry(name.clone()).or_insert_with(|| got.clone());
         }
         (Ty::Vec(p), Ty::Vec(a))
-        | (Ty::Set(p), Ty::Set(a))
+        | (Ty::Set(p, _), Ty::Set(a, _))
         | (Ty::Option(p), Ty::Option(a))
         | (Ty::Iter(p), Ty::Iter(a) | Ty::Vec(a))
         | (Ty::Range(p), Ty::Range(a)) => bind_generic(p, a, bound),
-        (Ty::Map(pk, pv), Ty::Map(ak, av)) | (Ty::Result(pk, pv), Ty::Result(ak, av)) => {
+        (Ty::Map(pk, pv, _), Ty::Map(ak, av, _)) | (Ty::Result(pk, pv), Ty::Result(ak, av)) => {
             bind_generic(pk, ak, bound);
             bind_generic(pv, av, bound);
         }
@@ -392,12 +395,16 @@ pub(super) fn subst(ty: &Ty, bound: &HashMap<Arc<str>, Ty>) -> Ty {
     match ty {
         Ty::Generic(name) => bound.get(name).cloned().unwrap_or_else(|| ty.clone()),
         Ty::Vec(t) => Ty::vec(subst(t, bound)),
-        Ty::Set(t) => Ty::Set(Box::new(subst(t, bound))),
+        Ty::Set(t, sorted) => Ty::Set(Box::new(subst(t, bound)), *sorted),
         Ty::Option(t) => Ty::option(subst(t, bound)),
         Ty::Iter(t) => Ty::iter(subst(t, bound)),
         Ty::Range(t) => Ty::Range(Box::new(subst(t, bound))),
         Ty::Entry(t) => Ty::Entry(Box::new(subst(t, bound))),
-        Ty::Map(k, v) => Ty::Map(Box::new(subst(k, bound)), Box::new(subst(v, bound))),
+        Ty::Map(k, v, sorted) => Ty::Map(
+            Box::new(subst(k, bound)),
+            Box::new(subst(v, bound)),
+            *sorted,
+        ),
         Ty::Result(k, v) => Ty::result(subst(k, bound), subst(v, bound)),
         Ty::Tuple(items) => Ty::Tuple(items.iter().map(|t| subst(t, bound)).collect()),
         Ty::Closure(params, ret) => Ty::Closure(
@@ -416,12 +423,12 @@ pub(super) fn erase(ty: &Ty) -> Ty {
     match ty {
         Ty::Generic(_) => Ty::Unknown,
         Ty::Vec(t) => Ty::vec(erase(t)),
-        Ty::Set(t) => Ty::Set(Box::new(erase(t))),
+        Ty::Set(t, sorted) => Ty::Set(Box::new(erase(t)), *sorted),
         Ty::Option(t) => Ty::option(erase(t)),
         Ty::Iter(t) => Ty::iter(erase(t)),
         Ty::Range(t) => Ty::Range(Box::new(erase(t))),
         Ty::Entry(t) => Ty::Entry(Box::new(erase(t))),
-        Ty::Map(k, v) => Ty::Map(Box::new(erase(k)), Box::new(erase(v))),
+        Ty::Map(k, v, sorted) => Ty::Map(Box::new(erase(k)), Box::new(erase(v)), *sorted),
         Ty::Result(k, v) => Ty::result(erase(k), erase(v)),
         Ty::Tuple(items) => Ty::Tuple(items.iter().map(erase).collect()),
         Ty::Closure(params, ret) => {

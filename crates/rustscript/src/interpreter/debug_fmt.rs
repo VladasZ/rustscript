@@ -122,6 +122,7 @@ fn write_value(value: &Value, opts: &DebugOpts, indent: usize, out: &mut String)
                     pad(indent)
                 ));
             }
+            Native::Anyhow(chain) => out.push_str(&super::anyhow_bridge::debug(chain)),
             Native::IoErr { debug, .. }
             | Native::JoinErr { debug, .. }
             | Native::ParseErr { debug, .. } => out.push_str(debug),
@@ -258,6 +259,10 @@ fn write_map(
 
 /// `Name`, `Name(a, b)` or `Name { f: v }`
 fn write_struct(s: &StructData, opts: &DebugOpts, indent: usize, out: &mut String) {
+    if let Some((secs, nanos)) = duration_parts(s) {
+        out.push_str(&super::format::duration_debug(secs, nanos, opts.leaf));
+        return;
+    }
     out.push_str(super::resolver::bare(s.name()));
     let values = s.values.lock().clone();
     if values.is_empty() {
@@ -294,6 +299,21 @@ fn write_struct(s: &StructData, opts: &DebugOpts, indent: usize, out: &mut Strin
         }
         out.push_str(" }");
     }
+}
+
+/// The seconds and nanoseconds of the bridge's `std::time::Duration`, a script struct of the
+/// same name has a type id.
+fn duration_parts(s: &StructData) -> Option<(u64, u32)> {
+    if &**s.name() != "Duration"
+        || s.shape.type_id != super::bytecode::NO_TYPE
+        || s.shape.fields.len() != 2
+    {
+        return None;
+    }
+    let values = s.values.lock();
+    let secs = u64::try_from(values.first()?.int_parts()?.0).ok()?;
+    let nanos = u32::try_from(values.get(1)?.int_parts()?.0).ok()?;
+    Some((secs, nanos))
 }
 
 /// The slot is snapshotted, not held, so a nested read can't relock it.

@@ -27,6 +27,8 @@ pub enum Const {
 
 /// Sentinel destination for a discarded result, so a map insert skips the `Some(old)` nobody reads.
 pub const NO_CONV: u16 = u16::MAX;
+/// The `try_targets` entry of a function that returns `anyhow::Result`.
+pub const ANYHOW_ERROR: &str = "anyhow::Error";
 
 pub const DISCARD: Reg = Reg::MAX;
 
@@ -164,8 +166,10 @@ pub enum DefaultIr {
     Str,
     Unit,
     Vec,
-    Map,
-    Set,
+    /// the flag is a `BTreeMap`
+    Map(bool),
+    /// the flag is a `BTreeSet`
+    Set(bool),
     Opt,
     Tuple(Vec<DefaultIr>),
     /// a derived `Default`

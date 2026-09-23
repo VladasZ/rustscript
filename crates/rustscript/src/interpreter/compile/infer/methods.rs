@@ -9,8 +9,6 @@ use crate::interpreter::numeric::IntWidth;
 impl Infer<'_, '_> {
     pub(super) fn method_call(&mut self, m: &syn::ExprMethodCall, expected: &Ty) -> Ty {
         let name = m.method.to_string();
-        let recv_want = receiver_expectation(&name, expected);
-        let recv = self.expr(&m.receiver, &recv_want);
         let turbofish = m
             .turbofish
             .as_ref()
@@ -21,6 +19,13 @@ impl Infer<'_, '_> {
                 })
             })
             .map(|t| self.lower(t));
+        // a `collect::<Vec<Point>>()` turbofish says what the chain yields, like an annotation
+        let wanted = match (&turbofish, name.as_str()) {
+            (Some(t), "collect") => self.vars.meet(t, expected),
+            _ => expected.clone(),
+        };
+        let recv_want = receiver_expectation(&name, &wanted);
+        let recv = self.expr(&m.receiver, &recv_want);
         let args: Vec<&Expr> = m.args.iter().collect();
         // a script type answers from its own impl
         if let Ty::Struct(canon) | Ty::Enum(canon) = &recv
@@ -56,11 +61,11 @@ impl Infer<'_, '_> {
                 let item = (**item).clone();
                 self.vec_method(&recv, &item, &name, &args, turbofish, expected)
             }
-            Ty::Set(item) => {
+            Ty::Set(item, _) => {
                 let item = (**item).clone();
                 self.set_method(&recv, &item, &name, &args)
             }
-            Ty::Map(key, value) => {
+            Ty::Map(key, value, _) => {
                 let (key, value) = ((**key).clone(), (**value).clone());
                 self.map_method(&recv, &key, &value, &name, &args)
             }
@@ -490,6 +495,25 @@ fn receiver_expectation(name: &str, expected: &Ty) -> Ty {
         }
         "ok" => match expected {
             Ty::Option(t) => Ty::result((**t).clone(), Ty::Unknown),
+            _ => Ty::Unknown,
+        },
+        "collect" => collect_source(expected),
+        _ => Ty::Unknown,
+    }
+}
+
+/// The iterator a `collect` into `target` pulls from, so closures up the chain learn their
+/// item type from the collection it lands in.
+pub(super) fn collect_source(target: &Ty) -> Ty {
+    match target {
+        Ty::Vec(t) | Ty::Set(t, _) => Ty::iter((**t).clone()),
+        Ty::Map(k, v, _) => Ty::iter(Ty::Tuple(vec![(**k).clone(), (**v).clone()])),
+        Ty::Result(ok, err) => match collect_source(ok) {
+            Ty::Iter(item) => Ty::iter(Ty::result(*item, (**err).clone())),
+            _ => Ty::Unknown,
+        },
+        Ty::Option(inner) => match collect_source(inner) {
+            Ty::Iter(item) => Ty::iter(Ty::option(*item)),
             _ => Ty::Unknown,
         },
         _ => Ty::Unknown,

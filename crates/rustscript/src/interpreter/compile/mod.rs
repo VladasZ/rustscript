@@ -57,34 +57,6 @@ struct LoopCtx {
     label: Option<String>,
 }
 
-/// Where the source states a `collect` target, the call is renamed to a target specific method.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum CollectTarget {
-    Str,
-    Map,
-    Set,
-}
-
-impl CollectTarget {
-    pub(super) fn method_name(self) -> &'static str {
-        match self {
-            Self::Str => "collect_string",
-            Self::Map => "collect_map",
-            Self::Set => "collect_set",
-        }
-    }
-
-    pub(super) fn of_type(ty: &syn::Type) -> Option<Self> {
-        let syn::Type::Path(p) = ty else { return None };
-        match p.path.segments.last()?.ident.to_string().as_str() {
-            "String" => Some(Self::Str),
-            "HashMap" | "BTreeMap" => Some(Self::Map),
-            "HashSet" | "BTreeSet" => Some(Self::Set),
-            _ => None,
-        }
-    }
-}
-
 pub struct Compiler<'a> {
     ctx: &'a Ctx<'a>,
     /// the type of every expression of the body being compiled, see `infer`
@@ -612,12 +584,14 @@ mod block;
 mod calls;
 mod captures;
 mod closure;
+mod collect;
 mod defaults;
 mod expr;
 mod flow;
 mod fn_state;
 mod guards;
 mod infer;
+mod json_macro;
 mod liveness;
 mod macros;
 mod method;
@@ -628,6 +602,8 @@ mod struct_lit;
 mod support;
 mod typed;
 mod walks;
+
+use collect::{CollectInner, CollectTarget};
 
 use support::{
     FloatTy, NumericTy, bin_kind, collect_pattern_names, expr_kind, first_generic_type,
@@ -742,4 +718,21 @@ pub(super) fn derives_default(attrs: &[syn::Attribute]) -> bool {
         });
         parsed.is_ok() && found
     })
+}
+
+impl<'r> Ctx<'r> {
+    /// The same tables for a chunk in module `module`, inside an impl of `impl_type` or not.
+    pub fn at(
+        &self,
+        module: usize,
+        modules: &[crate::loader::ModuleSrc],
+        impl_type: Option<&'r str>,
+    ) -> Ctx<'r> {
+        Ctx {
+            module,
+            file: modules[module].file.clone(),
+            impl_type,
+            ..*self
+        }
+    }
 }

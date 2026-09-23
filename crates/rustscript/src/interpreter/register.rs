@@ -15,9 +15,9 @@ use super::bytecode::Chunk;
 use super::resolver::{ModuleSyms, Res, Resolver, StructDef};
 use super::{enum_def, impls, resolver};
 
-/// Real Rust prints the `Debug` form, except `anyhow::Error` whose `Debug` is the bare message.
-/// A `Result` with less than 2 type arguments is the anyhow shape unless the imports say otherwise.
-pub(super) fn main_err_uses_display(
+/// Whether a return type is `anyhow::Result<T>` or `Result<T, anyhow::Error>`, through the
+/// imports. Its `?` wraps every error into an anyhow chain.
+pub(super) fn returns_anyhow_result(
     output: &syn::ReturnType,
     uses: &HashMap<String, Vec<String>>,
 ) -> bool {
@@ -191,8 +191,7 @@ fn register_item(
             let canon: Arc<str> = resolver.canon(m, &name).into();
             resolver.modules[m].enums.insert(name, canon.clone());
             let type_id = resolver.type_id(&canon);
-            let def = enum_def::EnumDef::new(
-                enum_def::EnumKind::Other,
+            let def = enum_def::EnumDef::with_serde(
                 canon.clone(),
                 type_id,
                 e.variants.iter().map(|v| {
@@ -201,6 +200,7 @@ fn register_item(
                         matches!(v.fields, syn::Fields::Unit),
                     )
                 }),
+                super::serde_attrs::serde_enum(e),
             );
             resolver.enum_defs.insert(canon.clone(), def);
             resolver.enums.insert(canon, Rc::new(e.clone()));

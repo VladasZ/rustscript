@@ -4,6 +4,7 @@ use anyhow::{Result, anyhow, bail};
 use num_traits::AsPrimitive;
 
 use super::{Flow, StepCtx};
+use crate::interpreter::anyhow_bridge::{self, anyhow_value};
 use crate::interpreter::bytecode::{MacroKind, PPat};
 use crate::interpreter::numeric::{float_to_int, truncate};
 use crate::interpreter::ops::{self};
@@ -54,6 +55,10 @@ pub(super) fn convert_early(ctx: &StepCtx, early: Value, conv: u16) -> Result<Va
     let Some(payload) = payload else {
         return Ok(early);
     };
+    // `?` into an `anyhow::Result` wraps any error as the root of an anyhow chain
+    if &**target == crate::interpreter::bytecode::ANYHOW_ERROR {
+        return Ok(Value::err(anyhow_bridge::into_anyhow(payload)));
+    }
     let Some(chunk) = ctx.vm.conversion_impl(target, &payload) else {
         return Ok(early);
     };
@@ -66,11 +71,11 @@ pub(super) fn cast_op(ctx: &mut StepCtx, dst: u16, src: u16, ty: u16) -> Result<
     Ok(ctx.set(dst, v))
 }
 
-pub(super) fn coerce_op(ctx: &mut StepCtx, dst: u16, src: u16, ty: u16) -> Flow {
+pub(super) fn coerce_op(ctx: &mut StepCtx, dst: u16, src: u16, ty: u16) -> Result<Flow> {
     let v = ctx
         .vm
-        .coerce_value(ctx.get(src).clone(), &ctx.cur.coerces[ty as usize]);
-    ctx.set(dst, v)
+        .coerce_value(ctx.get(src).clone(), &ctx.cur.coerces[ty as usize])?;
+    Ok(ctx.set(dst, v))
 }
 
 pub(super) fn test_bind(ctx: &mut StepCtx, val: u16, pat: u16, dst: u16) -> Flow {
@@ -169,9 +174,9 @@ pub(super) fn macro_call(ctx: &mut StepCtx, kind: MacroKind, dst: u16, spec: u16
             ctx.set(dst, Value::Unit)
         }
         MacroKind::Panic => bail!("{text}"),
-        MacroKind::Anyhow => ctx.set(dst, Value::err(Value::str(text))),
+        MacroKind::Anyhow => ctx.set(dst, anyhow_value(vec![text])),
         MacroKind::Bail => {
-            ctx.ret = Value::err(Value::str(text));
+            ctx.ret = Value::err(anyhow_value(vec![text]));
             Flow::Ret
         }
     })

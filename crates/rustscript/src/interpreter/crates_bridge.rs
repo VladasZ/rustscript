@@ -31,7 +31,7 @@ pub(super) fn crate_bridge(id: PathId, args: &[Value]) -> Result<Option<Value>> 
     let s0 = || args.first().map(Value::display).unwrap_or_default();
     Ok(Some(match id {
         // dirs
-        PathId::DirsHomeDir => opt_path(dirs::home_dir()),
+        PathId::DirsHomeDir => opt_path(super::env_overlay::home_dir()),
         PathId::DirsCacheDir => opt_path(dirs::cache_dir()),
         PathId::DirsConfigDir => opt_path(dirs::config_dir()),
         PathId::DirsConfigLocalDir => opt_path(dirs::config_local_dir()),
@@ -43,10 +43,7 @@ pub(super) fn crate_bridge(id: PathId, args: &[Value]) -> Result<Option<Value>> 
         PathId::DirsDownloadDir => opt_path(dirs::download_dir()),
         PathId::DirsDocumentDir => opt_path(dirs::document_dir()),
         // which
-        PathId::WhichWhich => match which::which(s0()) {
-            Ok(p) => Value::ok(make_path(p.display().to_string())),
-            Err(e) => Value::err(Value::str(e.to_string())),
-        },
+        PathId::WhichWhich => env_aware(id, &s0())?,
         // glob
         PathId::GlobGlob => match glob::glob(&s0()) {
             Ok(paths) => Value::ok(Value::vec(
@@ -112,18 +109,9 @@ pub(super) fn crate_bridge(id: PathId, args: &[Value]) -> Result<Option<Value>> 
                 ("suffix".into(), Value::str("")),
             ],
         ),
-        PathId::TempfileTempdir => match tempfile::tempdir() {
-            Ok(d) => Value::ok(Native::TempDir(d).wrap()),
-            Err(e) => Value::err(Value::str(e.to_string())),
-        },
-        PathId::TempfileTempfile => match tempfile::tempfile() {
-            Ok(f) => Value::ok(Native::File(std::io::BufReader::new(f)).wrap()),
-            Err(e) => Value::err(Value::str(e.to_string())),
-        },
-        PathId::NamedTempFileNew => match tempfile::NamedTempFile::new() {
-            Ok(f) => Value::ok(Native::NamedTempFile(f).wrap()),
-            Err(e) => Value::err(Value::str(e.to_string())),
-        },
+        PathId::TempfileTempdir | PathId::TempfileTempfile | PathId::NamedTempFileNew => {
+            env_aware(id, &s0())?
+        }
         // winreg
         PathId::RegKeyPredef => super::winreg_bridge::predef(args),
         // windows-service
@@ -198,6 +186,43 @@ pub(super) fn base64_method(s: &StructData, method: &MethodName, args: &[Value])
             }
         }
         _ => bail!("unknown method `{method}` on a base64 engine"),
+    })
+}
+
+/// The calls that read an environment variable the script may have changed, see
+/// `env_overlay`.
+fn env_aware(id: PathId, arg: &str) -> Result<Value> {
+    Ok(match id {
+        PathId::WhichWhich => {
+            let found = match super::env_overlay::search_path() {
+                Some(path) => which::which_in(arg, Some(path), std::env::current_dir()?),
+                None => which::which(arg),
+            };
+            match found {
+                Ok(p) => Value::ok(make_path(p.display().to_string())),
+                Err(e) => Value::err(Value::str(e.to_string())),
+            }
+        }
+        PathId::TempfileTempdir => match super::env_overlay::tempfile_dir()
+            .map_or_else(tempfile::tempdir, tempfile::tempdir_in)
+        {
+            Ok(d) => Value::ok(Native::TempDir(d).wrap()),
+            Err(e) => Value::err(Value::str(e.to_string())),
+        },
+        PathId::TempfileTempfile => match super::env_overlay::tempfile_dir()
+            .map_or_else(tempfile::tempfile, tempfile::tempfile_in)
+        {
+            Ok(f) => Value::ok(Native::File(std::io::BufReader::new(f)).wrap()),
+            Err(e) => Value::err(Value::str(e.to_string())),
+        },
+        PathId::NamedTempFileNew => match super::env_overlay::tempfile_dir().map_or_else(
+            tempfile::NamedTempFile::new,
+            tempfile::NamedTempFile::new_in,
+        ) {
+            Ok(f) => Value::ok(Native::NamedTempFile(f).wrap()),
+            Err(e) => Value::err(Value::str(e.to_string())),
+        },
+        _ => bail!("not an environment aware call"),
     })
 }
 

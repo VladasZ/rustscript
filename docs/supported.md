@@ -94,7 +94,7 @@ The `supported_page_is_current` test enforces it.
 
 ## Iterator
 
-`all`, `any`, `as_str`, `by_ref`, `chain`, `cloned`, `collect`, `collect_map`, `collect_set`, `collect_string`, `copied`, `count`, `enumerate`, `filter`, `filter_map`, `find`, `find_map`, `for_each`, `inspect`, `last`, `map`, `max`, `min`, `next`, `next_back`, `nth`, `peek`, `peekable`, `position`, `product`, `rev`, `rposition`, `skip`, `skip_while`, `step_by`, `sum`, `take`, `take_while`, `to_vec`, `zip`
+`all`, `any`, `as_str`, `by_ref`, `chain`, `cloned`, `collect`, `collect_btree_map`, `collect_btree_set`, `collect_map`, `collect_option`, `collect_result`, `collect_set`, `collect_string`, `copied`, `count`, `enumerate`, `filter`, `filter_map`, `find`, `find_map`, `for_each`, `inspect`, `last`, `map`, `max`, `min`, `next`, `next_back`, `nth`, `peek`, `peekable`, `position`, `product`, `rev`, `rposition`, `skip`, `skip_while`, `step_by`, `sum`, `take`, `take_while`, `to_vec`, `zip`
 
 ## Line
 
@@ -102,7 +102,7 @@ The `supported_page_is_current` test enforces it.
 
 ## Map
 
-`as_array`, `as_array_mut`, `as_object`, `as_object_mut`, `clone`, `contains`, `contains_key`, `count`, `difference`, `drain`, `entry`, `get`, `get_mut`, `insert`, `intersection`, `into_iter`, `into_keys`, `into_values`, `is_disjoint`, `is_empty`, `is_subset`, `is_superset`, `iter`, `keys`, `len`, `remove`, `symmetric_difference`, `union`, `values`, `values_mut`
+`as_array`, `as_array_mut`, `as_object`, `as_object_mut`, `btree_range`, `clone`, `contains`, `contains_key`, `count`, `difference`, `drain`, `entry`, `first`, `first_key_value`, `get`, `get_mut`, `insert`, `intersection`, `into_iter`, `into_keys`, `into_values`, `is_disjoint`, `is_empty`, `is_subset`, `is_superset`, `iter`, `keys`, `last`, `last_key_value`, `len`, `pop_first`, `pop_last`, `remove`, `symmetric_difference`, `union`, `values`, `values_mut`
 
 ## Match
 
@@ -230,7 +230,7 @@ The `supported_page_is_current` test enforces it.
 
 ## Vec
 
-`all`, `any`, `append`, `as_array`, `as_array_mut`, `as_object`, `as_object_mut`, `as_slice`, `back`, `back_mut`, `binary_search`, `by_ref`, `chunks`, `clear`, `clone`, `cloned`, `collect`, `collect_map`, `collect_set`, `collect_string`, `concat`, `contains`, `copied`, `copy_from_slice`, `count`, `dedup`, `enumerate`, `extend`, `extend_from_slice`, `filter`, `filter_map`, `find`, `find_map`, `first`, `first_mut`, `flat_map`, `flatten`, `fold`, `for_each`, `front`, `front_mut`, `get`, `get_mut`, `insert`, `into_iter`, `is_empty`, `iter`, `iter_mut`, `join`, `last`, `last_mut`, `len`, `make_contiguous`, `map`, `max`, `max_by_key`, `min`, `min_by_key`, `next`, `next_back`, `nth`, `partition`, `peekable`, `pop`, `pop_back`, `pop_front`, `position`, `product`, `push`, `push_back`, `push_front`, `reduce`, `remove`, `repeat`, `retain`, `rev`, `reverse`, `skip`, `skip_while`, `sort`, `sort_by`, `sort_by_cached_key`, `sort_by_key`, `sort_unstable`, `split_first`, `sum`, `swap`, `swap_remove`, `take`, `take_while`, `to_vec`, `truncate`, `windows`
+`all`, `any`, `append`, `as_array`, `as_array_mut`, `as_object`, `as_object_mut`, `as_slice`, `back`, `back_mut`, `binary_search`, `by_ref`, `chunks`, `clear`, `clone`, `cloned`, `collect`, `collect_btree_map`, `collect_btree_set`, `collect_map`, `collect_option`, `collect_result`, `collect_set`, `collect_string`, `concat`, `contains`, `copied`, `copy_from_slice`, `count`, `dedup`, `enumerate`, `extend`, `extend_from_slice`, `filter`, `filter_map`, `find`, `find_map`, `first`, `first_mut`, `flat_map`, `flatten`, `fold`, `for_each`, `front`, `front_mut`, `get`, `get_mut`, `insert`, `into_iter`, `is_empty`, `iter`, `iter_mut`, `join`, `last`, `last_mut`, `len`, `make_contiguous`, `map`, `max`, `max_by_key`, `min`, `min_by_key`, `next`, `next_back`, `nth`, `partition`, `peekable`, `pop`, `pop_back`, `pop_front`, `position`, `product`, `push`, `push_back`, `push_front`, `reduce`, `remove`, `repeat`, `retain`, `rev`, `reverse`, `skip`, `skip_while`, `sort`, `sort_by`, `sort_by_cached_key`, `sort_by_key`, `sort_unstable`, `split_first`, `sum`, `swap`, `swap_remove`, `take`, `take_while`, `to_vec`, `truncate`, `windows`
 
 ## VerifyingKey
 

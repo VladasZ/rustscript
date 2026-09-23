@@ -49,8 +49,10 @@ impl Compiler<'_> {
             "char" => Some(DefaultIr::Char),
             "String" | "str" => Some(DefaultIr::Str),
             "Vec" | "VecDeque" => Some(DefaultIr::Vec),
-            "HashMap" | "BTreeMap" => Some(DefaultIr::Map),
-            "HashSet" | "BTreeSet" => Some(DefaultIr::Set),
+            "HashMap" => Some(DefaultIr::Map(false)),
+            "BTreeMap" => Some(DefaultIr::Map(true)),
+            "HashSet" => Some(DefaultIr::Set(false)),
+            "BTreeSet" => Some(DefaultIr::Set(true)),
             "Option" => Some(DefaultIr::Opt),
             _ => None,
         };
@@ -161,6 +163,11 @@ impl Compiler<'_> {
         };
         if let Some(canon) = self.result_error_type(ty) {
             self.cur().ret_error = Some(canon);
+        } else if crate::interpreter::register::returns_anyhow_result(
+            output,
+            &self.ctx.resolver.modules[self.ctx.module].uses,
+        ) {
+            self.cur().ret_error = Some(Arc::from(crate::interpreter::bytecode::ANYHOW_ERROR));
         }
     }
 

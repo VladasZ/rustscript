@@ -1,5 +1,9 @@
 ::assert_failed
 ::ensure_fail
+::json_array
+::json_null
+::json_object
+::json_value
 ::unreachable_match
 Arc::clone
 Arc::new
@@ -8,7 +12,9 @@ BASE64_STANDARD
 BASE64_STANDARD_NO_PAD
 BASE64_URL_SAFE
 BASE64_URL_SAFE_NO_PAD
+BTreeMap::from
 BTreeMap::new
+BTreeSet::from
 BTreeSet::new
 Block::bordered
 Block::default
@@ -65,8 +71,10 @@ HKEY_CURRENT_CONFIG
 HKEY_CURRENT_USER
 HKEY_LOCAL_MACHINE
 HKEY_USERS
+HashMap::from
 HashMap::new
 HashMap::with_capacity
+HashSet::from
 HashSet::new
 HashSet::with_capacity
 Header::default

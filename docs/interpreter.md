@@ -10,7 +10,9 @@ There are 4 steps, all in `crates/rustscript/src`.
 
 1. The loader in `loader.rs` collects the files. `mod name;` loads `name.rs`
    or `name/mod.rs` like `rustc` does. Local path crates from the nearest
-   `Cargo.toml` are grafted in as modules.
+   `Cargo.toml` are grafted in as modules. A `fn` declared inside a block
+   moves to its module under a hidden name, and the uses of its name in that
+   block are renamed to match, see `nested_fns.rs`.
 2. Every file is parsed with [`syn`](https://github.com/dtolnay/syn).
 3. The resolver gives every item a key like `foo::bar` and resolves imports,
    renames, `crate::`, `self::`, `super::` and re-exports at load time.
@@ -93,6 +95,19 @@ its registers on return.
 Strings are `Arc<String>` read lock free. `push` grows in place when the
 buffer is not shared, so a build up loop stays linear.
 
+A `HashMap` or `HashSet` keeps insertion order. A `BTreeMap` or `BTreeSet`
+keeps key order on every insert, the order a derived `Ord` gives the key, see
+`value/map_store.rs`.
+
+`env::set_var` and `env::remove_var` write to a map the interpreter keeps,
+never to the real process environment. Reads, spawned children and the
+bridges that read `PATH`, `HOME` and the temp directory variables see it, see
+`env_overlay.rs`.
+
+An `anyhow::Error` is a chain of messages, the outermost context first, so
+`{}`, `{:#}` and `{:?}` print what anyhow prints. A `?` in a function that
+returns `anyhow::Result` wraps any other error as the root of a chain.
+
 Iterators are lazy native resources, so `by_ref`, `peekable` and open ranges
 keep their real semantics. `rev` is lazy too, each pull is a `next_back` of
 the source, so a `map` closure runs from the back, including through
@@ -108,14 +123,24 @@ typed ops that skip the generic dispatch. There is no hot loop tier any more,
 the old one guessed types at runtime and fell back on a miss. A typed tier on
 top of the inference table is planned.
 
-## One inference pass
+## Type inference
 
-The compiler runs one type inference pass per function body before lowering
+The compiler runs a type inference pass per function body before lowering
 it. The result is one table, the type of every expression, read by literal
-widths, typed ops, `collect` targets, `Default` and `From` resolution. The
-pass rejects nothing, `rustc` did that in `rust check`. An expression it
-cannot type is `Unknown` and the runtime goes by what the value says.
-Lifetimes mean nothing at runtime.
+widths, typed ops, `collect` targets, `Default` and `From` resolution. An
+expression it cannot type is `Unknown` and the runtime goes by what the value
+says. Lifetimes mean nothing at runtime.
+
+A local whose type a later use fills in, `let mut v = Vec::new()` then
+`Ok(v)` against the return type, makes a second pass that starts the `let`
+from what the first pass learned. An `if` or `match` branch typed before a
+later branch named the type is walked again with it.
+
+The pass is strict where a guess could print a wrong result. A `collect`,
+`parse`, `or_default` or `Default::default` whose target type it can't tell
+stops the script before it runs with an `unsupported` error that asks for a
+turbofish or a `let` annotation. So does an `into` with no known target when
+a script `From` impl could take the value.
 
 ## Numerics match debug Rust
 
@@ -199,6 +224,16 @@ by its real owner, so an `Rc` cycle leaks like in real Rust.
 A panic prints the standard header with file and line, a script backtrace and
 exits with 101. An `Err` out of `main` prints `Error: ...` and exits with 1.
 Same as compiled Rust.
+
+## Serde
+
+Struct and enum layouts are precomputed at load, see `serde_types.rs`.
+`rename`, `rename_all`, `skip_serializing_if = "Option::is_none"` and
+`default`, with or without a path, apply to fields. A `default` compiles to a
+chunk per field and runs each time the field is missing. Enums read and write
+in all 4 serde forms, externally, internally and adjacently tagged and
+untagged. An enum reads from the parsed json tree, because an internally
+tagged or untagged one must see the whole object first.
 
 ## Crate bridges
 

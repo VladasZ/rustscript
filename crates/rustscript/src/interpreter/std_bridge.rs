@@ -96,7 +96,7 @@ pub(super) fn native_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
         | PathId::SerdeJsonToStringPretty
         | PathId::SerdeJsonToValue => return bridge_serde_json(id, args).map(Some),
         PathId::EnvArgs => Value::vec(super::script_args().into_iter().map(Value::str).collect()),
-        PathId::EnvVar => match std::env::var(s(0)?) {
+        PathId::EnvVar => match super::env_overlay::var(&s(0)?) {
             Ok(v) => Value::ok(Value::str(v)),
             // so `Err(VarError::NotPresent)` matches and `{e:?}` prints `NotPresent`
             Err(std::env::VarError::NotPresent) => {
@@ -113,25 +113,25 @@ pub(super) fn native_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
             Err(e) => Value::err(super::native::io_error_value(&e)),
         },
         PathId::EnvSetVar => {
-            // Safety: scripts treat the environment as script wide state.
-            unsafe { std::env::set_var(s(0)?, s(1)?) };
+            super::env_overlay::set(s(0)?, s(1)?);
             Value::Unit
         }
         PathId::EnvRemoveVar => {
-            unsafe { std::env::remove_var(s(0)?) };
+            super::env_overlay::remove(s(0)?);
             Value::Unit
         }
-        PathId::EnvVarOs => match std::env::var_os(s(0)?) {
+        PathId::EnvVarOs => match super::env_overlay::var_os(&s(0)?) {
             Some(v) => Value::some(make_os_string(v.to_string_lossy().into_owned())),
             None => Value::none(),
         },
         PathId::EnvVars | PathId::EnvVarsOs => Value::vec(
-            std::env::vars()
+            super::env_overlay::vars()
+                .into_iter()
                 .map(|(k, v)| Value::tuple(vec![Value::str(k), Value::str(v)]))
                 .collect(),
         ),
         PathId::EnvSetCurrentDir => wrap_unit(std::env::set_current_dir(s(0)?)),
-        PathId::EnvTempDir => make_path(std::env::temp_dir().display().to_string()),
+        PathId::EnvTempDir => make_path(super::env_overlay::temp_dir().display().to_string()),
         PathId::ProcessExit => {
             let code = args
                 .first()

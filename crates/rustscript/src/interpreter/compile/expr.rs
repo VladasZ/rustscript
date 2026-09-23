@@ -394,6 +394,21 @@ impl Compiler<'_> {
                 to: 0,
                 conv,
             });
+            // the owned arguments already built for a call this `?` interrupts are dropped
+            // first, the newest first like the panic unwinder, a drop list runs in reverse
+            let open: Vec<Reg> = self
+                .cur()
+                .unwind_temps
+                .iter()
+                .filter(|(reg, until)| *until == usize::MAX && *reg != dst)
+                .map(|(reg, _)| *reg)
+                .collect();
+            if !open.is_empty() {
+                let f = self.cur();
+                f.drop_lists.push(open.into());
+                let list = idx16(f.drop_lists.len() - 1);
+                self.emit(Op::DropScope { list });
+            }
             let depth = self.cur().scope_order.len();
             self.emit_scope_drops(depth);
             self.emit(Op::Ret { src: dst });

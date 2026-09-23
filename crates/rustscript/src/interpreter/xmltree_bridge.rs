@@ -4,8 +4,6 @@
 use anyhow::{Result, bail};
 use xmltree::{Element, Namespace, XMLNode};
 
-use indexmap::IndexMap;
-
 use super::bytecode::{BuiltinId, MethodName};
 use super::enum_def::XML_NODE;
 use super::std_bridge::as_i64;
@@ -180,7 +178,7 @@ fn option_value(v: &Value) -> Option<Value> {
 }
 
 fn map_value(pairs: impl IntoIterator<Item = (Value, Value)>) -> Value {
-    let mut map = IndexMap::default();
+    let mut map = crate::interpreter::value::MapStore::default();
     for (k, v) in pairs {
         if let Some(key) = k.into_key() {
             map.insert(key, v);

@@ -475,11 +475,19 @@ impl Vm {
                     self.call_closure_data(&clo(0)?, &[])?
                 }
             }
-            BuiltinId::OkOrElse | BuiltinId::WithContext => {
+            BuiltinId::OkOrElse => {
                 if is_some {
                     Value::ok(inner()?)
                 } else {
                     Value::err(self.call_closure_data(&clo(0)?, &[])?)
+                }
+            }
+            BuiltinId::WithContext => {
+                if is_some {
+                    Value::ok(inner()?)
+                } else {
+                    let ctx = self.call_closure_data(&clo(0)?, &[])?.display();
+                    Value::err(super::anyhow_bridge::anyhow_value(vec![ctx]))
                 }
             }
             BuiltinId::OrElse => {
@@ -560,10 +568,7 @@ impl Vm {
                     Value::ok(inner()?)
                 } else {
                     let ctx = self.call_closure_data(&clo(0)?, &[])?.display();
-                    Value::err(Value::str(format!(
-                        "{ctx}\nCaused by: {}",
-                        inner()?.display()
-                    )))
+                    Value::err(super::anyhow_bridge::with_context(ctx, &inner()?))
                 }
             }
             _ => return Ok(None),

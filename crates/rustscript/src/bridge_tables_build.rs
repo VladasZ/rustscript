@@ -64,7 +64,9 @@ pub const BRIDGES: &[Bridge] = &[
     b("vecmap.rs", "vec_removal", "Vec"),
     b("vecmap.rs", "vec_copy_from_slice", "Vec"),
     b("vecmap.rs", "vec_min_max", "Vec"),
-    b("vecmap.rs", "map_method", "Map"),
+    b("map_methods.rs", "map_method", "Map"),
+    b("map_methods.rs", "sorted_ends", "Map"),
+    b("map_methods.rs", "set_or_sorted_method", "Map"),
     b("higher_order.rs", "higher_order", "*"),
     b("higher_order.rs", "vec_higher_order", "Vec"),
     b("higher_order.rs", "vec_transform_ho", "Vec"),
@@ -75,6 +77,7 @@ pub const BRIDGES: &[Bridge] = &[
     b("higher_order.rs", "result_higher_order", "Result"),
     b("higher_order.rs", "entry_higher_order", "Entry"),
     b("iterator/drive.rs", "iterator_method", "Iterator"),
+    b("iterator/drive.rs", "collect_terminal", "Iterator"),
     b("iterator/reduce.rs", "iterator_higher_order", "Iterator"),
     b("iterator/reduce.rs", "iterator_predicate", "Iterator"),
     // dispatch front door

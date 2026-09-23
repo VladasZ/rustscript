@@ -177,7 +177,7 @@ impl Infer<'_, '_> {
             "as_bool" => Ty::option(Ty::Bool),
             "as_array" | "as_array_mut" => Ty::option(Ty::vec(Ty::Json)),
             "as_object" | "as_object_mut" => {
-                Ty::option(Ty::Map(Box::new(Ty::Str), Box::new(Ty::Json)))
+                Ty::option(Ty::Map(Box::new(Ty::Str), Box::new(Ty::Json), false))
             }
             "is_null" | "is_string" | "is_number" | "is_boolean" | "is_array" | "is_object"
             | "is_i64" | "is_u64" | "is_f64" => Ty::Bool,

@@ -11,7 +11,8 @@ use super::{
     Handle, IteratorState, Step, chars, int_arg, lines_next, option_inner, owns_items, value_iter,
     wrap,
 };
-use crate::interpreter::bytecode::{BuiltinId, MethodName};
+use crate::interpreter::bytecode::{BuiltinId, DefaultIr, MethodName};
+use crate::interpreter::enum_def::{EnumKind, OK, SOME};
 use crate::interpreter::native::Native;
 use crate::interpreter::shared::usize_i64;
 use crate::interpreter::value::{ClosureData, MapKind, Value};
@@ -291,6 +292,36 @@ impl Vm {
         self.run_chunk(&clo.chunk, args, &clo.captured, owned)
     }
 
+    /// `collect` into `Result<C, E>` or `Option<C>`. It stops pulling at the first `Err` or
+    /// `None` and hands that back. Like std the source drops what it still holds first, then
+    /// the items collected so far. `method.default` is the empty `C`, see `collect_inner`.
+    fn collect_short_circuit(
+        self: &Arc<Self>,
+        iterator: &Handle,
+        method: &MethodName,
+    ) -> Result<Value> {
+        let result = method.id == BuiltinId::CollectResult;
+        let mut kept = Vec::new();
+        while let Some(item) = self.iterator_next(iterator)? {
+            match short_circuit_payload(item, result)? {
+                Ok(payload) => kept.push(payload),
+                Err(residual) => {
+                    self.drop_leftovers(iterator)?;
+                    for value in kept {
+                        self.discard(iterator, value)?;
+                    }
+                    return Ok(residual);
+                }
+            }
+        }
+        let inner = collect_inner(kept, method.default.as_deref())?;
+        Ok(if result {
+            Value::ok(inner)
+        } else {
+            Value::some(inner)
+        })
+    }
+
     /// A by value terminal consumes the iterator, so what it never pulled drops inside the
     /// call, before the statement goes on. `take(0).collect()` drops the source's items there.
     pub(super) fn drop_leftovers(self: &Arc<Self>, iterator: &Handle) -> Result<()> {
@@ -412,6 +443,42 @@ impl Vm {
         })
     }
 
+    /// The `collect` forms, picked by the target the compiler named.
+    fn collect_terminal(self: &Arc<Self>, iterator: &Handle, method: &MethodName) -> Result<Value> {
+        let scalar = method.scalar.as_ref();
+        Ok(match method.id {
+            BuiltinId::Collect | BuiltinId::ToVec => {
+                if in_place::collects_nothing(iterator, scalar) {
+                    Value::vec(Vec::new())
+                } else {
+                    Value::vec(self.drain_iterator(iterator)?)
+                }
+            }
+            BuiltinId::CollectString => Value::str(
+                self.drain_iterator(iterator)?
+                    .iter()
+                    .map(Value::display)
+                    .collect::<String>(),
+            ),
+            BuiltinId::CollectMap | BuiltinId::CollectBtreeMap => {
+                crate::interpreter::vecmap::collect_map(
+                    self.drain_iterator(iterator)?,
+                    method.id == BuiltinId::CollectBtreeMap,
+                )?
+            }
+            BuiltinId::CollectSet | BuiltinId::CollectBtreeSet => {
+                crate::interpreter::vecmap::collect_set(
+                    self.drain_iterator(iterator)?,
+                    method.id == BuiltinId::CollectBtreeSet,
+                )?
+            }
+            BuiltinId::CollectResult | BuiltinId::CollectOption => {
+                self.collect_short_circuit(iterator, method)?
+            }
+            _ => bail!("not a collect"),
+        })
+    }
+
     pub(in crate::interpreter) fn iterator_method(
         self: &Arc<Self>,
         iterator: &Handle,
@@ -474,25 +541,15 @@ impl Vm {
             BuiltinId::Sum => self.iterator_sum(iterator, scalar)?,
             BuiltinId::Product => self.iterator_product(iterator, scalar)?,
             BuiltinId::Max | BuiltinId::Min => self.iterator_extreme(iterator, method.id)?,
-            BuiltinId::Collect | BuiltinId::ToVec => {
-                if in_place::collects_nothing(iterator, scalar) {
-                    Value::vec(Vec::new())
-                } else {
-                    Value::vec(self.drain_iterator(iterator)?)
-                }
-            }
-            BuiltinId::CollectString => Value::str(
-                self.drain_iterator(iterator)?
-                    .iter()
-                    .map(Value::display)
-                    .collect::<String>(),
-            ),
-            BuiltinId::CollectMap => {
-                crate::interpreter::vecmap::collect_map(self.drain_iterator(iterator)?)?
-            }
-            BuiltinId::CollectSet => {
-                crate::interpreter::vecmap::collect_set(self.drain_iterator(iterator)?)?
-            }
+            BuiltinId::Collect
+            | BuiltinId::ToVec
+            | BuiltinId::CollectString
+            | BuiltinId::CollectMap
+            | BuiltinId::CollectBtreeMap
+            | BuiltinId::CollectSet
+            | BuiltinId::CollectBtreeSet
+            | BuiltinId::CollectResult
+            | BuiltinId::CollectOption => self.collect_terminal(iterator, method)?,
             BuiltinId::Rev if supports_back(iterator) => wrap(IteratorState::Rev {
                 source: iterator.clone(),
             }),
@@ -535,9 +592,52 @@ pub(super) fn consumes_iterator(id: BuiltinId) -> bool {
             | BuiltinId::CollectString
             | BuiltinId::CollectMap
             | BuiltinId::CollectSet
+            | BuiltinId::CollectBtreeMap
+            | BuiltinId::CollectBtreeSet
+            | BuiltinId::CollectResult
+            | BuiltinId::CollectOption
             | BuiltinId::Fold
             | BuiltinId::Reduce
             | BuiltinId::ForEach
             | BuiltinId::Partition
     )
+}
+
+/// The payload of an `Ok` or `Some`, or the `Err` or `None` item itself that ends the collect.
+pub(crate) fn short_circuit_payload(
+    item: Value,
+    result: bool,
+) -> Result<std::result::Result<Value, Value>> {
+    let (kind, keep) = if result {
+        (EnumKind::Result, OK)
+    } else {
+        (EnumKind::Option, SOME)
+    };
+    match &item {
+        Value::Enum { def, variant, data } if def.kind == kind => {
+            if *variant == keep {
+                Ok(Ok(Value::payload(data)?))
+            } else {
+                Ok(Err(item))
+            }
+        }
+        other => bail!(
+            "collect into {} needs {} items, got {}",
+            if result { "Result" } else { "Option" },
+            if result { "Result" } else { "Option" },
+            other.type_name()
+        ),
+    }
+}
+
+/// The collection inside a collected `Result` or `Option`, picked by its empty value.
+pub(crate) fn collect_inner(items: Vec<Value>, inner: Option<&DefaultIr>) -> Result<Value> {
+    use crate::interpreter::vecmap::{collect_map, collect_set};
+    Ok(match inner {
+        Some(DefaultIr::Str) => Value::str(items.iter().map(Value::display).collect::<String>()),
+        Some(DefaultIr::Map(sorted)) => collect_map(items, *sorted)?,
+        Some(DefaultIr::Set(sorted)) => collect_set(items, *sorted)?,
+        Some(DefaultIr::Unit) => Value::Unit,
+        _ => Value::vec(items),
+    })
 }

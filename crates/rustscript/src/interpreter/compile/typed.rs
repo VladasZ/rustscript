@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use super::infer::Ty;
-use super::{CollectTarget, Compiler};
+use super::{CollectInner, CollectTarget, Compiler};
 use crate::interpreter::bytecode::{DefaultIr, ScalarTy};
 use crate::interpreter::typeir::TypeIr;
 
@@ -29,8 +29,10 @@ impl Compiler<'_> {
     pub(super) fn collect_target_of(&self, m: &syn::ExprMethodCall) -> Option<CollectTarget> {
         match self.types.of_node(m) {
             Ty::Str => Some(CollectTarget::Str),
-            Ty::Map(..) => Some(CollectTarget::Map),
-            Ty::Set(_) => Some(CollectTarget::Set),
+            Ty::Map(_, _, sorted) => Some(CollectTarget::Map(sorted)),
+            Ty::Set(_, sorted) => Some(CollectTarget::Set(sorted)),
+            Ty::Result(ok, _) => Some(CollectTarget::Result(CollectInner::of_ty(&ok))),
+            Ty::Option(inner) => Some(CollectTarget::Option(CollectInner::of_ty(&inner))),
             _ => None,
         }
     }
@@ -42,7 +44,9 @@ impl Compiler<'_> {
         match method {
             "parse" => result.payload().to_scalar(),
             "unwrap_or_default" | "sum" | "product" | "collect" | "collect_string"
-            | "collect_map" | "collect_set" => result.to_scalar(),
+            | "collect_map" | "collect_set" | "collect_btree_map" | "collect_btree_set" => {
+                result.to_scalar()
+            }
             "concat" => self.types.of(&m.receiver).item().to_scalar(),
             name if self.ctx.method_atoms.contains_key(name) => {
                 self.types.of(&m.receiver).to_scalar()
@@ -62,8 +66,8 @@ impl Compiler<'_> {
             Ty::Str => DefaultIr::Str,
             Ty::Unit => DefaultIr::Unit,
             Ty::Vec(_) => DefaultIr::Vec,
-            Ty::Map(..) => DefaultIr::Map,
-            Ty::Set(_) => DefaultIr::Set,
+            Ty::Map(_, _, sorted) => DefaultIr::Map(*sorted),
+            Ty::Set(_, sorted) => DefaultIr::Set(*sorted),
             Ty::Option(_) => DefaultIr::Opt,
             Ty::Tuple(items) => DefaultIr::Tuple(
                 items
@@ -81,8 +85,8 @@ impl Compiler<'_> {
     pub(super) fn type_ir_of(ty: &Ty) -> TypeIr {
         match ty {
             Ty::Vec(t) => TypeIr::Vec(Arc::new(Self::type_ir_of(t))),
-            Ty::Map(_, v) => TypeIr::MapValue(Arc::new(Self::type_ir_of(v))),
-            Ty::Set(t) => TypeIr::Set(Arc::new(Self::type_ir_of(t))),
+            Ty::Map(_, v, sorted) => TypeIr::MapValue(Arc::new(Self::type_ir_of(v)), *sorted),
+            Ty::Set(t, sorted) => TypeIr::Set(Arc::new(Self::type_ir_of(t)), *sorted),
             Ty::Option(t) => TypeIr::Option(Arc::new(Self::type_ir_of(t))),
             Ty::Struct(canon) => TypeIr::Struct(canon.clone()),
             Ty::Generic(name) => TypeIr::Generic(name.clone()),
@@ -120,8 +124,10 @@ fn from_key(ty: &Ty) -> Option<String> {
         Ty::Str => "String".to_string(),
         Ty::Unit => "()".to_string(),
         Ty::Vec(t) => format!("Vec<{}>", from_key(t)?),
-        Ty::Set(t) => format!("HashSet<{}>", from_key(t)?),
-        Ty::Map(k, v) => format!("HashMap<{},{}>", from_key(k)?, from_key(v)?),
+        Ty::Set(t, false) => format!("HashSet<{}>", from_key(t)?),
+        Ty::Set(t, true) => format!("BTreeSet<{}>", from_key(t)?),
+        Ty::Map(k, v, false) => format!("HashMap<{},{}>", from_key(k)?, from_key(v)?),
+        Ty::Map(k, v, true) => format!("BTreeMap<{},{}>", from_key(k)?, from_key(v)?),
         Ty::Option(t) => format!("Option<{}>", from_key(t)?),
         Ty::Result(t, e) => format!("Result<{},{}>", from_key(t)?, from_key(e)?),
         Ty::Tuple(items) => {
@@ -141,4 +147,20 @@ fn from_key(ty: &Ty) -> Option<String> {
         }
         _ => return None,
     })
+}
+
+impl Compiler<'_> {
+    /// Whether a script `From` impl could take this source, so an `into` with no known target
+    /// might have to run it. Without one, `into` keeps the value, which is what every builtin
+    /// conversion does here.
+    pub(super) fn user_from_accepts(&self, source: &Ty) -> bool {
+        let keys: Vec<String> = from_keys(source)
+            .into_iter()
+            .map(|key| format!("from<{key}>"))
+            .collect();
+        self.ctx.impl_sigs.keys().any(|(_, name)| {
+            name.starts_with("from")
+                && (source.is_unknown() || name == "from" || keys.contains(name))
+        })
+    }
 }

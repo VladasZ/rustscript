@@ -1,3 +1,4 @@
+mod anyhow_bridge;
 mod assoc;
 mod borrow;
 mod bridge;
@@ -12,6 +13,7 @@ mod debug_fmt;
 mod discard;
 mod ed25519_bridge;
 mod enum_def;
+mod env_overlay;
 mod format;
 mod higher_order;
 mod http;
@@ -20,6 +22,7 @@ mod int_methods;
 mod iterator;
 mod json_bridge;
 mod jwt_bridge;
+mod map_methods;
 mod methods;
 mod native;
 mod native_methods;
@@ -36,6 +39,7 @@ mod register;
 mod resolver;
 mod rs_str;
 mod serde_attrs;
+mod serde_types;
 mod service_bridge;
 mod shared;
 mod std_bridge;
@@ -65,7 +69,7 @@ use compile::{Compiler, Ctx};
 use register::{
     PendingConst, build_fn_index, build_impl_table, build_module_tree, collect_const_types,
     collect_fn_signatures, collect_impl_items, collect_mut_methods, collect_traits,
-    impl_name_tables, main_err_uses_display, register_items,
+    impl_name_tables, register_items, returns_anyhow_result,
 };
 use resolver::{Resolver, StructDef};
 pub use vm_support::{ErrReturn, ScriptPanic};
@@ -132,9 +136,11 @@ pub struct Interp {
     resolver: Resolver,
     /// lazy, so declaration order doesn't matter
     globals: RefCell<Vec<GlobalSlot>>,
+    /// `#[serde(default)]` fields by struct and slot, each a chunk that makes the value
+    serde_defaults: SerdeDefaults,
     /// for the bridge dispatch to expand aliases
     main_index: Option<u32>,
-    /// an `Err` out of `main` prints `Display` instead of `Debug`
+    /// `main` returns an `anyhow::Result`
     main_err_display: bool,
 }
 
@@ -168,41 +174,30 @@ impl Interp {
             .collect();
         let const_types = collect_const_types(modules, &resolver);
 
+        // every chunk compiles against the same tables, only its module and impl differ
+        let base = Ctx {
+            resolver: &resolver,
+            module: 0,
+            file: modules[0].file.clone(),
+            async_mode,
+            impl_type: None,
+            fn_signatures: &fn_signatures,
+            mut_methods: &mut_methods,
+            impl_methods: &impl_methods,
+            method_atoms: &method_atoms,
+            impl_sigs: &impl_sigs,
+            const_types: &const_types,
+            has_drop,
+        };
         let mut functions = Vec::with_capacity(pending_fns.len());
         for (m, f) in &pending_fns {
-            let ctx = Ctx {
-                resolver: &resolver,
-                module: *m,
-                file: modules[*m].file.clone(),
-                async_mode,
-                impl_type: None,
-                fn_signatures: &fn_signatures,
-                mut_methods: &mut_methods,
-                impl_methods: &impl_methods,
-                method_atoms: &method_atoms,
-                impl_sigs: &impl_sigs,
-                const_types: &const_types,
-                has_drop,
-            };
+            let ctx = base.at(*m, modules, None);
             let mut c = Compiler::new(&ctx);
             functions.push(Arc::new(c.compile_fn(&f.sig, &f.block)?));
         }
         let mut methods = Vec::with_capacity(pending_methods.len());
         for (ty, name, m, f) in &pending_methods {
-            let ctx = Ctx {
-                resolver: &resolver,
-                module: *m,
-                file: modules[*m].file.clone(),
-                async_mode,
-                impl_type: Some(ty),
-                fn_signatures: &fn_signatures,
-                mut_methods: &mut_methods,
-                impl_methods: &impl_methods,
-                method_atoms: &method_atoms,
-                impl_sigs: &impl_sigs,
-                const_types: &const_types,
-                has_drop,
-            };
+            let ctx = base.at(*m, modules, Some(ty));
             let mut c = Compiler::new(&ctx);
             methods.push((
                 ty.clone(),
@@ -213,36 +208,25 @@ impl Interp {
         let impls = build_impl_table(&resolver, methods, &method_atoms);
         let mut globals = Vec::with_capacity(pending_consts.len());
         for (m, expr, ty) in &pending_consts {
-            let ctx = Ctx {
-                resolver: &resolver,
-                module: *m,
-                file: modules[*m].file.clone(),
-                async_mode,
-                impl_type: None,
-                fn_signatures: &fn_signatures,
-                mut_methods: &mut_methods,
-                impl_methods: &impl_methods,
-                method_atoms: &method_atoms,
-                impl_sigs: &impl_sigs,
-                const_types: &const_types,
-                has_drop,
-            };
+            let ctx = base.at(*m, modules, None);
             let mut c = Compiler::new(&ctx);
             globals.push(GlobalSlot::Todo(Arc::new(c.compile_const(expr, ty)?)));
         }
+        let serde_defaults = compile_serde_defaults(&base, modules)?;
 
         let fn_index = build_fn_index(&resolver);
         let main_index = resolver.modules[0].fns.get("main").copied();
         let uses = resolver.modules[0].uses.clone();
         let main_err_display = main_index
             .and_then(|i| pending_fns.get(i as usize))
-            .is_some_and(|(_, f)| main_err_uses_display(&f.sig.output, &uses));
+            .is_some_and(|(_, f)| returns_anyhow_result(&f.sig.output, &uses));
         Ok(Interp {
             functions,
             fn_index,
             impls,
             resolver,
             globals: RefCell::new(globals),
+            serde_defaults,
             main_index,
             main_err_display,
         })
@@ -314,6 +298,7 @@ impl Interp {
             impls: self.impls.clone(),
             globals,
             structs: self.build_structs(),
+            serde_enums: self.build_enums(),
             enums,
             unit_structs,
             struct_names,
@@ -345,11 +330,14 @@ impl Interp {
             && def.kind == enum_def::EnumKind::Result
             && *variant == enum_def::ERR
         {
-            // a compiled binary prints `Debug` here, anyhow prints the bare message
-            let render: fn(&value::Value) -> String = if self.main_err_display {
-                value::Value::display
-            } else {
-                value::Value::debug
+            // a compiled binary prints `Debug` here, an `anyhow::Result` main holds an anyhow
+            // error even when the script returned a bare one through `into`
+            let render = |v: &value::Value| {
+                if self.main_err_display {
+                    anyhow_bridge::into_anyhow(v.clone()).debug()
+                } else {
+                    v.debug()
+                }
             };
             let msg = data.lock().first().map(render).unwrap_or_default();
             return Err(anyhow::Error::new(vm_support::ErrReturn(msg)));
@@ -364,4 +352,49 @@ impl Interp {
     fn resolver(&self) -> &Resolver {
         &self.resolver
     }
+}
+
+/// The chunk of each `#[serde(default)]` field, by struct and slot.
+type SerdeDefaults = HashMap<(Arc<str>, usize), Arc<Chunk>>;
+
+/// One chunk per `#[serde(default)]` field, compiled in the struct's module.
+fn compile_serde_defaults(base: &Ctx<'_>, modules: &[ModuleSrc]) -> Result<SerdeDefaults> {
+    let mut out = HashMap::new();
+    for (canon, def) in &base.resolver.structs {
+        let syn::Fields::Named(named) = &def.ast.fields else {
+            continue;
+        };
+        // the slot counts named fields like `build_structs`
+        for (slot, field) in named.named.iter().enumerate() {
+            let Some(default) = serde_attrs::serde_default(field) else {
+                continue;
+            };
+            let expr = serde_default_expr(&default, &def.ast.ident)?;
+            let ctx = base.at(def.module, modules, Some(canon));
+            let chunk = Compiler::new(&ctx).compile_const(&expr, &field.ty)?;
+            out.insert((canon.clone(), slot), Arc::new(chunk));
+        }
+    }
+    Ok(out)
+}
+
+/// The expression a missing `#[serde(default)]` field evaluates. A path may name `Self`, which
+/// is the struct.
+fn serde_default_expr(
+    default: &serde_attrs::SerdeDefault,
+    owner: &syn::Ident,
+) -> Result<syn::Expr> {
+    Ok(match default {
+        serde_attrs::SerdeDefault::Type => syn::parse_quote!(Default::default()),
+        serde_attrs::SerdeDefault::Path(text) => {
+            let mut path: syn::Path = syn::parse_str(text)
+                .map_err(|e| anyhow!("bad `#[serde(default = \"{text}\")]`: {e}"))?;
+            if let Some(first) = path.segments.first_mut()
+                && first.ident == "Self"
+            {
+                first.ident = owner.clone();
+            }
+            syn::parse_quote!(#path())
+        }
+    })
 }
