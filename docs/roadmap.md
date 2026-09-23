@@ -70,6 +70,57 @@ an empty message, so the two diverge before the real panic. Needs reduction with
 eval order or closure dispatch difference. The failure artifacts are in the
 Differential run artifacts.
 
+### `toml::from_str` into a derived struct accepts a missing required field
+
+Real Rust returns an error. The interpreter returns `Ok` with a broken value,
+and the script then panics on the first field read. `serde_json::from_str` with
+the same structs is right, so the fault is in the toml bridge, not in the
+`Deserialize` derive. Found in `shared/src/release.rs` of `hilen/build`, where a
+`hilen.toml` with no `[release]` table panics in place of a clean error.
+
+```rust
+#!/usr/bin/env rust
+
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct Outer {
+    inner: Inner,
+}
+
+#[derive(Deserialize)]
+struct Inner {
+    value: String,
+}
+
+fn main() {
+    let parsed: Result<Outer, toml::de::Error> = toml::from_str("other = 1");
+    match parsed {
+        Ok(outer) => println!("ok {}", outer.inner.value),
+        Err(e) => println!("err {e}"),
+    }
+}
+```
+
+Compiled, `rust FILE.rs cmp`:
+
+```
+err TOML parse error at line 1, column 1
+  |
+1 | other = 1
+  | ^
+missing field `inner`
+```
+
+Interpreted, rustscript 0.6.36:
+
+```
+thread 'main' panicked at zz_repro.rs:18:40:
+cannot read a field of enum
+```
+
+The script needs `serde` with `derive` and `toml` in the nearest `Cargo.toml`.
+
 ## Generator plan
 
 The differential generator is being brought closer to real Rust in phases,
