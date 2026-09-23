@@ -14,7 +14,7 @@ use super::is_assign_op;
 /// out, that binding is the closure's own local.
 pub(super) fn closure_written_names(
     body: &Block,
-    mutates: &dyn Fn(&str) -> bool,
+    mutates: &dyn Fn(&syn::ExprMethodCall) -> bool,
 ) -> HashSet<String> {
     let mut scan = Scan::new(mutates);
     scan.visit_block(body);
@@ -24,7 +24,7 @@ pub(super) fn closure_written_names(
 /// `closure_written_names` for a closure body, which is an expression.
 pub(super) fn closure_written_names_expr(
     body: &Expr,
-    mutates: &dyn Fn(&str) -> bool,
+    mutates: &dyn Fn(&syn::ExprMethodCall) -> bool,
 ) -> HashSet<String> {
     let mut scan = Scan::new(mutates);
     scan.visit_expr(body);
@@ -37,11 +37,11 @@ struct Scan<'m> {
     names: HashSet<String>,
     /// the names each open closure declares, its parameters and `let`s
     local: Vec<HashSet<String>>,
-    mutates: &'m dyn Fn(&str) -> bool,
+    mutates: &'m dyn Fn(&syn::ExprMethodCall) -> bool,
 }
 
 impl<'m> Scan<'m> {
-    fn new(mutates: &'m dyn Fn(&str) -> bool) -> Self {
+    fn new(mutates: &'m dyn Fn(&syn::ExprMethodCall) -> bool) -> Self {
         Scan {
             depth: 0,
             names: HashSet::new(),
@@ -137,7 +137,7 @@ impl<'ast> Visit<'ast> for Scan<'_> {
     }
 
     fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
-        if (self.mutates)(&m.method.to_string()) {
+        if (self.mutates)(m) {
             self.written(&m.receiver);
         }
         visit::visit_expr_method_call(self, m);

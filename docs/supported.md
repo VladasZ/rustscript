@@ -6,7 +6,7 @@ The `supported_page_is_current` test enforces it.
 
 ## any value
 
-`abs`, `abs_diff`, `acos`, `as_array`, `as_array_mut`, `as_bool`, `as_f64`, `as_i128`, `as_i64`, `as_object`, `as_object_mut`, `as_str`, `as_u64`, `as_usize`, `asin`, `atan`, `atan2`, `cbrt`, `ceil`, `checked_abs`, `checked_add`, `checked_div`, `checked_ilog2`, `checked_mul`, `checked_neg`, `checked_next_power_of_two`, `checked_pow`, `checked_rem`, `checked_rem_euclid`, `checked_shl`, `checked_shr`, `checked_sub`, `clamp`, `clear`, `clone`, `cmp`, `contains`, `copysign`, `cos`, `cosh`, `count`, `count_ones`, `count_zeros`, `div_ceil`, `div_euclid`, `envs`, `exp`, `exp2`, `extend`, `extend_from_slice`, `floor`, `fold`, `fract`, `get`, `hypot`, `ilog10`, `ilog2`, `into`, `is_array`, `is_boolean`, `is_empty`, `is_f64`, `is_finite`, `is_i64`, `is_infinite`, `is_multiple_of`, `is_nan`, `is_negative`, `is_normal`, `is_null`, `is_number`, `is_object`, `is_positive`, `is_power_of_two`, `is_sign_negative`, `is_sign_positive`, `is_string`, `is_subnormal`, `is_u64`, `isqrt`, `leading_ones`, `leading_zeros`, `len`, `ln`, `log10`, `log2`, `make_ascii_lowercase`, `make_ascii_uppercase`, `max`, `midpoint`, `min`, `mode`, `mul_add`, `next_multiple_of`, `next_power_of_two`, `overflowing_add`, `overflowing_mul`, `overflowing_sub`, `partial_cmp`, `pointer`, `pointer_mut`, `pow`, `powf`, `powi`, `push`, `push_str`, `readonly`, `recip`, `rem_euclid`, `repeat`, `reverse_bits`, `rotate_left`, `rotate_right`, `round`, `round_ties_even`, `saturating_add`, `saturating_mul`, `saturating_pow`, `saturating_sub`, `set_readonly`, `signum`, `sin`, `sinh`, `sqrt`, `swap_bytes`, `tan`, `tanh`, `then`, `then_some`, `then_with`, `to_be_bytes`, `to_degrees`, `to_le_bytes`, `to_ne_bytes`, `to_radians`, `to_string`, `total_cmp`, `trailing_ones`, `trailing_zeros`, `trunc`, `wrapping_abs`, `wrapping_add`, `wrapping_mul`, `wrapping_neg`, `wrapping_pow`, `wrapping_shl`, `wrapping_shr`, `wrapping_sub`
+`abs`, `abs_diff`, `acos`, `as_array`, `as_array_mut`, `as_bool`, `as_f64`, `as_i128`, `as_i64`, `as_object`, `as_object_mut`, `as_str`, `as_u64`, `as_usize`, `asin`, `atan`, `atan2`, `cbrt`, `ceil`, `checked_abs`, `checked_add`, `checked_div`, `checked_ilog2`, `checked_mul`, `checked_neg`, `checked_next_power_of_two`, `checked_pow`, `checked_rem`, `checked_rem_euclid`, `checked_shl`, `checked_shr`, `checked_sub`, `clamp`, `clear`, `clone`, `cmp`, `contains`, `copysign`, `cos`, `cosh`, `count`, `count_ones`, `count_zeros`, `div_ceil`, `div_euclid`, `envs`, `exp`, `exp2`, `extend`, `extend_from_slice`, `floor`, `fold`, `fract`, `get`, `hypot`, `ilog10`, `ilog2`, `into`, `is_array`, `is_boolean`, `is_empty`, `is_f64`, `is_finite`, `is_i64`, `is_infinite`, `is_multiple_of`, `is_nan`, `is_negative`, `is_normal`, `is_null`, `is_number`, `is_object`, `is_positive`, `is_power_of_two`, `is_sign_negative`, `is_sign_positive`, `is_string`, `is_subnormal`, `is_u64`, `isqrt`, `leading_ones`, `leading_zeros`, `len`, `ln`, `log10`, `log2`, `make_ascii_lowercase`, `make_ascii_uppercase`, `max`, `midpoint`, `min`, `mode`, `mul_add`, `next_multiple_of`, `next_power_of_two`, `overflowing_add`, `overflowing_mul`, `overflowing_sub`, `partial_cmp`, `pointer`, `pointer_mut`, `pow`, `powf`, `powi`, `push`, `push_str`, `readonly`, `recip`, `rem_euclid`, `repeat`, `retain`, `reverse_bits`, `rotate_left`, `rotate_right`, `round`, `round_ties_even`, `saturating_add`, `saturating_mul`, `saturating_pow`, `saturating_sub`, `set_readonly`, `signum`, `sin`, `sinh`, `sqrt`, `swap_bytes`, `tan`, `tanh`, `then`, `then_some`, `then_with`, `to_be_bytes`, `to_degrees`, `to_le_bytes`, `to_ne_bytes`, `to_radians`, `to_string`, `total_cmp`, `trailing_ones`, `trailing_zeros`, `trunc`, `wrapping_abs`, `wrapping_add`, `wrapping_mul`, `wrapping_neg`, `wrapping_pow`, `wrapping_shl`, `wrapping_shr`, `wrapping_sub`
 
 ## Base64
 
@@ -66,7 +66,7 @@ The `supported_page_is_current` test enforces it.
 
 ## Duration
 
-`as_micros`, `as_millis`, `as_nanos`, `as_secs`, `as_secs_f64`, `checked_add`, `checked_sub`, `is_zero`, `nanos`, `secs`, `subsec_micros`, `subsec_millis`, `subsec_nanos`
+`as_micros`, `as_millis`, `as_nanos`, `as_secs`, `as_secs_f64`, `checked_add`, `checked_sub`, `is_zero`, `subsec_micros`, `subsec_millis`, `subsec_nanos`
 
 ## Element
 
@@ -102,7 +102,7 @@ The `supported_page_is_current` test enforces it.
 
 ## Map
 
-`as_array`, `as_array_mut`, `as_object`, `as_object_mut`, `btree_range`, `clone`, `contains`, `contains_key`, `count`, `difference`, `drain`, `entry`, `first`, `first_key_value`, `get`, `get_mut`, `insert`, `intersection`, `into_iter`, `into_keys`, `into_values`, `is_disjoint`, `is_empty`, `is_subset`, `is_superset`, `iter`, `keys`, `last`, `last_key_value`, `len`, `pop_first`, `pop_last`, `remove`, `symmetric_difference`, `union`, `values`, `values_mut`
+`as_array`, `as_array_mut`, `as_object`, `as_object_mut`, `btree_range`, `clone`, `contains`, `contains_key`, `count`, `difference`, `drain`, `entry`, `extend`, `first`, `first_key_value`, `get`, `get_mut`, `insert`, `intersection`, `into_iter`, `into_keys`, `into_values`, `is_disjoint`, `is_empty`, `is_subset`, `is_superset`, `iter`, `iter_mut`, `keys`, `last`, `last_key_value`, `len`, `pop_first`, `pop_last`, `remove`, `symmetric_difference`, `union`, `values`, `values_mut`
 
 ## Match
 

@@ -162,6 +162,10 @@ impl Infer<'_, '_> {
                 let want = params.get(i).cloned().unwrap_or(Ty::Unknown);
                 self.expr(arg, &want);
             }
+            if ret.has_unknown() && !expected.is_unknown() {
+                let called = Ty::Closure(params, Box::new(expected.clone()));
+                self.refine_local(name, &called);
+            }
             return Some(*ret);
         }
         None

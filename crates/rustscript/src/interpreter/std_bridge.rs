@@ -1,15 +1,19 @@
 //! Bridges for `std` paths.
 
 use std::sync::Arc;
+use std::time::Duration;
+
+use num_traits::AsPrimitive;
 
 use anyhow::{Result, anyhow, bail};
 
 use super::bytecode::{BuiltinId, MethodName, PathId};
 use super::crates_bridge::crate_bridge;
 use super::enum_def::{NOT_PRESENT, NOT_UNICODE, VAR_ERROR};
-use super::json_bridge::bridge_serde_json;
+use super::json_paths::bridge_serde_json;
 use super::native::Native;
 use super::native_methods::{self, value_to_bytes};
+use super::numeric::IntWidth;
 use super::value::{StructData, Value};
 
 fn fs_native_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
@@ -252,30 +256,76 @@ pub(super) fn std_stream_method(
     }
 }
 
-pub(super) fn duration_from_value(v: &Value) -> Option<std::time::Duration> {
+pub(super) fn duration_from_value(v: &Value) -> Option<Duration> {
     if let Value::Struct(s) = v
         && &**s.name() == "Duration"
     {
-        let secs = u64::try_from(field_int(s, "secs")).unwrap_or_default();
-        let nanos = u32::try_from(field_int(s, "nanos")).unwrap_or_default();
-        return Some(std::time::Duration::new(secs, nanos));
+        let (secs, nanos) = duration_fields(s);
+        return Some(Duration::new(secs, nanos));
     }
     None
 }
 
-pub(super) fn make_duration(d: std::time::Duration) -> Value {
+/// The seconds are a real `u64`, a plain `field_int` would lose a count past `i64::MAX`.
+pub(super) fn duration_fields(s: &StructData) -> (u64, u32) {
+    let secs = s
+        .get("secs")
+        .and_then(|v| v.int_parts())
+        .and_then(|(n, _)| u64::try_from(n).ok())
+        .unwrap_or_default();
+    let nanos = u32::try_from(field_int(s, "nanos")).unwrap_or_default();
+    (secs, nanos)
+}
+
+pub(super) fn make_duration(d: Duration) -> Value {
     Value::struct_of(
         "Duration",
         [
             (
                 "secs".into(),
-                Value::Int(i64::try_from(d.as_secs()).unwrap_or(i64::MAX)),
+                Value::int_of_width(i128::from(d.as_secs()), IntWidth::U64),
             ),
             ("nanos".into(), Value::Int(i64::from(d.subsec_nanos()))),
         ],
     )
 }
 
+/// The `Duration` constructors, with the std panic messages.
+pub(super) fn duration_ctor(id: PathId, args: &[Value]) -> Result<Option<Value>> {
+    let int = |i: usize| -> Result<u64> {
+        args.get(i)
+            .and_then(Value::int_parts)
+            .and_then(|(n, _)| u64::try_from(n).ok())
+            .ok_or_else(|| anyhow!("`{id}` takes an unsigned integer"))
+    };
+    let float = |i: usize| -> Result<f64> {
+        match args.get(i) {
+            Some(Value::Float(f)) => Ok(*f),
+            Some(Value::F32(f)) => Ok(f64::from(*f)),
+            _ => bail!("`{id}` takes a float"),
+        }
+    };
+    let d = match id {
+        PathId::DurationNew => {
+            let secs = int(0)?;
+            let nanos = u32::try_from(int(1)?)?;
+            if secs.checked_add(u64::from(nanos / 1_000_000_000)).is_none() {
+                bail!("overflow in Duration::new");
+            }
+            Duration::new(secs, nanos)
+        }
+        PathId::DurationFromSecs => Duration::from_secs(int(0)?),
+        PathId::DurationFromMillis => Duration::from_millis(int(0)?),
+        PathId::DurationFromMicros => Duration::from_micros(int(0)?),
+        PathId::DurationFromNanos => Duration::from_nanos(int(0)?),
+        PathId::DurationFromSecsF64 => Duration::try_from_secs_f64(float(0)?)?,
+        PathId::DurationFromSecsF32 => {
+            Duration::try_from_secs_f32(AsPrimitive::<f32>::as_(float(0)?))?
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(make_duration(d)))
+}
 /// The Unix `MetadataExt` fields are gated so the interpreter still builds on `Windows`.
 pub(super) fn make_metadata(m: &std::fs::Metadata) -> Value {
     let mut f: Vec<(Arc<str>, Value)> = vec![
@@ -499,13 +549,6 @@ pub(super) fn field_int(s: &StructData, k: &str) -> i64 {
 
 pub(super) fn arg_str(args: &[Value], i: usize) -> String {
     args.get(i).map(path_like).unwrap_or_default()
-}
-
-pub(super) fn arg_int(args: &[Value], i: usize) -> i64 {
-    match args.get(i) {
-        Some(Value::Int(n)) => *n,
-        _ => 0,
-    }
 }
 
 pub(super) fn open_file(path: &str, opts: &std::fs::OpenOptions) -> Value {

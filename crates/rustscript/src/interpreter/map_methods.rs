@@ -26,6 +26,9 @@ pub(super) fn map_method(
     if let Some(out) = set_or_sorted_method(m, kind, method, args)? {
         return Ok(out);
     }
+    if let Some(out) = map_write_method(m, kind, method, args)? {
+        return Ok(out);
+    }
     Ok(match method.id {
         BuiltinId::Len | BuiltinId::Count => super::shared::usize_value(m.lock().len()),
         BuiltinId::IsEmpty => Value::Bool(m.lock().is_empty()),
@@ -79,9 +82,7 @@ pub(super) fn map_method(
         BuiltinId::IntoKeys => map_into_iterator(m, true),
         BuiltinId::IntoValues => map_into_iterator(m, false),
         BuiltinId::Keys => Value::vec(m.lock().keys().map(MapKey::to_value).collect()),
-        BuiltinId::Values | BuiltinId::ValuesMut => {
-            Value::vec(m.lock().values().cloned().collect())
-        }
+        BuiltinId::Values => Value::vec(m.lock().values().cloned().collect()),
         BuiltinId::Entry => {
             let Some(key) = args.first().and_then(Value::as_key) else {
                 bail!("invalid entry key");
@@ -337,4 +338,59 @@ pub(super) fn collect_set(items: Vec<Value>, sorted: bool) -> Result<Value> {
         set.insert(key, Value::Unit);
     }
     Ok(Value::set_of(set))
+}
+
+/// A `&mut V` into the entry of `key`.
+fn entry_ref(m: &Arc<Mutex<MapStore>>, key: MapKey) -> Value {
+    Value::Ref(Arc::new(super::value::ValueRef::map_entry(m.clone(), key)))
+}
+
+/// The methods that write into the entries, `values_mut`, `iter_mut` and `extend`. None for any
+/// other method.
+fn map_write_method(
+    m: &Arc<Mutex<MapStore>>,
+    kind: MapKind,
+    method: &MethodName,
+    args: &[Value],
+) -> Result<Option<Value>> {
+    Ok(Some(match method.id {
+        // `&mut V` items, so a write through one lands in the entry
+        BuiltinId::ValuesMut => {
+            let keys: Vec<MapKey> = m.lock().keys().cloned().collect();
+            Value::vec(keys.into_iter().map(|k| entry_ref(m, k)).collect())
+        }
+        BuiltinId::IterMut if kind != MapKind::Set => {
+            let keys: Vec<MapKey> = m.lock().keys().cloned().collect();
+            Value::vec(
+                keys.into_iter()
+                    .map(|k| Value::tuple(vec![k.to_value(), entry_ref(m, k)]))
+                    .collect(),
+            )
+        }
+        BuiltinId::Extend => {
+            let Some(Value::Vec(items)) = args.first() else {
+                bail!("`extend` needs something iterable");
+            };
+            let items = take(&mut *items.lock());
+            let mut store = m.lock();
+            for item in items {
+                let (k, v) = if kind == MapKind::Set {
+                    (item, Value::Unit)
+                } else {
+                    let Value::Tuple(pair) = item else {
+                        bail!("a map `extend` needs key and value pairs");
+                    };
+                    let mut pair = take(&mut *pair.lock()).into_iter();
+                    let (Some(k), Some(v)) = (pair.next(), pair.next()) else {
+                        bail!("a map `extend` needs key and value pairs");
+                    };
+                    (k, v)
+                };
+                let k = k.into_key().ok_or_else(|| anyhow!("invalid map key"))?;
+                store.insert(k, v);
+            }
+            Value::Unit
+        }
+        _ => return Ok(None),
+    }))
 }

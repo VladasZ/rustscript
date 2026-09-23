@@ -67,6 +67,7 @@ pub const BRIDGES: &[Bridge] = &[
     b("map_methods.rs", "map_method", "Map"),
     b("map_methods.rs", "sorted_ends", "Map"),
     b("map_methods.rs", "set_or_sorted_method", "Map"),
+    b("map_methods.rs", "map_write_method", "Map"),
     b("higher_order.rs", "higher_order", "*"),
     b("higher_order.rs", "vec_higher_order", "Vec"),
     b("higher_order.rs", "vec_transform_ho", "Vec"),

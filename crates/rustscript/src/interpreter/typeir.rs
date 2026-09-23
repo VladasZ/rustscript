@@ -38,6 +38,31 @@ pub fn lower_cast(ty: &syn::Type) -> CastIr {
     }
 }
 
+/// A primitive a typed parse reads with the real serde visitor, so a value that does not fit is
+/// the serde error and a number keeps its width.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ScalarIr {
+    Int(IntWidth),
+    F32,
+    F64,
+    Bool,
+    Char,
+    Str,
+}
+
+impl ScalarIr {
+    fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "f32" => ScalarIr::F32,
+            "f64" => ScalarIr::F64,
+            "bool" => ScalarIr::Bool,
+            "char" => ScalarIr::Char,
+            "String" => ScalarIr::Str,
+            other => ScalarIr::Int(IntWidth::parse(other)?),
+        })
+    }
+}
+
 /// Aliases are followed and struct paths canonicalized here, so runtime never resolves a name.
 #[derive(Clone)]
 pub enum TypeIr {
@@ -55,12 +80,17 @@ pub enum TypeIr {
     Enum(Arc<str>),
     /// bound by the caller's turbofish through the type environment
     Generic(Arc<str>),
+    /// coercion leaves it alone, a typed parse checks it
+    Scalar(ScalarIr),
 }
 
 impl TypeIr {
     pub fn is_active(&self) -> bool {
         match self {
-            TypeIr::Dynamic | TypeIr::Generic(_) | TypeIr::MapValue(_, false) => false,
+            TypeIr::Dynamic
+            | TypeIr::Generic(_)
+            | TypeIr::Scalar(_)
+            | TypeIr::MapValue(_, false) => false,
             TypeIr::Struct(_) | TypeIr::Enum(_) | TypeIr::Set(..) | TypeIr::MapValue(_, true) => {
                 true
             }
@@ -136,7 +166,7 @@ fn lower(
                 Ok(Res::Enum(canon)) => TypeIr::Enum(canon),
                 // an alias target resolves in its own module, where no function generics apply
                 Ok(Res::Alias(m, target)) => lower(&target, resolver, m, &[], depth + 1),
-                _ => TypeIr::Dynamic,
+                _ => ScalarIr::parse(&name).map_or(TypeIr::Dynamic, TypeIr::Scalar),
             }
         }
     }

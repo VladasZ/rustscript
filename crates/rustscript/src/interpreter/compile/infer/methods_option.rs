@@ -319,7 +319,10 @@ impl Infer<'_, '_> {
                     Ty::Vec(inner) => Ty::vec(self.vars.meet(&inner, item)),
                     // a target nothing names is decided later by `rustc`, guessing a vec here
                     // would beat the branch that does name it
-                    _ => Ty::Unknown,
+                    _ => {
+                        self.unknown_target = true;
+                        Ty::Unknown
+                    }
                 }
             }
             "sum" | "product" => {

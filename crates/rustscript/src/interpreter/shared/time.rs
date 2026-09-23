@@ -6,11 +6,12 @@ use std::time::Duration;
 use anyhow::{Result, anyhow, bail};
 
 use crate::interpreter::bytecode::{BinKind, BuiltinId};
+use crate::interpreter::numeric::IntWidth;
 
 use super::Args;
 
 pub(crate) enum DurOut {
-    Int(i64),
+    Int(i128, IntWidth),
     Float(f64),
     Bool(bool),
 }
@@ -30,14 +31,16 @@ pub(crate) fn duration_arith(op: BinKind, a: Duration, b: Duration) -> Result<Du
 
 pub(crate) fn duration_core(name: BuiltinId, secs: u64, nanos: u32) -> Option<DurOut> {
     let total = u128::from(secs) * 1_000_000_000 + u128::from(nanos);
+    let wide = |n: u128| DurOut::Int(n.cast_signed(), IntWidth::U128);
+    let sub = |n: u32| DurOut::Int(i128::from(n), IntWidth::U32);
     Some(match name {
-        BuiltinId::AsSecs => DurOut::Int(i64::try_from(secs).unwrap_or(i64::MAX)),
-        BuiltinId::AsMillis => DurOut::Int(i64::try_from(total / 1_000_000).unwrap_or(i64::MAX)),
-        BuiltinId::AsMicros => DurOut::Int(i64::try_from(total / 1_000).unwrap_or(i64::MAX)),
-        BuiltinId::AsNanos => DurOut::Int(i64::try_from(total).unwrap_or(i64::MAX)),
-        BuiltinId::SubsecNanos => DurOut::Int(i64::from(nanos)),
-        BuiltinId::SubsecMillis => DurOut::Int(i64::from(nanos / 1_000_000)),
-        BuiltinId::SubsecMicros => DurOut::Int(i64::from(nanos / 1_000)),
+        BuiltinId::AsSecs => DurOut::Int(i128::from(secs), IntWidth::U64),
+        BuiltinId::AsMillis => wide(total / 1_000_000),
+        BuiltinId::AsMicros => wide(total / 1_000),
+        BuiltinId::AsNanos => wide(total),
+        BuiltinId::SubsecNanos => sub(nanos),
+        BuiltinId::SubsecMillis => sub(nanos / 1_000_000),
+        BuiltinId::SubsecMicros => sub(nanos / 1_000),
         BuiltinId::AsSecsF64 => {
             DurOut::Float(AsPrimitive::<f64>::as_(secs) + f64::from(nanos) / 1e9)
         }

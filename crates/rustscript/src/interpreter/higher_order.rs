@@ -13,7 +13,7 @@ use super::iterator::{as_closure, option_inner};
 use super::methods::ordering_from_value;
 use super::native::Native;
 use super::shared::usize_i64;
-use super::value::{List, Map, MapKey, Value, ValueRef};
+use super::value::{List, Map, MapKey, MapKind, Value, ValueRef};
 use super::vecmap::{SortKey, sort_key};
 use super::vm::Vm;
 
@@ -47,6 +47,9 @@ impl Vm {
                 }
             }
             Value::Vec(items) => self.vec_higher_order(items, name, args),
+            Value::Map(map, kind) if name == BuiltinId::Retain => {
+                self.map_retain(map, *kind, args).map(Some)
+            }
             Value::Native(iterator) if matches!(&*iterator.lock(), Native::Iterator(_)) => {
                 self.iterator_higher_order(iterator, name, args)
             }
@@ -72,6 +75,33 @@ impl Vm {
             }
             _ => Ok(None),
         }
+    }
+
+    /// `retain` on a map hands the closure `(&K, &mut V)`, on a set `&T`. A rejected entry is
+    /// the map's own and drops right there, like in std.
+    fn map_retain(self: &Arc<Self>, map: &Map, kind: MapKind, args: &[Value]) -> Result<Value> {
+        let f = as_closure(args.first())?;
+        let keys: Vec<MapKey> = map.lock().keys().cloned().collect();
+        for key in keys {
+            let call_args = if kind == MapKind::Set {
+                vec![key.to_value()]
+            } else {
+                vec![
+                    key.to_value(),
+                    Value::Ref(Arc::new(ValueRef::map_entry(map.clone(), key.clone()))),
+                ]
+            };
+            if self.call_closure_data(&f, &call_args)?.is_truthy() {
+                continue;
+            }
+            let removed = map.lock().shift_remove_entry(&key);
+            if let Some((_, value)) = removed
+                && self.has_drop
+            {
+                self.run_user_drop(value)?;
+            }
+        }
+        Ok(Value::Unit)
     }
 
     /// Non closure forms fall through to `entry_method`.

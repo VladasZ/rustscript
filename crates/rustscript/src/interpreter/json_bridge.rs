@@ -8,12 +8,11 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 use rustc_hash::FxHashMap;
 
-use super::bridge::arg;
 use super::bytecode::PathId;
 use super::enum_def::{EnumKind, OK, SOME};
 use super::numeric::IntWidth;
 use super::serde_types::{DataError, EnumInfo, enum_to_json};
-use super::typeir::TypeIr;
+use super::typeir::{ScalarIr, TypeIr};
 use super::value::{MapKey, MapStore, RsStr, StructShape, Value};
 use super::vm::Vm;
 
@@ -40,7 +39,10 @@ fn is_none(value: &Value) -> bool {
 impl Vm {
     pub(super) fn coerce_value(self: &Arc<Self>, value: Value, ty: &TypeIr) -> Result<Value> {
         Ok(match ty {
-            TypeIr::Dynamic | TypeIr::Generic(_) | TypeIr::MapValue(_, false) => value,
+            TypeIr::Dynamic
+            | TypeIr::Generic(_)
+            | TypeIr::Scalar(_)
+            | TypeIr::MapValue(_, false) => value,
             TypeIr::MapValue(_, true) => {
                 let Value::Map(m, kind) = &value else {
                     return Ok(value);
@@ -52,44 +54,7 @@ impl Vm {
                 sorted.extend(m.lock().iter().map(|(k, v)| (k.clone(), v.clone())));
                 Value::Map(Arc::new(parking_lot::Mutex::new(sorted)), *kind)
             }
-            TypeIr::Vec(inner) => {
-                let Value::Vec(items) = &value else {
-                    return Ok(value);
-                };
-                match &**inner {
-                    // a struct element type resolves once for the whole vector
-                    TypeIr::Struct(canon) => match self.structs.get(&**canon) {
-                        Some(info) => {
-                            let items = items.lock().clone();
-                            let mut out = Vec::with_capacity(items.len());
-                            for v in items {
-                                out.push(match &v {
-                                    Value::Map(m, _) => {
-                                        let map = m.lock().clone();
-                                        self.struct_from_map(info, &map)?
-                                    }
-                                    _ => v,
-                                });
-                            }
-                            Value::vec(out)
-                        }
-                        None => value,
-                    },
-                    TypeIr::Vec(_)
-                    | TypeIr::Option(_)
-                    | TypeIr::Set(..)
-                    | TypeIr::Enum(_)
-                    | TypeIr::MapValue(_, true) => {
-                        let items = items.lock().clone();
-                        let mut out = Vec::with_capacity(items.len());
-                        for v in items {
-                            out.push(self.coerce_value(v, inner)?);
-                        }
-                        Value::vec(out)
-                    }
-                    TypeIr::Dynamic | TypeIr::Generic(_) | TypeIr::MapValue(_, false) => value,
-                }
-            }
+            TypeIr::Vec(inner) => self.coerce_vec(value, inner)?,
             TypeIr::Set(inner, sorted) => {
                 // a `collect()` lands here as a Vec and packs into the shared map storage
                 if let Value::Map(m, _) = &value
@@ -140,6 +105,49 @@ impl Vm {
                         .map_err(|e| anyhow::Error::new(DataError(e)))?
                 }
             },
+        })
+    }
+
+    /// A vec coerces per element.
+    fn coerce_vec(self: &Arc<Self>, value: Value, inner: &TypeIr) -> Result<Value> {
+        let Value::Vec(items) = &value else {
+            return Ok(value);
+        };
+        Ok(match inner {
+            // a struct element type resolves once for the whole vector
+            TypeIr::Struct(canon) => match self.structs.get(&**canon) {
+                Some(info) => {
+                    let items = items.lock().clone();
+                    let mut out = Vec::with_capacity(items.len());
+                    for v in items {
+                        out.push(match &v {
+                            Value::Map(m, _) => {
+                                let map = m.lock().clone();
+                                self.struct_from_map(info, &map)?
+                            }
+                            _ => v,
+                        });
+                    }
+                    Value::vec(out)
+                }
+                None => value,
+            },
+            TypeIr::Vec(_)
+            | TypeIr::Option(_)
+            | TypeIr::Set(..)
+            | TypeIr::Enum(_)
+            | TypeIr::MapValue(_, true) => {
+                let items = items.lock().clone();
+                let mut out = Vec::with_capacity(items.len());
+                for v in items {
+                    out.push(self.coerce_value(v, inner)?);
+                }
+                Value::vec(out)
+            }
+            TypeIr::Dynamic
+            | TypeIr::Generic(_)
+            | TypeIr::Scalar(_)
+            | TypeIr::MapValue(_, false) => value,
         })
     }
 
@@ -197,6 +205,7 @@ impl Vm {
     ) -> JsonPlan {
         match ty {
             TypeIr::Dynamic => JsonPlan::Dynamic,
+            TypeIr::Scalar(s) => JsonPlan::Scalar(*s, false),
             TypeIr::Generic(name) => match tenv.iter().find(|(n, _)| **n == **name) {
                 Some((_, bound)) => self.json_plan(bound, building, tenv),
                 None => JsonPlan::Dynamic,
@@ -207,6 +216,7 @@ impl Vm {
             }
             TypeIr::Option(inner) => match self.json_plan(inner, building, tenv) {
                 JsonPlan::Enum(info, _) => JsonPlan::Enum(info, true),
+                JsonPlan::Scalar(s, _) => JsonPlan::Scalar(s, true),
                 plan => plan,
             },
             TypeIr::MapValue(inner, sorted) => {
@@ -238,9 +248,11 @@ impl Vm {
         }
     }
 
-    /// `serde_json::from_str::<T>` with a known target type
+    /// `serde_json::from_str::<T>`, `toml::from_str` or `serde_yaml::from_str` with a known
+    /// target type, `format` is the path that names which
     pub(super) fn typed_from_str(
         self: &Arc<Self>,
+        format: PathId,
         args: &[Value],
         ty: &TypeIr,
         tenv: &[(Arc<str>, TypeIr)],
@@ -255,9 +267,19 @@ impl Vm {
             None => bail!("from_str needs a string"),
         };
         let plan = self.json_plan(ty, &mut Vec::new(), tenv);
-        Ok(match parse_json_planned(text, &plan, self) {
+        let parsed = match format {
+            PathId::TomlFromStr => toml::Deserializer::parse(text)
+                .and_then(|de| parse_planned(de, &plan, self))
+                .map_err(|e| e.to_string()),
+            PathId::SerdeYamlFromStr => {
+                parse_planned(serde_yaml::Deserializer::from_str(text), &plan, self)
+                    .map_err(|e| e.to_string())
+            }
+            _ => parse_json_planned(text, &plan, self).map_err(|e| e.to_string()),
+        };
+        Ok(match parsed {
             Ok(v) => Value::ok(v),
-            Err(e) => Value::err(Value::str(e.to_string())),
+            Err(e) => Value::err(Value::str(e)),
         })
     }
 }
@@ -275,6 +297,9 @@ pub(super) enum JsonPlan {
     /// read as a plain json tree first, see `serde_types`. The flag is an `Option` around it,
     /// where a json null is `None` before any variant sees it.
     Enum(Arc<EnumInfo>, bool),
+    /// read with the real serde visitor of the primitive, see `scalar_seed`. The flag is an
+    /// `Option` around it, where a null is `None`.
+    Scalar(ScalarIr, bool),
 }
 
 pub(super) struct StructPlan {
@@ -307,15 +332,25 @@ fn parse_json_planned(
     plan: &JsonPlan,
     vm: &Arc<Vm>,
 ) -> std::result::Result<Value, serde_json::Error> {
-    use serde::de::DeserializeSeed;
     let mut de = serde_json::Deserializer::from_str(text);
+    let v = parse_planned(&mut de, plan, vm)?;
+    de.end()?;
+    Ok(v)
+}
+
+/// One typed parse over any serde format, so a toml or yaml input reports what its own crate
+/// reports, a missing field included.
+fn parse_planned<'de, D: serde::Deserializer<'de>>(
+    de: D,
+    plan: &JsonPlan,
+    vm: &Arc<Vm>,
+) -> std::result::Result<Value, D::Error> {
+    use serde::de::DeserializeSeed;
     let cx = ParseCx {
         keys: RefCell::new(FxHashMap::default()),
         vm: Some(vm),
     };
-    let v = PlanSeed { plan, cx: &cx }.deserialize(&mut de)?;
-    de.end()?;
-    Ok(v)
+    PlanSeed { plan, cx: &cx }.deserialize(de)
 }
 
 /// What every level of 1 parse shares. The vm runs `#[serde(default)]` functions, a parse
@@ -353,6 +388,9 @@ impl<'de> serde::de::DeserializeSeed<'de> for PlanSeed<'_> {
                     .map_err(serde::de::Error::custom),
                 None => Ok(raw),
             };
+        }
+        if let JsonPlan::Scalar(scalar, optional) = self.plan {
+            return super::json_scalar::scalar_seed(d, *scalar, *optional);
         }
         if let JsonPlan::Enum(info, optional) = self.plan {
             return d.deserialize_any(super::serde_types::EnumVisitor {
@@ -718,43 +756,6 @@ fn struct_to_json(s: &super::value::StructData) -> Result<serde_json::Value> {
     })
 }
 
-/// The dynamic path, `from_str` with no type plus `to_string` and `to_string_pretty`.
-pub(super) fn bridge_serde_json(id: PathId, args: &[Value]) -> Result<Value> {
-    match id {
-        PathId::SerdeJsonFromStr => {
-            let owned;
-            let s: &str = match args.first() {
-                Some(Value::Str(s)) => s,
-                Some(other) => {
-                    owned = other.display();
-                    &owned
-                }
-                None => bail!("from_str needs a string"),
-            };
-            match parse_json(s) {
-                Ok(v) => Ok(Value::ok(v)),
-                Err(e) => Ok(Value::err(Value::str(e.to_string()))),
-            }
-        }
-        PathId::SerdeJsonToString | PathId::SerdeJsonToStringPretty => {
-            let v = arg(args, 0)?;
-            let j = pvalue_to_json(&v)?;
-            let s = if id == PathId::SerdeJsonToStringPretty {
-                serde_json::to_string_pretty(&j)?
-            } else {
-                serde_json::to_string(&j)?
-            };
-            Ok(Value::ok(Value::str(s)))
-        }
-        PathId::SerdeJsonToValue => {
-            let v = arg(args, 0)?;
-            Ok(Value::ok(json_to_pvalue(pvalue_to_json(&v)?)))
-        }
-        _ => bail!("unsupported serde_json function `{id}`"),
-    }
-}
-
-/// The fields the input left out, in declaration order like serde's derive. A
 /// `#[serde(default)]` field runs its default, an `Option` stays None, and the first other one
 /// fails the parse, after the defaults before it ran.
 fn fill_missing<E: serde::de::Error>(

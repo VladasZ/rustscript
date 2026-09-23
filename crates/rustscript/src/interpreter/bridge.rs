@@ -100,6 +100,14 @@ impl Vm {
         if path.id == PathId::Other {
             return self.dispatch_user_call(path, args);
         }
+        // the value itself, width tag included
+        if path.id == PathId::HintBlackBox {
+            return one(args);
+        }
+        // a `u64` count past `i64::MAX` is real, so these read the arguments before the widening
+        if let Some(d) = super::std_bridge::duration_ctor(path.id, &args)? {
+            return Ok(d);
+        }
         // the bridge paths read plain `i64` and `f64`, a width tagged literal arrives widened
         for arg in &mut args {
             if let Some(image) = arg.bridge_image() {
@@ -353,7 +361,17 @@ impl Vm {
                 }
                 super::vecmap::vec_method(v, name, args)
             }
-            Value::Map(map, kind) => super::vecmap::map_method(map, *kind, name, args),
+            Value::Map(map, kind) => {
+                // `extend` takes any iterable, so a map, an array or a lazy chain drains first
+                if name.id == BuiltinId::Extend
+                    && let Some(first) = args.first()
+                    && !matches!(first, Value::Vec(_))
+                {
+                    let items = self.drain_items(first.clone())?;
+                    args[0] = Value::vec(items);
+                }
+                super::vecmap::map_method(map, *kind, name, args)
+            }
             Value::Enum { def, .. } if def.kind == EnumKind::Option => {
                 methods::opt_method(recv, name, args)
             }

@@ -105,6 +105,22 @@ pub(super) fn call_path(
         PathId::UnreachableMatch => bail!("no match arm matched the value"),
         PathId::AssertFailed => bail!("assertion failed"),
         PathId::JsonNull => return Ok(ctx.set(dst, Value::none())),
+        PathId::JsonIndex => {
+            let parts = ctx.take_range(abase, argc);
+            let found = match (parts.first(), parts.get(1)) {
+                (Some(base), Some(key)) => crate::interpreter::serde_types::json_index(base, key),
+                _ => None,
+            };
+            return Ok(ctx.set(dst, found.unwrap_or_else(Value::none)));
+        }
+        // `to_string` on a `serde_json::Value`, the compact json and not the map display
+        PathId::JsonToString => {
+            let parts = ctx.take_range(abase, argc);
+            let json = crate::interpreter::json_bridge::pvalue_to_json(
+                parts.first().unwrap_or(&Value::Unit),
+            )?;
+            return Ok(ctx.set(dst, Value::str(json.to_string())));
+        }
         PathId::JsonValue | PathId::JsonArray | PathId::JsonObject => {
             let parts = ctx.take_range(abase, argc);
             return Ok(ctx.set(
@@ -128,11 +144,17 @@ pub(super) fn call_path(
         _ => {}
     }
     let call_args = ctx.take_range(abase, argc);
-    // typed json parses straight into the target structs
+    // a typed json, toml or yaml parse reads straight into the target structs
     if let Some(ty) = &path.coerce
-        && path.id == PathId::SerdeJsonFromStr
+        && matches!(
+            path.id,
+            PathId::SerdeJsonFromStr | PathId::TomlFromStr | PathId::SerdeYamlFromStr
+        )
     {
-        return Ok(ctx.set(dst, vm.typed_from_str(&call_args, ty, ctx.cur_tenv)?));
+        return Ok(ctx.set(
+            dst,
+            vm.typed_from_str(path.id, &call_args, ty, ctx.cur_tenv)?,
+        ));
     }
     let mut v = vm.dispatch_call(path, call_args)?;
     if let Some(ty) = &path.coerce {

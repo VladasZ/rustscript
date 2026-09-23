@@ -21,6 +21,8 @@ mod impls;
 mod int_methods;
 mod iterator;
 mod json_bridge;
+mod json_paths;
+mod json_scalar;
 mod jwt_bridge;
 mod map_methods;
 mod methods;

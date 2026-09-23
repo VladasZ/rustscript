@@ -143,7 +143,8 @@ impl Infer<'_, '_> {
             }
             ("Box" | "Rc" | "Arc" | "RefCell" | "Cell" | "Mutex", "new")
             | ("Rc" | "Arc", "clone")
-            | ("mem", "take") => self.arg(args, 0, expected),
+            | ("mem", "take")
+            | ("hint", "black_box") => self.arg(args, 0, expected),
             ("Rc" | "Arc", "strong_count") => {
                 self.walk_args(args);
                 Ty::usize()

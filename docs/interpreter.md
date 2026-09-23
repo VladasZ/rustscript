@@ -133,8 +133,11 @@ says. Lifetimes mean nothing at runtime.
 
 A local whose type a later use fills in, `let mut v = Vec::new()` then
 `Ok(v)` against the return type, makes a second pass that starts the `let`
-from what the first pass learned. An `if` or `match` branch typed before a
-later branch named the type is walked again with it.
+from what the first pass learned. A `parse` or `collect` with no target makes
+one too. The second pass seeds a literal typed by a later use, a pattern
+binding like the `port` of `if let Ok(port) = s.parse()`, and a closure local
+whose call site expects a return type. An `if` or `match` branch typed before
+a later branch named the type is walked again with it.
 
 The pass is strict where a guess could print a wrong result. A `collect`,
 `parse`, `or_default` or `Default::default` whose target type it can't tell
@@ -234,6 +237,16 @@ chunk per field and runs each time the field is missing. Enums read and write
 in all 4 serde forms, externally, internally and adjacently tagged and
 untagged. An enum reads from the parsed json tree, because an internally
 tagged or untagged one must see the whole object first.
+
+A typed `serde_json::from_str`, `toml::from_str` or `serde_yaml::from_str`
+reads straight into the target through the real deserializer of the crate, so
+its errors are the real ones, a missing field included. An integer, float,
+`bool`, `char` or `String` field is read by the serde visitor of that type,
+so `300` into a `u8` is the serde error and the value keeps its width.
+
+A `serde_json::Value` is a plain map, list or string at runtime. The compiler
+knows the type, so `{}`, `{:?}`, `{:#}`, `to_string` and `v["key"]` go
+through serde_json. A missing key or index reads `null`.
 
 ## Crate bridges
 

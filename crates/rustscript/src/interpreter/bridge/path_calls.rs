@@ -263,10 +263,7 @@ pub(super) fn duration_method(
     args: &[Value],
 ) -> Result<Value> {
     let m = name.id;
-    let secs =
-        u64::try_from(crate::interpreter::std_bridge::field_int(s, "secs")).unwrap_or_default();
-    let nanos =
-        u32::try_from(crate::interpreter::std_bridge::field_int(s, "nanos")).unwrap_or_default();
+    let (secs, nanos) = crate::interpreter::std_bridge::duration_fields(s);
     if let BuiltinId::CheckedAdd | BuiltinId::CheckedSub = m {
         let own = Duration::new(secs, nanos);
         let Some(other) = args
@@ -284,7 +281,7 @@ pub(super) fn duration_method(
         }));
     }
     match shared::duration_core(m, secs, nanos) {
-        Some(shared::DurOut::Int(i)) => Ok(Value::Int(i)),
+        Some(shared::DurOut::Int(n, width)) => Ok(Value::int_of_width(n, width)),
         Some(shared::DurOut::Float(f)) => Ok(Value::Float(f)),
         Some(shared::DurOut::Bool(b)) => Ok(Value::Bool(b)),
         None => bail!("unknown method `{}` on Duration", name.text),

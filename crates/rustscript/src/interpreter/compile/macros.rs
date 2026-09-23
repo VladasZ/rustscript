@@ -10,7 +10,7 @@ use crate::interpreter::bytecode::{BinKind, Const, FmtSpec, MacroKind, Op, PathR
 
 use std::rc::Rc;
 
-use super::infer::MacroBody;
+use super::infer::{MacroBody, Ty};
 use super::{Compiler, inline_holes, parse_exprs, parse_matches, parse_vec_repeat};
 
 impl Compiler<'_> {
@@ -316,6 +316,7 @@ impl Compiler<'_> {
             template: text.to_string(),
             positional: Vec::new(),
             named: Vec::new(),
+            json: Vec::new(),
         });
         Ok(u16::try_from(f.fmts.len() - 1)?)
     }
@@ -334,7 +335,8 @@ impl Compiler<'_> {
         mut iter: impl Iterator<Item = &'a Expr>,
         newline: bool,
     ) -> Result<u16> {
-        let mut template = match iter.next() {
+        let first = iter.next();
+        let mut template = match first {
             Some(Expr::Lit(l)) => match &l.lit {
                 Lit::Str(s) => s.value(),
                 _ => bail!("format template must be a string literal"),
@@ -347,6 +349,7 @@ impl Compiler<'_> {
         }
         let mut positional = Vec::new();
         let mut named: Vec<(String, Reg)> = Vec::new();
+        let mut json = Vec::new();
         for arg in iter {
             let value = match arg {
                 Expr::Assign(a) if matches!(&*a.left, Expr::Path(p) if p.path.get_ident().is_some()) => {
@@ -355,6 +358,9 @@ impl Compiler<'_> {
                 other => other,
             };
             let r = self.compile_expr(value)?;
+            if self.types.of(value) == Ty::Json {
+                json.push(r);
+            }
             if let Expr::Assign(a) = arg
                 && let Expr::Path(p) = &*a.left
                 && let Some(n) = p.path.get_ident()
@@ -369,6 +375,9 @@ impl Compiler<'_> {
             if named.iter().all(|(n, _)| n != &hole) {
                 let r = self.alloc();
                 self.load_name(&hole, r)?;
+                if first.is_some_and(|t| self.types.hole(t, &hole) == Ty::Json) {
+                    json.push(r);
+                }
                 named.push((hole, r));
             }
         }
@@ -377,6 +386,7 @@ impl Compiler<'_> {
             template,
             positional,
             named,
+            json,
         });
         Ok(u16::try_from(f.fmts.len() - 1)?)
     }

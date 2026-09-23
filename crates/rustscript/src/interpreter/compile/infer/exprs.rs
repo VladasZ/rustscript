@@ -146,7 +146,8 @@ impl Infer<'_, '_> {
                 }
             }
             Expr::Let(l) => {
-                let scrutinee = self.expr(&l.expr, &Ty::Unknown);
+                let want = self.pat_expectation(&l.pat);
+                let scrutinee = self.expr(&l.expr, &want);
                 self.bind_pat(&l.pat, &scrutinee);
                 Ty::Bool
             }
@@ -236,14 +237,14 @@ impl Infer<'_, '_> {
                 for arm in &m.arms {
                     self.push();
                     self.bind_pat(&arm.pat, &scrutinee);
-                    let body = self.expr(&arm.body, expected);
+                    let (body, open) = self.tracking_targets(|this| this.expr(&arm.body, expected));
                     self.pop();
                     out = self.vars.meet(&out, &body);
-                    bodies.push(body);
+                    bodies.push((body, open));
                 }
                 // an arm typed before a later arm named the type learns it now
-                for (arm, body) in m.arms.iter().zip(bodies) {
-                    if body.has_unknown() && body != out {
+                for (arm, (body, open)) in m.arms.iter().zip(bodies) {
+                    if (body.has_unknown() || open) && body != out {
                         self.push();
                         self.bind_pat(&arm.pat, &scrutinee);
                         self.expr(&arm.body, &out);
@@ -330,17 +331,27 @@ impl Infer<'_, '_> {
         self.expr(cond, &Ty::Bool);
     }
 
+    /// Runs `walk` and says whether it met a `parse` or `collect` with no target, so a branch
+    /// whose literals a later branch types is walked again with that type.
+    fn tracking_targets<T>(&mut self, walk: impl FnOnce(&mut Self) -> T) -> (T, bool) {
+        let before = std::mem::take(&mut self.unknown_target);
+        let out = walk(self);
+        let open = self.unknown_target;
+        self.unknown_target |= before;
+        (out, open)
+    }
+
     fn if_expr(&mut self, i: &syn::ExprIf, expected: &Ty) -> Ty {
         self.push();
         self.cond(&i.cond);
-        let then = self.block_inner(&i.then_branch, expected);
+        let (then, open) = self.tracking_targets(|this| this.block_inner(&i.then_branch, expected));
         self.pop();
         match &i.else_branch {
             Some((_, other)) => {
                 let alt = self.expr(other, &then);
                 let both = self.vars.meet(&then, &alt);
                 // the `then` side learns a type only the `else` side names
-                if then.has_unknown() && both != then {
+                if (then.has_unknown() || open) && both != then {
                     self.push();
                     self.cond(&i.cond);
                     self.block_inner(&i.then_branch, &both);

@@ -644,3 +644,17 @@ pub(super) fn user_enum_to_json(
     };
     enum_to_json(def, variant, body)
 }
+
+/// `value[key]` on a `serde_json::Value`. A string key reads an object and an integer key an
+/// array. Anything that is not there is `None`, which `serde_json` reads as `null`.
+pub(super) fn json_index(base: &Value, key: &Value) -> Option<Value> {
+    match (base, key) {
+        (Value::Map(m, _), Value::Str(k)) => m.lock().get(&MapKey::Str(k.clone())).cloned(),
+        (Value::Vec(items), key) => {
+            let (i, _) = key.int_parts()?;
+            let i = usize::try_from(i).ok()?;
+            items.lock().get(i).cloned()
+        }
+        _ => None,
+    }
+}
