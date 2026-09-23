@@ -3,6 +3,7 @@ mod cfg_eval;
 mod checker;
 mod interpreter;
 mod loader;
+mod nested_fns;
 mod supported;
 mod update;
 

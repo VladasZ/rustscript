@@ -28,6 +28,13 @@ impl Compiler<'_> {
             {
                 let name = p.path.segments[0].ident.to_string();
                 let location = self.resolve_for_write(&name);
+                // the value comes back from a lend, the callee already dropped what it replaced,
+                // so the store must find nothing to drop
+                match location {
+                    NameLoc::Cell(cell) => self.emit(Op::ClearCell { cell }),
+                    NameLoc::Upvalue(idx) => self.emit(Op::ClearUpvalue { idx }),
+                    NameLoc::Local(_) | NameLoc::None => {}
+                }
                 self.emit_name_store(location, base + idx16(i), &name)?;
                 continue;
             }

@@ -238,7 +238,11 @@ impl Infer<'_, '_> {
                 Ty::iter(ret)
             }
             "filter_map" | "map_while" => {
-                let ret = self.closure_ret(args, 0, vec![item.clone()]);
+                let want = match expected.item() {
+                    Ty::Unknown => Ty::Unknown,
+                    item => Ty::option(item),
+                };
+                let ret = self.closure_ret_expecting(args, 0, vec![item.clone()], &want);
                 Ty::iter(ret.payload())
             }
             "flat_map" => {
@@ -308,7 +312,7 @@ impl Infer<'_, '_> {
             "collect" => {
                 let target = turbofish.unwrap_or_else(|| expected.clone());
                 match target {
-                    Ty::Str | Ty::Set(_) | Ty::Map(..) | Ty::Result(..) | Ty::Option(_) => {
+                    Ty::Str | Ty::Set(..) | Ty::Map(..) | Ty::Result(..) | Ty::Option(_) => {
                         self.vars.unify(&target.item(), item);
                         target
                     }

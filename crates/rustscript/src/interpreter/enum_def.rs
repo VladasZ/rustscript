@@ -20,6 +20,27 @@ pub struct VariantDef {
     pub unit: bool,
 }
 
+/// How serde writes a script enum, from `#[serde(tag, content, untagged)]`.
+#[derive(Clone, Default)]
+pub enum SerdeRepr {
+    /// `{"Variant": payload}`, a unit variant is the bare name
+    #[default]
+    External,
+    /// `{"tag": "Variant", ..fields}`
+    Internal(Arc<str>),
+    /// `{"tag": "Variant", "content": payload}`
+    Adjacent(Arc<str>, Arc<str>),
+    /// the payload alone, a read tries the variants in order
+    Untagged,
+}
+
+#[derive(Clone, Default)]
+pub struct SerdeEnum {
+    pub repr: SerdeRepr,
+    /// the name serde writes per variant, `rename` and `rename_all` applied
+    pub names: Vec<Arc<str>>,
+}
+
 pub struct EnumDef {
     pub kind: EnumKind,
     /// declared by the script
@@ -29,6 +50,7 @@ pub struct EnumDef {
     /// `NO_TYPE` for a builtin
     pub type_id: u16,
     pub variants: Vec<VariantDef>,
+    pub serde: SerdeEnum,
 }
 
 impl EnumDef {
@@ -41,6 +63,28 @@ impl EnumDef {
         EnumDef::build(kind, true, name, type_id, variants)
     }
 
+    /// A script enum with its serde attributes.
+    pub fn with_serde(
+        name: impl Into<Arc<str>>,
+        type_id: u16,
+        variants: impl IntoIterator<Item = (Arc<str>, bool)>,
+        serde: SerdeEnum,
+    ) -> Arc<EnumDef> {
+        let mut def = EnumDef::build(EnumKind::Other, true, name, type_id, variants);
+        if let Some(def) = Arc::get_mut(&mut def) {
+            def.serde = serde;
+        }
+        def
+    }
+
+    /// The name serde writes for a variant.
+    pub fn serde_name(&self, index: u16) -> &Arc<str> {
+        self.serde
+            .names
+            .get(usize::from(index))
+            .unwrap_or_else(|| self.variant_name(index))
+    }
+
     fn build(
         kind: EnumKind,
         user: bool,
@@ -48,15 +92,21 @@ impl EnumDef {
         type_id: u16,
         variants: impl IntoIterator<Item = (Arc<str>, bool)>,
     ) -> Arc<EnumDef> {
+        let variants: Vec<VariantDef> = variants
+            .into_iter()
+            .map(|(name, unit)| VariantDef { name, unit })
+            .collect();
+        let names = variants.iter().map(|v| v.name.clone()).collect();
         Arc::new(EnumDef {
             kind,
             user,
             name: name.into(),
             type_id,
-            variants: variants
-                .into_iter()
-                .map(|(name, unit)| VariantDef { name, unit })
-                .collect(),
+            variants,
+            serde: SerdeEnum {
+                repr: SerdeRepr::External,
+                names,
+            },
         })
     }
 

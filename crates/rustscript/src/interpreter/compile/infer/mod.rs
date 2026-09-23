@@ -15,7 +15,7 @@ mod paths;
 mod paths_builtin;
 mod ty;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -41,6 +41,8 @@ pub(super) struct Types {
     /// `ExprMethodCall` or `ExprCall` and not the `Expr` around it
     nodes: HashMap<*const (), Ty>,
     macros: HashMap<*const syn::Macro, Rc<MacroBody>>,
+    /// `into` calls whose target no context names
+    unresolved: HashSet<*const ()>,
 }
 
 impl Types {
@@ -49,7 +51,13 @@ impl Types {
             exprs: HashMap::new(),
             nodes: HashMap::new(),
             macros: HashMap::new(),
+            unresolved: HashSet::new(),
         }
+    }
+
+    pub(super) fn is_unresolved<T>(&self, node: &T) -> bool {
+        self.unresolved
+            .contains(&std::ptr::from_ref(node).cast::<()>())
     }
 
     pub(super) fn of(&self, expr: &Expr) -> Ty {
@@ -71,8 +79,31 @@ impl Types {
     }
 }
 
+/// A local whose type a later use fills in, `let mut v = Vec::new()` then `Ok(v)` against the
+/// return type, makes a second pass that starts every such `let` from what the first pass
+/// learned. So `v.push(s.parse()?)` above the `Ok(v)` knows what to parse.
 pub(super) fn infer_fn(ctx: &Ctx, sig: &syn::Signature, block: &Block) -> Types {
+    let first = infer_fn_pass(ctx, sig, block, HashMap::new());
+    if !first.refined_late {
+        return first.finish();
+    }
+    // numeric variables are numbered per pass, a seed keeps only what the first pass fixed
+    let seeds = first
+        .finals
+        .iter()
+        .map(|(site, ty)| (*site, first.vars.resolve_fixed(ty)))
+        .collect();
+    infer_fn_pass(ctx, sig, block, seeds).finish()
+}
+
+fn infer_fn_pass<'c, 'r>(
+    ctx: &'c Ctx<'r>,
+    sig: &syn::Signature,
+    block: &Block,
+    seeds: HashMap<*const syn::PatIdent, Ty>,
+) -> Infer<'c, 'r> {
     let mut pass = Infer::new(ctx);
+    pass.seeds = seeds;
     pass.generics = sig
         .generics
         .type_params()
@@ -97,7 +128,7 @@ pub(super) fn infer_fn(ctx: &Ctx, sig: &syn::Signature, block: &Block) -> Types 
     }
     let ret = pass.ret.clone();
     pass.block_inner(block, &ret);
-    pass.finish()
+    pass
 }
 
 pub(super) fn infer_const(ctx: &Ctx, expr: &Expr, ty: Option<&syn::Type>) -> Types {
@@ -114,7 +145,16 @@ struct Infer<'c, 'r> {
     types: HashMap<*const Expr, Ty>,
     nodes: HashMap<*const (), Ty>,
     macros: HashMap<*const syn::Macro, Rc<MacroBody>>,
+    unresolved: HashSet<*const ()>,
     scopes: Vec<HashMap<String, Ty>>,
+    /// the `let` binding behind each name in `scopes`, for the second pass
+    sites: Vec<HashMap<String, *const syn::PatIdent>>,
+    /// the last type each binding had, what a second pass starts it from
+    finals: HashMap<*const syn::PatIdent, Ty>,
+    /// the first pass's `finals`
+    seeds: HashMap<*const syn::PatIdent, Ty>,
+    /// a use filled in a binding's type after its `let`
+    refined_late: bool,
     ret: Ty,
     /// the value type of each enclosing `loop`, for `break v`
     loops: Vec<Ty>,
@@ -129,7 +169,12 @@ impl<'c, 'r> Infer<'c, 'r> {
             types: HashMap::new(),
             nodes: HashMap::new(),
             macros: HashMap::new(),
+            unresolved: HashSet::new(),
             scopes: Vec::new(),
+            sites: Vec::new(),
+            finals: HashMap::new(),
+            seeds: HashMap::new(),
+            refined_late: false,
             ret: Ty::Unit,
             loops: Vec::new(),
             generics: Vec::new(),
@@ -151,6 +196,7 @@ impl<'c, 'r> Infer<'c, 'r> {
             exprs,
             nodes,
             macros: self.macros,
+            unresolved: self.unresolved,
         }
     }
 
@@ -158,10 +204,35 @@ impl<'c, 'r> Infer<'c, 'r> {
 
     fn push(&mut self) {
         self.scopes.push(HashMap::new());
+        self.sites.push(HashMap::new());
     }
 
     fn pop(&mut self) {
         self.scopes.pop();
+        self.sites.pop();
+    }
+
+    /// A use that expects a type fills in the unknown parts of the local it names.
+    fn refine_local(&mut self, name: &str, expected: &Ty) {
+        if expected.is_unknown() {
+            return;
+        }
+        let Some(depth) = self.scopes.iter().rposition(|s| s.contains_key(name)) else {
+            return;
+        };
+        let current = self.scopes[depth][name].clone();
+        if !current.has_unknown() {
+            return;
+        }
+        let refined = self.vars.meet(&current, expected);
+        if refined == current {
+            return;
+        }
+        self.scopes[depth].insert(name.to_string(), refined.clone());
+        if let Some(site) = self.sites.get(depth).and_then(|s| s.get(name)) {
+            self.finals.insert(*site, refined);
+            self.refined_late = true;
+        }
     }
 
     fn define(&mut self, name: &str, ty: Ty) {
@@ -239,8 +310,10 @@ impl<'c, 'r> Infer<'c, 'r> {
             "char" => Ty::Char,
             "String" | "str" | "OsString" | "OsStr" => Ty::Str,
             "Vec" | "VecDeque" => Ty::vec(arg(0)),
-            "HashSet" | "BTreeSet" => Ty::Set(Box::new(arg(0))),
-            "HashMap" | "BTreeMap" | "IndexMap" => Ty::Map(Box::new(arg(0)), Box::new(arg(1))),
+            "HashSet" => Ty::Set(Box::new(arg(0)), false),
+            "BTreeSet" => Ty::Set(Box::new(arg(0)), true),
+            "HashMap" | "IndexMap" => Ty::Map(Box::new(arg(0)), Box::new(arg(1)), false),
+            "BTreeMap" => Ty::Map(Box::new(arg(0)), Box::new(arg(1)), true),
             "Option" => Ty::option(arg(0)),
             "Result" => {
                 let err = if type_arg(last, 1).is_some() {
@@ -364,10 +437,16 @@ impl<'c, 'r> Infer<'c, 'r> {
     }
 
     fn local(&mut self, local: &syn::Local) {
-        let (pat, annotation) = match &local.pat {
+        let (pat, mut annotation) = match &local.pat {
             Pat::Type(t) => (&*t.pat, self.lower(&t.ty)),
             other => (other, Ty::Unknown),
         };
+        // the second pass starts the initializer from what a later use taught the first
+        if let Pat::Ident(id) = pat
+            && let Some(seed) = self.seeds.get(&std::ptr::from_ref(id)).cloned()
+        {
+            annotation = self.vars.meet(&annotation, &seed);
+        }
         let ty = match &local.init {
             Some(init) => {
                 let found = self.expr(&init.expr, &annotation);
@@ -383,6 +462,25 @@ impl<'c, 'r> Infer<'c, 'r> {
 
     // patterns
 
+    /// A name binding, started from the seed a first pass left for it, and remembered so a
+    /// later use can refine it.
+    fn bind_name(&mut self, id: &syn::PatIdent, ty: &Ty) {
+        let site = std::ptr::from_ref(id);
+        let ty = match self.seeds.get(&site) {
+            Some(seed) => {
+                let seed = seed.clone();
+                self.vars.meet(ty, &seed)
+            }
+            None => ty.clone(),
+        };
+        let name = id.ident.to_string();
+        if let Some(sites) = self.sites.last_mut() {
+            sites.insert(name.clone(), site);
+        }
+        self.finals.insert(site, ty.clone());
+        self.define(&name, ty);
+    }
+
     fn bind_pat(&mut self, pat: &Pat, ty: &Ty) {
         match pat {
             Pat::Ident(id) => {
@@ -390,7 +488,7 @@ impl<'c, 'r> Infer<'c, 'r> {
                     self.bind_pat(sub, ty);
                 }
                 if !super::pattern::is_unit_variant_ident(id) {
-                    self.define(&id.ident.to_string(), ty.clone());
+                    self.bind_name(id, ty);
                 }
             }
             Pat::Type(t) => {

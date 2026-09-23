@@ -73,6 +73,7 @@ bright_cyan
 bright_green
 bright_red
 bright_yellow
+btree_range
 build
 by_ref
 bytes
@@ -111,7 +112,11 @@ close
 cmp
 code
 collect
+collect_btree_map
+collect_btree_set
 collect_map
+collect_option
+collect_result
 collect_set
 collect_string
 column_spacing
@@ -197,6 +202,7 @@ find
 find_iter
 find_map
 first
+first_key_value
 first_mut mut
 flags
 flat_map
@@ -329,6 +335,7 @@ keys_len
 kill
 kind
 last
+last_key_value
 last_mut mut
 leading_ones
 leading_zeros
@@ -417,7 +424,9 @@ pointer
 pointer_mut
 pop mut
 pop_back mut
+pop_first mut
 pop_front mut
+pop_last mut
 position
 post
 pow

@@ -70,6 +70,12 @@ an empty message, so the two diverge before the real panic. Needs reduction with
 eval order or closure dispatch difference. The failure artifacts are in the
 Differential run artifacts.
 
+Likely fixed by the lent closure fix behind the
+`lent_closure_in_a_cell_keeps_its_captures` regression. A closure passed as
+`&mut cl` from a capture cell lost its moved captures on the way back, which is
+this same `&mut F` helper shape. Replay these seeds from their run artifacts
+and delete this entry when they agree.
+
 ### `toml::from_str` into a derived struct accepts a missing required field
 
 Real Rust returns an error. The interpreter returns `Ok` with a broken value,
@@ -120,6 +126,87 @@ cannot read a field of enum
 ```
 
 The script needs `serde` with `derive` and `toml` in the nearest `Cargo.toml`.
+
+Likely place: `Vm::struct_from_map` in `json_bridge.rs`, the coercion toml and
+yaml go through. A missing key with no `#[serde(default)]` becomes `None`
+there. The json path checks the same case in `fill_missing`.
+
+### `serde_json::Value` prints like a Rust map, not like json
+
+```rust
+fn main() {
+    let v: serde_json::Value =
+        serde_json::from_str(r#"{"a":[1,2.5,null,true,"s"],"b":{"c":-1}}"#).unwrap();
+    println!("{v}");
+    println!("{v:?}");
+    println!("{}", v["a"][4]);
+}
+```
+
+Compiled:
+
+```
+{"a":[1,2.5,null,true,"s"],"b":{"c":-1}}
+Object {"a": Array [Number(1), Number(2.5), Null, Bool(true), String("s")], "b": Object {"c": Number(-1)}}
+"s"
+```
+
+Interpreted:
+
+```
+{"a": [1, 2.5, None, true, "s"], "b": {"c": -1}}
+{"a": [1, 2.5, None, true, "s"], "b": {"c": -1}}
+s
+```
+
+`{:#}` should pretty print like `to_string_pretty`. A json value is a plain
+map, list or string at runtime, so the formatter can't tell it apart. Likely
+fix: the compiler knows `Ty::Json` at the format site and can flag the argument,
+then `bridge/template.rs` renders it through `pvalue_to_json` and the real
+`serde_json::Value` formatting.
+
+### Map `extend` and `values_mut` fail at runtime
+
+```rust
+use std::collections::HashMap;
+
+fn main() {
+    let mut m: HashMap<&str, i32> = HashMap::from([("a", 1)]);
+    m.extend([("b", 2)]);
+    for v in m.values_mut() {
+        *v += 1;
+    }
+    println!("{} {:?}", m.len(), m.get("a"));
+}
+```
+
+Compiled prints `2 Some(2)`. Interpreted stops at `extend` with
+`unknown method extend on HashMap`, and without it `values_mut` panics with
+`assignment through a non-reference value`. Both apply to `BTreeMap` too.
+`extend` passes the coverage check because `Vec` has it, so the script starts
+and dies halfway. `retain` on a map is missing as well, the coverage check does
+report that one. Likely place: `map_methods.rs`, `values_mut` needs element
+references like `ValueRef::map_entry`, and the coverage tables in
+`bridge_tables_build.rs` should tag `extend` per receiver.
+
+### `Duration` seconds past `i64::MAX` are clamped
+
+```rust
+use std::time::Duration;
+
+fn main() {
+    println!("{}", Duration::new(u64::MAX, 0).as_secs());
+}
+```
+
+Compiled prints `18446744073709551615`, interpreted prints
+`9223372036854775807`. The bridge keeps `secs` as `Value::Int`, see
+`bridge/path_calls.rs`, it should be a `u64` `IntW`.
+
+### Missing std paths found while testing
+
+`Duration::from_secs_f64` and `std::hint::black_box` are not bridged. Both are
+refused before the script runs, so nothing runs wrong.
 
 ## Generator plan
 

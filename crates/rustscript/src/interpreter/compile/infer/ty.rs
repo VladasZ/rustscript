@@ -24,8 +24,10 @@ pub(crate) enum Ty {
     /// a float literal nothing has typed yet
     FloatVar(u32),
     Vec(Box<Ty>),
-    Set(Box<Ty>),
-    Map(Box<Ty>, Box<Ty>),
+    /// the flag is a `BTreeSet`, kept in key order
+    Set(Box<Ty>, bool),
+    /// the flag is a `BTreeMap`, kept in key order
+    Map(Box<Ty>, Box<Ty>, bool),
     Option(Box<Ty>),
     Result(Box<Ty>, Box<Ty>),
     Tuple(Vec<Ty>),
@@ -75,6 +77,22 @@ impl Ty {
         matches!(self, Ty::Unknown)
     }
 
+    /// Whether any part is still `Unknown`, `Vec<Unknown>` included.
+    pub(crate) fn has_unknown(&self) -> bool {
+        match self {
+            Ty::Unknown => true,
+            Ty::Vec(t)
+            | Ty::Set(t, _)
+            | Ty::Option(t)
+            | Ty::Iter(t)
+            | Ty::Range(t)
+            | Ty::Entry(t) => t.has_unknown(),
+            Ty::Map(a, b, _) | Ty::Result(a, b) => a.has_unknown() || b.has_unknown(),
+            Ty::Tuple(items) => items.iter().any(Ty::has_unknown),
+            _ => false,
+        }
+    }
+
     pub(crate) fn is_numeric(&self) -> bool {
         matches!(
             self,
@@ -86,12 +104,12 @@ impl Ty {
     pub(crate) fn item(&self) -> Ty {
         match self {
             Ty::Vec(t)
-            | Ty::Set(t)
+            | Ty::Set(t, _)
             | Ty::Iter(t)
             | Ty::Range(t)
             | Ty::Option(t)
             | Ty::Result(t, _) => (**t).clone(),
-            Ty::Map(k, v) => Ty::Tuple(vec![(**k).clone(), (**v).clone()]),
+            Ty::Map(k, v, _) => Ty::Tuple(vec![(**k).clone(), (**v).clone()]),
             Ty::Str => Ty::Char,
             _ => Ty::Unknown,
         }
@@ -119,8 +137,8 @@ impl Ty {
                 ScalarTy::Opt(Box::new(t.to_scalar().unwrap_or(ScalarTy::Other)))
             }
             Ty::Vec(t) => ScalarTy::List(Box::new(t.to_scalar().unwrap_or(ScalarTy::Other))),
-            Ty::Map(_, v) => ScalarTy::Map(Box::new(v.to_scalar().unwrap_or(ScalarTy::Other))),
-            Ty::Set(t) => ScalarTy::Set(Box::new(t.to_scalar().unwrap_or(ScalarTy::Other))),
+            Ty::Map(_, v, _) => ScalarTy::Map(Box::new(v.to_scalar().unwrap_or(ScalarTy::Other))),
+            Ty::Set(t, _) => ScalarTy::Set(Box::new(t.to_scalar().unwrap_or(ScalarTy::Other))),
             Ty::Unknown | Ty::IntVar(_) | Ty::FloatVar(_) | Ty::Generic(_) => return None,
             _ => ScalarTy::Other,
         })
@@ -219,10 +237,10 @@ impl Vars {
             (Ty::Vec(x), Ty::Vec(y) | Ty::Iter(y))
             | (Ty::Range(x), Ty::Range(y) | Ty::Iter(y))
             | (Ty::Iter(x), Ty::Iter(y) | Ty::Vec(y) | Ty::Range(y))
-            | (Ty::Set(x), Ty::Set(y))
+            | (Ty::Set(x, _), Ty::Set(y, _))
             | (Ty::Option(x), Ty::Option(y))
             | (Ty::Entry(x), Ty::Entry(y)) => self.unify(x, y),
-            (Ty::Map(k1, v1), Ty::Map(k2, v2)) | (Ty::Result(k1, v1), Ty::Result(k2, v2)) => {
+            (Ty::Map(k1, v1, _), Ty::Map(k2, v2, _)) | (Ty::Result(k1, v1), Ty::Result(k2, v2)) => {
                 self.unify(k1, k2);
                 self.unify(v1, v2);
             }
@@ -259,14 +277,16 @@ impl Vars {
             (Ty::FloatVar(_), fixed @ (Ty::F32 | Ty::F64))
             | (fixed @ (Ty::F32 | Ty::F64), Ty::FloatVar(_)) => fixed.clone(),
             (Ty::Vec(x), Ty::Vec(y)) => Ty::vec(self.meet(x, y)),
-            (Ty::Set(x), Ty::Set(y)) => Ty::Set(Box::new(self.meet(x, y))),
+            (Ty::Set(x, a), Ty::Set(y, b)) => Ty::Set(Box::new(self.meet(x, y)), *a || *b),
             (Ty::Option(x), Ty::Option(y)) => Ty::option(self.meet(x, y)),
             (Ty::Iter(x), Ty::Iter(y)) => Ty::iter(self.meet(x, y)),
             (Ty::Range(x), Ty::Range(y)) => Ty::Range(Box::new(self.meet(x, y))),
             (Ty::Entry(x), Ty::Entry(y)) => Ty::Entry(Box::new(self.meet(x, y))),
-            (Ty::Map(k1, v1), Ty::Map(k2, v2)) => {
-                Ty::Map(Box::new(self.meet(k1, k2)), Box::new(self.meet(v1, v2)))
-            }
+            (Ty::Map(k1, v1, a), Ty::Map(k2, v2, b)) => Ty::Map(
+                Box::new(self.meet(k1, k2)),
+                Box::new(self.meet(v1, v2)),
+                *a || *b,
+            ),
             (Ty::Result(k1, v1), Ty::Result(k2, v2)) => {
                 Ty::result(self.meet(k1, k2), self.meet(v1, v2))
             }
@@ -288,6 +308,44 @@ impl Vars {
     }
 
     /// Every variable replaced by what it was fixed to, or the `rustc` default.
+    /// Like `resolve`, but a literal nothing has typed yet stays unknown instead of taking the
+    /// `i32` or `f64` default, so a later pass can still type it.
+    pub(crate) fn resolve_fixed(&self, ty: &Ty) -> Ty {
+        match ty {
+            Ty::IntVar(id) => match self.ints[self.int_root(*id) as usize] {
+                Bind::Fixed(w) => Ty::Int(w),
+                _ => Ty::Unknown,
+            },
+            Ty::FloatVar(id) => match self.floats[self.float_root(*id) as usize] {
+                Bind::Fixed(true) => Ty::F32,
+                Bind::Fixed(false) => Ty::F64,
+                _ => Ty::Unknown,
+            },
+            Ty::Vec(t) => Ty::vec(self.resolve_fixed(t)),
+            Ty::Set(t, sorted) => Ty::Set(Box::new(self.resolve_fixed(t)), *sorted),
+            Ty::Option(t) => Ty::option(self.resolve_fixed(t)),
+            Ty::Iter(t) => Ty::iter(self.resolve_fixed(t)),
+            Ty::Range(t) => Ty::Range(Box::new(self.resolve_fixed(t))),
+            Ty::Entry(t) => Ty::Entry(Box::new(self.resolve_fixed(t))),
+            Ty::Map(k, v, sorted) => Ty::Map(
+                Box::new(self.resolve_fixed(k)),
+                Box::new(self.resolve_fixed(v)),
+                *sorted,
+            ),
+            Ty::Result(k, v) => Ty::result(self.resolve_fixed(k), self.resolve_fixed(v)),
+            Ty::Tuple(items) => Ty::Tuple(items.iter().map(|t| self.resolve_fixed(t)).collect()),
+            Ty::Closure(params, ret) => Ty::Closure(
+                params.iter().map(|t| self.resolve_fixed(t)).collect(),
+                Box::new(self.resolve_fixed(ret)),
+            ),
+            Ty::Named(name, args) => Ty::Named(
+                name.clone(),
+                args.iter().map(|t| self.resolve_fixed(t)).collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+
     pub(crate) fn resolve(&self, ty: &Ty) -> Ty {
         match ty {
             Ty::IntVar(id) => match self.ints[self.int_root(*id) as usize] {
@@ -299,12 +357,16 @@ impl Vars {
                 _ => Ty::F64,
             },
             Ty::Vec(t) => Ty::vec(self.resolve(t)),
-            Ty::Set(t) => Ty::Set(Box::new(self.resolve(t))),
+            Ty::Set(t, sorted) => Ty::Set(Box::new(self.resolve(t)), *sorted),
             Ty::Option(t) => Ty::option(self.resolve(t)),
             Ty::Iter(t) => Ty::iter(self.resolve(t)),
             Ty::Range(t) => Ty::Range(Box::new(self.resolve(t))),
             Ty::Entry(t) => Ty::Entry(Box::new(self.resolve(t))),
-            Ty::Map(k, v) => Ty::Map(Box::new(self.resolve(k)), Box::new(self.resolve(v))),
+            Ty::Map(k, v, sorted) => Ty::Map(
+                Box::new(self.resolve(k)),
+                Box::new(self.resolve(v)),
+                *sorted,
+            ),
             Ty::Result(k, v) => Ty::result(self.resolve(k), self.resolve(v)),
             Ty::Tuple(items) => Ty::Tuple(items.iter().map(|t| self.resolve(t)).collect()),
             Ty::Closure(params, ret) => Ty::Closure(

@@ -118,7 +118,14 @@ pub(super) fn render_placeholder(
                 user_padded = Some(padded);
                 text
             }
-            None => value.display(),
+            // an anyhow error writes without `pad`, so a width does nothing
+            None => match crate::interpreter::anyhow_bridge::display(&value, fmt.contains('#')) {
+                Some(text) => {
+                    user_padded = Some(false);
+                    text
+                }
+                None => value.display(),
+            },
         }
     };
     let mut user_debug = false;

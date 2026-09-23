@@ -165,6 +165,14 @@ fn int_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     }))
 }
 
+/// The array a `HashMap::from` or `BTreeSet::from` takes by value.
+fn from_items(args: &[Value]) -> Result<Vec<Value>> {
+    match args.first() {
+        Some(Value::Vec(items)) => Ok(items.lock().clone()),
+        _ => bail!("`from` needs an array"),
+    }
+}
+
 fn container_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     Ok(Some(match id {
         // a shape can't grow after the instance exists, so it has every field a builder call can set
@@ -178,10 +186,19 @@ fn container_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
             Some(other) => Value::vec(vec![other.clone()]),
             None => Value::vec(vec![]),
         },
+        // `from` an array, a later duplicate key wins like std
+        PathId::HashMapFrom | PathId::BTreeMapFrom => {
+            super::vecmap::collect_map(from_items(args)?, id == PathId::BTreeMapFrom)?
+        }
+        PathId::HashSetFrom | PathId::BTreeSetFrom => {
+            super::vecmap::collect_set(from_items(args)?, id == PathId::BTreeSetFrom)?
+        }
         // `std::cmp::Reverse`, a newtype whose order is the inner order flipped
         PathId::CmpReverse => Value::struct_of("Reverse", [(Arc::from("0"), arg(args, 0)?)]),
-        PathId::HashMapNew | PathId::BTreeMapNew | PathId::HashMapWithCapacity => Value::map(),
-        PathId::HashSetNew | PathId::BTreeSetNew | PathId::HashSetWithCapacity => Value::set(),
+        PathId::HashMapNew | PathId::HashMapWithCapacity => Value::map(),
+        PathId::HashSetNew | PathId::HashSetWithCapacity => Value::set(),
+        PathId::BTreeMapNew => Value::sorted_map(),
+        PathId::BTreeSetNew => Value::sorted_set(),
         // `Rc::clone(&x)` is `x.clone()`, and a cell clone shares its slot
         PathId::BoxNew | PathId::RcClone | PathId::ArcClone => arg(args, 0)?,
         // real shared cells, `Box` above stays transparent

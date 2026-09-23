@@ -148,7 +148,11 @@ impl Compiler<'_> {
                 }
                 self.chain_made(&mut made, &mut seen);
             } else {
+                // a plain condition is an operand of `&&`, a temporary scope of its own, so
+                // its temporaries end here while the `let` scrutinees live on
+                let term_temps = self.cur().owned_temps.len();
                 let cond = self.compile_expr(term)?;
+                self.drop_temps(term_temps, Some(cond));
                 self.chain_made(&mut made, &mut seen);
                 else_jumps.push((self.here(), made.clone()));
                 self.emit(Op::JumpIfFalse { cond, to: 0 });
@@ -636,6 +640,18 @@ impl Compiler<'_> {
             self.patch_jump(skip, next);
             if let Some(gs) = guard_skip {
                 self.patch_jump(gs, next);
+            }
+            // an arm that did not take the value leaves its bindings empty, they only looked at
+            // the scrutinee, which still owns every part a later arm or an unwind drops
+            if self.ctx.has_drop {
+                let binds: Vec<Reg> = self.cur().pats[usize::from(pat)]
+                    .binds
+                    .iter()
+                    .map(|(_, reg)| *reg)
+                    .collect();
+                for reg in binds {
+                    self.emit(Op::LoadUnit { dst: reg });
+                }
             }
         }
         // no arm matched

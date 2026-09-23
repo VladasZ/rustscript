@@ -326,3 +326,83 @@ pub(super) fn expand_widths_with(
 fn fill_str(c: char, n: usize) -> String {
     std::iter::repeat_n(c, n).collect()
 }
+
+/// `{:?}` of a `std::time::Duration`, ported from `core::time`. The unit follows the size, `s`
+/// down to `ns`, trailing zeros go unless a precision asks for digits, and the last digit
+/// rounds half up with a carry into the integer part.
+pub(super) fn duration_debug(secs: u64, nanos: u32, spec: &str) -> String {
+    let parsed = parse_spec(spec);
+    let prefix = if parsed.plus { "+" } else { "" };
+    let (integer, fraction, divisor, postfix) = if secs > 0 {
+        (secs, nanos, 100_000_000, "s")
+    } else if nanos >= 1_000_000 {
+        (
+            u64::from(nanos / 1_000_000),
+            nanos % 1_000_000,
+            100_000,
+            "ms",
+        )
+    } else if nanos >= 1_000 {
+        (u64::from(nanos / 1_000), nanos % 1_000, 100, "µs")
+    } else {
+        (u64::from(nanos), 0, 1, "ns")
+    };
+    let (mut fraction, mut divisor) = (fraction, divisor);
+    let mut digits = [b'0'; 9];
+    let mut pos = 0;
+    let limit = parsed.precision.map_or(9, |p| p.min(9));
+    while fraction > 0 && pos < limit {
+        let digit = u8::try_from(fraction / divisor).unwrap_or(0);
+        digits[pos] = b'0' + digit;
+        fraction %= divisor;
+        divisor /= 10;
+        pos += 1;
+    }
+    let integer = if fraction > 0 && fraction >= divisor * 5 {
+        let mut at = pos;
+        let mut carry = true;
+        while carry && at > 0 {
+            at -= 1;
+            if digits[at] < b'9' {
+                digits[at] += 1;
+                carry = false;
+            } else {
+                digits[at] = b'0';
+            }
+        }
+        if carry {
+            integer.checked_add(1)
+        } else {
+            Some(integer)
+        }
+    } else {
+        Some(integer)
+    };
+    let end = parsed.precision.map_or(pos, |p| p.min(9));
+    let mut out = String::from(prefix);
+    match integer {
+        Some(i) => out.push_str(&i.to_string()),
+        None => out.push_str("18446744073709551616"),
+    }
+    if end > 0 {
+        let shown = String::from_utf8_lossy(&digits[..end]).into_owned();
+        let width = parsed.precision.unwrap_or(pos);
+        out.push_str(&format!(".{shown:0<width$}"));
+    }
+    out.push_str(postfix);
+    let Some(width) = parsed.width else {
+        return out;
+    };
+    let len = out.chars().count();
+    if width <= len {
+        return out;
+    }
+    let gap = width - len;
+    let fill = parsed.fill.to_string();
+    let (before, after) = match parsed.align {
+        Some('>') => (gap, 0),
+        Some('^') => (gap / 2, gap - gap / 2),
+        _ => (0, gap),
+    };
+    format!("{}{out}{}", fill.repeat(before), fill.repeat(after))
+}

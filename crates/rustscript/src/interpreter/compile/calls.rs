@@ -9,6 +9,7 @@ use crate::interpreter::bytecode::{Const, DefaultIr, EnumVariant, Op, PathId, Pa
 use crate::interpreter::numeric::IntWidth;
 use crate::interpreter::typeir::CastIr;
 
+use super::infer::Ty;
 use super::{Compiler, NameLoc, Res, TypeIr, first_generic_type, idx16};
 
 impl Compiler<'_> {
@@ -139,6 +140,42 @@ impl Compiler<'_> {
                 self.emit_default(dst, ir);
                 return Ok(());
             }
+            // a bare `Default::default()` into a type with its own `impl Default` calls it
+            if path_expr.qself.is_none()
+                && path.segments.len() == 2
+                && path.segments[0].ident == "Default"
+                && let Ty::Struct(canon) | Ty::Enum(canon) = self.types.of_node(c)
+                && self
+                    .ctx
+                    .impl_sigs
+                    .contains_key(&(canon.to_string(), "default".to_string()))
+            {
+                let p = self.add_path(PathRef::user(
+                    vec![canon.to_string(), "default".to_string()],
+                    None,
+                ));
+                let base = self.compile_args(std::iter::empty())?;
+                self.emit(Op::CallPath {
+                    dst,
+                    path: p,
+                    base,
+                    argc: 0,
+                });
+                return Ok(());
+            }
+            // strict inference, a bare `Default::default()` must know what it builds
+            if path_expr.qself.is_none()
+                && path.segments.len() == 2
+                && path.segments[0].ident == "Default"
+                && self.types.of_node(c).is_unknown()
+            {
+                let line = path.segments[1].ident.span().start().line;
+                bail!(
+                    "unsupported: line {line} of {}, the interpreter cannot tell what type \
+                     `Default::default` makes here, name it with a `let` annotation",
+                    self.ctx.file
+                );
+            }
             // `<S>::default()` on a type with its own `fn default` is `S::default()`
             if let Some(qself) = &path_expr.qself
                 && let syn::Type::Path(tp) = &*qself.ty
@@ -231,8 +268,16 @@ impl Compiler<'_> {
                 let k = self.add_const(Const::Str(Arc::from("")));
                 self.emit(Op::LoadConst { dst, k });
             }
-            EmptyKind::Map => self.emit(Op::MakeMap { dst, set: false }),
-            EmptyKind::Set => self.emit(Op::MakeMap { dst, set: true }),
+            EmptyKind::Map(sorted) => self.emit(Op::MakeMap {
+                dst,
+                set: false,
+                sorted,
+            }),
+            EmptyKind::Set(sorted) => self.emit(Op::MakeMap {
+                dst,
+                set: true,
+                sorted,
+            }),
         }
         Ok(true)
     }
@@ -468,8 +513,10 @@ pub(super) fn is_tokio_spawn(path: &syn::Path) -> bool {
 pub(super) enum EmptyKind {
     Vec,
     Str,
-    Map,
-    Set,
+    /// the flag is a `BTreeMap`
+    Map(bool),
+    /// the flag is a `BTreeSet`
+    Set(bool),
 }
 
 pub(super) fn empty_container(id: PathId) -> Option<EmptyKind> {
@@ -479,10 +526,10 @@ pub(super) fn empty_container(id: PathId) -> Option<EmptyKind> {
         | PathId::VecDequeNew
         | PathId::VecDequeWithCapacity => EmptyKind::Vec,
         PathId::StringNew | PathId::StringWithCapacity => EmptyKind::Str,
-        PathId::HashMapNew | PathId::HashMapWithCapacity | PathId::BTreeMapNew | PathId::MapNew => {
-            EmptyKind::Map
-        }
-        PathId::HashSetNew | PathId::HashSetWithCapacity | PathId::BTreeSetNew => EmptyKind::Set,
+        PathId::HashMapNew | PathId::HashMapWithCapacity | PathId::MapNew => EmptyKind::Map(false),
+        PathId::BTreeMapNew => EmptyKind::Map(true),
+        PathId::HashSetNew | PathId::HashSetWithCapacity => EmptyKind::Set(false),
+        PathId::BTreeSetNew => EmptyKind::Set(true),
         _ => return None,
     })
 }

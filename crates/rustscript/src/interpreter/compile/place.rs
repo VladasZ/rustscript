@@ -490,7 +490,7 @@ impl Compiler<'_> {
         matches!(
             self.types.of(expr),
             Ty::Vec(_)
-                | Ty::Set(_)
+                | Ty::Set(..)
                 | Ty::Map(..)
                 | Ty::Option(_)
                 | Ty::Result(..)
@@ -607,7 +607,7 @@ impl Compiler<'_> {
             ty,
             Ty::Str
                 | Ty::Vec(_)
-                | Ty::Set(_)
+                | Ty::Set(..)
                 | Ty::Map(..)
                 | Ty::Struct(_)
                 | Ty::Enum(_)

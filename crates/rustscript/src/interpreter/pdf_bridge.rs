@@ -2,7 +2,6 @@
 //! lopdf defines.
 
 use anyhow::{Result, bail};
-use indexmap::IndexMap;
 use lopdf::{Document, ObjectId};
 
 use super::bytecode::{BuiltinId, MethodName};
@@ -25,7 +24,7 @@ pub(super) fn document_method(
     Ok(Some(match name.id {
         // page number to `ObjectId`, as a map of int to tuple
         BuiltinId::GetPages => {
-            let mut map = IndexMap::default();
+            let mut map = crate::interpreter::value::MapStore::default();
             for (num, id) in doc.get_pages() {
                 let key = Value::Int(i64::from(num))
                     .into_key()

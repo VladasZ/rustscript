@@ -1,5 +1,6 @@
 //! The hashable key form of a value. Manual `Hash` so the exact bytes per variant are fixed.
 
+use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -48,6 +49,62 @@ impl PartialEq for MapKey {
 }
 
 impl Eq for MapKey {}
+
+/// The order of a derived `Ord`, which is what a `BTreeMap` key sorts by. A struct compares its
+/// fields in declaration order and an enum its variant index first, then the payload.
+/// `std::cmp::Reverse` flips its inner key.
+impl Ord for MapKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (MapKey::Bool(a), MapKey::Bool(b)) => a.cmp(b),
+            (MapKey::Int(_) | MapKey::Wide(..), MapKey::Int(_) | MapKey::Wide(..)) => {
+                self.int_value().cmp(&other.int_value())
+            }
+            (MapKey::Char(a), MapKey::Char(b)) => a.cmp(b),
+            (MapKey::Str(a), MapKey::Str(b)) => (**a).cmp(&**b),
+            (MapKey::Unit, MapKey::Unit) => Ordering::Equal,
+            (MapKey::Opt(a), MapKey::Opt(b)) => a.cmp(b),
+            (MapKey::Struct(sa, a), MapKey::Struct(_, b)) if &*sa.name == "Reverse" => b.cmp(a),
+            (MapKey::Tuple(a), MapKey::Tuple(b))
+            | (MapKey::Vec(a), MapKey::Vec(b))
+            | (MapKey::Struct(_, a), MapKey::Struct(_, b)) => a.cmp(b),
+            (MapKey::Enum(_, va, a), MapKey::Enum(_, vb, b)) => va.cmp(vb).then_with(|| a.cmp(b)),
+            // 1 real map never mixes key types, this only keeps the order total
+            _ => self.rank().cmp(&other.rank()),
+        }
+    }
+}
+
+impl PartialOrd for MapKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl MapKey {
+    fn int_value(&self) -> i128 {
+        match self {
+            MapKey::Int(i) => i128::from(*i),
+            MapKey::Wide(v, w) => w.decode(*v),
+            _ => 0,
+        }
+    }
+
+    fn rank(&self) -> u8 {
+        match self {
+            MapKey::Bool(_) => 0,
+            MapKey::Int(_) | MapKey::Wide(..) => 1,
+            MapKey::Char(_) => 2,
+            MapKey::Str(_) => 3,
+            MapKey::Unit => 4,
+            MapKey::Tuple(_) => 5,
+            MapKey::Opt(_) => 6,
+            MapKey::Vec(_) => 7,
+            MapKey::Struct(..) => 8,
+            MapKey::Enum(..) => 9,
+        }
+    }
+}
 
 impl Hash for MapKey {
     fn hash<H: Hasher>(&self, state: &mut H) {

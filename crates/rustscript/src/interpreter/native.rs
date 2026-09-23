@@ -83,6 +83,9 @@ pub enum Native {
         /// the impl went through `f.pad`, which honors the caller's width
         padded: bool,
     },
+    /// an `anyhow::Error`, the `Display` of each layer from the outermost context to the root
+    /// cause, see `anyhow_bridge`
+    Anyhow(Vec<String>),
     /// left behind after a task is taken to await or a stdin pipe is closed
     Taken,
 }
@@ -121,6 +124,7 @@ impl Native {
             Native::IoErr { .. } => "IoError",
             Native::JoinErr { .. } => "JoinError",
             Native::Fmt { .. } => "Formatter",
+            Native::Anyhow(_) => "Error",
             Native::Taken => "Taken",
         }
     }

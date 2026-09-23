@@ -103,6 +103,8 @@ pub struct Vm {
     pub globals: Vec<Mutex<GlobalSlot>>,
     /// for coercion and typed json
     pub structs: super::json_bridge::Structs,
+    /// the serde layout of every script enum
+    pub serde_enums: super::serde_types::Enums,
     /// for dynamic variant construction
     pub enums: Vec<Arc<EnumDef>>,
     /// for `struct Marker;` used as a value

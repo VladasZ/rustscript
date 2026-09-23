@@ -112,6 +112,7 @@ impl Compiler<'_> {
                 self.emit(Op::LoadConst { dst, k });
             }
             "join" => self.compile_join_macro(dst, mac)?,
+            "json" => self.compile_json_macro(dst, mac)?,
             other => bail!("unsupported macro: {other}!"),
         }
         Ok(())
@@ -195,7 +196,10 @@ impl Compiler<'_> {
         if let Some(g) = guard {
             let skip = self.here();
             self.emit(Op::JumpIfFalse { cond: dst, to: 0 });
+            // a guard is a temporary scope of its own, like a `match` arm's
+            let guard_temps = self.cur().owned_temps.len();
             self.compile_into(dst, g)?;
+            self.drop_temps(guard_temps, Some(dst));
             let end = self.mark()?;
             self.patch_jump(skip, end);
         }
@@ -212,7 +216,16 @@ impl Compiler<'_> {
         let ok = self.here();
         self.emit(Op::JumpIfTrue { cond: c, to: 0 });
         let msg = self.alloc();
-        if let Some(m) = args.get(1) {
+        // a literal message formats with the rest like `anyhow!`, inline `{n}` included
+        if let Some(syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(_),
+            ..
+        })) = args.get(1)
+        {
+            let rest = &args[1..];
+            let formatted: syn::Expr = syn::parse_quote!(format!(#(#rest),*));
+            self.compile_into(msg, &formatted)?;
+        } else if let Some(m) = args.get(1) {
             self.compile_into(msg, m)?;
         } else {
             let k = self.add_const(Const::Str(Arc::from("condition failed")));

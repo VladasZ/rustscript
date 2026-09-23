@@ -10,7 +10,8 @@ use crate::interpreter::bytecode::{BinKind, BuiltinId, DISCARD, Op, PathRef, Reg
 use super::infer::Ty;
 use super::place;
 use super::walks::unparen;
-use super::{CollectTarget, Compiler, NameLoc, idx16};
+use super::{CollectInner, CollectTarget, Compiler, NameLoc, idx16};
+use crate::interpreter::bytecode::DefaultIr;
 
 impl Compiler<'_> {
     /// `last` is the consuming terminal on an iterator and the slice method on a collection,
@@ -71,9 +72,103 @@ impl Compiler<'_> {
         Ok(true)
     }
 
+    /// `map.range(a..b)` on a `BTreeMap` or `BTreeSet`. A range value keeps an open start as 0,
+    /// which is wrong for negative or string keys, so each bound goes as its own argument with a
+    /// flag for whether it is there. The args are start, has start, end, has end, inclusive.
+    fn compile_sorted_range(&mut self, dst: Reg, m: &syn::ExprMethodCall) -> Result<bool> {
+        if m.method != "range" || m.args.len() != 1 {
+            return Ok(false);
+        }
+        if !matches!(
+            self.types.of(&m.receiver),
+            Ty::Map(_, _, true) | Ty::Set(_, true)
+        ) {
+            return Ok(false);
+        }
+        let Expr::Range(r) = unparen(&m.args[0]) else {
+            return Ok(false);
+        };
+        let unit: Expr = syn::parse_quote!(());
+        let flag = |b: bool| -> Expr { syn::parse_quote!(#b) };
+        let args = [
+            r.start.as_deref().cloned().unwrap_or_else(|| unit.clone()),
+            flag(r.start.is_some()),
+            r.end.as_deref().cloned().unwrap_or_else(|| unit.clone()),
+            flag(r.end.is_some()),
+            flag(matches!(r.limits, syn::RangeLimits::Closed(_))),
+        ];
+        let recv = self.compile_expr(&m.receiver)?;
+        let base = self.compile_shared_args(args.iter())?;
+        let name = self.add_name_full("btree_range".to_string(), None, None, false, false);
+        self.set_line(m.method.span());
+        self.emit(Op::Method {
+            dst,
+            recv,
+            name,
+            base,
+            argc: idx16(args.len()),
+        });
+        Ok(true)
+    }
+
+    /// `zip` and `chain` take their iterable by value, a fresh collection hands its items to
+    /// the adapter, which drops the ones nobody pulled.
+    fn compile_method_args(&mut self, m: &syn::ExprMethodCall, method: &str) -> Result<Reg> {
+        let owning_arg: Option<Expr> = match m.args.first() {
+            Some(arg)
+                if self.ctx.has_drop
+                    && m.args.len() == 1
+                    && matches!(method, "zip" | "chain")
+                    && !matches!(unparen(arg), Expr::Reference(_))
+                    && self.temp_owned(arg) =>
+            {
+                Some(syn::parse_quote!((#arg).into_iter()))
+            }
+            _ => None,
+        };
+        match &owning_arg {
+            Some(arg) => self.compile_shared_args(std::iter::once(arg)),
+            None => self.compile_shared_args(m.args.iter()),
+        }
+    }
+
+    /// Strict inference. A method whose result type comes from the context must know that
+    /// type, a guess could print a wrong result where compiled Rust is right.
+    fn check_target_known(&self, m: &syn::ExprMethodCall) -> Result<()> {
+        if !m.args.is_empty() {
+            return Ok(());
+        }
+        let method = m.method.to_string();
+        let ty = self.types.of_node(m);
+        let unknown = match method.as_str() {
+            "collect" => {
+                ty.is_unknown() && m.turbofish.is_none() && self.collect_target(m).is_none()
+            }
+            "parse" => m.turbofish.is_none() && ty.payload().is_unknown(),
+            "or_default" => matches!(self.types.of(&m.receiver), Ty::Entry(_)) && ty.is_unknown(),
+            "into" => {
+                self.types.is_unresolved(m) && self.user_from_accepts(&self.types.of(&m.receiver))
+            }
+            _ => false,
+        };
+        if unknown {
+            let line = m.method.span().start().line;
+            bail!(
+                "unsupported: line {line} of {}, the interpreter cannot tell what type `{method}` \
+                 makes here, name it with a turbofish or a `let` annotation",
+                self.ctx.file
+            );
+        }
+        Ok(())
+    }
+
     pub(super) fn compile_method(&mut self, dst: Reg, m: &syn::ExprMethodCall) -> Result<()> {
+        self.check_target_known(m)?;
         if m.method == "copy_from_slice" {
             return self.compile_copy_from_slice(dst, m);
+        }
+        if self.compile_sorted_range(dst, m)? {
+            return Ok(());
         }
         if self.compile_into_iter(dst, m)? {
             return Ok(());
@@ -102,7 +197,7 @@ impl Compiler<'_> {
             });
             return Ok(());
         }
-        if self.compile_into_conversion(dst, m)? {
+        if self.compile_into_conversion(dst, m)? || self.compile_parse_user(dst, m)? {
             return Ok(());
         }
         let method_text = m.method.to_string();
@@ -140,12 +235,14 @@ impl Compiler<'_> {
             (self.read_before_args(reg, m), None)
         };
         let place = mutating && place::is_place_expr(&m.receiver);
-        let base = self.compile_shared_args(m.args.iter())?;
+        let base = self.compile_method_args(m, &method_text)?;
         self.cur().close_operands(held);
         let (method, scalar) = self.method_name_and_scalar(m);
-        let default = if method == "unwrap_or_default" {
+        let default = if matches!(method.as_str(), "unwrap_or_default" | "or_default") {
             let ty = self.types.of_node(m);
             self.default_ir_of(&ty)
+        } else if matches!(method.as_str(), "collect_result" | "collect_option") {
+            self.collect_inner_default(m)
         } else {
             None
         };
@@ -192,6 +289,35 @@ impl Compiler<'_> {
         let path = PathRef::user(self.impl_path_for_from(&canon, &source), None);
         let p = self.add_path(path);
         let base = self.compile_args(std::iter::once(&*m.receiver))?;
+        self.emit(Op::CallPath {
+            dst,
+            path: p,
+            base,
+            argc: 1,
+        });
+        Ok(true)
+    }
+
+    /// `s.parse::<T>()` into a script type is `T::from_str(s)`, which is what std calls. True
+    /// when the call was emitted here.
+    fn compile_parse_user(&mut self, dst: Reg, m: &syn::ExprMethodCall) -> Result<bool> {
+        if m.method != "parse" || !m.args.is_empty() {
+            return Ok(false);
+        }
+        let (Ty::Struct(canon) | Ty::Enum(canon)) = self.types.of_node(m).payload() else {
+            return Ok(false);
+        };
+        if !self
+            .ctx
+            .impl_sigs
+            .contains_key(&(canon.to_string(), "from_str".to_string()))
+        {
+            return Ok(false);
+        }
+        let path = PathRef::user(vec![canon.to_string(), "from_str".to_string()], None);
+        let p = self.add_path(path);
+        let base = self.compile_args(std::iter::once(&*m.receiver))?;
+        self.set_line(m.method.span());
         self.emit(Op::CallPath {
             dst,
             path: p,
@@ -297,19 +423,44 @@ impl Compiler<'_> {
         m: &syn::ExprMethodCall,
     ) -> (String, Option<ScalarTy>) {
         let mut method = m.method.to_string();
-        if method == "collect" {
-            let target = m
-                .turbofish
-                .as_ref()
-                .and_then(turbofish_collect_target)
-                .or_else(|| self.collect_target_of(m));
-            if let Some(target) = target {
-                method = target.method_name().to_string();
-            }
+        if method == "collect"
+            && let Some(target) = self.collect_target(m)
+        {
+            method = target.method_name().to_string();
         }
         let scalar =
             turbofish_scalar(m.turbofish.as_ref()).or_else(|| self.method_scalar(m, &method));
         (method, scalar)
+    }
+}
+
+impl Compiler<'_> {
+    /// The written turbofish first, then the inferred result. A turbofish `Result<_, _>` takes
+    /// its `C` from the inferred type.
+    pub(super) fn collect_target(&self, m: &syn::ExprMethodCall) -> Option<CollectTarget> {
+        let inferred = self.collect_target_of(m);
+        let written = m.turbofish.as_ref().and_then(turbofish_collect_target);
+        match (written, inferred) {
+            (Some(CollectTarget::Result(None)), Some(CollectTarget::Result(inner)))
+            | (Some(CollectTarget::Option(None)), Some(CollectTarget::Option(inner))) => written
+                .map(|w| match w {
+                    CollectTarget::Result(_) => CollectTarget::Result(inner),
+                    _ => CollectTarget::Option(inner),
+                }),
+            (Some(w), _) => Some(w),
+            (None, i) => i,
+        }
+    }
+
+    /// The empty `C` of a collect into `Result<C, E>` or `Option<C>`, a `Vec` when nothing
+    /// says otherwise.
+    pub(super) fn collect_inner_default(&self, m: &syn::ExprMethodCall) -> Option<DefaultIr> {
+        match self.collect_target(m)? {
+            CollectTarget::Result(inner) | CollectTarget::Option(inner) => {
+                Some(inner.unwrap_or(CollectInner::Vec).empty())
+            }
+            _ => None,
+        }
     }
 }
 

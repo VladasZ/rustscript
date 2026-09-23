@@ -1,5 +1,6 @@
 //! Struct literals and the field defaults they fill in.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -22,9 +23,21 @@ impl Compiler<'_> {
                 .resolver
                 .resolve_struct_key(self.ctx.module, &s.path)
         });
+        let variant = resolved
+            .is_none()
+            .then(|| self.struct_variant(&s.path))
+            .flatten();
         let (name, def) = if let Some(canon) = resolved {
             let def = self.ctx.resolver.structs.get(&canon).map(|d| d.ast.clone());
             (canon.to_string(), def)
+        } else if let Some((_, _, fields)) = &variant {
+            let bare = s
+                .path
+                .segments
+                .last()
+                .map(|seg| seg.ident.to_string())
+                .unwrap_or_default();
+            (bare, Some(fields.clone()))
         } else {
             let bare = s
                 .path
@@ -82,20 +95,8 @@ impl Compiler<'_> {
             .collect();
         let info = {
             let fields: Vec<Arc<str>> = order.into_iter().map(Into::into).collect();
-            let known = self.shapes.iter().find(|s| {
-                *s.name == name
-                    && s.fields == fields
-                    && s.renames == renames
-                    && s.skip_none == skip_none
-            });
-            let shape = if let Some(shared) = known {
-                shared.clone()
-            } else {
-                let type_id = self.ctx.resolver.type_id_of(&name);
-                let built = StructShape::typed(name, type_id, fields, renames, skip_none);
-                self.shapes.push(built.clone());
-                built
-            };
+            let variant = variant.map(|(def, index, _)| (def, index));
+            let shape = self.literal_shape(name, fields, renames, skip_none, variant);
             let f = self.cur();
             f.struct_lits.push(StructLit {
                 shape,
@@ -106,6 +107,66 @@ impl Compiler<'_> {
         };
         self.emit(Op::MakeStruct { dst, info, base });
         Ok(())
+    }
+
+    /// Shared with every literal of the same layout and the same enum variant.
+    fn literal_shape(
+        &mut self,
+        name: String,
+        fields: Vec<Arc<str>>,
+        renames: Vec<Option<Arc<str>>>,
+        skip_none: Vec<bool>,
+        variant: Option<(Arc<crate::interpreter::enum_def::EnumDef>, u16)>,
+    ) -> Arc<StructShape> {
+        let variant_key = variant
+            .as_ref()
+            .map(|(def, index)| (Arc::as_ptr(def), *index));
+        let known = self.shapes.iter().find(|s| {
+            *s.name == name
+                && s.fields == fields
+                && s.renames == renames
+                && s.skip_none == skip_none
+                && s.variant.as_ref().map(|(d, i)| (Arc::as_ptr(d), *i)) == variant_key
+        });
+        if let Some(shared) = known {
+            return shared.clone();
+        }
+        let type_id = self.ctx.resolver.type_id_of(&name);
+        let mut built = StructShape::typed(name, type_id, fields, renames, skip_none);
+        if let Some((def, index)) = variant {
+            built = built.as_variant(def, index);
+        }
+        self.shapes.push(built.clone());
+        built
+    }
+
+    /// `E::S { .. }` of a script enum, its definition, index, and its fields as a struct so
+    /// the literal orders and renames them like a struct.
+    fn struct_variant(
+        &self,
+        path: &syn::Path,
+    ) -> Option<(
+        Arc<crate::interpreter::enum_def::EnumDef>,
+        u16,
+        Rc<syn::ItemStruct>,
+    )> {
+        let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let (def, index) = self.resolve_variant(&segs)?;
+        if !def.user {
+            return None;
+        }
+        let ast = self.ctx.resolver.enums.get(&def.name)?;
+        let v = ast.variants.get(usize::from(index))?;
+        let syn::Fields::Named(_) = &v.fields else {
+            return None;
+        };
+        let ident = &v.ident;
+        let fields = &v.fields;
+        Some((
+            def.clone(),
+            index,
+            Rc::new(syn::parse_quote!(struct #ident #fields)),
+        ))
     }
 
     // patterns

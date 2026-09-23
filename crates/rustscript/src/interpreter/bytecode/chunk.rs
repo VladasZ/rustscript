@@ -215,6 +215,8 @@ pub enum Op {
     MakeMap {
         dst: Reg,
         set: bool,
+        /// a `BTreeMap` or `BTreeSet`
+        sorted: bool,
     },
     MakeTuple {
         dst: Reg,
@@ -546,6 +548,9 @@ pub struct StructShape {
     pub renames: Vec<Option<Arc<str>>>,
     /// `#[serde(skip_serializing_if = "Option::is_none")]` per field, empty when none.
     pub skip_none: Vec<bool>,
+    /// The enum and variant index of a struct variant, `E::S { .. }`. Serde writes it inside
+    /// the enum's representation.
+    pub variant: Option<(Arc<super::super::enum_def::EnumDef>, u16)>,
 }
 
 impl StructShape {
@@ -556,6 +561,7 @@ impl StructShape {
             fields,
             renames: Vec::new(),
             skip_none: Vec::new(),
+            variant: None,
         })
     }
 
@@ -572,6 +578,23 @@ impl StructShape {
             fields,
             renames,
             skip_none,
+            variant: None,
+        })
+    }
+
+    /// This shape as the payload of variant `index` of `def`.
+    pub fn as_variant(
+        &self,
+        def: Arc<super::super::enum_def::EnumDef>,
+        index: u16,
+    ) -> Arc<StructShape> {
+        Arc::new(StructShape {
+            name: self.name.clone(),
+            type_id: self.type_id,
+            fields: self.fields.clone(),
+            renames: self.renames.clone(),
+            skip_none: self.skip_none.clone(),
+            variant: Some((def, index)),
         })
     }
 

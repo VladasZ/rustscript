@@ -69,6 +69,19 @@ impl Infer<'_, '_> {
         let ty = self.expr_inner(e, expected);
         let ty = self.vars.meet(&ty, expected);
         self.types.insert(std::ptr::from_ref(e), ty.clone());
+        // `into` takes its target from the context, the pass types it as its receiver when
+        // none reaches it, which strict mode refuses
+        if let Expr::MethodCall(m) = e
+            && m.method == "into"
+            && m.args.is_empty()
+        {
+            let node: *const () = std::ptr::from_ref(m).cast();
+            if expected.is_unknown() {
+                self.unresolved.insert(node);
+            } else {
+                self.unresolved.remove(&node);
+            }
+        }
         let node: *const () = match e {
             Expr::MethodCall(m) => std::ptr::from_ref(m).cast(),
             Expr::Call(c) => std::ptr::from_ref(c).cast(),
@@ -219,12 +232,23 @@ impl Infer<'_, '_> {
                 let want = match_scrutinee_expectation(m, expected);
                 let scrutinee = self.expr(&m.expr, &want);
                 let mut out = Ty::Unknown;
+                let mut bodies = Vec::with_capacity(m.arms.len());
                 for arm in &m.arms {
                     self.push();
                     self.bind_pat(&arm.pat, &scrutinee);
                     let body = self.expr(&arm.body, expected);
                     self.pop();
                     out = self.vars.meet(&out, &body);
+                    bodies.push(body);
+                }
+                // an arm typed before a later arm named the type learns it now
+                for (arm, body) in m.arms.iter().zip(bodies) {
+                    if body.has_unknown() && body != out {
+                        self.push();
+                        self.bind_pat(&arm.pat, &scrutinee);
+                        self.expr(&arm.body, &out);
+                        self.pop();
+                    }
                 }
                 out
             }
@@ -314,7 +338,15 @@ impl Infer<'_, '_> {
         match &i.else_branch {
             Some((_, other)) => {
                 let alt = self.expr(other, &then);
-                self.vars.meet(&then, &alt)
+                let both = self.vars.meet(&then, &alt);
+                // the `then` side learns a type only the `else` side names
+                if then.has_unknown() && both != then {
+                    self.push();
+                    self.cond(&i.cond);
+                    self.block_inner(&i.then_branch, &both);
+                    self.pop();
+                }
+                both
             }
             None => Ty::Unit,
         }
@@ -390,7 +422,7 @@ impl Infer<'_, '_> {
                     (**item).clone()
                 }
             }
-            Ty::Map(key, value) => {
+            Ty::Map(key, value, _) => {
                 self.expr(&ix.index, key);
                 (**value).clone()
             }
@@ -449,10 +481,38 @@ impl Infer<'_, '_> {
 
     fn struct_literal(&mut self, s: &syn::ExprStruct) -> Ty {
         let canon = self.struct_key(&s.path);
+        // an enum struct variant, `Shape::Rect { w, h }`, types its fields from the variant
+        let variant = if canon.is_some() {
+            None
+        } else {
+            let segs: Vec<String> = s
+                .path
+                .segments
+                .iter()
+                .map(|s| s.ident.to_string())
+                .collect();
+            match self.ctx.resolver.resolve(self.ctx.module, &segs) {
+                Ok(Res::TypeMember(canon, rest))
+                    if self.ctx.resolver.enums.contains_key(&canon) =>
+                {
+                    let fields = rest
+                        .first()
+                        .map(|v| self.variant_payload(&canon, v))
+                        .unwrap_or_default();
+                    Some((canon, fields))
+                }
+                _ => None,
+            }
+        };
         for field in &s.fields {
-            let want = canon
-                .as_ref()
-                .map_or(Ty::Unknown, |canon| self.field_ty(canon, &field.member));
+            let want = match (&canon, &variant, &field.member) {
+                (Some(canon), _, member) => self.field_ty(canon, member),
+                (None, Some((_, fields)), syn::Member::Named(name)) => fields
+                    .iter()
+                    .find(|(n, _)| n.as_deref() == Some(name.to_string().as_str()))
+                    .map_or(Ty::Unknown, |(_, t)| t.clone()),
+                _ => Ty::Unknown,
+            };
             self.expr(&field.expr, &want);
         }
         let ty = canon.clone().map_or(Ty::Unknown, Ty::Struct);
@@ -462,18 +522,6 @@ impl Infer<'_, '_> {
         if canon.is_some() {
             return ty;
         }
-        // an enum struct variant, `Shape::Rect { w, h }`
-        let segs: Vec<String> = s
-            .path
-            .segments
-            .iter()
-            .map(|s| s.ident.to_string())
-            .collect();
-        match self.ctx.resolver.resolve(self.ctx.module, &segs) {
-            Ok(Res::TypeMember(canon, _)) if self.ctx.resolver.enums.contains_key(&canon) => {
-                Ty::Enum(canon)
-            }
-            _ => Ty::Unknown,
-        }
+        variant.map_or(Ty::Unknown, |(canon, _)| Ty::Enum(canon))
     }
 }
