@@ -13,9 +13,7 @@ use super::int_methods::{ByteOrder, from_bytes, from_bytes_order};
 use super::jwt_bridge::jwt_assoc;
 use super::native::Native;
 use super::numeric::IntWidth;
-use super::std_bridge::{
-    arg_int, arg_str, as_i64, bytes_to_string, make_duration, make_path, open_file, path_like,
-};
+use super::std_bridge::{arg_str, as_i64, bytes_to_string, make_path, open_file, path_like};
 use super::value::{CellKind, Value};
 
 pub(super) fn assoc_fn(id: PathId, args: &[Value]) -> Result<Option<Value>> {
@@ -408,22 +406,6 @@ fn misc_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
         // time
         PathId::InstantNow => Native::Instant(std::time::Instant::now()).wrap(),
         PathId::SystemTimeNow => Native::SystemTime(std::time::SystemTime::now()).wrap(),
-        PathId::DurationFromSecs => make_duration(std::time::Duration::from_secs(
-            u64::try_from(arg_int(args, 0)).unwrap_or_default(),
-        )),
-        PathId::DurationFromMillis => make_duration(std::time::Duration::from_millis(
-            u64::try_from(arg_int(args, 0)).unwrap_or_default(),
-        )),
-        PathId::DurationFromMicros => make_duration(std::time::Duration::from_micros(
-            u64::try_from(arg_int(args, 0)).unwrap_or_default(),
-        )),
-        PathId::DurationFromNanos => make_duration(std::time::Duration::from_nanos(
-            u64::try_from(arg_int(args, 0)).unwrap_or_default(),
-        )),
-        PathId::DurationNew => make_duration(std::time::Duration::new(
-            u64::try_from(arg_int(args, 0)).unwrap_or_default(),
-            u32::try_from(arg_int(args, 1)).unwrap_or_default(),
-        )),
         // net
         PathId::TcpListenerBind => match std::net::TcpListener::bind(arg_str(args, 0)) {
             Ok(l) => Value::ok(Native::Listener(l).wrap()),

@@ -357,11 +357,11 @@ impl BuiltinId {
         match self {
             Clone | ToString | CloneFrom => &["*"],
             Len | IsEmpty | Get => &["Str", "Vec", "Map"],
-            Insert | Remove => &["Vec", "Map"],
+            Insert | Remove | IterMut | Retain => &["Vec", "Map"],
             ContainsKey | Entry | Keys | Values => &["Map"],
             Iter => &["Vec", "Map", "Option"],
-            IterMut | Pop | First | Last | SplitFirst | Sort | SortByKey | SortByCachedKey
-            | SortBy | Join | Concat | Retain => &["Vec"],
+            Pop | First | Last | SplitFirst | Sort | SortByKey | SortByCachedKey | SortBy
+            | Join | Concat => &["Vec"],
             Push | Contains => &["Str", "Vec"],
             PushStr | SplitWhitespace | Split | Chars | Lines | Trim | StartsWith | EndsWith
             | Parse | WriteAll | WriteStr | WriteFmt => &["Str"],
@@ -440,6 +440,8 @@ pub struct FmtSpec {
     pub template: String,
     pub positional: Vec<Reg>,
     pub named: Vec<(String, Reg)>,
+    /// the argument registers that hold a `serde_json::Value`, which prints as json
+    pub json: Vec<Reg>,
 }
 
 pub struct PatInfo {

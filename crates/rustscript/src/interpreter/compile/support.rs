@@ -517,6 +517,8 @@ pub(super) fn init_is_owned(expr: &Expr, binding_owns: BindingOwns) -> bool {
             | "partition" | "unzip" => chain_owns_items(&m.receiver, binding_owns),
             _ => false,
         },
+        // a `break 'label value` moves its value out like the `break` of a `loop`
+        Expr::Block(b) if b.label.is_some() => true,
         Expr::Block(b) => b.block.stmts.last().is_some_and(|stmt| match stmt {
             syn::Stmt::Expr(e, None) => init_is_owned(e, binding_owns),
             _ => false,

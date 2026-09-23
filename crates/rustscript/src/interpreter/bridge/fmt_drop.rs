@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::interpreter::bytecode::Chunk;
+use crate::interpreter::bytecode::{Chunk, Reg};
+use crate::interpreter::json_bridge::pvalue_to_json;
 use crate::interpreter::native::Native;
 use crate::interpreter::value::{Upvalue, Value};
 use crate::interpreter::vm::Vm;
@@ -22,16 +23,20 @@ impl Vm {
         regs: &[Value],
     ) -> Result<String> {
         let f = &chunk.fmts[spec as usize];
-        let positional: Vec<Value> = f
-            .positional
-            .iter()
-            .map(|r| regs[*r as usize].clone())
-            .collect();
-        let named: Vec<(&str, Value)> = f
-            .named
-            .iter()
-            .map(|(n, r)| (n.as_str(), regs[*r as usize].clone()))
-            .collect();
+        // a json value is a plain map, list or string at runtime, so the spec says which
+        // arguments print as json
+        let arg = |r: Reg| -> Value {
+            let v = &regs[r as usize];
+            if f.json.contains(&r)
+                && let Ok(json) = pvalue_to_json(v)
+            {
+                return Native::Json(json).wrap();
+            }
+            v.clone()
+        };
+        let positional: Vec<Value> = f.positional.iter().map(|r| arg(*r)).collect();
+        let named: Vec<(&str, Value)> =
+            f.named.iter().map(|(n, r)| (n.as_str(), arg(*r))).collect();
         render_template(self, &f.template, &positional, &named)
     }
 

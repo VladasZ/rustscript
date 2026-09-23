@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 
+use crate::interpreter::native::Native;
 use crate::interpreter::value::Value;
 use crate::interpreter::vm::Vm;
 
@@ -58,24 +59,7 @@ pub(super) fn render_placeholder(
     named: &[(&str, Value)],
 ) -> Result<String> {
     let (name, fmt) = spec.split_once(':').unwrap_or((spec, ""));
-    // `{:.*}` takes its precision from the next positional argument
-    let fmt = if fmt.contains(".*") {
-        let precision = match resolve_arg("", next_pos, positional, named)? {
-            Value::Int(i) => i,
-            ref other @ Value::IntW(..) => other
-                .untag_int()
-                .ok_or_else(|| anyhow::anyhow!("format precision out of range"))?,
-            other => {
-                bail!(
-                    "format precision must be an integer, got {}",
-                    other.type_name()
-                )
-            }
-        };
-        fmt.replace(".*", &format!(".{precision}"))
-    } else {
-        fmt.to_string()
-    };
+    let fmt = star_precision(fmt, next_pos, positional, named)?;
     let fmt = fmt.as_str();
     let value = resolve_arg(name, next_pos, positional, named)?;
     // a `{:w$}` width names another argument
@@ -92,6 +76,9 @@ pub(super) fn render_placeholder(
         }
     };
     let fmt = crate::interpreter::format::expand_widths_with(fmt, &mut lookup)?;
+    if let Some(text) = json_text(&value, &fmt) {
+        return Ok(text);
+    }
     let number = match &value {
         Value::Float(f) => Some(crate::interpreter::format::SpecNumber::Float(*f)),
         Value::F32(f) => Some(crate::interpreter::format::SpecNumber::F32(*f)),
@@ -164,6 +151,48 @@ pub(super) fn render_placeholder(
         number,
         user_padded.is_some(),
     ))
+}
+
+/// `{:.*}` takes its precision from the next positional argument.
+fn star_precision(
+    fmt: &str,
+    next_pos: &mut usize,
+    positional: &[Value],
+    named: &[(&str, Value)],
+) -> Result<String> {
+    if !fmt.contains(".*") {
+        return Ok(fmt.to_string());
+    }
+    let precision = match resolve_arg("", next_pos, positional, named)? {
+        Value::Int(i) => i,
+        ref other @ Value::IntW(..) => other
+            .untag_int()
+            .ok_or_else(|| anyhow::anyhow!("format precision out of range"))?,
+        other => {
+            bail!(
+                "format precision must be an integer, got {}",
+                other.type_name()
+            )
+        }
+    };
+    Ok(fmt.replace(".*", &format!(".{precision}")))
+}
+
+/// A `serde_json::Value` argument, see `render_fmt`. `serde_json` writes its text straight out, so
+/// a width does nothing, like in real Rust.
+fn json_text(value: &Value, fmt: &str) -> Option<String> {
+    let Value::Native(n) = value else {
+        return None;
+    };
+    let Native::Json(json) = &*n.lock() else {
+        return None;
+    };
+    Some(match (fmt.contains('?'), fmt.contains('#')) {
+        (true, true) => format!("{json:#?}"),
+        (true, false) => format!("{json:?}"),
+        (false, true) => format!("{json:#}"),
+        (false, false) => json.to_string(),
+    })
 }
 
 pub(super) fn resolve_arg(

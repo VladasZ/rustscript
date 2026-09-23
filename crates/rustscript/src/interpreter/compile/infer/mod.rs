@@ -43,6 +43,8 @@ pub(super) struct Types {
     macros: HashMap<*const syn::Macro, Rc<MacroBody>>,
     /// `into` calls whose target no context names
     unresolved: HashSet<*const ()>,
+    /// the inline `{name}` holes of a format template, by the template expression
+    holes: HashMap<*const Expr, Vec<(String, Ty)>>,
 }
 
 impl Types {
@@ -52,7 +54,16 @@ impl Types {
             nodes: HashMap::new(),
             macros: HashMap::new(),
             unresolved: HashSet::new(),
+            holes: HashMap::new(),
         }
+    }
+
+    /// The type of the local an inline `{name}` hole of this template reads.
+    pub(super) fn hole(&self, template: &Expr, name: &str) -> Ty {
+        self.holes
+            .get(&std::ptr::from_ref(template))
+            .and_then(|holes| holes.iter().find(|(n, _)| n == name))
+            .map_or(Ty::Unknown, |(_, ty)| ty.clone())
     }
 
     pub(super) fn is_unresolved<T>(&self, node: &T) -> bool {
@@ -81,10 +92,12 @@ impl Types {
 
 /// A local whose type a later use fills in, `let mut v = Vec::new()` then `Ok(v)` against the
 /// return type, makes a second pass that starts every such `let` from what the first pass
-/// learned. So `v.push(s.parse()?)` above the `Ok(v)` knows what to parse.
+/// learned. So `v.push(s.parse()?)` above the `Ok(v)` knows what to parse. A `parse` with no
+/// target also makes one, `let y = s.parse().ok().unwrap_or(0)` learns `i32` from a later
+/// `(y, m)` returned as `(i32, u32)`.
 pub(super) fn infer_fn(ctx: &Ctx, sig: &syn::Signature, block: &Block) -> Types {
     let first = infer_fn_pass(ctx, sig, block, HashMap::new());
-    if !first.refined_late {
+    if !first.refined_late && !first.unknown_target {
         return first.finish();
     }
     // numeric variables are numbered per pass, a seed keeps only what the first pass fixed
@@ -146,6 +159,7 @@ struct Infer<'c, 'r> {
     nodes: HashMap<*const (), Ty>,
     macros: HashMap<*const syn::Macro, Rc<MacroBody>>,
     unresolved: HashSet<*const ()>,
+    holes: HashMap<*const Expr, Vec<(String, Ty)>>,
     scopes: Vec<HashMap<String, Ty>>,
     /// the `let` binding behind each name in `scopes`, for the second pass
     sites: Vec<HashMap<String, *const syn::PatIdent>>,
@@ -155,6 +169,8 @@ struct Infer<'c, 'r> {
     seeds: HashMap<*const syn::PatIdent, Ty>,
     /// a use filled in a binding's type after its `let`
     refined_late: bool,
+    /// a `parse` or `collect` met no target, a later use may still name one
+    unknown_target: bool,
     ret: Ty,
     /// the value type of each enclosing `loop`, for `break v`
     loops: Vec<Ty>,
@@ -170,11 +186,13 @@ impl<'c, 'r> Infer<'c, 'r> {
             nodes: HashMap::new(),
             macros: HashMap::new(),
             unresolved: HashSet::new(),
+            holes: HashMap::new(),
             scopes: Vec::new(),
             sites: Vec::new(),
             finals: HashMap::new(),
             seeds: HashMap::new(),
             refined_late: false,
+            unknown_target: false,
             ret: Ty::Unit,
             loops: Vec::new(),
             generics: Vec::new(),
@@ -197,6 +215,17 @@ impl<'c, 'r> Infer<'c, 'r> {
             nodes,
             macros: self.macros,
             unresolved: self.unresolved,
+            holes: self
+                .holes
+                .iter()
+                .map(|(ptr, holes)| {
+                    let resolved = holes
+                        .iter()
+                        .map(|(name, ty)| (name.clone(), self.vars.resolve(ty)))
+                        .collect();
+                    (*ptr, resolved)
+                })
+                .collect(),
         }
     }
 
@@ -221,7 +250,12 @@ impl<'c, 'r> Infer<'c, 'r> {
             return;
         };
         let current = self.scopes[depth][name].clone();
-        if !current.has_unknown() {
+        // a literal typed by its use, `(y, m)` returned as `(i32, u32)`
+        self.vars.unify(&current, expected);
+        // a closure local learns its return type from a call that expects one
+        let open =
+            current.has_unknown() || matches!(&current, Ty::Closure(_, ret) if ret.has_unknown());
+        if !open {
             return;
         }
         let refined = self.vars.meet(&current, expected);
@@ -570,6 +604,47 @@ impl<'c, 'r> Infer<'c, 'r> {
                 self.literal(&lit.clone(), ty);
             }
             _ => {}
+        }
+    }
+
+    /// What a pattern says about its scrutinee, from the seeds a first pass left for its
+    /// bindings. `if let Ok(port) = s.parse()` learns the target from a later use of `port`.
+    fn pat_expectation(&self, pat: &Pat) -> Ty {
+        match pat {
+            Pat::Ident(id) if id.subpat.is_none() => self
+                .seeds
+                .get(&std::ptr::from_ref(id))
+                .cloned()
+                .unwrap_or(Ty::Unknown),
+            Pat::Paren(p) => self.pat_expectation(&p.pat),
+            Pat::Reference(r) => self.pat_expectation(&r.pat),
+            Pat::Tuple(t) => {
+                let items: Vec<Ty> = t.elems.iter().map(|p| self.pat_expectation(p)).collect();
+                if items.iter().all(Ty::is_unknown) {
+                    Ty::Unknown
+                } else {
+                    Ty::Tuple(items)
+                }
+            }
+            Pat::TupleStruct(ts) if ts.elems.len() == 1 => {
+                let inner = self.pat_expectation(&ts.elems[0]);
+                if inner.is_unknown() {
+                    return Ty::Unknown;
+                }
+                match ts
+                    .path
+                    .segments
+                    .last()
+                    .map(|s| s.ident.to_string())
+                    .as_deref()
+                {
+                    Some("Some") => Ty::option(inner),
+                    Some("Ok") => Ty::result(inner, Ty::Unknown),
+                    Some("Err") => Ty::result(Ty::Unknown, inner),
+                    _ => Ty::Unknown,
+                }
+            }
+            _ => Ty::Unknown,
         }
     }
 

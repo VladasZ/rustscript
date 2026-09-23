@@ -86,6 +86,9 @@ pub enum Native {
     /// an `anyhow::Error`, the `Display` of each layer from the outermost context to the root
     /// cause, see `anyhow_bridge`
     Anyhow(Vec<String>),
+    /// a `serde_json::Value` format argument, rebuilt from its runtime map or list so it prints
+    /// as json, see `render_fmt`
+    Json(serde_json::Value),
     /// left behind after a task is taken to await or a stdin pipe is closed
     Taken,
 }
@@ -125,6 +128,7 @@ impl Native {
             Native::JoinErr { .. } => "JoinError",
             Native::Fmt { .. } => "Formatter",
             Native::Anyhow(_) => "Error",
+            Native::Json(_) => "Value",
             Native::Taken => "Taken",
         }
     }

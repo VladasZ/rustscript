@@ -1,8 +1,10 @@
 ::assert_failed
 ::ensure_fail
 ::json_array
+::json_index
 ::json_null
 ::json_object
+::json_to_string
 ::json_value
 ::unreachable_match
 Arc::clone
@@ -49,6 +51,8 @@ Duration::from_micros
 Duration::from_millis
 Duration::from_nanos
 Duration::from_secs
+Duration::from_secs_f32
+Duration::from_secs_f64
 Duration::hours
 Duration::microseconds
 Duration::milliseconds
@@ -282,6 +286,7 @@ fs::write
 glob::glob
 hex::decode
 hex::encode
+hint::black_box
 i128::MAX
 i128::MIN
 i128::from

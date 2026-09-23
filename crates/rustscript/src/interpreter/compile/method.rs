@@ -5,7 +5,7 @@ use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens;
 use syn::Expr;
 
-use crate::interpreter::bytecode::{BinKind, BuiltinId, DISCARD, Op, PathRef, Reg, ScalarTy};
+use crate::interpreter::bytecode::{BinKind, DISCARD, Op, PathRef, Reg, ScalarTy};
 
 use super::infer::Ty;
 use super::place;
@@ -174,12 +174,13 @@ impl Compiler<'_> {
             return Ok(());
         }
         // `x.get(k).copied().unwrap_or(d)` builds and tears down an Option per call, that
-        // dominates counting loops
+        // dominates counting loops. The fused op builds `d` before the clone, so with a `Drop`
+        // impl a panic in `d` would miss the clone it has to drop.
         if dst != DISCARD
             && m.method == "unwrap_or"
             && m.args.len() == 1
             && let Expr::MethodCall(c) = &*m.receiver
-            && (c.method == "copied" || c.method == "cloned")
+            && (c.method == "copied" || (c.method == "cloned" && !self.ctx.has_drop))
             && c.args.is_empty()
             && let Expr::MethodCall(g) = &*c.receiver
             && g.method == "get"
@@ -200,13 +201,12 @@ impl Compiler<'_> {
         if self.compile_into_conversion(dst, m)? || self.compile_parse_user(dst, m)? {
             return Ok(());
         }
+        if self.compile_json_to_string(dst, m)? {
+            return Ok(());
+        }
         let method_text = m.method.to_string();
-        let mutating = (BuiltinId::resolve(&method_text).mutates()
-            || self.ctx.mut_methods.contains(&method_text))
-            // `rotate_left` mutates a slice but returns a value on an integer, writing back over
-            // an integer receiver would undo the assignment
-            && !(matches!(method_text.as_str(), "rotate_left" | "rotate_right")
-                && matches!(self.types.of(&m.receiver), Ty::Int(_)));
+        // writing back over an integer receiver of `rotate_left` would undo the assignment
+        let mutating = self.method_mutates(m);
         let owned = self.scrutinee_owned(&m.receiver);
         let mut unwinds_receiver = false;
         // the tail call of a block unwinds its receiver like the temporaries around it, in
@@ -274,6 +274,23 @@ impl Compiler<'_> {
         // the variable
         self.emit_mut_arg_writebacks(m.args.iter(), base)?;
         Ok(())
+    }
+
+    /// `to_string` on a `serde_json::Value`. A json value is a plain map, list or string at
+    /// runtime, only the type says it prints as json.
+    fn compile_json_to_string(&mut self, dst: Reg, m: &syn::ExprMethodCall) -> Result<bool> {
+        if m.method != "to_string" || !m.args.is_empty() || self.types.of(&m.receiver) != Ty::Json {
+            return Ok(false);
+        }
+        let base = self.compile_args(std::iter::once(&*m.receiver))?;
+        let path = self.add_path(PathRef::new(vec!["::json_to_string".to_string()], None));
+        self.emit(Op::CallPath {
+            dst,
+            path,
+            base,
+            argc: 1,
+        });
+        Ok(true)
     }
 
     /// `v.into()` into a script type is `T::from(v)`, anything else is identity and stays a

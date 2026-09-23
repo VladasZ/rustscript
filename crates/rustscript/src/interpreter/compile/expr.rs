@@ -6,7 +6,7 @@ use syn::{BinOp, Expr, Lit, UnOp};
 
 use std::sync::Arc;
 
-use crate::interpreter::bytecode::{BinKind, Const, Op, Reg, UnKind};
+use crate::interpreter::bytecode::{BinKind, Const, Op, PathRef, Reg, UnKind};
 use crate::interpreter::numeric::{IntWidth, truncate};
 
 use super::walks::qualified_method_ref;
@@ -78,6 +78,27 @@ impl Compiler<'_> {
         }
     }
 
+    /// A json value reads `null` where a map or a vec would panic.
+    fn compile_index(&mut self, dst: Reg, idx: &syn::ExprIndex) -> Result<()> {
+        if self.types.of(&idx.expr) == Ty::Json && !matches!(&*idx.index, Expr::Range(_)) {
+            let base = self.compile_shared_args([&*idx.expr, &*idx.index].into_iter())?;
+            let path = self.add_path(PathRef::new(vec!["::json_index".to_string()], None));
+            self.emit(Op::CallPath {
+                dst,
+                path,
+                base,
+                argc: 2,
+            });
+            return Ok(());
+        }
+        let base = self.compile_expr(&idx.expr)?;
+        let key = self.compile_expr(&idx.index)?;
+        // `rustc` names the opening bracket of an indexing panic
+        self.set_line(idx.bracket_token.span.open());
+        self.emit(Op::Index { dst, base, key });
+        Ok(())
+    }
+
     pub(super) fn compile_into(&mut self, dst: Reg, expr: &Expr) -> Result<()> {
         self.set_line(expr.span());
         match expr {
@@ -136,13 +157,7 @@ impl Compiler<'_> {
                 let count = self.compile_expr(&r.len)?;
                 self.emit(Op::MakeArrayRepeat { dst, val, count });
             }
-            Expr::Index(idx) => {
-                let base = self.compile_expr(&idx.expr)?;
-                let key = self.compile_expr(&idx.index)?;
-                // `rustc` names the opening bracket of an indexing panic
-                self.set_line(idx.bracket_token.span.open());
-                self.emit(Op::Index { dst, base, key });
-            }
+            Expr::Index(idx) => self.compile_index(dst, idx)?,
             Expr::Field(f) => {
                 let base = self.compile_expr(&f.base)?;
                 let member = self.member_of(&f.member);

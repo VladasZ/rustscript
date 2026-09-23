@@ -236,6 +236,9 @@ impl Infer<'_, '_> {
             }
             "parse" => {
                 let target = turbofish.unwrap_or_else(|| expected.payload());
+                if target.is_unknown() {
+                    self.unknown_target = true;
+                }
                 Ty::result(target, Ty::named("ParseError"))
             }
             "push" => {
@@ -493,8 +496,9 @@ fn receiver_expectation(name: &str, expected: &Ty) -> Ty {
                 _ => Ty::Unknown,
             }
         }
+        // `?` hands a `Result` expectation down even over an `Option`
         "ok" => match expected {
-            Ty::Option(t) => Ty::result((**t).clone(), Ty::Unknown),
+            Ty::Option(t) | Ty::Result(t, _) => Ty::result((**t).clone(), Ty::Unknown),
             _ => Ty::Unknown,
         },
         "collect" => collect_source(expected),

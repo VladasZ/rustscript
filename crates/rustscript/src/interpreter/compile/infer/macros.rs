@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use syn::Expr;
 
-use super::super::support::{parse_exprs, parse_matches, parse_vec_repeat};
+use super::super::support::{inline_holes, parse_exprs, parse_matches, parse_vec_repeat};
 use super::{Infer, MacroBody, Ty};
 use crate::interpreter::numeric::IntWidth;
 
@@ -64,6 +64,16 @@ impl Infer<'_, '_> {
                     return Ty::Unknown;
                 };
                 let first = self.fmt_macro_ty(&name, &exprs, expected);
+                let template = match name.as_str() {
+                    "assert_eq" | "assert_ne" | "debug_assert_eq" | "debug_assert_ne" => 2,
+                    "assert" | "debug_assert" | "ensure" | "write" | "writeln" => 1,
+                    _ => 0,
+                };
+                if !matches!(name.as_str(), "dbg" | "join")
+                    && let Some(template) = exprs.get(template)
+                {
+                    self.template_holes(template);
+                }
                 self.macros
                     .insert(std::ptr::from_ref(mac), Rc::new(MacroBody::Exprs(exprs)));
                 first
@@ -137,6 +147,25 @@ impl Infer<'_, '_> {
                     _ => Ty::Unknown,
                 }
             }
+        }
+    }
+
+    /// The types of the locals the inline `{name}` holes of a template read, so the compiler
+    /// knows a hole holds a `serde_json::Value`.
+    fn template_holes(&mut self, template: &Expr) {
+        let Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(s),
+            ..
+        }) = template
+        else {
+            return;
+        };
+        let holes: Vec<(String, Ty)> = inline_holes(&s.value())
+            .into_iter()
+            .filter_map(|name| self.lookup(&name).map(|ty| (name, ty)))
+            .collect();
+        if !holes.is_empty() {
+            self.holes.insert(std::ptr::from_ref(template), holes);
         }
     }
 

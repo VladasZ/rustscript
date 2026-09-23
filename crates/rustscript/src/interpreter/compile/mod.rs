@@ -358,20 +358,23 @@ impl<'a> Compiler<'a> {
 
     /// The closures of `body` decide which of its bindings need a capture cell.
     fn scan_captures(&mut self, body: &Block) {
-        let mut_methods = self.ctx.mut_methods;
-        let names = captures::closure_written_names(body, &|name| {
-            BuiltinId::resolve(name).mutates() || mut_methods.contains(name)
-        });
+        let names = captures::closure_written_names(body, &|m| self.method_mutates(m));
         self.cur().cell_names = names;
     }
 
     /// `scan_captures` for a closure body.
     fn scan_captures_expr(&mut self, body: &Expr) {
-        let mut_methods = self.ctx.mut_methods;
-        let names = captures::closure_written_names_expr(body, &|name| {
-            BuiltinId::resolve(name).mutates() || mut_methods.contains(name)
-        });
+        let names = captures::closure_written_names_expr(body, &|m| self.method_mutates(m));
         self.cur().cell_names = names;
+    }
+
+    /// Whether the call writes its receiver. `rotate_left` mutates a slice but returns a value
+    /// on an integer, so an integer receiver is only read.
+    pub(super) fn method_mutates(&self, m: &syn::ExprMethodCall) -> bool {
+        let name = m.method.to_string();
+        (BuiltinId::resolve(&name).mutates() || self.ctx.mut_methods.contains(&name))
+            && !(matches!(name.as_str(), "rotate_left" | "rotate_right")
+                && matches!(self.types.of(&m.receiver), infer::Ty::Int(_)))
     }
 
     fn define_block_const(&mut self, name: &str, reg: Reg) {
