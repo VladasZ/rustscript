@@ -479,7 +479,12 @@ pub(super) fn index(recv: &Value, key: &Value) -> Result<Value> {
 
 /// The messages are the exact debug Rust texts. Inverted range here, out of bounds and char
 /// boundary at the use site.
-fn range_bounds(len: usize, start: i64, end: i64, inclusive: bool) -> Result<(usize, usize)> {
+pub(super) fn range_bounds(
+    len: usize,
+    start: i64,
+    end: i64,
+    inclusive: bool,
+) -> Result<(usize, usize)> {
     if start < 0 {
         bail!("negative slice start {start}");
     }
@@ -496,7 +501,7 @@ fn range_bounds(len: usize, start: i64, end: i64, inclusive: bool) -> Result<(us
     Ok((usize::try_from(start)?, usize::try_from(end)?))
 }
 
-fn char_boundary_error(s: &str, a: usize, b: usize) -> anyhow::Error {
+pub(super) fn char_boundary_error(s: &str, a: usize, b: usize) -> anyhow::Error {
     let (side, bad) = if s.is_char_boundary(a) {
         ("end", b)
     } else {

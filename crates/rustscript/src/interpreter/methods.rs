@@ -250,6 +250,14 @@ pub(super) fn str_method(s: &RsStr, method: &MethodName, args: &[Value]) -> Resu
             str_grow(&mut scratch, method.id, &arg(args, 0)?)?;
             bail!("cannot mutate a string through this receiver")
         }
+        // `str_edit` runs these on the register, a reference or a cell
+        BuiltinId::ReplaceRange
+        | BuiltinId::InsertStr
+        | BuiltinId::Insert
+        | BuiltinId::Truncate
+        | BuiltinId::Remove
+        | BuiltinId::Pop
+        | BuiltinId::Retain => bail!("cannot mutate a string through this receiver"),
         BuiltinId::Contains => Value::Bool(s.contains(&arg_str(0))),
         BuiltinId::StartsWith => Value::Bool(s.starts_with(&arg_str(0))),
         BuiltinId::EndsWith => Value::Bool(s.ends_with(&arg_str(0))),

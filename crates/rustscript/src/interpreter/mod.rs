@@ -45,6 +45,7 @@ mod serde_types;
 mod service_bridge;
 mod shared;
 mod std_bridge;
+mod str_edit;
 mod typeir;
 mod value;
 mod vecmap;
