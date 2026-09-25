@@ -79,7 +79,18 @@ impl Compiler<'_> {
                 let name = p.path.segments[0].ident.to_string();
                 !self.cur().aliases.contains_key(&name) && self.scrutinee_owned(arg)
             }
+            // `s.t` or `make().t` moves the field out, the rest stays with its owner
+            Expr::Field(f) => self.field_base_owned(&f.base),
             other => self.temp_owned(other),
+        }
+    }
+
+    fn field_base_owned(&mut self, base: &Expr) -> bool {
+        match base {
+            Expr::Paren(p) => self.field_base_owned(&p.expr),
+            Expr::Group(g) => self.field_base_owned(&g.expr),
+            Expr::Field(f) => self.field_base_owned(&f.base),
+            other => self.arg_owned(other),
         }
     }
 

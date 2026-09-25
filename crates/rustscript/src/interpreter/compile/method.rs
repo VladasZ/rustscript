@@ -113,8 +113,10 @@ impl Compiler<'_> {
 
     /// `zip` and `chain` take their iterable by value, a fresh collection hands its items to
     /// the adapter, which drops the ones nobody pulled.
+    /// The argument compiles as written, a quoted `(arg).into_iter()` would be a node the type
+    /// table does not know.
     fn compile_method_args(&mut self, m: &syn::ExprMethodCall, method: &str) -> Result<Reg> {
-        let owning_arg: Option<Expr> = match m.args.first() {
+        match m.args.first() {
             Some(arg)
                 if self.ctx.has_drop
                     && m.args.len() == 1
@@ -122,13 +124,16 @@ impl Compiler<'_> {
                     && !matches!(unparen(arg), Expr::Reference(_))
                     && self.temp_owned(arg) =>
             {
-                Some(syn::parse_quote!((#arg).into_iter()))
+                let base = self.alloc();
+                let src = self.compile_owned_expr(arg)?;
+                self.emit(Op::IterInit {
+                    dst: base,
+                    src,
+                    owned: true,
+                });
+                Ok(base)
             }
-            _ => None,
-        };
-        match &owning_arg {
-            Some(arg) => self.compile_shared_args(std::iter::once(arg)),
-            None => self.compile_shared_args(m.args.iter()),
+            _ => self.compile_shared_args(m.args.iter()),
         }
     }
 

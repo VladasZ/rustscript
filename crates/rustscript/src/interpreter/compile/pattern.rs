@@ -458,3 +458,98 @@ fn ref_bind_names(pat: &PPat, out: &mut Vec<String>) {
         _ => {}
     }
 }
+
+/// Past this many alternatives a guarded arm tests its pattern whole, the guard runs once.
+const MAX_GUARDED_ALTERNATIVES: usize = 64;
+
+impl Compiler<'_> {
+    /// A guard runs once per alternative of its arm's or-patterns, nested ones too, in the order
+    /// rustc tries them, and each alternative binds on its own. So `(x, _) | (_, x) if x == 2`
+    /// matches `(1, 2)` through the second one. The entries share the arm's binds and consts.
+    pub(super) fn guarded_alternatives(&mut self, pat: u16) -> Vec<u16> {
+        let info = &self.cur().pats[usize::from(pat)];
+        let alts = or_alternatives(&info.pat);
+        if alts.len() < 2 || alts.len() > MAX_GUARDED_ALTERNATIVES {
+            return vec![pat];
+        }
+        let (binds, consts) = (info.binds.clone(), info.consts.clone());
+        let f = self.cur();
+        alts.into_iter()
+            .map(|alt| {
+                f.pats.push(PatInfo {
+                    pat: alt,
+                    binds: binds.clone(),
+                    consts: consts.clone(),
+                });
+                idx16(f.pats.len() - 1)
+            })
+            .collect()
+    }
+}
+
+/// The first element varies slowest, like rustc's expansion.
+fn or_alternatives(pat: &PPat) -> Vec<PPat> {
+    match pat {
+        PPat::Or(alts) => alts.iter().flat_map(or_alternatives).collect(),
+        PPat::Ident {
+            name,
+            sub: Some(sub),
+            by_ref,
+        } => or_alternatives(sub)
+            .into_iter()
+            .map(|sub| PPat::Ident {
+                name: name.clone(),
+                sub: Some(Box::new(sub)),
+                by_ref: *by_ref,
+            })
+            .collect(),
+        PPat::Tuple(elems) => alternatives_of_each(elems)
+            .into_iter()
+            .map(PPat::Tuple)
+            .collect(),
+        PPat::Slice(elems) => alternatives_of_each(elems)
+            .into_iter()
+            .map(PPat::Slice)
+            .collect(),
+        PPat::TupleStruct { tag, elems } => alternatives_of_each(elems)
+            .into_iter()
+            .map(|elems| PPat::TupleStruct {
+                tag: tag.clone(),
+                elems,
+            })
+            .collect(),
+        PPat::Struct { name, fields } => {
+            let pats: Vec<PPat> = fields.iter().map(|(_, p)| p.clone()).collect();
+            alternatives_of_each(&pats)
+                .into_iter()
+                .map(|pats| PPat::Struct {
+                    name: name.clone(),
+                    fields: fields
+                        .iter()
+                        .map(|(key, _)| key.clone())
+                        .zip(pats)
+                        .collect(),
+                })
+                .collect()
+        }
+        other => vec![other.clone()],
+    }
+}
+
+fn alternatives_of_each(elems: &[PPat]) -> Vec<Vec<PPat>> {
+    let mut out = vec![Vec::new()];
+    for elem in elems {
+        let alts = or_alternatives(elem);
+        out = out
+            .into_iter()
+            .flat_map(|prefix: Vec<PPat>| {
+                alts.iter().map(move |alt| {
+                    let mut next = prefix.clone();
+                    next.push(alt.clone());
+                    next
+                })
+            })
+            .collect();
+    }
+    out
+}

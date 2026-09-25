@@ -188,20 +188,37 @@ impl Compiler<'_> {
         let scrut = self.compile_expr(expr)?;
         self.push_scope();
         let pidx = self.pattern_info(pat)?;
-        self.emit(Op::TestBind {
-            val: scrut,
-            pat: pidx,
-            dst,
-        });
-        if let Some(g) = guard {
+        let tests = if guard.is_some() {
+            self.guarded_alternatives(pidx)
+        } else {
+            vec![pidx]
+        };
+        let mut to_end = Vec::new();
+        for (i, &test) in tests.iter().enumerate() {
+            self.emit(Op::TestBind {
+                val: scrut,
+                pat: test,
+                dst,
+            });
+            let Some(g) = guard else {
+                continue;
+            };
             let skip = self.here();
             self.emit(Op::JumpIfFalse { cond: dst, to: 0 });
             // a guard is a temporary scope of its own, like a `match` arm's
             let guard_temps = self.cur().owned_temps.len();
             self.compile_into(dst, g)?;
             self.drop_temps(guard_temps, Some(dst));
-            let end = self.mark()?;
-            self.patch_jump(skip, end);
+            if i + 1 < tests.len() {
+                to_end.push(self.here());
+                self.emit(Op::JumpIfTrue { cond: dst, to: 0 });
+            }
+            let next = self.mark()?;
+            self.patch_jump(skip, next);
+        }
+        let end = self.mark()?;
+        for j in to_end {
+            self.patch_jump(j, end);
         }
         self.pop_scope();
         Ok(())

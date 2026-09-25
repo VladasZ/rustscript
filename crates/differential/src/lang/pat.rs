@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::lang::expr::Expr;
 use crate::lang::ty::{IntWidth, Ty};
 use crate::lang::user::UserShape;
 
@@ -224,6 +225,15 @@ impl Pat {
             }
             _ => {}
         }
+    }
+
+    /// The binding a `ref` binding of this pattern borrows through the scrutinee, held until the
+    /// bindings go. None when nothing binds by `ref` or the scrutinee is a temporary.
+    pub fn pins<'e>(&self, scrutinee: &'e Expr) -> Option<&'e str> {
+        if self.borrowed().is_empty() {
+            return None;
+        }
+        scrutinee.place_root()
     }
 
     /// The bindings that stand behind a reference, so the body may only clone them.

@@ -673,3 +673,28 @@ impl Expr {
         }
     }
 }
+
+impl Expr {
+    /// The binding a place expression names, `v`, `v.0`, `v[i]`, when it renders without a
+    /// clone. A `ref` binding into it keeps that binding borrowed while the pattern's bindings
+    /// live, see `Pat::pins`.
+    pub fn place_root(&self) -> Option<&str> {
+        let in_place = |ty: &Ty, mode: ReadMode| ty.is_copy() || mode == ReadMode::Move;
+        match self {
+            Self::Var { name, ty, mode } => in_place(ty, *mode).then_some(name.as_str()),
+            Self::Field { base, ty, mode, .. } | Self::TupleField { base, ty, mode, .. } => {
+                in_place(ty, *mode).then(|| base.base_root()).flatten()
+            }
+            Self::Index { base, ty, .. } => ty.is_copy().then(|| base.base_root()).flatten(),
+            _ => None,
+        }
+    }
+
+    /// A base renders bare when it is a binding, so it stays a place whatever it holds.
+    fn base_root(&self) -> Option<&str> {
+        match self {
+            Self::Var { name, .. } => Some(name),
+            other => other.place_root(),
+        }
+    }
+}

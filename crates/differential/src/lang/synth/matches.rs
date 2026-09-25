@@ -16,7 +16,7 @@ impl Generator<'_> {
         let by_ref = matches!(scrutinee_ty, Ty::Vec(_));
         self.begin_branches();
         let arms = self.arms_for(&scrutinee_ty, &mut |inner, pat, guard| {
-            inner.arm(pat, guard, want, depth)
+            inner.arm(pat, guard, &scrutinee, want, depth)
         });
         self.end_branches();
         let arms = arms?;
@@ -48,7 +48,7 @@ impl Generator<'_> {
         let mut binds = Vec::new();
         pat.bindings(&mut binds);
         let guard = (!binds.is_empty() && self.chance(0.6)).then(|| {
-            Box::new(self.with_pat(&pat.clone(), |inner| {
+            Box::new(self.with_pat(&pat.clone(), &scrutinee, |inner| {
                 inner.borrowing(|inner| inner.expr(&Ty::Bool, depth - 1))
             }))
         });
@@ -215,9 +215,9 @@ impl Generator<'_> {
         }
     }
 
-    fn arm(&mut self, pat: Pat, guard: bool, want: &Ty, depth: usize) -> Arm {
+    fn arm(&mut self, pat: Pat, guard: bool, scrutinee: &Expr, want: &Ty, depth: usize) -> Arm {
         self.branch(|inner| {
-            inner.with_pat(&pat.clone(), |inner| {
+            inner.with_pat(&pat.clone(), scrutinee, |inner| {
                 // a guard runs with the scrutinee borrowed and may run for several arms, so
                 // `rustc` lets it move nothing, a binding or an outer local alike
                 let guard =

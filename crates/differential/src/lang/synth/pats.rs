@@ -3,6 +3,7 @@
 
 use rand::RngExt;
 
+use crate::lang::expr::Expr;
 use crate::lang::own::BindKind;
 use crate::lang::pat::{BindBy, Pat};
 use crate::lang::synth::Generator;
@@ -262,12 +263,21 @@ impl Generator<'_> {
     }
 
     /// Runs `build` with the bindings of `pat` in scope. A `ref` binding stands behind a
-    /// reference, so the body reads it by clone alone.
-    pub(super) fn with_pat<T>(&mut self, pat: &Pat, build: impl FnOnce(&mut Self) -> T) -> T {
+    /// reference, so the body reads it by clone alone, and it keeps the place `scrutinee` names
+    /// borrowed for the whole arm, see `Pat::pins`.
+    pub(super) fn with_pat<T>(
+        &mut self,
+        pat: &Pat,
+        scrutinee: &Expr,
+        build: impl FnOnce(&mut Self) -> T,
+    ) -> T {
         let mut binds = Vec::new();
         pat.bindings(&mut binds);
         let borrowed = pat.borrowed();
         self.scoped(|inner| {
+            if let Some(root) = pat.pins(scrutinee) {
+                inner.scope.pin(root);
+            }
             for (name, ty) in binds {
                 if borrowed.contains(&name) {
                     inner.scope.push_borrowed(name, ty);
