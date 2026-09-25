@@ -12,7 +12,42 @@ Differential workflow.
 
 ## Open
 
-Nothing open.
+### `String::replace_range` and `Path::canonicalize` are missing
+
+Found while auditing the `kimai` skill scripts in `thing`, which work around
+both.
+
+```rust
+use std::path::Path;
+
+fn main() {
+    let mut s = String::from("hello world");
+    s.replace_range(0..5, "HELLO");
+    println!("{s}");
+    println!("{}", Path::new(".").canonicalize().is_ok());
+}
+```
+
+Compiled:
+
+```
+HELLO world
+true
+```
+
+Interpreted:
+
+```
+rust unsupported: 2 methods used by this script are not implemented by the interpreter:
+  `replace_range` is not implemented by the interpreter, in `main`
+  `canonicalize` is not implemented by the interpreter, in `main`
+```
+
+Likely place: the string methods in
+`crates/rustscript/src/interpreter/compile/infer/methods_scalar.rs` and
+`compile/method.rs`, and the path methods in
+`crates/rustscript/src/interpreter/std_bridge.rs`. Each needs an example under
+`crates/examples/examples`.
 
 ## Generator plan
 
