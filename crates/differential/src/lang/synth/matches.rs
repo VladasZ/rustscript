@@ -49,7 +49,7 @@ impl Generator<'_> {
         pat.bindings(&mut binds);
         let guard = (!binds.is_empty() && self.chance(0.6)).then(|| {
             Box::new(self.with_pat(&pat.clone(), &scrutinee, |inner| {
-                inner.borrowing(|inner| inner.expr(&Ty::Bool, depth - 1))
+                inner.guarding(&scrutinee, |inner| inner.expr(&Ty::Bool, depth - 1))
             }))
         });
         Some(Expr::Matches {
@@ -220,8 +220,8 @@ impl Generator<'_> {
             inner.with_pat(&pat.clone(), scrutinee, |inner| {
                 // a guard runs with the scrutinee borrowed and may run for several arms, so
                 // `rustc` lets it move nothing, a binding or an outer local alike
-                let guard =
-                    guard.then(|| inner.borrowing(|inner| inner.expr(&Ty::Bool, depth - 1)));
+                let guard = guard
+                    .then(|| inner.guarding(scrutinee, |inner| inner.expr(&Ty::Bool, depth - 1)));
                 let body = inner.expr(want, depth - 1);
                 Arm { pat, guard, body }
             })

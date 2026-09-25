@@ -170,7 +170,55 @@ pub fn block_mutable(stmts: &[Stmt]) -> BTreeSet<String> {
     for stmt in stmts {
         stmt.assigned(&mut out);
     }
+    // a closure that calls an `FnMut` closure it captured is `FnMut` itself
+    let mut closures = Vec::new();
+    closure_calls(stmts, &mut closures);
+    let mut grew = true;
+    while grew {
+        grew = false;
+        for (name, called) in &closures {
+            if !out.contains(name) && called.iter().any(|callee| out.contains(callee)) {
+                out.insert(name.clone());
+                grew = true;
+            }
+        }
+    }
     out
+}
+
+/// Every literal closure under these statements with the closures its body calls.
+fn closure_calls(stmts: &[Stmt], out: &mut Vec<(String, BTreeSet<String>)>) {
+    for stmt in stmts {
+        if let Stmt::LetClosure {
+            name,
+            source: ClosureSource::Literal { body, .. },
+            ..
+        } = stmt
+        {
+            let mut called = BTreeSet::new();
+            called_closures(body, &mut called);
+            out.push((name.clone(), called));
+        }
+        for body in stmt.bodies() {
+            closure_calls(body, out);
+        }
+    }
+}
+
+fn called_closures(expr: &Expr, out: &mut BTreeSet<String>) {
+    for node in expr.nodes() {
+        match node {
+            Expr::ClosureCall { name, .. } => {
+                out.insert(name.clone());
+            }
+            Expr::Block { stmts, .. } => {
+                for inner in stmts.iter().flat_map(Stmt::exprs) {
+                    called_closures(inner, out);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

@@ -118,6 +118,24 @@ impl<'a> Generator<'a> {
         out
     }
 
+    /// A match guard. `rustc` keeps a place scrutinee borrowed through every guard, so a guard
+    /// may not take it by `&mut` either.
+    pub(super) fn guarding<T>(
+        &mut self,
+        scrutinee: &Expr,
+        build: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let root = scrutinee.place_root().map(str::to_string);
+        if let Some(root) = &root {
+            self.scope.hold_shared(root);
+        }
+        let out = self.borrowing(build);
+        if root.is_some() {
+            self.scope.release_shared();
+        }
+        out
+    }
+
     /// A statement list with a scope of its own, the bindings it declares are gone after it.
     pub(super) fn scoped<T>(&mut self, build: impl FnOnce(&mut Self) -> T) -> T {
         let mark = self.scope.enter_scope();

@@ -122,6 +122,8 @@ impl Compiler<'_> {
                     && m.args.len() == 1
                     && matches!(method, "zip" | "chain")
                     && !matches!(unparen(arg), Expr::Reference(_))
+                    && !matches!(self.types.of(&m.receiver), Ty::Option(_))
+                    && !matches!(self.types.of(arg), Ty::Option(_))
                     && self.temp_owned(arg) =>
             {
                 let base = self.alloc();

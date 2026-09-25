@@ -7,7 +7,7 @@ use syn::{Expr, Pat};
 
 use crate::interpreter::bytecode::{Op, PathRef, Reg};
 
-use super::place::ShellHome;
+use super::scrutinee::ShellHome;
 use super::support::{pattern_borrows, pattern_owns};
 use super::walks::flatten_and;
 
@@ -117,7 +117,7 @@ impl Compiler<'_> {
             if let Expr::Let(let_expr) = term {
                 let (owned, by_ref) = self.pattern_mode(&let_expr.pat, &let_expr.expr);
                 let scrut = self.compile_scrutinee(&let_expr.expr, owned, by_ref)?;
-                let takes = owned && self.scrutinee_owned(&let_expr.expr);
+                let takes = owned && self.pattern_scrutinee_owned(&let_expr.expr);
                 let home = if takes {
                     self.shell_home(&let_expr.expr)
                 } else {
@@ -127,9 +127,11 @@ impl Compiler<'_> {
                 self.hold_shell(scrut, home);
                 self.chain_made(&mut made, &mut seen);
                 let held = made.clone();
+                let mixed = by_ref && pattern_owns(&let_expr.pat);
+                let take_from = self.take_from(scrut, &let_expr.expr, mixed, takes);
                 let matched = self.alloc();
                 let pat = self.pattern_info_over(&let_expr.pat, &let_expr.expr)?;
-                self.exempt_binds(pat, takes);
+                self.exempt_binds(pat, take_from.is_some());
                 if self.init_holds_guard(&let_expr.expr) {
                     self.guard_pattern_binds(pat);
                 }
@@ -143,8 +145,11 @@ impl Compiler<'_> {
                     cond: matched,
                     to: 0,
                 });
-                if takes {
-                    self.take_pattern_binds(scrut, pat);
+                if let Some(owner) = take_from {
+                    if owner != scrut {
+                        self.deref_value_binds(pat);
+                    }
+                    self.take_pattern_binds(owner, pat);
                 }
                 self.chain_made(&mut made, &mut seen);
             } else {
@@ -218,7 +223,7 @@ impl Compiler<'_> {
             let scrut = self.compile_scrutinee(&let_expr.expr, owned, by_ref)?;
             let while_let_depth = self.cur().scope_order.len();
             self.push_scope();
-            let takes = owned && self.scrutinee_owned(&let_expr.expr);
+            let takes = owned && self.pattern_scrutinee_owned(&let_expr.expr);
             let home = if takes {
                 self.shell_home(&let_expr.expr)
             } else {
@@ -553,7 +558,7 @@ impl Compiler<'_> {
     }
 
     /// Emit cleanup without changing the compile-time lists: other branches still need them.
-    fn emit_exit_drops(&mut self, entry: usize, temps: usize, keep: Option<Reg>) {
+    pub(super) fn emit_exit_drops(&mut self, entry: usize, temps: usize, keep: Option<Reg>) {
         let f = self.cur();
         let mut end = f.owned_temps.len();
         let mut lists = Vec::new();
@@ -600,7 +605,7 @@ impl Compiler<'_> {
         scrut: Reg,
         pat: u16,
         guard: Option<&Expr>,
-        takes: bool,
+        take_from: Option<Reg>,
         matched: Reg,
     ) -> Result<Vec<usize>> {
         let tests = if guard.is_some() {
@@ -631,8 +636,11 @@ impl Compiler<'_> {
                 self.emit(Op::JumpIfFalse { cond: g, to: 0 });
             }
             // a guard reads the bindings by reference, the move happens once it passed
-            if takes {
-                self.take_pattern_binds(scrut, test);
+            if let Some(owner) = take_from {
+                if owner != scrut {
+                    self.deref_value_binds(test);
+                }
+                self.take_pattern_binds(owner, test);
             }
             if i + 1 == tests.len() {
                 to_next_arm = fails;
@@ -654,23 +662,34 @@ impl Compiler<'_> {
     }
 
     pub(super) fn compile_match(&mut self, dst: Reg, m: &syn::ExprMatch) -> Result<()> {
-        fn arm_pattern(pat: &Pat) -> &Pat {
-            match pat {
-                Pat::Guard(g) => &g.pat,
-                p => p,
-            }
-        }
-        let borrows = m
+        // syn 3 parses `pat if cond` as `Pat::Guard`
+        let arms: Vec<MatchArm> = m
             .arms
             .iter()
-            .any(|arm| pattern_borrows(arm_pattern(&arm.pat)));
-        let owns = m.arms.iter().any(|arm| pattern_owns(arm_pattern(&arm.pat)));
-        let (owned, by_ref) = self.scrutinee_mode(owns, borrows, &m.expr);
-        let scrut = self.compile_scrutinee(&m.expr, owned, by_ref)?;
-        let holds_guard = self.init_holds_guard(&m.expr);
-        let takes = owned && self.scrutinee_owned(&m.expr);
+            .map(|arm| match &arm.pat {
+                Pat::Guard(g) => (&*g.pat, Some(&*g.guard), ArmBody::Expr(&arm.body)),
+                p => (p, None, ArmBody::Expr(&arm.body)),
+            })
+            .collect();
+        self.compile_match_arms(dst, &m.expr, &arms)
+    }
+
+    /// A `match` over its parts, so `matches!` lowers to the same arms and its by value
+    /// bindings drop with the arm like a `match` arm's.
+    pub(super) fn compile_match_arms(
+        &mut self,
+        dst: Reg,
+        scrutinee: &syn::Expr,
+        arms: &[MatchArm],
+    ) -> Result<()> {
+        let borrows = arms.iter().any(|(pat, _, _)| pattern_borrows(pat));
+        let owns = arms.iter().any(|(pat, _, _)| pattern_owns(pat));
+        let (owned, by_ref) = self.scrutinee_mode(owns, borrows, scrutinee);
+        let scrut = self.compile_scrutinee(scrutinee, owned, by_ref)?;
+        let holds_guard = self.init_holds_guard(scrutinee);
+        let takes = owned && self.pattern_scrutinee_owned(scrutinee);
         let home = if takes {
-            self.shell_home(&m.expr)
+            self.shell_home(scrutinee)
         } else {
             ShellHome::None
         };
@@ -681,24 +700,23 @@ impl Compiler<'_> {
             ShellHome::Scope => self.cur().owned_temps.push(scrut),
             ShellHome::None => {}
         }
+        let take_from = self.take_from(scrut, scrutinee, owns && by_ref, takes);
         let mut end_jumps = Vec::new();
-        for arm in &m.arms {
+        for &(arm_pat, arm_guard, body) in arms {
             self.push_scope();
             let matched = self.alloc();
-            // syn 3 parses `pat if cond` as `Pat::Guard`
-            let (arm_pat, arm_guard) = match &arm.pat {
-                Pat::Guard(g) => (&*g.pat, Some(&*g.guard)),
-                p => (p, None),
-            };
-            let pat = self.pattern_info_over(arm_pat, &m.expr)?;
-            self.exempt_binds(pat, takes);
+            let pat = self.pattern_info_over(arm_pat, scrutinee)?;
+            self.exempt_binds(pat, take_from.is_some());
             if holds_guard {
                 self.guard_pattern_binds(pat);
             }
-            let to_next_arm = self.compile_arm_test(scrut, pat, arm_guard, takes, matched)?;
+            let to_next_arm = self.compile_arm_test(scrut, pat, arm_guard, take_from, matched)?;
             // an arm body is a temporary scope of its own, its temporaries end with the arm
             let arm_temps = self.cur().owned_temps.len();
-            self.compile_owned_into(dst, &arm.body)?;
+            match body {
+                ArmBody::Expr(body) => self.compile_owned_into(dst, body)?,
+                ArmBody::Bool(v) => self.emit(Op::LoadBool { dst, v }),
+            }
             self.drop_temps(arm_temps, Some(dst));
             self.emit_scope_drops(1);
             let je = self.here();
@@ -728,6 +746,16 @@ impl Compiler<'_> {
 
     // calls
 }
+
+/// What an arm evaluates to, a `matches!` arm is a bare `true` or `false`.
+#[derive(Clone, Copy)]
+pub(super) enum ArmBody<'a> {
+    Expr(&'a syn::Expr),
+    Bool(bool),
+}
+
+/// The pattern, the guard and the body of one arm.
+pub(super) type MatchArm<'a> = (&'a Pat, Option<&'a syn::Expr>, ArmBody<'a>);
 
 fn label_name(label: Option<&syn::Label>) -> Option<String> {
     label.map(|l| l.name.ident.to_string())

@@ -578,7 +578,7 @@ impl Checker {
                     let arm = &arms[index];
                     inner.push_matched(&arm.pat, scrutinee);
                     if let Some(guard) = &arm.guard {
-                        inner.expr(guard);
+                        inner.guard(scrutinee, guard);
                     }
                     inner.crossing(|inner| inner.expr(&arm.body));
                 });
@@ -621,9 +621,21 @@ impl Checker {
         let mark = self.scope.enter_scope();
         self.push_pat(pat);
         if let Some(guard) = guard {
-            self.expr(guard);
+            self.guard(scrutinee, guard);
         }
         self.scope.exit_scope(mark);
+    }
+
+    /// A place scrutinee stays borrowed through the guard, so the guard takes no `&mut` of it.
+    pub(super) fn guard(&mut self, scrutinee: &Expr, guard: &Expr) {
+        let root = scrutinee.place_root();
+        if let Some(root) = root {
+            self.scope.hold_shared(root);
+        }
+        self.expr(guard);
+        if root.is_some() {
+            self.scope.release_shared();
+        }
     }
 
     /// A binding receiver is borrowed while the arguments run.

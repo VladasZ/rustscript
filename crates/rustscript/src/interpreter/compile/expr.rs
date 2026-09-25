@@ -424,8 +424,17 @@ impl Compiler<'_> {
                 let list = idx16(f.drop_lists.len() - 1);
                 self.emit(Op::DropScope { list });
             }
-            let depth = self.cur().scope_order.len();
-            self.emit_scope_drops(depth);
+            // then the temporaries of the statements it leaves, `T(1) > (x?)` drops the
+            // `T(1)`, between the scopes like a `return`. The tried value hands its residual
+            // to the return, so it is no temporary of the early exit.
+            let tried = self.cur().owned_temps.iter().rposition(|reg| *reg == src);
+            if let Some(at) = tried {
+                self.cur().owned_temps.remove(at);
+            }
+            self.emit_exit_drops(0, 0, Some(dst));
+            if let Some(at) = tried {
+                self.cur().owned_temps.insert(at, src);
+            }
             self.emit(Op::Ret { src: dst });
             let ok = self.mark()?;
             self.patch_jump(site, ok);

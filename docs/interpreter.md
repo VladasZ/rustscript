@@ -83,7 +83,12 @@ temporaries of a `break value` end at the `break`. A `break`, `continue` or
 and outer scope drops. A `let else` whose pattern
 binds nothing drops its scrutinee before the `else`. A pattern that mixes a by
 value binding with a `ref` binding over a fresh value moves the first and
-lends the second. A field moved into a call argument, `s.t` or `make().t`,
+lends the second. Over a local the by value parts move out of the local, a
+partial move, the `ref` ones keep lending from it, and the rest drops with the
+local. A `match` on a field of a fresh value, `(make()).f`, takes the field out,
+and what no arm binds drops with the statement. `matches!` binds like a `match`
+arm, so a by value binding drops at the end of the arm. A `?` that returns
+early drops the temporaries its statement made, like a `return`. A field moved into a call argument, `s.t` or `make().t`,
 is an owned operand. On a panic the owned operands of a call unwind between the
 drop lists, after the scopes that opened and closed while the later operands
 were built, a match arm or a block, and before the temporaries of the

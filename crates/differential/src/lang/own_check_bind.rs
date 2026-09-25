@@ -77,7 +77,7 @@ impl Checker {
                     let arm = &arms[index];
                     inner.push_matched(&arm.pat, scrutinee);
                     if let Some(guard) = &arm.guard {
-                        inner.expr(guard);
+                        inner.guard(scrutinee, guard);
                     }
                     inner.stmts(&arm.body);
                 });

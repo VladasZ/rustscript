@@ -7,7 +7,8 @@ use syn::{Block, Expr, Pat, Stmt};
 use crate::interpreter::bytecode::{DISCARD, Op, Reg};
 
 use super::pattern::is_wild;
-use super::place::{ShellHome, is_place_expr};
+use super::place::is_place_expr;
+use super::scrutinee::ShellHome;
 use super::support::{init_is_unique, pattern_borrows, pattern_owns};
 use super::walks::{from_str_root, unparen};
 use super::{Compiler, macro_yields_value, numeric_annotation};
@@ -192,6 +193,8 @@ impl Compiler<'_> {
         self.patch_jump(jmp_ok, ok_at);
         if takes {
             self.take_pattern_binds(val, pidx);
+        } else {
+            self.move_parts_from_local(&local.pat, val, pidx, &init.expr);
         }
         // the bindings live on, the rest of a fresh scrutinee ends with the statement
         if let ShellHome::Scope = home {
@@ -242,7 +245,10 @@ impl Compiler<'_> {
             .init
             .as_ref()
             .is_some_and(|init| from_str_root(&init.expr).is_some());
-        self.bind_let(local, val, parsed)?;
+        let pidx = self.bind_let(local, val, parsed)?;
+        if let (Some(pidx), Some(init)) = (pidx, &local.init) {
+            self.move_parts_from_local(&local.pat, val, pidx, &init.expr);
+        }
         // `let _ = make();` binds nothing, so a fresh value drops right here like real Rust
         if self.ctx.has_drop
             && is_wild(&local.pat)
@@ -276,16 +282,16 @@ impl Compiler<'_> {
 
     /// Binds the pattern and records which bindings own their value, so scope end drops only
     /// those.
-    fn bind_let(&mut self, local: &syn::Local, val: Reg, parsed: bool) -> Result<()> {
+    fn bind_let(&mut self, local: &syn::Local, val: Reg, parsed: bool) -> Result<Option<u16>> {
         let before = self.cur().scope_order.last().map_or(0, Vec::len);
-        if let Pat::Type(t) = &local.pat {
+        let pidx = if let Pat::Type(t) = &local.pat {
             if !parsed {
                 self.emit_annotation(val, &t.ty);
             }
-            self.bind_pattern_irrefutable(&t.pat, val)?;
+            self.bind_pattern_irrefutable(&t.pat, val)?
         } else {
-            self.bind_pattern_irrefutable(&local.pat, val)?;
-        }
+            self.bind_pattern_irrefutable(&local.pat, val)?
+        };
         if let Some(init) = &local.init {
             self.note_guard_binding(&init.expr, before);
             // `let it = v.into_iter()` hands out items of its own on every later `it.next()`
@@ -320,7 +326,7 @@ impl Compiler<'_> {
             }
             f.drop_exempt.extend(bound);
         }
-        Ok(())
+        Ok(pidx)
     }
 
     /// A numeric primitive retags through a cast, which only ever acts on a bare literal.
