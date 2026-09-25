@@ -159,7 +159,8 @@ impl Generator<'_> {
         let arms = self.arms_for(&scrutinee_ty, &mut |inner, pat, guard| {
             inner.branch(|inner| {
                 inner.with_pat(&pat.clone(), &scrutinee, |inner| {
-                    let guard = guard.then(|| inner.borrowing(|inner| inner.expr(&Ty::Bool, 2)));
+                    let guard =
+                        guard.then(|| inner.guarding(&scrutinee, |inner| inner.expr(&Ty::Bool, 2)));
                     let body = inner.nested_body();
                     StmtArm { pat, guard, body }
                 })

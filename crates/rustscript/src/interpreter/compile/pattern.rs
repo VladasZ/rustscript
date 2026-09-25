@@ -10,6 +10,7 @@ use crate::interpreter::enum_def::{EnumDef, builtin_enum, prelude_variant};
 use crate::interpreter::numeric::IntWidth;
 use crate::interpreter::resolver::bare;
 
+use super::scrutinee::ShellHome;
 use super::support::{pattern_borrows, pattern_owns};
 use super::{Compiler, NameLoc, Res, collect_pattern_names, idx16};
 
@@ -116,6 +117,77 @@ impl Compiler<'_> {
             .map(|(_, reg)| *reg)
             .collect();
         self.cur().drop_exempt.extend(regs);
+    }
+
+    /// What the bound parts move out of once a pattern matched, the scrutinee it owns, or a
+    /// local it borrows for a `ref` binding next to a by value one. Then the by value ones move
+    /// their parts out of the local, a partial move, and the rest drops with the local.
+    pub(super) fn take_from(
+        &mut self,
+        scrut: Reg,
+        scrutinee: &Expr,
+        mixed: bool,
+        takes: bool,
+    ) -> Option<Reg> {
+        if takes {
+            return Some(scrut);
+        }
+        if !mixed || !self.ctx.has_drop {
+            return None;
+        }
+        if !matches!(self.shell_home(scrutinee), ShellHome::Local { .. }) {
+            return None;
+        }
+        let owner = self.alloc();
+        self.emit(Op::Deref {
+            dst: owner,
+            src: scrut,
+        });
+        Some(owner)
+    }
+
+    /// `let (ref a, b) = local`. The by value bindings take their parts out of the local and
+    /// drop with their scope, the `ref` ones keep lending from it.
+    pub(super) fn move_parts_from_local(&mut self, pat: &Pat, val: Reg, pidx: u16, init: &Expr) {
+        if !pattern_borrows(pat) || !pattern_owns(pat) {
+            return;
+        }
+        let Some(owner) = self.take_from(val, init, true, false) else {
+            return;
+        };
+        self.deref_value_binds(pidx);
+        self.take_pattern_binds(owner, pidx);
+        let info = &self.cur().pats[usize::from(pidx)];
+        let mut refs = Vec::new();
+        ref_bind_names(&info.pat, &mut refs);
+        let values: Vec<Reg> = info
+            .binds
+            .iter()
+            .filter(|(name, _)| !refs.contains(name))
+            .map(|(_, reg)| *reg)
+            .collect();
+        let f = self.cur();
+        for reg in values {
+            f.drop_exempt.remove(&reg);
+        }
+        self.exempt_ref_binds(pidx);
+    }
+
+    /// The by value bindings of a pattern over a borrowed local hold references into it. They
+    /// read their parts out before the parts move, see `compile_match_arms`.
+    pub(super) fn deref_value_binds(&mut self, pat: u16) {
+        let info = &self.cur().pats[usize::from(pat)];
+        let mut names = Vec::new();
+        ref_bind_names(&info.pat, &mut names);
+        let regs: Vec<Reg> = info
+            .binds
+            .iter()
+            .filter(|(name, _)| !names.contains(name))
+            .map(|(_, reg)| *reg)
+            .collect();
+        for reg in regs {
+            self.emit(Op::Deref { dst: reg, src: reg });
+        }
     }
 
     pub(super) fn exempt_pattern_binds(&mut self, pat: u16) {
@@ -307,13 +379,14 @@ impl Compiler<'_> {
         }
     }
 
-    pub(super) fn bind_pattern_irrefutable(&mut self, pat: &Pat, reg: Reg) -> Result<()> {
+    /// The pattern index when the pattern destructures, a bare name binds without one.
+    pub(super) fn bind_pattern_irrefutable(&mut self, pat: &Pat, reg: Reg) -> Result<Option<u16>> {
         match pat {
             Pat::Ident(id) if id.subpat.is_none() => {
                 self.define(&id.ident.to_string(), reg);
-                Ok(())
+                Ok(None)
             }
-            Pat::Wild(_) => Ok(()),
+            Pat::Wild(_) => Ok(None),
             Pat::Type(t) => self.bind_pattern_irrefutable(&t.pat, reg),
             Pat::Paren(p) => self.bind_pattern_irrefutable(&p.pat, reg),
             Pat::Reference(r) => self.bind_pattern_irrefutable(&r.pat, reg),
@@ -325,7 +398,7 @@ impl Compiler<'_> {
                     pat: pidx,
                     dst: matched,
                 });
-                Ok(())
+                Ok(Some(pidx))
             }
         }
     }

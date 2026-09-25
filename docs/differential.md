@@ -43,7 +43,9 @@ the loop, a reference an expression takes holds its binding to the end of the
 statement, and a reference a `let` keeps holds it to the end of the scope. A
 held binding is still read and borrowed again, it is never moved or written.
 Only a `let` is written in place, a pattern binding or a parameter has no
-`mut`.
+`mut`. A closure that calls a captured `FnMut` closure is `FnMut` too, so its
+`let` gets `mut`. A place scrutinee stays borrowed through every match guard,
+so a guard never takes it by `&mut`.
 
 ## Binding forms
 

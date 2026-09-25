@@ -10,19 +10,6 @@ use super::infer::Ty;
 use super::support::{chain_owns_items, init_is_owned, iterable_is_owned, temp_is_owned};
 use super::{Compiler, NameLoc, idx16};
 
-/// Where a scrutinee's shell drops after its bound parts moved out, see `shell_home`.
-#[derive(Clone, Copy)]
-pub(super) enum ShellHome {
-    /// the bindings' own scope, after the bindings
-    Scope,
-    /// the scope of the moved local, at the slot after it
-    Local {
-        scope: usize,
-        at: usize,
-    },
-    None,
-}
-
 /// Composite storage is shared with the place, so the store is a handle move. A string splits inside
 /// its methods and only the store brings the new buffer home.
 pub(super) enum PlaceBack {
@@ -306,45 +293,6 @@ impl Compiler<'_> {
         Ok(true)
     }
 
-    /// A `&mut place` scrutinee wraps the place as a borrow, so bindings write through. A
-    /// scrutinee whose pattern binds by value is moved out of, or copied when it stays live.
-    /// Whether a pattern over the expression takes its bindings out of a value of its own. A
-    /// borrow parameter, `self` in a `&self` method, a reference or an accessor only lends its
-    /// parts, so the bindings must not drop at the arm's end.
-    pub(super) fn scrutinee_owned(&mut self, expr: &Expr) -> bool {
-        match expr {
-            Expr::Paren(p) => self.scrutinee_owned(&p.expr),
-            Expr::Group(g) => self.scrutinee_owned(&g.expr),
-            Expr::Reference(_) => false,
-            Expr::Path(p) if p.path.segments.len() == 1 && p.qself.is_none() => {
-                let name = p.path.segments[0].ident.to_string();
-                match self.resolve(&name) {
-                    NameLoc::Local(reg) => {
-                        let f = self.cur();
-                        !f.shares_only(reg) && !f.drop_exempt.contains(&reg)
-                    }
-                    _ => true,
-                }
-            }
-            other => self.init_owned(other),
-        }
-    }
-
-    /// An owned scrutinee nobody else holds, a call or a constructor. A local read by `Own` may
-    /// be a copy when it lives on, so only a fresh value drops on the path that binds nothing.
-    pub(super) fn fresh_scrutinee(&mut self, expr: &Expr) -> bool {
-        match expr {
-            Expr::Paren(p) => self.fresh_scrutinee(&p.expr),
-            Expr::Group(g) => self.fresh_scrutinee(&g.expr),
-            Expr::Path(_)
-            | Expr::Field(_)
-            | Expr::Index(_)
-            | Expr::Reference(_)
-            | Expr::Unary(_) => false,
-            other => self.scrutinee_owned(other),
-        }
-    }
-
     /// `init_is_owned` plus the script's own methods, which always hand back a value of the
     /// caller's own.
     pub(super) fn init_owned(&self, expr: &Expr) -> bool {
@@ -375,49 +323,6 @@ impl Compiler<'_> {
         }
         f.local_reg(seen)
             .is_some_and(|reg| f.owning_iters.contains(&reg))
-    }
-
-    /// Where the shell of an owned scrutinee drops once `TakeBinds` moved its bound parts
-    /// out. A fresh value drops with the bindings' scope. A local read by move is a partial
-    /// move, its rest drops where the local was declared, right after it in reverse order.
-    /// Only a program with a `Drop` impl can observe either.
-    pub(super) fn shell_home(&mut self, expr: &Expr) -> ShellHome {
-        if !self.ctx.has_drop {
-            return ShellHome::None;
-        }
-        if self.fresh_scrutinee(expr) {
-            return ShellHome::Scope;
-        }
-        let Some(name) = single_path_name(expr) else {
-            return ShellHome::None;
-        };
-        let name = self.unalias(&name);
-        let NameLoc::Local(reg) = self.resolve(&name) else {
-            return ShellHome::None;
-        };
-        let f = self.cur();
-        let Some(scope) = f.scope_order.iter().rposition(|regs| regs.contains(&reg)) else {
-            return ShellHome::None;
-        };
-        let at = f.scope_order[scope]
-            .iter()
-            .position(|r| *r == reg)
-            .map_or(0, |at| at + 1);
-        ShellHome::Local { scope, at }
-    }
-
-    /// Holds the shell in its home scope so the scope's drops end it, see `shell_home`.
-    pub(super) fn hold_shell(&mut self, shell: Reg, home: ShellHome) {
-        let f = self.cur();
-        match home {
-            ShellHome::Scope => f
-                .scope_order
-                .last_mut()
-                .expect("a scope is always open")
-                .push(shell),
-            ShellHome::Local { scope, at } => f.scope_order[scope].insert(at, shell),
-            ShellHome::None => {}
-        }
     }
 
     /// A call of one of the script's own methods, also as the value a block, an `if` or a
@@ -452,6 +357,8 @@ impl Compiler<'_> {
     /// `binds_by_ref` is a `ref` or `ref mut` binding in the pattern. Over a place it borrows
     /// like `&mut place`, so the bindings sit in the storage and a write through one lands. A
     /// scalar local stays a value read, its register has no reference form.
+    /// A `&mut place` scrutinee wraps the place as a borrow, so bindings write through. A
+    /// scrutinee whose pattern binds by value is moved out of, or copied when it stays live.
     pub(super) fn compile_scrutinee(
         &mut self,
         expr: &Expr,
@@ -540,6 +447,10 @@ impl Compiler<'_> {
                     }
                     NameLoc::Cell(cell) => {
                         self.emit(Op::LoadCell { dst, cell });
+                        // a copy leaves the cell full for a closure that reads it later
+                        if copies(&self.types.of(expr)) {
+                            return Ok(());
+                        }
                         self.emit(Op::Own {
                             dst,
                             src: dst,
@@ -601,7 +512,7 @@ impl Compiler<'_> {
     }
 
     /// Whether an owned read of the expression is a move, its inferred type rules `Copy` out.
-    fn moves_out(&self, expr: &Expr) -> bool {
+    pub(super) fn moves_out(&self, expr: &Expr) -> bool {
         let ty = self.types.of(expr);
         matches!(
             ty,

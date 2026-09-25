@@ -4,12 +4,13 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
 use syn::punctuated::Punctuated;
-use syn::{Expr, Lit};
+use syn::{Expr, Lit, Pat};
 
 use crate::interpreter::bytecode::{BinKind, Const, FmtSpec, MacroKind, Op, PathRef, Reg};
 
 use std::rc::Rc;
 
+use super::flow::ArmBody;
 use super::infer::{MacroBody, Ty};
 use super::{Compiler, inline_holes, parse_exprs, parse_matches, parse_vec_repeat};
 
@@ -185,43 +186,15 @@ impl Compiler<'_> {
             bail!("matches! body is not a match");
         };
         let (expr, pat, guard) = &**parts;
-        let scrut = self.compile_expr(expr)?;
-        self.push_scope();
-        let pidx = self.pattern_info(pat)?;
-        let tests = if guard.is_some() {
-            self.guarded_alternatives(pidx)
-        } else {
-            vec![pidx]
-        };
-        let mut to_end = Vec::new();
-        for (i, &test) in tests.iter().enumerate() {
-            self.emit(Op::TestBind {
-                val: scrut,
-                pat: test,
-                dst,
-            });
-            let Some(g) = guard else {
-                continue;
-            };
-            let skip = self.here();
-            self.emit(Op::JumpIfFalse { cond: dst, to: 0 });
-            // a guard is a temporary scope of its own, like a `match` arm's
-            let guard_temps = self.cur().owned_temps.len();
-            self.compile_into(dst, g)?;
-            self.drop_temps(guard_temps, Some(dst));
-            if i + 1 < tests.len() {
-                to_end.push(self.here());
-                self.emit(Op::JumpIfTrue { cond: dst, to: 0 });
-            }
-            let next = self.mark()?;
-            self.patch_jump(skip, next);
-        }
-        let end = self.mark()?;
-        for j in to_end {
-            self.patch_jump(j, end);
-        }
-        self.pop_scope();
-        Ok(())
+        let wild = Pat::Wild(syn::PatWild {
+            attrs: Vec::new(),
+            underscore_token: syn::Token![_](proc_macro2::Span::call_site()),
+        });
+        let arms = [
+            (pat, guard.as_ref(), ArmBody::Bool(true)),
+            (&wild, None, ArmBody::Bool(false)),
+        ];
+        self.compile_match_arms(dst, expr, &arms)
     }
 
     fn compile_ensure_macro(&mut self, dst: Reg, mac: &syn::Macro) -> Result<()> {

@@ -601,6 +601,7 @@ mod method;
 mod names;
 mod pattern;
 mod place;
+mod scrutinee;
 mod struct_lit;
 mod support;
 mod typed;
