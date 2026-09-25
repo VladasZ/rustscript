@@ -15,8 +15,8 @@ impl Checker {
                 let mark = self.scope.enter_scope();
                 for link in links {
                     self.expr(link.expr());
-                    if let ChainLink::Let { pat, .. } = link {
-                        self.push_pat(pat);
+                    if let ChainLink::Let { pat, expr } = link {
+                        self.push_matched(pat, expr);
                     }
                 }
                 let before = self.scope.snapshot();
@@ -75,7 +75,7 @@ impl Checker {
                 self.expr(scrutinee);
                 self.branches(arms.len(), |inner, index| {
                     let arm = &arms[index];
-                    inner.push_pat(&arm.pat);
+                    inner.push_matched(&arm.pat, scrutinee);
                     if let Some(guard) = &arm.guard {
                         inner.expr(guard);
                     }

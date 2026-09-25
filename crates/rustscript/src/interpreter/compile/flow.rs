@@ -158,6 +158,22 @@ impl Compiler<'_> {
                 self.emit(Op::JumpIfFalse { cond, to: 0 });
             }
         }
+        // The chain's temporaries and bindings drop together in reverse, link by link, so a
+        // later link's binding and temporary go before an earlier link's. That holds at the end
+        // of the body and on a `break`, `continue` or `return` out of it.
+        let f = self.cur();
+        f.owned_temps.truncate(temp_mark);
+        if let Some(scope) = f.scope_order.last_mut() {
+            let rest: Vec<Reg> = scope
+                .iter()
+                .filter(|r| !made.contains(r))
+                .copied()
+                .collect();
+            *scope = made.iter().copied().chain(rest).collect();
+        }
+        if let Some(mark) = f.scope_temps.last_mut() {
+            *mark = temp_mark;
+        }
         self.compile_block_inner(&if_expr.then_branch, dst)?;
         self.emit_scope_drops(1);
         self.pop_scope();
@@ -560,6 +576,83 @@ impl Compiler<'_> {
         }
     }
 
+    /// An arm that did not take the value leaves its bindings empty, they only looked at the
+    /// scrutinee, which still owns every part a later arm or an unwind drops.
+    fn clear_pattern_binds(&mut self, pat: u16) {
+        if !self.ctx.has_drop {
+            return;
+        }
+        let binds: Vec<Reg> = self.cur().pats[usize::from(pat)]
+            .binds
+            .iter()
+            .map(|(_, reg)| *reg)
+            .collect();
+        for reg in binds {
+            self.emit(Op::LoadUnit { dst: reg });
+        }
+    }
+
+    /// Tests an arm's pattern and guard, and ends where the body starts. A guarded arm tries each
+    /// alternative of its or-patterns in turn, see `guarded_alternatives`. The result is the
+    /// jumps a failed arm takes to the next one.
+    fn compile_arm_test(
+        &mut self,
+        scrut: Reg,
+        pat: u16,
+        guard: Option<&Expr>,
+        takes: bool,
+        matched: Reg,
+    ) -> Result<Vec<usize>> {
+        let tests = if guard.is_some() {
+            self.guarded_alternatives(pat)
+        } else {
+            vec![pat]
+        };
+        let mut to_next_arm = Vec::new();
+        let mut to_body = Vec::new();
+        for (i, &test) in tests.iter().enumerate() {
+            self.emit(Op::TestBind {
+                val: scrut,
+                pat: test,
+                dst: matched,
+            });
+            let mut fails = vec![self.here()];
+            self.emit(Op::JumpIfFalse {
+                cond: matched,
+                to: 0,
+            });
+            if let Some(guard) = guard {
+                // a guard is a temporary scope of its own, its temporaries end before the
+                // branch on it, whichever way it goes
+                let guard_temps = self.cur().owned_temps.len();
+                let g = self.compile_expr(guard)?;
+                self.drop_temps(guard_temps, Some(g));
+                fails.push(self.here());
+                self.emit(Op::JumpIfFalse { cond: g, to: 0 });
+            }
+            // a guard reads the bindings by reference, the move happens once it passed
+            if takes {
+                self.take_pattern_binds(scrut, test);
+            }
+            if i + 1 == tests.len() {
+                to_next_arm = fails;
+            } else {
+                to_body.push(self.here());
+                self.emit(Op::Jump { to: 0 });
+                let retry = self.mark()?;
+                for j in fails {
+                    self.patch_jump(j, retry);
+                }
+                self.clear_pattern_binds(pat);
+            }
+        }
+        let body = self.mark()?;
+        for j in to_body {
+            self.patch_jump(j, body);
+        }
+        Ok(to_next_arm)
+    }
+
     pub(super) fn compile_match(&mut self, dst: Reg, m: &syn::ExprMatch) -> Result<()> {
         fn arm_pattern(pat: &Pat) -> &Pat {
             match pat {
@@ -602,31 +695,7 @@ impl Compiler<'_> {
             if holds_guard {
                 self.guard_pattern_binds(pat);
             }
-            self.emit(Op::TestBind {
-                val: scrut,
-                pat,
-                dst: matched,
-            });
-            let skip = self.here();
-            self.emit(Op::JumpIfFalse {
-                cond: matched,
-                to: 0,
-            });
-            let mut guard_skip = None;
-            if let Some(guard) = arm_guard {
-                // a guard is a temporary scope of its own, its temporaries end before the
-                // branch on it, whichever way it goes
-                let guard_temps = self.cur().owned_temps.len();
-                let g = self.compile_expr(guard)?;
-                self.drop_temps(guard_temps, Some(g));
-                let gs = self.here();
-                self.emit(Op::JumpIfFalse { cond: g, to: 0 });
-                guard_skip = Some(gs);
-            }
-            // a guard reads the bindings by reference, the move happens once it passed
-            if takes {
-                self.take_pattern_binds(scrut, pat);
-            }
+            let to_next_arm = self.compile_arm_test(scrut, pat, arm_guard, takes, matched)?;
             // an arm body is a temporary scope of its own, its temporaries end with the arm
             let arm_temps = self.cur().owned_temps.len();
             self.compile_owned_into(dst, &arm.body)?;
@@ -637,22 +706,10 @@ impl Compiler<'_> {
             end_jumps.push(je);
             self.pop_scope();
             let next = self.mark()?;
-            self.patch_jump(skip, next);
-            if let Some(gs) = guard_skip {
-                self.patch_jump(gs, next);
+            for j in to_next_arm {
+                self.patch_jump(j, next);
             }
-            // an arm that did not take the value leaves its bindings empty, they only looked at
-            // the scrutinee, which still owns every part a later arm or an unwind drops
-            if self.ctx.has_drop {
-                let binds: Vec<Reg> = self.cur().pats[usize::from(pat)]
-                    .binds
-                    .iter()
-                    .map(|(_, reg)| *reg)
-                    .collect();
-                for reg in binds {
-                    self.emit(Op::LoadUnit { dst: reg });
-                }
-            }
+            self.clear_pattern_binds(pat);
         }
         // no arm matched
         let p = self.add_path(PathRef::new(vec!["::unreachable_match".to_string()], None));

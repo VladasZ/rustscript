@@ -23,6 +23,15 @@ impl Generator<'_> {
         }
     }
 
+    /// An `if let` link, whose `ref` bindings keep the place they match borrowed for the rest
+    /// of the chain and the body, see `Pat::pins`.
+    fn push_link_pat(&mut self, pat: &Pat, scrutinee: &Expr) {
+        if let Some(root) = pat.pins(scrutinee) {
+            self.scope.pin(root);
+        }
+        self.push_pat(pat);
+    }
+
     /// A scrutinee with a refutable pattern over it. A binding forces real literal suffixes,
     /// see `match_expr`.
     fn refutable_pair(&mut self, depth: usize) -> Option<(Pat, Expr)> {
@@ -39,8 +48,8 @@ impl Generator<'_> {
         let mut links = vec![ChainLink::Let { pat, expr }];
         self.begin_branches();
         let then_body = self.branch(|inner| {
-            if let ChainLink::Let { pat, .. } = &links[0] {
-                inner.push_pat(&pat.clone());
+            if let ChainLink::Let { pat, expr } = &links[0] {
+                inner.push_link_pat(&pat.clone(), &expr.clone());
             }
             let extra = if inner.chance(0.4) {
                 inner.rng.random_range(1..=2)
@@ -56,8 +65,8 @@ impl Generator<'_> {
                     }
                     ChainLink::Cond(inner.expr(&Ty::Bool, 2))
                 });
-                if let ChainLink::Let { pat, .. } = &link {
-                    inner.push_pat(pat);
+                if let ChainLink::Let { pat, expr } = &link {
+                    inner.push_link_pat(pat, expr);
                 }
                 links.push(link);
             }
@@ -149,7 +158,7 @@ impl Generator<'_> {
         self.begin_branches();
         let arms = self.arms_for(&scrutinee_ty, &mut |inner, pat, guard| {
             inner.branch(|inner| {
-                inner.with_pat(&pat.clone(), |inner| {
+                inner.with_pat(&pat.clone(), &scrutinee, |inner| {
                     let guard = guard.then(|| inner.borrowing(|inner| inner.expr(&Ty::Bool, 2)));
                     let body = inner.nested_body();
                     StmtArm { pat, guard, body }

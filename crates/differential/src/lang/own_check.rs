@@ -106,6 +106,15 @@ impl Checker {
         }
     }
 
+    /// The bindings of a pattern over `scrutinee`. A `ref` binding into a place keeps that
+    /// place's binding borrowed until the scope ends, see `Pat::pins`.
+    pub(super) fn push_matched(&mut self, pat: &Pat, scrutinee: &Expr) {
+        if let Some(root) = pat.pins(scrutinee) {
+            self.scope.pin(root);
+        }
+        self.push_pat(pat);
+    }
+
     pub(super) fn push_let(&mut self, name: &str, ty: &Ty) {
         self.scope.push_let(name.to_string(), ty.clone());
     }
@@ -567,7 +576,7 @@ impl Checker {
                 self.expr(scrutinee);
                 self.branches(arms.len(), |inner, index| {
                     let arm = &arms[index];
-                    inner.push_pat(&arm.pat);
+                    inner.push_matched(&arm.pat, scrutinee);
                     if let Some(guard) = &arm.guard {
                         inner.expr(guard);
                     }

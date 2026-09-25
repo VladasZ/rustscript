@@ -41,6 +41,26 @@ fn generated_programs_compile() {
     );
 }
 
+/// Seeds whose programs `rustc` once rejected. 20721018167 wrote `&mut` through the fallback
+/// `break` of a value loop to a binding a later `let` in the body shadows. 20721211030 assigned
+/// to a binding while an `if let` `ref` binding into it was still used. They regenerate as a
+/// newer generator draws, so they stay a smoke check.
+#[test]
+fn once_rejected_seeds_compile() {
+    let root = workspace_root();
+    let runner = Runner::build(&root, 20_000).expect("build interpreter");
+    for seed in [20_721_018_167u64, 20_721_211_030] {
+        let source = generate(seed).render();
+        let result = runner.run_source(&source).expect("run generated program");
+        assert_ne!(
+            result.classification,
+            Classification::RustcRejected,
+            "seed {seed} did not compile:\n{}",
+            result.compiler.stderr,
+        );
+    }
+}
+
 /// Every shape that can hide a real divergence. See `generation_covers_the_language`.
 const EXPECTED_FEATURES: &[&str] = &[
     // types

@@ -158,6 +158,8 @@ impl Vm {
             return Ok(None);
         };
         let Some(second) = self.iterator_next(right)? else {
+            // the left item already came out, so it drops here, ahead of the rest of the left side
+            self.discard(left, first)?;
             return Ok(None);
         };
         Ok(Some(Value::tuple(vec![first, second])))

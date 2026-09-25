@@ -302,20 +302,7 @@ pub fn mark_mutable(stmts: &mut [Stmt], tail: Option<&Expr>) {
     let mut scope: Vec<(String, Vec<usize>)> = Vec::new();
     collect_written(stmts, &mut Vec::new(), &mut scope, &mut written);
     if let Some(tail) = tail {
-        let mut names = BTreeSet::new();
-        tail.written_names(&mut names);
-        for node in tail.nodes() {
-            if let Expr::Block { stmts, .. } = node {
-                for stmt in stmts {
-                    stmt.assigned(&mut names);
-                }
-            }
-        }
-        for name in names {
-            if let Some((_, let_path)) = scope.iter().rev().find(|(bound, _)| *bound == name) {
-                written.push(let_path.clone());
-            }
-        }
+        resolve_names(&expr_writes(&[tail]), &scope, &mut written);
     }
     for path in written {
         if let Some(Stmt::Let { mutable, .. }) = stmt_at_mut(stmts, &path) {
@@ -332,18 +319,27 @@ fn collect_written(
 ) {
     for (index, stmt) in stmts.iter().enumerate() {
         path.push(index);
-        // the exit and the value of a `loop` that breaks with one run after its body and see
-        // the body's bindings, so they resolve inside it
-        let late = matches!(stmt, Stmt::LetLoop { .. });
-        if !late {
-            resolve_writes(stmt, scope, written);
-        }
+        // A `loop` that breaks with a value checks its fallback before the body, so that one
+        // resolves outside. The exit and the value run after the body and see its bindings.
+        let late = if let Stmt::LetLoop {
+            fallback,
+            exit,
+            value,
+            ..
+        } = stmt
+        {
+            resolve_names(&expr_writes(&[fallback]), scope, written);
+            Some(expr_writes(&[exit, value]))
+        } else {
+            resolve_names(&stmt.own_writes(), scope, written);
+            None
+        };
         for (body_index, body) in stmt.bodies().iter().enumerate() {
             path.push(body_index);
             let mark = scope.len();
             collect_written(body, path, scope, written);
-            if late {
-                resolve_writes(stmt, scope, written);
+            if let Some(names) = &late {
+                resolve_names(names, scope, written);
             }
             scope.truncate(mark);
             path.pop();
@@ -355,12 +351,32 @@ fn collect_written(
     }
 }
 
-fn resolve_writes(stmt: &Stmt, scope: &[(String, Vec<usize>)], written: &mut Vec<Vec<usize>>) {
-    for name in stmt.own_writes() {
-        if let Some((_, let_path)) = scope.iter().rev().find(|(bound, _)| *bound == name) {
+fn resolve_names(
+    names: &BTreeSet<String>,
+    scope: &[(String, Vec<usize>)],
+    written: &mut Vec<Vec<usize>>,
+) {
+    for name in names {
+        if let Some((_, let_path)) = scope.iter().rev().find(|(bound, _)| bound == name) {
             written.push(let_path.clone());
         }
     }
+}
+
+/// The names these expressions write, the statements of a block expression inside included.
+fn expr_writes(exprs: &[&Expr]) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for expr in exprs {
+        expr.written_names(&mut names);
+        for node in expr.nodes() {
+            if let Expr::Block { stmts, .. } = node {
+                for stmt in stmts {
+                    stmt.assigned(&mut names);
+                }
+            }
+        }
+    }
+    names
 }
 
 /// `path` alternates a statement index and a body index, see `collect_written`.

@@ -49,7 +49,9 @@ Only a `let` is written in place, a pattern binding or a parameter has no
 
 Patterns nest by type, `Some((a, 1u8..=5u8))`, and come with or patterns, `@`
 bindings, `ref` bindings, const patterns and char ranges. A `ref` binding is
-read through `(*name)` and only cloned. The statements that bind through a
+read through `(*name)` and only cloned. A `ref` binding into a place, `v` or
+`v.0`, keeps that binding held for the whole arm or `if let` body, see
+`Pat::pins`. The statements that bind through a
 pattern are `if let` with let chains and an `else`, `while let Some(x) =
 v.pop()` with the vec hidden from its body, `let else`, a `match` whose arms
 are statement lists, and `let x = loop { .. break value; }`. `matches!` is an
