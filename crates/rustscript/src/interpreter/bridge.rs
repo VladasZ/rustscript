@@ -234,6 +234,9 @@ impl Vm {
         name: &MethodName,
         args: &mut [Value],
     ) -> Result<Value> {
+        if let Some(out) = self.str_edit_in_place(recv, name.id, args)? {
+            return Ok(out);
+        }
         let dereferenced = match recv {
             Value::Ref(reference) => match deref_receiver(reference, name, args)? {
                 RefRead::Value(value) => Some(value),

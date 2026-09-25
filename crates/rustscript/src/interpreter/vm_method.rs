@@ -58,6 +58,12 @@ fn method_call(
         let v = option_get_or_insert(ctx, recv, name.id, s)?;
         return Ok(ctx.set_opt(dst, v));
     }
+    if let Value::Str(text) = &ctx.stack[base + recv]
+        && let Some((edited, out)) = vm.str_edit(text, name.id, &ctx.stack[s..s + argc])?
+    {
+        ctx.stack[base + recv] = Value::Str(edited);
+        return Ok(ctx.set_opt(dst, out));
+    }
     // an integer method with integer arguments skips the whole dispatch walk
     if matches!(ctx.stack[base + recv], Value::Int(_) | Value::IntW(..))
         && ctx.stack[s..s + argc]

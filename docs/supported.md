@@ -150,7 +150,7 @@ The `supported_page_is_current` test enforces it.
 
 ## Path
 
-`ancestors`, `as_os_str`, `as_path`, `clone`, `display`, `ends_with`, `exists`, `extension`, `file_name`, `file_stem`, `into_os_string`, `into_string`, `is_absolute`, `is_dir`, `is_file`, `join`, `parent`, `push`, `starts_with`, `to_owned`, `to_path_buf`, `to_str`, `to_string_lossy`, `with_extension`
+`ancestors`, `as_os_str`, `as_path`, `canonicalize`, `clone`, `display`, `ends_with`, `exists`, `extension`, `file_name`, `file_stem`, `into_os_string`, `into_string`, `is_absolute`, `is_dir`, `is_file`, `join`, `parent`, `push`, `starts_with`, `to_owned`, `to_path_buf`, `to_str`, `to_string_lossy`, `with_extension`
 
 ## RegKey
 
@@ -214,7 +214,7 @@ The `supported_page_is_current` test enforces it.
 
 ## String and str
 
-`as_bytes`, `as_ref`, `as_str`, `as_string`, `black`, `blue`, `bold`, `bright_blue`, `bright_cyan`, `bright_green`, `bright_red`, `bright_yellow`, `bytes`, `char_indices`, `chars`, `clear`, `clone`, `cmp`, `contains`, `context`, `count`, `cyan`, `dimmed`, `encode_utf16`, `ends_with`, `eq_ignore_ascii_case`, `expect`, `find`, `get`, `green`, `into_bytes`, `into_owned`, `into_string`, `is_ascii`, `is_char_boundary`, `is_empty`, `is_none`, `is_some`, `italic`, `len`, `lines`, `magenta`, `matches`, `normal`, `on_blue`, `on_green`, `on_red`, `parse`, `purple`, `push`, `push_str`, `red`, `repeat`, `replace`, `replacen`, `reversed`, `rfind`, `rsplit`, `rsplit_once`, `rsplitn`, `split`, `split_once`, `split_whitespace`, `splitn`, `starts_with`, `strip_prefix`, `strip_suffix`, `to_ascii_lowercase`, `to_ascii_uppercase`, `to_lowercase`, `to_owned`, `to_str`, `to_string`, `to_string_lossy`, `to_uppercase`, `trim`, `trim_end`, `trim_end_matches`, `trim_matches`, `trim_start`, `trim_start_matches`, `trim_string`, `underline`, `unwrap`, `unwrap_or`, `unwrap_or_default`, `unwrap_or_else`, `white`, `with_context`, `yellow`
+`as_bytes`, `as_ref`, `as_str`, `as_string`, `black`, `blue`, `bold`, `bright_blue`, `bright_cyan`, `bright_green`, `bright_red`, `bright_yellow`, `bytes`, `char_indices`, `chars`, `clear`, `clone`, `cmp`, `contains`, `context`, `count`, `cyan`, `dimmed`, `encode_utf16`, `ends_with`, `eq_ignore_ascii_case`, `expect`, `find`, `get`, `green`, `insert`, `insert_str`, `into_bytes`, `into_owned`, `into_string`, `is_ascii`, `is_char_boundary`, `is_empty`, `is_none`, `is_some`, `italic`, `len`, `lines`, `magenta`, `matches`, `normal`, `on_blue`, `on_green`, `on_red`, `parse`, `pop`, `purple`, `push`, `push_str`, `red`, `remove`, `repeat`, `replace`, `replace_range`, `replacen`, `retain`, `reversed`, `rfind`, `rsplit`, `rsplit_once`, `rsplitn`, `split`, `split_once`, `split_whitespace`, `splitn`, `starts_with`, `strip_prefix`, `strip_suffix`, `to_ascii_lowercase`, `to_ascii_uppercase`, `to_lowercase`, `to_owned`, `to_str`, `to_string`, `to_string_lossy`, `to_uppercase`, `trim`, `trim_end`, `trim_end_matches`, `trim_matches`, `trim_start`, `trim_start_matches`, `trim_string`, `truncate`, `underline`, `unwrap`, `unwrap_or`, `unwrap_or_default`, `unwrap_or_else`, `white`, `with_context`, `yellow`
 
 ## Style
 

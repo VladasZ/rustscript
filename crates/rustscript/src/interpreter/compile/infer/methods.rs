@@ -250,6 +250,7 @@ impl Infer<'_, '_> {
             | "truncate"
             | "insert"
             | "insert_str"
+            | "replace_range"
             | "retain"
             | "make_ascii_uppercase"
             | "make_ascii_lowercase"

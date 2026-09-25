@@ -77,6 +77,7 @@ btree_range
 build
 by_ref
 bytes
+canonicalize
 captures
 captures_iter
 cbrt
@@ -466,6 +467,7 @@ remove_modifier
 repeat
 replace mut
 replace_all
+replace_range mut
 replacen
 resize mut
 retain mut
