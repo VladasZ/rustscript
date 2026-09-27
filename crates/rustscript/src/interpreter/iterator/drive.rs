@@ -481,7 +481,34 @@ impl Vm {
         })
     }
 
+    /// A by value terminal owns the iterator, so when it panics, what it never pulled drops
+    /// inside the call, before the temporaries of the caller.
+    pub(super) fn unwind_terminal(
+        self: &Arc<Self>,
+        iterator: &Handle,
+        id: BuiltinId,
+        result: Result<Option<Value>>,
+    ) -> Result<Option<Value>> {
+        if result.is_err()
+            && consumes_iterator(id)
+            && let Err(error) = self.drop_leftovers(iterator)
+        {
+            eprintln!("panic in drop during unwinding: {error:#}");
+        }
+        result
+    }
+
     pub(in crate::interpreter) fn iterator_method(
+        self: &Arc<Self>,
+        iterator: &Handle,
+        method: &MethodName,
+        args: &[Value],
+    ) -> Result<Option<Value>> {
+        let result = self.run_iterator_method(iterator, method, args);
+        self.unwind_terminal(iterator, method.id, result)
+    }
+
+    fn run_iterator_method(
         self: &Arc<Self>,
         iterator: &Handle,
         method: &MethodName,

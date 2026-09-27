@@ -8,6 +8,7 @@ use syn::Expr;
 use super::super::bytecode::{NO_ROOT, Op, PathId, Reg};
 use super::infer::Ty;
 use super::support::{chain_owns_items, init_is_owned, iterable_is_owned, temp_is_owned};
+use super::walks::unparen;
 use super::{Compiler, NameLoc, idx16};
 
 /// Composite storage is shared with the place, so the store is a handle move. A string splits inside
@@ -247,6 +248,20 @@ impl Compiler<'_> {
             },
             _ => return Ok(false),
         };
+        // `let r = pick(&mut n)` runs the call and names `n` like `let r = &mut n`
+        if let Some(place) = self.returned_mut_arg(&init.expr)
+            && let Some(var) = single_path_name(place)
+        {
+            let target = self.unalias(&var);
+            if !matches!(self.resolve(&target), NameLoc::None) {
+                self.compile_expr(&init.expr)?;
+                self.set_alias(&name, Some(target));
+                if is_last {
+                    self.emit(Op::LoadUnit { dst });
+                }
+                return Ok(true);
+            }
+        }
         let Expr::Reference(r) = &*init.expr else {
             return Ok(false);
         };
@@ -264,11 +279,45 @@ impl Compiler<'_> {
             }
             return Ok(true);
         }
-        if !matches!(&*r.expr, Expr::Field(_) | Expr::Index(_)) {
+        let Some(reg) = self.compile_projection_ref(&r.expr)? else {
+            return Ok(false);
+        };
+        self.define(&name, reg);
+        self.cur().ref_locals.insert(reg);
+        self.cur().drop_exempt.insert(reg);
+        if is_last {
+            self.emit(Op::LoadUnit { dst });
+        }
+        Ok(true)
+    }
+
+    /// A function that returns `&mut T` hands back `&mut v[i]` or `&mut s.f` as a reference,
+    /// so a write through the result reaches the storage it shares with the caller.
+    pub(super) fn compile_returned_ref(&mut self, dst: Reg, expr: &Expr) -> Result<bool> {
+        if !self.cur().returns_mut_ref {
             return Ok(false);
         }
-        let Some(place) = self.compile_place(&r.expr)? else {
+        let Expr::Reference(r) = unparen(expr) else {
             return Ok(false);
+        };
+        if r.mutability.is_none() {
+            return Ok(false);
+        }
+        let Some(reg) = self.compile_projection_ref(unparen(&r.expr))? else {
+            return Ok(false);
+        };
+        self.emit(Op::Move { dst, src: reg });
+        Ok(true)
+    }
+
+    /// `&mut v[i]` or `&mut s.f` as a real reference into the storage. `None` for any other
+    /// place.
+    pub(super) fn compile_projection_ref(&mut self, expr: &Expr) -> Result<Option<Reg>> {
+        if !matches!(expr, Expr::Field(_) | Expr::Index(_)) {
+            return Ok(None);
+        }
+        let Some(place) = self.compile_place(expr)? else {
+            return Ok(None);
         };
         let reg = self.alloc();
         match place.back {
@@ -284,24 +333,49 @@ impl Compiler<'_> {
             }),
             _ => anyhow::bail!("projection borrow without a projection place"),
         }
-        self.define(&name, reg);
-        self.cur().ref_locals.insert(reg);
-        self.cur().drop_exempt.insert(reg);
-        if is_last {
-            self.emit(Op::LoadUnit { dst });
-        }
-        Ok(true)
+        Ok(Some(reg))
     }
 
     /// `init_is_owned` plus the script's own methods, which always hand back a value of the
     /// caller's own.
     pub(super) fn init_owned(&self, expr: &Expr) -> bool {
-        init_is_owned(expr, &|name| self.binding_owns_items(name)) || self.user_method_call(expr)
+        !self.lends_result(expr)
+            && (init_is_owned(expr, &|name| self.binding_owns_items(name))
+                || self.user_method_call(expr))
     }
 
     /// `temp_is_owned` plus the script's own methods.
     pub(super) fn temp_owned(&self, expr: &Expr) -> bool {
-        temp_is_owned(expr, &|name| self.binding_owns_items(name)) || self.user_method_call(expr)
+        !self.lends_result(expr)
+            && (temp_is_owned(expr, &|name| self.binding_owns_items(name))
+                || self.user_method_call(expr))
+    }
+
+    /// A call of a script function or method that returns a reference hands out storage
+    /// someone else owns, so nothing drops it here.
+    fn lends_result(&self, expr: &Expr) -> bool {
+        let returns_ref = |sig: &syn::Signature| matches!(&sig.output, syn::ReturnType::Type(_, ty) if matches!(&**ty, syn::Type::Reference(_)));
+        match unparen(expr) {
+            Expr::Call(call) => match &*call.func {
+                Expr::Path(path) => path
+                    .path
+                    .get_ident()
+                    .and_then(|name| self.ctx.fn_signatures.get(&name.to_string()))
+                    .is_some_and(returns_ref),
+                _ => false,
+            },
+            Expr::MethodCall(m) => {
+                let name = m.method.to_string();
+                let mut sigs = self
+                    .ctx
+                    .impl_sigs
+                    .iter()
+                    .filter(|((_, method), _)| *method == name)
+                    .peekable();
+                sigs.peek().is_some() && sigs.all(|(_, sig)| returns_ref(sig))
+            }
+            _ => false,
+        }
     }
 
     pub(super) fn iterable_owned(&self, expr: &Expr) -> bool {
@@ -410,6 +484,11 @@ impl Compiler<'_> {
 
     /// The place, or the plain expression.
     pub(super) fn compile_mut_receiver(&mut self, expr: &Expr) -> Result<Place> {
+        // `pick(&mut s).push(c)` runs the call and then mutates `s` itself
+        if let Some(place) = self.returned_mut_arg(expr) {
+            self.compile_expr(expr)?;
+            return self.compile_mut_receiver(place);
+        }
         if let Some(place) = self.compile_place(expr)? {
             return Ok(place);
         }

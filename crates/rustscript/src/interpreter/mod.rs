@@ -71,8 +71,8 @@ use bytecode::Chunk;
 use compile::{Compiler, Ctx};
 use register::{
     PendingConst, build_fn_index, build_impl_table, build_module_tree, collect_const_types,
-    collect_fn_signatures, collect_impl_items, collect_mut_methods, collect_traits,
-    impl_name_tables, register_items, returns_anyhow_result,
+    collect_fn_signatures, collect_impl_items, collect_mut_arg_returns, collect_mut_methods,
+    collect_traits, impl_name_tables, register_items, returns_anyhow_result,
 };
 use resolver::{Resolver, StructDef};
 pub use vm_support::{ErrReturn, ScriptPanic};
@@ -168,6 +168,7 @@ impl Interp {
             collect_impl_items(&mut resolver, &pending_impls, &traits, &mut pending_consts)?;
 
         let fn_signatures = collect_fn_signatures(&pending_fns);
+        let mut_arg_returns = collect_mut_arg_returns(&pending_fns);
 
         let (has_drop, mut_methods) = collect_mut_methods(&pending_methods);
         let (impl_methods, method_atoms) = impl_name_tables(&pending_methods);
@@ -185,6 +186,7 @@ impl Interp {
             async_mode,
             impl_type: None,
             fn_signatures: &fn_signatures,
+            mut_arg_returns: &mut_arg_returns,
             mut_methods: &mut_methods,
             impl_methods: &impl_methods,
             method_atoms: &method_atoms,

@@ -23,6 +23,16 @@ impl Vm {
         name: BuiltinId,
         args: &[Value],
     ) -> Result<Option<Value>> {
+        let result = self.run_higher_order(iterator, name, args);
+        self.unwind_terminal(iterator, name, result)
+    }
+
+    fn run_higher_order(
+        self: &Arc<Self>,
+        iterator: &Handle,
+        name: BuiltinId,
+        args: &[Value],
+    ) -> Result<Option<Value>> {
         let closure = |index| as_closure(args.get(index));
         let value = match name {
             BuiltinId::Map => wrap(IteratorState::Map {

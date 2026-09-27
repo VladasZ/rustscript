@@ -32,7 +32,16 @@ impl Generator<'_> {
         // a comparison takes both sides by reference
         let (left, right) = self.borrowing(|inner| {
             let left = inner.expr(&operand, depth - 1);
+            let root = (!operand.is_primitive())
+                .then(|| left.place_root().map(str::to_string))
+                .flatten();
+            if let Some(root) = &root {
+                inner.scope.hold_shared(root);
+            }
             let right = inner.expr(&operand, depth - 1);
+            if root.is_some() {
+                inner.scope.release_shared();
+            }
             (left, right)
         });
         Expr::Bin {

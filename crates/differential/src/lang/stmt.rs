@@ -364,6 +364,8 @@ pub enum MutOp {
 }
 
 impl MutOp {
+    /// In the order rustc evaluates them. A `+=` on an integer runs its right side before
+    /// the place, so `add` comes before the `entry` key.
     pub fn exprs(&self) -> Vec<&Expr> {
         match self {
             Self::VecPush(expr)
@@ -386,7 +388,7 @@ impl MutOp {
             Self::VecRetain { pred, .. } => vec![pred],
             Self::MapInsert { key, value } | Self::MapEntryPush { key, value } => vec![key, value],
             Self::MapRemove { key } => vec![key],
-            Self::MapEntryAdd { key, default, add } => vec![key, default, add],
+            Self::MapEntryAdd { key, default, add } => vec![add, key, default],
         }
     }
 
@@ -412,7 +414,7 @@ impl MutOp {
             Self::VecRetain { pred, .. } => vec![pred],
             Self::MapInsert { key, value } | Self::MapEntryPush { key, value } => vec![key, value],
             Self::MapRemove { key } => vec![key],
-            Self::MapEntryAdd { key, default, add } => vec![key, default, add],
+            Self::MapEntryAdd { key, default, add } => vec![add, key, default],
         }
     }
 

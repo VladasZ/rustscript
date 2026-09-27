@@ -10,12 +10,24 @@ use crate::interpreter::numeric::IntWidth;
 use crate::interpreter::typeir::CastIr;
 
 use super::infer::Ty;
+use super::walks::unparen;
 use super::{Compiler, NameLoc, Res, TypeIr, first_generic_type, idx16};
 
 impl Compiler<'_> {
     /// The window is reserved first so the temporaries of an argument can't break the packing.
     /// Arguments for an op that takes the window, a call or a constructor. An owned value in
     /// it is the panic unwinder's to drop, when a later argument panics before the op runs.
+    /// Marks `expr` as the whole of a temporary scope, a block tail, a closure body, a
+    /// condition, a `&&` or `||` operand or a match guard. A call or a tuple, array or
+    /// struct literal there unwinds its owned operands after the temporaries of its
+    /// arguments, the reverse of anywhere else.
+    pub(super) fn mark_root_call(&mut self, expr: &Expr) {
+        self.cur().tail_call = matches!(
+            unparen(expr),
+            Expr::Call(_) | Expr::MethodCall(_) | Expr::Tuple(_) | Expr::Array(_) | Expr::Struct(_)
+        );
+    }
+
     pub(super) fn compile_args<'e>(&mut self, args: impl Iterator<Item = &'e Expr>) -> Result<Reg> {
         // the tail call of a block unwinds its operands like the temporaries around them, in
         // reverse order of creation, any other call unwinds them first

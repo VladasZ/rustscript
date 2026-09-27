@@ -83,6 +83,14 @@ impl RunResult {
             Classification::InterpreterCrash | Classification::InterpreterUnsupported => {
                 gap_reason(&self.interpreted.stderr)
             }
+            // the first error, or a reduction drifts to any other program rustc rejects
+            Classification::RustcRejected => self
+                .compiler
+                .stderr
+                .lines()
+                .find(|line| line.starts_with("error"))
+                .unwrap_or_default()
+                .to_string(),
             _ => String::new(),
         };
         let mut signature = normalize_digits(&raw);

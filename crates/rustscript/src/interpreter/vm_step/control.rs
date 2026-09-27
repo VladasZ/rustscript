@@ -1,5 +1,7 @@
 //! `?`, casts, pattern tests, formatting and await.
 
+use std::sync::Arc;
+
 use anyhow::{Result, anyhow, bail};
 use num_traits::AsPrimitive;
 
@@ -10,7 +12,7 @@ use crate::interpreter::numeric::{float_to_int, truncate};
 use crate::interpreter::ops::{self};
 use crate::interpreter::pattern::{bind_pattern_refs, take_bound, try_bind};
 use crate::interpreter::typeir::CastIr;
-use crate::interpreter::value::Value;
+use crate::interpreter::value::{Value, ValueRef};
 
 pub(super) fn try_op(ctx: &mut StepCtx, dst: u16, src: u16, conv: u16) -> Result<Flow> {
     Ok(match ops::eval_try(ctx.take(src))? {
@@ -129,6 +131,27 @@ pub(super) fn test_bind(ctx: &mut StepCtx, val: u16, pat: u16, dst: u16) -> Flow
         ctx.put(reg, v);
     }
     ctx.set(dst, Value::Bool(matched))
+}
+
+/// A scalar stays a value, a guard compares it like one and it has no `Drop`.
+pub(super) fn lend_binds(ctx: &mut StepCtx, pat: u16) -> Flow {
+    let info = &ctx.cur.pats[pat as usize];
+    let regs: Vec<u16> = info.binds.iter().map(|(_, reg)| *reg).collect();
+    for reg in regs {
+        let value = ctx.get(reg);
+        if matches!(
+            value,
+            Value::Vec(_)
+                | Value::Map(..)
+                | Value::Tuple(_)
+                | Value::Struct(_)
+                | Value::Enum { .. }
+        ) {
+            let lent = Value::Ref(Arc::new(ValueRef::borrowed(value.clone())));
+            ctx.put(reg, lent);
+        }
+    }
+    Flow::Next
 }
 
 /// A reference scrutinee lent its parts, so it stays whole.

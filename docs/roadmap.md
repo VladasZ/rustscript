@@ -12,7 +12,29 @@ Differential workflow.
 
 ## Open
 
-Nothing open.
+### A `&mut` returned from one of several `&mut` parameters
+
+A `&mut` argument is a copy the call hands back into the caller's local. A
+function that returns one of its `&mut` parameters whole works when its tail is
+that parameter, see `collect_mut_arg_returns`. When the choice depends on a
+value, the caller cannot tell which local the result names.
+
+```rust
+fn pick<'a>(a: &'a mut usize, b: &'a mut usize, first: bool) -> &'a mut usize {
+    if first { a } else { b }
+}
+
+fn main() {
+    let (mut a, mut b) = (1usize, 2usize);
+    *pick(&mut a, &mut b, false) += 5;
+    println!("{a} {b}");
+}
+```
+
+Compiled prints `1 7`. Interpreted panics with `assignment through a
+non-reference value`. The fix is a real reference to a caller local, a
+`&mut local` argument passed as a `Ref` into the caller's slot instead of a
+copy, see `emit_mut_arg_writebacks` and `unwind_drops` in `vm.rs`.
 
 ## Generator plan
 

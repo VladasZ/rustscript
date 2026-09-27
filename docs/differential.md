@@ -45,7 +45,10 @@ held binding is still read and borrowed again, it is never moved or written.
 Only a `let` is written in place, a pattern binding or a parameter has no
 `mut`. A closure that calls a captured `FnMut` closure is `FnMut` too, so its
 `let` gets `mut`. A place scrutinee stays borrowed through every match guard,
-so a guard never takes it by `&mut`.
+so a guard never takes it by `&mut`. A comparison of non primitive values goes through
+`PartialOrd`, so a place on its left stays borrowed while the right side runs. A
+`+=` on an integer runs its right side first, `*m.entry(k).or_insert(0) += v`
+included, so the checker reads `v` before the key.
 
 ## Binding forms
 
@@ -83,7 +86,9 @@ promote ARTIFACT NAME
 `run` drives a campaign. `generate` prints the program of one seed, so any
 finding replays locally. `replay` re-runs a saved artifact, `reduce` shrinks
 it to a minimal failing case, `mutate` grows a variant of it, and `promote`
-copies the reduced case into `regressions/` under the given name.
+copies the reduced case into `regressions/` under the given name. A
+`RustcRejected` case keeps its first rustc error through the reduction, so it
+never drifts to another program rustc rejects.
 
 ## Seeds
 
@@ -114,3 +119,7 @@ included, so a fixed bug stays fixed. Fixing a new finding ends with a
 `surface` compares the std surface against the method catalog and the
 interpreter listing, so the methods neither side knows are in the log of
 every run. `--refresh` re-harvests the std listing.
+
+Rust leaves the sign of a computed NaN open, so it can differ between two
+builds of the same program. The `is_sign_positive`, `is_sign_negative` and
+`copysign` rows clear the sign of a NaN with `abs` before they read it.

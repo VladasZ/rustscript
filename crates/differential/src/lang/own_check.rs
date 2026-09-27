@@ -607,11 +607,28 @@ impl Checker {
                 self.scope.exit_scope(mark);
             }
             Expr::Pipe(pipe) => self.pipe(pipe),
+            Expr::Bin {
+                op, left, right, ..
+            } if op.is_comparison() && !left.ty().is_primitive() => self.comparison(left, right),
             _ => {
                 for child in expr.children() {
                     self.expr(child);
                 }
             }
+        }
+    }
+
+    /// A comparison through `PartialOrd` keeps a place on its left borrowed while the right
+    /// side runs, so the right side takes no `&mut` of it.
+    fn comparison(&mut self, left: &Expr, right: &Expr) {
+        self.expr(left);
+        let root = left.place_root();
+        if let Some(root) = root {
+            self.scope.hold_shared(root);
+        }
+        self.expr(right);
+        if root.is_some() {
+            self.scope.release_shared();
         }
     }
 

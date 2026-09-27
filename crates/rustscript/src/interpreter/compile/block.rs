@@ -77,9 +77,10 @@ impl Compiler<'_> {
                     if is_last && semi.is_none() {
                         // real Rust unwinds the owned operands of a tail call after the
                         // temporaries of its arguments, the reverse of any other call
-                        self.cur().tail_call =
-                            matches!(unparen(expr), Expr::Call(_) | Expr::MethodCall(_));
-                        self.compile_owned_into(dst, expr)?;
+                        self.mark_root_call(expr);
+                        if !self.compile_returned_ref(dst, expr)? {
+                            self.compile_owned_into(dst, expr)?;
+                        }
                         self.cur().tail_call = false;
                     } else {
                         // A statement position call discards its result. With `Drop` impls
@@ -219,6 +220,7 @@ impl Compiler<'_> {
             return Ok(());
         }
         let by_ref = pattern_borrows(&local.pat);
+        let temp_mark = self.cur().owned_temps.len();
         let val = match &local.init {
             // `let (a, b) = &mut place` destructures a borrow, so the bindings write into it,
             // and so does `let (ref mut a, _) = place`
@@ -249,6 +251,9 @@ impl Compiler<'_> {
         if let (Some(pidx), Some(init)) = (pidx, &local.init) {
             self.move_parts_from_local(&local.pat, val, pidx, &init.expr);
         }
+        if let Some(init) = &local.init {
+            self.extend_let_temp(&init.expr, val, temp_mark);
+        }
         // `let _ = make();` binds nothing, so a fresh value drops right here like real Rust
         if self.ctx.has_drop
             && is_wild(&local.pat)
@@ -261,6 +266,44 @@ impl Compiler<'_> {
             self.emit(Op::LoadUnit { dst });
         }
         Ok(())
+    }
+
+    /// `let r = &make()` keeps the temporary alive to the end of the scope and drops it there
+    /// like a local declared at the `let`. `&mut make()` and `&make().f` keep the whole
+    /// temporary, which is the newest the init made.
+    fn extend_let_temp(&mut self, init: &Expr, val: Reg, temp_mark: usize) {
+        if !self.ctx.has_drop {
+            return;
+        }
+        let Expr::Reference(r) = unparen(init) else {
+            return;
+        };
+        let mut root = unparen(&r.expr);
+        let mut direct = r.mutability.is_none();
+        while let Expr::Field(f) = root {
+            root = unparen(&f.base);
+            direct = false;
+        }
+        if !self.temp_owned(root) {
+            return;
+        }
+        let held = if direct {
+            let reg = self.alloc();
+            self.emit(Op::Move { dst: reg, src: val });
+            reg
+        } else {
+            let f = self.cur();
+            if f.owned_temps.len() <= temp_mark {
+                return;
+            }
+            let Some(reg) = f.owned_temps.pop() else {
+                return;
+            };
+            reg
+        };
+        if let Some(scope) = self.cur().scope_order.last_mut() {
+            scope.push(held);
+        }
     }
 
     /// A `let mut` of a value that may share storage with something live copies first, so its
