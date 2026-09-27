@@ -18,7 +18,20 @@ impl Compiler<'_> {
         args: impl Iterator<Item = &'e Expr>,
         base: Reg,
     ) -> Result<()> {
+        self.emit_mut_arg_writebacks_skipping(args, base, &[])
+    }
+
+    /// `emit_mut_arg_writebacks` without the arguments `skip` marks.
+    pub(super) fn emit_mut_arg_writebacks_skipping<'e>(
+        &mut self,
+        args: impl Iterator<Item = &'e Expr>,
+        base: Reg,
+        skip: &[bool],
+    ) -> Result<()> {
         for (i, arg) in args.enumerate() {
+            if skip.get(i).copied().unwrap_or(false) {
+                continue;
+            }
             if let Expr::Reference(r) = arg
                 && r.mutability.is_some()
                 && let Expr::Path(p) = &*r.expr
@@ -182,7 +195,7 @@ impl Compiler<'_> {
         // the body value leaves the closure, so a returned parameter moves out before the
         // parameters drop
         self.compile_owned_into(ret, &c.body)?;
-        self.cur().tail_call = false;
+        self.cur().next_call.root = false;
         self.drop_temps(0, Some(ret));
         self.release_guard_temps(0, Some(ret));
         if let Some(idx) = self.cur().ret_cast {

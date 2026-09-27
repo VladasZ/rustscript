@@ -218,7 +218,7 @@ impl Compiler<'_> {
         let mut unwinds_receiver = false;
         // the tail call of a block unwinds its receiver like the temporaries around it, in
         // reverse order of creation, any other call unwinds it first
-        let tail = std::mem::take(&mut self.cur().tail_call);
+        let tail = std::mem::take(&mut self.cur().next_call.root);
         let held = self.cur().unwind_temps.len();
         let (recv, receiver_place) = if mutating {
             let p = self.compile_mut_receiver(&m.receiver)?;

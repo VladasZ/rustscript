@@ -17,7 +17,7 @@ impl Compiler<'_> {
     pub(super) fn compile_struct_literal(&mut self, dst: Reg, s: &syn::ExprStruct) -> Result<()> {
         // a block's tail unwinds its fields like the temporaries around them, see
         // `mark_root_call`
-        let tail = take(&mut self.cur().tail_call);
+        let tail = take(&mut self.cur().next_call.root);
         // a user struct resolves to its canonical name, anything else keeps the last segment
         let self_type = (s.path.segments.len() == 1 && s.path.segments[0].ident == "Self")
             .then_some(self.ctx.impl_type)

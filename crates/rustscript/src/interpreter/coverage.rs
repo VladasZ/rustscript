@@ -353,6 +353,7 @@ fn writes(op: &Op) -> Option<u16> {
         | Op::LoadGlobal { dst, .. }
         | Op::LoadUpvalue { dst, .. }
         | Op::LoadCell { dst, .. }
+        | Op::CellRef { dst, .. }
         | Op::Index { dst, .. }
         | Op::Deref { dst, .. }
         | Op::GetField { dst, .. } => Some(*dst),

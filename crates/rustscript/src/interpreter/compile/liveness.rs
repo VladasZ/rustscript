@@ -232,7 +232,7 @@ fn effects(f: &FnState, op: &Op, reads: &mut Vec<Reg>, writes: &mut Vec<Reg>) {
         | Op::MakeMap { dst, .. }
         | Op::LoadEnum { dst, .. }
         | Op::BuildDefault { dst, .. } => writes.push(*dst),
-        Op::LoadCell { dst, cell } => {
+        Op::LoadCell { dst, cell } | Op::CellRef { dst, cell } => {
             reads.push(*cell);
             writes.push(*dst);
         }

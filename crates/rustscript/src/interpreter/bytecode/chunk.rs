@@ -40,6 +40,12 @@ pub enum Op {
         dst: Reg,
         cell: Reg,
     },
+    /// A reference to the capture cell, the `&mut x` argument of a function that returns
+    /// `&mut`, so a write through what it returns lands in `x`.
+    CellRef {
+        dst: Reg,
+        cell: Reg,
+    },
     StoreCell {
         cell: Reg,
         src: Reg,

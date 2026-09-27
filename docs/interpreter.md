@@ -72,7 +72,9 @@ A `&mut` argument is a copy the callee hands back on return. A function or metho
 returns `&mut v[i]` or `&mut s.f` hands back a real reference into that storage, and
 one whose tail is one of its `&mut` parameters, `fn pick(n: &mut usize) -> &mut usize
 { n }`, makes a write through `*pick(&mut x)`, a method call on it or a `let r =
-pick(&mut x)` land in `x`. A call that returns a reference owns nothing, so nothing
+pick(&mut x)` land in `x`. One that picks among several `&mut` parameters gets a
+reference to each `&mut x` argument instead of a copy, so `x` lives in a capture
+cell like a local a closure writes, see `captures::ref_arg_names`. A call that returns a reference owns nothing, so nothing
 drops its result.
 A closure whose body is a bare call unwinds it like a block's tail call. So does
 every call and every tuple, array or struct literal that is the whole of a temporary

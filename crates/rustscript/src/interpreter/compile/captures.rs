@@ -254,3 +254,53 @@ fn root_name(expr: &Expr) -> Option<String> {
         _ => None,
     }
 }
+
+/// The names a call of a function that returns `&mut` borrows with `&mut name`. Such a
+/// binding lives in a capture cell, so the call gets a reference to it and a write through
+/// what the call returns lands in the binding, see `Op::CellRef`.
+pub(super) fn ref_arg_names(
+    body: &Block,
+    lends: &dyn Fn(&syn::ExprCall) -> bool,
+) -> HashSet<String> {
+    let mut scan = RefArgs {
+        lends,
+        names: HashSet::new(),
+    };
+    scan.visit_block(body);
+    scan.names
+}
+
+/// `ref_arg_names` for a closure body, which is an expression.
+pub(super) fn ref_arg_names_expr(
+    body: &Expr,
+    lends: &dyn Fn(&syn::ExprCall) -> bool,
+) -> HashSet<String> {
+    let mut scan = RefArgs {
+        lends,
+        names: HashSet::new(),
+    };
+    scan.visit_expr(body);
+    scan.names
+}
+
+struct RefArgs<'a> {
+    lends: &'a dyn Fn(&syn::ExprCall) -> bool,
+    names: HashSet<String>,
+}
+
+impl<'ast> Visit<'ast> for RefArgs<'_> {
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if (self.lends)(call) {
+            for arg in &call.args {
+                if let Expr::Reference(r) = arg
+                    && r.mutability.is_some()
+                    && let Expr::Path(p) = &*r.expr
+                    && let Some(name) = p.path.get_ident()
+                {
+                    self.names.insert(name.to_string());
+                }
+            }
+        }
+        visit::visit_expr_call(self, call);
+    }
+}

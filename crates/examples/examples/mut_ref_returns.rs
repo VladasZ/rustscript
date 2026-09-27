@@ -1,7 +1,8 @@
 #!/usr/bin/env rust
 
 // Functions and methods that return `&mut`, a whole parameter or a field or element of one, with
-// writes through the result by `=`, `+=`, a method call and a named binding.
+// writes through the result by `=`, `+=`, a method call and a named binding, also when the
+// function picks one of several `&mut` parameters at runtime.
 
 struct Trace(i64);
 
@@ -55,6 +56,19 @@ fn first(values: &mut [usize]) -> &mut usize {
     &mut values[0]
 }
 
+fn pick<'a>(a: &'a mut usize, b: &'a mut usize, first: bool) -> &'a mut usize {
+    *a += 1;
+    if first { a } else { b }
+}
+
+fn longer<'a>(a: &'a mut String, b: &'a mut String) -> &'a mut String {
+    if a.len() >= b.len() { a } else { b }
+}
+
+fn heavier<'a>(a: &'a mut Trace, b: &'a mut Trace) -> &'a mut Trace {
+    if a.0 > b.0 { a } else { b }
+}
+
 fn main() {
     let mut n = 1usize;
     *pass(&mut n) += 2;
@@ -94,4 +108,22 @@ fn main() {
     pass_trace(&mut trace).0 += 1;
     *pass_trace(&mut trace) = Trace(20);
     println!("trace {}", trace.0);
+
+    let (mut a, mut b) = (1usize, 2usize);
+    *pick(&mut a, &mut b, false) += 5;
+    *pick(&mut a, &mut b, true) = 40;
+    let chosen = pick(&mut a, &mut b, false);
+    *chosen *= 2;
+    println!("pick {a} {b}");
+
+    let mut left = String::from("ab");
+    let mut right = String::from("c");
+    longer(&mut left, &mut right).push('!');
+    println!("longer {left} {right}");
+
+    let mut light = Trace(3);
+    let mut heavy = Trace(9);
+    heavier(&mut light, &mut heavy).0 += 1;
+    *heavier(&mut light, &mut heavy) = Trace(30);
+    println!("heavier {} {}", light.0, heavy.0);
 }

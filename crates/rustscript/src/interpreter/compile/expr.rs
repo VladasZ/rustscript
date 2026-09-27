@@ -543,7 +543,7 @@ impl Compiler<'_> {
         let mark = self.cur().owned_temps.len();
         self.mark_root_call(operand);
         self.compile_into(dst, operand)?;
-        self.cur().tail_call = false;
+        self.cur().next_call.root = false;
         self.drop_temps(mark, None);
         Ok(())
     }
@@ -593,7 +593,7 @@ impl Compiler<'_> {
         }
         self.mark_root_call(cond);
         let c = self.compile_expr(cond)?;
-        self.cur().tail_call = false;
+        self.cur().next_call.root = false;
         let at = self.here();
         self.emit(Op::JumpIfFalse { cond: c, to: 0 });
         Ok(at)
