@@ -412,6 +412,11 @@ pub enum Op {
         val: Reg,
         pat: u16,
     },
+    /// Before the guard of an owned scrutinee. A binding that holds a shared value turns into
+    /// a borrow of it, so a panic in the guard drops that value once, with the scrutinee.
+    LendBinds {
+        pat: u16,
+    },
 
     Fmt {
         dst: Reg,

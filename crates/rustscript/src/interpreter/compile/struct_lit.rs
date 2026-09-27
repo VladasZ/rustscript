@@ -1,5 +1,6 @@
 //! Struct literals and the field defaults they fill in.
 
+use std::mem::take;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -14,6 +15,9 @@ use super::{Compiler, idx16};
 
 impl Compiler<'_> {
     pub(super) fn compile_struct_literal(&mut self, dst: Reg, s: &syn::ExprStruct) -> Result<()> {
+        // a block's tail unwinds its fields like the temporaries around them, see
+        // `mark_root_call`
+        let tail = take(&mut self.cur().tail_call);
         // a user struct resolves to its canonical name, anything else keeps the last segment
         let self_type = (s.path.segments.len() == 1 && s.path.segments[0].ident == "Self")
             .then_some(self.ctx.impl_type)
@@ -74,7 +78,11 @@ impl Compiler<'_> {
                     // a field already built drops when a later field panics, the struct op
                     // takes it out of the window once it runs
                     if self.ctx.has_drop && self.arg_owned(e) {
-                        self.cur().hold_operand(dstf);
+                        if tail {
+                            self.cur().owned_temps.push(dstf);
+                        } else {
+                            self.cur().hold_operand(dstf);
+                        }
                     }
                 }
                 None => self.emit(Op::LoadUnit { dst: dstf }),

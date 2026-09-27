@@ -28,6 +28,8 @@ pub struct Ctx<'r> {
     pub impl_type: Option<&'r str>,
     /// every script function by name, for the inference pass. A name defined twice is absent.
     pub fn_signatures: &'r HashMap<String, syn::Signature>,
+    /// functions that return one of their `&mut` parameters whole, see `collect_mut_arg_returns`
+    pub mut_arg_returns: &'r HashMap<String, usize>,
     /// `&mut self` method names. A call compiles its receiver as a place split from sharing.
     pub mut_methods: &'r HashSet<String>,
     /// Includes impls on bridge types like `impl From<Point> for String`, a path call on one is a
@@ -146,6 +148,10 @@ impl<'a> Compiler<'a> {
             let idx = self.add_cast(ty);
             self.cur().ret_cast = Some(idx);
         }
+        self.cur().returns_mut_ref = matches!(
+            &sig.output,
+            syn::ReturnType::Type(_, ty) if matches!(&**ty, syn::Type::Reference(r) if r.mutability.is_some())
+        );
         self.install_return_error(&sig.output);
         let ret = self.alloc();
         self.compile_block(block, ret)?;

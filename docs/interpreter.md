@@ -68,7 +68,17 @@ the value with the frame, like the edition 2021 disjoint capture.
 A `let r = &mut n` and a bare `ref mut r` binding over a variable are aliases of the
 variable for their scope, so a write through them lands in it, and a closure that
 writes through a `&mut` scalar parameter of its function writes the parameter's cell.
-A closure whose body is a bare call unwinds it like a block's tail call.
+A `&mut` argument is a copy the callee hands back on return. A function or method that
+returns `&mut v[i]` or `&mut s.f` hands back a real reference into that storage, and
+one whose tail is one of its `&mut` parameters, `fn pick(n: &mut usize) -> &mut usize
+{ n }`, makes a write through `*pick(&mut x)`, a method call on it or a `let r =
+pick(&mut x)` land in `x`. A call that returns a reference owns nothing, so nothing
+drops its result.
+A closure whose body is a bare call unwinds it like a block's tail call. So does
+every call and every tuple, array or struct literal that is the whole of a temporary
+scope, a block tail, an `if` or `while` condition, an operand of `&&` or `||` and a
+match guard. Its owned operands unwind after the temporaries of its arguments, where
+anywhere else they unwind first.
 
 Drops follow the scopes of real Rust on every path. A let chain that misses
 drops what its earlier links bound, in reverse, before the `else` runs. A
@@ -87,7 +97,10 @@ lends the second. Over a local the by value parts move out of the local, a
 partial move, the `ref` ones keep lending from it, and the rest drops with the
 local. A `match` on a field of a fresh value, `(make()).f`, takes the field out,
 and what no arm binds drops with the statement. `matches!` binds like a `match`
-arm, so a by value binding drops at the end of the arm. A `?` that returns
+arm, so a by value binding drops at the end of the arm. A guard over an owned scrutinee sees its non scalar bindings as
+references, so a panic in the guard drops the scrutinee once, with the statement.
+`let r = &make()`, `&mut make()` and `&make().f` keep the temporary alive to the end
+of the scope and drop it there like a local. A `?` that returns
 early drops the temporaries its statement made, like a `return`. A field moved into a call argument, `s.t` or `make().t`,
 is an owned operand. On a panic the owned operands of a call unwind between the
 drop lists, after the scopes that opened and closed while the later operands
@@ -212,7 +225,10 @@ the value of a store whose place panicked first, in reverse order, then the
 other temporaries of the statement newest first, then the locals, and a value
 lent to the callee by reference goes back to the caller first, into the
 local or the temporary it came from, so it drops where the caller declared or
-made it. `clear`, `dedup` and
+made it. A by value terminal like `fold`, `for_each` or `collect` that panics drops what it
+never pulled inside the call, before the temporaries of the caller. A `+=` on a
+number runs its right side before the place, an overloaded one on a `String` or a
+user type runs the place first, like rustc. `clear`, `dedup` and
 `truncate` drop the items they remove inside the call, and `flatten` keeps
 owning the items its source owned, so a `count` over it drops them. A by
 value pattern moves only the parts it binds, so the rest of the scrutinee,

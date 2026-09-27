@@ -294,7 +294,14 @@ pub(super) const ROWS: &[Method] = &[
     m("powi", Float, &[SmallI32], Same, "{r}.powi({0})"),
     m("powf", Float, &[Same], Same, "{r}.powf({0})"),
     m("hypot", Float, &[Same], Same, "{r}.hypot({0})"),
-    m("copysign", Float, &[Same], Same, "{r}.copysign({0})"),
+    // rustc leaves the sign of a computed NaN open, so a NaN sign source is made positive first
+    m(
+        "copysign",
+        Float,
+        &[Same],
+        Same,
+        "({{ let diff_mag = {r}; let diff_sign = {0}; diff_mag.copysign(if diff_sign.is_nan() {{ diff_sign.abs() }} else {{ diff_sign }}) }})",
+    ),
     m("float_min", Float, &[Same], Same, "{r}.min({0})"),
     m("float_max", Float, &[Same], Same, "{r}.max({0})"),
     // panics when min > max or either is NaN
@@ -338,19 +345,20 @@ pub(super) const ROWS: &[Method] = &[
         Exact(FBool),
         "{r}.is_subnormal()",
     ),
+    // a computed NaN has no fixed sign, `abs` clears it, see `copysign`
     m(
         "is_sign_positive",
         Float,
         &[],
         Exact(FBool),
-        "{r}.is_sign_positive()",
+        "({{ let diff_sign = {r}; (if diff_sign.is_nan() {{ diff_sign.abs() }} else {{ diff_sign }}).is_sign_positive() }})",
     ),
     m(
         "is_sign_negative",
         Float,
         &[],
         Exact(FBool),
-        "{r}.is_sign_negative()",
+        "({{ let diff_sign = {r}; (if diff_sign.is_nan() {{ diff_sign.abs() }} else {{ diff_sign }}).is_sign_negative() }})",
     ),
     m(
         "float_to_string",

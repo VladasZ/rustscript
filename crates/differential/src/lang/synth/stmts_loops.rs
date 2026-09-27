@@ -202,10 +202,12 @@ impl Generator<'_> {
                 let key_ty = (**key).clone();
                 let val_ty = (**value).clone();
                 match (&val_ty, self.rng.random_range(0..4)) {
-                    (Ty::Int(_), 0) => self.op_without(name, |inner| MutOp::MapEntryAdd {
-                        key: inner.expr(&key_ty, 1),
-                        default: inner.expr(&val_ty, 1),
-                        add: inner.expr(&val_ty, 1),
+                    // the `+=` runs its right side first, see `MutOp::exprs`
+                    (Ty::Int(_), 0) => self.op_without(name, |inner| {
+                        let add = inner.expr(&val_ty, 1);
+                        let key = inner.expr(&key_ty, 1);
+                        let default = inner.expr(&val_ty, 1);
+                        MutOp::MapEntryAdd { key, default, add }
                     }),
                     (Ty::Vec(elem), 0) => {
                         let elem = (**elem).clone();

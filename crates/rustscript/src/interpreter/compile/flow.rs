@@ -41,7 +41,11 @@ impl Compiler<'_> {
     pub(super) fn compile_return(&mut self, r: &syn::ExprReturn) -> Result<()> {
         let temp_mark = self.cur().owned_temps.len();
         let mut src = if let Some(e) = &r.expr {
-            self.compile_owned_expr(e)?
+            let reg = self.alloc();
+            if !self.compile_returned_ref(reg, e)? {
+                self.compile_owned_into(reg, e)?;
+            }
+            reg
         } else {
             let u = self.alloc();
             self.emit(Op::LoadUnit { dst: u });
@@ -613,6 +617,9 @@ impl Compiler<'_> {
         } else {
             vec![pat]
         };
+        // A guard sees the bindings of an owned scrutinee by reference, so a panic in it drops
+        // the scrutinee alone, with the statement, and never a binding too.
+        let lends = guard.is_some() && take_from == Some(scrut) && self.ctx.has_drop;
         let mut to_next_arm = Vec::new();
         let mut to_body = Vec::new();
         for (i, &test) in tests.iter().enumerate() {
@@ -621,6 +628,9 @@ impl Compiler<'_> {
                 pat: test,
                 dst: matched,
             });
+            if lends {
+                self.emit(Op::LendBinds { pat: test });
+            }
             let mut fails = vec![self.here()];
             self.emit(Op::JumpIfFalse {
                 cond: matched,
@@ -630,14 +640,16 @@ impl Compiler<'_> {
                 // a guard is a temporary scope of its own, its temporaries end before the
                 // branch on it, whichever way it goes
                 let guard_temps = self.cur().owned_temps.len();
+                self.mark_root_call(guard);
                 let g = self.compile_expr(guard)?;
+                self.cur().tail_call = false;
                 self.drop_temps(guard_temps, Some(g));
                 fails.push(self.here());
                 self.emit(Op::JumpIfFalse { cond: g, to: 0 });
             }
             // a guard reads the bindings by reference, the move happens once it passed
             if let Some(owner) = take_from {
-                if owner != scrut {
+                if owner != scrut || lends {
                     self.deref_value_binds(test);
                 }
                 self.take_pattern_binds(owner, test);

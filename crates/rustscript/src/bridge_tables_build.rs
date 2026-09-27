@@ -77,9 +77,9 @@ pub const BRIDGES: &[Bridge] = &[
     b("higher_order.rs", "option_pair", "Option"),
     b("higher_order.rs", "result_higher_order", "Result"),
     b("higher_order.rs", "entry_higher_order", "Entry"),
-    b("iterator/drive.rs", "iterator_method", "Iterator"),
+    b("iterator/drive.rs", "run_iterator_method", "Iterator"),
     b("iterator/drive.rs", "collect_terminal", "Iterator"),
-    b("iterator/reduce.rs", "iterator_higher_order", "Iterator"),
+    b("iterator/reduce.rs", "run_higher_order", "Iterator"),
     b("iterator/reduce.rs", "iterator_predicate", "Iterator"),
     // dispatch front door
     b("bridge.rs", "eval_method", "*"),

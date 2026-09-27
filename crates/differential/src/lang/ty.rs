@@ -106,6 +106,15 @@ impl Ty {
         }
     }
 
+    /// A builtin comparison reads both sides as values. Any other type compares through
+    /// `PartialOrd` and keeps its left side borrowed while the right side runs.
+    pub fn is_primitive(&self) -> bool {
+        matches!(
+            self,
+            Self::Int(_) | Self::Float(_) | Self::Bool | Self::Char
+        )
+    }
+
     pub fn is_int(&self) -> bool {
         matches!(self, Self::Int(_))
     }

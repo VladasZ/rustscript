@@ -6,7 +6,9 @@ use syn::{Expr, UnOp};
 
 use crate::interpreter::bytecode::{BinKind, FieldName, Member, Op, Reg};
 
+use super::infer::Ty;
 use super::place;
+use super::walks::unparen;
 use super::{Compiler, NameLoc, idx16, int_literal};
 
 impl Compiler<'_> {
@@ -49,6 +51,29 @@ impl Compiler<'_> {
             return Some(target);
         }
         self.deref_param_upvalue(name).then(|| name.to_string())
+    }
+
+    /// The caller's place in `pick(&mut n)` when `pick` hands that parameter back whole, see
+    /// `collect_mut_arg_returns`. The call works on a copy it writes back into `n`, so a write
+    /// through its result goes to `n` after the call.
+    pub(super) fn returned_mut_arg<'e>(&mut self, expr: &'e Expr) -> Option<&'e Expr> {
+        let Expr::Call(call) = unparen(expr) else {
+            return None;
+        };
+        let Expr::Path(path) = &*call.func else {
+            return None;
+        };
+        let name = path.path.get_ident()?.to_string();
+        let index = *self.ctx.mut_arg_returns.get(&name)?;
+        // a local closure of the same name is not the function
+        if !matches!(self.resolve(&name), NameLoc::None) {
+            return None;
+        }
+        let Expr::Reference(arg) = unparen(call.args.iter().nth(index)?) else {
+            return None;
+        };
+        arg.mutability?;
+        Some(&arg.expr)
     }
 
     /// The value stored into a local, owned. Its literals carry the local's width from the
@@ -104,6 +129,17 @@ impl Compiler<'_> {
                 self.release_from_unwind(val, held);
             }
             Expr::Unary(u) if matches!(u.op, UnOp::Deref(_)) => {
+                if let Some(place) = self.returned_mut_arg(&u.expr) {
+                    if let Some(name) = place::single_path_name(place) {
+                        let val = self.compile_stored_value(value)?;
+                        self.compile_expr(&u.expr)?;
+                        let location = self.resolve_for_write(&name);
+                        self.emit_name_store(location, val, &name)?;
+                        return Ok(());
+                    }
+                    self.compile_expr(&u.expr)?;
+                    return self.compile_assign(place, value);
+                }
                 // `*r = v` on a `&mut variable` alias writes the variable, which may live in an
                 // enclosing frame
                 if let Some(name) = place::single_path_name(&u.expr)
@@ -162,9 +198,10 @@ impl Compiler<'_> {
                 self.emit_name_store(location, result, &name)?;
             }
             Expr::Index(idx) => {
-                let b = self.compile_expr(rhs)?;
+                let early = self.compound_rhs_first(target, rhs)?;
                 let base = self.compile_place_base(&idx.expr)?;
                 let key = self.compile_expr(&idx.index)?;
+                let b = self.compound_rhs(early, rhs)?;
                 let cur = self.alloc();
                 self.emit(Op::Index {
                     dst: cur,
@@ -182,8 +219,9 @@ impl Compiler<'_> {
                 });
             }
             Expr::Field(f) => {
-                let b = self.compile_expr(rhs)?;
+                let early = self.compound_rhs_first(target, rhs)?;
                 let base = self.compile_place_base(&f.base)?;
+                let b = self.compound_rhs(early, rhs)?;
                 let member = self.member_of(&f.member);
                 let cur = self.alloc();
                 self.emit(Op::GetField {
@@ -202,20 +240,42 @@ impl Compiler<'_> {
                 });
             }
             Expr::Unary(u) if matches!(u.op, UnOp::Deref(_)) => {
-                self.compile_compound_deref_assign(u, op, rhs)?;
+                self.compile_compound_deref_assign(target, u, op, rhs)?;
             }
             _ => bail!("invalid compound assignment target"),
         }
         Ok(())
     }
 
+    /// A `+=` on a number runs its right side before the place. An overloaded one, on a
+    /// `String` or a user type, is a call of `add_assign` and runs the place first. `None`
+    /// when the right side waits for `compound_rhs`.
+    fn compound_rhs_first(&mut self, target: &Expr, rhs: &Expr) -> Result<Option<Reg>> {
+        if matches!(self.types.of(target), Ty::Str | Ty::Struct(_) | Ty::Enum(_)) {
+            return Ok(None);
+        }
+        self.compile_expr(rhs).map(Some)
+    }
+
+    fn compound_rhs(&mut self, early: Option<Reg>, rhs: &Expr) -> Result<Reg> {
+        match early {
+            Some(reg) => Ok(reg),
+            None => self.compile_expr(rhs),
+        }
+    }
+
     /// The deref arm of `compile_compound_assign`.
     pub(super) fn compile_compound_deref_assign(
         &mut self,
+        target_expr: &Expr,
         u: &syn::ExprUnary,
         op: BinKind,
         rhs: &Expr,
     ) -> Result<()> {
+        if let Some(place) = self.returned_mut_arg(&u.expr) {
+            self.compile_expr(&u.expr)?;
+            return self.compile_compound_assign(place, op, rhs);
+        }
         // a `&mut variable` alias reads and writes the variable itself
         if let Some(name) = place::single_path_name(&u.expr)
             && let Some(target) = self.deref_write_target(&name)
@@ -234,8 +294,9 @@ impl Compiler<'_> {
             self.emit_name_store(location, result, &target)?;
             return Ok(());
         }
-        let b = self.compile_expr(rhs)?;
+        let early = self.compound_rhs_first(target_expr, rhs)?;
         if let Some(cell) = self.deref_param_cell(&u.expr) {
+            let b = self.compound_rhs(early, rhs)?;
             let current = self.load_name_location(NameLoc::Cell(cell), "")?;
             let result = self.alloc();
             self.set_line(u.span());
@@ -250,6 +311,7 @@ impl Compiler<'_> {
         }
         let param = self.deref_param_reg(&u.expr);
         let target = self.compile_expr(&u.expr)?;
+        let b = self.compound_rhs(early, rhs)?;
         self.set_line(u.span());
         let Some(target) = param else {
             // the fused op holds the lock across the read-modify-write, so concurrent tasks can't

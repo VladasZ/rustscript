@@ -110,6 +110,54 @@ pub(super) fn collect_fn_signatures(
         .filter_map(|(name, sig)| sig.map(|sig| (name, sig)))
         .collect()
 }
+/// The functions that hand back one of their `&mut` parameters whole, like
+/// `fn pick(n: &mut usize) -> &mut usize { n }`, by name with the index of that parameter. A
+/// `&mut` argument is a copy the call hands back, so a write through the result must land in
+/// the caller's place. A name defined twice is absent.
+pub(super) fn collect_mut_arg_returns(
+    pending_fns: &[(usize, Rc<syn::ItemFn>)],
+) -> HashMap<String, usize> {
+    let mut seen: HashMap<String, Option<usize>> = HashMap::default();
+    for (_, f) in pending_fns {
+        let index = returned_mut_param(f);
+        seen.entry(f.sig.ident.to_string())
+            .and_modify(|known| *known = None)
+            .or_insert(index);
+    }
+    seen.into_iter()
+        .filter_map(|(name, index)| index.map(|index| (name, index)))
+        .collect()
+}
+
+fn returned_mut_param(f: &syn::ItemFn) -> Option<usize> {
+    let syn::ReturnType::Type(_, ty) = &f.sig.output else {
+        return None;
+    };
+    if !is_mut_ref(ty) {
+        return None;
+    }
+    let Some(syn::Stmt::Expr(tail, None)) = f.block.stmts.last() else {
+        return None;
+    };
+    let mut tail = tail;
+    while let syn::Expr::Paren(p) = tail {
+        tail = &p.expr;
+    }
+    let syn::Expr::Path(path) = tail else {
+        return None;
+    };
+    let name = path.path.get_ident()?;
+    f.sig.inputs.iter().position(|input| {
+        matches!(input, syn::FnArg::Typed(t)
+            if is_mut_ref(&t.ty)
+                && matches!(&*t.pat, syn::Pat::Ident(id) if id.ident == *name))
+    })
+}
+
+fn is_mut_ref(ty: &syn::Type) -> bool {
+    matches!(ty, syn::Type::Reference(r) if r.mutability.is_some())
+}
+
 pub(super) fn build_fn_index(resolver: &Resolver) -> HashMap<String, u32> {
     let mut fn_index = HashMap::default();
     for syms in &resolver.modules {

@@ -541,7 +541,9 @@ impl Compiler<'_> {
     /// One operand of `&&` or `||`, its temporaries dropped before the next operand runs.
     fn compile_lazy_operand(&mut self, dst: Reg, operand: &Expr) -> Result<()> {
         let mark = self.cur().owned_temps.len();
+        self.mark_root_call(operand);
         self.compile_into(dst, operand)?;
+        self.cur().tail_call = false;
         self.drop_temps(mark, None);
         Ok(())
     }
@@ -589,7 +591,9 @@ impl Compiler<'_> {
             }
             return Ok(at);
         }
+        self.mark_root_call(cond);
         let c = self.compile_expr(cond)?;
+        self.cur().tail_call = false;
         let at = self.here();
         self.emit(Op::JumpIfFalse { cond: c, to: 0 });
         Ok(at)

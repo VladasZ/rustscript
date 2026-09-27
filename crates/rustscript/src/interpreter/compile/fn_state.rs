@@ -113,7 +113,7 @@ pub(super) struct FnState {
     /// number of drop lists made when its op ran, `usize::MAX` while the op is still ahead,
     /// see `hold_operand`.
     pub(super) unwind_temps: Vec<(Reg, usize)>,
-    /// The next call compiled is the tail expression of a block. Its owned operands then
+    /// The next call compiled is the whole of a temporary scope, see `mark_root_call`. Its owned operands then
     /// unwind after the temporaries its arguments made, not before, see `compile_args`.
     pub(super) tail_call: bool,
     /// named bindings that hold a `RefCell` guard, released at scope end even without `Drop` impls
@@ -128,6 +128,8 @@ pub(super) struct FnState {
     pub(super) call_type_args: Vec<Arc<[TypeIr]>>,
     /// Retagging on the way out keeps the declared width without a cast at every call site.
     pub(super) ret_cast: Option<u16>,
+    /// The function returns `&mut T`, see `compile_returned_ref`.
+    pub(super) returns_mut_ref: bool,
 }
 
 impl FnState {
@@ -195,6 +197,7 @@ impl FnState {
             generics: Vec::new(),
             call_type_args: Vec::new(),
             ret_cast: None,
+            returns_mut_ref: false,
             guard_temps: Vec::new(),
             owned_temps: Vec::new(),
             unwind_temps: Vec::new(),

@@ -74,6 +74,12 @@ impl Infer<'_, '_> {
             "count_ones" | "count_zeros" | "leading_zeros" | "trailing_zeros" | "leading_ones"
             | "trailing_ones" => Ty::Int(IntWidth::U32),
             "is_positive" | "is_negative" | "is_power_of_two" => Ty::Bool,
+            "is_multiple_of" => {
+                for arg in args {
+                    self.expr(arg, recv);
+                }
+                Ty::Bool
+            }
             "to_be_bytes" | "to_le_bytes" | "to_ne_bytes" => Ty::vec(Ty::Int(IntWidth::U8)),
             "to_string" | "as_str" => Ty::Str,
             "sqrt" | "powf" | "powi" => Ty::F64,

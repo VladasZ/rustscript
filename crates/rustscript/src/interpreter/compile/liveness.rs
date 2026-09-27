@@ -134,6 +134,11 @@ fn table_effects(f: &FnState, op: &Op, reads: &mut Vec<Reg>, writes: &mut Vec<Re
             writes.extend(info.binds.iter().map(|(_, reg)| *reg));
             writes.push(*dst);
         }
+        Op::LendBinds { pat } => {
+            let binds = f.pats[usize::from(*pat)].binds.iter().map(|(_, reg)| *reg);
+            reads.extend(binds.clone());
+            writes.extend(binds);
+        }
         Op::TakeBinds { val, pat } => {
             reads.push(*val);
             reads.extend(f.pats[usize::from(*pat)].consts.iter());
