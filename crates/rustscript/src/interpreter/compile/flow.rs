@@ -642,7 +642,7 @@ impl Compiler<'_> {
                 let guard_temps = self.cur().owned_temps.len();
                 self.mark_root_call(guard);
                 let g = self.compile_expr(guard)?;
-                self.cur().tail_call = false;
+                self.cur().next_call.root = false;
                 self.drop_temps(guard_temps, Some(g));
                 fails.push(self.here());
                 self.emit(Op::JumpIfFalse { cond: g, to: 0 });

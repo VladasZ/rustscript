@@ -81,7 +81,7 @@ impl Compiler<'_> {
                         if !self.compile_returned_ref(dst, expr)? {
                             self.compile_owned_into(dst, expr)?;
                         }
-                        self.cur().tail_call = false;
+                        self.cur().next_call.root = false;
                     } else {
                         // A statement position call discards its result. With `Drop` impls
                         // around, what it hands back still drops at the semicolon.

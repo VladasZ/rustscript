@@ -364,14 +364,35 @@ impl<'a> Compiler<'a> {
 
     /// The closures of `body` decide which of its bindings need a capture cell.
     fn scan_captures(&mut self, body: &Block) {
-        let names = captures::closure_written_names(body, &|m| self.method_mutates(m));
+        let mut names = captures::closure_written_names(body, &|m| self.method_mutates(m));
+        names.extend(captures::ref_arg_names(body, &|c| self.lends_cell_refs(c)));
         self.cur().cell_names = names;
     }
 
     /// `scan_captures` for a closure body.
     fn scan_captures_expr(&mut self, body: &Expr) {
-        let names = captures::closure_written_names_expr(body, &|m| self.method_mutates(m));
+        let mut names = captures::closure_written_names_expr(body, &|m| self.method_mutates(m));
+        names.extend(captures::ref_arg_names_expr(body, &|c| {
+            self.lends_cell_refs(c)
+        }));
         self.cur().cell_names = names;
+    }
+
+    /// A call of a script function that returns `&mut` from a choice of its parameters,
+    /// see `captures::ref_arg_names`. One that returns a single parameter whole is
+    /// `returned_mut_arg`.
+    pub(super) fn lends_cell_refs(&self, call: &syn::ExprCall) -> bool {
+        let Expr::Path(path) = &*call.func else {
+            return false;
+        };
+        let Some(name) = path.path.get_ident().map(ToString::to_string) else {
+            return false;
+        };
+        !self.ctx.mut_arg_returns.contains_key(&name)
+            && self.ctx.fn_signatures.get(&name).is_some_and(|sig| {
+                matches!(&sig.output, syn::ReturnType::Type(_, ty)
+                    if matches!(&**ty, syn::Type::Reference(r) if r.mutability.is_some()))
+            })
     }
 
     /// Whether the call writes its receiver. `rotate_left` mutates a slice but returns a value

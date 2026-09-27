@@ -10,6 +10,7 @@ use crate::interpreter::numeric::IntWidth;
 use crate::interpreter::typeir::CastIr;
 
 use super::infer::Ty;
+use super::place;
 use super::walks::unparen;
 use super::{Compiler, NameLoc, Res, TypeIr, first_generic_type, idx16};
 
@@ -22,7 +23,7 @@ impl Compiler<'_> {
     /// struct literal there unwinds its owned operands after the temporaries of its
     /// arguments, the reverse of anywhere else.
     pub(super) fn mark_root_call(&mut self, expr: &Expr) {
-        self.cur().tail_call = matches!(
+        self.cur().next_call.root = matches!(
             unparen(expr),
             Expr::Call(_) | Expr::MethodCall(_) | Expr::Tuple(_) | Expr::Array(_) | Expr::Struct(_)
         );
@@ -31,7 +32,7 @@ impl Compiler<'_> {
     pub(super) fn compile_args<'e>(&mut self, args: impl Iterator<Item = &'e Expr>) -> Result<Reg> {
         // the tail call of a block unwinds its operands like the temporaries around them, in
         // reverse order of creation, any other call unwinds them first
-        let tail = std::mem::take(&mut self.cur().tail_call);
+        let tail = std::mem::take(&mut self.cur().next_call.root);
         let list: Vec<&Expr> = args.collect();
         self.compile_window(&list, Some(tail))
     }
@@ -49,6 +50,7 @@ impl Compiler<'_> {
     /// The window itself. `taken` is `Some` when the op takes the owned values out of it, and
     /// says whether the call is a block's tail, see `compile_args`.
     fn compile_window(&mut self, list: &[&Expr], taken: Option<bool>) -> Result<Reg> {
+        let cell_refs = std::mem::take(&mut self.cur().next_call.cell_refs);
         let base = self.cur().reg_top;
         for _ in 0..list.len() {
             self.alloc();
@@ -56,6 +58,10 @@ impl Compiler<'_> {
         let held = self.cur().unwind_temps.len();
         for (i, a) in list.iter().enumerate() {
             let reg = base + idx16(i);
+            if cell_refs && let Some(cell) = self.cell_ref_arg(a) {
+                self.emit(Op::CellRef { dst: reg, cell });
+                continue;
+            }
             self.compile_owned_into(reg, a)?;
             if !self.ctx.has_drop {
                 continue;
@@ -79,6 +85,19 @@ impl Compiler<'_> {
         }
         self.cur().close_operands(held);
         Ok(base)
+    }
+
+    /// The capture cell of `name` in a `&mut name` argument, see `lends_cell_refs`.
+    pub(super) fn cell_ref_arg(&mut self, arg: &Expr) -> Option<Reg> {
+        let Expr::Reference(r) = unparen(arg) else {
+            return None;
+        };
+        r.mutability?;
+        let name = place::single_path_name(&r.expr)?;
+        match self.resolve(&name) {
+            NameLoc::Cell(cell) => Some(cell),
+            _ => None,
+        }
     }
 
     /// Whether the window holds a value of its own for the argument. A local moves or copies
@@ -326,6 +345,8 @@ impl Compiler<'_> {
             // turbofish type args are recorded so the callee can bind them
             Res::Fn(idx) => {
                 let targ = self.record_call_type_args(path);
+                let lends = self.lends_cell_refs(c);
+                self.cur().next_call.cell_refs = lends;
                 let base = self.compile_args(c.args.iter())?;
                 self.emit_borrow_takes(c.args.iter());
                 self.emit(Op::CallFn {
@@ -335,7 +356,13 @@ impl Compiler<'_> {
                     argc,
                     targ,
                 });
-                self.emit_mut_arg_writebacks(c.args.iter(), base)?;
+                // a cell the callee got by reference holds its value already
+                let skip: Vec<bool> = c
+                    .args
+                    .iter()
+                    .map(|a| lends && self.cell_ref_arg(a).is_some())
+                    .collect();
+                self.emit_mut_arg_writebacks_skipping(c.args.iter(), base, &skip)?;
                 return Ok(());
             }
             Res::Struct(canon) => PathRef::user(vec![canon.to_string()], coerce),

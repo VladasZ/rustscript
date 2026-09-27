@@ -14,7 +14,7 @@ use parking_lot::Mutex;
 use super::bytecode::{Chunk, DefaultIr, Op};
 use super::numeric::IntWidth;
 use super::ops::{self, apply_bin, apply_bin_imm, apply_un, cmp_test, cmp_test_imm};
-use super::value::{ClosureData, Upvalue, Value};
+use super::value::{ClosureData, Upvalue, Value, ValueRef};
 use super::vm::{TypeEnv, Vm};
 use super::vm_method::{get_or_default, method_op};
 
@@ -129,6 +129,7 @@ pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
         | Op::LoadGlobal { .. }
         | Op::LoadUpvalue { .. }
         | Op::LoadCell { .. }
+        | Op::CellRef { .. }
         | Op::StoreCell { .. }
         | Op::DropCell { .. }
         | Op::MakeCell { .. }
@@ -334,6 +335,7 @@ fn load_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
         Op::LoadGlobal { dst, idx } => ctx.set(*dst, ctx.vm.global(*idx as usize)?),
         Op::LoadUpvalue { dst, idx } => ctx.set(*dst, ctx.upvalues()[*idx as usize].get()),
         Op::LoadCell { dst, cell } => load_cell(ctx, *dst, *cell),
+        Op::CellRef { dst, cell } => cell_ref(ctx, *dst, *cell),
         Op::StoreCell { cell, src } => store_cell(ctx, *cell, *src)?,
         Op::DropCell { cell } => drop_cell(ctx, *cell),
         Op::MakeCell { cell } => make_cell(ctx, *cell),
@@ -588,6 +590,11 @@ fn jump(ctx: &mut StepCtx, to: usize) -> Result<Flow> {
 fn load_cell(ctx: &mut StepCtx, dst: u16, cell: u16) -> Flow {
     let v = ctx.cell(cell).lock().clone();
     ctx.set(dst, v)
+}
+
+fn cell_ref(ctx: &mut StepCtx, dst: u16, cell: u16) -> Flow {
+    let slot = ctx.cell(cell).clone();
+    ctx.set(dst, Value::Ref(Arc::new(ValueRef::cell_slot(slot))))
 }
 
 fn store_cell(ctx: &mut StepCtx, cell: u16, src: u16) -> Result<Flow> {

@@ -43,6 +43,17 @@ pub(super) struct BindingSite {
 }
 
 /// A stack of these supports nested closures.
+/// Flags for the next call the compiler emits, each taken by that call.
+#[derive(Default)]
+pub(super) struct NextCall {
+    /// The call is the whole of a temporary scope, see `mark_root_call`. Its owned operands
+    /// unwind after the temporaries its arguments made, not before, see `compile_args`.
+    pub(super) root: bool,
+    /// The call passes its `&mut name` arguments that live in a capture cell as references
+    /// to the cell, see `lends_cell_refs`.
+    pub(super) cell_refs: bool,
+}
+
 pub(super) struct FnState {
     pub(super) code: Vec<Op>,
     pub(super) lines: Vec<u32>,
@@ -113,9 +124,8 @@ pub(super) struct FnState {
     /// number of drop lists made when its op ran, `usize::MAX` while the op is still ahead,
     /// see `hold_operand`.
     pub(super) unwind_temps: Vec<(Reg, usize)>,
-    /// The next call compiled is the whole of a temporary scope, see `mark_root_call`. Its owned operands then
-    /// unwind after the temporaries its arguments made, not before, see `compile_args`.
-    pub(super) tail_call: bool,
+    /// What the next call compiled does differently, see `NextCall`.
+    pub(super) next_call: NextCall,
     /// named bindings that hold a `RefCell` guard, released at scope end even without `Drop` impls
     pub(super) guard_regs: HashSet<Reg>,
     pub(super) has_guards: bool,
@@ -201,7 +211,7 @@ impl FnState {
             guard_temps: Vec::new(),
             owned_temps: Vec::new(),
             unwind_temps: Vec::new(),
-            tail_call: false,
+            next_call: NextCall::default(),
             guard_regs: HashSet::new(),
             has_guards: false,
         }
