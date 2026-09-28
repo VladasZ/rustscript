@@ -294,13 +294,14 @@ pub(super) const ROWS: &[Method] = &[
     m("powi", Float, &[SmallI32], Same, "{r}.powi({0})"),
     m("powf", Float, &[Same], Same, "{r}.powf({0})"),
     m("hypot", Float, &[Same], Same, "{r}.hypot({0})"),
-    // rustc leaves the sign of a computed NaN open, so a NaN sign source is made positive first
+    // rustc leaves the sign of a computed NaN open, so a NaN sign source is made positive first.
+    // The array gives an untyped float literal argument the receiver type before `is_nan`.
     m(
         "copysign",
         Float,
         &[Same],
         Same,
-        "({{ let diff_mag = {r}; let diff_sign = {0}; diff_mag.copysign(if diff_sign.is_nan() {{ diff_sign.abs() }} else {{ diff_sign }}) }})",
+        "({{ let [diff_mag, diff_sign] = [{r}, {0}]; diff_mag.copysign(if diff_sign.is_nan() {{ diff_sign.abs() }} else {{ diff_sign }}) }})",
     ),
     m("float_min", Float, &[Same], Same, "{r}.min({0})"),
     m("float_max", Float, &[Same], Same, "{r}.max({0})"),

@@ -713,16 +713,30 @@ impl Compiler<'_> {
             ShellHome::None => {}
         }
         let take_from = self.take_from(scrut, scrutinee, owns && by_ref, takes);
+        // a local read by move keeps its value when the arm that runs moves nothing out of it,
+        // so a later assignment still drops the old value
+        let restore = match home {
+            ShellHome::Local { .. } => self.scrutinee_local(scrutinee),
+            _ => None,
+        };
         let mut end_jumps = Vec::new();
         for &(arm_pat, arm_guard, body) in arms {
             self.push_scope();
             let matched = self.alloc();
             let pat = self.pattern_info_over(arm_pat, scrutinee)?;
+            let restores = restore.filter(|_| !self.pattern_moves(arm_pat));
+            let take_from = if restores.is_some() { None } else { take_from };
             self.exempt_binds(pat, take_from.is_some());
             if holds_guard {
                 self.guard_pattern_binds(pat);
             }
             let to_next_arm = self.compile_arm_test(scrut, pat, arm_guard, take_from, matched)?;
+            if let Some(local) = restores {
+                self.emit(Op::Take {
+                    dst: local,
+                    src: scrut,
+                });
+            }
             // an arm body is a temporary scope of its own, its temporaries end with the arm
             let arm_temps = self.cur().owned_temps.len();
             match body {

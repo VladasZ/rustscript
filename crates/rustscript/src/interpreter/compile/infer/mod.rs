@@ -45,6 +45,8 @@ pub(super) struct Types {
     unresolved: HashSet<*const ()>,
     /// the inline `{name}` holes of a format template, by the template expression
     holes: HashMap<*const Expr, Vec<(String, Ty)>>,
+    /// the type of each name a pattern binds, by its `PatIdent`
+    binds: HashMap<*const syn::PatIdent, Ty>,
 }
 
 impl Types {
@@ -55,6 +57,7 @@ impl Types {
             macros: HashMap::new(),
             unresolved: HashSet::new(),
             holes: HashMap::new(),
+            binds: HashMap::new(),
         }
     }
 
@@ -74,6 +77,13 @@ impl Types {
     pub(super) fn of(&self, expr: &Expr) -> Ty {
         self.exprs
             .get(&std::ptr::from_ref(expr))
+            .cloned()
+            .unwrap_or(Ty::Unknown)
+    }
+
+    pub(super) fn of_bind(&self, id: &syn::PatIdent) -> Ty {
+        self.binds
+            .get(&std::ptr::from_ref(id))
             .cloned()
             .unwrap_or(Ty::Unknown)
     }
@@ -225,6 +235,11 @@ impl<'c, 'r> Infer<'c, 'r> {
                         .collect();
                     (*ptr, resolved)
                 })
+                .collect(),
+            binds: self
+                .finals
+                .iter()
+                .map(|(site, ty)| (*site, self.vars.resolve(ty)))
                 .collect(),
         }
     }

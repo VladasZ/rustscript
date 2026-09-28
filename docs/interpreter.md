@@ -65,6 +65,8 @@ parameter's cell hands its value back to the caller on return. A `move`
 closure takes a value the frame never reads again and drops it at its own
 end, and one that reads only fields that copy takes those fields and leaves
 the value with the frame, like the edition 2021 disjoint capture.
+A name inside a macro the scan can not parse, `vec![(1, v.clone()); 3]`, counts as a
+read of the whole value at any bracket depth.
 A `let r = &mut n` and a bare `ref mut r` binding over a variable are aliases of the
 variable for their scope, so a write through them lands in it, and a closure that
 writes through a `&mut` scalar parameter of its function writes the parameter's cell.
@@ -101,6 +103,9 @@ local. A `match` on a field of a fresh value, `(make()).f`, takes the field out,
 and what no arm binds drops with the statement. `matches!` binds like a `match`
 arm, so a by value binding drops at the end of the arm. A guard over an owned scrutinee sees its non scalar bindings as
 references, so a panic in the guard drops the scrutinee once, with the statement.
+A `match` that reads a local by move hands the value back to the local when the arm that
+runs moves nothing out of it, its guard failed or it binds only `Copy` parts, so a later
+assignment still drops the old value.
 `let r = &make()`, `&mut make()` and `&make().f` keep the temporary alive to the end
 of the scope and drop it there like a local. A `?` that returns
 early drops the temporaries its statement made, like a `return`. A field moved into a call argument, `s.t` or `make().t`,

@@ -1,10 +1,10 @@
 //! How a pattern owns its scrutinee, whether its bindings take parts out of a value of its
 //! own, and where the rest of that value drops once they did.
 
-use syn::Expr;
+use syn::{Expr, Pat};
 
 use super::super::bytecode::Reg;
-use super::place::single_path_name;
+use super::place::{copies, single_path_name};
 use super::walks::unparen;
 use super::{Compiler, NameLoc};
 
@@ -115,6 +115,41 @@ impl Compiler<'_> {
                 .push(shell),
             ShellHome::Local { scope, at } => f.scope_order[scope].insert(at, shell),
             ShellHome::None => {}
+        }
+    }
+}
+
+impl Compiler<'_> {
+    /// Whether a match arm moves a part out of its scrutinee. A by value binding of a `Copy`
+    /// part copies it, and a type inference left open counts as a move.
+    pub(super) fn pattern_moves(&self, pat: &Pat) -> bool {
+        match pat {
+            Pat::Ident(id) if super::pattern::is_unit_variant_ident(id) => false,
+            Pat::Ident(id) => {
+                (id.by_ref.is_none() && !copies(&self.types.of_bind(id)))
+                    || id
+                        .subpat
+                        .as_ref()
+                        .is_some_and(|sub| self.pattern_moves(&sub.1))
+            }
+            Pat::Tuple(t) => t.elems.iter().any(|p| self.pattern_moves(p)),
+            Pat::TupleStruct(ts) => ts.elems.iter().any(|p| self.pattern_moves(p)),
+            Pat::Slice(s) => s.elems.iter().any(|p| self.pattern_moves(p)),
+            Pat::Struct(s) => s.fields.iter().any(|f| self.pattern_moves(&f.pat)),
+            Pat::Paren(p) => self.pattern_moves(&p.pat),
+            Pat::Type(t) => self.pattern_moves(&t.pat),
+            Pat::Or(o) => o.cases.iter().any(|p| self.pattern_moves(p)),
+            _ => false,
+        }
+    }
+
+    /// The local an owned scrutinee was read out of, see `ShellHome::Local`.
+    pub(super) fn scrutinee_local(&mut self, expr: &Expr) -> Option<Reg> {
+        let name = single_path_name(unparen(expr))?;
+        let name = self.unalias(&name);
+        match self.resolve(&name) {
+            NameLoc::Local(reg) => Some(reg),
+            _ => None,
         }
     }
 }
