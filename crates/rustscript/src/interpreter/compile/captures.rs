@@ -213,11 +213,7 @@ impl<'ast> Visit<'ast> for Uses<'_> {
         let parsed = mac
             .parse_body_with(syn::punctuated::Punctuated::<Expr, syn::Token![,]>::parse_terminated);
         let Ok(args) = parsed else {
-            let mentions =
-                mac.tokens.clone().into_iter().any(
-                    |tree| matches!(tree, proc_macro2::TokenTree::Ident(id) if id == self.name),
-                );
-            if mentions {
+            if mentions(mac.tokens.clone(), self.name) {
                 self.whole = true;
             }
             return;
@@ -303,4 +299,13 @@ impl<'ast> Visit<'ast> for RefArgs<'_> {
         }
         visit::visit_expr_call(self, call);
     }
+}
+
+/// Whether the tokens name `name` anywhere, inside groups too, `vec![(1, v.clone()); 3]`.
+fn mentions(tokens: proc_macro2::TokenStream, name: &str) -> bool {
+    tokens.into_iter().any(|tree| match tree {
+        proc_macro2::TokenTree::Ident(id) => id == name,
+        proc_macro2::TokenTree::Group(g) => mentions(g.stream(), name),
+        _ => false,
+    })
 }

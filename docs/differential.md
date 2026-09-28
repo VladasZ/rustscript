@@ -123,3 +123,5 @@ every run. `--refresh` re-harvests the std listing.
 Rust leaves the sign of a computed NaN open, so it can differ between two
 builds of the same program. The `is_sign_positive`, `is_sign_negative` and
 `copysign` rows clear the sign of a NaN with `abs` before they read it.
+`copysign` binds its 2 operands through an array, so an untyped float literal
+argument takes the receiver type before `is_nan` reads it.
