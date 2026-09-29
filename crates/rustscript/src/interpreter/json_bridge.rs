@@ -1,5 +1,6 @@
-//! `serde_json` parsing, serialization and the coercion pass for annotated lets. Struct layouts are
-//! precomputed at load, so nothing here touches the syn AST, which is not `Send`.
+//! `serde_json` parsing and the coercion pass for annotated lets, serialization is in
+//! `json_serialize`. Struct layouts are precomputed at load, so nothing here touches the syn AST,
+//! which is not `Send`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -9,11 +10,13 @@ use anyhow::{Result, bail};
 use rustc_hash::FxHashMap;
 
 use super::bytecode::PathId;
-use super::enum_def::{EnumKind, OK, SOME};
+use super::enum_def::{EnumKind, OK};
 use super::numeric::IntWidth;
-use super::serde_types::{DataError, EnumInfo, enum_to_json};
+use super::serde_types::{DataError, EnumInfo};
 use super::typeir::{ScalarIr, TypeIr};
 use super::value::{MapKey, MapStore, RsStr, StructShape, Value};
+
+pub(super) use super::json_serialize::{json_to_pvalue, pvalue_to_json};
 use super::vm::Vm;
 
 /// precomputed at load
@@ -29,10 +32,6 @@ pub struct StructInfo {
 }
 
 pub type Structs = HashMap<Arc<str>, Arc<StructInfo>>;
-
-fn is_none(value: &Value) -> bool {
-    matches!(value, Value::Enum { def, variant, .. } if def.kind == EnumKind::Option && *variant != SOME)
-}
 
 // coercion
 
@@ -180,12 +179,20 @@ impl Vm {
                 .get(slot)
                 .and_then(Option::as_ref)
                 .unwrap_or(fname);
-            let raw = match map.get(&MapKey::Str((&**key).into())) {
-                Some(v) => v.clone(),
-                None => match info.defaults.get(slot).and_then(Option::as_ref) {
-                    Some(chunk) => self.run_chunk(chunk, &[], &[], false)?,
-                    None => Value::none(),
-                },
+            let flatten = info.shape.serde.get(slot).is_some_and(|f| f.flatten);
+            let raw = if flatten {
+                // the keys no plain field takes, a flattened struct ignores the ones it lacks
+                let mut rest = map.clone();
+                rest.retain(|k, _| !matches!(k, MapKey::Str(s) if info.key_map.contains_key(&**s)));
+                Value::map_of(rest)
+            } else {
+                match map.get(&MapKey::Str((&**key).into())) {
+                    Some(v) => v.clone(),
+                    None => match info.defaults.get(slot).and_then(Option::as_ref) {
+                        Some(chunk) => self.run_chunk(chunk, &[], &[], false)?,
+                        None => Value::none(),
+                    },
+                }
             };
             let coerced = match ty {
                 Some(t) => self.coerce_value(raw, t)?,
@@ -448,32 +455,75 @@ impl serde::de::Visitor<'_> for KeySeed<'_> {
     }
 }
 
-/// Resolves an object key to its slot without allocating. Unknown keys are skipped.
+/// Resolves an object key to its slot without allocating. An unknown key is kept only when a
+/// `flatten` field needs it.
 struct FieldSeed<'a> {
     key_map: &'a FxHashMap<String, usize>,
+    keep_unknown: bool,
+}
+
+enum FieldKey {
+    Slot(usize),
+    Unknown(String),
+    Skip,
 }
 
 impl<'de> serde::de::DeserializeSeed<'de> for FieldSeed<'_> {
-    type Value = Option<usize>;
+    type Value = FieldKey;
 
     fn deserialize<D: serde::Deserializer<'de>>(
         self,
         d: D,
-    ) -> std::result::Result<Option<usize>, D::Error> {
+    ) -> std::result::Result<FieldKey, D::Error> {
         d.deserialize_str(self)
     }
 }
 
 impl serde::de::Visitor<'_> for FieldSeed<'_> {
-    type Value = Option<usize>;
+    type Value = FieldKey;
 
     fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         f.write_str("an object key")
     }
 
-    fn visit_str<E: serde::de::Error>(self, s: &str) -> std::result::Result<Option<usize>, E> {
-        Ok(self.key_map.get(s).copied())
+    fn visit_str<E: serde::de::Error>(self, s: &str) -> std::result::Result<FieldKey, E> {
+        Ok(match self.key_map.get(s) {
+            Some(slot) => FieldKey::Slot(*slot),
+            None if self.keep_unknown => FieldKey::Unknown(s.to_string()),
+            None => FieldKey::Skip,
+        })
     }
+}
+
+/// Fills each `flatten` field from the keys no other field took, in field order. A flattened
+/// struct takes its own keys out, so a later flattened map sees only the rest, like serde.
+fn fill_flattened<E: serde::de::Error>(
+    sp: &StructPlan,
+    values: &mut [Value],
+    filled: &mut [bool],
+    mut rest: serde_json::Map<String, serde_json::Value>,
+    cx: &ParseCx<'_>,
+) -> std::result::Result<(), E> {
+    use serde::de::DeserializeSeed;
+    for (slot, attrs) in sp.info.shape.serde.iter().enumerate() {
+        if !attrs.flatten {
+            continue;
+        }
+        let plan = &sp.fields[slot];
+        let v = PlanSeed { plan, cx }
+            .deserialize(serde_json::Value::Object(rest.clone()))
+            .map_err(E::custom)?;
+        if let JsonPlan::Struct(inner) = plan {
+            rest.retain(|k, _| !inner.info.key_map.contains_key(k));
+        }
+        values[slot] = if sp.info.optional[slot] && !v.is_none_value() {
+            Value::some(v)
+        } else {
+            v
+        };
+        filled[slot] = true;
+    }
+    Ok(())
 }
 
 pub(super) struct PlanVisitor<'a> {
@@ -553,11 +603,17 @@ impl<'de> serde::de::Visitor<'de> for PlanVisitor<'_> {
                     .map(|_| Value::none())
                     .collect();
                 let mut filled = vec![false; values.len()];
+                let keep_unknown = sp.info.shape.serde.iter().any(|f| f.flatten);
+                let mut rest = serde_json::Map::new();
                 while let Some(slot) = access.next_key_seed(FieldSeed {
                     key_map: &sp.info.key_map,
+                    keep_unknown,
                 })? {
                     match slot {
-                        Some(i) => {
+                        FieldKey::Unknown(key) => {
+                            rest.insert(key, access.next_value()?);
+                        }
+                        FieldKey::Slot(i) => {
                             let v = access.next_value_seed(PlanSeed {
                                 plan: &sp.fields[i],
                                 cx: self.cx,
@@ -570,10 +626,13 @@ impl<'de> serde::de::Visitor<'de> for PlanVisitor<'_> {
                             };
                             filled[i] = true;
                         }
-                        None => {
+                        FieldKey::Skip => {
                             access.next_value::<serde::de::IgnoredAny>()?;
                         }
                     }
+                }
+                if keep_unknown {
+                    fill_flattened(sp, &mut values, &mut filled, rest, self.cx)?;
                 }
                 fill_missing(&mut values, &filled, &sp.info, self.cx.vm)?;
                 Ok(Value::structure(sp.info.shape.clone(), values))
@@ -603,157 +662,6 @@ impl<'de> serde::de::Visitor<'de> for PlanVisitor<'_> {
             }
         }
     }
-}
-
-// serialization
-
-/// For the toml and yaml bridges. Null maps to None like the json parser.
-pub(super) fn json_to_pvalue(v: serde_json::Value) -> Value {
-    use serde_json::Value as JsonValue;
-    match v {
-        JsonValue::Null => Value::none(),
-        JsonValue::Bool(b) => Value::Bool(b),
-        JsonValue::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Value::Int(i)
-            } else if let Some(u) = n.as_u64() {
-                Value::int_of_width(i128::from(u), super::numeric::IntWidth::U64)
-            } else {
-                Value::Float(n.as_f64().unwrap_or(f64::NAN))
-            }
-        }
-        JsonValue::String(s) => Value::str(s),
-        JsonValue::Array(items) => Value::vec(items.into_iter().map(json_to_pvalue).collect()),
-        JsonValue::Object(map) => {
-            let mut out = super::value::MapStore::default();
-            for (k, v) in map {
-                if let Some(key) = Value::str(k).into_key() {
-                    out.insert(key, json_to_pvalue(v));
-                }
-            }
-            Value::map_of(out)
-        }
-    }
-}
-
-pub(super) fn pvalue_to_json(v: &Value) -> Result<serde_json::Value> {
-    use serde_json::Value as JsonValue;
-    Ok(match v {
-        Value::Unit => JsonValue::Null,
-        Value::Bool(b) => JsonValue::Bool(*b),
-        Value::Int(i) => JsonValue::Number(serde_json::Number::from(*i)),
-        Value::IntW(bits, w) => {
-            let value = w.decode(*bits);
-            match i64::try_from(value) {
-                Ok(small) => JsonValue::Number(serde_json::Number::from(small)),
-                Err(_) => JsonValue::Number(serde_json::Number::from(
-                    u64::try_from(value).expect("width-tagged value fits u64"),
-                )),
-            }
-        }
-        // a 128 bit integer is a number only while it fits the json range
-        Value::Big(raw, w) => {
-            let as_i64 = if *w == super::numeric::IntWidth::U128 {
-                i64::try_from(raw.cast_unsigned()).map_err(|_| ())
-            } else {
-                i64::try_from(*raw).map_err(|_| ())
-            };
-            match as_i64 {
-                Ok(small) => JsonValue::Number(serde_json::Number::from(small)),
-                Err(()) => bail!("128-bit integer does not fit a json number"),
-            }
-        }
-        Value::Float(f) => {
-            serde_json::Number::from_f64(*f).map_or(JsonValue::Null, JsonValue::Number)
-        }
-        Value::F32(f) => {
-            serde_json::Number::from_f64(f64::from(*f)).map_or(JsonValue::Null, JsonValue::Number)
-        }
-        Value::Char(c) => JsonValue::String(c.to_string()),
-        Value::Str(s) => JsonValue::String(s.to_string()),
-        Value::Vec(items) | Value::Tuple(items) => JsonValue::Array(
-            items
-                .lock()
-                .iter()
-                .map(pvalue_to_json)
-                .collect::<Result<_>>()?,
-        ),
-        // serde writes a set as a list
-        Value::Map(map, super::value::MapKind::Set) => JsonValue::Array(
-            map.lock()
-                .keys()
-                .map(|k| pvalue_to_json(&k.to_value()))
-                .collect::<Result<_>>()?,
-        ),
-        Value::Map(map, _) => {
-            let mut obj = serde_json::Map::default();
-            for (k, val) in map.lock().iter() {
-                obj.insert(k.to_value().display(), pvalue_to_json(val)?);
-            }
-            JsonValue::Object(obj)
-        }
-        Value::Struct(s) => struct_to_json(s)?,
-        Value::Enum { def, variant, data } if def.user => {
-            super::serde_types::user_enum_to_json(def, *variant, &data.lock())?
-        }
-        Value::Enum { def, variant, data } => {
-            let payload = data.lock().clone();
-            if def.kind == EnumKind::Option {
-                if *variant == SOME {
-                    pvalue_to_json(&payload[0])?
-                } else {
-                    JsonValue::Null
-                }
-            } else if payload.is_empty() {
-                JsonValue::String(def.variant_name(*variant).to_string())
-            } else {
-                let mut obj = serde_json::Map::default();
-                obj.insert(
-                    def.variant_name(*variant).to_string(),
-                    JsonValue::Array(payload.iter().map(pvalue_to_json).collect::<Result<_>>()?),
-                );
-                JsonValue::Object(obj)
-            }
-        }
-        Value::Range { .. } => bail!("cannot serialize a range to json"),
-        Value::Closure(_) => bail!("cannot serialize a closure to json"),
-        // serde serializes cells by content
-        Value::Cell(_, slot) => {
-            let inner = slot.lock().clone();
-            pvalue_to_json(&inner)?
-        }
-        Value::Ref(reference) => {
-            let Some(value) = reference.get() else {
-                bail!("cannot serialize a dangling reference to json");
-            };
-            pvalue_to_json(&value)?
-        }
-        Value::Native(n) => bail!("cannot serialize a {} to json", n.lock().type_name()),
-    })
-}
-
-/// A struct as a json object, `rename` and `skip_serializing_if` applied. A struct variant
-/// goes inside its enum representation.
-fn struct_to_json(s: &super::value::StructData) -> Result<serde_json::Value> {
-    use serde_json::Value as JsonValue;
-    let mut obj = serde_json::Map::default();
-    let values = s.values.lock();
-    for (slot, (field, val)) in s.shape.fields.iter().zip(values.iter()).enumerate() {
-        if s.shape.skip_none.get(slot).copied().unwrap_or(false) && is_none(val) {
-            continue;
-        }
-        let key = s
-            .shape
-            .renames
-            .get(slot)
-            .and_then(Option::as_ref)
-            .unwrap_or(field);
-        obj.insert(key.to_string(), pvalue_to_json(val)?);
-    }
-    Ok(match &s.shape.variant {
-        Some((def, index)) => enum_to_json(def, *index, Some(JsonValue::Object(obj)))?,
-        None => JsonValue::Object(obj),
-    })
 }
 
 /// `#[serde(default)]` field runs its default, an `Option` stays None, and the first other one

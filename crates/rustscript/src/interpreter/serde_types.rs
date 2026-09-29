@@ -79,7 +79,7 @@ impl Interp {
     ) -> StructInfo {
         let mut fields: Vec<Arc<str>> = Vec::new();
         let mut renames: Vec<Option<Arc<str>>> = Vec::new();
-        let mut skip_none: Vec<bool> = Vec::new();
+        let mut field_serde = Vec::new();
         let mut coerce = Vec::new();
         let mut json = Vec::new();
         let mut optional = Vec::new();
@@ -94,12 +94,16 @@ impl Interp {
                     super::serde_attrs::serde_rename(f).or_else(|| rule.map(|r| r.apply(&name)));
                 fields.push(Arc::from(name.as_str()));
                 renames.push(rename.as_deref().map(Arc::from));
-                skip_none.push(super::serde_attrs::serde_skip_none(f));
+                let attrs = super::serde_attrs::serde_field(f);
+                field_serde.push(attrs);
                 let ir = lower_type(&f.ty, self.resolver(), module, &[]);
                 coerce.push(ir.is_active().then(|| ir.clone()));
                 json.push(ir);
                 optional.push(is_option(&f.ty));
-                key_map.insert(rename.unwrap_or(name), slot);
+                // a flattened field has no key of its own, its keys sit in the parent
+                if !attrs.flatten {
+                    key_map.insert(rename.unwrap_or(name), slot);
+                }
                 defaults.push(
                     defaults_of.and_then(|c| self.serde_defaults.get(&(c.clone(), slot)).cloned()),
                 );
@@ -111,7 +115,7 @@ impl Interp {
             self.resolver().type_id_of(shape_name),
             fields,
             renames,
-            skip_none,
+            field_serde,
         );
         StructInfo {
             shape,

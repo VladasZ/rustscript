@@ -1,23 +1,29 @@
 //! `#[serde(rename = "..")]`, `#[serde(rename_all = "..")]`,
-//! `#[serde(skip_serializing_if = "Option::is_none")]` and `#[serde(default)]`.
+//! `#[serde(skip_serializing_if = "Option::is_none")]`, `#[serde(flatten)]` and
+//! `#[serde(default)]`.
 //!
-//! Each parser reads 1 key and steps over the value of every other key, so
+//! Each parser reads its keys and steps over the value of every other key, so
 //! `#[serde(default = "f", rename = "x")]` gives both.
 
-/// True for `skip_serializing_if = "Option::is_none"`, the one predicate serialization honors.
-pub(super) fn serde_skip_none(field: &syn::Field) -> bool {
-    let mut skip = false;
+pub(super) use super::bytecode::FieldSerde;
+
+/// `skip_serializing_if = "Option::is_none"`, the one predicate serialization honors, and
+/// `flatten`.
+pub(super) fn serde_field(field: &syn::Field) -> FieldSerde {
+    let mut out = FieldSerde::default();
     for attr in &field.attrs {
         if !attr.path().is_ident("serde") {
             continue;
         }
         if attr
             .parse_nested_meta(|meta| {
-                if meta.path.is_ident("skip_serializing_if")
+                if meta.path.is_ident("flatten") {
+                    out.flatten = true;
+                } else if meta.path.is_ident("skip_serializing_if")
                     && let Ok(value) = meta.value()
                     && let Ok(lit) = value.parse::<syn::LitStr>()
                 {
-                    skip = lit.value() == "Option::is_none";
+                    out.skip_none = lit.value() == "Option::is_none";
                 } else {
                     skip_value(&meta)?;
                 }
@@ -25,10 +31,10 @@ pub(super) fn serde_skip_none(field: &syn::Field) -> bool {
             })
             .is_err()
         {
-            return false;
+            return FieldSerde::default();
         }
     }
-    skip
+    out
 }
 
 pub(super) fn serde_rename(field: &syn::Field) -> Option<String> {

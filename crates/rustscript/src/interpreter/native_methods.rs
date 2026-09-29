@@ -12,7 +12,7 @@ use super::native::Native;
 use super::std_bridge::as_i64;
 use super::value::Value;
 
-type Handle = Arc<Mutex<Native>>;
+pub(super) type Handle = Arc<Mutex<Native>>;
 
 /// Each item is a `Result<String>` so a script can use `line?`.
 pub(super) fn lines_next(handle: &Handle) -> Option<Value> {
@@ -36,11 +36,11 @@ pub(super) fn drain_lines(handle: &Handle) -> Vec<Value> {
     out
 }
 
-fn int_len(n: usize) -> i64 {
+pub(super) fn int_len(n: usize) -> i64 {
     i64::try_from(n).expect("length exceeds i64")
 }
 
-fn io_err<T>(r: std::io::Result<T>, on_ok: impl FnOnce(T) -> Value) -> Value {
+pub(super) fn io_err<T>(r: std::io::Result<T>, on_ok: impl FnOnce(T) -> Value) -> Value {
     match r {
         Ok(v) => Value::ok(on_ok(v)),
         Err(e) => Value::err(super::native::io_error_value(&e)),
@@ -110,10 +110,10 @@ pub(super) fn native_method(
     if let Some(v) = joinerr_method(handle, method) {
         return Ok(Some(v));
     }
-    if let Some(v) = socket_addr_method(handle, method) {
+    if let Some(v) = super::native_net::socket_addr_method(handle, method) {
         return Ok(Some(v));
     }
-    if let Some(v) = ip_addr_method(handle, method) {
+    if let Some(v) = super::native_net::ip_addr_method(handle, method) {
         return Ok(Some(v));
     }
     // the families use disjoint names, handles that consume self move out of the Mutex inside
@@ -130,10 +130,10 @@ pub(super) fn native_method(
     if let Some(v) = child_native_method(handle, method)? {
         return Ok(Some(v));
     }
-    if let Some(v) = net_native_method(handle, method)? {
+    if let Some(v) = super::native_net::net_native_method(handle, method)? {
         return Ok(Some(v));
     }
-    if let Some(v) = udp_native_method(handle, method, args)? {
+    if let Some(v) = super::native_net::udp_native_method(handle, method, args)? {
         return Ok(Some(v));
     }
     if let Some(v) = time_native_method(handle, method, args)? {
@@ -170,44 +170,31 @@ pub(super) fn joinerr_method(handle: &Handle, method: &MethodName) -> Option<Val
     }
 }
 
-pub(super) fn socket_addr_method(handle: &Handle, method: &MethodName) -> Option<Value> {
-    let Native::SocketAddr(addr) = *handle.lock() else {
-        return None;
-    };
-    match method.id {
-        BuiltinId::Ip => Some(Native::IpAddr(addr.ip()).wrap()),
-        BuiltinId::Port => Some(Value::Int(i64::from(addr.port()))),
-        BuiltinId::IsIpv4 => Some(Value::Bool(addr.is_ipv4())),
-        BuiltinId::IsIpv6 => Some(Value::Bool(addr.is_ipv6())),
-        _ => None,
+/// The length of the shared `Vec` a `read` style call fills.
+pub(super) fn buffer_len(target: Option<&Value>) -> usize {
+    match target {
+        Some(Value::Vec(v)) => v.lock().len(),
+        _ => 0,
     }
 }
 
-pub(super) fn ip_addr_method(handle: &Handle, method: &MethodName) -> Option<Value> {
-    let Native::IpAddr(ip) = *handle.lock() else {
-        return None;
-    };
-    match method.id {
-        BuiltinId::IsIpv4 => Some(Value::Bool(ip.is_ipv4())),
-        BuiltinId::IsIpv6 => Some(Value::Bool(ip.is_ipv6())),
-        BuiltinId::IsLoopback => Some(Value::Bool(ip.is_loopback())),
-        BuiltinId::IsUnspecified => Some(Value::Bool(ip.is_unspecified())),
-        BuiltinId::IsMulticast => Some(Value::Bool(ip.is_multicast())),
-        _ => None,
+/// The buffer arrives as a shared Vec, so the bytes are copied back into it.
+pub(super) fn fill_buffer(target: Option<&Value>, bytes: &[u8]) {
+    if let Some(Value::Vec(v)) = target {
+        let mut items = v.lock();
+        for (item, byte) in items.iter_mut().zip(bytes) {
+            *item = Value::Int(i64::from(*byte));
+        }
     }
 }
 
-/// The buffer arrives as a shared Vec, so the bytes are copied back into it. `read_exact` fills
-/// the whole buffer or fails with `UnexpectedEof`.
+/// `read_exact` fills the whole buffer or fails with `UnexpectedEof`.
 fn read_into(handle: &Handle, id: BuiltinId, args: &[Value]) -> Result<Value> {
     let mut h = handle.lock();
     let Some(r) = h.as_read() else {
         bail!("{} on non-reader {}", id.name(), h.type_name());
     };
-    let len = match args.first() {
-        Some(Value::Vec(v)) => v.lock().len(),
-        _ => 0,
-    };
+    let len = buffer_len(args.first());
     let mut buf = vec![0u8; len];
     let read = if id == BuiltinId::ReadExact {
         r.read_exact(&mut buf).map(|()| None)
@@ -216,12 +203,7 @@ fn read_into(handle: &Handle, id: BuiltinId, args: &[Value]) -> Result<Value> {
     };
     drop(h);
     Ok(io_err(read, |n| {
-        if let Some(Value::Vec(v)) = args.first() {
-            let mut items = v.lock();
-            for (item, byte) in items.iter_mut().zip(&buf[..n.unwrap_or(len)]) {
-                *item = Value::Int(i64::from(*byte));
-            }
-        }
+        fill_buffer(args.first(), &buf[..n.unwrap_or(len)]);
         n.map_or(Value::Unit, |n| Value::Int(int_len(n)))
     }))
 }
@@ -483,7 +465,7 @@ fn child_native_method(handle: &Handle, method: &MethodName) -> Result<Option<Va
                 return Ok(Some(match c.try_wait() {
                     Ok(Some(s)) => Value::ok(Value::some(super::process::make_exit_status(s))),
                     Ok(None) => Value::ok(Value::none()),
-                    Err(e) => Value::err(Value::str(e.to_string())),
+                    Err(e) => Value::err(super::native::io_error_value(&e)),
                 }));
             }
             bail!("try_wait on non-child {}", h.type_name());
@@ -509,119 +491,10 @@ fn child_native_method(handle: &Handle, method: &MethodName) -> Result<Option<Va
             if let Native::Child(c) = taken {
                 return Ok(Some(match c.wait_with_output() {
                     Ok(o) => Value::ok(super::process::make_output(o)),
-                    Err(e) => Value::err(Value::str(e.to_string())),
+                    Err(e) => Value::err(super::native::io_error_value(&e)),
                 }));
             }
             bail!("wait_with_output on non-child");
-        }
-        _ => {}
-    }
-    Ok(None)
-}
-
-fn net_native_method(handle: &Handle, method: &MethodName) -> Result<Option<Value>> {
-    match method.id {
-        BuiltinId::Accept => {
-            let h = handle.lock();
-            if let Native::Listener(l) = &*h {
-                return Ok(Some(match l.accept() {
-                    Ok((stream, addr)) => Value::ok(Value::tuple(vec![
-                        Native::Stream(stream).wrap(),
-                        Native::SocketAddr(addr).wrap(),
-                    ])),
-                    Err(e) => Value::err(Value::str(e.to_string())),
-                }));
-            }
-            bail!("accept on non-listener {}", h.type_name());
-        }
-        BuiltinId::Incoming => {
-            bail!("incoming() is not supported; loop with listener.accept() instead");
-        }
-        BuiltinId::LocalAddr => {
-            let h = handle.lock();
-            let addr = match &*h {
-                Native::Listener(l) => l.local_addr(),
-                Native::Stream(s) => s.local_addr(),
-                Native::Udp(s) => s.local_addr(),
-                _ => bail!("local_addr on {}", h.type_name()),
-            };
-            return Ok(Some(io_err(addr, |a| Native::SocketAddr(a).wrap())));
-        }
-        BuiltinId::PeerAddr => {
-            let h = handle.lock();
-            if let Native::Stream(s) = &*h {
-                return Ok(Some(io_err(s.peer_addr(), |a| {
-                    Native::SocketAddr(a).wrap()
-                })));
-            }
-            bail!("peer_addr on {}", h.type_name());
-        }
-        BuiltinId::Shutdown => {
-            let h = handle.lock();
-            if let Native::Stream(s) = &*h {
-                return Ok(Some(io_err(s.shutdown(std::net::Shutdown::Both), |()| {
-                    Value::Unit
-                })));
-            }
-            bail!("shutdown on {}", h.type_name());
-        }
-        BuiltinId::TryClone => {
-            let h = handle.lock();
-            match &*h {
-                Native::Stream(s) => {
-                    return Ok(Some(io_err(s.try_clone(), |s| Native::Stream(s).wrap())));
-                }
-                Native::Udp(s) => {
-                    return Ok(Some(io_err(s.try_clone(), |s| Native::Udp(s).wrap())));
-                }
-                _ => bail!("try_clone on {}", h.type_name()),
-            }
-        }
-        _ => {}
-    }
-    Ok(None)
-}
-
-fn udp_native_method(
-    handle: &Handle,
-    method: &MethodName,
-    args: &mut [Value],
-) -> Result<Option<Value>> {
-    match method.id {
-        BuiltinId::SetBroadcast => {
-            let on = matches!(args.first(), Some(Value::Bool(true)));
-            let h = handle.lock();
-            if let Native::Udp(s) = &*h {
-                return Ok(Some(io_err(s.set_broadcast(on), |()| Value::Unit)));
-            }
-            bail!("set_broadcast on {}", h.type_name());
-        }
-        BuiltinId::SendTo => {
-            let bytes = value_to_bytes(args.first());
-            let addr = args.get(1).map(Value::display).unwrap_or_default();
-            let h = handle.lock();
-            if let Native::Udp(s) = &*h {
-                return Ok(Some(io_err(s.send_to(&bytes, addr), |n| {
-                    Value::Int(int_len(n))
-                })));
-            }
-            bail!("send_to on {}", h.type_name());
-        }
-        BuiltinId::Send => {
-            let bytes = value_to_bytes(args.first());
-            let h = handle.lock();
-            if let Native::Udp(s) = &*h {
-                return Ok(Some(io_err(s.send(&bytes), |n| Value::Int(int_len(n)))));
-            }
-            bail!("send on {}", h.type_name());
-        }
-        BuiltinId::Connect => {
-            let addr = args.first().map(Value::display).unwrap_or_default();
-            let h = handle.lock();
-            if let Native::Udp(s) = &*h {
-                return Ok(Some(io_err(s.connect(addr), |()| Value::Unit)));
-            }
-            bail!("connect on {}", h.type_name());
         }
         _ => {}
     }

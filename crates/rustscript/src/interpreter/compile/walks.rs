@@ -21,38 +21,48 @@ pub(super) fn flatten_and(cond: &Expr) -> Vec<&Expr> {
     out
 }
 
-/// Looks through `?`, `unwrap` and `expect`. A call with its own turbofish doesn't count.
+/// Looks through `?`, `unwrap`, `expect` and `ok`. A call with its own turbofish doesn't count.
 pub(super) fn from_str_root(e: &Expr) -> Option<&syn::ExprCall> {
-    from_str_chain(e, false)
+    let Expr::Call(c) = unwrapped_root(e, false) else {
+        return None;
+    };
+    let Expr::Path(p) = &*c.func else { return None };
+    let seg = p.path.segments.last()?;
+    if seg.ident != "from_str" || first_generic_type(seg).is_some() {
+        return None;
+    }
+    Some(c)
 }
 
-/// Rewrites only the error, so the annotation still names the parse target.
-fn maps_only_the_error(method: &syn::Ident) -> bool {
-    method == "map_err" || method == "context" || method == "with_context"
-}
-
-/// The error mapping methods are only followed under a `?`, `unwrap` or `expect`, without one the
-/// annotation names a `Result` and not the payload.
-fn from_str_chain(e: &Expr, unwrapped: bool) -> Option<&syn::ExprCall> {
-    match e {
-        Expr::Call(c) => {
-            let Expr::Path(p) = &*c.func else { return None };
-            let seg = p.path.segments.last()?;
-            if seg.ident != "from_str" || first_generic_type(seg).is_some() {
-                return None;
-            }
-            Some(c)
-        }
-        Expr::Try(t) => from_str_chain(&t.expr, true),
-        Expr::Paren(p) => from_str_chain(&p.expr, unwrapped),
-        Expr::Group(g) => from_str_chain(&g.expr, unwrapped),
-        Expr::MethodCall(m) if m.method == "unwrap" || m.method == "expect" => {
-            from_str_chain(&m.receiver, true)
-        }
-        Expr::MethodCall(m) if unwrapped && maps_only_the_error(&m.method) => {
-            from_str_chain(&m.receiver, unwrapped)
-        }
+/// A `try_into()` under `?`, `unwrap`, `expect` and `ok`, whose target is the annotation or the
+/// argument around it.
+pub(super) fn try_into_root(e: &Expr) -> Option<&syn::ExprMethodCall> {
+    match unwrapped_root(e, false) {
+        Expr::MethodCall(m) if m.method == "try_into" && m.args.is_empty() => Some(m),
         _ => None,
+    }
+}
+
+/// Rewrites only the error or drops it with `ok`, so the annotation still names the conversion
+/// target.
+fn keeps_the_payload(method: &syn::Ident) -> bool {
+    method == "map_err" || method == "context" || method == "with_context" || method == "ok"
+}
+
+/// The payload keeping methods are only followed under a `?`, `unwrap` or `expect`, without one the
+/// annotation names a `Result` and not the payload.
+fn unwrapped_root(e: &Expr, unwrapped: bool) -> &Expr {
+    match e {
+        Expr::Try(t) => unwrapped_root(&t.expr, true),
+        Expr::Paren(p) => unwrapped_root(&p.expr, unwrapped),
+        Expr::Group(g) => unwrapped_root(&g.expr, unwrapped),
+        Expr::MethodCall(m) if m.method == "unwrap" || m.method == "expect" => {
+            unwrapped_root(&m.receiver, true)
+        }
+        Expr::MethodCall(m) if unwrapped && keeps_the_payload(&m.method) => {
+            unwrapped_root(&m.receiver, unwrapped)
+        }
+        other => other,
     }
 }
 

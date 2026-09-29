@@ -143,6 +143,55 @@ pub(super) fn json_kind(recv: &Value) -> shared::JsonKind {
     }
 }
 
+/// `try_into` to the target the compiler read, see `method_scalar`. A slice checks its length and
+/// an integer its range. The errors are real std errors, so their texts follow the toolchain.
+pub(super) fn try_into(recv: &Value, method: &MethodName) -> Result<Value> {
+    use super::numeric::IntWidth;
+    fn std_err(e: &(impl std::fmt::Display + std::fmt::Debug)) -> Value {
+        Value::err(
+            Native::ParseErr {
+                display: e.to_string(),
+                debug: format!("{e:?}"),
+            }
+            .wrap(),
+        )
+    }
+    let too_big = || std_err(&u8::try_from(256u16).expect_err("256 is past u8"));
+    let too_small = || std_err(&u8::try_from(-1i8).expect_err("-1 is below u8"));
+    match (&method.scalar, recv) {
+        (Some(ScalarTy::Array(len)), Value::Vec(items)) => {
+            let items = items.lock();
+            Ok(if items.len() == *len {
+                Value::ok(Value::vec(items.clone()))
+            } else {
+                std_err(&<[u8; 1]>::try_from(&[][..]).expect_err("an empty slice is short"))
+            })
+        }
+        (Some(ScalarTy::Int(target)), _) => {
+            let target = *target;
+            Ok(match recv.int_parts() {
+                Some((n, _)) if n < target.min() => too_small(),
+                // `max` of a u128 does not fit the i128 pipeline, and every i128 fits a u128
+                Some((n, _)) if target != IntWidth::U128 && n > target.max() => too_big(),
+                Some((n, _)) => Value::ok(Value::int_of_width(n, target)),
+                // a u128 past `i128::MAX` fits only a u128
+                None if matches!(recv, Value::Big(_, IntWidth::U128)) => {
+                    if target == IntWidth::U128 {
+                        Value::ok(recv.clone())
+                    } else {
+                        too_big()
+                    }
+                }
+                None => bail!(
+                    "`try_into` to an integer needs an integer, got {}",
+                    recv.debug()
+                ),
+            })
+        }
+        _ => bail!("`try_into` here has no integer or array target the interpreter can read"),
+    }
+}
+
 pub(super) fn generic_method(recv: &Value, method: &MethodName, args: &[Value]) -> Result<Value> {
     match (recv, method.id) {
         // A conversion that only changes the static type is a no-op. A real conversion like
@@ -303,7 +352,7 @@ fn default_of(target: Option<&ScalarTy>) -> Value {
         Some(ScalarTy::Bool) => Value::Bool(false),
         Some(ScalarTy::Char) => Value::Char('\0'),
         Some(ScalarTy::Opt(_)) => Value::none(),
-        Some(ScalarTy::List(_)) => Value::vec(Vec::new()),
+        Some(ScalarTy::List(_) | ScalarTy::Array(_)) => Value::vec(Vec::new()),
         Some(ScalarTy::Map(_)) => Value::map(),
         Some(ScalarTy::Set(_)) => Value::set(),
         // `Other` knows as much as no type at all

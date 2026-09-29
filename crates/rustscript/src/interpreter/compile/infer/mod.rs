@@ -6,7 +6,9 @@
 //! The pass is bidirectional in the small. An annotation or a signature flows down into literals,
 //! closures and constructor arguments, and a literal nothing types ends as `i32` or `f64`.
 
+mod arrays;
 mod exprs;
+mod json_mask;
 mod macros;
 mod methods;
 mod methods_option;
@@ -25,6 +27,7 @@ use super::Ctx;
 use crate::interpreter::numeric::IntWidth;
 use crate::interpreter::resolver::Res;
 
+pub(super) use json_mask::json_mask;
 pub(super) use ty::Ty;
 use ty::Vars;
 
@@ -43,6 +46,8 @@ pub(super) struct Types {
     macros: HashMap<*const syn::Macro, Rc<MacroBody>>,
     /// `into` calls whose target no context names
     unresolved: HashSet<*const ()>,
+    /// the length of the array a `try_into` lands in, by the call, see `try_into_root`
+    array_lens: HashMap<*const (), usize>,
     /// the inline `{name}` holes of a format template, by the template expression
     holes: HashMap<*const Expr, Vec<(String, Ty)>>,
     /// the type of each name a pattern binds, by its `PatIdent`
@@ -56,6 +61,7 @@ impl Types {
             nodes: HashMap::new(),
             macros: HashMap::new(),
             unresolved: HashSet::new(),
+            array_lens: HashMap::new(),
             holes: HashMap::new(),
             binds: HashMap::new(),
         }
@@ -67,6 +73,12 @@ impl Types {
             .get(&std::ptr::from_ref(template))
             .and_then(|holes| holes.iter().find(|(n, _)| n == name))
             .map_or(Ty::Unknown, |(_, ty)| ty.clone())
+    }
+
+    pub(super) fn array_len(&self, m: &syn::ExprMethodCall) -> Option<usize> {
+        self.array_lens
+            .get(&std::ptr::from_ref(m).cast::<()>())
+            .copied()
     }
 
     pub(super) fn is_unresolved<T>(&self, node: &T) -> bool {
@@ -169,6 +181,7 @@ struct Infer<'c, 'r> {
     nodes: HashMap<*const (), Ty>,
     macros: HashMap<*const syn::Macro, Rc<MacroBody>>,
     unresolved: HashSet<*const ()>,
+    array_lens: HashMap<*const (), usize>,
     holes: HashMap<*const Expr, Vec<(String, Ty)>>,
     scopes: Vec<HashMap<String, Ty>>,
     /// the `let` binding behind each name in `scopes`, for the second pass
@@ -196,6 +209,7 @@ impl<'c, 'r> Infer<'c, 'r> {
             nodes: HashMap::new(),
             macros: HashMap::new(),
             unresolved: HashSet::new(),
+            array_lens: HashMap::new(),
             holes: HashMap::new(),
             scopes: Vec::new(),
             sites: Vec::new(),
@@ -225,6 +239,7 @@ impl<'c, 'r> Infer<'c, 'r> {
             nodes,
             macros: self.macros,
             unresolved: self.unresolved,
+            array_lens: self.array_lens,
             holes: self
                 .holes
                 .iter()
@@ -496,6 +511,7 @@ impl<'c, 'r> Infer<'c, 'r> {
         {
             annotation = self.vars.meet(&annotation, &seed);
         }
+        self.note_let_array(local);
         let ty = match &local.init {
             Some(init) => {
                 let found = self.expr(&init.expr, &annotation);

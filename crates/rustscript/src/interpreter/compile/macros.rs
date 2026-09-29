@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
-use syn::punctuated::Punctuated;
 use syn::{Expr, Lit, Pat};
 
 use crate::interpreter::bytecode::{BinKind, Const, FmtSpec, MacroKind, Op, PathRef, Reg};
@@ -11,7 +10,7 @@ use crate::interpreter::bytecode::{BinKind, Const, FmtSpec, MacroKind, Op, PathR
 use std::rc::Rc;
 
 use super::flow::ArmBody;
-use super::infer::{MacroBody, Ty};
+use super::infer::{MacroBody, json_mask};
 use super::{Compiler, inline_holes, parse_exprs, parse_matches, parse_vec_repeat};
 
 impl Compiler<'_> {
@@ -55,8 +54,11 @@ impl Compiler<'_> {
             // `write!` lowers to build the string then `write_all`, so every writer the bridge
             // supports works and the `io::Result` is real
             "write" | "writeln" => {
-                let args =
-                    mac.parse_body_with(Punctuated::<Expr, syn::Token![,]>::parse_terminated)?;
+                // the parse the type pass saw, so the arguments keep their types
+                let body = self.macro_exprs(mac)?;
+                let MacroBody::Exprs(args) = &*body else {
+                    bail!("{name}! arguments are not a list");
+                };
                 let mut iter = args.iter();
                 let Some(mut target) = iter.next() else {
                     bail!("{name}! needs a destination as its first argument");
@@ -348,8 +350,8 @@ impl Compiler<'_> {
                 other => other,
             };
             let r = self.compile_expr(value)?;
-            if self.types.of(value) == Ty::Json {
-                json.push(r);
+            if let Some(mask) = json_mask(self.ctx, &self.types.of(value)) {
+                json.push((r, mask));
             }
             if let Expr::Assign(a) = arg
                 && let Expr::Path(p) = &*a.left
@@ -365,8 +367,10 @@ impl Compiler<'_> {
             if named.iter().all(|(n, _)| n != &hole) {
                 let r = self.alloc();
                 self.load_name(&hole, r)?;
-                if first.is_some_and(|t| self.types.hole(t, &hole) == Ty::Json) {
-                    json.push(r);
+                if let Some(t) = first
+                    && let Some(mask) = json_mask(self.ctx, &self.types.hole(t, &hole))
+                {
+                    json.push((r, mask));
                 }
                 named.push((hole, r));
             }

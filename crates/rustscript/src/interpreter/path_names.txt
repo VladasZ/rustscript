@@ -360,6 +360,7 @@ reqwest::blocking::Client::new
 reqwest::blocking::get
 reqwest::get
 serde_json::from_str
+serde_json::from_value
 serde_json::to_string
 serde_json::to_string_pretty
 serde_json::to_value

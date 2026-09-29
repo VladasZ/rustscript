@@ -282,6 +282,7 @@ pub(crate) fn parse_core(text: &str, target: Option<&ScalarTy>) -> Parsed {
         | ScalarTy::List(_)
         | ScalarTy::Map(_)
         | ScalarTy::Set(_)
+        | ScalarTy::Array(_)
         | ScalarTy::Other => Parsed::Fail(format!("cannot parse `{text}`")),
     }
 }

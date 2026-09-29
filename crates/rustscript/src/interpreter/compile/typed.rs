@@ -43,6 +43,12 @@ impl Compiler<'_> {
         let result = self.types.of_node(m);
         match method {
             "parse" => result.payload().to_scalar(),
+            // an array target keeps its length, see `note_array_target`
+            "try_into" => match (self.types.array_len(m), result.payload()) {
+                (Some(len), _) => Some(ScalarTy::Array(len)),
+                (None, Ty::Int(width)) => Some(ScalarTy::Int(width)),
+                _ => None,
+            },
             "unwrap_or_default" | "sum" | "product" | "collect" | "collect_string"
             | "collect_map" | "collect_set" | "collect_btree_map" | "collect_btree_set" => {
                 result.to_scalar()

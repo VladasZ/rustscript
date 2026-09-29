@@ -74,7 +74,7 @@ pub(super) fn run_command(s: &StructData) -> Value {
     cmd.stderr(stdio_or(s, "stderr", std::process::Stdio::piped()));
     match cmd.output() {
         Ok(out) => Value::ok(make_output(out)),
-        Err(e) => Value::err(Value::str(e.to_string())),
+        Err(e) => Value::err(super::native::io_error_value(&e)),
     }
 }
 
@@ -86,7 +86,7 @@ pub(super) fn status_command(s: &StructData) -> Value {
     cmd.stderr(stdio_for(s, "stderr"));
     match cmd.status() {
         Ok(status) => Value::ok(make_exit_status(status)),
-        Err(e) => Value::err(Value::str(e.to_string())),
+        Err(e) => Value::err(super::native::io_error_value(&e)),
     }
 }
 
@@ -134,7 +134,7 @@ pub(super) fn spawn_command(s: &StructData) -> Value {
     cmd.stderr(stdio_for(s, "stderr"));
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => return Value::err(Value::str(e.to_string())),
+        Err(e) => return Value::err(super::native::io_error_value(&e)),
     };
     let stdin = child
         .stdin
@@ -369,7 +369,7 @@ pub(super) fn child_method(recv: &Value, name: &MethodName, args: &mut [Value]) 
             if let Native::Child(c) = &mut *h {
                 match c.wait() {
                     Ok(st) => st,
-                    Err(e) => return Ok(Value::err(Value::str(e.to_string()))),
+                    Err(e) => return Ok(Value::err(super::native::io_error_value(&e))),
                 }
             } else {
                 bail!("child handle missing");
