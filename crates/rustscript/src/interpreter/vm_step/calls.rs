@@ -255,7 +255,7 @@ pub(super) fn make_struct(ctx: &mut StepCtx, dst: u16, info: u16, first: u16) ->
         let rest = ctx.stack[ctx.base + first as usize + written].clone();
         let mut fields = lit.shape.fields.clone();
         let mut renames = lit.shape.renames.clone();
-        let mut skip_none = lit.shape.skip_none.clone();
+        let mut field_serde = lit.shape.serde.clone();
         if let Value::Struct(r) = rest {
             // the base is the literal's own, a moved local or a fresh value, so the fields it
             // takes leave unit behind and the rest drops only what stayed
@@ -273,8 +273,8 @@ pub(super) fn make_struct(ctx: &mut StepCtx, dst: u16, info: u16, first: u16) ->
                         if !renames.is_empty() {
                             renames.push(r.shape.renames.get(slot).cloned().flatten());
                         }
-                        if !skip_none.is_empty() {
-                            skip_none.push(r.shape.skip_none.get(slot).copied().unwrap_or(false));
+                        if !field_serde.is_empty() {
+                            field_serde.push(r.shape.serde.get(slot).copied().unwrap_or_default());
                         }
                     }
                 }
@@ -285,7 +285,7 @@ pub(super) fn make_struct(ctx: &mut StepCtx, dst: u16, info: u16, first: u16) ->
             lit.shape.type_id,
             fields,
             renames,
-            skip_none,
+            field_serde,
         );
         Value::structure(shape, values)
     } else {

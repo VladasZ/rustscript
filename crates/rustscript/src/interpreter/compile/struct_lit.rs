@@ -9,7 +9,7 @@ use syn::Expr;
 
 use crate::interpreter::bytecode::StructShape;
 use crate::interpreter::bytecode::{Op, Reg, StructLit};
-use crate::interpreter::serde_attrs::{serde_rename, serde_rename_all, serde_skip_none};
+use crate::interpreter::serde_attrs::{serde_field, serde_rename, serde_rename_all};
 
 use super::{Compiler, idx16};
 
@@ -62,7 +62,7 @@ impl Compiler<'_> {
         // With a `..rest` the shape lists every declared field, without one only the written
         // ones, the literal must have written all.
         let has_rest = s.rest.is_some();
-        let (order, renames, skip_none) = literal_field_order(def.as_deref(), &written, has_rest);
+        let (order, renames, field_serde) = literal_field_order(def.as_deref(), &written, has_rest);
         // reserve the window first so field temporaries don't break the packing
         let slots = order.len() + usize::from(has_rest);
         let base = self.cur().reg_top;
@@ -104,7 +104,7 @@ impl Compiler<'_> {
         let info = {
             let fields: Vec<Arc<str>> = order.into_iter().map(Into::into).collect();
             let variant = variant.map(|(def, index, _)| (def, index));
-            let shape = self.literal_shape(name, fields, renames, skip_none, variant);
+            let shape = self.literal_shape(name, fields, renames, field_serde, variant);
             let f = self.cur();
             f.struct_lits.push(StructLit {
                 shape,
@@ -123,7 +123,7 @@ impl Compiler<'_> {
         name: String,
         fields: Vec<Arc<str>>,
         renames: Vec<Option<Arc<str>>>,
-        skip_none: Vec<bool>,
+        field_serde: Vec<crate::interpreter::bytecode::FieldSerde>,
         variant: Option<(Arc<crate::interpreter::enum_def::EnumDef>, u16)>,
     ) -> Arc<StructShape> {
         let variant_key = variant
@@ -133,14 +133,14 @@ impl Compiler<'_> {
             *s.name == name
                 && s.fields == fields
                 && s.renames == renames
-                && s.skip_none == skip_none
+                && s.serde == field_serde
                 && s.variant.as_ref().map(|(d, i)| (Arc::as_ptr(d), *i)) == variant_key
         });
         if let Some(shared) = known {
             return shared.clone();
         }
         let type_id = self.ctx.resolver.type_id_of(&name);
-        let mut built = StructShape::typed(name, type_id, fields, renames, skip_none);
+        let mut built = StructShape::typed(name, type_id, fields, renames, field_serde);
         if let Some((def, index)) = variant {
             built = built.as_variant(def, index);
         }
@@ -185,7 +185,11 @@ pub(super) fn literal_field_order(
     def: Option<&syn::ItemStruct>,
     written: &[(String, &Expr)],
     has_rest: bool,
-) -> (Vec<String>, Vec<Option<Arc<str>>>, Vec<bool>) {
+) -> (
+    Vec<String>,
+    Vec<Option<Arc<str>>>,
+    Vec<crate::interpreter::bytecode::FieldSerde>,
+) {
     match def {
         Some(def) => {
             let mut ordered: Vec<String> = def
@@ -212,16 +216,17 @@ pub(super) fn literal_field_order(
                         .map(Arc::<str>::from)
                 })
                 .collect();
-            let skip_none = ordered
+            let field_serde = ordered
                 .iter()
                 .map(|k| {
                     def.fields
                         .iter()
                         .find(|f| f.ident.as_ref().is_some_and(|i| i == k))
-                        .is_some_and(serde_skip_none)
+                        .map(serde_field)
+                        .unwrap_or_default()
                 })
                 .collect();
-            (ordered, renames, skip_none)
+            (ordered, renames, field_serde)
         }
         None => (
             written.iter().map(|(k, _)| k.clone()).collect(),

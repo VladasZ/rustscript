@@ -72,7 +72,11 @@ fn layout_of_scalar(ty: &ScalarTy) -> Option<Layout> {
         ScalarTy::F64 => (8, 8),
         ScalarTy::Bool => (1, 1),
         ScalarTy::Str | ScalarTy::List(_) => (24, 8),
-        ScalarTy::Opt(_) | ScalarTy::Map(_) | ScalarTy::Set(_) | ScalarTy::Other => return None,
+        ScalarTy::Opt(_)
+        | ScalarTy::Map(_)
+        | ScalarTy::Set(_)
+        | ScalarTy::Array(_)
+        | ScalarTy::Other => return None,
     })
 }
 

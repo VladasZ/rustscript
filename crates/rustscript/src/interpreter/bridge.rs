@@ -340,6 +340,7 @@ impl Vm {
                 None => None,
             },
             BuiltinId::Clone if tagged => Some(recv.clone()),
+            BuiltinId::TryInto => Some(methods::try_into(recv, name)?),
             _ => methods::json_type_test(recv, name)
                 .or_else(|| methods::json_value_method(recv, name, args)),
         })

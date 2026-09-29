@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::interpreter::bytecode::{Chunk, Reg};
-use crate::interpreter::json_bridge::pvalue_to_json;
+use crate::interpreter::json_serialize::mark_json;
 use crate::interpreter::native::Native;
 use crate::interpreter::value::{Upvalue, Value};
 use crate::interpreter::vm::Vm;
@@ -27,12 +27,10 @@ impl Vm {
         // arguments print as json
         let arg = |r: Reg| -> Value {
             let v = &regs[r as usize];
-            if f.json.contains(&r)
-                && let Ok(json) = pvalue_to_json(v)
-            {
-                return Native::Json(json).wrap();
+            match f.json.iter().find(|(reg, _)| *reg == r) {
+                Some((_, mask)) => mark_json(v, mask),
+                None => v.clone(),
             }
-            v.clone()
         };
         let positional: Vec<Value> = f.positional.iter().map(|r| arg(*r)).collect();
         let named: Vec<(&str, Value)> =

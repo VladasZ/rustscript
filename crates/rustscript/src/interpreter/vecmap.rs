@@ -115,6 +115,20 @@ pub(super) fn vec_method(v: &List, method: &MethodName, args: &mut [Value]) -> R
 /// `get_mut` gives a real element reference so writes land. A non integer argument is None like
 /// in serde.
 fn vec_get(v: &List, method: &MethodName, args: &[Value]) -> Value {
+    // `get(1..3)` is the sub slice, or None when the range is out of bounds or inverted
+    if method.id == BuiltinId::Get
+        && let Some(Value::Range {
+            start,
+            end,
+            inclusive,
+        }) = args.first()
+    {
+        let items = v.lock();
+        return match super::ops::range_bounds(items.len(), *start, *end, *inclusive) {
+            Ok((a, b)) if b <= items.len() => Value::some(Value::vec(items[a..b].to_vec())),
+            _ => Value::none(),
+        };
+    }
     let index = args
         .first()
         .and_then(Value::int_parts)

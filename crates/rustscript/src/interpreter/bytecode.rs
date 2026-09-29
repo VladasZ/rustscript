@@ -244,6 +244,8 @@ pub enum ScalarTy {
     Map(Box<ScalarTy>),
     /// `HashSet<T>` or `BTreeSet<T>`
     Set(Box<ScalarTy>),
+    /// `[T; N]` by its length, the target of a slice `try_into`
+    Array(usize),
     /// a type this model doesn't describe, only its presence matters
     Other,
 }
@@ -440,8 +442,26 @@ pub struct FmtSpec {
     pub template: String,
     pub positional: Vec<Reg>,
     pub named: Vec<(String, Reg)>,
-    /// the argument registers that hold a `serde_json::Value`, which prints as json
-    pub json: Vec<Reg>,
+    /// the argument registers whose type holds a `serde_json::Value`, and where in it. A json
+    /// value is a plain map, list or string at runtime, so only the static type can say.
+    pub json: Vec<(Reg, JsonMask)>,
+}
+
+/// Where the `serde_json::Value` parts sit inside a format argument's type.
+#[derive(Clone)]
+pub enum JsonMask {
+    /// the whole value
+    Here,
+    /// every item of a vec
+    Items(Box<JsonMask>),
+    /// every value of a map
+    Values(Box<JsonMask>),
+    /// tuple positions, or struct fields by name
+    Parts(Vec<(Arc<str>, JsonMask)>),
+    /// the payload of `Some`
+    Some(Box<JsonMask>),
+    /// the payloads of `Ok` and `Err`
+    Result(Option<Box<JsonMask>>, Option<Box<JsonMask>>),
 }
 
 pub struct PatInfo {
@@ -532,4 +552,4 @@ pub enum MacroKind {
 
 mod chunk;
 
-pub use chunk::{Chunk, Op, StructShape, path_call_chunk};
+pub use chunk::{Chunk, FieldSerde, Op, StructShape, path_call_chunk};

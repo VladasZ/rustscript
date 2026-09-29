@@ -96,6 +96,7 @@ pub(super) fn native_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     };
     Ok(Some(match id {
         PathId::SerdeJsonFromStr
+        | PathId::SerdeJsonFromValue
         | PathId::SerdeJsonToString
         | PathId::SerdeJsonToStringPretty
         | PathId::SerdeJsonToValue => return bridge_serde_json(id, args).map(Some),
@@ -369,8 +370,13 @@ pub(super) fn os_string_method(s: &Arc<StructData>, method: &MethodName) -> Resu
     let value = s.get("s").map(|value| value.display()).unwrap_or_default();
     Ok(match method.id {
         BuiltinId::Into => make_path(value),
-        BuiltinId::ToStringLossy | BuiltinId::ToStr => Value::str(value),
+        BuiltinId::ToStringLossy | BuiltinId::Display => Value::str(value),
+        // the text is kept as valid UTF-8, so the checked forms always succeed
+        BuiltinId::ToStr => Value::some(Value::str(value)),
+        BuiltinId::IntoString => Value::ok(Value::str(value)),
         BuiltinId::IsEmpty => Value::Bool(value.is_empty()),
+        BuiltinId::Len => super::shared::usize_value(value.len()),
+        BuiltinId::ToOsString | BuiltinId::ToOwned | BuiltinId::AsOsStr => make_os_string(value),
         _ => bail!("unknown method `{method}` on OsString"),
     })
 }
@@ -423,12 +429,11 @@ pub(super) fn path_method(
     Ok(match method.id {
         BuiltinId::Display | BuiltinId::ToStringLossy => Value::str(s.clone()),
         BuiltinId::ToStr => Value::some(Value::str(s.clone())),
-        BuiltinId::IntoString | BuiltinId::IntoOsString => Value::ok(Value::str(s.clone())),
-        BuiltinId::ToOwned
-        | BuiltinId::ToPathBuf
-        | BuiltinId::Clone
-        | BuiltinId::AsPath
-        | BuiltinId::AsOsStr => make_path(s.clone()),
+        BuiltinId::IntoString => Value::ok(Value::str(s.clone())),
+        BuiltinId::IntoOsString | BuiltinId::AsOsStr => make_os_string(s.clone()),
+        BuiltinId::ToOwned | BuiltinId::ToPathBuf | BuiltinId::Clone | BuiltinId::AsPath => {
+            make_path(s.clone())
+        }
         BuiltinId::IsDir => Value::Bool(p.is_dir()),
         BuiltinId::IsFile => Value::Bool(p.is_file()),
         BuiltinId::IsAbsolute => Value::Bool(p.is_absolute()),

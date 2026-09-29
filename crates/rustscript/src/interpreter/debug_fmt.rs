@@ -126,6 +126,13 @@ fn write_value(value: &Value, opts: &DebugOpts, indent: usize, out: &mut String)
             Native::IoErr { debug, .. }
             | Native::JoinErr { debug, .. }
             | Native::ParseErr { debug, .. } => out.push_str(debug),
+            // a json part of a typed value, see `mark_json`. The pretty form is indented to where
+            // it sits.
+            Native::Json(json) if opts.pretty => {
+                let text = format!("{json:#?}");
+                out.push_str(&text.replace('\n', &format!("\n{}", pad(indent))));
+            }
+            Native::Json(json) => out.push_str(&format!("{json:?}")),
             Native::SocketAddr(a) => out.push_str(&format!("{a:?}")),
             Native::IpAddr(a) => out.push_str(&format!("{a:?}")),
             other => out.push_str(&format!("<{}>", other.type_name())),
@@ -263,6 +270,13 @@ fn write_map(
 fn write_struct(s: &StructData, opts: &DebugOpts, indent: usize, out: &mut String) {
     if let Some((secs, nanos)) = duration_parts(s) {
         out.push_str(&super::format::duration_debug(secs, nanos, opts.leaf));
+        return;
+    }
+    // std prints a path or an os string as its quoted text, not as the bridge struct
+    if matches!(&**s.name(), "Path" | "PathBuf" | "OsString")
+        && let Some(text) = s.get("s")
+    {
+        write_value(&text, opts, indent, out);
         return;
     }
     out.push_str(super::resolver::bare(s.name()));

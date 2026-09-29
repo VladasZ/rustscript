@@ -318,6 +318,10 @@ fn written_key(ty: &ScalarTy) -> Option<String> {
         ScalarTy::Char => "char".to_string(),
         ScalarTy::Str => "String".to_string(),
         ScalarTy::List(elem) => format!("Vec<{}>", written_key(elem)?),
-        ScalarTy::Opt(_) | ScalarTy::Map(_) | ScalarTy::Set(_) | ScalarTy::Other => return None,
+        ScalarTy::Opt(_)
+        | ScalarTy::Map(_)
+        | ScalarTy::Set(_)
+        | ScalarTy::Array(_)
+        | ScalarTy::Other => return None,
     })
 }

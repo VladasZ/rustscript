@@ -548,6 +548,15 @@ impl Chunk {
     }
 }
 
+/// The serde field attributes the shape carries into serialize and deserialize.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct FieldSerde {
+    /// `skip_serializing_if = "Option::is_none"`
+    pub skip_none: bool,
+    /// `flatten`, the field's keys sit in the parent object
+    pub flatten: bool,
+}
+
 /// Shared by every instance, so a field read is a short scan plus an index and building an
 /// instance allocates no map.
 pub struct StructShape {
@@ -557,8 +566,8 @@ pub struct StructShape {
     pub fields: Vec<Arc<str>>,
     /// `#[serde(rename = "..")]` per field, empty when none. Read when serializing.
     pub renames: Vec<Option<Arc<str>>>,
-    /// `#[serde(skip_serializing_if = "Option::is_none")]` per field, empty when none.
-    pub skip_none: Vec<bool>,
+    /// `skip_serializing_if` and `flatten` per field, empty when none.
+    pub serde: Vec<FieldSerde>,
     /// The enum and variant index of a struct variant, `E::S { .. }`. Serde writes it inside
     /// the enum's representation.
     pub variant: Option<(Arc<super::super::enum_def::EnumDef>, u16)>,
@@ -571,7 +580,7 @@ impl StructShape {
             type_id: NO_TYPE,
             fields,
             renames: Vec::new(),
-            skip_none: Vec::new(),
+            serde: Vec::new(),
             variant: None,
         })
     }
@@ -581,14 +590,14 @@ impl StructShape {
         type_id: u16,
         fields: Vec<Arc<str>>,
         renames: Vec<Option<Arc<str>>>,
-        skip_none: Vec<bool>,
+        serde: Vec<FieldSerde>,
     ) -> Arc<StructShape> {
         Arc::new(StructShape {
             name: name.into(),
             type_id,
             fields,
             renames,
-            skip_none,
+            serde,
             variant: None,
         })
     }
@@ -604,7 +613,7 @@ impl StructShape {
             type_id: self.type_id,
             fields: self.fields.clone(),
             renames: self.renames.clone(),
-            skip_none: self.skip_none.clone(),
+            serde: self.serde.clone(),
             variant: Some((def, index)),
         })
     }

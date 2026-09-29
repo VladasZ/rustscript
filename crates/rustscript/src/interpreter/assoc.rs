@@ -1,6 +1,7 @@
 //! Associated functions like `String::from` and `File::open`.
 
 use num_traits::AsPrimitive;
+use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
@@ -12,6 +13,7 @@ use super::enum_def::{SEEK_FROM, XML_NODE};
 use super::int_methods::{ByteOrder, from_bytes, from_bytes_order};
 use super::jwt_bridge::jwt_assoc;
 use super::native::Native;
+use super::native_net::socket_addrs;
 use super::numeric::IntWidth;
 use super::std_bridge::{arg_str, as_i64, bytes_to_string, make_path, open_file, path_like};
 use super::value::{CellKind, Value};
@@ -407,18 +409,19 @@ fn misc_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
         PathId::InstantNow => Native::Instant(std::time::Instant::now()).wrap(),
         PathId::SystemTimeNow => Native::SystemTime(std::time::SystemTime::now()).wrap(),
         // net
-        PathId::TcpListenerBind => match std::net::TcpListener::bind(arg_str(args, 0)) {
-            Ok(l) => Value::ok(Native::Listener(l).wrap()),
-            Err(e) => Value::err(Value::str(e.to_string())),
-        },
-        PathId::TcpStreamConnect => match std::net::TcpStream::connect(arg_str(args, 0)) {
-            Ok(s) => Value::ok(Native::Stream(s).wrap()),
-            Err(e) => Value::err(Value::str(e.to_string())),
-        },
-        PathId::UdpSocketBind => match std::net::UdpSocket::bind(arg_str(args, 0)) {
-            Ok(s) => Value::ok(Native::Udp(s).wrap()),
-            Err(e) => Value::err(Value::str(e.to_string())),
-        },
+        PathId::TcpListenerBind | PathId::TcpStreamConnect | PathId::UdpSocketBind => {
+            let opened = socket_addrs(args.first()).and_then(|addrs| {
+                Ok(match id {
+                    PathId::TcpListenerBind => Native::Listener(TcpListener::bind(&addrs[..])?),
+                    PathId::TcpStreamConnect => Native::Stream(TcpStream::connect(&addrs[..])?),
+                    _ => Native::Udp(UdpSocket::bind(&addrs[..])?),
+                })
+            });
+            match opened {
+                Ok(native) => Value::ok(native.wrap()),
+                Err(e) => Value::err(super::native::io_error_value(&e)),
+            }
+        }
         PathId::DocumentLoad => super::pdf_bridge::load(&arg_str(args, 0)),
         PathId::ElementParse => super::xmltree_bridge::parse(args),
         PathId::ElementNew => super::xmltree_bridge::new_element(&arg_str(args, 0)),

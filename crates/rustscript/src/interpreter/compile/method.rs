@@ -152,6 +152,7 @@ impl Compiler<'_> {
                 ty.is_unknown() && m.turbofish.is_none() && self.collect_target(m).is_none()
             }
             "parse" => m.turbofish.is_none() && ty.payload().is_unknown(),
+            "try_into" => self.method_scalar(m, "try_into").is_none(),
             "or_default" => matches!(self.types.of(&m.receiver), Ty::Entry(_)) && ty.is_unknown(),
             "into" => {
                 self.types.is_unresolved(m) && self.user_from_accepts(&self.types.of(&m.receiver))

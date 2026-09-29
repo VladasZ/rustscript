@@ -39,6 +39,8 @@ pub(super) fn bridge_serde_json(id: PathId, args: &[Value]) -> Result<Value> {
             let v = arg(args, 0)?;
             Ok(Value::ok(json_to_pvalue(pvalue_to_json(&v)?)))
         }
+        // a json value is already a runtime value, the call site coerces it into the target type
+        PathId::SerdeJsonFromValue => Ok(Value::ok(arg(args, 0)?)),
         _ => bail!("unsupported serde_json function `{id}`"),
     }
 }

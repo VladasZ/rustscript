@@ -202,6 +202,7 @@ impl Infer<'_, '_> {
             .map(|s| s.ident.to_string())
             .collect();
         let args: Vec<&Expr> = c.args.iter().collect();
+        self.note_bytes_call(&segs, &args);
         if let [name] = segs.as_slice()
             && let Some(ty) = self.prelude_call(name, &path.path.segments[0], &args, expected)
         {
@@ -325,6 +326,7 @@ impl Infer<'_, '_> {
                 syn::FnArg::Typed(t) => Some(self.lower(&t.ty)),
             })
             .collect();
+        self.note_param_arrays(sig, args);
         let ret = match &sig.output {
             syn::ReturnType::Type(_, ty) => self.lower(ty),
             syn::ReturnType::Default => Ty::Unit,
