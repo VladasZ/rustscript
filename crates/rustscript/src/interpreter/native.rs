@@ -40,6 +40,9 @@ pub enum Native {
     Listener(TcpListener),
     Stream(TcpStream),
     Udp(UdpSocket),
+    /// the real host values, so `Display`, `Debug` and the accessors are the std ones
+    SocketAddr(std::net::SocketAddr),
+    IpAddr(std::net::IpAddr),
     /// the real lopdf value
     Pdf(Box<lopdf::Document>),
     /// deleted when the value drops or on `close`
@@ -111,6 +114,8 @@ impl Native {
             Native::Listener(_) => "TcpListener",
             Native::Stream(_) => "TcpStream",
             Native::Udp(_) => "UdpSocket",
+            Native::SocketAddr(_) => "SocketAddr",
+            Native::IpAddr(_) => "IpAddr",
             Native::Pdf(_) => "PdfDocument",
             Native::TempDir(_) => "TempDir",
             Native::NamedTempFile(_) => "NamedTempFile",

@@ -257,6 +257,7 @@ into_os_string
 into_owned
 into_string
 into_values
+ip
 is_absolute
 is_alphabetic
 is_alphanumeric
@@ -288,10 +289,14 @@ is_ge
 is_gt
 is_i64
 is_infinite
+is_ipv4
+is_ipv6
 is_le
+is_loopback
 is_lowercase
 is_lt
 is_match
+is_multicast
 is_multiple_of
 is_nan
 is_ne
@@ -321,6 +326,7 @@ is_superset
 is_symlink
 is_terminal
 is_u64
+is_unspecified
 is_uppercase
 is_whitespace
 is_zero
@@ -428,6 +434,7 @@ pop_back mut
 pop_first mut
 pop_front mut
 pop_last mut
+port
 position
 post
 pow
@@ -451,6 +458,7 @@ raw_arg
 raw_os_error
 raw_query
 read
+read_exact
 read_line mut
 read_to_end mut
 read_to_string mut

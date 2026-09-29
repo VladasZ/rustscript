@@ -126,7 +126,7 @@ The `supported_page_is_current` test enforces it.
 
 ## native handles (files, sockets, readers, processes)
 
-`accept`, `by_ref`, `close`, `collect`, `connect`, `duration_since`, `elapsed`, `flush`, `id`, `incoming`, `inner`, `is_cancelled`, `is_panic`, `is_terminal`, `kill`, `kind`, `lines`, `local_addr`, `lock`, `metadata`, `next`, `pad`, `path`, `peer_addr`, `raw_os_error`, `read`, `read_line`, `read_to_end`, `read_to_string`, `read_until`, `seek`, `send`, `send_to`, `set_broadcast`, `set_len`, `set_modified`, `shutdown`, `stderr`, `stdin`, `sync_all`, `sync_data`, `try_clone`, `try_wait`, `wait`, `wait_with_output`, `write`, `write_all`, `write_fmt`, `write_str`
+`accept`, `by_ref`, `close`, `collect`, `connect`, `duration_since`, `elapsed`, `flush`, `id`, `incoming`, `inner`, `ip`, `is_cancelled`, `is_ipv4`, `is_ipv6`, `is_loopback`, `is_multicast`, `is_panic`, `is_terminal`, `is_unspecified`, `kill`, `kind`, `lines`, `local_addr`, `lock`, `metadata`, `next`, `pad`, `path`, `peer_addr`, `port`, `raw_os_error`, `read`, `read_exact`, `read_line`, `read_to_end`, `read_to_string`, `read_until`, `seek`, `send`, `send_to`, `set_broadcast`, `set_len`, `set_modified`, `shutdown`, `stderr`, `stdin`, `sync_all`, `sync_data`, `try_clone`, `try_wait`, `wait`, `wait_with_output`, `write`, `write_all`, `write_fmt`, `write_str`
 
 ## OpenOptions
 
