@@ -126,6 +126,8 @@ fn write_value(value: &Value, opts: &DebugOpts, indent: usize, out: &mut String)
             Native::IoErr { debug, .. }
             | Native::JoinErr { debug, .. }
             | Native::ParseErr { debug, .. } => out.push_str(debug),
+            Native::SocketAddr(a) => out.push_str(&format!("{a:?}")),
+            Native::IpAddr(a) => out.push_str(&format!("{a:?}")),
             other => out.push_str(&format!("<{}>", other.type_name())),
         },
         Value::Enum { def, variant, data } => {

@@ -110,6 +110,12 @@ pub(super) fn native_method(
     if let Some(v) = joinerr_method(handle, method) {
         return Ok(Some(v));
     }
+    if let Some(v) = socket_addr_method(handle, method) {
+        return Ok(Some(v));
+    }
+    if let Some(v) = ip_addr_method(handle, method) {
+        return Ok(Some(v));
+    }
     // the families use disjoint names, handles that consume self move out of the Mutex inside
     // their helper
     if let Some(v) = reader_native_method(handle, method, args)? {
@@ -164,6 +170,62 @@ pub(super) fn joinerr_method(handle: &Handle, method: &MethodName) -> Option<Val
     }
 }
 
+pub(super) fn socket_addr_method(handle: &Handle, method: &MethodName) -> Option<Value> {
+    let Native::SocketAddr(addr) = *handle.lock() else {
+        return None;
+    };
+    match method.id {
+        BuiltinId::Ip => Some(Native::IpAddr(addr.ip()).wrap()),
+        BuiltinId::Port => Some(Value::Int(i64::from(addr.port()))),
+        BuiltinId::IsIpv4 => Some(Value::Bool(addr.is_ipv4())),
+        BuiltinId::IsIpv6 => Some(Value::Bool(addr.is_ipv6())),
+        _ => None,
+    }
+}
+
+pub(super) fn ip_addr_method(handle: &Handle, method: &MethodName) -> Option<Value> {
+    let Native::IpAddr(ip) = *handle.lock() else {
+        return None;
+    };
+    match method.id {
+        BuiltinId::IsIpv4 => Some(Value::Bool(ip.is_ipv4())),
+        BuiltinId::IsIpv6 => Some(Value::Bool(ip.is_ipv6())),
+        BuiltinId::IsLoopback => Some(Value::Bool(ip.is_loopback())),
+        BuiltinId::IsUnspecified => Some(Value::Bool(ip.is_unspecified())),
+        BuiltinId::IsMulticast => Some(Value::Bool(ip.is_multicast())),
+        _ => None,
+    }
+}
+
+/// The buffer arrives as a shared Vec, so the bytes are copied back into it. `read_exact` fills
+/// the whole buffer or fails with `UnexpectedEof`.
+fn read_into(handle: &Handle, id: BuiltinId, args: &[Value]) -> Result<Value> {
+    let mut h = handle.lock();
+    let Some(r) = h.as_read() else {
+        bail!("{} on non-reader {}", id.name(), h.type_name());
+    };
+    let len = match args.first() {
+        Some(Value::Vec(v)) => v.lock().len(),
+        _ => 0,
+    };
+    let mut buf = vec![0u8; len];
+    let read = if id == BuiltinId::ReadExact {
+        r.read_exact(&mut buf).map(|()| None)
+    } else {
+        r.read(&mut buf).map(Some)
+    };
+    drop(h);
+    Ok(io_err(read, |n| {
+        if let Some(Value::Vec(v)) = args.first() {
+            let mut items = v.lock();
+            for (item, byte) in items.iter_mut().zip(&buf[..n.unwrap_or(len)]) {
+                *item = Value::Int(i64::from(*byte));
+            }
+        }
+        n.map_or(Value::Unit, |n| Value::Int(int_len(n)))
+    }))
+}
+
 fn reader_native_method(
     handle: &Handle,
     method: &MethodName,
@@ -200,28 +262,8 @@ fn reader_native_method(
                 Value::Int(int_len(n))
             })));
         }
-        BuiltinId::Read => {
-            let mut h = handle.lock();
-            let Some(r) = h.as_read() else {
-                bail!("read on non-reader {}", h.type_name());
-            };
-            // the buffer arrives as a shared Vec, so copy back into it
-            let len = match args.first() {
-                Some(Value::Vec(v)) => v.lock().len(),
-                _ => 0,
-            };
-            let mut buf = vec![0u8; len];
-            let read = r.read(&mut buf);
-            drop(h);
-            return Ok(Some(io_err(read, |n| {
-                if let Some(Value::Vec(v)) = args.first() {
-                    let mut items = v.lock();
-                    for (i, byte) in buf.iter().take(n).enumerate() {
-                        items[i] = Value::Int(i64::from(*byte));
-                    }
-                }
-                Value::Int(int_len(n))
-            })));
+        BuiltinId::Read | BuiltinId::ReadExact => {
+            return read_into(handle, method.id, args).map(Some);
         }
         BuiltinId::ReadToEnd => {
             let mut h = handle.lock();
@@ -485,7 +527,7 @@ fn net_native_method(handle: &Handle, method: &MethodName) -> Result<Option<Valu
                 return Ok(Some(match l.accept() {
                     Ok((stream, addr)) => Value::ok(Value::tuple(vec![
                         Native::Stream(stream).wrap(),
-                        Value::str(addr.to_string()),
+                        Native::SocketAddr(addr).wrap(),
                     ])),
                     Err(e) => Value::err(Value::str(e.to_string())),
                 }));
@@ -503,12 +545,14 @@ fn net_native_method(handle: &Handle, method: &MethodName) -> Result<Option<Valu
                 Native::Udp(s) => s.local_addr(),
                 _ => bail!("local_addr on {}", h.type_name()),
             };
-            return Ok(Some(io_err(addr, |a| Value::str(a.to_string()))));
+            return Ok(Some(io_err(addr, |a| Native::SocketAddr(a).wrap())));
         }
         BuiltinId::PeerAddr => {
             let h = handle.lock();
             if let Native::Stream(s) = &*h {
-                return Ok(Some(io_err(s.peer_addr(), |a| Value::str(a.to_string()))));
+                return Ok(Some(io_err(s.peer_addr(), |a| {
+                    Native::SocketAddr(a).wrap()
+                })));
             }
             bail!("peer_addr on {}", h.type_name());
         }

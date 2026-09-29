@@ -12,53 +12,6 @@ Differential workflow.
 
 ## Open
 
-### read_exact on a BufReader over a TcpStream
-
-Needed by the RustScript ports of the ssh onboard server and the app-icon
-picker in thing, which read a POST body by its Content-Length.
-
-```rust
-use std::io::{BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
-
-fn main() -> std::io::Result<()> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let mut client = TcpStream::connect(listener.local_addr()?)?;
-    client.write_all(b"hello")?;
-    let (server, _) = listener.accept()?;
-    let mut reader = BufReader::new(server);
-    let mut body = vec![0; 5];
-    reader.read_exact(&mut body)?;
-    println!("{}", String::from_utf8_lossy(&body));
-    Ok(())
-}
-```
-
-Compiled prints `hello`. Interpreted stops before running with
-`read_exact is not implemented by the interpreter, in main`. `read_line` and
-`read_to_end` exist on the same reader, see `BuiltinId::ReadLine` in
-`interpreter/native_methods.rs`.
-
-### ip on a SocketAddr from local_addr
-
-Needed by the same onboard port to print the LAN address a UDP connect picks.
-
-```rust
-use std::net::UdpSocket;
-
-fn main() -> std::io::Result<()> {
-    let socket = UdpSocket::bind("127.0.0.1:0")?;
-    let addr = socket.local_addr()?;
-    println!("{}", addr.ip());
-    Ok(())
-}
-```
-
-Compiled prints `127.0.0.1`. Interpreted stops before running with
-`ip is not implemented by the interpreter, in main`. `local_addr` answers a plain
-string, see `BuiltinId::LocalAddr` in `interpreter/native_methods.rs`, so the
-`SocketAddr` methods `ip` and `port` have nothing to act on.
-
 ## Generator plan
 
 The differential generator is being brought closer to real Rust in phases,

@@ -55,6 +55,8 @@ pub const BRIDGES: &[Bridge] = &[
     b("cell.rs", "cell_method", "Cell"),
     b("native_methods.rs", "io_error_method", "Native"),
     b("native_methods.rs", "joinerr_method", "Native"),
+    b("native_methods.rs", "socket_addr_method", "Native"),
+    b("native_methods.rs", "ip_addr_method", "Native"),
     b("methods.rs", "generic_method", "*"),
     b("vecmap.rs", "vec_method", "Vec"),
     b("vecmap.rs", "deque_method", "Vec"),

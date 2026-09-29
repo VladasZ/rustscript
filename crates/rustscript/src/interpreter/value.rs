@@ -598,16 +598,18 @@ impl Value {
                             .all(|(k, v)| b.shape.slot(k).is_some_and(|i| v.eq_value(&vb[i])))
                 }
             }
-            // parse errors compare by kind, every other native by identity
+            // parse errors compare by kind, addresses by value, every other native by identity
             (Value::Native(a), Value::Native(b)) => {
                 Arc::ptr_eq(a, b)
-                    || matches!(
-                        (&*a.lock(), &*b.lock()),
+                    || match (&*a.lock(), &*b.lock()) {
                         (
                             Native::ParseErr { debug: da, .. },
-                            Native::ParseErr { debug: db, .. }
-                        ) if da == db
-                    )
+                            Native::ParseErr { debug: db, .. },
+                        ) => da == db,
+                        (Native::SocketAddr(x), Native::SocketAddr(y)) => x == y,
+                        (Native::IpAddr(x), Native::IpAddr(y)) => x == y,
+                        _ => false,
+                    }
             }
             _ => false,
         }
@@ -639,6 +641,8 @@ impl Value {
                 | Native::ParseErr { display, .. } => display.clone(),
                 // `{}` of an anyhow error is its outermost message
                 Native::Anyhow(chain) => chain.first().cloned().unwrap_or_default(),
+                Native::SocketAddr(a) => a.to_string(),
+                Native::IpAddr(a) => a.to_string(),
                 other => format!("<{}>", other.type_name()),
             },
             // `VarError` implements `Display`, scripts print it with `{e}`
