@@ -36,6 +36,8 @@ pub enum Native {
     ChildStdin(ChildStdin),
     File(BufReader<File>),
     Reader(BufReader<Box<dyn Read + Send>>),
+    /// kept apart from `Reader` so `into_inner` can hand the socket back
+    SocketReader(BufReader<TcpStream>),
     Writer(Box<dyn Write + Send>),
     Listener(TcpListener),
     Stream(TcpStream),
@@ -110,6 +112,7 @@ impl Native {
             Native::ChildStdin(_) => "ChildStdin",
             Native::File(_) => "File",
             Native::Reader(_) => "Reader",
+            Native::SocketReader(_) => "BufReader",
             Native::Writer(_) => "Writer",
             Native::Listener(_) => "TcpListener",
             Native::Stream(_) => "TcpStream",
@@ -142,6 +145,7 @@ impl Native {
         match self {
             Native::File(r) => Some(r),
             Native::Reader(r) => Some(r),
+            Native::SocketReader(r) => Some(r),
             _ => None,
         }
     }
@@ -152,6 +156,7 @@ impl Native {
         match self {
             Native::File(r) => Some(r),
             Native::Reader(r) => Some(r),
+            Native::SocketReader(r) => Some(r),
             _ => None,
         }
     }

@@ -1,4 +1,5 @@
-//! The reqwest bridge, blocking and async. Only `.send()`, `.text()` and `.json()` yield futures.
+//! The reqwest bridge, blocking and async. Only `.send()`, `.text()`, `.json()` and `.bytes()` yield
+//! futures.
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -9,6 +10,7 @@ use reqwest::{Client, Method};
 
 use super::bridge::arg;
 use super::bytecode::{BuiltinId, MethodName, PathId};
+use super::crates_bridge::bytes_to_vec;
 use super::json_bridge::{json_to_pvalue, parse_json, pvalue_to_json};
 use super::native::Native;
 use super::std_bridge::duration_from_value;
@@ -117,6 +119,7 @@ fn request_struct(method: &str, url: &str, client: Value) -> Arc<StructData> {
             ("headers".into(), Value::vec(vec![])),
             ("query".into(), Value::vec(vec![])),
             ("body".into(), Value::Unit),
+            ("form".into(), Value::Unit),
             ("timeout".into(), Value::Unit),
             ("client".into(), client),
         ],
@@ -324,6 +327,7 @@ fn request_method(s: &Arc<StructData>, method: &MethodName, args: &[Value]) -> R
             let json = pvalue_to_json(args.first().unwrap_or(&Value::Unit))?;
             add_header(s, "Content-Type", "application/json");
             s.set("body", Value::str(serde_json::to_string(&json)?));
+            s.set("form", Value::Unit);
             Ok(this())
         }
         BuiltinId::Body => {
@@ -331,6 +335,14 @@ fn request_method(s: &Arc<StructData>, method: &MethodName, args: &[Value]) -> R
                 "body",
                 Value::str(args.first().map(Value::display).unwrap_or_default()),
             );
+            s.set("form", Value::Unit);
+            Ok(this())
+        }
+        // the pairs go to the real `form`, which encodes them and sets the content type
+        BuiltinId::Form => {
+            let pairs = form_pairs(args.first().unwrap_or(&Value::Unit))?;
+            s.set("form", header_pairs(pairs));
+            s.set("body", Value::Unit);
             Ok(this())
         }
         BuiltinId::Timeout => {
@@ -389,6 +401,9 @@ fn execute_blocking(s: &StructData) -> Result<Value> {
     if let Some(Value::Str(body)) = s.get("body") {
         rb = rb.body(body.to_string());
     }
+    if let Some(form) = form_field(s) {
+        rb = rb.form(&form);
+    }
     let resp = rb.send()?;
     let status = resp.status().as_u16();
     let headers: Vec<(String, String)> = resp
@@ -433,6 +448,7 @@ struct Plan {
     headers: Vec<(String, String)>,
     query: Vec<(String, String)>,
     body: Option<String>,
+    form: Option<Vec<(String, String)>>,
     timeout: Option<Duration>,
     client: Client,
 }
@@ -457,6 +473,7 @@ fn build_plan(s: &StructData) -> Plan {
             Some(Value::Str(b)) => Some(b.to_string()),
             _ => None,
         },
+        form: form_field(s),
         timeout: duration_field(s, "timeout"),
         client,
     }
@@ -486,6 +503,9 @@ async fn run_plan(plan: Plan) -> Result<Value> {
     }
     if let Some(body) = plan.body {
         rb = rb.body(body);
+    }
+    if let Some(form) = &plan.form {
+        rb = rb.form(form);
     }
     let resp = rb.send().await?;
     let status = resp.status().as_u16();
@@ -533,6 +553,39 @@ fn pairs_field(s: &StructData, field: &str) -> Vec<(String, String)> {
     }
 }
 
+fn form_field(s: &StructData) -> Option<Vec<(String, String)>> {
+    match s.get("form") {
+        Some(Value::Vec(_)) => Some(pairs_field(s, "form")),
+        _ => None,
+    }
+}
+
+/// A slice of pairs, a map or a struct, the shapes `serde_urlencoded` takes. A `None` field is
+/// left out, as serde does.
+fn form_pairs(v: &Value) -> Result<Vec<(String, String)>> {
+    let scalar = |v: &serde_json::Value| match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Null => None,
+        other => Some(other.to_string()),
+    };
+    match pvalue_to_json(v)? {
+        serde_json::Value::Object(map) => Ok(map
+            .iter()
+            .filter_map(|(k, v)| Some((k.clone(), scalar(v)?)))
+            .collect()),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .filter_map(|item| match item {
+                serde_json::Value::Array(pair) if pair.len() == 2 => {
+                    Some(Ok((scalar(&pair[0])?, scalar(&pair[1])?)))
+                }
+                other => Some(Err(anyhow!("form expects key value pairs, got {other}"))),
+            })
+            .collect(),
+        other => bail!("form expects pairs, a map or a struct, got {other}"),
+    }
+}
+
 fn header_pairs(pairs: Vec<(String, String)>) -> Value {
     Value::vec(
         pairs
@@ -574,6 +627,10 @@ fn response_method(s: &Arc<StructData>, method: &MethodName) -> Result<Value> {
         }
         BuiltinId::Text => text_future(body()),
         BuiltinId::Json => json_future(body()),
+        BuiltinId::Bytes => {
+            let raw = body();
+            Native::Future(Box::pin(async move { Value::ok(bytes_to_vec(&raw)) })).wrap()
+        }
         BuiltinId::ContentLength => s.get("content_length").unwrap_or_else(Value::none),
         BuiltinId::Headers => Value::struct_of(
             "HeaderMap",

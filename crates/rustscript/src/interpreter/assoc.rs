@@ -216,6 +216,22 @@ fn container_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
             super::shared::usize_value(Arc::strong_count(slot) - 2)
         }
         // file and pipe readers are already buffered, a raw socket gets one
+        PathId::BufReaderNew | PathId::BufReaderWithCapacity
+            if let Some(Value::Native(h)) = args.last()
+                && matches!(&*h.lock(), Native::Stream(_)) =>
+        {
+            let cloned = {
+                let locked = h.lock();
+                let Native::Stream(s) = &*locked else {
+                    unreachable!()
+                };
+                s.try_clone()
+            };
+            match cloned {
+                Ok(clone) => Native::SocketReader(std::io::BufReader::new(clone)).wrap(),
+                Err(e) => return Err(anyhow!("cannot buffer socket: {e}")),
+            }
+        }
         PathId::BufReaderNew
         | PathId::BufReaderWithCapacity
         | PathId::BufWriterNew

@@ -77,6 +77,7 @@ pub(super) fn vec_method(v: &List, method: &MethodName, args: &mut [Value]) -> R
             let needle = arg(args, 0)?;
             Value::Bool(v.lock().iter().any(|x| x.eq_value(&needle)))
         }
+        BuiltinId::StartsWith | BuiltinId::EndsWith => vec_affix(v, method, args)?,
         BuiltinId::Sort | BuiltinId::SortUnstable => {
             let mut items = v.lock();
             items.sort_by_key(sort_key);
@@ -618,4 +619,29 @@ impl Ord for SortKey {
             | (SortKey::Rev(_), SortKey::List(_)) => Ordering::Greater,
         }
     }
+}
+
+/// `starts_with` and `ends_with` on a slice.
+fn vec_affix(v: &List, method: &MethodName, args: &[Value]) -> Result<Value> {
+    let needle: Vec<Value> = match arg(args, 0)? {
+        Value::Vec(n) => n.lock().clone(),
+        // a byte string literal
+        Value::Str(t) => t.bytes().map(|b| Value::Int(i64::from(b))).collect(),
+        other => bail!("{} needs a slice, got {}", method.text, other.display()),
+    };
+    let items = v.lock();
+    let Some(skip) = items.len().checked_sub(needle.len()) else {
+        return Ok(Value::Bool(false));
+    };
+    let at = if method.id == BuiltinId::StartsWith {
+        0
+    } else {
+        skip
+    };
+    Ok(Value::Bool(
+        items[at..at + needle.len()]
+            .iter()
+            .zip(&needle)
+            .all(|(x, n)| x.eq_value(n)),
+    ))
 }
