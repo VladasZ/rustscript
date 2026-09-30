@@ -212,6 +212,7 @@ floor
 flush
 fold
 for_each
+form
 format
 fract
 front

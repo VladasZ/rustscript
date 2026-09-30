@@ -247,6 +247,17 @@ fn reader_native_method(
         BuiltinId::Read | BuiltinId::ReadExact => {
             return read_into(handle, method.id, args).map(Some);
         }
+        // bytes still in the buffer are lost, as with the real `into_inner`
+        BuiltinId::IntoInner => {
+            let taken = std::mem::replace(&mut *handle.lock(), Native::Taken);
+            return Ok(match taken {
+                Native::SocketReader(r) => Some(Native::Stream(r.into_inner()).wrap()),
+                other => {
+                    *handle.lock() = other;
+                    None
+                }
+            });
+        }
         BuiltinId::ReadToEnd => {
             let mut h = handle.lock();
             let Some(r) = h.as_read() else {
@@ -300,6 +311,10 @@ fn lines_native_method(handle: &Handle, method: &MethodName) -> Option<Value> {
                     Box::new(r.lines())
                 }
                 Native::Reader(r) => {
+                    use std::io::BufRead;
+                    Box::new(r.lines())
+                }
+                Native::SocketReader(r) => {
                     use std::io::BufRead;
                     Box::new(r.lines())
                 }

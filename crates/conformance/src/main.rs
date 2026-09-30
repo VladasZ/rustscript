@@ -40,6 +40,7 @@ fn main() {
     println!("{} says {}", project_name(), GREETING);
     println!("limit {LIMIT}");
     println!("shapes from the {} set", shapes::SHAPE_SET);
+    println!("measured in {}", crate::geometry::units::unit_name());
 
     let c = Circle::new(3);
     let r = Rect { w: 4, h: 5 };

@@ -47,6 +47,7 @@ regex = "1.13"
 reqwest = { version = "0.13", features = [
     "blocking",
     "cookies",
+    "form",
     "json",
     "query",
     "rustls",

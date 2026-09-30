@@ -126,7 +126,7 @@ The `supported_page_is_current` test enforces it.
 
 ## native handles (files, sockets, readers, processes)
 
-`accept`, `by_ref`, `close`, `collect`, `connect`, `duration_since`, `elapsed`, `flush`, `id`, `incoming`, `inner`, `ip`, `is_cancelled`, `is_ipv4`, `is_ipv6`, `is_loopback`, `is_multicast`, `is_panic`, `is_terminal`, `is_unspecified`, `kill`, `kind`, `lines`, `local_addr`, `lock`, `metadata`, `next`, `pad`, `path`, `peer_addr`, `port`, `raw_os_error`, `read`, `read_exact`, `read_line`, `read_to_end`, `read_to_string`, `read_until`, `recv`, `recv_from`, `seek`, `send`, `send_to`, `set_broadcast`, `set_len`, `set_modified`, `shutdown`, `stderr`, `stdin`, `sync_all`, `sync_data`, `try_clone`, `try_wait`, `wait`, `wait_with_output`, `write`, `write_all`, `write_fmt`, `write_str`
+`accept`, `by_ref`, `close`, `collect`, `connect`, `duration_since`, `elapsed`, `flush`, `id`, `incoming`, `inner`, `into_inner`, `ip`, `is_cancelled`, `is_ipv4`, `is_ipv6`, `is_loopback`, `is_multicast`, `is_panic`, `is_terminal`, `is_unspecified`, `kill`, `kind`, `lines`, `local_addr`, `lock`, `metadata`, `next`, `pad`, `path`, `peer_addr`, `port`, `raw_os_error`, `read`, `read_exact`, `read_line`, `read_to_end`, `read_to_string`, `read_until`, `recv`, `recv_from`, `seek`, `send`, `send_to`, `set_broadcast`, `set_len`, `set_modified`, `shutdown`, `stderr`, `stdin`, `sync_all`, `sync_data`, `try_clone`, `try_wait`, `wait`, `wait_with_output`, `write`, `write_all`, `write_fmt`, `write_str`
 
 ## OpenOptions
 
@@ -162,11 +162,11 @@ The `supported_page_is_current` test enforces it.
 
 ## Request
 
-`basic_auth`, `bearer_auth`, `body`, `client`, `header`, `json`, `query`, `send`, `timeout`
+`basic_auth`, `bearer_auth`, `body`, `client`, `form`, `header`, `json`, `query`, `send`, `timeout`
 
 ## Response
 
-`body`, `code`, `content_length`, `error_for_status`, `headers`, `json`, `map`, `status`, `text`
+`body`, `bytes`, `code`, `content_length`, `error_for_status`, `headers`, `json`, `map`, `status`, `text`
 
 ## Result
 
@@ -230,7 +230,7 @@ The `supported_page_is_current` test enforces it.
 
 ## Vec
 
-`all`, `any`, `append`, `as_array`, `as_array_mut`, `as_object`, `as_object_mut`, `as_slice`, `back`, `back_mut`, `binary_search`, `by_ref`, `chunks`, `clear`, `clone`, `cloned`, `collect`, `collect_btree_map`, `collect_btree_set`, `collect_map`, `collect_option`, `collect_result`, `collect_set`, `collect_string`, `concat`, `contains`, `copied`, `copy_from_slice`, `count`, `dedup`, `enumerate`, `extend`, `extend_from_slice`, `filter`, `filter_map`, `find`, `find_map`, `first`, `first_mut`, `flat_map`, `flatten`, `fold`, `for_each`, `front`, `front_mut`, `get`, `get_mut`, `insert`, `into_iter`, `is_empty`, `iter`, `iter_mut`, `join`, `last`, `last_mut`, `len`, `make_contiguous`, `map`, `max`, `max_by_key`, `min`, `min_by_key`, `next`, `next_back`, `nth`, `partition`, `peekable`, `pop`, `pop_back`, `pop_front`, `position`, `product`, `push`, `push_back`, `push_front`, `reduce`, `remove`, `repeat`, `retain`, `rev`, `reverse`, `skip`, `skip_while`, `sort`, `sort_by`, `sort_by_cached_key`, `sort_by_key`, `sort_unstable`, `split_first`, `sum`, `swap`, `swap_remove`, `take`, `take_while`, `to_vec`, `truncate`, `windows`
+`all`, `any`, `append`, `as_array`, `as_array_mut`, `as_object`, `as_object_mut`, `as_slice`, `back`, `back_mut`, `binary_search`, `by_ref`, `chunks`, `clear`, `clone`, `cloned`, `collect`, `collect_btree_map`, `collect_btree_set`, `collect_map`, `collect_option`, `collect_result`, `collect_set`, `collect_string`, `concat`, `contains`, `copied`, `copy_from_slice`, `count`, `dedup`, `ends_with`, `enumerate`, `extend`, `extend_from_slice`, `filter`, `filter_map`, `find`, `find_map`, `first`, `first_mut`, `flat_map`, `flatten`, `fold`, `for_each`, `front`, `front_mut`, `get`, `get_mut`, `insert`, `into_iter`, `is_empty`, `iter`, `iter_mut`, `join`, `last`, `last_mut`, `len`, `make_contiguous`, `map`, `max`, `max_by_key`, `min`, `min_by_key`, `next`, `next_back`, `nth`, `partition`, `peekable`, `pop`, `pop_back`, `pop_front`, `position`, `product`, `push`, `push_back`, `push_front`, `reduce`, `remove`, `repeat`, `retain`, `rev`, `reverse`, `skip`, `skip_while`, `sort`, `sort_by`, `sort_by_cached_key`, `sort_by_key`, `sort_unstable`, `split_first`, `starts_with`, `sum`, `swap`, `swap_remove`, `take`, `take_while`, `to_vec`, `truncate`, `windows`
 
 ## VerifyingKey
 

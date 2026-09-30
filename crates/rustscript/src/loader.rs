@@ -49,6 +49,7 @@ pub fn load(script_path: &Path, root_source: &str, label: &str) -> Result<Progra
         &mut files,
         &dir,
         &dir,
+        &dir,
         Vec::new(),
         Arc::from(label),
         ast.items,
@@ -130,11 +131,16 @@ fn item_attrs(item: &Item) -> &[syn::Attribute] {
 const MAX_MODULE_DEPTH: usize = 64;
 
 /// Returns this module without its `mod` items. Children are appended depth first.
+///
+/// `path_base` is where a `#[path]` resolves. At the top of a file that is the file's own dir, in
+/// an inline `mod` block it is `children_dir`, as in the Rust reference.
+#[allow(clippy::too_many_arguments)]
 fn collect(
     modules: &mut Vec<ModuleSrc>,
     files: &mut Vec<(PathBuf, String)>,
     script_dir: &Path,
     children_dir: &Path,
+    path_base: &Path,
     path: Vec<String>,
     file: Arc<str>,
     items: Vec<Item>,
@@ -172,22 +178,28 @@ fn collect(
         // So a bin can keep its modules in a subdirectory and cargo doesn't treat each one as a binary.
         let path_attr = mod_path_attr(&m);
         let child_dir;
+        let child_base;
         let (child_items, child_file) = match m.content {
             Some((_, inline_items)) => {
                 child_dir = children_dir.join(&name);
+                child_base = child_dir.clone();
                 (inline_items, file.clone())
             }
             None => {
                 if let Some(rel) = &path_attr {
-                    let target = children_dir.join(rel);
+                    let target = path_base.join(rel);
                     let loaded = load_file_at(files, script_dir, &target, &child_path)?;
                     child_dir = target
                         .parent()
-                        .map_or_else(|| children_dir.to_path_buf(), Path::to_path_buf);
+                        .map_or_else(|| path_base.to_path_buf(), Path::to_path_buf);
+                    child_base = child_dir.clone();
                     loaded
                 } else {
                     child_dir = children_dir.join(&name);
-                    load_file(files, script_dir, children_dir, &name, &child_path)?
+                    let (loaded, file_dir) =
+                        load_file(files, script_dir, children_dir, &name, &child_path)?;
+                    child_base = file_dir;
+                    loaded
                 }
             }
         };
@@ -196,6 +208,7 @@ fn collect(
             files,
             script_dir,
             &child_dir,
+            &child_base,
             child_path,
             child_file,
             child_items,
@@ -226,14 +239,17 @@ fn mod_path_attr(m: &syn::ItemMod) -> Option<String> {
     None
 }
 
-/// `name.rs` first, then `name/mod.rs`.
+/// A module file's items and its display name.
+type Loaded = (Vec<Item>, Arc<str>);
+
+/// `name.rs` first, then `name/mod.rs`. Also returns the dir the file sits in.
 fn load_file(
     files: &mut Vec<(PathBuf, String)>,
     script_dir: &Path,
     children_dir: &Path,
     name: &str,
     child_path: &[String],
-) -> Result<(Vec<Item>, Arc<str>)> {
+) -> Result<(Loaded, PathBuf)> {
     let flat = children_dir.join(format!("{name}.rs"));
     let nested = children_dir.join(name).join("mod.rs");
     let file = match (flat.is_file(), nested.is_file()) {
@@ -252,7 +268,13 @@ fn load_file(
             nested.display()
         ),
     };
-    load_file_at(files, script_dir, &file, child_path)
+    let file_dir = file
+        .parent()
+        .map_or_else(|| children_dir.to_path_buf(), Path::to_path_buf);
+    Ok((
+        load_file_at(files, script_dir, &file, child_path)?,
+        file_dir,
+    ))
 }
 
 fn load_file_at(
@@ -311,6 +333,7 @@ fn graft_crate_deps(
         let mut root = collect(
             modules,
             &mut crate_files,
+            &src_dir,
             &src_dir,
             &src_dir,
             vec![module_name],

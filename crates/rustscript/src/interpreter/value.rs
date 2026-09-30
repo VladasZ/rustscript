@@ -645,6 +645,14 @@ impl Value {
                 Native::IpAddr(a) => a.to_string(),
                 other => format!("<{}>", other.type_name()),
             },
+            // `{}` of a status is `200 OK`, the code with its reason
+            Value::Struct(s) if &**s.name() == "StatusCode" => match s.get("code") {
+                Some(Value::Int(code)) => u16::try_from(code)
+                    .ok()
+                    .and_then(|c| reqwest::StatusCode::from_u16(c).ok())
+                    .map_or_else(|| code.to_string(), |c| c.to_string()),
+                _ => self.debug(),
+            },
             // `VarError` implements `Display`, scripts print it with `{e}`
             Value::Enum { def, variant, data } if def.kind == EnumKind::VarError => {
                 if *variant == NOT_UNICODE {
