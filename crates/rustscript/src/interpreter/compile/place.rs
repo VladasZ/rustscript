@@ -357,10 +357,9 @@ impl Compiler<'_> {
         let returns_ref = |sig: &syn::Signature| matches!(&sig.output, syn::ReturnType::Type(_, ty) if matches!(&**ty, syn::Type::Reference(_)));
         match unparen(expr) {
             Expr::Call(call) => match &*call.func {
-                Expr::Path(path) => path
-                    .path
-                    .get_ident()
-                    .and_then(|name| self.ctx.fn_signatures.get(&name.to_string()))
+                Expr::Path(path) => self
+                    .script_fn(&path.path)
+                    .and_then(|func| self.fn_signature(func))
                     .is_some_and(returns_ref),
                 _ => false,
             },

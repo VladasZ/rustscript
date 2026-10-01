@@ -26,10 +26,10 @@ pub struct Ctx<'r> {
     /// lets `.await`, `tokio::spawn` and `join!` compile
     pub async_mode: bool,
     pub impl_type: Option<&'r str>,
-    /// every script function by name, for the inference pass. A name defined twice is absent.
-    pub fn_signatures: &'r HashMap<String, syn::Signature>,
+    /// every script function by the index a resolved path carries, for the inference pass
+    pub fn_signatures: &'r [syn::Signature],
     /// functions that return one of their `&mut` parameters whole, see `collect_mut_arg_returns`
-    pub mut_arg_returns: &'r HashMap<String, usize>,
+    pub mut_arg_returns: &'r HashMap<u32, usize>,
     /// `&mut self` method names. A call compiles its receiver as a place split from sharing.
     pub mut_methods: &'r HashSet<String>,
     /// Includes impls on bridge types like `impl From<Point> for String`, a path call on one is a
@@ -385,14 +385,27 @@ impl<'a> Compiler<'a> {
         let Expr::Path(path) = &*call.func else {
             return false;
         };
-        let Some(name) = path.path.get_ident().map(ToString::to_string) else {
+        let Some(func) = self.script_fn(&path.path) else {
             return false;
         };
-        !self.ctx.mut_arg_returns.contains_key(&name)
-            && self.ctx.fn_signatures.get(&name).is_some_and(|sig| {
+        !self.ctx.mut_arg_returns.contains_key(&func)
+            && self.fn_signature(func).is_some_and(|sig| {
                 matches!(&sig.output, syn::ReturnType::Type(_, ty)
                     if matches!(&**ty, syn::Type::Reference(r) if r.mutability.is_some()))
             })
+    }
+
+    /// The script function a bare name calls, from the module the call sits in.
+    pub(super) fn script_fn(&self, path: &syn::Path) -> Option<u32> {
+        let name = path.get_ident()?.to_string();
+        match self.resolve_path_res(&[name]) {
+            Ok(Res::Fn(func)) => Some(func),
+            _ => None,
+        }
+    }
+
+    pub(super) fn fn_signature(&self, func: u32) -> Option<&syn::Signature> {
+        self.ctx.fn_signatures.get(func as usize)
     }
 
     /// Whether the call writes its receiver. `rotate_left` mutates a slice but returns a value

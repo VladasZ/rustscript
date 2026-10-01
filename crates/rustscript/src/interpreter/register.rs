@@ -97,35 +97,26 @@ pub(super) fn register_items(
 }
 
 /// So a call to a generic helper can read the type its arguments give to a type parameter.
+/// The index is the one a resolved path carries, two modules can define the same name.
 pub(super) fn collect_fn_signatures(
     pending_fns: &[(usize, Rc<syn::ItemFn>)],
-) -> HashMap<String, syn::Signature> {
-    let mut seen: HashMap<String, Option<syn::Signature>> = HashMap::default();
-    for (_, f) in pending_fns {
-        seen.entry(f.sig.ident.to_string())
-            .and_modify(|known| *known = None)
-            .or_insert_with(|| Some(f.sig.clone()));
-    }
-    seen.into_iter()
-        .filter_map(|(name, sig)| sig.map(|sig| (name, sig)))
-        .collect()
+) -> Vec<syn::Signature> {
+    pending_fns.iter().map(|(_, f)| f.sig.clone()).collect()
 }
 /// The functions that hand back one of their `&mut` parameters whole, like
-/// `fn pick(n: &mut usize) -> &mut usize { n }`, by name with the index of that parameter. A
-/// `&mut` argument is a copy the call hands back, so a write through the result must land in
-/// the caller's place. A name defined twice is absent.
+/// `fn pick(n: &mut usize) -> &mut usize { n }`, by function index with the index of that
+/// parameter. A `&mut` argument is a copy the call hands back, so a write through the result
+/// must land in the caller's place.
 pub(super) fn collect_mut_arg_returns(
     pending_fns: &[(usize, Rc<syn::ItemFn>)],
-) -> HashMap<String, usize> {
-    let mut seen: HashMap<String, Option<usize>> = HashMap::default();
-    for (_, f) in pending_fns {
-        let index = returned_mut_param(f);
-        seen.entry(f.sig.ident.to_string())
-            .and_modify(|known| *known = None)
-            .or_insert(index);
-    }
-    seen.into_iter()
-        .filter_map(|(name, index)| index.map(|index| (name, index)))
+) -> HashMap<u32, usize> {
+    pending_fns
+        .iter()
+        .enumerate()
+        .filter_map(|(func, (_, f))| {
+            let func = u32::try_from(func).expect("table fits u32");
+            returned_mut_param(f).map(|index| (func, index))
+        })
         .collect()
 }
 

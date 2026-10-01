@@ -64,7 +64,7 @@ impl Compiler<'_> {
             return None;
         };
         let name = path.path.get_ident()?.to_string();
-        let index = *self.ctx.mut_arg_returns.get(&name)?;
+        let index = *self.ctx.mut_arg_returns.get(&self.script_fn(&path.path)?)?;
         // a local closure of the same name is not the function
         if !matches!(self.resolve(&name), NameLoc::None) {
             return None;
