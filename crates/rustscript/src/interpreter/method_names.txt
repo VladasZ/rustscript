@@ -266,7 +266,9 @@ is_array
 is_ascii
 is_ascii_alphabetic
 is_ascii_alphanumeric
+is_ascii_control
 is_ascii_digit
+is_ascii_graphic
 is_ascii_hexdigit
 is_ascii_lowercase
 is_ascii_punctuation

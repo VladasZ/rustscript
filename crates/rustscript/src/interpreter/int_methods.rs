@@ -559,6 +559,7 @@ fn int_query_method(
 ) -> Option<Result<IntOut>> {
     if let Some(out) = int_range_family(name, width, recv, args)
         .or_else(|| int_bit_family(name, width, recv, args))
+        .or_else(|| ascii::int_ascii_family(name, recv, args))
     {
         return Some(out);
     }
@@ -683,6 +684,7 @@ fn swap_bytes(width: IntWidth, value: i128) -> u128 {
     out
 }
 
+mod ascii;
 mod big;
 
 pub use big::big_int_method;
