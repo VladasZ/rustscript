@@ -44,6 +44,8 @@ pub(crate) fn char_method(ch: char, name: BuiltinId, args: &impl Args) -> Option
         BuiltinId::IsAsciiWhitespace => b(ch.is_ascii_whitespace()),
         BuiltinId::IsAsciiPunctuation => b(ch.is_ascii_punctuation()),
         BuiltinId::IsAsciiHexdigit => b(ch.is_ascii_hexdigit()),
+        BuiltinId::IsAsciiControl => b(ch.is_ascii_control()),
+        BuiltinId::IsAsciiGraphic => b(ch.is_ascii_graphic()),
         BuiltinId::IsAscii => b(ch.is_ascii()),
         BuiltinId::IsControl => b(ch.is_control()),
         BuiltinId::EqIgnoreAsciiCase => b(args

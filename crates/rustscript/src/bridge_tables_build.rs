@@ -44,6 +44,7 @@ pub const BRIDGES: &[Bridge] = &[
     b("int_methods.rs", "int_bit_family", "*"),
     b("int_methods.rs", "int_query_method", "*"),
     b("int_methods/big.rs", "big_int_method", "*"),
+    b("int_methods/ascii.rs", "int_ascii_family", "*"),
     // value methods
     b("methods.rs", "json_value_method", "*"),
     b("methods.rs", "str_method", "Str"),

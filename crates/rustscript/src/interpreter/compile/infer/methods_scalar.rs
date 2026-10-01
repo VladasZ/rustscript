@@ -80,6 +80,22 @@ impl Infer<'_, '_> {
                 }
                 Ty::Bool
             }
+            "is_ascii"
+            | "is_ascii_alphabetic"
+            | "is_ascii_alphanumeric"
+            | "is_ascii_control"
+            | "is_ascii_digit"
+            | "is_ascii_graphic"
+            | "is_ascii_hexdigit"
+            | "is_ascii_lowercase"
+            | "is_ascii_punctuation"
+            | "is_ascii_uppercase"
+            | "is_ascii_whitespace"
+            | "eq_ignore_ascii_case" => {
+                self.walk_all(args);
+                Ty::Bool
+            }
+            "to_ascii_uppercase" | "to_ascii_lowercase" => recv.clone(),
             "to_be_bytes" | "to_le_bytes" | "to_ne_bytes" => Ty::vec(Ty::Int(IntWidth::U8)),
             "to_string" | "as_str" => Ty::Str,
             "sqrt" | "powf" | "powi" => Ty::F64,
@@ -153,6 +169,7 @@ impl Infer<'_, '_> {
             | "is_ascii_punctuation"
             | "is_ascii_whitespace"
             | "is_ascii_hexdigit"
+            | "is_ascii_control"
             | "is_digit"
             | "is_control"
             | "is_ascii_graphic"
