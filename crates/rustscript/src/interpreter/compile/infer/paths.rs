@@ -77,11 +77,7 @@ impl Infer<'_, '_> {
                     None => Ty::Unknown,
                 }
             }
-            Ok(Res::Fn(_)) => match self
-                .ctx
-                .fn_signatures
-                .get(segs.last().map_or("", String::as_str))
-            {
+            Ok(Res::Fn(func)) => match self.ctx.fn_signatures.get(func as usize) {
                 Some(sig) => self.fn_value(&sig.clone(), None),
                 None => Ty::Unknown,
             },
@@ -210,13 +206,10 @@ impl Infer<'_, '_> {
         }
         let segs = self.self_prefixed(segs);
         match self.ctx.resolver.resolve(self.ctx.module, &segs) {
-            Ok(Res::Fn(_)) => {
-                let name = segs.last().cloned().unwrap_or_default();
-                match self.ctx.fn_signatures.get(&name).cloned() {
-                    Some(sig) => self.sig_call(&sig, None, &args, expected),
-                    None => self.walk_args(&args),
-                }
-            }
+            Ok(Res::Fn(func)) => match self.ctx.fn_signatures.get(func as usize).cloned() {
+                Some(sig) => self.sig_call(&sig, None, &args, expected),
+                None => self.walk_args(&args),
+            },
             Ok(Res::Struct(canon)) => {
                 let fields = self.variant_fields(&path.path, &Ty::Struct(canon.clone()));
                 for (i, arg) in args.iter().enumerate() {
