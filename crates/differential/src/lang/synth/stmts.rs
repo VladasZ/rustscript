@@ -430,6 +430,7 @@ impl Generator<'_> {
             21 => self
                 .for_unordered_stmt()
                 .unwrap_or_else(|| self.observation()),
+            22 | 23 => self.ref_mut_stmt().unwrap_or_else(|| self.observation()),
             0 => self.assign_stmt(),
             1 => self.compound_stmt().unwrap_or_else(|| self.assign_stmt()),
             2 => self

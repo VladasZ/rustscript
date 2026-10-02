@@ -78,6 +78,26 @@ order real Rust randomizes, so the body only pushes one value per entry, a value
 neither panic nor print a drop, and the statement sorts the vec after the loop. An
 `iter_mut` loop writes each element with `*r = x`, `*r += x` or a method like `r.push(x)`.
 
+## Mutable references
+
+A `&mut` statement borrows one binding for its whole body, so nothing in it names that
+binding. The forms are in `MutPlace`. The borrow block `{ let r = &mut x; .. }`, `&mut s.f0`,
+`&mut v[i]`, `v.get_mut(i)`, `v.last_mut()`, `m.get_mut(&k)`,
+`m.entry(k).or_insert_with(|| d)`, `for r in m.values_mut()` and
+`if let Some(ref mut r) = opt`. The body clones the old value, writes through the reference
+like an `iter_mut` loop does, and prints through it. A `values_mut` loop runs in a random
+order, so its write sees its own entry alone, can neither panic nor print a drop, and prints
+nothing.
+
+## Closure parameters by reference
+
+`filter` and `retain` hand their closure a reference. `RefParam` picks how the closure names
+the item. A clone bound in the body, `|&x| ..` for a copy item, or `|x| ..` with the body
+reading `(*x)`.
+
+Inside a loop `v.extend(..)` never reads `v`. A vec that doubles in nested loops grows until
+the native run times out.
+
 ## Binding forms
 
 Patterns nest by type, `Some((a, 1u8..=5u8))`, and come with or patterns, `@`

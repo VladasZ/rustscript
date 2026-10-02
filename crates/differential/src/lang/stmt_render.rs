@@ -6,7 +6,7 @@ use crate::lang::expr::Expr;
 use crate::lang::fmt::FmtSpec;
 use crate::lang::ty::Ty;
 
-use super::stmt::{Ann, ClosureParam, ClosureSource, ForForm, PrintForm, Stmt};
+use super::stmt::{Ann, ClosureParam, ClosureSource, ForForm, MutPlace, PrintForm, Stmt};
 
 impl Stmt {
     pub fn render(&self, mutable: &BTreeSet<String>, indent: usize) -> String {
@@ -51,6 +51,7 @@ impl Stmt {
             Self::ForMut { .. } | Self::ForEach { .. } | Self::ForUnordered { .. } => {
                 self.render_borrowing_for(mutable, indent, &pad)
             }
+            Self::RefMut { .. } => self.render_ref_mut(&pad),
             Self::CallMut {
                 name,
                 fn_name,
@@ -129,6 +130,32 @@ impl Stmt {
             }
             _ => unreachable!("render_place_write handles the place writes only"),
         }
+    }
+
+    fn render_ref_mut(&self, pad: &str) -> String {
+        let Self::RefMut {
+            name,
+            base,
+            place,
+            var,
+            elem,
+            write,
+        } = self
+        else {
+            unreachable!("render_ref_mut handles the `&mut` statement only");
+        };
+        // an entry order is random, so only the binding printed after the loop shows it
+        let print = if matches!(place, MutPlace::ValuesMut) || !prints_stably(elem) {
+            String::new()
+        } else {
+            format!("{pad}    println!(\"{var}: {{:?}}\", diff_ref);\n")
+        };
+        format!(
+            "{pad}{}\n{pad}    let {var}: {} = diff_ref.clone();\n{pad}    {}\n{print}{pad}}}\n",
+            place.head(name, base),
+            elem.rust(),
+            write.render()
+        )
     }
 
     /// The `for` loops that borrow their source, shared or by `iter_mut`.
@@ -335,6 +362,18 @@ impl Stmt {
             }
         }
         candidates
+    }
+}
+
+/// Whether `{:?}` of the type is the same on every run. A map or a set prints in an order real
+/// Rust randomizes, and a user type may hold one.
+fn prints_stably(ty: &Ty) -> bool {
+    match ty {
+        Ty::Map(..) | Ty::Set(_) | Ty::User(_) => false,
+        Ty::Vec(inner) | Ty::Opt(inner) | Ty::Slice(inner) => prints_stably(inner),
+        Ty::Tuple(items) => items.iter().all(prints_stably),
+        Ty::Res(ok, err) => prints_stably(ok) && prints_stably(err),
+        _ => true,
     }
 }
 

@@ -14,6 +14,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::lang::expr::{Expr, Helper};
+use crate::lang::ref_param::RefParam;
 use crate::lang::ty::Ty;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -48,6 +49,13 @@ impl Item {
         match self {
             Self::Scalar(ty) => ty.contains_trace(),
             Self::Pair(key, value) => key.contains_trace() || value.contains_trace(),
+        }
+    }
+
+    pub fn is_copy(&self) -> bool {
+        match self {
+            Self::Scalar(ty) => ty.is_copy(),
+            Self::Pair(key, value) => key.is_copy() && value.is_copy(),
         }
     }
 }
@@ -168,11 +176,14 @@ pub enum Stage {
         bind: Bind,
         body: Expr,
     },
-    /// `.filter(|r| { let item = r.clone(); pred })`, type preserving
+    /// `.filter(|r| { let item = r.clone(); pred })`, type preserving. `by` picks how the
+    /// closure names the item it is handed by reference.
     Filter {
         bind: Bind,
         pred: Expr,
         ann: ParamAnn,
+        #[serde(default)]
+        by: RefParam,
     },
     /// order sensitive, ordered pipelines only
     Rev,
@@ -258,15 +269,17 @@ impl Stage {
                     body.render()
                 )
             }
-            Self::Filter { bind, pred, ann } => {
-                let own = match ann {
-                    ParamAnn::Typed => format!(": {}", item.rust()),
-                    ParamAnn::Inferred => String::new(),
-                };
+            Self::Filter {
+                bind,
+                pred,
+                ann,
+                by,
+            } => {
+                let ty = item.rust();
+                let stated = matches!(ann, ParamAnn::Typed).then_some(ty.as_str());
                 format!(
-                    ".filter(|diff_ref| {{ let {}{own} = diff_ref.clone(); {} }})",
-                    bind.pattern(),
-                    pred.render()
+                    ".filter({})",
+                    by.closure(&bind.pattern(), stated, &pred.render())
                 )
             }
             Self::Rev => ".rev()".to_string(),
@@ -704,6 +717,11 @@ impl Pipe {
                 Stage::Enumerate => "lang-pipe-enumerate",
                 Stage::Sorted => "lang-pipe-sorted",
             });
+        }
+        for stage in &self.stages {
+            if let Stage::Filter { by, .. } = stage {
+                out.extend(by.feature());
+            }
         }
         for expr in self.exprs() {
             expr.features(out);

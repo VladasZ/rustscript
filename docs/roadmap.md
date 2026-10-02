@@ -19,22 +19,10 @@ Differential workflow.
 
 The differential generator is being brought closer to real Rust in phases,
 so it reaches the semantics the interpreter models by hand and the idioms the
-scripts in `thing` write. The ownership core and the drop tracer are done,
-see `docs/differential.md`. Each phase below ends the same way. New names in
+scripts in `thing` write. The ownership core, the drop tracer and the
+references of phase 1 are done, see `docs/differential.md`. Each phase below ends the same way. New names in
 `EXPECTED_FEATURES`, the compile guard green, a local campaign, and every
 finding fixed in the interpreter with a promoted regression.
-
-### Phase 1, references
-
-The binding forms, `&str`, `&[T]` and the shared `for` loops are done, see
-`docs/differential.md`. What is left.
-
-- `&mut` through `get_mut`, `last_mut`, `entry().or_insert_with`,
-  `values_mut`, `&mut s.f0`, `&mut v[i]`, and a borrow block
-  `{ let r = &mut x; ... }` that freezes `x`. A `ref mut` binding belongs
-  here too.
-- Closure params by reference with `|&b|` and `|b| *b != 0`. This is the
-  `filter` over `Vec<u8>` bug class from `flaws.md`.
 
 ### Phase 2, strings, formatting and iterators as scripts write them
 
