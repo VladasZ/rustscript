@@ -108,6 +108,14 @@ fn builtin_fast(
         BuiltinId::Replace if argc == 1 && is_option(ctx, recv) => {
             Some(option_replace(ctx, recv, s))
         }
+        // through a `&mut Option<T>`, the item of an `iter_mut` or a `&mut` parameter
+        BuiltinId::Take if argc == 0 && is_option_ref(ctx, recv) => {
+            option_ref_swap(ctx, recv, Value::none())
+        }
+        BuiltinId::Replace if argc == 1 && is_option_ref(ctx, recv) => {
+            let new = Value::some(ctx.stack[s].clone());
+            option_ref_swap(ctx, recv, new)
+        }
         BuiltinId::MakeAsciiUppercase => ascii_case(ctx, recv, true),
         BuiltinId::MakeAsciiLowercase => ascii_case(ctx, recv, false),
         BuiltinId::Push | BuiltinId::PushStr
@@ -149,6 +157,26 @@ fn builtin_fast(
 
 fn is_option(ctx: &StepCtx, recv: usize) -> bool {
     ctx.stack[ctx.base + recv].is_enum_kind(EnumKind::Option)
+}
+
+fn is_option_ref(ctx: &StepCtx, recv: usize) -> bool {
+    match &ctx.stack[ctx.base + recv] {
+        Value::Ref(target) => {
+            target.writable()
+                && target
+                    .get()
+                    .is_some_and(|value| value.is_enum_kind(EnumKind::Option))
+        }
+        _ => false,
+    }
+}
+
+/// Stores `new` behind the reference and hands the old option out.
+fn option_ref_swap(ctx: &StepCtx, recv: usize, new: Value) -> Option<Value> {
+    match &ctx.stack[ctx.base + recv] {
+        Value::Ref(target) => target.swap(new),
+        _ => None,
+    }
 }
 
 fn clone_from(ctx: &mut StepCtx, recv: usize, s: usize) -> Value {

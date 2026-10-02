@@ -3,6 +3,7 @@
 
 use rand::RngExt;
 
+use crate::lang::catalog::{opt_str_pair, opt_str_ref};
 use crate::lang::expr::Expr;
 use crate::lang::own::BindKind;
 use crate::lang::pat::{BindBy, Pat};
@@ -46,6 +47,7 @@ impl Generator<'_> {
             Ty::Int(width) => self.int_pat(*width),
             Ty::Bool => Pat::BoolLit(self.chance(0.5)),
             Ty::Char => self.char_pat(),
+            Ty::StrRef => Pat::StrLit(self.string_value()),
             Ty::Opt(inner) => {
                 if self.chance(0.7) {
                     Pat::Some(Box::new(self.sub_pat(inner, depth - 1, by_ref)))
@@ -249,7 +251,10 @@ impl Generator<'_> {
 
     /// A scrutinee type a refutable pattern exists for.
     pub(super) fn refutable_ty(&mut self) -> Ty {
-        match self.rng.random_range(0..8) {
+        match self.rng.random_range(0..10) {
+            // `if let Some(rest) = s.strip_prefix("a")`
+            8 => opt_str_ref(),
+            9 => opt_str_pair(),
             0..=2 => Ty::opt_of(self.elem_ty()),
             3 => self.res_ty(),
             4 => match self.user_ty() {

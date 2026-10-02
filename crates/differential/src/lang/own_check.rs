@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use crate::lang::block::{Block, FnKind};
 use crate::lang::expr::{Expr, MemKind, ReadMode};
-use crate::lang::own::{BindKind, Scope, referenced};
+use crate::lang::own::{BindKind, RefRules, Scope, referenced};
 use crate::lang::pat::Pat;
 use crate::lang::pipe::{Bind, Item, Pipe, Source, Stage, Term};
 use crate::lang::stmt::{ClosureSource, MutOp, Stmt};
@@ -62,28 +62,12 @@ pub fn check_block(block: &Block) -> Result<(), String> {
     }
 }
 
+#[derive(Default)]
 pub(super) struct Checker {
     pub(super) scope: Scope,
     /// the first rule broken
     fault: Option<String>,
-    /// The reference being checked is kept by a `let`, so the binding it borrows is held to
-    /// the end of the scope and no temporary may stand behind it.
-    pub(super) bound: bool,
-    /// A temporary may be borrowed, the reference is used up before the temporary ends. It
-    /// is not once the reference leaves a closure body, a match arm, an `if` branch or a
-    /// block, each ends its own temporaries.
-    temps_ok: bool,
-}
-
-impl Default for Checker {
-    fn default() -> Self {
-        Self {
-            scope: Scope::default(),
-            fault: None,
-            bound: false,
-            temps_ok: true,
-        }
-    }
+    pub(super) refs: RefRules,
 }
 
 impl Checker {
@@ -163,49 +147,53 @@ impl Checker {
     /// A reference an expression takes lives until its statement ends.
     fn stmt(&mut self, stmt: &Stmt) {
         let mark = self.scope.stmt_mark();
-        let saved = (self.bound, self.temps_ok);
-        (self.bound, self.temps_ok) = (false, true);
+        let saved = std::mem::take(&mut self.refs);
         self.stmt_inner(stmt);
-        (self.bound, self.temps_ok) = saved;
+        self.refs = saved;
         self.scope.stmt_release(mark);
     }
 
     /// An expression whose value a `let` keeps. With a reference in its type it runs bound,
-    /// see `Checker::bound`.
+    /// see `RefRules::bound`.
     pub(super) fn kept_expr(&mut self, expr: &Expr, ty: &Ty) {
         if !ty.contains_ref() {
             self.expr(expr);
             return;
         }
-        let saved = (self.bound, self.temps_ok);
-        (self.bound, self.temps_ok) = (true, false);
+        let saved = std::mem::replace(&mut self.refs, RefRules::kept(self.scope.depth()));
         self.expr(expr);
-        (self.bound, self.temps_ok) = saved;
+        self.refs = saved;
     }
 
-    /// The value leaves a scope that ends its own temporaries.
-    fn crossing(&mut self, build: impl FnOnce(&mut Self)) {
-        let saved = std::mem::replace(&mut self.temps_ok, false);
+    /// The right side of an assignment. Its value holds no reference, so every borrow it took
+    /// is over when the write happens, `v = v.as_slice().to_vec()`.
+    fn value_expr(&mut self, expr: &Expr) {
+        let mark = self.scope.stmt_mark();
+        self.expr(expr);
+        self.scope.stmt_release(mark);
+    }
+
+    /// The value leaves a scope that ends its own temporaries. `depth` is the scope depth
+    /// around that scope.
+    fn crossing(&mut self, depth: usize, build: impl FnOnce(&mut Self)) {
+        let saved = self.refs;
+        self.refs = saved.leaving(depth);
         build(self);
-        self.temps_ok = saved;
+        self.refs = saved;
     }
 
     /// A reference out of `base`, see `Expr::Borrow`.
     fn borrow(&mut self, base: &Expr) {
         match base {
             Expr::Var { name, ty, .. } if !ty.contains_ref() => {
-                self.require(self.scope.can_borrow(name), || {
+                self.require(self.scope.can_borrow(name, self.refs.floor), || {
                     format!("borrow of `{name}`")
                 });
-                if self.bound {
-                    self.scope.pin(name);
-                } else {
-                    self.scope.borrow_for_stmt(name);
-                }
+                self.scope.lend(name, self.refs);
             }
             other => {
                 let lends = other.ty().contains_ref();
-                self.require(lends || self.temps_ok, || {
+                self.require(lends || self.refs.temps_ok(), || {
                     "a reference outlives the temporary it borrows".to_string()
                 });
                 self.expr(other);
@@ -251,39 +239,10 @@ impl Checker {
                 self.mut_op(name, op);
                 self.scope.unfreeze();
             }
-            Stmt::ForAccum {
-                var,
-                source,
-                target,
-                op,
-            } => {
-                self.require(self.scope.can_write(target), || {
-                    format!("accumulate into `{target}`")
-                });
-                self.scope.freeze(target);
-                self.expr(source);
-                let elem = match source.ty() {
-                    Ty::Vec(elem) => *elem,
-                    other => other,
-                };
-                self.loop_with(var, &elem, |inner| inner.mut_op(target, op));
-                self.scope.unfreeze();
-            }
-            Stmt::ForMut {
-                name,
-                var,
-                elem,
-                expr,
-            } => {
-                self.require(self.scope.can_write(name), || {
-                    format!("iter_mut over `{name}`")
-                });
-                let hidden = self.scope.hide(name);
-                self.loop_with(var, elem, |inner| inner.expr(expr));
-                if let Some(hidden) = hidden {
-                    self.scope.unhide(hidden);
-                }
-            }
+            Stmt::ForAccum { .. }
+            | Stmt::ForMut { .. }
+            | Stmt::ForEach { .. }
+            | Stmt::ForUnordered { .. } => self.loop_form(stmt),
             Stmt::CallMut { name, args, .. } => {
                 self.require(self.scope.can_write(name), || format!("&mut of `{name}`"));
                 let hidden = self.scope.hide(name);
@@ -323,7 +282,7 @@ impl Checker {
                 }
             }
             Stmt::LetTuple { names, expr, .. } => {
-                self.expr(expr);
+                self.kept_expr(expr, &expr.ty());
                 for (name, ty) in names {
                     self.push_let(name, ty);
                 }
@@ -342,7 +301,7 @@ impl Checker {
                 }
             }
             Stmt::Assign { name, expr } => {
-                self.expr(expr);
+                self.value_expr(expr);
                 self.require(self.scope.can_assign(name), || {
                     format!("assign to `{name}`")
                 });
@@ -351,7 +310,7 @@ impl Checker {
             Stmt::AssignField {
                 name, index, expr, ..
             } => {
-                self.expr(expr);
+                self.value_expr(expr);
                 self.require(self.scope.can_assign_field(name, *index), || {
                     format!("assign to field {index} of `{name}`")
                 });
@@ -369,20 +328,8 @@ impl Checker {
         }
     }
 
-    /// A loop over items bound to `var`, see `loop_body`.
-    fn loop_with(&mut self, var: &str, elem: &Ty, build: impl FnOnce(&mut Self)) {
-        let before = self.scope.snapshot();
-        self.scope.enter_loop();
-        let mark = self.scope.enter_scope();
-        self.push_local(var, elem);
-        build(self);
-        self.scope.exit_scope(mark);
-        self.scope.leave_loop();
-        self.scope.restore(&before);
-    }
-
     /// `target` is the binding the op writes, the retain binding takes its element type.
-    fn mut_op(&mut self, target: &str, op: &MutOp) {
+    pub(super) fn mut_op(&mut self, target: &str, op: &MutOp) {
         if let MutOp::VecRetain { bind, pred } = op {
             let elem = match self.scope.slot(target).map(|slot| slot.ty.clone()) {
                 Some(Ty::Vec(elem)) => *elem,
@@ -430,6 +377,7 @@ impl Checker {
                     });
                 }
                 self.scope.enter_closure();
+                let mark_depth = self.scope.depth();
                 let mark = self.scope.enter_scope();
                 // the closure owns its captures, so inside they are fresh locals
                 for (used, ty) in &captured {
@@ -440,7 +388,7 @@ impl Checker {
                         self.push_local(&local, &ty);
                     }
                 }
-                self.crossing(|inner| inner.expr(body));
+                self.crossing(mark_depth, |inner| inner.expr(body));
                 self.scope.exit_scope(mark);
                 self.scope.leave_closure();
                 for (used, _) in &captured {
@@ -507,12 +455,10 @@ impl Checker {
     /// A value with no reference in its type uses up every reference below it, so the rules
     /// for a kept or a leaving reference end there.
     pub(super) fn expr(&mut self, expr: &Expr) {
-        let strict = self.bound || !self.temps_ok;
-        if strict && !expr.ty().contains_ref() {
-            let saved = (self.bound, self.temps_ok);
-            (self.bound, self.temps_ok) = (false, true);
+        if self.refs.is_strict() && !expr.ty().contains_ref() {
+            let saved = std::mem::take(&mut self.refs);
             self.expr_inner(expr);
-            (self.bound, self.temps_ok) = saved;
+            self.refs = saved;
         } else {
             self.expr_inner(expr);
         }
@@ -574,13 +520,14 @@ impl Checker {
                 scrutinee, arms, ..
             } => {
                 self.expr(scrutinee);
+                let depth = self.scope.depth();
                 self.branches(arms.len(), |inner, index| {
                     let arm = &arms[index];
                     inner.push_matched(&arm.pat, scrutinee);
                     if let Some(guard) = &arm.guard {
                         inner.guard(scrutinee, guard);
                     }
-                    inner.crossing(|inner| inner.expr(&arm.body));
+                    inner.crossing(depth, |inner| inner.expr(&arm.body));
                 });
             }
             Expr::If {
@@ -590,9 +537,10 @@ impl Checker {
                 ..
             } => {
                 self.expr(condition);
+                let depth = self.scope.depth();
                 self.branches(2, |inner, index| {
                     let side = if index == 0 { then_expr } else { else_expr };
-                    inner.crossing(|inner| inner.expr(side));
+                    inner.crossing(depth, |inner| inner.expr(side));
                 });
             }
             Expr::Matches {
@@ -601,9 +549,10 @@ impl Checker {
                 guard,
             } => self.matches(scrutinee, pat, guard.as_deref()),
             Expr::Block { stmts, tail } => {
+                let depth = self.scope.depth();
                 let mark = self.scope.enter_scope();
                 self.stmts(stmts);
-                self.crossing(|inner| inner.expr(tail));
+                self.crossing(depth, |inner| inner.expr(tail));
                 self.scope.exit_scope(mark);
             }
             Expr::Pipe(pipe) => self.pipe(pipe),
@@ -726,10 +675,11 @@ impl Checker {
                     other => Item::Scalar(other),
                 };
                 self.scope.enter_closure();
+                let depth = self.scope.depth();
                 let mark = self.scope.enter_scope();
                 self.push_bind(acc, &acc_item);
                 self.push_bind(bind, &item);
-                self.crossing(|inner| inner.expr(body));
+                self.crossing(depth, |inner| inner.expr(body));
                 self.scope.exit_scope(mark);
                 self.scope.leave_closure();
             }
@@ -739,9 +689,10 @@ impl Checker {
 
     fn pipe_body(&mut self, bind: &Bind, item: &Item, body: &Expr) {
         self.scope.enter_closure();
+        let depth = self.scope.depth();
         let mark = self.scope.enter_scope();
         self.push_bind(bind, item);
-        self.crossing(|inner| inner.expr(body));
+        self.crossing(depth, |inner| inner.expr(body));
         self.scope.exit_scope(mark);
         self.scope.leave_closure();
     }

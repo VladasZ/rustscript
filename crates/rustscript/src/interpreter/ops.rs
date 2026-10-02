@@ -501,6 +501,49 @@ pub(super) fn range_bounds(
     Ok((usize::try_from(start)?, usize::try_from(end)?))
 }
 
+/// The bounds of `base[start..end]`, checked in the order std checks them, start past the
+/// end, end past the end, then an inverted range. An inclusive end past the end is named as
+/// written, an inverted one as the exclusive end.
+fn index_range(
+    len: usize,
+    start: i64,
+    end: i64,
+    inclusive: bool,
+    of_str: bool,
+) -> Result<(usize, usize)> {
+    if start < 0 {
+        bail!("negative slice start {start}");
+    }
+    let total = usize_i64(len);
+    let stop = if end == i64::MAX {
+        total
+    } else if inclusive {
+        end + 1
+    } else {
+        end
+    };
+    if start > total {
+        if of_str {
+            bail!("start byte index {start} is out of bounds for string of length {len}");
+        }
+        bail!("range start index {start} out of range for slice of length {len}");
+    }
+    if stop > total {
+        let shown = if inclusive { end } else { stop };
+        if of_str {
+            bail!("end byte index {shown} is out of bounds for string of length {len}");
+        }
+        bail!("range end index {shown} out of range for slice of length {len}");
+    }
+    if stop < start {
+        if of_str {
+            bail!("byte range starts at {start} but ends at {stop}");
+        }
+        bail!("slice index starts at {start} but ends at {stop}");
+    }
+    Ok((usize::try_from(start)?, usize::try_from(stop)?))
+}
+
 pub(super) fn char_boundary_error(s: &str, a: usize, b: usize) -> anyhow::Error {
     let (side, bad) = if s.is_char_boundary(a) {
         ("end", b)
@@ -522,23 +565,11 @@ fn slice_value(base: &Value, start: i64, end: i64, inclusive: bool) -> Result<Va
     match base {
         Value::Vec(items) => {
             let items = items.lock();
-            let (a, b) = range_bounds(items.len(), start, end, inclusive)?;
-            if b > items.len() {
-                bail!(
-                    "range end index {b} out of range for slice of length {}",
-                    items.len()
-                );
-            }
+            let (a, b) = index_range(items.len(), start, end, inclusive, false)?;
             Ok(Value::vec(items[a..b].to_vec()))
         }
         Value::Str(s) => {
-            let (a, b) = range_bounds(s.len(), start, end, inclusive)?;
-            if b > s.len() {
-                bail!(
-                    "end byte index {b} is out of bounds for string of length {}",
-                    s.len()
-                );
-            }
+            let (a, b) = index_range(s.len(), start, end, inclusive, true)?;
             match s.get(a..b) {
                 Some(sub) => Ok(Value::str(sub.to_string())),
                 None => Err(char_boundary_error(s, a, b)),
@@ -559,13 +590,7 @@ pub(super) fn splice_str(
     let Value::Str(new) = val else {
         bail!("cannot write {} back into a string slice", val.type_name());
     };
-    let (a, b) = range_bounds(s.len(), start, end, inclusive)?;
-    if b > s.len() {
-        bail!(
-            "end byte index {b} is out of bounds for string of length {}",
-            s.len()
-        );
-    }
+    let (a, b) = index_range(s.len(), start, end, inclusive, true)?;
     if s.get(a..b).is_none() {
         return Err(char_boundary_error(s, a, b));
     }

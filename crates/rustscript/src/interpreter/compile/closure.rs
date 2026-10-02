@@ -64,6 +64,65 @@ impl Compiler<'_> {
         Ok(())
     }
 
+    /// The arguments that forward a reference the caller holds into a parameter the callee
+    /// takes by value, `one(p)` into `fn one<T>(a: T)`. The callee owns that parameter and may
+    /// move it on, into its result, so the caller lends nothing and keeps its own handle.
+    pub(super) fn forwards_by_value(&mut self, func: u32, call: &syn::ExprCall) -> Vec<bool> {
+        let by_value = self.by_value_params(func);
+        call.args
+            .iter()
+            .enumerate()
+            .map(|(i, arg)| {
+                by_value.get(i).copied().unwrap_or(false)
+                    && !matches!(arg, Expr::Reference(_))
+                    && self.borrowed_local(arg).is_some()
+            })
+            .collect()
+    }
+
+    /// Which parameters of the script function are taken by value, a `T` and not a `&T`.
+    fn by_value_params(&self, func: u32) -> Vec<bool> {
+        match self.fn_signature(func) {
+            Some(sig) => sig
+                .inputs
+                .iter()
+                .map(|input| {
+                    matches!(input, syn::FnArg::Typed(t)
+                        if !matches!(&*t.ty, syn::Type::Reference(_)))
+                })
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The arguments that are shared references going into a by value parameter, which only
+    /// a generic one accepts. Only a program with a `Drop` impl can tell who owns the value
+    /// behind one, so the others keep the plain handle.
+    pub(super) fn refs_by_value(&mut self, func: u32, call: &syn::ExprCall) -> Vec<bool> {
+        if !self.ctx.has_drop {
+            return Vec::new();
+        }
+        let by_value = self.by_value_params(func);
+        call.args
+            .iter()
+            .enumerate()
+            .map(|(i, arg)| {
+                by_value.get(i).copied().unwrap_or(false)
+                    && match arg {
+                        Expr::Reference(r) => r.mutability.is_none(),
+                        Expr::MethodCall(m) => {
+                            m.args.is_empty()
+                                && matches!(
+                                    m.method.to_string().as_str(),
+                                    "as_slice" | "as_str" | "as_ref"
+                                )
+                        }
+                        other => self.borrowed_local(other).is_some(),
+                    }
+            })
+            .collect()
+    }
+
     /// A mutable local lives in a cell and a `&mut` alias points elsewhere, so both stay out.
     pub(super) fn borrowed_local(&mut self, arg: &Expr) -> Option<Reg> {
         let (name, forwarded) = match arg {
@@ -84,10 +143,16 @@ impl Compiler<'_> {
 
     /// The callee then holds the only live handle, so `Rc::strong_count` reads the same at any
     /// depth. The writebacks restore the registers, and a panic in the callee restores them
-    /// through `Chunk::lent_writebacks`. Always right before the call op.
-    pub(super) fn emit_borrow_takes<'e>(&mut self, args: impl Iterator<Item = &'e Expr>) {
+    /// through `Chunk::lent_writebacks`. Always right before the call op. An argument `kept`
+    /// marks stays with the caller, see `forwards_by_value`.
+    pub(super) fn emit_borrow_takes<'e>(
+        &mut self,
+        args: impl Iterator<Item = &'e Expr>,
+        kept: &[bool],
+    ) {
         let regs: Vec<(usize, Reg)> = args
             .enumerate()
+            .filter(|(i, _)| !kept.get(*i).copied().unwrap_or(false))
             .filter_map(|(i, arg)| self.borrowed_local(arg).map(|reg| (i, reg)))
             .collect();
         for &(_, reg) in &regs {

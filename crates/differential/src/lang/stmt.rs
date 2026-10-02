@@ -252,12 +252,36 @@ pub enum Stmt {
         target: String,
         op: MutOp,
     },
-    /// `for r in name.iter_mut() { let var: T = r.clone(); *r = expr; }`
+    /// `for r in name.iter_mut() { let var: T = r.clone(); write through r }`
     ForMut {
         name: String,
         var: String,
         elem: Ty,
-        expr: Expr,
+        write: ElemWrite,
+    },
+    /// `for var in &source { body }`, or one of the other forms of `ForForm`. The item is a
+    /// reference, so the body reads it through `(*var)` and can only clone it. A source that
+    /// is a binding is named in place and stays borrowed for the loop, any other is a
+    /// temporary that lives as long as the loop.
+    ForEach {
+        var: String,
+        elem: Ty,
+        source: Expr,
+        form: ForForm,
+        body: Vec<Stmt>,
+        #[serde(default)]
+        label: Option<String>,
+    },
+    /// `let mut name = Vec::new(); for (k, v) in &source { name.push(item); } name.sort();`
+    /// over a map or a set. Real Rust randomizes their order per process, so the body only
+    /// collects and the sort after the loop makes the result one every run agrees on.
+    ForUnordered {
+        name: String,
+        item_ty: Ty,
+        /// the bindings, 2 over a map and 1 over a set, each read through `(*name)`
+        binds: Vec<(String, Ty)>,
+        source: Expr,
+        item: Expr,
     },
     /// `fn_name(&mut name, args);`, a helper that writes through a `&mut`
     CallMut {
@@ -307,6 +331,68 @@ pub enum Stmt {
         value: Expr,
         fallback: Expr,
     },
+}
+
+/// How a `for` walks a vec by shared reference.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ForForm {
+    /// `for x in &v`
+    Ref,
+    /// `for x in v.iter()`
+    Iter,
+    /// `for (index, x) in v.iter().enumerate()`
+    Enumerate { index: String },
+}
+
+/// What an `iter_mut` loop does to each element through its `&mut`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ElemWrite {
+    /// `*r = expr;`
+    Assign(Expr),
+    /// `*r op= expr;`
+    Compound(BinOp, Expr),
+    /// `r.push(expr);` and friends, the call derefs the `&mut`
+    Method(Box<MutOp>),
+}
+
+impl ElemWrite {
+    pub fn exprs(&self) -> Vec<&Expr> {
+        match self {
+            Self::Assign(expr) | Self::Compound(_, expr) => vec![expr],
+            Self::Method(op) => op.exprs(),
+        }
+    }
+
+    pub fn exprs_mut(&mut self) -> Vec<&mut Expr> {
+        match self {
+            Self::Assign(expr) | Self::Compound(_, expr) => vec![expr],
+            Self::Method(op) => op.exprs_mut(),
+        }
+    }
+
+    pub fn render(&self) -> String {
+        match self {
+            Self::Assign(expr) => format!("*diff_ref = {};", expr.render()),
+            Self::Compound(op, expr) => format!("*diff_ref {}= {};", op.token(), expr.render()),
+            Self::Method(op) => op.render("diff_ref"),
+        }
+    }
+
+    pub fn has_fallible_op(&self) -> bool {
+        match self {
+            Self::Assign(_) => false,
+            Self::Compound(op, _) => op.is_fallible(),
+            Self::Method(op) => op.has_fallible_op(),
+        }
+    }
+
+    pub fn feature(&self) -> &'static str {
+        match self {
+            Self::Assign(_) => "lang-iter-mut-assign",
+            Self::Compound(..) => "lang-iter-mut-compound",
+            Self::Method(_) => "lang-iter-mut-method",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

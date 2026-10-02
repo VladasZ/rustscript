@@ -42,6 +42,8 @@ A shared borrow holds a binding without taking it. `for x in &v` holds `v` for
 the loop, a reference an expression takes holds its binding to the end of the
 statement, and a reference a `let` keeps holds it to the end of the scope. A
 held binding is still read and borrowed again, it is never moved or written.
+The right side of an assignment holds no reference, so the borrows it took are
+over when the write happens, `v = v.as_slice().to_vec()`.
 Only a `let` is written in place, a pattern binding or a parameter has no
 `mut`. A closure that calls a captured `FnMut` closure is `FnMut` too, so its
 `let` gets `mut`. A place scrutinee stays borrowed through every match guard,
@@ -49,6 +51,32 @@ so a guard never takes it by `&mut`. A comparison of non primitive values goes t
 `PartialOrd`, so a place on its left stays borrowed while the right side runs. A
 `+=` on an integer runs its right side first, `*m.entry(k).or_insert(0) += v`
 included, so the checker reads `v` before the key.
+
+## References
+
+`&str` and `&[T]` are real types. A literal borrows nothing. `s.as_str()`, `&s[..2]`,
+`v.as_slice()` and `&v[1..3]` borrow a `let`, or a temporary that ends with its statement.
+Where a reference goes decides what it may borrow, see `RefRules` in `lang/own.rs`. One used
+up inside its statement may borrow a temporary. One a `let` keeps holds its binding until
+the scope of that `let` ends, and one that leaves an `if` branch, a match arm or a block
+borrows nothing declared inside it. A binding that holds a reference is never written.
+
+The catalog rows over `&str`, `&[T]`, `Option<&str>` and `Option<(&str, &str)>` are in
+`catalog/rows_refs.rs`, and a `String` row takes its text arguments as `&str`. A whole
+borrow has 2 more spellings, a bare `s` as the receiver of a call and `&s` as an argument.
+Both are a reference only in that position, so the reducer and the mutator never move them.
+A helper function takes `&str` and `&[T]` parameters, `match s.as_str()` has string
+literal arms, and `if let Some(rest) = s.strip_prefix(..)` binds a reference.
+
+## Loops over a collection
+
+`for x in &v`, `for x in v.iter()` and `for (i, x) in v.iter().enumerate()` have a
+statement body. The item stands behind a reference, so the body reads it through `(*x)`
+and only clones it. A source that is a binding stays borrowed for the loop, any other source
+is a temporary that drops right after it. `for (k, v) in &map` and `for x in &set` run in an
+order real Rust randomizes, so the body only pushes one value per entry, a value that can
+neither panic nor print a drop, and the statement sorts the vec after the loop. An
+`iter_mut` loop writes each element with `*r = x`, `*r += x` or a method like `r.push(x)`.
 
 ## Binding forms
 

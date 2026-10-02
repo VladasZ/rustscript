@@ -6,7 +6,7 @@ use crate::lang::expr::Expr;
 use crate::lang::fmt::FmtSpec;
 use crate::lang::ty::Ty;
 
-use super::stmt::{Ann, ClosureParam, ClosureSource, PrintForm, Stmt};
+use super::stmt::{Ann, ClosureParam, ClosureSource, ForForm, PrintForm, Stmt};
 
 impl Stmt {
     pub fn render(&self, mutable: &BTreeSet<String>, indent: usize) -> String {
@@ -48,16 +48,9 @@ impl Stmt {
                 source.render(),
                 op.render(target)
             ),
-            Self::ForMut {
-                name,
-                var,
-                elem,
-                expr,
-            } => format!(
-                "{pad}for diff_ref in {name}.iter_mut() {{\n{pad}    let {var}: {} = diff_ref.clone();\n{pad}    *diff_ref = {};\n{pad}}}\n",
-                elem.rust(),
-                expr.render()
-            ),
+            Self::ForMut { .. } | Self::ForEach { .. } | Self::ForUnordered { .. } => {
+                self.render_borrowing_for(mutable, indent, &pad)
+            }
             Self::CallMut {
                 name,
                 fn_name,
@@ -135,6 +128,65 @@ impl Stmt {
                 out
             }
             _ => unreachable!("render_place_write handles the place writes only"),
+        }
+    }
+
+    /// The `for` loops that borrow their source, shared or by `iter_mut`.
+    fn render_borrowing_for(&self, mutable: &BTreeSet<String>, indent: usize, pad: &str) -> String {
+        match self {
+            Self::ForMut {
+                name,
+                var,
+                elem,
+                write,
+            } => format!(
+                "{pad}for diff_ref in {name}.iter_mut() {{\n{pad}    let {var}: {} = diff_ref.clone();\n{pad}    {}\n{pad}}}\n",
+                elem.rust(),
+                write.render()
+            ),
+            Self::ForEach {
+                var,
+                source,
+                form,
+                body,
+                label,
+                ..
+            } => {
+                let place = source.render_place();
+                let head = match form {
+                    ForForm::Ref => format!("{var} in &{place}"),
+                    ForForm::Iter => format!("{var} in {place}.iter()"),
+                    ForForm::Enumerate { index } => {
+                        format!("({index}, {var}) in {place}.iter().enumerate()")
+                    }
+                };
+                let mut out = format!("{pad}{}for {head} {{\n", label_prefix(label.as_deref()));
+                for stmt in body {
+                    out.push_str(&stmt.render(mutable, indent + 1));
+                }
+                out.push_str(&format!("{pad}}}\n"));
+                out
+            }
+            Self::ForUnordered {
+                name,
+                item_ty,
+                binds,
+                source,
+                item,
+            } => {
+                let names: Vec<&str> = binds.iter().map(|(bind, _)| bind.as_str()).collect();
+                let pat = match names.as_slice() {
+                    [single] => (*single).to_string(),
+                    many => format!("({})", many.join(", ")),
+                };
+                format!(
+                    "{pad}let mut {name}: Vec<{}> = Vec::new();\n{pad}for {pat} in &{} {{\n{pad}    {name}.push({});\n{pad}}}\n{pad}{name}.sort();\n",
+                    item_ty.rust(),
+                    source.render_place(),
+                    item.render()
+                )
+            }
+            _ => unreachable!("render_borrowing_for handles the borrowing loops only"),
         }
     }
 

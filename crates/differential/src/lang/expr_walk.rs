@@ -562,7 +562,7 @@ impl Expr {
         }
         for child in self.children() {
             if child.ty() == ty {
-                candidates.push(child.clone());
+                candidates.push(child.clone().traveling());
             }
         }
         if let Some(shorter) = self.pop_item() {
@@ -594,6 +594,18 @@ impl Expr {
         candidates
     }
 
+    /// A borrow lifted out of the position it was built for, as the plain form that is a
+    /// reference anywhere.
+    pub fn traveling(self) -> Self {
+        match self {
+            Self::Borrow { base, kind } if !kind.travels() => Self::Borrow {
+                base,
+                kind: BorrowKind::Whole,
+            },
+            other => other,
+        }
+    }
+
     fn pop_item(&self) -> Option<Self> {
         let mut shorter = self.clone();
         match &mut shorter {
@@ -619,6 +631,7 @@ fn borrow_feature(kind: BorrowKind, base: &Ty) -> &'static str {
         (BorrowKind::Range { .. }, Ty::Vec(_) | Ty::Slice(_)) => "lang-borrow-slice-range",
         (BorrowKind::Range { .. }, _) => "lang-borrow-str-range",
         (BorrowKind::Amp, _) => "lang-borrow-amp",
+        (BorrowKind::Recv, _) => "lang-borrow-recv",
     }
 }
 

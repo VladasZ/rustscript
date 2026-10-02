@@ -58,6 +58,10 @@ pub fn mutate(parent: &Program, parent_seed: u64, donor_seed: u64, output_seed: 
 /// Whether a subtree can move between programs. It must name nothing only its own program
 /// declares and need no function body or `let` annotation around it.
 fn is_portable(expr: &Expr) -> bool {
+    // a borrow that is a reference only in its own position can not move to another one
+    if matches!(expr, Expr::Borrow { kind, .. } if !kind.travels()) {
+        return false;
+    }
     expr.nodes().iter().all(|node| {
         let own = !matches!(
             node,

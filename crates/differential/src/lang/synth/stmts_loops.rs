@@ -86,7 +86,7 @@ impl Generator<'_> {
         let mut body = Vec::new();
         self.nesting += 1;
         // every nesting form holds more bodies, so a deep body holds none
-        let draws = if self.nesting < 3 { 11 } else { 8 };
+        let draws = if self.nesting < 3 { 12 } else { 8 };
         for _ in 0..count {
             let stmt = self.statement(|inner| match inner.rng.random_range(0..draws) {
                 0 => inner.assign_stmt(),
@@ -97,6 +97,10 @@ impl Generator<'_> {
                 3 if inner.in_loop => inner.break_or_continue(),
                 4 if inner.fn_ret.is_some() => inner.return_stmt(),
                 5 | 6 => inner.binding_stmt(),
+                7 => inner
+                    .for_unordered_stmt()
+                    .unwrap_or_else(|| inner.observation()),
+                11 => inner.for_each_stmt().unwrap_or_else(|| inner.observation()),
                 8 => inner.if_let_stmt().unwrap_or_else(|| inner.observation()),
                 9 => inner.match_stmt().unwrap_or_else(|| inner.observation()),
                 10 if inner.in_loop || inner.fn_ret.is_some() => {
@@ -301,37 +305,6 @@ impl Generator<'_> {
             }
             _ => unreachable!("pick_collection offers only the types above"),
         }
-    }
-
-    /// `for r in vec.iter_mut() { *r = expr(r) }` on a vec binding.
-    pub(super) fn for_mut_stmt(&mut self) -> Option<Stmt> {
-        let vecs: Vec<(String, Ty)> = self
-            .live_locals()
-            .into_iter()
-            .filter(|(name, _)| self.scope.can_write(name))
-            .filter_map(|(name, ty)| match ty {
-                Ty::Vec(elem) => Some((name, *elem)),
-                _ => None,
-            })
-            .collect();
-        if vecs.is_empty() {
-            return None;
-        }
-        let (name, elem) = self.pick(&vecs).clone();
-        let var = self.fresh("diff_e");
-        // the vec is borrowed for the loop, so its name is hidden
-        let expr = self.without_binding(&name, |inner| {
-            inner.looping(|inner| {
-                inner.push_local(var.clone(), elem.clone());
-                inner.expr(&elem, 2)
-            })
-        });
-        Some(Stmt::ForMut {
-            name,
-            var,
-            elem,
-            expr,
-        })
     }
 
     /// `helper(&mut binding, args)`

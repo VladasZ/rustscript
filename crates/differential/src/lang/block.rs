@@ -320,6 +320,11 @@ impl Block {
         }
         for def in &self.fns {
             out.insert(def.feature());
+            if let FnKind::Plain { params, .. } = &def.kind
+                && params.iter().any(|param| param.ty.contains_ref())
+            {
+                out.insert("lang-fn-ref-param");
+            }
             for expr in def.exprs() {
                 expr.features(out);
             }

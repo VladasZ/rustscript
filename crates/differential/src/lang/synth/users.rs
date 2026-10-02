@@ -435,18 +435,34 @@ impl Generator<'_> {
         let name = self.fresh("diff_fn");
         let count = self.rng.random_range(0..=2);
         let params: Vec<Param> = (0..count)
-            .map(|_| Param {
-                name: self.fresh("diff_p"),
-                ty: if self.chance(0.7) {
-                    self.scalar_ty()
-                } else {
-                    self.elem_ty()
-                },
-                mode: if self.chance(0.3) {
-                    ParamMode::Ref
-                } else {
-                    ParamMode::Owned
-                },
+            .map(|_| {
+                let name = self.fresh("diff_p");
+                // `&str` and `&[T]` are taken as they are, a `&&str` is not what scripts write
+                if self.chance(0.25) {
+                    let ty = if self.chance(0.65) {
+                        Ty::StrRef
+                    } else {
+                        Ty::slice_of(self.scalar_ty())
+                    };
+                    return Param {
+                        name,
+                        ty,
+                        mode: ParamMode::Owned,
+                    };
+                }
+                Param {
+                    name,
+                    ty: if self.chance(0.7) {
+                        self.scalar_ty()
+                    } else {
+                        self.elem_ty()
+                    },
+                    mode: if self.chance(0.3) {
+                        ParamMode::Ref
+                    } else {
+                        ParamMode::Owned
+                    },
+                }
             })
             .collect();
         let locals: Vec<(String, Ty)> = params

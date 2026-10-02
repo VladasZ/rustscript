@@ -26,19 +26,9 @@ finding fixed in the interpreter with a promoted regression.
 
 ### Phase 1, references
 
-The binding forms are done, see `docs/differential.md`. What is left.
+The binding forms, `&str`, `&[T]` and the shared `for` loops are done, see
+`docs/differential.md`. What is left.
 
-- `&str` as a real type. Literals are `&'static str`, borrows of a `String`
-  local live in a frozen region. Fn params `&str` and `&[T]`, calls with `&v`,
-  `&v[1..3]`, `s.as_str()`, `&s[..2]`. `Option<&str>` from `strip_prefix`
-  and `split_once`. String literal arms on `.as_str()`. The model is in place
-  and nothing generates it yet. `Ty::StrRef`, `Ty::Slice`, `Expr::Borrow` and
-  `Pat::StrLit` render, and `own_check` holds the borrow rules. The generator
-  still needs an `expr` road for a reference type, the `let` that keeps one,
-  the catalog rows that take and hand out `&str`, and the fn params.
-- `for x in &v`, `for x in v.iter()`, `for (k, v) in &map` through the sort
-  rule, `for (i, x) in v.iter().enumerate()`, `iter_mut` with any write
-  through `*x` or a method.
 - `&mut` through `get_mut`, `last_mut`, `entry().or_insert_with`,
   `values_mut`, `&mut s.f0`, `&mut v[i]`, and a borrow block
   `{ let r = &mut x; ... }` that freezes `x`. A `ref mut` binding belongs

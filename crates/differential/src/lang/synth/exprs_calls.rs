@@ -3,7 +3,7 @@
 use rand::RngExt;
 
 use crate::lang::block::{Param, ParamMode};
-use crate::lang::expr::{BinOp, Expr, ReadMode, UnOp, unbare_deep};
+use crate::lang::expr::{BinOp, BorrowKind, Expr, ReadMode, UnOp, unbare_deep};
 use crate::lang::own::{BindKind, OwnState, root_binding};
 use crate::lang::synth::{Generator, MAX_EXPR_DEPTH, MOVE_CHANCE, is_partial_ord};
 use crate::lang::ty::{FloatWidth, IntWidth, Ty};
@@ -11,10 +11,10 @@ use crate::lang::user::{MethodKind, UserShape};
 
 impl Generator<'_> {
     pub(super) fn comparison(&mut self, depth: usize) -> Expr {
-        let operand = if self.chance(0.6) {
-            self.scalar_ty()
-        } else {
-            self.any_ty()
+        let operand = match self.rng.random_range(0..20) {
+            0..=11 => self.scalar_ty(),
+            12 | 13 => self.ref_ty(),
+            _ => self.any_ty(),
         };
         let ops: &[BinOp] = if is_partial_ord(&operand) {
             &[
@@ -512,6 +512,11 @@ impl Generator<'_> {
         let args = params
             .iter()
             .map(|param| match param.mode {
+                // a `&str` parameter takes a `&String` too, the call coerces it
+                ParamMode::Owned if param.ty.contains_ref() => {
+                    let arg = self.expr(&param.ty, depth);
+                    self.respell(arg, BorrowKind::Amp)
+                }
                 ParamMode::Owned => self.expr(&param.ty, depth),
                 ParamMode::Ref => self.borrowing(|inner| inner.expr(&param.ty, depth)),
             })

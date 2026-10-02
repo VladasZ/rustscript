@@ -22,6 +22,14 @@ pub enum RecvClass {
     Res,
     Map,
     Set,
+    /// `&str`
+    StrRef,
+    /// `&[E]`
+    Slice,
+    /// `Option<&str>`, what `strip_prefix` and `get` hand out
+    OptStrRef,
+    /// `Option<(&str, &str)>`, what `split_once` hands out
+    OptStrPair,
 }
 
 impl RecvClass {
@@ -40,13 +48,20 @@ impl RecvClass {
             Self::Res => matches!(ty, Ty::Res(..)),
             Self::Map => matches!(ty, Ty::Map(..)),
             Self::Set => matches!(ty, Ty::Set(_)),
+            Self::StrRef => matches!(ty, Ty::StrRef),
+            Self::Slice => matches!(ty, Ty::Slice(_)),
+            Self::OptStrRef => *ty == opt_str_ref(),
+            Self::OptStrPair => *ty == opt_str_pair(),
         }
     }
 
     /// Whether an `Elem` result can name the receiver as a container over the wanted type. `Map`
     /// and `Res` need 2 types and are completed in `solve`.
     pub fn is_container(self) -> bool {
-        matches!(self, Self::Vec | Self::VecOfVec | Self::Opt | Self::Set)
+        matches!(
+            self,
+            Self::Vec | Self::VecOfVec | Self::Opt | Self::Set | Self::Slice
+        )
     }
 
     pub fn wrap(self, elem: Ty) -> Option<Ty> {
@@ -55,6 +70,7 @@ impl RecvClass {
             Self::VecOfVec => Some(Ty::vec_of(Ty::vec_of(elem))),
             Self::Opt => Some(Ty::opt_of(elem)),
             Self::Set => Some(Ty::set_of(elem)),
+            Self::Slice => Some(Ty::slice_of(elem)),
             _ => None,
         }
     }
@@ -88,6 +104,7 @@ pub enum Fixed {
     Bool,
     Char,
     Str,
+    StrRef,
     U32,
     U64,
     USize,
@@ -100,6 +117,7 @@ impl Fixed {
             Self::Bool => Ty::Bool,
             Self::Char => Ty::Char,
             Self::Str => Ty::Str,
+            Self::StrRef => Ty::StrRef,
             Self::U32 => Ty::Int(IntWidth::U32),
             Self::U64 => Ty::Int(IntWidth::U64),
             Self::USize => Ty::Int(IntWidth::USize),
@@ -202,8 +220,8 @@ const fn with_fish(method: Method, fish: FishReq) -> Method {
 
 use ElemReq::{Default as DefaultElem, Key as KeyElem, Num, Ord as OrdElem, Str as StrElem};
 use Fixed::{
-    Bool as FBool, Char as FChar, F64 as FF64, Str as FStr, U32 as FU32, U64 as FU64,
-    USize as FUSize,
+    Bool as FBool, Char as FChar, F64 as FF64, Str as FStr, StrRef as FStrRef, U32 as FU32,
+    U64 as FU64, USize as FUSize,
 };
 use RecvClass::{
     Char, Float, Int, Opt, Res, SignedInt, Str, UnsignedInt, Vec as VecRecv, VecOfVec,
@@ -219,6 +237,7 @@ const VAL_PAT: &TyPat = &TyPat::Val;
 const USIZE_PAT: &TyPat = &Exact(FUSize);
 const U32_PAT: &TyPat = &Exact(FU32);
 const STR_PAT: &TyPat = &Exact(FStr);
+const STR_REF_PAT: &TyPat = &Exact(FStrRef);
 const BOOL_PAT: &TyPat = &Exact(FBool);
 const CHAR_PAT: &TyPat = &Exact(FChar);
 
@@ -226,6 +245,7 @@ pub static METHODS: LazyLock<Vec<Method>> = LazyLock::new(|| {
     [
         rows_num::ROWS,
         rows_text::ROWS,
+        rows_refs::ROWS,
         rows_vec::ROWS,
         rows_containers::ROWS,
     ]
@@ -234,6 +254,7 @@ pub static METHODS: LazyLock<Vec<Method>> = LazyLock::new(|| {
 
 mod rows_containers;
 mod rows_num;
+mod rows_refs;
 mod rows_text;
 mod rows_vec;
 
@@ -338,6 +359,14 @@ fn solve_pair(method: &Method, found: Found) -> Option<Solved> {
 }
 
 /// See `Ty::is_hash` for why a trace never sits in a map.
+pub fn opt_str_ref() -> Ty {
+    Ty::opt_of(Ty::StrRef)
+}
+
+pub fn opt_str_pair() -> Ty {
+    Ty::opt_of(Ty::Tuple(vec![Ty::StrRef, Ty::StrRef]))
+}
+
 pub fn is_map_val(ty: &Ty) -> bool {
     ty.is_ord() && ty.has_default() && !ty.contains_trace()
 }
@@ -359,7 +388,17 @@ struct Found {
     val: Option<Ty>,
 }
 
+/// A pattern that stands for a type of the receiver never takes a reference. Only a row that
+/// names `&str` hands one out, so every row template may assume owned parts.
 fn unify(pat: &TyPat, want: &Ty, found: &mut Found) -> Option<()> {
+    if want.contains_ref()
+        && matches!(
+            pat,
+            Same | Elem | TyPat::Key | TyPat::Val | OkT | ErrT | Fish
+        )
+    {
+        return None;
+    }
     match pat {
         Same => {
             if found.same.as_ref().is_some_and(|seen| seen != want) {

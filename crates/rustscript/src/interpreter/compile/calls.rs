@@ -51,6 +51,17 @@ impl Compiler<'_> {
     /// says whether the call is a block's tail, see `compile_args`.
     fn compile_window(&mut self, list: &[&Expr], taken: Option<bool>) -> Result<Reg> {
         let cell_refs = std::mem::take(&mut self.cur().next_call.cell_refs);
+        let value_refs = std::mem::take(&mut self.cur().next_call.value_refs);
+        // the callee frame starts at the window, so what must outlive the call sits below it
+        let behind: Vec<Option<Reg>> = (0..list.len())
+            .map(|i| {
+                value_refs
+                    .get(i)
+                    .copied()
+                    .unwrap_or(false)
+                    .then(|| self.alloc())
+            })
+            .collect();
         let base = self.cur().reg_top;
         for _ in 0..list.len() {
             self.alloc();
@@ -60,6 +71,10 @@ impl Compiler<'_> {
             let reg = base + idx16(i);
             if cell_refs && let Some(cell) = self.cell_ref_arg(a) {
                 self.emit(Op::CellRef { dst: reg, cell });
+                continue;
+            }
+            if let Some(value) = behind[i] {
+                self.compile_value_ref(reg, value, a)?;
                 continue;
             }
             self.compile_owned_into(reg, a)?;
@@ -85,6 +100,26 @@ impl Compiler<'_> {
         }
         self.cur().close_operands(held);
         Ok(base)
+    }
+
+    /// A reference argument for a parameter the callee takes by value, `pick(&a, &b)` into
+    /// `fn pick<T>(a: T, b: T)`. The callee owns its parameter and would drop it, or hand it
+    /// back as its result for the caller to drop. So the window gets a borrow that drops
+    /// nothing, and a temporary behind it stays here until its statement ends.
+    fn compile_value_ref(&mut self, reg: Reg, value: Reg, arg: &Expr) -> Result<()> {
+        self.compile_owned_into(value, arg)?;
+        let temporary = match arg {
+            Expr::Reference(r) => self.temp_owned(&r.expr),
+            other => self.arg_owned(other),
+        };
+        if temporary {
+            self.cur().owned_temps.push(value);
+        }
+        self.emit(Op::MakeBorrow {
+            dst: reg,
+            src: value,
+        });
+        Ok(())
     }
 
     /// The capture cell of `name` in a `&mut name` argument, see `lends_cell_refs`.
@@ -152,7 +187,7 @@ impl Compiler<'_> {
         let Expr::Path(path_expr) = &*c.func else {
             let callee = self.compile_expr(&c.func)?;
             let base = self.compile_args(c.args.iter())?;
-            self.emit_borrow_takes(c.args.iter());
+            self.emit_borrow_takes(c.args.iter(), &[]);
             self.emit(Op::CallValue {
                 dst,
                 callee,
@@ -347,8 +382,18 @@ impl Compiler<'_> {
                 let targ = self.record_call_type_args(path);
                 let lends = self.lends_cell_refs(c);
                 self.cur().next_call.cell_refs = lends;
+                let value_refs = self.refs_by_value(idx, c);
+                // a borrow in the window is not the binding itself, so nothing is lent or
+                // taken back
+                let kept: Vec<bool> = self
+                    .forwards_by_value(idx, c)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, kept)| kept || value_refs.get(i).copied().unwrap_or(false))
+                    .collect();
+                self.cur().next_call.value_refs = value_refs;
                 let base = self.compile_args(c.args.iter())?;
-                self.emit_borrow_takes(c.args.iter());
+                self.emit_borrow_takes(c.args.iter(), &kept);
                 self.emit(Op::CallFn {
                     dst,
                     func: idx,
@@ -360,7 +405,8 @@ impl Compiler<'_> {
                 let skip: Vec<bool> = c
                     .args
                     .iter()
-                    .map(|a| lends && self.cell_ref_arg(a).is_some())
+                    .zip(&kept)
+                    .map(|(a, kept)| *kept || (lends && self.cell_ref_arg(a).is_some()))
                     .collect();
                 self.emit_mut_arg_writebacks_skipping(c.args.iter(), base, &skip)?;
                 return Ok(());
@@ -517,7 +563,7 @@ impl Compiler<'_> {
             return Ok(false);
         };
         let base = self.compile_args(c.args.iter())?;
-        self.emit_borrow_takes(c.args.iter());
+        self.emit_borrow_takes(c.args.iter(), &[]);
         self.emit(Op::CallValue {
             dst,
             callee,
