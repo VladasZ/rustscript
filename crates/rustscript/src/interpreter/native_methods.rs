@@ -643,10 +643,7 @@ fn as_int(v: Option<&Value>) -> Option<i64> {
 fn seek_from(v: Option<&Value>) -> SeekFrom {
     // `SeekFrom::Start(n)` is an enum value carrying the offset
     if let Some(Value::Enum { def, variant, data }) = v {
-        let n = data.lock().first().and_then(|x| match x {
-            Value::Int(i) => Some(*i),
-            _ => None,
-        });
+        let n = data.lock().first().and_then(as_i64);
         match (&**def.variant_name(*variant), n) {
             ("Start", Some(n)) => return SeekFrom::Start(u64::try_from(n).unwrap_or_default()),
             ("End", Some(n)) => return SeekFrom::End(n),

@@ -7,6 +7,7 @@ use crate::interpreter::bytecode::DefaultIr;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum CollectTarget {
     Str,
+    PathBuf,
     /// the flag is a `BTreeMap`
     Map(bool),
     /// the flag is a `BTreeSet`
@@ -73,6 +74,7 @@ impl CollectTarget {
     pub(super) fn method_name(self) -> &'static str {
         match self {
             Self::Str => "collect_string",
+            Self::PathBuf => "collect_path_buf",
             Self::Map(false) => "collect_map",
             Self::Set(false) => "collect_set",
             Self::Map(true) => "collect_btree_map",
@@ -96,6 +98,7 @@ impl CollectTarget {
             "Result" => Some(Self::Result(inner())),
             "Option" => Some(Self::Option(inner())),
             "String" => Some(Self::Str),
+            "PathBuf" => Some(Self::PathBuf),
             "HashMap" => Some(Self::Map(false)),
             "BTreeMap" => Some(Self::Map(true)),
             "HashSet" => Some(Self::Set(false)),

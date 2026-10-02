@@ -245,6 +245,10 @@ pub(super) fn generic_method(recv: &Value, method: &MethodName, args: &[Value]) 
             let ordering = ordering_from_value(recv).expect("checked by the guard");
             ordering_method(ordering, method, args)
         }
+        (Value::Enum { .. }, _) if super::std_bridge::component_text(recv).is_some() => {
+            let text = super::std_bridge::component_text(recv).expect("checked by the guard");
+            super::std_bridge::component_method(text, method)
+        }
         // an unknown method on an Option says Option, not the bare word enum
         (Value::Enum { def, .. }, _) => {
             bail!("unknown method `{}` on {}", method.text, def.name)

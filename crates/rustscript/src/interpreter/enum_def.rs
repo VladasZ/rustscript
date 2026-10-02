@@ -249,6 +249,21 @@ pub static SEEK_FROM: LazyLock<Arc<EnumDef>> = LazyLock::new(|| {
     )
 });
 
+/// `std::path::Component`. `Prefix` and `Normal` carry their text as an `OsString`.
+pub static COMPONENT: LazyLock<Arc<EnumDef>> = LazyLock::new(|| {
+    EnumDef::tuples(
+        EnumKind::Other,
+        "Component",
+        &[
+            ("Prefix", false),
+            ("RootDir", true),
+            ("CurDir", true),
+            ("ParentDir", true),
+            ("Normal", false),
+        ],
+    )
+});
+
 pub static XML_NODE: LazyLock<Arc<EnumDef>> = LazyLock::new(|| {
     EnumDef::tuples(
         EnumKind::Other,
@@ -396,6 +411,7 @@ pub fn builtin_enum(name: &str) -> Option<&'static Arc<EnumDef>> {
         "VarError" => &VAR_ERROR,
         "ErrorKind" => &ERROR_KIND,
         "SeekFrom" => &SEEK_FROM,
+        "Component" => &COMPONENT,
         "XMLNode" => &XML_NODE,
         "Color" => &COLOR,
         "Constraint" => &CONSTRAINT,
