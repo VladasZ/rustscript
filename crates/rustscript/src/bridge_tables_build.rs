@@ -100,6 +100,7 @@ pub const BRIDGES: &[Bridge] = &[
     b("bridge/path_calls.rs", "datetime_method", "DateTime"),
     // std
     b("std_bridge.rs", "path_method", "Path"),
+    b("std_bridge.rs", "component_method", "Component"),
     b("std_bridge.rs", "metadata_method", "Metadata"),
     b("std_bridge.rs", "os_string_method", "OsString"),
     b("std_bridge.rs", "dir_entry_method", "DirEntry"),

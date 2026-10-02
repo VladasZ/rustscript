@@ -320,6 +320,7 @@ fn vec_method_by_name(v: &List, method: &MethodName, args: &mut [Value]) -> Resu
         | BuiltinId::Chunks
         | BuiltinId::Repeat
         | BuiltinId::Swap => return vec_slice_view(v, method.id, args),
+        BuiltinId::CollectPathBuf => super::std_bridge::collect_path_buf(&v.lock()),
         BuiltinId::CollectString => {
             Value::str(v.lock().iter().map(Value::display).collect::<String>())
         }

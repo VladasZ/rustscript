@@ -29,6 +29,7 @@ impl Compiler<'_> {
     pub(super) fn collect_target_of(&self, m: &syn::ExprMethodCall) -> Option<CollectTarget> {
         match self.types.of_node(m) {
             Ty::Str => Some(CollectTarget::Str),
+            ty if ty == Ty::named("PathBuf") => Some(CollectTarget::PathBuf),
             Ty::Map(_, _, sorted) => Some(CollectTarget::Map(sorted)),
             Ty::Set(_, sorted) => Some(CollectTarget::Set(sorted)),
             Ty::Result(ok, _) => Some(CollectTarget::Result(CollectInner::of_ty(&ok))),

@@ -232,11 +232,11 @@ impl Infer<'_, '_> {
             | ("DirEntry", "file_name")
             | ("DateTime", "to_rfc3339")
             | ("DelayedFormat", "to_string")
-            | ("Uuid", "to_string" | "simple" | "hyphenated") => Ty::Str,
+            | ("Uuid", "to_string" | "simple" | "hyphenated")
+            | ("Component", "as_os_str") => Ty::Str,
             ("Captures", "len") | ("Match", "start" | "end" | "len") => Ty::usize(),
-            ("Regex", "split") | ("Path" | "PathBuf", "components" | "ancestors" | "iter") => {
-                Ty::iter(Ty::Str)
-            }
+            ("Regex", "split") | ("Path" | "PathBuf", "ancestors" | "iter") => Ty::iter(Ty::Str),
+            ("Path" | "PathBuf", "components") => Ty::iter(Ty::named("Component")),
             ("Regex", "captures") => Ty::option(Ty::named("Captures")),
             ("Regex", "find") | ("Captures", "get" | "name") => Ty::option(Ty::named("Match")),
             ("Regex", "find_iter") => Ty::iter(Ty::named("Match")),

@@ -9,7 +9,7 @@ use anyhow::{Result, anyhow, bail};
 
 use super::bytecode::{BuiltinId, MethodName, PathId};
 use super::crates_bridge::crate_bridge;
-use super::enum_def::{NOT_PRESENT, NOT_UNICODE, VAR_ERROR};
+use super::enum_def::{COMPONENT, EnumDef, NOT_PRESENT, NOT_UNICODE, VAR_ERROR};
 use super::json_paths::bridge_serde_json;
 use super::native::Native;
 use super::native_methods::{self, value_to_bytes};
@@ -460,6 +460,7 @@ pub(super) fn path_method(
                 .map(|ancestor| make_path(ancestor.display().to_string()))
                 .collect(),
         ),
+        BuiltinId::Components => Value::vec(p.components().map(make_component).collect()),
         BuiltinId::Join | BuiltinId::Push => {
             let joined = p.join(args.first().map(Value::display).unwrap_or_default());
             make_path(joined.display().to_string())
@@ -473,6 +474,52 @@ pub(super) fn path_method(
         }
         _ => bail!("unknown method `{method}` on Path"),
     })
+}
+
+fn make_component(component: std::path::Component) -> Value {
+    use std::path::Component;
+    let text = || make_os_string(component.as_os_str().to_string_lossy().into_owned());
+    let (variant, data) = match component {
+        Component::Prefix(_) => ("Prefix", vec![text()]),
+        Component::RootDir => ("RootDir", Vec::new()),
+        Component::CurDir => ("CurDir", Vec::new()),
+        Component::ParentDir => ("ParentDir", Vec::new()),
+        Component::Normal(_) => ("Normal", vec![text()]),
+    };
+    Value::enum_named(&COMPONENT, variant, data)
+        .expect("the matched Component variants are all listed")
+}
+
+/// The text `Component::as_os_str` gives, `None` when the value is not a `Component`.
+pub(super) fn component_text(v: &Value) -> Option<String> {
+    let Value::Enum { def, variant, data } = v else {
+        return None;
+    };
+    if !EnumDef::same(def, &COMPONENT) {
+        return None;
+    }
+    Some(match &**def.variant_name(*variant) {
+        "RootDir" => std::path::MAIN_SEPARATOR_STR.to_string(),
+        "CurDir" => ".".to_string(),
+        "ParentDir" => "..".to_string(),
+        _ => data.lock().first().map(path_like).unwrap_or_default(),
+    })
+}
+
+pub(super) fn component_method(text: String, method: &MethodName) -> Result<Value> {
+    Ok(match method.id {
+        BuiltinId::AsOsStr => make_os_string(text),
+        _ => bail!("unknown method `{method}` on Component"),
+    })
+}
+
+/// `collect::<PathBuf>()`, every item is pushed like `PathBuf::push` does.
+pub(super) fn collect_path_buf(items: &[Value]) -> Value {
+    let mut path = std::path::PathBuf::new();
+    for item in items {
+        path.push(component_text(item).unwrap_or_else(|| path_like(item)));
+    }
+    make_path(path.display().to_string())
 }
 
 pub(super) fn dir_entry_method(s: &Arc<StructData>, method: &MethodName) -> Result<Value> {

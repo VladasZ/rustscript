@@ -456,6 +456,9 @@ impl Vm {
                     Value::vec(self.drain_iterator(iterator)?)
                 }
             }
+            BuiltinId::CollectPathBuf => {
+                crate::interpreter::std_bridge::collect_path_buf(&self.drain_iterator(iterator)?)
+            }
             BuiltinId::CollectString => Value::str(
                 self.drain_iterator(iterator)?
                     .iter()
@@ -573,6 +576,7 @@ impl Vm {
             BuiltinId::Collect
             | BuiltinId::ToVec
             | BuiltinId::CollectString
+            | BuiltinId::CollectPathBuf
             | BuiltinId::CollectMap
             | BuiltinId::CollectBtreeMap
             | BuiltinId::CollectSet
@@ -619,6 +623,7 @@ pub(super) fn consumes_iterator(id: BuiltinId) -> bool {
             | BuiltinId::Collect
             | BuiltinId::ToVec
             | BuiltinId::CollectString
+            | BuiltinId::CollectPathBuf
             | BuiltinId::CollectMap
             | BuiltinId::CollectSet
             | BuiltinId::CollectBtreeMap
