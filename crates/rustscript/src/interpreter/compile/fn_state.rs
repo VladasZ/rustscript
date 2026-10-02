@@ -52,6 +52,8 @@ pub(super) struct NextCall {
     /// The call passes its `&mut name` arguments that live in a capture cell as references
     /// to the cell, see `lends_cell_refs`.
     pub(super) cell_refs: bool,
+    /// The arguments that are references the callee takes by value, see `refs_by_value`.
+    pub(super) value_refs: Vec<bool>,
 }
 
 pub(super) struct FnState {

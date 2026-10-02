@@ -6,8 +6,10 @@ mod exprs_calls;
 mod matches;
 mod pats;
 mod pipes;
+mod refs;
 mod stmts;
 mod stmts_bind;
+mod stmts_for;
 mod stmts_loops;
 mod users;
 
@@ -16,7 +18,7 @@ use rand::rngs::StdRng;
 
 use crate::lang::block::{Block, ConstDef, FnDef};
 use crate::lang::expr::{Expr, ReadMode};
-use crate::lang::own::{BindKind, OwnState, Scope, Snapshot};
+use crate::lang::own::{BindKind, OwnState, RefRules, Scope, Snapshot};
 use crate::lang::ty::{
     FLOAT_WIDTHS, FloatWidth, INT_WIDTHS, IntWidth, MAX_TY_DEPTH, SCALAR_TYPES, StdErr, Ty,
 };
@@ -63,6 +65,8 @@ pub struct Generator<'a> {
     /// holds it borrowed for as long as the literal lives, so a second mention in the same
     /// statement is 2 mutable borrows at once and rustc rejects it.
     pub(super) called_closures: Vec<String>,
+    /// what the reference being built may borrow, the checker moves its own the same way
+    pub(super) refs: RefRules,
 }
 
 impl<'a> Generator<'a> {
@@ -84,15 +88,18 @@ impl<'a> Generator<'a> {
             forbid_bare: false,
             nesting: 0,
             called_closures: Vec::new(),
+            refs: RefRules::default(),
         }
     }
 
     /// Wraps one statement, so the closures called inside it are forgotten again at its end.
     pub(super) fn statement<T>(&mut self, build: impl FnOnce(&mut Self) -> T) -> T {
         let saved = std::mem::take(&mut self.called_closures);
+        let saved_refs = std::mem::take(&mut self.refs);
         let mark = self.scope.stmt_mark();
         let out = build(self);
         self.scope.stmt_release(mark);
+        self.refs = saved_refs;
         self.called_closures = saved;
         out
     }
@@ -540,7 +547,7 @@ impl<'a> Generator<'a> {
 pub(super) fn is_partial_ord(ty: &Ty) -> bool {
     match ty {
         Ty::Float(_) => true,
-        Ty::Vec(inner) | Ty::Opt(inner) => is_partial_ord(inner),
+        Ty::Vec(inner) | Ty::Opt(inner) | Ty::Slice(inner) => is_partial_ord(inner),
         Ty::Tuple(items) => items.iter().all(is_partial_ord),
         Ty::Res(ok, err) => is_partial_ord(ok) && is_partial_ord(err),
         other => other.is_ord(),

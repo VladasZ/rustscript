@@ -1,8 +1,8 @@
 //! `Vec` rows.
 
 use super::{
-    ELEM, Elem, ElemReq, Exact, FBool, FStr, FUSize, KeyElem, Method, Num, Opt, OrdElem, SAME,
-    Same, SmallUsize, StrElem, TyPat, USIZE_PAT, VecOfVec, VecRecv, borrowing, m, with_elem,
+    ELEM, Elem, ElemReq, Exact, FBool, FStr, FStrRef, FUSize, KeyElem, Method, Num, Opt, OrdElem,
+    SAME, Same, SmallUsize, StrElem, TyPat, USIZE_PAT, VecOfVec, VecRecv, borrowing, m, with_elem,
 };
 
 pub(super) const ROWS: &[Method] = &[
@@ -255,9 +255,9 @@ pub(super) const ROWS: &[Method] = &[
         borrowing(m(
             "vec_join",
             VecRecv,
-            &[Exact(FStr)],
+            &[Exact(FStrRef)],
             Exact(FStr),
-            "{r}.join({0}.as_str())",
+            "{r}.join::<&str>({0})",
         )),
         StrElem,
     ),

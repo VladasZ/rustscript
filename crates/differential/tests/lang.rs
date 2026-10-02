@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use rustscript_differential::generator::generate;
-use rustscript_differential::lang::catalog::{METHODS, solve};
+use rustscript_differential::lang::catalog::{METHODS, opt_str_pair, opt_str_ref, solve};
 use rustscript_differential::lang::ty::{INT_WIDTHS, SCALAR_TYPES, StdErr, Ty};
 use rustscript_differential::model::Program;
 use rustscript_differential::runner::{Classification, Runner};
@@ -88,6 +88,24 @@ const EXPECTED_FEATURES: &[&str] = &[
     "lang-ty-struct",
     "lang-ty-enum",
     "lang-ty-trace",
+    "lang-ty-str-ref",
+    "lang-ty-slice",
+    // references
+    "lang-str-ref-lit",
+    "lang-let-ref",
+    "lang-borrow-as-str",
+    "lang-borrow-as-slice",
+    "lang-borrow-str-range",
+    "lang-borrow-slice-range",
+    "lang-borrow-amp",
+    "lang-borrow-recv",
+    "lang-fn-ref-param",
+    "lang-pat-str",
+    "sr_trim",
+    "sr_strip_prefix",
+    "sr_split_once",
+    "osr_unwrap_or",
+    "sl_first",
     // ownership
     "lang-trace-lit",
     "lang-move",
@@ -148,6 +166,14 @@ const EXPECTED_FEATURES: &[&str] = &[
     "lang-continue",
     "lang-for-accum",
     "lang-iter-mut",
+    "lang-iter-mut-assign",
+    "lang-iter-mut-compound",
+    "lang-iter-mut-method",
+    "lang-for-ref",
+    "lang-for-iter",
+    "lang-for-enumerate",
+    "lang-for-map",
+    "lang-for-set",
     "lang-compound",
     "lang-match",
     "lang-pat-range",
@@ -241,6 +267,7 @@ fn generation_covers_the_language() {
 #[test]
 fn every_catalog_method_is_reachable() {
     let mut wanted: Vec<Ty> = SCALAR_TYPES.to_vec();
+    wanted.extend([Ty::StrRef, opt_str_ref(), opt_str_pair()]);
     for width in INT_WIDTHS {
         wanted.push(Ty::vec_of(Ty::Int(*width)));
         wanted.push(Ty::opt_of(Ty::Int(*width)));

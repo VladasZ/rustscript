@@ -60,7 +60,7 @@ impl Expr {
     }
 
     /// A binding by name, anything else parenthesized as a temporary.
-    fn render_place(&self) -> String {
+    pub(super) fn render_place(&self) -> String {
         match self {
             Self::Var { name, .. } => name.clone(),
             other => format!("({})", other.render()),
@@ -156,6 +156,7 @@ impl Expr {
                         format!("(&{place}[{}..{}])", bound(lo), bound(hi))
                     }
                     BorrowKind::Amp => format!("(&{place})"),
+                    BorrowKind::Recv => place,
                 }
             }
             Self::Matches {

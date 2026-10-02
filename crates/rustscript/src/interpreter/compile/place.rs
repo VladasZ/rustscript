@@ -344,6 +344,23 @@ impl Compiler<'_> {
                 || self.user_method_call(expr))
     }
 
+    /// `for x in &make()` borrows a temporary that lives as long as the loop, so it drops
+    /// where an owning iterator does.
+    pub(super) fn lends_loop_temp(&self, source: &Expr) -> bool {
+        self.ctx.has_drop
+            && matches!(source, Expr::Reference(r)
+                if r.mutability.is_none() && self.temp_owned(&r.expr))
+    }
+
+    /// The register drops with the open scope, so a `return` out of a loop still drops it.
+    pub(super) fn hold_in_scope(&mut self, reg: Reg) {
+        self.cur()
+            .scope_order
+            .last_mut()
+            .expect("a scope is always open")
+            .push(reg);
+    }
+
     /// `temp_is_owned` plus the script's own methods.
     pub(super) fn temp_owned(&self, expr: &Expr) -> bool {
         !self.lends_result(expr)

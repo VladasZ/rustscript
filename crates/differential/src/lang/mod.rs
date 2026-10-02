@@ -10,6 +10,7 @@ pub mod fmt;
 pub mod own;
 mod own_check;
 mod own_check_bind;
+mod own_check_loops;
 pub mod pat;
 pub mod pipe;
 pub mod stmt;

@@ -2,6 +2,7 @@
 
 use rand::RngExt;
 
+use crate::lang::catalog::opt_str_ref;
 use crate::lang::expr::{Arm, Expr, unbare_deep};
 use crate::lang::pat::Pat;
 use crate::lang::synth::Generator;
@@ -61,7 +62,10 @@ impl Generator<'_> {
 
     /// A type some arm list below covers.
     pub(super) fn scrutinee_ty(&mut self) -> Option<Ty> {
-        Some(match self.rng.random_range(0..9) {
+        Some(match self.rng.random_range(0..12) {
+            // `match s.as_str() { "a" => .., _ => .. }`
+            9 | 10 => Ty::StrRef,
+            11 => opt_str_ref(),
             0 => Ty::opt_of(self.elem_ty()),
             1 => self.res_ty(),
             2 | 3 => self.user_ty()?,
@@ -115,6 +119,21 @@ impl Generator<'_> {
                 let count = self.rng.random_range(1..=3);
                 for _ in 0..count {
                     let pat = self.char_pat();
+                    arms.push(make(self, pat, false));
+                }
+                open = true;
+            }
+            Ty::StrRef => {
+                let count = self.rng.random_range(1..=3);
+                for _ in 0..count {
+                    let pat = if self.chance(0.25) {
+                        Pat::Or(vec![
+                            Pat::StrLit(self.string_value()),
+                            Pat::StrLit(self.string_value()),
+                        ])
+                    } else {
+                        Pat::StrLit(self.string_value())
+                    };
                     arms.push(make(self, pat, false));
                 }
                 open = true;

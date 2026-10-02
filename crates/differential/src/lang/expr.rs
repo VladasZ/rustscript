@@ -152,6 +152,17 @@ pub enum BorrowKind {
     /// `(&base)`, a `&String` or a `&Vec<T>`. It only becomes a `&str` or a `&[T]` where the
     /// compiler coerces, so it is built as a call argument and never travels.
     Amp,
+    /// `base` alone, the receiver of a `&str` or a slice method. The call derefs it, so like
+    /// `Amp` it never travels.
+    Recv,
+}
+
+impl BorrowKind {
+    /// Whether the node is a `&str` or a `&[T]` wherever it stands. The other kinds only
+    /// become one in the position they were built for.
+    pub fn travels(self) -> bool {
+        matches!(self, Self::Whole | Self::Range { .. })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

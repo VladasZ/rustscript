@@ -262,6 +262,7 @@ pub(super) fn eval_cast(target: &CastIr, v: Value) -> Result<Value> {
                 other => bail!("cannot cast {} to char", other.type_name()),
             });
         }
+        CastIr::Reference => return Ok(v),
         CastIr::Unsupported(name) => bail!("unsupported cast target: {name}"),
         CastIr::Int(width) => *width,
     };

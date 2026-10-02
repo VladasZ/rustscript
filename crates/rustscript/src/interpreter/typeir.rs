@@ -12,11 +12,16 @@ pub enum CastIr {
     F32,
     Char,
     Int(IntWidth),
+    /// `&[] as &[T]`, a cast to a reference only unsizes, the value stays as it is
+    Reference,
     /// kept so the cast fails only if it runs, dead code may hold one
     Unsupported(Arc<str>),
 }
 
 pub fn lower_cast(ty: &syn::Type) -> CastIr {
+    if matches!(ty, syn::Type::Reference(_)) {
+        return CastIr::Reference;
+    }
     let name = match ty {
         syn::Type::Path(p) => p
             .path

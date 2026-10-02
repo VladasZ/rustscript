@@ -3,9 +3,10 @@
 use rand::RngExt;
 
 use crate::lang::catalog::{
-    ElemReq, FishReq, METHODS, Method, RecvClass, Solved, TyPat, arg_ty, fish_allows, solve,
+    ElemReq, FishReq, METHODS, Method, RecvClass, Solved, TyPat, arg_ty, fish_allows, opt_str_pair,
+    opt_str_ref, solve,
 };
-use crate::lang::expr::{BinOp, Expr, MemKind, ReadMode, VecTakeKind, unbare_deep};
+use crate::lang::expr::{BinOp, BorrowKind, Expr, MemKind, ReadMode, VecTakeKind, unbare_deep};
 use crate::lang::own::{BindKind, OwnState, root_binding};
 use crate::lang::pipe::Site;
 use crate::lang::stmt::{Ann, Stmt};
@@ -13,7 +14,19 @@ use crate::lang::synth::{Generator, MOVE_CHANCE};
 use crate::lang::ty::{FloatWidth, IntWidth, Ty};
 
 impl Generator<'_> {
+    /// A value with no reference in its type uses up every reference below it, so the rules
+    /// for a kept or a leaving reference end there, see `RefRules`.
     pub fn expr(&mut self, want: &Ty, depth: usize) -> Expr {
+        if want.contains_ref() {
+            return self.ref_expr(want, depth);
+        }
+        let saved = std::mem::take(&mut self.refs);
+        let out = self.owned_expr(want, depth);
+        self.refs = saved;
+        out
+    }
+
+    fn owned_expr(&mut self, want: &Ty, depth: usize) -> Expr {
         if depth == 0 {
             return self.leaf(want);
         }
@@ -412,6 +425,12 @@ impl Generator<'_> {
                 }
             }
             let recv = unbare_deep(self.typed_only(|inner| inner.expr(&recv_ty, depth - 1)));
+            // `s.trim()` is what scripts write, the call derefs the `String`
+            let recv = if method.template.starts_with("{r}.") {
+                self.respell(recv, BorrowKind::Recv)
+            } else {
+                recv
+            };
             // `x.eq_ignore_ascii_case(&replace(&mut x, 'a'))` writes the binding the receiver
             // borrows, so a borrowed receiver binding is held while the arguments run
             let held = if method.borrows_recv {
@@ -474,7 +493,12 @@ impl Generator<'_> {
             });
         }
         let ty = arg_ty(pattern, class, recv, fish)?;
-        Some(self.expr(&ty, depth - 1))
+        let arg = self.expr(&ty, depth - 1);
+        // only a parameter typed `&str` coerces a `&String`, an element or a `Same` one infers
+        Some(match pattern {
+            TyPat::Exact(_) => self.respell(arg, BorrowKind::Amp),
+            _ => arg,
+        })
     }
 
     /// A receiver type for a method whose result didn't pin one. The sample completes a half
@@ -507,6 +531,10 @@ impl Generator<'_> {
             RecvClass::Bool => Ty::Bool,
             RecvClass::Char => Ty::Char,
             RecvClass::Str => Ty::Str,
+            RecvClass::StrRef => Ty::StrRef,
+            RecvClass::OptStrRef => opt_str_ref(),
+            RecvClass::OptStrPair => opt_str_pair(),
+            RecvClass::Slice => Ty::slice_of(self.container_elem(method)?),
             RecvClass::Vec => Ty::vec_of(self.container_elem(method)?),
             RecvClass::VecOfVec => Ty::vec_of(Ty::vec_of(self.container_elem(method)?)),
             RecvClass::Opt => Ty::opt_of(self.container_elem(method)?),

@@ -408,6 +408,10 @@ impl Compiler<'_> {
             e => self.compile_expr(e)?,
         };
         let owned = self.iterable_owned(&f.expr) && !borrowed;
+        let lent_temp = self.lends_loop_temp(&f.expr);
+        if lent_temp {
+            self.hold_in_scope(src);
+        }
         let iter = self.alloc();
         self.emit(Op::IterInit {
             dst: iter,
@@ -418,11 +422,7 @@ impl Compiler<'_> {
         // at scope end for a `return` out of the loop
         let drops_iter = owned && self.ctx.has_drop;
         if drops_iter {
-            self.cur()
-                .scope_order
-                .last_mut()
-                .expect("a scope is always open")
-                .push(iter);
+            self.hold_in_scope(iter);
         }
         let idx = self.alloc();
         self.emit(Op::LoadInt { dst: idx, v: 0 });
@@ -471,11 +471,13 @@ impl Compiler<'_> {
         for b in lc.breaks {
             self.patch_jump(b, end);
         }
-        if drops_iter {
-            let f = self.cur();
-            f.drop_lists.push(Arc::from(vec![iter]));
-            let list = idx16(f.drop_lists.len() - 1);
-            self.emit(Op::DropScope { list });
+        for (drops, reg) in [(drops_iter, iter), (lent_temp, src)] {
+            if drops {
+                let f = self.cur();
+                f.drop_lists.push(Arc::from(vec![reg]));
+                let list = idx16(f.drop_lists.len() - 1);
+                self.emit(Op::DropScope { list });
+            }
         }
         self.emit(Op::LoadUnit { dst });
         Ok(())

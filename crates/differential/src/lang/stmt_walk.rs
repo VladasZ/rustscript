@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use crate::lang::expr::{Expr, Helper};
 use crate::lang::pat::Pat;
 
-use super::stmt::{Ann, ChainLink, ClosureParam, ClosureSource, Exit, Stmt};
+use super::stmt::{Ann, ChainLink, ClosureParam, ClosureSource, Exit, ForForm, Stmt};
 
 impl Stmt {
     /// Whether a `break` or `continue` in here, at any depth, names `label`.
@@ -39,6 +39,7 @@ impl Stmt {
             | Self::Scope { body }
             | Self::WhileLet { body, .. }
             | Self::LetLoop { body, .. }
+            | Self::ForEach { body, .. }
             | Self::LetElse {
                 else_body: body, ..
             } => vec![body],
@@ -69,6 +70,7 @@ impl Stmt {
             | Self::Scope { body }
             | Self::WhileLet { body, .. }
             | Self::LetLoop { body, .. }
+            | Self::ForEach { body, .. }
             | Self::LetElse {
                 else_body: body, ..
             } => vec![body],
@@ -96,7 +98,9 @@ impl Stmt {
             | Self::AssignField { expr, .. }
             | Self::Compound { expr, .. }
             | Self::Print { expr, .. }
-            | Self::ForMut { expr, .. } => out.push(expr),
+            | Self::ForEach { source: expr, .. } => out.push(expr),
+            Self::ForMut { write, .. } => out.extend(write.exprs()),
+            Self::ForUnordered { source, item, .. } => out.extend([source, item]),
             Self::LetClosure { source, calls, .. } => {
                 match source {
                     ClosureSource::Literal { body, .. } => out.push(body),
@@ -166,8 +170,15 @@ impl Stmt {
             | Self::Assign { expr, .. }
             | Self::AssignField { expr, .. }
             | Self::Compound { expr, .. }
-            | Self::Print { expr, .. }
-            | Self::ForMut { expr, .. } => out.push(expr),
+            | Self::Print { expr, .. } => out.push(expr),
+            Self::ForMut { .. }
+            | Self::ForUnordered { .. }
+            | Self::ForEach { .. }
+            | Self::ForRange { .. }
+            | Self::While { .. }
+            | Self::Loop { .. }
+            | Self::Scope { .. }
+            | Self::WhileLet { .. } => return self.loop_exprs_mut(),
             Self::LetClosure { source, calls, .. } => {
                 match source {
                     ClosureSource::Literal { body, .. } => out.push(body),
@@ -199,15 +210,6 @@ impl Stmt {
             }
             Self::CallMut { args, .. } => out.extend(args.iter_mut()),
             Self::Swap { .. } => {}
-            Self::ForRange { body, .. }
-            | Self::While { body, .. }
-            | Self::Loop { body, .. }
-            | Self::Scope { body }
-            | Self::WhileLet { body, .. } => {
-                for stmt in body {
-                    out.extend(stmt.exprs_mut());
-                }
-            }
             Self::IfLet {
                 links,
                 then_body,
@@ -259,6 +261,60 @@ impl Stmt {
             }
         }
         out
+    }
+
+    /// `exprs_mut` of the loops and the bare block.
+    fn loop_exprs_mut(&mut self) -> Vec<&mut Expr> {
+        let mut out = Vec::new();
+        match self {
+            Self::ForMut { write, .. } => out.extend(write.exprs_mut()),
+            Self::ForUnordered { source, item, .. } => out.extend([source, item]),
+            Self::ForEach { source, body, .. } => {
+                out.push(source);
+                for stmt in body {
+                    out.extend(stmt.exprs_mut());
+                }
+            }
+            Self::ForRange { body, .. }
+            | Self::While { body, .. }
+            | Self::Loop { body, .. }
+            | Self::Scope { body }
+            | Self::WhileLet { body, .. } => {
+                for stmt in body {
+                    out.extend(stmt.exprs_mut());
+                }
+            }
+            _ => {}
+        }
+        out
+    }
+
+    fn binding_features(&self) -> &'static [&'static str] {
+        match self {
+            Self::Let { ty, .. } if ty.contains_ref() => &["lang-let", "lang-let-ref"],
+            Self::Let {
+                ann: Ann::Inferred, ..
+            } => &["lang-let", "lang-let-inferred"],
+            Self::Let { .. } => &["lang-let"],
+            _ => &["lang-let-tuple"],
+        }
+    }
+
+    /// The features of the `for` loops that borrow their source.
+    fn borrowing_for_features(&self) -> &'static [&'static str] {
+        match self {
+            Self::ForMut { .. } => &["lang-iter-mut"],
+            Self::ForEach {
+                form: ForForm::Ref, ..
+            } => &["lang-for-ref"],
+            Self::ForEach {
+                form: ForForm::Iter,
+                ..
+            } => &["lang-for-iter"],
+            Self::ForEach { .. } => &["lang-for-enumerate"],
+            Self::ForUnordered { binds, .. } if binds.len() == 2 => &["lang-for-map"],
+            _ => &["lang-for-set"],
+        }
     }
 
     /// Names this statement writes to, so the renderer knows which bindings need `mut`.
@@ -359,7 +415,10 @@ impl Stmt {
 
     pub fn declared(&self) -> Vec<String> {
         match self {
-            Self::Let { name, .. } | Self::LetClosure { name, .. } | Self::LetLoop { name, .. } => {
+            Self::Let { name, .. }
+            | Self::LetClosure { name, .. }
+            | Self::LetLoop { name, .. }
+            | Self::ForUnordered { name, .. } => {
                 vec![name.clone()]
             }
             Self::LetTuple { names, .. } => names.iter().map(|(n, _)| n.clone()).collect(),
@@ -403,6 +462,7 @@ impl Stmt {
         let own = match self {
             Self::Compound { op, .. } => op.is_fallible(),
             Self::Mutate { op, .. } | Self::ForAccum { op, .. } => op.has_fallible_op(),
+            Self::ForMut { write, .. } => write.has_fallible_op(),
             _ => false,
         };
         own || self.own_exprs().iter().any(|expr| expr.has_fallible_op())
@@ -426,13 +486,7 @@ impl Stmt {
 
     pub fn features(&self, out: &mut BTreeSet<&'static str>) {
         let own: &[&'static str] = match self {
-            Self::Let {
-                ann: Ann::Typed, ..
-            } => &["lang-let"],
-            Self::Let {
-                ann: Ann::Inferred, ..
-            } => &["lang-let", "lang-let-inferred"],
-            Self::LetTuple { .. } => &["lang-let-tuple"],
+            Self::Let { .. } | Self::LetTuple { .. } => self.binding_features(),
             Self::LetClosure { source, .. } => match source {
                 ClosureSource::Literal {
                     capture_move: true,
@@ -467,7 +521,9 @@ impl Stmt {
             Self::Continue { .. } => &["lang-continue"],
             Self::Return { .. } => &["lang-early-return"],
             Self::ForAccum { .. } => &["lang-for-accum"],
-            Self::ForMut { .. } => &["lang-iter-mut"],
+            Self::ForMut { .. } | Self::ForEach { .. } | Self::ForUnordered { .. } => {
+                self.borrowing_for_features()
+            }
             Self::CallMut { .. } => &["lang-borrow-mut"],
             Self::IfLet {
                 links,
@@ -513,6 +569,9 @@ impl Stmt {
             }
             Self::Mutate { op, .. } | Self::ForAccum { op, .. } => {
                 out.insert(op.feature());
+            }
+            Self::ForMut { write, .. } => {
+                out.insert(write.feature());
             }
             _ => {}
         }
@@ -583,6 +642,14 @@ impl Stmt {
                 out.push(',');
             }
             Self::ForMut { .. } => out.push_str("for-mut,"),
+            Self::ForUnordered { .. } => out.push_str("for-unordered,"),
+            Self::ForEach { body, .. } => {
+                out.push_str("for-each(");
+                for stmt in body {
+                    stmt.shape(out);
+                }
+                out.push_str("),");
+            }
             Self::CallMut { .. } => out.push_str("call-mut,"),
             Self::IfLet { .. }
             | Self::WhileLet { .. }

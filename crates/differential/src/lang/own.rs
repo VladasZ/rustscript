@@ -41,6 +41,7 @@ pub struct Slot {
     place: bool,
     /// behind a reference, `self.f0` in a `&self` method, so a read must clone
     borrowed: bool,
+    scope_depth: usize,
     loop_depth: usize,
     closure_depth: usize,
 }
@@ -49,6 +50,46 @@ impl Slot {
     /// A closure binding carries its return type, but the closure itself never copies.
     pub fn is_copy(&self) -> bool {
         matches!(self.kind, BindKind::Local | BindKind::Const) && self.ty.is_copy()
+    }
+}
+
+/// Where the reference being built goes, which decides what it may borrow. The generator and
+/// the checker keep one each and move it the same way.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RefRules {
+    /// The reference is kept by a `let`, so the binding it borrows is held to the end of the
+    /// scope of that `let`.
+    pub bound: bool,
+    /// The scope depth the reference leaves to, through a `let`, a closure body, a match arm,
+    /// an `if` branch or a block. Each ends its own temporaries, so no temporary may stand
+    /// behind the reference, and neither may a `let` declared deeper. `None` while the
+    /// reference is used up inside its own statement, where a temporary lives long enough.
+    pub floor: Option<usize>,
+}
+
+impl RefRules {
+    /// A `let` at scope `depth` keeps the reference.
+    pub fn kept(depth: usize) -> Self {
+        Self {
+            bound: true,
+            floor: Some(depth),
+        }
+    }
+
+    /// The reference leaves a scope that sits at `depth`.
+    pub fn leaving(self, depth: usize) -> Self {
+        Self {
+            bound: self.bound,
+            floor: self.floor.or(Some(depth)),
+        }
+    }
+
+    pub fn temps_ok(self) -> bool {
+        self.floor.is_none()
+    }
+
+    pub fn is_strict(self) -> bool {
+        self.bound || self.floor.is_some()
     }
 }
 
@@ -105,6 +146,7 @@ impl Scope {
             state: OwnState::Owned,
             place,
             borrowed,
+            scope_depth: self.scope_depth,
             loop_depth: self.loop_depth,
             closure_depth: self.closure_depth,
         });
@@ -214,9 +256,30 @@ impl Scope {
         self.stmt_shared.truncate(mark);
     }
 
+    /// A reference out of the binding, held for as long as `rules` say the reference lives.
+    pub fn lend(&mut self, name: &str, rules: RefRules) {
+        match rules {
+            RefRules {
+                bound: true,
+                floor: Some(depth),
+            } => self.pin_at(name, depth),
+            _ => self.borrow_for_stmt(name),
+        }
+    }
+
     /// A `let` keeps a reference to the binding, so it is borrowed until the scope ends.
     pub fn pin(&mut self, name: &str) {
-        self.pinned.push((name.to_string(), self.scope_depth));
+        self.pin_at(name, self.scope_depth);
+    }
+
+    /// The same for a `let` at scope `depth`, whose initializer borrows from inside an `if`
+    /// branch or a match arm. The borrow outlives that inner scope.
+    pub fn pin_at(&mut self, name: &str, depth: usize) {
+        self.pinned.push((name.to_string(), depth));
+    }
+
+    pub fn depth(&self) -> usize {
+        self.scope_depth
     }
 
     fn is_held(&self, name: &str) -> bool {
@@ -321,14 +384,16 @@ impl Scope {
     }
 
     /// A shared reference to the binding, `name.as_str()`. A pattern binding or a parameter
-    /// may die before the reference does, so only a `let` is offered.
-    pub fn can_borrow(&self, name: &str) -> bool {
+    /// may die before the reference does, so only a `let` is offered. With a `floor` the
+    /// reference leaves to that scope depth, so a `let` declared deeper dies before it.
+    pub fn can_borrow(&self, name: &str, floor: Option<usize>) -> bool {
         !self.is_held(name)
             && self.slot(name).is_some_and(|slot| {
                 slot.place
                     && !slot.borrowed
                     && slot.state == OwnState::Owned
                     && slot.closure_depth == self.closure_depth
+                    && floor.is_none_or(|floor| slot.scope_depth <= floor)
             })
     }
 

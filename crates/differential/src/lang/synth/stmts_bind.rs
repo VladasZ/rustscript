@@ -115,7 +115,8 @@ impl Generator<'_> {
         let ty = self.refutable_ty();
         // a `ref` binding would borrow the temporary the scrutinee is
         let pat = self.refutable_value_pat(&ty)?;
-        let expr = unbare_deep(self.expr(&ty, MAX_EXPR_DEPTH - 1));
+        // the bindings stay for the scope, so a reference among them is kept like a `let`
+        let expr = unbare_deep(self.kept(|inner| inner.expr(&ty, MAX_EXPR_DEPTH - 1)));
         // the `else` runs on the leaving path only, so what it moves is still here after
         let before = self.scope.snapshot();
         let (else_body, exit) = self.scoped(|inner| {

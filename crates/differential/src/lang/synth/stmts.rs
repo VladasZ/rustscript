@@ -29,6 +29,9 @@ impl Generator<'_> {
         {
             return stmt;
         }
+        if self.chance(0.14) {
+            return self.ref_binding();
+        }
         let ty = self.any_ty();
         if let Ty::Tuple(items) = &ty
             && items.len() >= 2
@@ -422,7 +425,11 @@ impl Generator<'_> {
     // mutations
 
     pub(super) fn mutation(&mut self) -> Stmt {
-        match self.rng.random_range(0..22) {
+        match self.rng.random_range(0..26) {
+            19 | 20 => self.for_each_stmt().unwrap_or_else(|| self.observation()),
+            21 => self
+                .for_unordered_stmt()
+                .unwrap_or_else(|| self.observation()),
             0 => self.assign_stmt(),
             1 => self.compound_stmt().unwrap_or_else(|| self.assign_stmt()),
             2 => self
@@ -456,7 +463,11 @@ impl Generator<'_> {
     }
 
     pub(super) fn observation(&mut self) -> Stmt {
-        let ty = self.any_ty();
+        let ty = if self.chance(0.12) {
+            self.ref_ty()
+        } else {
+            self.any_ty()
+        };
         let expr = self.borrowing(|inner| inner.expr(&ty, MAX_EXPR_DEPTH));
         self.print_stmt(expr)
     }
@@ -565,7 +576,20 @@ impl Generator<'_> {
 
     pub(super) fn compound_stmt(&mut self) -> Option<Stmt> {
         let (name, ty) = self.pick_writable()?;
-        let op = match &ty {
+        let op = self.compound_op(&ty)?;
+        let rhs_ty = if matches!(op, BinOp::Shl | BinOp::Shr) {
+            Ty::U32
+        } else {
+            ty
+        };
+        // the target is borrowed for the write, so the right side can't take it
+        let expr = self.holding(&name, |inner| inner.expr(&rhs_ty, MAX_EXPR_DEPTH - 1));
+        Some(Stmt::Compound { name, op, expr })
+    }
+
+    /// An operator `ty op= value` compiles for.
+    pub(super) fn compound_op(&mut self, ty: &Ty) -> Option<BinOp> {
+        Some(match ty {
             Ty::Int(_) => *self.pick(&[
                 BinOp::Add,
                 BinOp::Sub,
@@ -582,14 +606,6 @@ impl Generator<'_> {
             Ty::Bool => *self.pick(&[BinOp::BitAnd, BinOp::BitOr, BinOp::BitXor]),
             Ty::Str => BinOp::Add,
             _ => return None,
-        };
-        let rhs_ty = if matches!(op, BinOp::Shl | BinOp::Shr) {
-            Ty::U32
-        } else {
-            ty
-        };
-        // the target is borrowed for the write, so the right side can't take it
-        let expr = self.holding(&name, |inner| inner.expr(&rhs_ty, MAX_EXPR_DEPTH - 1));
-        Some(Stmt::Compound { name, op, expr })
+        })
     }
 }
