@@ -9,6 +9,7 @@ use crate::lang::own::referenced;
 use crate::lang::pipe::{
     Access, Bind, Item, ParamAnn, Pipe, Site, Source, Stage, Term, fallible_pending,
 };
+use crate::lang::ref_param::RefParam;
 use crate::lang::synth::Generator;
 use crate::lang::ty::Ty;
 
@@ -101,6 +102,25 @@ impl Generator<'_> {
         })
     }
 
+    /// The predicate of a closure that is handed `&item`, with the way it names the item.
+    pub(super) fn pred_by(&mut self, bind: &str, item: &Ty, depth: usize) -> (RefParam, Expr) {
+        let by = match self.rng.random_range(0..10) {
+            0..4 => RefParam::Cloned,
+            4..7 if item.is_copy() => RefParam::Pat,
+            _ => RefParam::Deref,
+        };
+        let locals = [(by.local(bind), item.clone())];
+        let pred = self.closure_body(|inner| {
+            let build = |inner: &mut Self| inner.typed_only(|inner| inner.expr(&Ty::Bool, depth));
+            if by == RefParam::Deref {
+                inner.with_borrowed(&locals, build)
+            } else {
+                inner.with_locals(&locals, build)
+            }
+        });
+        (by, pred)
+    }
+
     fn pipe_to_scalar_collect(
         &mut self,
         elem: &Ty,
@@ -129,7 +149,7 @@ impl Generator<'_> {
         }
         if self.chance(0.4) {
             let bind = self.fresh_bind();
-            let pred = self.body_with(&bind, &item, &Ty::Bool, depth - 1);
+            let (by, pred) = self.pred_by(&bind, &item, depth - 1);
             if !sort_before_fallible(
                 &mut stages,
                 &mut ordered,
@@ -142,6 +162,7 @@ impl Generator<'_> {
                 bind: Bind::One(bind),
                 pred,
                 ann: self.param_ann(),
+                by,
             });
         }
         // a vec keeps arrival order, a set forgets it
@@ -199,10 +220,16 @@ impl Generator<'_> {
                 let pair = Item::Pair(key.clone(), value.clone());
                 // when the pair can't sort, the filter is dropped rather than the whole pipe
                 if sort_before_fallible(&mut stages, &mut ordered, &pair, &pred) {
+                    let by = if pair.is_copy() && self.chance(0.5) {
+                        RefParam::Pat
+                    } else {
+                        RefParam::Cloned
+                    };
                     stages.push(Stage::Filter {
                         bind: Bind::Pair(key_bind, val_bind),
                         pred,
                         ann: ParamAnn::Typed,
+                        by,
                     });
                 }
             }
@@ -251,7 +278,7 @@ impl Generator<'_> {
         };
         if *want == Ty::USIZE && self.chance(0.4) {
             let bind = self.fresh_bind();
-            let pred = self.body_with(&bind, &item, &Ty::Bool, depth - 1);
+            let (by, pred) = self.pred_by(&bind, &item, depth - 1);
             let mut stages = Vec::new();
             if !sort_before_fallible(&mut stages, &mut ordered, &Item::Scalar(item), &pred) {
                 return None;
@@ -260,6 +287,7 @@ impl Generator<'_> {
                 bind: Bind::One(bind),
                 pred,
                 ann: self.param_ann(),
+                by,
             });
             return Some(Pipe {
                 source,

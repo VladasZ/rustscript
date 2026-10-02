@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::lang::expr::{BinOp, Expr};
 use crate::lang::fmt::FmtSpec;
 use crate::lang::pat::Pat;
+use crate::lang::ref_param::RefParam;
+use crate::lang::stmt_render::field_name;
 use crate::lang::ty::Ty;
 
 /// An inferred binding is where the interpreter must learn a type from the initializer alone.
@@ -259,6 +261,17 @@ pub enum Stmt {
         elem: Ty,
         write: ElemWrite,
     },
+    /// A `&mut` into `name`, taken by one of the forms of `MutPlace` and written through.
+    /// `name` is borrowed for the whole statement, so nothing in it reads `name`. `base` is the
+    /// type of the binding and `elem` the type behind the reference.
+    RefMut {
+        name: String,
+        base: Ty,
+        place: MutPlace,
+        var: String,
+        elem: Ty,
+        write: ElemWrite,
+    },
     /// `for var in &source { body }`, or one of the other forms of `ForForm`. The item is a
     /// reference, so the body reads it through `(*var)` and can only clone it. A source that
     /// is a binding is named in place and stays borrowed for the loop, any other is a
@@ -331,6 +344,102 @@ pub enum Stmt {
         value: Expr,
         fallback: Expr,
     },
+}
+
+/// Where the `&mut` of a `Stmt::RefMut` points.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum MutPlace {
+    /// `{ let r = &mut name; .. }`, the borrow block
+    Whole,
+    /// `&mut name.f0`, a struct or a tuple field
+    Field(usize),
+    /// `&mut name[i]`, panics out of bounds
+    Index(u8),
+    /// `if let Some(r) = name.get_mut(i) { .. }`
+    GetMut(u8),
+    /// `if let Some(r) = name.last_mut() { .. }`
+    LastMut,
+    /// `if let Some(r) = name.get_mut(&key) { .. }` on a map
+    MapGetMut(Expr),
+    /// `name.entry(key).or_insert_with(|| default)`
+    Entry { key: Expr, default: Expr },
+    /// `for r in name.values_mut() { .. }`. The order is random per process, so the write sees
+    /// its own entry alone and can neither panic nor print a drop.
+    ValuesMut,
+    /// `if let Some(ref mut r) = name { .. }` on an option
+    OptRefMut,
+}
+
+impl MutPlace {
+    /// In the order they run.
+    pub fn exprs(&self) -> Vec<&Expr> {
+        match self {
+            Self::MapGetMut(key) => vec![key],
+            Self::Entry { key, default } => vec![key, default],
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn exprs_mut(&mut self) -> Vec<&mut Expr> {
+        match self {
+            Self::MapGetMut(key) => vec![key],
+            Self::Entry { key, default } => vec![key, default],
+            _ => Vec::new(),
+        }
+    }
+
+    /// Whether the body runs only when the place is there.
+    pub fn is_conditional(&self) -> bool {
+        matches!(
+            self,
+            Self::GetMut(_) | Self::LastMut | Self::MapGetMut(_) | Self::OptRefMut
+        )
+    }
+
+    /// The line that opens the statement and binds `diff_ref`.
+    pub fn head(&self, name: &str, base: &Ty) -> String {
+        match self {
+            Self::Whole => format!("{{ let diff_ref = &mut {name};"),
+            Self::Field(index) => {
+                format!(
+                    "{{ let diff_ref = &mut {name}.{};",
+                    field_name(base, *index)
+                )
+            }
+            Self::Index(index) => format!("{{ let diff_ref = &mut {name}[{index}usize];"),
+            Self::GetMut(index) => {
+                format!("if let Some(diff_ref) = {name}.get_mut({index}usize) {{")
+            }
+            Self::LastMut => format!("if let Some(diff_ref) = {name}.last_mut() {{"),
+            Self::MapGetMut(key) => {
+                format!(
+                    "if let Some(diff_ref) = {name}.get_mut(&{}) {{",
+                    key.render()
+                )
+            }
+            Self::Entry { key, default } => format!(
+                "{{ let diff_ref = {name}.entry({}).or_insert_with(|| {});",
+                key.render(),
+                default.render()
+            ),
+            Self::ValuesMut => format!("for diff_ref in {name}.values_mut() {{"),
+            Self::OptRefMut => format!("if let Some(ref mut diff_ref) = {name} {{"),
+        }
+    }
+
+    pub fn feature(&self) -> &'static str {
+        match self {
+            Self::Whole => "lang-ref-mut-block",
+            Self::Field(_) => "lang-ref-mut-field",
+            Self::Index(_) => "lang-ref-mut-index",
+            Self::GetMut(_) => "lang-ref-mut-get-mut",
+            Self::LastMut => "lang-ref-mut-last-mut",
+            Self::MapGetMut(_) => "lang-ref-mut-map-get-mut",
+            Self::Entry { .. } => "lang-ref-mut-entry",
+            Self::ValuesMut => "lang-ref-mut-values-mut",
+            Self::OptRefMut => "lang-ref-mut-pat",
+        }
+    }
 }
 
 /// How a `for` walks a vec by shared reference.
@@ -420,6 +529,8 @@ pub enum MutOp {
     VecRetain {
         bind: String,
         pred: Expr,
+        #[serde(default)]
+        by: RefParam,
     },
     StrPush(Expr),
     StrPushStr(Expr),
@@ -523,10 +634,9 @@ impl MutOp {
                 format!("{name}[{index}usize] = {};", value.render())
             }
             Self::VecExtend(expr) => format!("{name}.extend({});", expr.render()),
-            Self::VecRetain { bind, pred } => format!(
-                "{name}.retain(|diff_ref| {{ let {bind} = diff_ref.clone(); {} }});",
-                pred.render()
-            ),
+            Self::VecRetain { bind, pred, by } => {
+                format!("{name}.retain({});", by.closure(bind, None, &pred.render()))
+            }
             Self::StrPushStr(expr) => format!("{name}.push_str(&{});", expr.render()),
             Self::MapInsert { key, value } => {
                 format!("{name}.insert({}, {});", key.render(), value.render())

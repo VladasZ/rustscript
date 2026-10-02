@@ -18,31 +18,6 @@ favour of tokio tasks, so those are not repeated here.
 
 Verified against `rustscript 0.6.8 (a17a006, built 2026-08-19)`.
 
-## `filter` over `Vec<u8>` bytes removes nothing
-
-An `into_iter().filter(...).collect()` chain over a `Vec<u8>` runs and
-returns every byte, the predicate is never applied. Real Rust drops the
-filtered bytes.
-
-```rust
-#!/usr/bin/env rust
-
-fn main() {
-    let bytes: Vec<u8> = vec![65, 0, 66, 0];
-    let kept: Vec<u8> = bytes.into_iter().filter(|b| *b != 0).collect();
-    println!("{}", kept.len());
-}
-```
-
-- `rustc` prints `2`.
-- `rust` prints `4`.
-
-Hit for real in `shell/win/wsl.rs`, which stripped the zero bytes out of
-UTF-16 `wsl.exe` output this way and got the raw bytes back, so the distro
-check saw an empty string. Until it is fixed, avoid byte filtering, or avoid
-needing it, the wsl stage now probes the distro with an exit code instead of
-parsing output.
-
 ## A `const` as a match pattern never matches
 
 A named constant used as a pattern inside `match` compiles, runs, and simply

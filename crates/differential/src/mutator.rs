@@ -147,7 +147,9 @@ fn binders(expr: &Expr, out: &mut BTreeSet<String>) {
 
 fn bind_names(bind: &Bind, out: &mut BTreeSet<String>) {
     match bind {
+        // a closure that reads its item through the reference names it `(*name)`
         Bind::One(name) => {
+            out.insert(format!("(*{name})"));
             out.insert(name.clone());
         }
         Bind::Pair(key, value) => {

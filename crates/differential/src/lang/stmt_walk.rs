@@ -6,7 +6,9 @@ use std::collections::BTreeSet;
 use crate::lang::expr::{Expr, Helper};
 use crate::lang::pat::Pat;
 
-use super::stmt::{Ann, ChainLink, ClosureParam, ClosureSource, Exit, ForForm, Stmt};
+use super::stmt::{
+    Ann, ChainLink, ClosureParam, ClosureSource, Exit, ForForm, MutOp, MutPlace, Stmt,
+};
 
 impl Stmt {
     /// Whether a `break` or `continue` in here, at any depth, names `label`.
@@ -100,6 +102,10 @@ impl Stmt {
             | Self::Print { expr, .. }
             | Self::ForEach { source: expr, .. } => out.push(expr),
             Self::ForMut { write, .. } => out.extend(write.exprs()),
+            Self::RefMut { place, write, .. } => {
+                out.extend(place.exprs());
+                out.extend(write.exprs());
+            }
             Self::ForUnordered { source, item, .. } => out.extend([source, item]),
             Self::LetClosure { source, calls, .. } => {
                 match source {
@@ -172,6 +178,7 @@ impl Stmt {
             | Self::Compound { expr, .. }
             | Self::Print { expr, .. } => out.push(expr),
             Self::ForMut { .. }
+            | Self::RefMut { .. }
             | Self::ForUnordered { .. }
             | Self::ForEach { .. }
             | Self::ForRange { .. }
@@ -268,6 +275,10 @@ impl Stmt {
         let mut out = Vec::new();
         match self {
             Self::ForMut { write, .. } => out.extend(write.exprs_mut()),
+            Self::RefMut { place, write, .. } => {
+                out.extend(place.exprs_mut());
+                out.extend(write.exprs_mut());
+            }
             Self::ForUnordered { source, item, .. } => out.extend([source, item]),
             Self::ForEach { source, body, .. } => {
                 out.push(source);
@@ -325,6 +336,7 @@ impl Stmt {
             | Self::Compound { name, .. }
             | Self::Mutate { name, .. }
             | Self::ForMut { name, .. }
+            | Self::RefMut { name, .. }
             | Self::CallMut { name, .. }
             | Self::WhileLet { name, .. }
             | Self::ForAccum { target: name, .. }
@@ -381,6 +393,7 @@ impl Stmt {
             | Self::Compound { name, .. }
             | Self::Mutate { name, .. }
             | Self::ForMut { name, .. }
+            | Self::RefMut { name, .. }
             | Self::CallMut { name, .. }
             | Self::WhileLet { name, .. }
             | Self::ForAccum { target: name, .. } => {
@@ -463,6 +476,9 @@ impl Stmt {
             Self::Compound { op, .. } => op.is_fallible(),
             Self::Mutate { op, .. } | Self::ForAccum { op, .. } => op.has_fallible_op(),
             Self::ForMut { write, .. } => write.has_fallible_op(),
+            Self::RefMut { place, write, .. } => {
+                matches!(place, MutPlace::Index(_)) || write.has_fallible_op()
+            }
             _ => false,
         };
         own || self.own_exprs().iter().any(|expr| expr.has_fallible_op())
@@ -525,6 +541,7 @@ impl Stmt {
                 self.borrowing_for_features()
             }
             Self::CallMut { .. } => &["lang-borrow-mut"],
+            Self::RefMut { .. } => &["lang-ref-mut"],
             Self::IfLet {
                 links,
                 else_body: Some(_),
@@ -559,6 +576,19 @@ impl Stmt {
         {
             out.insert("lang-pat-guard");
         }
+        self.op_features(out);
+        for body in self.bodies() {
+            for stmt in body {
+                stmt.features(out);
+            }
+        }
+        for expr in self.exprs() {
+            expr.features(out);
+        }
+    }
+
+    /// The features of what a statement prints or writes.
+    fn op_features(&self, out: &mut BTreeSet<&'static str>) {
         match self {
             Self::Print { spec, form, .. } => {
                 spec.features(out);
@@ -569,19 +599,18 @@ impl Stmt {
             }
             Self::Mutate { op, .. } | Self::ForAccum { op, .. } => {
                 out.insert(op.feature());
+                if let MutOp::VecRetain { by, .. } = op {
+                    out.extend(by.feature());
+                }
             }
             Self::ForMut { write, .. } => {
                 out.insert(write.feature());
             }
-            _ => {}
-        }
-        for body in self.bodies() {
-            for stmt in body {
-                stmt.features(out);
+            Self::RefMut { place, write, .. } => {
+                out.insert(place.feature());
+                out.insert(write.feature());
             }
-        }
-        for expr in self.exprs() {
-            expr.features(out);
+            _ => {}
         }
     }
 
@@ -642,6 +671,7 @@ impl Stmt {
                 out.push(',');
             }
             Self::ForMut { .. } => out.push_str("for-mut,"),
+            Self::RefMut { .. } => out.push_str("ref-mut,"),
             Self::ForUnordered { .. } => out.push_str("for-unordered,"),
             Self::ForEach { body, .. } => {
                 out.push_str("for-each(");

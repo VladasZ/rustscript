@@ -41,7 +41,7 @@ impl Generator<'_> {
     }
 
     /// A write through the `&mut` of one element, picked by its type.
-    fn elem_write(&mut self, elem: &Ty) -> ElemWrite {
+    pub(super) fn elem_write(&mut self, elem: &Ty) -> ElemWrite {
         if self.chance(0.4) {
             return ElemWrite::Assign(self.expr(elem, 2));
         }

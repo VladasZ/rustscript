@@ -2,7 +2,7 @@
 
 use crate::lang::expr::Expr;
 use crate::lang::own_check::Checker;
-use crate::lang::stmt::{ElemWrite, ForForm, Stmt};
+use crate::lang::stmt::{ElemWrite, ForForm, MutPlace, Stmt};
 use crate::lang::ty::Ty;
 
 impl Checker {
@@ -38,13 +38,8 @@ impl Checker {
                     format!("iter_mut over `{name}`")
                 });
                 let hidden = self.scope.hide(name);
-                self.loop_with(&[(var.clone(), elem.clone())], &[], |inner| match write {
-                    ElemWrite::Method(op) => inner.mut_op("diff_ref", op),
-                    other => {
-                        for expr in other.exprs() {
-                            inner.expr(expr);
-                        }
-                    }
+                self.loop_with(&[(var.clone(), elem.clone())], &[], |inner| {
+                    inner.elem_write(write);
                 });
                 if let Some(hidden) = hidden {
                     self.scope.unhide(hidden);
@@ -88,6 +83,59 @@ impl Checker {
                 self.push_let(name, &Ty::vec_of(item_ty.clone()));
             }
             _ => unreachable!("loop_form handles the collection loops only"),
+        }
+    }
+
+    /// A `&mut` into a binding. The binding is borrowed for the whole statement, so nothing
+    /// in it reads the name.
+    pub(super) fn ref_mut(
+        &mut self,
+        name: &str,
+        place: &MutPlace,
+        var: &str,
+        elem: &Ty,
+        write: &ElemWrite,
+    ) {
+        self.require(self.scope.can_write(name), || format!("&mut into `{name}`"));
+        let hidden = self.scope.hide(name);
+        match place {
+            MutPlace::MapGetMut(key) => self.expr(key),
+            MutPlace::Entry { key, default } => {
+                self.expr(key);
+                self.scope.enter_closure();
+                self.expr(default);
+                self.scope.leave_closure();
+            }
+            _ => {}
+        }
+        let item = [(var.to_string(), elem.clone())];
+        if matches!(place, MutPlace::ValuesMut) {
+            self.loop_with(&item, &[], |inner| inner.elem_write(write));
+        } else if place.is_conditional() {
+            self.branches(1, |inner, _| {
+                inner.push_local(var, elem);
+                inner.elem_write(write);
+            });
+        } else {
+            let mark = self.scope.enter_scope();
+            self.push_local(var, elem);
+            self.elem_write(write);
+            self.scope.exit_scope(mark);
+        }
+        if let Some(hidden) = hidden {
+            self.scope.unhide(hidden);
+        }
+    }
+
+    /// A write through the `&mut` a statement holds as `diff_ref`.
+    fn elem_write(&mut self, write: &ElemWrite) {
+        match write {
+            ElemWrite::Method(op) => self.mut_op("diff_ref", op),
+            other => {
+                for expr in other.exprs() {
+                    self.expr(expr);
+                }
+            }
         }
     }
 

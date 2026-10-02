@@ -13,6 +13,7 @@ mod own_check_bind;
 mod own_check_loops;
 pub mod pat;
 pub mod pipe;
+pub mod ref_param;
 pub mod stmt;
 mod stmt_bind;
 mod stmt_render;

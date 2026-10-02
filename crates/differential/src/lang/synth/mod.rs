@@ -11,6 +11,7 @@ mod stmts;
 mod stmts_bind;
 mod stmts_for;
 mod stmts_loops;
+mod stmts_ref_mut;
 mod users;
 
 use rand::RngExt;

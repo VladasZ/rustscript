@@ -177,16 +177,17 @@ impl Generator<'_> {
                     7 => MutOp::VecSwap(self.rng.random_range(0..=4), self.rng.random_range(0..=4)),
                     8 => {
                         let bind = self.fresh("diff_r");
-                        let locals = [(bind.clone(), elem.clone())];
                         // `retain` holds the vec, so the predicate must not read it
-                        let pred = self.without_binding(name, |inner| {
-                            inner.closure_body(|inner| {
-                                inner.with_locals(&locals, |inner| inner.expr(&Ty::Bool, 1))
-                            })
-                        });
-                        MutOp::VecRetain { bind, pred }
+                        let (by, pred) =
+                            self.without_binding(name, |inner| inner.pred_by(&bind, &elem, 1));
+                        MutOp::VecRetain { bind, pred, by }
                     }
                     9 => MutOp::VecClear,
+                    // `v.extend(v.clone())` doubles the vec, and nested loops over a long vec
+                    // run it until the output is gigabytes
+                    _ if self.in_loop => self.op_without(name, |inner| {
+                        MutOp::VecExtend(inner.expr(&Ty::vec_of(elem), 1))
+                    }),
                     _ => MutOp::VecExtend(self.expr(&Ty::vec_of(elem), 1)),
                 }
             }

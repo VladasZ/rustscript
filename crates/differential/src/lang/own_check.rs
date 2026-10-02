@@ -7,6 +7,7 @@ use crate::lang::expr::{Expr, MemKind, ReadMode};
 use crate::lang::own::{BindKind, RefRules, Scope, referenced};
 use crate::lang::pat::Pat;
 use crate::lang::pipe::{Bind, Item, Pipe, Source, Stage, Term};
+use crate::lang::ref_param::RefParam;
 use crate::lang::stmt::{ClosureSource, MutOp, Stmt};
 use crate::lang::ty::Ty;
 use crate::lang::user::MethodKind;
@@ -239,6 +240,14 @@ impl Checker {
                 self.mut_op(name, op);
                 self.scope.unfreeze();
             }
+            Stmt::RefMut {
+                name,
+                place,
+                var,
+                elem,
+                write,
+                ..
+            } => self.ref_mut(name, place, var, elem, write),
             Stmt::ForAccum { .. }
             | Stmt::ForMut { .. }
             | Stmt::ForEach { .. }
@@ -330,7 +339,7 @@ impl Checker {
 
     /// `target` is the binding the op writes, the retain binding takes its element type.
     pub(super) fn mut_op(&mut self, target: &str, op: &MutOp) {
-        if let MutOp::VecRetain { bind, pred } = op {
+        if let MutOp::VecRetain { bind, pred, by } = op {
             let elem = match self.scope.slot(target).map(|slot| slot.ty.clone()) {
                 Some(Ty::Vec(elem)) => *elem,
                 other => {
@@ -340,7 +349,7 @@ impl Checker {
             };
             self.scope.enter_closure();
             let mark = self.scope.enter_scope();
-            self.push_local(bind, &elem);
+            self.push_item(&by.local(bind), &elem, *by);
             self.expr(pred);
             self.scope.exit_scope(mark);
             self.scope.leave_closure();
@@ -348,6 +357,15 @@ impl Checker {
         }
         for expr in op.exprs() {
             self.expr(expr);
+        }
+    }
+
+    /// The item of a closure that is handed a reference, under the name the body reads.
+    fn push_item(&mut self, local: &str, ty: &Ty, by: RefParam) {
+        if by == RefParam::Deref {
+            self.scope.push_borrowed(local.to_string(), ty.clone());
+        } else {
+            self.push_local(local, ty);
         }
     }
 
@@ -635,6 +653,25 @@ impl Checker {
             match stage {
                 Stage::Map { bind, body, .. } | Stage::PairWith { bind, body } => {
                     self.pipe_body(bind, &item, body);
+                }
+                Stage::Filter {
+                    bind: Bind::One(name),
+                    pred,
+                    by: RefParam::Deref,
+                    ..
+                } => {
+                    // the item stays behind the reference, so the body only reads it
+                    let ty = match &item {
+                        Item::Scalar(ty) => ty.clone(),
+                        Item::Pair(key, value) => Ty::Tuple(vec![key.clone(), value.clone()]),
+                    };
+                    self.scope.enter_closure();
+                    let depth = self.scope.depth();
+                    let mark = self.scope.enter_scope();
+                    self.scope.push_borrowed(format!("(*{name})"), ty);
+                    self.crossing(depth, |inner| inner.expr(pred));
+                    self.scope.exit_scope(mark);
+                    self.scope.leave_closure();
                 }
                 Stage::Filter { bind, pred, .. } => self.pipe_body(bind, &item, pred),
                 _ => {}
