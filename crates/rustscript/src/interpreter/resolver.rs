@@ -83,6 +83,16 @@ impl Resolver {
         }
     }
 
+    /// The canonical path of a fn, the key the fn index holds it under.
+    pub fn fn_segs(&self, idx: u32) -> Option<Vec<String>> {
+        self.modules.iter().find_map(|syms| {
+            let (name, _) = syms.fns.iter().find(|(_, f)| **f == idx)?;
+            let mut segs = syms.path.clone();
+            segs.push(name.clone());
+            Some(segs)
+        })
+    }
+
     pub fn resolve(&self, m: usize, segs: &[String]) -> Result<Res> {
         self.resolve_at(m, segs, 0)
     }

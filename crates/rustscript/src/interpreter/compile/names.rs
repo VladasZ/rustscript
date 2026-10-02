@@ -308,7 +308,12 @@ impl Compiler<'_> {
                 }
                 self.external_path(canon, None)
             }
-            Res::Fn(_) => PathRef::user(segs.to_vec(), None),
+            // The VM finds a fn by its canonical key, and the name as written is only that key
+            // at the root module.
+            Res::Fn(idx) => {
+                let canon = self.ctx.resolver.fn_segs(idx);
+                PathRef::user(canon.unwrap_or_else(|| segs.to_vec()), None)
+            }
         };
         let path = self.add_path(path);
         self.emit(Op::PathValue { dst, path });
