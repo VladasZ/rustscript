@@ -77,6 +77,7 @@ fn write_value(value: &Value, opts: &DebugOpts, indent: usize, out: &mut String)
             start,
             end,
             inclusive,
+            ..
         } => {
             let sep = if *inclusive { "..=" } else { ".." };
             out.push_str(&format!("{start}{sep}{end}"));

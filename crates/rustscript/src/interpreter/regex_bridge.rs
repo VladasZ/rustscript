@@ -8,7 +8,9 @@ use parking_lot::Mutex;
 use super::bridge::VArgs;
 use super::bytecode::{BuiltinId, MethodName};
 use super::native::Native;
-use super::shared::{CapturesOut, MatchOut, RegexOut, captures_core, match_core, regex_core};
+use super::shared::{
+    CapturesOut, MatchOut, RegexOut, captures_core, match_core, regex_core, usize_value,
+};
 use super::value::{RsStr, Value};
 
 type CaptureNames = Arc<Vec<(Arc<str>, usize)>>;
@@ -122,7 +124,7 @@ fn regex_method(regex: &RegexValue, method: &MethodName, args: &[Value]) -> Resu
 fn match_method(found: &MatchValue, method: &MethodName) -> Result<Value> {
     match match_core(method.id, &found.source, found.start, found.end) {
         Some(MatchOut::Text(s)) => Ok(Value::str(s)),
-        Some(MatchOut::Int(i)) => Ok(Value::Int(i)),
+        Some(MatchOut::Int(i)) => Ok(usize_value(i)),
         None => bail!("unknown method `{}` on Match", method.text),
     }
 }
@@ -130,7 +132,7 @@ fn match_method(found: &MatchValue, method: &MethodName) -> Result<Value> {
 fn captures_method(captures: &CapturesValue, method: &MethodName, args: &[Value]) -> Result<Value> {
     let names = captures.names.iter().map(|(n, i)| (n.as_ref(), *i));
     match captures_core(method.id, &captures.groups, names, &VArgs(args))? {
-        Some(CapturesOut::Int(i)) => Ok(Value::Int(i)),
+        Some(CapturesOut::Int(i)) => Ok(usize_value(i)),
         Some(CapturesOut::OptSpan(span)) => Ok(span.map_or_else(Value::none, |(start, end)| {
             Value::some(match_value(captures.source.clone(), start, end))
         })),

@@ -9,6 +9,7 @@ use parking_lot::Mutex;
 use super::bytecode::{BuiltinId, MethodName};
 use super::enum_def::ERROR_KIND;
 use super::native::Native;
+use super::numeric::IntWidth;
 use super::std_bridge::as_i64;
 use super::value::Value;
 
@@ -70,8 +71,7 @@ fn byte_arg(arg: Option<&Value>, method: &str) -> Result<u8> {
 
 fn append_bytes(target: &Value, bytes: &[u8]) {
     if let Value::Vec(v) = target {
-        v.lock()
-            .extend(bytes.iter().map(|b| Value::Int(i64::from(*b))));
+        v.lock().extend(bytes.iter().copied().map(Value::byte));
     }
 }
 
@@ -150,7 +150,7 @@ pub(super) fn io_error_method(handle: &Handle, method: &MethodName) -> Option<Va
     match method.id {
         BuiltinId::Kind => Value::enum_named(&ERROR_KIND, kind, Vec::new()),
         BuiltinId::RawOsError => Some(match code {
-            Some(n) => Value::some(Value::Int(i64::from(*n))),
+            Some(n) => Value::some(Value::int_of_width(i128::from(*n), IntWidth::I32)),
             None => Value::none(),
         }),
         _ => None,
@@ -183,7 +183,7 @@ pub(super) fn fill_buffer(target: Option<&Value>, bytes: &[u8]) {
     if let Some(Value::Vec(v)) = target {
         let mut items = v.lock();
         for (item, byte) in items.iter_mut().zip(bytes) {
-            *item = Value::Int(i64::from(*byte));
+            *item = Value::byte(*byte);
         }
     }
 }
@@ -495,7 +495,7 @@ fn child_native_method(handle: &Handle, method: &MethodName) -> Result<Option<Va
         BuiltinId::Id => {
             let h = handle.lock();
             if let Native::Child(c) = &*h {
-                return Ok(Some(Value::Int(i64::from(c.id()))));
+                return Ok(Some(Value::int_of_width(i128::from(c.id()), IntWidth::U32)));
             }
         }
         BuiltinId::WaitWithOutput => {

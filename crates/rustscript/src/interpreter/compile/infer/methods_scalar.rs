@@ -252,6 +252,9 @@ impl Infer<'_, '_> {
             )
             | ("DirEntry", "path") => Ty::named("PathBuf"),
             ("Path" | "PathBuf", "canonicalize") => io(Ty::named("PathBuf")),
+            ("Path" | "PathBuf", "strip_prefix") => {
+                Ty::result(Ty::named("Path"), Ty::named("StripPrefixError"))
+            }
             ("Path" | "PathBuf", "push" | "set_extension" | "pop") | ("JoinHandle", "abort") => {
                 Ty::Unit
             }

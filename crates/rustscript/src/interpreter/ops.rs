@@ -432,6 +432,7 @@ pub(super) fn index(recv: &Value, key: &Value) -> Result<Value> {
         start,
         end,
         inclusive,
+        ..
     } = key
     {
         return slice_value(recv, *start, *end, *inclusive);

@@ -36,8 +36,7 @@ pub(super) fn element_method(
             match el.write(&mut out) {
                 Ok(()) => {
                     if let Some(Value::Vec(v)) = args.first() {
-                        v.lock()
-                            .extend(out.into_iter().map(|b| Value::Int(i64::from(b))));
+                        v.lock().extend(out.into_iter().map(Value::byte));
                     }
                     Ok(Value::ok(Value::Unit))
                 }

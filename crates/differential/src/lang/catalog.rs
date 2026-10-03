@@ -279,8 +279,12 @@ pub fn solve(method: &Method, want: &Ty) -> Option<Solved> {
         return None;
     }
     let recv = match (found.same, found.elem) {
-        (Some(same), _) => {
+        (Some(same), elem) => {
             if !method.recv.accepts(&same) {
+                return None;
+            }
+            // a row that names both, `(ELEM, SAME)` for `split_first`, needs them to agree
+            if elem.is_some() && inner_elem(method.recv, &same) != elem.as_ref() {
                 return None;
             }
             Some(same)

@@ -141,7 +141,7 @@ mod imp {
                     .map(Value::str)
                     .collect(),
             ),
-            _ => Value::vec(v.bytes.iter().map(|b| Value::Int(i64::from(*b))).collect()),
+            _ => Value::vec(v.bytes.iter().copied().map(Value::byte).collect()),
         }
     }
 
@@ -220,7 +220,7 @@ mod imp {
             [
                 (
                     "bytes".into(),
-                    Value::vec(v.bytes.iter().map(|b| Value::Int(i64::from(*b))).collect()),
+                    Value::vec(v.bytes.iter().copied().map(Value::byte).collect()),
                 ),
                 ("vtype".into(), unit_enum(&REG_TYPE, type_name(&v.vtype))),
             ],

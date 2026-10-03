@@ -6,6 +6,7 @@ use lopdf::{Document, ObjectId};
 
 use super::bytecode::{BuiltinId, MethodName};
 use super::native::Native;
+use super::numeric::IntWidth;
 use super::std_bridge::as_i64;
 use super::value::Value;
 
@@ -26,7 +27,7 @@ pub(super) fn document_method(
         BuiltinId::GetPages => {
             let mut map = crate::interpreter::value::MapStore::default();
             for (num, id) in doc.get_pages() {
-                let key = Value::Int(i64::from(num))
+                let key = Value::int_of_width(i128::from(num), IntWidth::U32)
                     .into_key()
                     .expect("an int is always a valid map key");
                 map.insert(key, object_id_value(id));
@@ -36,12 +37,7 @@ pub(super) fn document_method(
         BuiltinId::GetPageContent => {
             let id = object_id_arg(args, 0)?;
             let bytes = doc.get_page_content(id);
-            Value::vec(
-                bytes
-                    .into_iter()
-                    .map(|b| Value::Int(i64::from(b)))
-                    .collect(),
-            )
+            Value::vec(bytes.into_iter().map(Value::byte).collect())
         }
         BuiltinId::ChangePageContent => {
             let id = object_id_arg(args, 0)?;
@@ -65,16 +61,17 @@ pub(super) fn document_method(
 
 fn object_id_value(id: ObjectId) -> Value {
     Value::tuple(vec![
-        Value::Int(i64::from(id.0)),
-        Value::Int(i64::from(id.1)),
+        Value::int_of_width(i128::from(id.0), IntWidth::U32),
+        Value::int_of_width(i128::from(id.1), IntWidth::U16),
     ])
 }
 
 fn object_id_arg(args: &[Value], i: usize) -> Result<ObjectId> {
     if let Some(Value::Tuple(items)) = args.get(i) {
         let items = items.lock();
-        if let (Some(Value::Int(a)), Some(Value::Int(b))) = (items.first(), items.get(1)) {
-            return Ok((u32::try_from(*a)?, u16::try_from(*b)?));
+        let part = |slot: usize| items.get(slot).and_then(Value::int_parts);
+        if let (Some((a, _)), Some((b, _))) = (part(0), part(1)) {
+            return Ok((u32::try_from(a)?, u16::try_from(b)?));
         }
     }
     bail!("expected a page ObjectId tuple like the ones get_pages returns");

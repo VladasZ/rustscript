@@ -116,7 +116,15 @@ statement. A closure that only borrows the item of an adapter, `filter`,
 `take_while`, `skip_while`, drops that item when it panics, and every adapter
 passes on the ownership of the iterator it wraps. `partition`, `max_by_key`
 and `min_by_key` also drop the items they already kept when a closure or the
-source iterator panics.
+source iterator panics. The value a `for` loop iterates, a temporary behind
+`&` or an owning iterator, unwinds before the other temporaries of the loop
+head.
+
+A borrow stored in a tuple, an array, a `vec!`, an enum variant or a struct
+field, `[a.as_slice(), &b]` or `Some(a.as_slice())`, sits behind a reference
+value that drops nothing, so the owner keeps its items when the holder goes.
+A loop over such a slice hands out borrowed items, and `starts_with`,
+`ends_with`, `extend_from_slice` and `concat` read through the reference.
 
 A `RefCell` borrow is a guard value, and the live borrows of every cell sit in
 one table, so a second `borrow_mut` panics with the std message. The compiler
@@ -188,6 +196,10 @@ truncates or saturates like `rustc`. `f32` computes at `f32` precision.
 Integer methods answer in the receiver's width. Declared parameter and
 return types retag values. A declared `const` or `static` type retags the
 same way, so a `const N: u16` is a real u16 and meets other u16 values.
+A range yields items of the width of its bounds, `0u8..3` and `0..v.len()`.
+An index or a count from the std is a `usize`, from `enumerate`, `position`,
+`find`, `char_indices` and the regex offsets. Bytes from `bytes`, `as_bytes`,
+a byte string literal, `to_be_bytes` and a file read are `u8`.
 
 Result types chosen by the caller follow the source. `parse` and `sum` take
 the turbofish, so `"300".parse::<u8>()` is an `Err`. `unwrap_or_default`

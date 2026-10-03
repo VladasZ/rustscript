@@ -61,6 +61,15 @@ impl ValueRef {
         Self::Borrowed { value }
     }
 
+    /// The value behind a plain borrow. A slice a call hands back, `pick(a.as_slice(), ..)`,
+    /// arrives like this, and a builtin that takes a slice reads the vec under it.
+    pub fn lent(&self) -> Option<Value> {
+        match self {
+            Self::Borrowed { value } => Some(value.clone()),
+            _ => None,
+        }
+    }
+
     pub fn get(&self) -> Option<Value> {
         match self {
             Self::VecElement { values, index } => values.lock().get(*index).cloned(),

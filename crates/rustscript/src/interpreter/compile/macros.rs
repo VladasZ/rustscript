@@ -292,7 +292,7 @@ impl Compiler<'_> {
             MacroBody::Exprs(exprs) => exprs,
             MacroBody::Matches(..) => bail!("vec! body is not a list"),
         };
-        let base = self.compile_args(exprs.iter())?;
+        let base = self.compile_elems(exprs.iter())?;
         self.emit(Op::MakeVec {
             dst,
             base,

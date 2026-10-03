@@ -28,6 +28,7 @@ pub(super) fn set_index(ctx: &mut StepCtx, base: u16, key: u16, val: u16) -> Res
         start,
         end,
         inclusive,
+        ..
     } = ctx.get(key)
     {
         let target = place_base(ctx.get(base))?;

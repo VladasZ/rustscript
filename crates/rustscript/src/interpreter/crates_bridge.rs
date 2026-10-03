@@ -274,6 +274,7 @@ pub(super) fn rng_method(name: &MethodName, args: &[Value]) -> Result<Value> {
                 start,
                 end,
                 inclusive,
+                ..
             }) => {
                 let hi = if *inclusive { end + 1 } else { *end };
                 if hi > *start {

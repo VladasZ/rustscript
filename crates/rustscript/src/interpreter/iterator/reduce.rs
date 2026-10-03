@@ -13,6 +13,7 @@ use super::{
 use crate::interpreter::bridge::arg;
 use crate::interpreter::bytecode::{BuiltinId, ScalarTy};
 use crate::interpreter::ops::compare_values;
+use crate::interpreter::shared::usize_value;
 use crate::interpreter::value::{ClosureData, Value};
 use crate::interpreter::vm::Vm;
 
@@ -317,7 +318,7 @@ impl Vm {
         name: BuiltinId,
         closure: &Arc<ClosureData>,
     ) -> Result<Value> {
-        let mut index = 0;
+        let mut index = 0usize;
         // `rposition` walks to the end and keeps the last match, same index without a reversible
         // iterator
         let mut last_match = None;
@@ -330,7 +331,7 @@ impl Vm {
             match name {
                 BuiltinId::Find if matches => return Ok(Value::some(value)),
                 BuiltinId::Find => self.discard(iterator, value)?,
-                BuiltinId::Position if matches => return Ok(Value::some(Value::Int(index))),
+                BuiltinId::Position if matches => return Ok(Value::some(usize_value(index))),
                 BuiltinId::Rposition if matches => last_match = Some(index),
                 BuiltinId::Any if matches => return Ok(Value::Bool(true)),
                 BuiltinId::All if !matches => return Ok(Value::Bool(false)),
@@ -341,7 +342,7 @@ impl Vm {
         Ok(match name {
             BuiltinId::Find | BuiltinId::Position => Value::none(),
             BuiltinId::Rposition => {
-                last_match.map_or_else(Value::none, |i| Value::some(Value::Int(i)))
+                last_match.map_or_else(Value::none, |i| Value::some(usize_value(i)))
             }
             BuiltinId::Any => Value::Bool(false),
             BuiltinId::All => Value::Bool(true),

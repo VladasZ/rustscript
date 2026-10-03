@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow, bail};
 use crate::interpreter::bytecode::{BuiltinId, ScalarTy};
 use crate::interpreter::numeric::IntWidth;
 
-use super::{Args, int_arg, usize_arg, usize_i64};
+use super::{Args, int_arg, usize_arg};
 
 pub(crate) enum CharOut {
     Bool(bool),
@@ -80,10 +80,11 @@ pub(crate) enum StrOut {
     Keep,
     OkKeep,
     Strs(Vec<String>),
-    CharIdx(Vec<(i64, char)>),
-    Ints(Vec<i64>),
+    CharIdx(Vec<(usize, char)>),
+    Bytes(Vec<u8>),
+    Utf16(Vec<u16>),
     OptOwned(Option<String>),
-    OptInt(Option<i64>),
+    OptInt(Option<usize>),
     OptPair(Option<(String, String)>),
     Ordering(Ordering),
 }
@@ -155,15 +156,13 @@ pub(crate) fn str_core(s: &str, name: BuiltinId, args: &impl Args) -> Result<Opt
         BuiltinId::Context | BuiltinId::WithContext => StrOut::OkKeep,
         BuiltinId::IsSome => StrOut::Bool(true),
         BuiltinId::IsNone => StrOut::Bool(false),
-        BuiltinId::AsBytes | BuiltinId::IntoBytes => {
-            StrOut::Ints(s.bytes().map(i64::from).collect())
-        }
-        BuiltinId::EncodeUtf16 => StrOut::Ints(s.encode_utf16().map(i64::from).collect()),
+        BuiltinId::AsBytes | BuiltinId::IntoBytes => StrOut::Bytes(s.bytes().collect()),
+        BuiltinId::EncodeUtf16 => StrOut::Utf16(s.encode_utf16().collect()),
         BuiltinId::StripPrefix => StrOut::OptOwned(s.strip_prefix(&a(0)).map(str::to_string)),
         BuiltinId::StripSuffix => StrOut::OptOwned(s.strip_suffix(&a(0)).map(str::to_string)),
         // byte offsets like std, so `&s[..s.find(x).unwrap()]` works
-        BuiltinId::Find => StrOut::OptInt(s.find(&a(0)).map(usize_i64)),
-        BuiltinId::Rfind => StrOut::OptInt(s.rfind(&a(0)).map(usize_i64)),
+        BuiltinId::Find => StrOut::OptInt(s.find(&a(0))),
+        BuiltinId::Rfind => StrOut::OptInt(s.rfind(&a(0))),
         BuiltinId::SplitOnce => StrOut::OptPair(
             s.split_once(&a(0))
                 .map(|(x, y)| (x.to_string(), y.to_string())),
@@ -191,9 +190,7 @@ pub(crate) fn str_core(s: &str, name: BuiltinId, args: &impl Args) -> Result<Opt
             StrOut::Strs(s.rsplitn(n, &a(1)).map(str::to_string).collect())
         }
         BuiltinId::Matches => StrOut::Strs(s.matches(&a(0)).map(str::to_string).collect()),
-        BuiltinId::CharIndices => {
-            StrOut::CharIdx(s.char_indices().map(|(i, c)| (usize_i64(i), c)).collect())
-        }
+        BuiltinId::CharIndices => StrOut::CharIdx(s.char_indices().collect()),
         BuiltinId::TrimMatches | BuiltinId::TrimStartMatches | BuiltinId::TrimEndMatches => {
             let pat = a(0);
             let out = match name {

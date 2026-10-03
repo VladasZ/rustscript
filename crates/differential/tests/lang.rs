@@ -328,6 +328,26 @@ fn catalog_names_are_unique() {
     }
 }
 
+/// `split_first` gives `(T, Vec<T>)`, so its element and its receiver come from one wanted type
+/// and must agree. A nightly campaign had `Vec::<i8>::new().split_first()` collected into a
+/// `Vec<(bool, Vec<i8>)>`, which `rustc` rejects.
+#[test]
+fn a_row_with_element_and_receiver_needs_them_to_agree() {
+    use rustscript_differential::lang::ty::IntWidth;
+
+    let bytes = Ty::vec_of(Ty::int(IntWidth::I8));
+    let pair = |head: Ty| Ty::opt_of(Ty::Tuple(vec![head, bytes.clone()]));
+    for name in ["vec_split_first", "vec_split_last"] {
+        let method = METHODS
+            .iter()
+            .find(|method| method.name == name)
+            .expect("the row is in the catalog");
+        assert!(solve(method, &pair(Ty::Bool)).is_none(), "`{name}`");
+        let solved = solve(method, &pair(Ty::int(IntWidth::I8))).expect("a matching pair");
+        assert_eq!(solved.recv, Some(bytes.clone()), "`{name}`");
+    }
+}
+
 /// A closure that can panic must not run on an unordered stretch, real Rust randomizes map and set order
 /// so the panic message changes per run. A nightly campaign hit this with `into_values()` sorted
 /// only after the map.

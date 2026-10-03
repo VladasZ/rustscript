@@ -6,6 +6,7 @@ use anyhow::{Result, bail};
 use super::bytecode::{BuiltinId, MethodName};
 use super::native::Native;
 use super::native_methods::{Handle, buffer_len, fill_buffer, int_len, io_err, value_to_bytes};
+use super::numeric::IntWidth;
 use super::value::Value;
 
 /// A net address argument through the real `ToSocketAddrs`, so a `"host:port"` string, a
@@ -47,7 +48,7 @@ pub(super) fn socket_addr_method(handle: &Handle, method: &MethodName) -> Option
     };
     match method.id {
         BuiltinId::Ip => Some(Native::IpAddr(addr.ip()).wrap()),
-        BuiltinId::Port => Some(Value::Int(i64::from(addr.port()))),
+        BuiltinId::Port => Some(Value::int_of_width(i128::from(addr.port()), IntWidth::U16)),
         BuiltinId::IsIpv4 => Some(Value::Bool(addr.is_ipv4())),
         BuiltinId::IsIpv6 => Some(Value::Bool(addr.is_ipv6())),
         _ => None,

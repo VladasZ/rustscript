@@ -14,9 +14,21 @@ use super::{
 use crate::interpreter::bytecode::{BuiltinId, DefaultIr, MethodName};
 use crate::interpreter::enum_def::{EnumKind, OK, SOME};
 use crate::interpreter::native::Native;
-use crate::interpreter::shared::usize_i64;
-use crate::interpreter::value::{ClosureData, MapKind, Value};
+use crate::interpreter::shared::usize_value;
+use crate::interpreter::value::{ClosureData, MapKind, Value, ValueRef};
 use crate::interpreter::vm::Vm;
+
+/// A scalar has nothing to drop and stays a plain value.
+fn lend(item: &Value) -> Value {
+    match item {
+        Value::Vec(_)
+        | Value::Tuple(_)
+        | Value::Map(..)
+        | Value::Struct(_)
+        | Value::Enum { .. } => Value::Ref(Arc::new(ValueRef::borrowed(item.clone()))),
+        scalar => scalar.clone(),
+    }
+}
 
 impl Vm {
     /// the receiver mutates in place through its `&mut self`
@@ -90,10 +102,12 @@ impl Vm {
                 start,
                 end,
                 inclusive,
+                width,
             } => wrap(IteratorState::Range {
                 next: start,
                 end,
                 inclusive,
+                width,
             }),
             Value::Str(source) => chars(source),
             // `Option` yields its payload once, `Result` yields an `Ok` once
@@ -111,6 +125,20 @@ impl Vm {
                     vec: false,
                 })
             }
+            // A borrowed slice hands out borrows of its items. The loop that walks it may hold
+            // them as its own, and they still belong to the vec.
+            Value::Ref(reference) => match reference.lent() {
+                Some(Value::Vec(items)) => {
+                    let lent = items.lock().iter().map(lend).collect();
+                    wrap(IteratorState::Owned {
+                        values: lent,
+                        index: 0,
+                        vec: false,
+                    })
+                }
+                Some(lent) => return self.iterator_value(lent),
+                None => bail!("a reference is not iterable"),
+            },
             other => bail!("{} is not iterable", other.type_name()),
         })
     }
@@ -240,7 +268,7 @@ impl Vm {
             },
             Step::Enumerate(source, index) => Ok(self
                 .iterator_next(&source)?
-                .map(|value| Value::tuple(vec![Value::Int(usize_i64(index)), value]))),
+                .map(|value| Value::tuple(vec![usize_value(index), value]))),
             Step::Zip(left, right) => self.zip_next(&left, &right),
             Step::Chain(left, right, left_done) => {
                 self.chain_next(iterator, &left, &right, left_done)

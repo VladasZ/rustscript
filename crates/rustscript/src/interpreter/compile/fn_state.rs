@@ -126,6 +126,11 @@ pub(super) struct FnState {
     /// number of drop lists made when its op ran, `usize::MAX` while the op is still ahead,
     /// see `hold_operand`.
     pub(super) unwind_temps: Vec<(Reg, usize)>,
+    /// What a `for` loop drops when it ends, the temporary it iterates or its owning iterator,
+    /// each with the index of the drop list the loop end made for it. The open scope lists the
+    /// register too, for a `return` out of the loop, and an unwind must not take that later
+    /// place. Real Rust drops it before the other temporaries of the loop head.
+    pub(super) loop_ends: Vec<(Reg, usize)>,
     /// What the next call compiled does differently, see `NextCall`.
     pub(super) next_call: NextCall,
     /// named bindings that hold a `RefCell` guard, released at scope end even without `Drop` impls
@@ -213,6 +218,7 @@ impl FnState {
             guard_temps: Vec::new(),
             owned_temps: Vec::new(),
             unwind_temps: Vec::new(),
+            loop_ends: Vec::new(),
             next_call: NextCall::default(),
             guard_regs: HashSet::new(),
             has_guards: false,
@@ -345,13 +351,15 @@ impl FnState {
         operands.sort_unstable_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)));
         let held: HashSet<Reg> = operands.iter().map(|(reg, _)| *reg).collect();
         let mut pending = operands.into_iter().peekable();
+        // a register serves one loop at a time, so the last loop end decides its place
+        let loop_ends: HashMap<Reg, usize> = self.loop_ends.iter().copied().collect();
         let mut droppable: Vec<Reg> = Vec::new();
         for (index, list) in self.drop_lists.iter().enumerate() {
             while let Some((reg, _)) = pending.next_if(|(_, until)| *until <= index) {
                 droppable.push(reg);
             }
             for &reg in list.iter().rev() {
-                if held.contains(&reg) {
+                if held.contains(&reg) || loop_ends.get(&reg).is_some_and(|end| *end != index) {
                     continue;
                 }
                 // a local sits in the list of every early `return` before its scope's own
