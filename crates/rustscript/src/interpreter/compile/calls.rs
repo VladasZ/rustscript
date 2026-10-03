@@ -37,6 +37,44 @@ impl Compiler<'_> {
         self.compile_window(&list, Some(tail))
     }
 
+    /// The elements of a tuple, array or `vec!` literal or of an enum variant. A borrowed one,
+    /// `[a.as_slice(), &b]`, shares the storage of its owner, and the literal would drop that
+    /// storage with itself. So it goes in behind a borrow that drops nothing, like a reference
+    /// argument of a by value parameter, see `compile_value_ref`.
+    pub(super) fn compile_elems<'e>(
+        &mut self,
+        elems: impl Iterator<Item = &'e Expr>,
+    ) -> Result<Reg> {
+        let list: Vec<&Expr> = elems.collect();
+        if self.ctx.has_drop {
+            let lent: Vec<bool> = list.iter().map(|elem| self.lends_storage(elem)).collect();
+            if lent.contains(&true) {
+                self.cur().next_call.value_refs = lent;
+            }
+        }
+        self.compile_args(list.into_iter())
+    }
+
+    /// A shared borrow of a value that has parts to drop.
+    pub(super) fn lends_storage(&mut self, elem: &Expr) -> bool {
+        let borrows = match unparen(elem) {
+            Expr::Reference(r) => r.mutability.is_none(),
+            Expr::MethodCall(_) => !self.arg_owned(elem),
+            _ => false,
+        };
+        borrows
+            && match self.types.of(elem) {
+                Ty::Vec(_)
+                | Ty::Set(..)
+                | Ty::Map(..)
+                | Ty::Struct(_)
+                | Ty::Enum(_)
+                | Ty::Result(..) => true,
+                ty @ (Ty::Tuple(_) | Ty::Option(_)) => !place::copies(&ty),
+                _ => false,
+            }
+    }
+
     /// Arguments a native method reads in place and leaves in the window, so nothing may
     /// drop them later.
     pub(super) fn compile_shared_args<'e>(
@@ -318,7 +356,7 @@ impl Compiler<'_> {
         if let Some((def, index)) = self.resolve_variant(&path.segs)
             && !def.is_unit(index)
         {
-            let base = self.compile_args(c.args.iter())?;
+            let base = self.compile_elems(c.args.iter())?;
             let info = self.add_enum_variant(EnumVariant {
                 def,
                 variant: index,
@@ -416,7 +454,7 @@ impl Compiler<'_> {
                 if let Some(variant) = self.enum_variant(&canon, &rest, |fields| {
                     matches!(fields, syn::Fields::Unnamed(fields) if fields.unnamed.len() == argc as usize)
                 }) {
-                    let base = self.compile_args(c.args.iter())?;
+                    let base = self.compile_elems(c.args.iter())?;
                     let info = self.add_enum_variant(variant);
                     self.emit(Op::MakeEnum {
                         dst,

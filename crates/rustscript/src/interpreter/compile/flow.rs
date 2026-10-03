@@ -475,6 +475,7 @@ impl Compiler<'_> {
             if drops {
                 let f = self.cur();
                 f.drop_lists.push(Arc::from(vec![reg]));
+                f.loop_ends.push((reg, f.drop_lists.len() - 1));
                 let list = idx16(f.drop_lists.len() - 1);
                 self.emit(Op::DropScope { list });
             }

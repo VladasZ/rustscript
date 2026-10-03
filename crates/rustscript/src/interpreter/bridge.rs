@@ -3,6 +3,7 @@
 
 use num_traits::AsPrimitive;
 use std::f64::consts::{E, PI, TAU};
+use std::mem::take;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
@@ -355,6 +356,11 @@ impl Vm {
         match recv {
             Value::Str(s) => methods::str_method(s, name, args),
             Value::Vec(v) => {
+                if name.id == BuiltinId::ExtendFromSlice
+                    && let Some(first) = args.first_mut()
+                {
+                    *first = super::vecmap::unlend(take(first));
+                }
                 // a lazy `extend` argument is drained here, the vec method itself can't read one
                 if matches!(name.id, BuiltinId::Extend | BuiltinId::ExtendFromSlice)
                     && let Some(first) = args.first()

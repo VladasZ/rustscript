@@ -41,5 +41,21 @@ fn main() {
     let two = T(8);
     let inner = pick(&one, &two, true).0;
     println!("e {inner}");
+
+    // a slice that comes back from the call is still a slice for the methods that take one
+    let texts = vec![String::from("a"), String::from("b")];
+    let tail = vec![String::from("b")];
+    let empty: &[String] = &[];
+    println!(
+        "f {}",
+        empty.starts_with(pick(texts.as_slice(), tail.as_slice(), true))
+    );
+    println!(
+        "g {}",
+        texts.ends_with(pick(texts.as_slice(), tail.as_slice(), false))
+    );
+    let mut grown = texts.clone();
+    grown.extend_from_slice(pick(texts.as_slice(), tail.as_slice(), false));
+    println!("h {grown:?} {texts:?} {tail:?}");
     println!("end");
 }

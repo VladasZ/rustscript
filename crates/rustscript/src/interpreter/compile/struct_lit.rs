@@ -75,6 +75,14 @@ impl Compiler<'_> {
             match written.iter().find(|(k, _)| k == fname) {
                 Some((_, e)) => {
                     self.compile_owned_into(dstf, e)?;
+                    // a borrowed field shares storage the struct must not drop, see
+                    // `compile_elems`
+                    if self.ctx.has_drop && self.lends_storage(e) && !self.arg_owned(e) {
+                        self.emit(Op::MakeBorrow {
+                            dst: dstf,
+                            src: dstf,
+                        });
+                    }
                     // a field already built drops when a later field panics, the struct op
                     // takes it out of the window once it runs
                     if self.ctx.has_drop && self.arg_owned(e) {

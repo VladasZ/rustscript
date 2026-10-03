@@ -4,7 +4,7 @@ use anyhow::{Result, bail};
 
 use crate::interpreter::bytecode::BuiltinId;
 
-use super::{Args, usize_arg, usize_i64};
+use super::{Args, usize_arg};
 
 /// Spans index into the source the caller holds.
 pub(crate) enum RegexOut {
@@ -50,7 +50,7 @@ pub(crate) fn regex_core(
 
 pub(crate) enum MatchOut {
     Text(String),
-    Int(i64),
+    Int(usize),
 }
 
 pub(crate) fn match_core(
@@ -61,14 +61,14 @@ pub(crate) fn match_core(
 ) -> Option<MatchOut> {
     Some(match name {
         BuiltinId::AsStr => MatchOut::Text(source[start..end].to_string()),
-        BuiltinId::Start => MatchOut::Int(usize_i64(start)),
-        BuiltinId::End => MatchOut::Int(usize_i64(end)),
+        BuiltinId::Start => MatchOut::Int(start),
+        BuiltinId::End => MatchOut::Int(end),
         _ => return None,
     })
 }
 
 pub(crate) enum CapturesOut {
-    Int(i64),
+    Int(usize),
     OptSpan(Option<(usize, usize)>),
 }
 
@@ -90,7 +90,7 @@ pub(crate) fn captures_core<'n>(
             let index = names.find_map(|(n, i)| (n == wanted).then_some(i));
             CapturesOut::OptSpan(index.and_then(|i| groups.get(i).copied().flatten()))
         }
-        BuiltinId::Len => CapturesOut::Int(usize_i64(groups.len())),
+        BuiltinId::Len => CapturesOut::Int(groups.len()),
         _ => return Ok(None),
     }))
 }

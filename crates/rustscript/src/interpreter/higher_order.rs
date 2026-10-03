@@ -12,7 +12,7 @@ use super::enum_def::{EQUAL, EnumKind, OK, SOME};
 use super::iterator::{as_closure, option_inner};
 use super::methods::ordering_from_value;
 use super::native::Native;
-use super::shared::usize_i64;
+use super::shared::usize_value;
 use super::value::{List, Map, MapKey, MapKind, Value, ValueRef};
 use super::vecmap::{SortKey, sort_key};
 use super::vm::Vm;
@@ -294,7 +294,7 @@ impl Vm {
                 let mut found = Value::none();
                 for (i, x) in list.into_iter().enumerate() {
                     if self.call_closure_data(&f, &[x])?.is_truthy() {
-                        found = Value::some(Value::Int(usize_i64(i)));
+                        found = Value::some(usize_value(i));
                         break;
                     }
                 }

@@ -8,7 +8,8 @@ use anyhow::{Result, bail};
 
 use super::{Handle, IteratorState, option_inner, owns_items};
 use crate::interpreter::native::Native;
-use crate::interpreter::shared::usize_i64;
+use crate::interpreter::numeric::IntWidth;
+use crate::interpreter::shared::usize_value;
 use crate::interpreter::value::{ClosureData, Value};
 use crate::interpreter::vm::Vm;
 
@@ -80,6 +81,7 @@ pub(super) fn iterator_len(iterator: &Handle) -> Option<usize> {
             next,
             end,
             inclusive,
+            ..
         } => {
             let span = i128::from(*end) - i128::from(*next) + i128::from(*inclusive);
             usize::try_from(span.max(0)).ok()
@@ -135,7 +137,8 @@ fn back_step(state: &mut IteratorState) -> Result<Back> {
             next,
             end,
             inclusive,
-        } => Back::Ready(range_back(next, end, *inclusive)),
+            width,
+        } => Back::Ready(range_back(next, end, *inclusive).map(|value| typed(value, *width))),
         IteratorState::Map { source, closure } => Back::Map(source.clone(), closure.clone()),
         IteratorState::Filter { source, closure } => Back::Filter(source.clone(), closure.clone()),
         IteratorState::FilterMap { source, closure } => {
@@ -251,7 +254,7 @@ impl Vm {
         let len = sized(source, "enumerate")?;
         Ok(self
             .iterator_next_back(source)?
-            .map(|value| Value::tuple(vec![Value::Int(usize_i64(index + len - 1)), value])))
+            .map(|value| Value::tuple(vec![usize_value(index + len - 1), value])))
     }
 
     /// `Skip::next_back` only answers while items past the skipped prefix remain.
@@ -293,7 +296,11 @@ impl Vm {
     }
 }
 
-fn range_back(next: &mut i64, end: &mut i64, inclusive: bool) -> Option<Value> {
+fn typed(value: i64, width: IntWidth) -> Value {
+    Value::int_of_width(i128::from(value), width)
+}
+
+fn range_back(next: &mut i64, end: &mut i64, inclusive: bool) -> Option<i64> {
     if inclusive {
         if *next > *end {
             return None;
@@ -306,12 +313,12 @@ fn range_back(next: &mut i64, end: &mut i64, inclusive: bool) -> Option<Value> {
         } else {
             *end -= 1;
         }
-        Some(Value::Int(value))
+        Some(value)
     } else {
         if *next >= *end {
             return None;
         }
         *end -= 1;
-        Some(Value::Int(*end))
+        Some(*end)
     }
 }

@@ -144,6 +144,7 @@ fn replace_range(s: &mut String, args: &[Value]) -> Result<()> {
         start,
         end,
         inclusive,
+        ..
     } = arg(args, 0)?
     else {
         bail!("replace_range takes a range");

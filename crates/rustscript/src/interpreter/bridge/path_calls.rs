@@ -21,6 +21,7 @@ pub(super) fn range_builtin(
         start,
         end,
         inclusive,
+        ..
     } = recv
     else {
         return Ok(None);

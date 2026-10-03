@@ -10,6 +10,7 @@ use super::{CallReq, Flow, StepCtx};
 use crate::interpreter::bytecode::{CapSource, Chunk, PathId, path_call_chunk};
 use crate::interpreter::iterator::FastNext;
 use crate::interpreter::native::Native;
+use crate::interpreter::numeric::IntWidth;
 use crate::interpreter::ops::int_of;
 use crate::interpreter::value::{ClosureData, StructShape, Upvalue, Value};
 use crate::interpreter::vm::{TypeEnv, empty_type_env};
@@ -205,6 +206,14 @@ pub(super) fn make_range(
     end: u16,
     inclusive: bool,
 ) -> Result<Flow> {
+    // an untyped literal bound takes the width of the other one, `0..v.len()` is a `usize` range
+    let width = [start, end]
+        .into_iter()
+        .find_map(|reg| match ctx.get(reg) {
+            Value::IntW(_, width) => Some(*width),
+            _ => None,
+        })
+        .unwrap_or(IntWidth::I64);
     let start = int_of(ctx.get(start))?;
     let end = int_of(ctx.get(end))?;
     Ok(ctx.set(
@@ -213,6 +222,7 @@ pub(super) fn make_range(
             start,
             end,
             inclusive,
+            width,
         },
     ))
 }

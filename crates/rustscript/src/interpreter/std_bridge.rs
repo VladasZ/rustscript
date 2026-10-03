@@ -146,7 +146,7 @@ pub(super) fn native_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
             std::process::exit(code);
         }
         PathId::ProcessAbort => std::process::abort(),
-        PathId::ProcessId => Value::Int(i64::from(std::process::id())),
+        PathId::ProcessId => Value::int_of_width(i128::from(std::process::id()), IntWidth::U32),
         // io
         PathId::IoStdin => make_std_stream(
             "stdin",
@@ -343,11 +343,20 @@ pub(super) fn make_metadata(m: &std::fs::Metadata) -> Value {
     {
         use std::os::unix::fs::MetadataExt;
         use std::os::unix::fs::PermissionsExt;
-        f.push(("mode".into(), Value::Int(i64::from(m.permissions().mode()))));
+        f.push((
+            "mode".into(),
+            Value::int_of_width(i128::from(m.permissions().mode()), IntWidth::U32),
+        ));
         f.push(("dev".into(), Value::Int(m.dev().cast_signed())));
         f.push(("ino".into(), Value::Int(m.ino().cast_signed())));
-        f.push(("uid".into(), Value::Int(i64::from(m.uid()))));
-        f.push(("gid".into(), Value::Int(i64::from(m.gid()))));
+        f.push((
+            "uid".into(),
+            Value::int_of_width(i128::from(m.uid()), IntWidth::U32),
+        ));
+        f.push((
+            "gid".into(),
+            Value::int_of_width(i128::from(m.gid()), IntWidth::U32),
+        ));
         f.push(("mtime".into(), Value::Int(m.mtime())));
     }
     if let Ok(t) = m.modified() {
@@ -426,6 +435,8 @@ pub(super) fn path_method(
         Some(v) => Value::some(Value::str(v.to_string_lossy().into_owned())),
         None => Value::none(),
     };
+    // the other path is a `&str`, a `String` or a `Path`
+    let other = || args.first().map(path_like).unwrap_or_default();
     Ok(match method.id {
         BuiltinId::Display | BuiltinId::ToStringLossy => Value::str(s.clone()),
         BuiltinId::ToStr => Value::some(Value::str(s.clone())),
@@ -462,16 +473,22 @@ pub(super) fn path_method(
         ),
         BuiltinId::Components => Value::vec(p.components().map(make_component).collect()),
         BuiltinId::Join | BuiltinId::Push => {
-            let joined = p.join(args.first().map(Value::display).unwrap_or_default());
+            let joined = p.join(other());
             make_path(joined.display().to_string())
         }
         // Path compares whole components, so "/a/bc" doesn't start with "/a/b"
-        BuiltinId::StartsWith => {
-            Value::Bool(p.starts_with(args.first().map(Value::display).unwrap_or_default()))
-        }
-        BuiltinId::EndsWith => {
-            Value::Bool(p.ends_with(args.first().map(Value::display).unwrap_or_default()))
-        }
+        BuiltinId::StartsWith => Value::Bool(p.starts_with(other())),
+        BuiltinId::EndsWith => Value::Bool(p.ends_with(other())),
+        BuiltinId::StripPrefix => match p.strip_prefix(other()) {
+            Ok(rest) => Value::ok(make_path(rest.display().to_string())),
+            Err(e) => Value::err(
+                Native::ParseErr {
+                    display: e.to_string(),
+                    debug: format!("{e:?}"),
+                }
+                .wrap(),
+            ),
+        },
         _ => bail!("unknown method `{method}` on Path"),
     })
 }
@@ -582,12 +599,7 @@ pub(super) fn wrap_io(r: std::io::Result<String>) -> Value {
 
 pub(super) fn wrap_bytes(r: std::io::Result<Vec<u8>>) -> Value {
     match r {
-        Ok(bytes) => Value::ok(Value::vec(
-            bytes
-                .into_iter()
-                .map(|b| Value::Int(i64::from(b)))
-                .collect(),
-        )),
+        Ok(bytes) => Value::ok(Value::vec(bytes.into_iter().map(Value::byte).collect())),
         Err(e) => Value::err(super::native::io_error_value(&e)),
     }
 }

@@ -10,6 +10,7 @@ use super::discard::{discard, discard_payload};
 use super::enum_def::{EQUAL, EnumKind, GREATER, LESS, OK, ORDERING, SOME};
 use super::iterator;
 use super::native::Native;
+use super::numeric::IntWidth;
 use super::ops::compare_values;
 use super::shared::{self, CharOut, JsonKind, Parsed, StrOut, usize_i64};
 use super::value::{Map, MapKey, RsStr, Value, ValueRef};
@@ -146,7 +147,6 @@ pub(super) fn json_kind(recv: &Value) -> shared::JsonKind {
 /// `try_into` to the target the compiler read, see `method_scalar`. A slice checks its length and
 /// an integer its range. The errors are real std errors, so their texts follow the toolchain.
 pub(super) fn try_into(recv: &Value, method: &MethodName) -> Result<Value> {
-    use super::numeric::IntWidth;
     fn std_err(e: &(impl std::fmt::Display + std::fmt::Debug)) -> Value {
         Value::err(
             Native::ParseErr {
@@ -204,10 +204,9 @@ pub(super) fn generic_method(recv: &Value, method: &MethodName, args: &[Value]) 
                 CharOut::Bool(v) => Value::Bool(v),
                 CharOut::Char(c) => Value::Char(c),
                 CharOut::Str(s) => Value::str(s),
-                CharOut::OptU32(Some(digit)) => Value::some(Value::int_of_width(
-                    i128::from(digit),
-                    super::numeric::IntWidth::U32,
-                )),
+                CharOut::OptU32(Some(digit)) => {
+                    Value::some(Value::int_of_width(i128::from(digit), IntWidth::U32))
+                }
                 CharOut::OptU32(None) => Value::none(),
                 CharOut::USize(n) => shared::usize_value(n),
             })
@@ -320,6 +319,7 @@ pub(super) fn str_method(s: &RsStr, method: &MethodName, args: &[Value]) -> Resu
                 start,
                 end,
                 inclusive,
+                ..
             }) => {
                 // an `i64::MAX` end is the open end sentinel for `s.get(3..)`
                 let end = if *end == i64::MAX {
@@ -340,7 +340,7 @@ pub(super) fn str_method(s: &RsStr, method: &MethodName, args: &[Value]) -> Resu
         BuiltinId::Lines => iterator::lines(s.clone()),
         BuiltinId::Split => split_value(s, args.first()),
         BuiltinId::SplitWhitespace => iterator::split_whitespace(s.clone()),
-        BuiltinId::Count => Value::Int(usize_i64(s.chars().count())),
+        BuiltinId::Count => shared::usize_value(s.chars().count()),
         BuiltinId::Parse => parse_value(s, method.scalar.as_ref()),
         _ => return str_method_slow(s, method, args),
     })
@@ -431,16 +431,21 @@ fn str_out(s: &RsStr, out: StrOut) -> Value {
         StrOut::Strs(v) => Value::vec(v.into_iter().map(Value::str).collect()),
         StrOut::CharIdx(v) => Value::vec(
             v.into_iter()
-                .map(|(i, c)| Value::tuple(vec![Value::Int(i), Value::Char(c)]))
+                .map(|(i, c)| Value::tuple(vec![shared::usize_value(i), Value::Char(c)]))
                 .collect(),
         ),
-        StrOut::Ints(v) => Value::vec(v.into_iter().map(Value::Int).collect()),
+        StrOut::Bytes(v) => Value::vec(v.into_iter().map(Value::byte).collect()),
+        StrOut::Utf16(v) => Value::vec(
+            v.into_iter()
+                .map(|unit| Value::IntW(i64::from(unit), IntWidth::U16))
+                .collect(),
+        ),
         StrOut::OptOwned(o) => match o {
             Some(x) => Value::some(Value::str(x)),
             None => Value::none(),
         },
         StrOut::OptInt(o) => match o {
-            Some(i) => Value::some(Value::Int(i)),
+            Some(i) => Value::some(shared::usize_value(i)),
             None => Value::none(),
         },
         StrOut::OptPair(o) => match o {

@@ -7,6 +7,7 @@ use anyhow::{Result, bail};
 use parking_lot::Mutex;
 
 use super::native::Native;
+use super::numeric::IntWidth;
 use super::regex_bridge::{CapturesValue, MatchValue, RegexValue};
 use super::value::{ClosureData, List, RsStr, Value, ValueRef};
 
@@ -44,6 +45,7 @@ pub enum IteratorState {
         next: i64,
         end: i64,
         inclusive: bool,
+        width: IntWidth,
     },
     Bytes {
         source: RsStr,
@@ -396,7 +398,8 @@ impl IteratorState {
                 next,
                 end,
                 inclusive,
-            } => range_step(next, *end, *inclusive),
+                width,
+            } => range_step(next, *end, *inclusive, *width),
             IteratorState::Bytes { source, index } => bytes_step(source, index),
             IteratorState::Chars { source, offset } => chars_step(source, offset),
             _ => return FastNext::NotSimple,
@@ -478,7 +481,8 @@ impl IteratorState {
                 next,
                 end,
                 inclusive,
-            } => Step::Ready(range_step(next, *end, *inclusive)),
+                width,
+            } => Step::Ready(range_step(next, *end, *inclusive, *width)),
             IteratorState::Bytes { source, index } => Step::Ready(bytes_step(source, index)),
             IteratorState::Chars { source, offset } => Step::Ready(chars_step(source, offset)),
             IteratorState::Lines { source, offset } => Step::Ready(next_line(source, offset)),
@@ -539,7 +543,7 @@ impl IteratorState {
 fn bytes_step(source: &str, index: &mut usize) -> Option<Value> {
     let value = source.as_bytes().get(*index).copied();
     *index += usize::from(value.is_some());
-    value.map(|byte| Value::Int(i64::from(byte)))
+    value.map(Value::byte)
 }
 
 fn chars_step(source: &str, offset: &mut usize) -> Option<Value> {
@@ -550,14 +554,14 @@ fn chars_step(source: &str, offset: &mut usize) -> Option<Value> {
     value.map(Value::Char)
 }
 
-fn range_step(next: &mut i64, end: i64, inclusive: bool) -> Option<Value> {
+fn range_step(next: &mut i64, end: i64, inclusive: bool, width: IntWidth) -> Option<Value> {
     let done = if inclusive { *next > end } else { *next >= end };
     if done {
         None
     } else {
         let value = *next;
         *next += 1;
-        Some(Value::Int(value))
+        Some(Value::int_of_width(i128::from(value), width))
     }
 }
 

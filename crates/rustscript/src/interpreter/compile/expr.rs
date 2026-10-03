@@ -136,7 +136,7 @@ impl Compiler<'_> {
             Expr::MethodCall(m) => self.compile_method(dst, m)?,
             Expr::Macro(m) => self.compile_macro(&m.mac, dst)?,
             Expr::Tuple(t) => {
-                let base = self.compile_args(t.elems.iter())?;
+                let base = self.compile_elems(t.elems.iter())?;
                 self.emit(Op::MakeTuple {
                     dst,
                     base,
@@ -144,7 +144,7 @@ impl Compiler<'_> {
                 });
             }
             Expr::Array(a) => {
-                let base = self.compile_args(a.elems.iter())?;
+                let base = self.compile_elems(a.elems.iter())?;
                 self.emit(Op::MakeVec {
                     dst,
                     base,

@@ -151,6 +151,8 @@ pub enum Value {
         start: i64,
         end: i64,
         inclusive: bool,
+        /// the width of the items, `0u8..3` yields `u8`
+        width: IntWidth,
     },
     Closure(Arc<ClosureData>),
     Ref(Arc<ValueRef>),
@@ -362,9 +364,7 @@ impl Value {
             Const::F32(f) => Value::F32(*f),
             Const::Char(ch) => Value::Char(*ch),
             Const::Str(s) => Value::str(&**s),
-            Const::Bytes(bytes) => {
-                Value::vec(bytes.iter().map(|&b| Value::Int(i64::from(b))).collect())
-            }
+            Const::Bytes(bytes) => Value::vec(bytes.iter().copied().map(Value::byte).collect()),
         }
     }
 
@@ -385,6 +385,11 @@ impl Value {
             IntWidth::I128 | IntWidth::U128 => Value::Big(value, width),
             other => Value::IntW(other.encode(value), other),
         }
+    }
+
+    /// A byte the std or a crate hands out, a real `u8`.
+    pub(super) fn byte(byte: u8) -> Value {
+        Value::IntW(i64::from(byte), IntWidth::U8)
     }
 
     pub(super) fn untag_int(&self) -> Option<i64> {

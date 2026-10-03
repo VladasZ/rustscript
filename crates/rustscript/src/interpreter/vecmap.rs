@@ -96,9 +96,7 @@ pub(super) fn vec_method(v: &List, method: &MethodName, args: &mut [Value]) -> R
             v.lock()
                 .iter()
                 .enumerate()
-                .map(|(i, x)| {
-                    Value::tuple(vec![Value::Int(super::shared::usize_i64(i)), x.clone()])
-                })
+                .map(|(i, x)| Value::tuple(vec![super::shared::usize_value(i), x.clone()]))
                 .collect(),
         ),
         BuiltinId::Take => {
@@ -122,6 +120,7 @@ fn vec_get(v: &List, method: &MethodName, args: &[Value]) -> Value {
             start,
             end,
             inclusive,
+            ..
         }) = args.first()
     {
         let items = v.lock();
@@ -215,7 +214,7 @@ fn vec_product(v: &List, method: &MethodName) -> Result<Value> {
 /// Nested vecs flatten, strings join, told apart by the first element. An empty receiver goes by
 /// the written element type, or the string form.
 fn vec_concat(v: &List, element: Option<&ScalarTy>) -> Value {
-    let items = v.lock();
+    let items: Vec<Value> = v.lock().iter().cloned().map(unlend).collect();
     if items.is_empty() && matches!(element, Some(ScalarTy::List(_))) {
         return Value::vec(Vec::new());
     }
@@ -223,7 +222,7 @@ fn vec_concat(v: &List, element: Option<&ScalarTy>) -> Value {
         // the rows are borrowed, so the flat vec clones what it copies out of them
         Some(Value::Vec(_)) => {
             let mut out = Vec::new();
-            for x in items.iter() {
+            for x in &items {
                 if let Value::Vec(inner) = x {
                     out.extend(inner.lock().iter().map(Value::deep_clone));
                 }
@@ -622,12 +621,20 @@ impl Ord for SortKey {
     }
 }
 
+/// A slice a call hands back sits behind a plain borrow, see `ValueRef::lent`.
+pub(super) fn unlend(value: Value) -> Value {
+    match &value {
+        Value::Ref(reference) => reference.lent().unwrap_or(value),
+        _ => value,
+    }
+}
+
 /// `starts_with` and `ends_with` on a slice.
 fn vec_affix(v: &List, method: &MethodName, args: &[Value]) -> Result<Value> {
-    let needle: Vec<Value> = match arg(args, 0)? {
+    let needle: Vec<Value> = match unlend(arg(args, 0)?) {
         Value::Vec(n) => n.lock().clone(),
         // a byte string literal
-        Value::Str(t) => t.bytes().map(|b| Value::Int(i64::from(b))).collect(),
+        Value::Str(t) => t.bytes().map(Value::byte).collect(),
         other => bail!("{} needs a slice, got {}", method.text, other.display()),
     };
     let items = v.lock();

@@ -103,12 +103,7 @@ pub(super) fn f32_method(recv: f32, name: BuiltinId, args: &[Value]) -> Result<O
         shared::f32_core(recv, name, &VArgs(args))?.map(|out| match out {
             F32Out::Val(value) => Value::F32(value),
             F32Out::Bool(value) => Value::Bool(value),
-            F32Out::Bytes(bytes) => Value::vec(
-                bytes
-                    .into_iter()
-                    .map(|byte| Value::Int(i64::from(byte)))
-                    .collect(),
-            ),
+            F32Out::Bytes(bytes) => Value::vec(bytes.into_iter().map(Value::byte).collect()),
             F32Out::Ordering(ordering) => make_ordering(ordering),
             F32Out::SomeOrdering(ordering) => Value::some(make_ordering(ordering)),
         }),
@@ -133,12 +128,7 @@ pub(super) fn int_out(
         IntOut::Checked(None) | IntOut::CheckedCount(None) => Value::none(),
         IntOut::SomeFloat(value) => Value::some(Value::Float(value)),
         IntOut::Ordering(ordering) => make_ordering(ordering),
-        IntOut::Bytes(bytes) => Value::vec(
-            bytes
-                .into_iter()
-                .map(|byte| Value::Int(i64::from(byte)))
-                .collect(),
-        ),
+        IntOut::Bytes(bytes) => Value::vec(bytes.into_iter().map(Value::byte).collect()),
         IntOut::Overflowing(value, wrapped) => Value::tuple(vec![
             Value::int_of_width(value, width),
             Value::Bool(wrapped),
@@ -221,12 +211,7 @@ pub(super) fn num_out(out: NumOut) -> Value {
         NumOut::Int(i) => Value::Int(i),
         NumOut::Float(f) => Value::Float(f),
         NumOut::Bool(b) => Value::Bool(b),
-        NumOut::Bytes(bytes) => Value::vec(
-            bytes
-                .into_iter()
-                .map(|byte| Value::Int(i64::from(byte)))
-                .collect(),
-        ),
+        NumOut::Bytes(bytes) => Value::vec(bytes.into_iter().map(Value::byte).collect()),
         NumOut::SomeInt(i) => Value::some(Value::Int(i)),
         NumOut::SomeFloat(f) => Value::some(Value::Float(f)),
         NumOut::Nothing => Value::none(),
