@@ -147,6 +147,10 @@ impl Infer<'_, '_> {
             {
                 recv.clone()
             }
+            "clone_from" if args.len() == 1 => {
+                self.arg_ty(args, 0, recv);
+                Ty::Unit
+            }
             "to_string" => {
                 self.walk_all(args);
                 Ty::Str
@@ -369,6 +373,10 @@ impl Infer<'_, '_> {
             | "retain_mut"
             | "dedup_by_key" => {
                 self.closure_ret(args, 0, vec![item.clone()]);
+                Ty::Unit
+            }
+            "dedup_by" => {
+                self.closure_ret(args, 0, vec![item.clone(), item.clone()]);
                 Ty::Unit
             }
             "join" => {

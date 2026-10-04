@@ -222,7 +222,7 @@ impl Infer<'_, '_> {
         let same = Ty::iter(item.clone());
         match name {
             "iter" | "into_iter" | "iter_mut" | "rev" | "peekable" | "by_ref" | "cloned"
-            | "copied" | "fuse" | "cycle" | "skip" | "take" | "step_by" => {
+            | "copied" | "fuse" | "cycle" | "skip" | "take" | "step_by" | "clone" => {
                 for arg in args {
                     self.expr(arg, &Ty::usize());
                 }
@@ -272,6 +272,15 @@ impl Infer<'_, '_> {
             | "max_by_key" | "min_by" | "max_by" | "find" | "find_map" | "peek" | "nth_back" => {
                 self.iter_pick(item, name, args)
             }
+            "next_if" => {
+                self.closure_ret(args, 0, vec![item.clone()]);
+                Ty::option(item.clone())
+            }
+            "next_if_eq" => {
+                self.arg_ty(args, 0, item);
+                Ty::option(item.clone())
+            }
+            "is_sorted" => Ty::Bool,
             "position" | "rposition" => {
                 self.closure_ret(args, 0, vec![item.clone()]);
                 Ty::option(Ty::usize())

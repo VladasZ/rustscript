@@ -149,6 +149,16 @@ pub(super) const ROWS: &[Method] = &[
         Same,
         "({{ let mut diff_r = {r}; let mut diff_i = 0usize; diff_r.dedup_by_key(|_| {{ diff_i += 1; diff_i / 2 }}); diff_r }})",
     ),
+    with_elem(
+        m(
+            "vec_dedup_by",
+            VecRecv,
+            &[],
+            Same,
+            "({{ let mut diff_r = {r}; diff_r.dedup_by(|a, b| a == b); diff_r }})",
+        ),
+        OrdElem,
+    ),
     // cuts and splices, each panics past the end
     m(
         "vec_drain_front",
