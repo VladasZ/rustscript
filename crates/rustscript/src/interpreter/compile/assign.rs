@@ -1,5 +1,6 @@
 //! Plain and compound assignment.
 
+use crate::interpreter::shared::field_name;
 use anyhow::{Result, bail};
 use syn::spanned::Spanned;
 use syn::{Expr, UnOp};
@@ -384,7 +385,7 @@ impl Compiler<'_> {
     pub(super) fn member_of(&mut self, member: &syn::Member) -> u16 {
         match member {
             syn::Member::Named(n) => {
-                self.add_member(Member::Named(FieldName::new(n.to_string().into())))
+                self.add_member(Member::Named(FieldName::new(field_name(n).into())))
             }
             syn::Member::Unnamed(i) => self.add_member(Member::Indexed(i.index as usize)),
         }

@@ -15,36 +15,6 @@ Differential workflow.
 
 ## Open
 
-### A raw identifier field serializes with its `r#` prefix
-
-Found by `build/web/webos.rs` of the hilen build scripts, its `appinfo.json`
-came out with `"r#type"` and the LG packer refused it. The script waits on
-this entry.
-
-```rust
-#!/usr/bin/env rust
-
-use serde::Serialize;
-
-#[derive(Serialize)]
-struct Info {
-    r#type: String,
-}
-
-fn main() {
-    let info = Info {
-        r#type: "web".to_string(),
-    };
-    println!("{}", serde_json::to_string(&info).unwrap());
-}
-```
-
-Compiled: `{"type":"web"}`. Interpreted: `{"r#type":"web"}`.
-
-Likely place: where the interpreter takes the field names of a struct for a
-derived `Serialize`, and most likely `Deserialize` too. A raw identifier
-keeps its `r#` there, rustc drops it, `r#type` and `type` are one name.
-
 ## Generator plan
 
 The differential generator is being brought closer to real Rust in phases,
@@ -59,32 +29,24 @@ Real use breaks most often in the bridges and in exit codes, so phases 6 and
 counts in the surface report and win1 in the fleet are done, see
 `docs/differential.md`.
 
-### Phase 2, strings, formatting and iterators as scripts write them
+### Phase 2, the rest
 
-- `format!` with positional, named and inline args, nested specs, `write!`
-  and `writeln!` into a `String`, `+` and `+=` with `&str`, `to_string`
-  against `String::from` against `into`, `chars().rev()`, `char_indices`,
-  `bytes`, `lines`, `split` with `map(str::trim)`, `parse::<T>()` with `?`
-  and `map_err`.
-- Pipe sources from `iter()`, `chars()`, `bytes()`, `lines()`, `split()`,
-  `windows`, `chunks`, ranges with `rev` and `step_by`. New stages
-  `filter_map`, `flat_map`, `flatten`, `chain`, `zip`, `take_while`,
-  `skip_while`, `inspect` with a print, `scan`, `peekable` driven by
-  `while let`, `by_ref`, and an iterator stored in a binding and pulled with
-  `next`. New terminals `find`, `find_map`, `max_by_key`, `min_by_key`,
-  `partition`, `unzip`, `for_each`, `reduce`, `rposition`,
-  `collect::<String>`, `collect::<Result<Vec<_>, _>>`.
-- `BTreeMap`, `BTreeSet` and `VecDeque`. They are ordered, so they print
-  directly and the sort rule does not apply.
-- `sort_by_key`, `sort_by` with `cmp` and `Reverse`, `dedup_by_key`,
-  `binary_search`, `drain`, `split_off`, `insert`, `remove`, `extend` from
-  an iterator, `and_modify`.
-- Prints inside `map`, `filter`, `fold`, `for_each` and helper bodies. Never
-  inside a sort comparator, its call sequence is not part of the std
-  contract.
-- Evaluation order tracers, a helper that prints and returns its argument,
-  placed in call args, operands, struct fields, index and value of an
-  assignment.
+The catalog rows of this phase are done, see `docs/differential.md`. A row is one fixed
+template. Still open are the same forms as tree nodes the solver composes.
+
+- Pipe sources from `iter()`, `chars()`, `bytes()`, `lines()`, `split()`, `windows`,
+  `chunks`, and ranges with `rev` and `step_by`. Pipe stages `filter_map`, `flat_map`,
+  `flatten`, `chain`, `zip`, `take_while`, `skip_while`, `inspect` with a print, `scan`,
+  `peekable` and `by_ref`. Pipe terminals `find`, `find_map`, `max_by_key`, `min_by_key`,
+  `partition`, `unzip`, `for_each`, `reduce`, `rposition`, `collect::<String>` and
+  `collect::<Result<Vec<_>, _>>`. Each with a generated closure body.
+- `BTreeMap`, `BTreeSet` and `VecDeque` as types a binding holds, so every statement form
+  reads and writes them.
+- `write!` and `writeln!` as statements over a `String` binding, and a `format!` whose
+  arguments are generated expressions.
+- A print inside the generated body of a `map`, `filter` or `fold` closure of a pipe.
+- An inline format argument written with a keyword name, `println!("{t}", type = x)`, does
+  not parse in the interpreter.
 
 ### Phase 3, error handling and process semantics
 

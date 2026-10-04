@@ -1,5 +1,6 @@
 //! Struct literals and the field defaults they fill in.
 
+use crate::interpreter::shared::field_name;
 use std::mem::take;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -54,7 +55,7 @@ impl Compiler<'_> {
         let mut written: Vec<(String, &Expr)> = Vec::new();
         for f in &s.fields {
             let key = match &f.member {
-                syn::Member::Named(n) => n.to_string(),
+                syn::Member::Named(n) => field_name(n),
                 syn::Member::Unnamed(i) => i.index.to_string(),
             };
             written.push((key, &f.expr));
@@ -70,32 +71,7 @@ impl Compiler<'_> {
             self.alloc();
         }
         let held = self.cur().unwind_temps.len();
-        for (i, fname) in order.iter().enumerate() {
-            let dstf = base + idx16(i);
-            match written.iter().find(|(k, _)| k == fname) {
-                Some((_, e)) => {
-                    self.compile_owned_into(dstf, e)?;
-                    // a borrowed field shares storage the struct must not drop, see
-                    // `compile_elems`
-                    if self.ctx.has_drop && self.lends_storage(e) && !self.arg_owned(e) {
-                        self.emit(Op::MakeBorrow {
-                            dst: dstf,
-                            src: dstf,
-                        });
-                    }
-                    // a field already built drops when a later field panics, the struct op
-                    // takes it out of the window once it runs
-                    if self.ctx.has_drop && self.arg_owned(e) {
-                        if tail {
-                            self.cur().owned_temps.push(dstf);
-                        } else {
-                            self.cur().hold_operand(dstf);
-                        }
-                    }
-                }
-                None => self.emit(Op::LoadUnit { dst: dstf }),
-            }
-        }
+        self.compile_written_fields(base, &order, &written, tail)?;
         if let Some(rest) = &s.rest {
             let reg = base + idx16(order.len());
             self.compile_owned_into(reg, rest)?;
@@ -122,6 +98,50 @@ impl Compiler<'_> {
             idx16(f.struct_lits.len() - 1)
         };
         self.emit(Op::MakeStruct { dst, info, base });
+        Ok(())
+    }
+
+    /// Fills the field window of a literal. A field the literal leaves to its `..rest` starts
+    /// as unit.
+    fn compile_written_fields(
+        &mut self,
+        base: Reg,
+        order: &[String],
+        written: &[(String, &Expr)],
+        tail: bool,
+    ) -> Result<()> {
+        for (i, fname) in order.iter().enumerate() {
+            if !written.iter().any(|(k, _)| k == fname) {
+                self.emit(Op::LoadUnit {
+                    dst: base + idx16(i),
+                });
+            }
+        }
+        // the fields run in the order the literal writes them, not the declared one
+        for (key, e) in written {
+            let Some(i) = order.iter().position(|fname| fname == key) else {
+                continue;
+            };
+            let dstf = base + idx16(i);
+            self.compile_owned_into(dstf, e)?;
+            // a borrowed field shares storage the struct must not drop, see
+            // `compile_elems`
+            if self.ctx.has_drop && self.lends_storage(e) && !self.arg_owned(e) {
+                self.emit(Op::MakeBorrow {
+                    dst: dstf,
+                    src: dstf,
+                });
+            }
+            // a field already built drops when a later field panics, the struct op
+            // takes it out of the window once it runs
+            if self.ctx.has_drop && self.arg_owned(e) {
+                if tail {
+                    self.cur().owned_temps.push(dstf);
+                } else {
+                    self.cur().hold_operand(dstf);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -203,7 +223,7 @@ pub(super) fn literal_field_order(
             let mut ordered: Vec<String> = def
                 .fields
                 .iter()
-                .filter_map(|f| f.ident.as_ref().map(std::string::ToString::to_string))
+                .filter_map(|f| f.ident.as_ref().map(field_name))
                 .filter(|k| has_rest || written.iter().any(|(w, _)| w == k))
                 .collect();
             for (k, _) in written {
@@ -218,7 +238,7 @@ pub(super) fn literal_field_order(
                 .map(|k| {
                     def.fields
                         .iter()
-                        .find(|f| f.ident.as_ref().is_some_and(|i| i == k))
+                        .find(|f| f.ident.as_ref().is_some_and(|i| field_name(i) == *k))
                         .and_then(serde_rename)
                         .or_else(|| rule.map(|r| r.apply(k)))
                         .map(Arc::<str>::from)
@@ -229,7 +249,7 @@ pub(super) fn literal_field_order(
                 .map(|k| {
                     def.fields
                         .iter()
-                        .find(|f| f.ident.as_ref().is_some_and(|i| i == k))
+                        .find(|f| f.ident.as_ref().is_some_and(|i| field_name(i) == *k))
                         .map(serde_field)
                         .unwrap_or_default()
                 })

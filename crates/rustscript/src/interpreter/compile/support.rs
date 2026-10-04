@@ -381,6 +381,9 @@ pub(super) fn init_is_unique(expr: &Expr) -> bool {
 /// it. A place read, a path, a reference and a closure hand out a handle into storage that
 /// lives on, and a guard is released by `release_guard_temps`.
 pub(super) fn temp_is_owned(expr: &Expr, binding_owns: BindingOwns) -> bool {
+    if is_promoted(expr) {
+        return false;
+    }
     match expr {
         Expr::Paren(p) => temp_is_owned(&p.expr, binding_owns),
         Expr::Group(g) => temp_is_owned(&g.expr, binding_owns),
@@ -400,6 +403,23 @@ pub(super) fn temp_is_owned(expr: &Expr, binding_owns: BindingOwns) -> bool {
             _ => init_is_owned(expr, binding_owns),
         },
         other => init_is_owned(other, binding_owns),
+    }
+}
+
+/// Whether `rustc` promotes the expression to a static, an array or a tuple of literals. A
+/// borrow of it outlives the statement, `let it = [1, 2].iter();`, and it has nothing to drop.
+fn is_promoted(expr: &Expr) -> bool {
+    match expr {
+        Expr::Paren(p) => is_promoted(&p.expr),
+        Expr::Group(g) => is_promoted(&g.expr),
+        Expr::Lit(_) => true,
+        Expr::Array(a) => a.elems.iter().all(is_promoted),
+        Expr::Tuple(t) => t.elems.iter().all(is_promoted),
+        Expr::Repeat(r) => is_promoted(&r.expr) && is_promoted(&r.len),
+        Expr::Unary(u) => !matches!(u.op, syn::UnOp::Deref(_)) && is_promoted(&u.expr),
+        Expr::Cast(c) => is_promoted(&c.expr),
+        Expr::Reference(r) => r.mutability.is_none() && is_promoted(&r.expr),
+        _ => false,
     }
 }
 
@@ -486,6 +506,28 @@ fn expr_is_fresh(expr: &Expr) -> bool {
     }
 }
 
+/// Whether the last `let` of the block that binds `name` holds an iterator chain that owns
+/// its items. `None` when the block does not declare the name.
+fn block_binding_owns(block: &syn::Block, name: &str) -> Option<bool> {
+    block.stmts.iter().rev().find_map(|stmt| {
+        let syn::Stmt::Local(local) = stmt else {
+            return None;
+        };
+        let pat = match &local.pat {
+            syn::Pat::Type(typed) => &*typed.pat,
+            pat => pat,
+        };
+        let syn::Pat::Ident(ident) = pat else {
+            return None;
+        };
+        if ident.ident != name {
+            return None;
+        }
+        let init = local.init.as_ref()?;
+        Some(chain_owns_items(&init.expr, &|_| false))
+    })
+}
+
 /// Whether a `let` init hands the binding a value of its own, so scope end drops it. A borrow
 /// or an accessor that hands out a handle into other storage does not. An unknown method is
 /// treated as a borrow, a missed drop is safer than a drop of storage someone else owns.
@@ -498,11 +540,11 @@ pub(super) fn init_is_owned(expr: &Expr, binding_owns: BindingOwns) -> bool {
         Expr::Reference(_) => false,
         Expr::MethodCall(m) => match m.method.to_string().as_str() {
             "clone" | "cloned" | "copied" | "to_vec" | "to_owned" | "to_string" | "collect"
-            | "pop" | "remove" | "take" | "replace" | "swap_remove" | "split_off"
-            | "into_inner" | "new" | "default" | "with_capacity" | "borrow" | "borrow_mut"
-            | "try_borrow" | "try_borrow_mut" | "lock" | "concat" | "repeat" | "join"
-            | "into_iter" | "into_keys" | "into_values" | "drain" | "split_at" | "insert"
-            | "then_some" | "then" | "into" => true,
+            | "pop" | "pop_front" | "pop_back" | "pop_first" | "pop_last" | "remove" | "take"
+            | "replace" | "swap_remove" | "split_off" | "into_inner" | "new" | "default"
+            | "with_capacity" | "borrow" | "borrow_mut" | "try_borrow" | "try_borrow_mut"
+            | "lock" | "concat" | "repeat" | "join" | "into_iter" | "into_keys" | "into_values"
+            | "drain" | "split_at" | "insert" | "then_some" | "then" | "into" => true,
             // an adapter wraps the iterator it consumes, so it owns what that one owned
             "unwrap" | "expect" | "unwrap_or" | "unwrap_or_else" | "unwrap_or_default" | "ok"
             | "err" | "map" | "map_err" | "and_then" | "await" | "or" | "and" | "xor" | "zip"
@@ -514,13 +556,19 @@ pub(super) fn init_is_owned(expr: &Expr, binding_owns: BindingOwns) -> bool {
             // owns its items
             "last" | "nth" | "next" | "next_back" | "max" | "min" | "max_by" | "min_by"
             | "max_by_key" | "min_by_key" | "fold" | "reduce" | "find" | "find_map"
-            | "partition" | "unzip" => chain_owns_items(&m.receiver, binding_owns),
+            | "partition" | "unzip" | "next_if" | "next_if_eq" => {
+                chain_owns_items(&m.receiver, binding_owns)
+            }
             _ => false,
         },
         // a `break 'label value` moves its value out like the `break` of a `loop`
         Expr::Block(b) if b.label.is_some() => true,
+        // the tail may name a binding of the block itself, whose scope is closed by the time
+        // the `let` around it asks
         Expr::Block(b) => b.block.stmts.last().is_some_and(|stmt| match stmt {
-            syn::Stmt::Expr(e, None) => init_is_owned(e, binding_owns),
+            syn::Stmt::Expr(e, None) => init_is_owned(e, &|name| {
+                block_binding_owns(&b.block, name).unwrap_or_else(|| binding_owns(name))
+            }),
             _ => false,
         }),
         Expr::If(i) => i.then_branch.stmts.last().is_some_and(

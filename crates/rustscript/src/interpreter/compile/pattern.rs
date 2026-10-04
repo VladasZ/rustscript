@@ -1,5 +1,6 @@
 //! Pattern lowering.
 
+use crate::interpreter::shared::field_name;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -278,7 +279,7 @@ impl Compiler<'_> {
                     .iter()
                     .map(|field| {
                         let name = match &field.member {
-                            syn::Member::Named(name) => name.to_string(),
+                            syn::Member::Named(name) => field_name(name),
                             syn::Member::Unnamed(index) => index.index.to_string(),
                         };
                         (name, self.lower_pattern(&field.pat, consts))

@@ -13,6 +13,14 @@ use super::iterator;
 use super::native::Native;
 use super::value::{MapKey, MapKind, MapStore, Value};
 
+/// A key the map throws away. It is the map's own, so it drops inside the call like in real
+/// Rust. Only a user type can have a `Drop` impl.
+fn discard_key(key: &MapKey) {
+    if key.may_drop() {
+        discard(key.to_value());
+    }
+}
+
 pub(super) fn map_method(
     m: &Arc<Mutex<MapStore>>,
     kind: MapKind,
@@ -34,22 +42,7 @@ pub(super) fn map_method(
         BuiltinId::Len | BuiltinId::Count => super::shared::usize_value(m.lock().len()),
         BuiltinId::IsEmpty => Value::Bool(m.lock().is_empty()),
         BuiltinId::Clone => Value::Map(m.clone(), kind).deep_clone(),
-        BuiltinId::Insert => {
-            let k = take(&mut args[0])
-                .into_key()
-                .ok_or_else(|| anyhow!("invalid map key"))?;
-            // a set insert returns whether it was new, a map insert the old value
-            if kind == MapKind::Set {
-                let old = m.lock().insert(k, Value::Unit);
-                return Ok(Value::Bool(old.is_none()));
-            }
-            let val = args.get_mut(1).map_or(Value::Unit, take);
-            let old = m.lock().insert(k, val);
-            match old {
-                Some(v) => Value::some(v),
-                None => Value::none(),
-            }
-        }
+        BuiltinId::Insert => return map_insert(m, kind, args),
         // `get_mut` is `&mut V`, so writes must land in the entry
         BuiltinId::GetMut => {
             let arg = args.first().ok_or_else(|| anyhow!("invalid map key"))?;
@@ -68,18 +61,7 @@ pub(super) fn map_method(
             None => Value::none(),
         })?,
         BuiltinId::ContainsKey => lookup(0, &|v| Value::Bool(v.is_some()))?,
-        BuiltinId::Remove => {
-            let arg = args.first().ok_or_else(|| anyhow!("invalid map key"))?;
-            let k = arg.as_key().ok_or_else(|| anyhow!("invalid map key"))?;
-            let removed = m.lock().shift_remove(&k);
-            if kind == MapKind::Set {
-                return Ok(Value::Bool(removed.is_some()));
-            }
-            match removed {
-                Some(v) => Value::some(v),
-                None => Value::none(),
-            }
-        }
+        BuiltinId::Remove => return map_remove(m, kind, args),
         BuiltinId::IntoKeys => map_into_iterator(m, true),
         BuiltinId::IntoValues => map_into_iterator(m, false),
         BuiltinId::Keys => Value::vec(m.lock().keys().map(MapKey::to_value).collect()),
@@ -96,7 +78,8 @@ pub(super) fn map_method(
         }
         BuiltinId::Clear => {
             let entries = m.lock().take_all();
-            for (_, value) in entries {
+            for (key, value) in entries {
+                discard_key(&key);
                 discard(value);
             }
             Value::Unit
@@ -120,6 +103,46 @@ pub(super) fn map_method(
         ))),
         BuiltinId::AsArray | BuiltinId::AsArrayMut => Value::none(),
         _ => return super::methods::generic_method(&Value::Map(m.clone(), kind), method, args),
+    })
+}
+
+fn map_insert(m: &Arc<Mutex<MapStore>>, kind: MapKind, args: &mut [Value]) -> Result<Value> {
+    let k = take(&mut args[0])
+        .into_key()
+        .ok_or_else(|| anyhow!("invalid map key"))?;
+    // std keeps the key it has and drops the one handed in
+    let present = m.lock().contains_key(&k);
+    if present {
+        discard_key(&k);
+    }
+    // a set insert returns whether it was new, a map insert the old value
+    if kind == MapKind::Set {
+        if !present {
+            m.lock().insert(k, Value::Unit);
+        }
+        return Ok(Value::Bool(!present));
+    }
+    let val = args.get_mut(1).map_or(Value::Unit, take);
+    let old = m.lock().insert(k, val);
+    Ok(match old {
+        Some(v) => Value::some(v),
+        None => Value::none(),
+    })
+}
+
+fn map_remove(m: &Arc<Mutex<MapStore>>, kind: MapKind, args: &[Value]) -> Result<Value> {
+    let arg = args.first().ok_or_else(|| anyhow!("invalid map key"))?;
+    let k = arg.as_key().ok_or_else(|| anyhow!("invalid map key"))?;
+    let removed = m.lock().shift_remove_entry(&k);
+    if let Some((key, _)) = &removed {
+        discard_key(key);
+    }
+    if kind == MapKind::Set {
+        return Ok(Value::Bool(removed.is_some()));
+    }
+    Ok(match removed {
+        Some((_, v)) => Value::some(v),
+        None => Value::none(),
     })
 }
 
@@ -264,6 +287,14 @@ fn sorted_range(m: &Arc<Mutex<MapStore>>, kind: MapKind, args: &[Value]) -> Resu
             .ok_or_else(|| anyhow!("invalid range bound"))
     };
     let (start, end, inclusive) = (bound(0)?, bound(2)?, flag(4));
+    // the range owns its bounds and the call drops it, the start before the end
+    for (key, slot) in [(&start, 0), (&end, 2)] {
+        if key.as_ref().is_some_and(MapKey::may_drop)
+            && let Some(value) = args.get(slot)
+        {
+            discard(value.clone());
+        }
+    }
     let store = m.lock();
     // the std messages, std checks the bounds only when the map has entries
     if let (Some(s), Some(e)) = (&start, &end)
@@ -325,6 +356,7 @@ pub(super) fn collect_map(items: Vec<Value>, sorted: bool) -> Result<Value> {
     } else {
         MapStore::default()
     };
+    let mut entries = Vec::with_capacity(items.len());
     for item in items {
         let Value::Tuple(pair) = item else {
             bail!("collect into a map needs (key, value) items");
@@ -337,9 +369,44 @@ pub(super) fn collect_map(items: Vec<Value>, sorted: bool) -> Result<Value> {
         let key = take(&mut pair[0])
             .into_key()
             .ok_or_else(|| anyhow!("invalid map key"))?;
-        map.insert(key, value);
+        entries.push((key, value));
     }
+    fill(&mut map, entries, sorted);
     Ok(Value::map_of(map))
+}
+
+/// Puts collected entries into an empty store and drops what a repeated key pushes out. A
+/// `BTreeMap` sorts the entries first and keeps the last of equal keys, so the earlier ones
+/// drop in key order. A `HashMap` inserts one by one, it keeps the first key, drops the new
+/// one and drops the value it replaces.
+fn fill(store: &mut MapStore, mut entries: Vec<(MapKey, Value)>, sorted: bool) {
+    if sorted {
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut entries = entries.into_iter().peekable();
+        while let Some((key, value)) = entries.next() {
+            if entries.peek().is_some_and(|next| next.0 == key) {
+                discard_key(&key);
+                discard(value);
+            } else {
+                store.insert(key, value);
+            }
+        }
+        return;
+    }
+    for (key, value) in entries {
+        insert_or_replace(store, key, value);
+    }
+}
+
+/// `insert` on a store that may hold the key. std keeps the key it has, drops the new one and
+/// drops the value it replaces.
+fn insert_or_replace(store: &mut MapStore, key: MapKey, value: Value) {
+    if store.contains_key(&key) {
+        discard_key(&key);
+    }
+    if let Some(old) = store.insert(key, value) {
+        discard(old);
+    }
 }
 
 /// `sorted` builds a `BTreeSet`.
@@ -349,10 +416,12 @@ pub(super) fn collect_set(items: Vec<Value>, sorted: bool) -> Result<Value> {
     } else {
         MapStore::default()
     };
+    let mut entries = Vec::with_capacity(items.len());
     for item in items {
         let key = item.into_key().ok_or_else(|| anyhow!("invalid set key"))?;
-        set.insert(key, Value::Unit);
+        entries.push((key, Value::Unit));
     }
+    fill(&mut set, entries, sorted);
     Ok(Value::set_of(set))
 }
 
@@ -403,7 +472,7 @@ fn map_write_method(
                     (k, v)
                 };
                 let k = k.into_key().ok_or_else(|| anyhow!("invalid map key"))?;
-                store.insert(k, v);
+                insert_or_replace(&mut store, k, v);
             }
             Value::Unit
         }

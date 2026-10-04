@@ -12,7 +12,9 @@ There are 4 steps, all in `crates/rustscript/src`.
    or `name/mod.rs` like `rustc` does. Local path crates from the nearest
    `Cargo.toml` are grafted in as modules. A `fn` declared inside a block
    moves to its module under a hidden name, and the uses of its name in that
-   block are renamed to match, see `nested_fns.rs`.
+   block are renamed to match, see `nested_fns.rs`. A `struct`, `enum`,
+   `trait`, `type` or `impl` declared inside a block moves to the module too
+   and keeps its name. A name the module already has is refused.
 2. Every file is parsed with [`syn`](https://github.com/dtolnay/syn).
 3. The resolver gives every item a key like `foo::bar` and resolves imports,
    renames, `crate::`, `self::`, `super::` and re-exports at load time. A
@@ -145,6 +147,24 @@ its registers on return.
 Strings are `Arc<String>` read lock free. `push` grows in place when the
 buffer is not shared, so a build up loop stays linear.
 
+The fields of a struct literal run in the order the literal writes them. The struct
+keeps them in declared order. A field written as a raw identifier, `r#type`, has the
+name `type`, in `Debug` and in serde.
+
+An array or a tuple of literals is promoted to a static like in `rustc`, so
+`let it = [1, 2].iter();` still finds its items after the statement.
+
+A sort compares the values themselves, see `sort_by_order`, so a `u64` past
+`i64::MAX` and a `Reverse` key order like real Rust. `Reverse`, `iter::once` and
+`iter::repeat` keep the width of the value they hold.
+
+A key of a map or a set drops where real Rust drops it. A repeated `insert` keeps the
+key it has and drops the new one. `remove`, `clear` and `retain` drop the key they
+take out. A `collect` into a `BTreeMap` sorts first and keeps the last of equal keys.
+A `range` drops the bounds it took. `clone_from` on a `Vec` keeps the storage, it
+drops the items past the new length and clones into the rest, see
+`clone_from_value`.
+
 A `HashMap` or `HashSet` keeps insertion order. A `BTreeMap` or `BTreeSet`
 keeps key order on every insert, the order a derived `Ord` gives the key, see
 `value/map_store.rs`.
@@ -159,7 +179,8 @@ An `anyhow::Error` is a chain of messages, the outermost context first, so
 returns `anyhow::Result` wraps any other error as the root of a chain.
 
 Iterators are lazy native resources, so `by_ref`, `peekable` and open ranges
-keep their real semantics. `rev` is lazy too, each pull is a `next_back` of
+keep their real semantics. `cycle` starts each round from a copy of the iterator
+it was made from, see `IteratorState::fork`. `Chars` is double ended. `rev` is lazy too, each pull is a `next_back` of
 the source, so a `map` closure runs from the back, including through
 `step_by`. A `vec.into_iter()` chain
 of `map`, `skip` and `cloned` collected into a `Vec` of a compatible layout

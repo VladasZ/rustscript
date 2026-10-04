@@ -29,6 +29,13 @@ fn usize_arg(args: &impl Args, i: usize) -> Result<usize> {
     usize::try_from(n).map_err(|_| anyhow!("`{n}` is not a valid count"))
 }
 
+/// The name of a field as `rustc` knows it. `r#type` and `type` are one name, so `Debug` and
+/// serde print it without the `r#`.
+pub(super) fn field_name(ident: &syn::Ident) -> String {
+    use syn::ext::IdentExt;
+    ident.unraw().to_string()
+}
+
 /// Lengths fit in i64 on every platform we support.
 pub(super) fn usize_i64(i: usize) -> i64 {
     i64::try_from(i).expect("value exceeds i64")

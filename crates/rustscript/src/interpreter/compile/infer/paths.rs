@@ -207,7 +207,15 @@ impl Infer<'_, '_> {
         let segs = self.self_prefixed(segs);
         match self.ctx.resolver.resolve(self.ctx.module, &segs) {
             Ok(Res::Fn(func)) => match self.ctx.fn_signatures.get(func as usize).cloned() {
-                Some(sig) => self.sig_call(&sig, None, &args, expected),
+                Some(sig) => {
+                    let module = self
+                        .ctx
+                        .fn_modules
+                        .get(func as usize)
+                        .copied()
+                        .unwrap_or(self.ctx.module);
+                    self.sig_call_in(&sig, module, None, &args, expected)
+                }
                 None => self.walk_args(&args),
             },
             Ok(Res::Struct(canon)) => {
@@ -318,18 +326,31 @@ impl Infer<'_, '_> {
         args: &[&Expr],
         expected: &Ty,
     ) -> Ty {
+        self.sig_call_in(sig, self.ctx.module, self_ty, args, expected)
+    }
+
+    /// `module` is the one that declares the signature, its types resolve there. A caller in
+    /// another module may not even see their names.
+    pub(super) fn sig_call_in(
+        &mut self,
+        sig: &syn::Signature,
+        module: usize,
+        self_ty: Option<&Ty>,
+        args: &[&Expr],
+        expected: &Ty,
+    ) -> Ty {
         let saved = self.swap_generics(sig);
         let params: Vec<Ty> = sig
             .inputs
             .iter()
             .filter_map(|input| match input {
                 syn::FnArg::Receiver(_) => None,
-                syn::FnArg::Typed(t) => Some(self.lower(&t.ty)),
+                syn::FnArg::Typed(t) => Some(self.lower_in(&t.ty, module)),
             })
             .collect();
         self.note_param_arrays(sig, args);
         let ret = match &sig.output {
-            syn::ReturnType::Type(_, ty) => self.lower(ty),
+            syn::ReturnType::Type(_, ty) => self.lower_in(ty, module),
             syn::ReturnType::Default => Ty::Unit,
         };
         self.generics = saved;

@@ -124,7 +124,7 @@ impl Compiler<'_> {
                     && !matches!(unparen(arg), Expr::Reference(_))
                     && !matches!(self.types.of(&m.receiver), Ty::Option(_))
                     && !matches!(self.types.of(arg), Ty::Option(_))
-                    && self.temp_owned(arg) =>
+                    && self.arg_owned(arg) =>
             {
                 let base = self.alloc();
                 let src = self.compile_owned_expr(arg)?;

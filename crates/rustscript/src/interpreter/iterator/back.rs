@@ -38,6 +38,7 @@ pub(super) fn supports_back(iterator: &Handle) -> bool {
     match state {
         IteratorState::Values { .. }
         | IteratorState::Owned { .. }
+        | IteratorState::Chars { .. }
         | IteratorState::Range { .. } => true,
         IteratorState::Map { source, .. }
         | IteratorState::Filter { source, .. }
@@ -139,6 +140,17 @@ fn back_step(state: &mut IteratorState) -> Result<Back> {
             inclusive,
             width,
         } => Back::Ready(range_back(next, end, *inclusive).map(|value| typed(value, *width))),
+        IteratorState::Chars {
+            source,
+            offset,
+            back,
+        } => {
+            let value = source[*offset..source.len() - *back].chars().next_back();
+            if let Some(ch) = value {
+                *back += ch.len_utf8();
+            }
+            Back::Ready(value.map(Value::Char))
+        }
         IteratorState::Map { source, closure } => Back::Map(source.clone(), closure.clone()),
         IteratorState::Filter { source, closure } => Back::Filter(source.clone(), closure.clone()),
         IteratorState::FilterMap { source, closure } => {

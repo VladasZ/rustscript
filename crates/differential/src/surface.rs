@@ -115,6 +115,20 @@ pub const TRAIT_METHODS: &[&str] = &[
     "is_empty",
     "from",
     "peek",
+    "next_if",
+    "push_front",
+    "pop_front",
+    "push_back",
+    "pop_back",
+    "sort_by",
+    "sort_by_key",
+    "extend",
+    "first_key_value",
+    "last_key_value",
+    "range",
+    "and_modify",
+    "pop_first",
+    "pop_last",
 ];
 
 pub type Surface = BTreeMap<String, BTreeSet<String>>;

@@ -158,6 +158,16 @@ pub(super) fn keys_of(values: &[Value]) -> Option<Vec<MapKey>> {
 }
 
 impl MapKey {
+    /// Whether the key holds a user type, the only kind that can have a `Drop` impl.
+    pub fn may_drop(&self) -> bool {
+        match self {
+            MapKey::Struct(..) | MapKey::Enum(..) => true,
+            MapKey::Tuple(items) | MapKey::Vec(items) => items.iter().any(MapKey::may_drop),
+            MapKey::Opt(Some(inner)) => inner.may_drop(),
+            _ => false,
+        }
+    }
+
     pub fn to_value(&self) -> Value {
         match self {
             MapKey::Bool(b) => Value::Bool(*b),

@@ -11,7 +11,7 @@ use std::rc::Rc;
 
 use super::flow::ArmBody;
 use super::infer::{MacroBody, json_mask};
-use super::{Compiler, inline_holes, parse_exprs, parse_matches, parse_vec_repeat};
+use super::{Compiler, NameLoc, inline_holes, parse_exprs, parse_matches, parse_vec_repeat};
 
 impl Compiler<'_> {
     pub(super) fn compile_macro(&mut self, mac: &syn::Macro, dst: Reg) -> Result<()> {
@@ -372,7 +372,16 @@ impl Compiler<'_> {
         for hole in inline_holes(&template) {
             if named.iter().all(|(n, _)| n != &hole) {
                 let r = self.alloc();
-                self.load_name(&hole, r)?;
+                // `{type}` names the local `r#type`, the template can not write the `r#`
+                let raw = format!("r#{hole}");
+                let source = if matches!(self.resolve(&hole), NameLoc::None)
+                    && !matches!(self.resolve(&raw), NameLoc::None)
+                {
+                    raw.as_str()
+                } else {
+                    hole.as_str()
+                };
+                self.load_name(source, r)?;
                 if let Some(t) = first
                     && let Some(mask) = json_mask(self.ctx, &self.types.hole(t, &hole))
                 {

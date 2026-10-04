@@ -81,6 +81,10 @@ impl Vm {
         {
             return Ok(path_closure(path.clone(), chunk.num_params));
         }
+        // `.map(T)`, a tuple struct as a function. A one letter name looks like a constant.
+        if segs.len() == 1 && self.struct_names.contains(last) {
+            return Ok(path_closure(path.clone(), 1));
+        }
         // A `SCREAMING_CASE` tail is a constant. The closure fallback would smuggle a closure
         // into arithmetic.
         if last.chars().any(|c| c.is_ascii_uppercase())
@@ -109,6 +113,23 @@ impl Vm {
         if let Some(d) = super::std_bridge::duration_ctor(path.id, &args)? {
             return Ok(d);
         }
+        // these keep their argument as a value, so it keeps its width tag
+        match path.id {
+            PathId::Some => return Ok(Value::some(one(args)?)),
+            PathId::Ok => return Ok(Value::ok(one(args)?)),
+            PathId::Err => return Ok(Value::err(one(args)?)),
+            PathId::CmpReverse => {
+                return Ok(Value::struct_of("Reverse", [(Arc::from("0"), one(args)?)]));
+            }
+            // lazy like every iterator, backed by a list of 1 element
+            PathId::IterOnce => return self.iterator_value(Value::vec(vec![one(args)?])),
+            PathId::IterRepeat => return Ok(super::iterator::repeat(one(args)?, None)),
+            PathId::IterRepeatN => {
+                let count = usize::try_from(super::vecmap::int_arg(&args, 1)?)?;
+                return Ok(super::iterator::repeat(one(args)?, Some(count)));
+            }
+            _ => {}
+        }
         // the bridge paths read plain `i64` and `f64`, a width tagged literal arrives widened
         for arg in &mut args {
             if let Some(image) = arg.bridge_image() {
@@ -117,9 +138,6 @@ impl Vm {
         }
         match path.id {
             PathId::Other => return self.dispatch_user_call(path, args),
-            PathId::Some => return Ok(Value::some(one(args)?)),
-            PathId::Ok => return Ok(Value::ok(one(args)?)),
-            PathId::Err => return Ok(Value::err(one(args)?)),
             // the register was cleared at the call site, so this is the last holder and a user
             // `Drop` runs now
             PathId::Drop => {
@@ -134,9 +152,7 @@ impl Vm {
                     Err(e) => Value::err(Value::str(e.to_string())),
                 });
             }
-            // lazy like every iterator, backed by a list of 0 or 1 elements
             PathId::IterEmpty => return self.iterator_value(Value::vec(Vec::new())),
-            PathId::IterOnce => return self.iterator_value(Value::vec(vec![one(args)?])),
             // `sleep` is the 1 thread function that needs no threading
             PathId::ThreadSleep => {
                 let Some(d) = args
@@ -368,6 +384,15 @@ impl Vm {
                 {
                     let items = self.drain_items(first.clone())?;
                     args[0] = Value::vec(items);
+                }
+                // an eager chain result is a vec here, these adapters walk it as an iterator
+                if matches!(
+                    name.id,
+                    BuiltinId::Chain | BuiltinId::Zip | BuiltinId::StepBy
+                ) && let Value::Native(iterator) = super::iterator::value_iter(v.clone())
+                    && let Some(out) = self.iterator_method(&iterator, name, args)?
+                {
+                    return Ok(out);
                 }
                 super::vecmap::vec_method(v, name, args)
             }
