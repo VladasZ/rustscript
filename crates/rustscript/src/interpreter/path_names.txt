@@ -340,6 +340,8 @@ isize::from_str_radix
 isize::try_from
 iter::empty
 iter::once
+iter::repeat
+iter::repeat_n
 jsonwebtoken::encode
 mem::replace
 mem::swap

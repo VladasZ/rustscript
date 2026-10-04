@@ -89,7 +89,7 @@ impl Interp {
             let mut slot = 0;
             for f in &named.named {
                 let Some(ident) = &f.ident else { continue };
-                let name = ident.to_string();
+                let name = super::shared::field_name(ident);
                 let rename =
                     super::serde_attrs::serde_rename(f).or_else(|| rule.map(|r| r.apply(&name)));
                 fields.push(Arc::from(name.as_str()));

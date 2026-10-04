@@ -24,7 +24,15 @@ impl Infer<'_, '_> {
             (Some(t), "collect") => self.vars.meet(t, expected),
             _ => expected.clone(),
         };
-        let recv_want = receiver_expectation(&name, &wanted);
+        // `entry(k).and_modify(..).or_insert(1usize)` on a map with no written value type, the
+        // closure of `and_modify` runs before `or_insert` says what the value is
+        let recv_want = match (name.as_str(), m.args.first()) {
+            ("or_insert", Some(arg)) => match self.expr(arg, &Ty::Unknown) {
+                Ty::Unknown => Ty::Unknown,
+                given => Ty::Entry(Box::new(given)),
+            },
+            _ => receiver_expectation(&name, &wanted),
+        };
         let recv = self.expr(&m.receiver, &recv_want);
         self.note_method(m, &recv);
         let args: Vec<&Expr> = m.args.iter().collect();
@@ -463,13 +471,22 @@ impl Infer<'_, '_> {
 
     fn entry_method(&mut self, recv: &Ty, value: &Ty, name: &str, args: &[&Expr]) -> Ty {
         match name {
+            // a map with no written value type, `BTreeMap::new()`, takes it from what goes in
             "or_insert" => {
-                self.arg_ty(args, 0, value);
-                value.clone()
+                let given = self.arg_ty(args, 0, value);
+                if matches!(value, Ty::Unknown) {
+                    given
+                } else {
+                    value.clone()
+                }
             }
             "or_insert_with" => {
-                self.closure_ret(args, 0, Vec::new());
-                value.clone()
+                let made = self.closure_ret(args, 0, Vec::new());
+                if matches!(value, Ty::Unknown) {
+                    made
+                } else {
+                    value.clone()
+                }
             }
             "or_default" => value.clone(),
             "and_modify" => {
@@ -504,6 +521,11 @@ fn receiver_expectation(name: &str, expected: &Ty) -> Ty {
             _ => Ty::Unknown,
         },
         "collect" => collect_source(expected),
+        "and_modify" if matches!(expected, Ty::Entry(_)) => expected.clone(),
+        "entry" => match expected {
+            Ty::Entry(value) => Ty::Map(Box::new(Ty::Unknown), value.clone(), false),
+            _ => Ty::Unknown,
+        },
         _ => Ty::Unknown,
     }
 }

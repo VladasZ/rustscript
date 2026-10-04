@@ -56,7 +56,15 @@ pub(super) fn entry_method(
     Ok(match method.id {
         BuiltinId::OrInsert => {
             let default = arg(args, 0)?;
-            m.lock().get_or_insert_with(key.clone(), || default);
+            // an occupied entry drops the key it was made with and the unused default
+            if m.lock().contains_key(key) {
+                if key.may_drop() {
+                    discard(key.to_value());
+                }
+                discard(default);
+            } else {
+                m.lock().insert(key.clone(), default);
+            }
             Value::Ref(Arc::new(ValueRef::map_entry(m.clone(), key.clone())))
         }
         // the compiler lowers the map's value type into `method.default`, strict inference
@@ -65,6 +73,9 @@ pub(super) fn entry_method(
             let Some(ir) = method.default.as_deref() else {
                 bail!("`or_default` needs the map's value type");
             };
+            if m.lock().contains_key(key) && key.may_drop() {
+                discard(key.to_value());
+            }
             m.lock()
                 .get_or_insert_with(key.clone(), || super::vm_step::build_default(ir));
             Value::Ref(Arc::new(ValueRef::map_entry(m.clone(), key.clone())))

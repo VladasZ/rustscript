@@ -54,6 +54,8 @@ pub enum IteratorState {
     Chars {
         source: RsStr,
         offset: usize,
+        /// bytes already handed out by `next_back`
+        back: usize,
     },
     Lines {
         source: RsStr,
@@ -142,6 +144,27 @@ pub enum IteratorState {
         source: Handle,
         buffered: Option<Value>,
     },
+    /// `scan`, the closure writes the state through a `&mut` and its `None` ends a pull
+    Scan {
+        source: Handle,
+        closure: Arc<ClosureData>,
+        state: Arc<Mutex<Value>>,
+    },
+    MapWhile {
+        source: Handle,
+        closure: Arc<ClosureData>,
+    },
+    /// `cycle`, `original` is the untouched copy every new round starts from
+    Cycle {
+        original: Handle,
+        current: Handle,
+    },
+    /// `iter::repeat`, a clone of the value per pull. `iter::repeat_n` counts down and hands
+    /// the value itself out last.
+    Repeat {
+        value: Value,
+        remaining: Option<usize>,
+    },
 }
 
 enum Step {
@@ -162,6 +185,9 @@ enum Step {
     Stride(Handle, usize),
     TakeWhile(Handle, Arc<ClosureData>),
     SkipWhile(Handle, Arc<ClosureData>, bool),
+    Scan(Handle, Arc<ClosureData>, Arc<Mutex<Value>>),
+    MapWhile(Handle, Arc<ClosureData>),
+    Cycle(Handle, Handle),
 }
 
 pub(super) fn wrap(state: IteratorState) -> Value {
@@ -209,12 +235,24 @@ pub(super) fn peekable_draining(items: List) -> Value {
     })
 }
 
+/// `iter::repeat(value)`, or `iter::repeat_n(value, count)` with a count
+pub(super) fn repeat(value: Value, count: Option<usize>) -> Value {
+    wrap(IteratorState::Repeat {
+        value,
+        remaining: count,
+    })
+}
+
 pub(super) fn bytes(source: RsStr) -> Value {
     wrap(IteratorState::Bytes { source, index: 0 })
 }
 
 pub(super) fn chars(source: RsStr) -> Value {
-    wrap(IteratorState::Chars { source, offset: 0 })
+    wrap(IteratorState::Chars {
+        source,
+        offset: 0,
+        back: 0,
+    })
 }
 
 pub(super) fn lines(source: RsStr) -> Value {
@@ -332,6 +370,10 @@ impl IteratorState {
             | IteratorState::RegexCaptures { .. }
             | IteratorState::Map { .. }
             | IteratorState::FilterMap { .. }
+            | IteratorState::Scan { .. }
+            | IteratorState::MapWhile { .. }
+            | IteratorState::Cycle { .. }
+            | IteratorState::Repeat { .. }
             | IteratorState::Cloned { .. } => true,
             IteratorState::Zip { left, right } | IteratorState::Chain { left, right, .. } => {
                 owns_items(left) && owns_items(right)
@@ -387,7 +429,22 @@ impl IteratorState {
             | IteratorState::Rev { source }
             | IteratorState::StepBy { source, .. }
             | IteratorState::TakeWhile { source, .. }
-            | IteratorState::SkipWhile { source, .. } => take_remaining_of(source),
+            | IteratorState::SkipWhile { source, .. }
+            | IteratorState::Scan { source, .. }
+            | IteratorState::MapWhile { source, .. } => take_remaining_of(source),
+            // std declares the original before the running copy
+            IteratorState::Cycle { original, current } => {
+                let mut items = take_remaining_of(original);
+                items.extend(take_remaining_of(current));
+                items
+            }
+            IteratorState::Repeat {
+                remaining: Some(0), ..
+            } => Vec::new(),
+            IteratorState::Repeat { value, remaining } => {
+                *remaining = Some(0);
+                vec![std::mem::replace(value, Value::Unit)]
+            }
             _ => Vec::new(),
         }
     }
@@ -401,7 +458,11 @@ impl IteratorState {
                 width,
             } => range_step(next, *end, *inclusive, *width),
             IteratorState::Bytes { source, index } => bytes_step(source, index),
-            IteratorState::Chars { source, offset } => chars_step(source, offset),
+            IteratorState::Chars {
+                source,
+                offset,
+                back,
+            } => chars_step(source, offset, *back),
             _ => return FastNext::NotSimple,
         })
     }
@@ -438,6 +499,29 @@ impl IteratorState {
                 Some(item) => Step::Ready(Some(item)),
                 None => Step::Take(source.clone()),
             },
+            IteratorState::Scan {
+                source,
+                closure,
+                state,
+            } => Step::Scan(source.clone(), closure.clone(), state.clone()),
+            IteratorState::MapWhile { source, closure } => {
+                Step::MapWhile(source.clone(), closure.clone())
+            }
+            IteratorState::Cycle { original, current } => {
+                Step::Cycle(original.clone(), current.clone())
+            }
+            IteratorState::Repeat { value, remaining } => Step::Ready(match remaining {
+                None => Some(value.deep_clone()),
+                Some(0) => None,
+                Some(1) => {
+                    *remaining = Some(0);
+                    Some(std::mem::replace(value, Value::Unit))
+                }
+                Some(left) => {
+                    *left -= 1;
+                    Some(value.deep_clone())
+                }
+            }),
             _ => unreachable!("step_adaptor handles the stateful adaptors only"),
         }
     }
@@ -484,7 +568,11 @@ impl IteratorState {
                 width,
             } => Step::Ready(range_step(next, *end, *inclusive, *width)),
             IteratorState::Bytes { source, index } => Step::Ready(bytes_step(source, index)),
-            IteratorState::Chars { source, offset } => Step::Ready(chars_step(source, offset)),
+            IteratorState::Chars {
+                source,
+                offset,
+                back,
+            } => Step::Ready(chars_step(source, offset, *back)),
             IteratorState::Lines { source, offset } => Step::Ready(next_line(source, offset)),
             IteratorState::SplitWhitespace { source, offset } => {
                 Step::Ready(next_word(source, offset))
@@ -546,8 +634,8 @@ fn bytes_step(source: &str, index: &mut usize) -> Option<Value> {
     value.map(Value::byte)
 }
 
-fn chars_step(source: &str, offset: &mut usize) -> Option<Value> {
-    let value = source[*offset..].chars().next();
+fn chars_step(source: &str, offset: &mut usize, back: usize) -> Option<Value> {
+    let value = source[*offset..source.len() - back].chars().next();
     if let Some(ch) = value {
         *offset += ch.len_utf8();
     }
@@ -631,8 +719,9 @@ fn lines_next(handle: &Handle) -> Option<Value> {
 }
 
 fn int_arg(args: &[Value]) -> Result<i64> {
-    match args.first() {
-        Some(Value::Int(value)) if *value >= 0 => Ok(*value),
+    // an untyped literal after an eager adapter arrives with the default width
+    match args.first().and_then(Value::int_parts) {
+        Some((value, _)) if value >= 0 => Ok(i64::try_from(value).unwrap_or(i64::MAX)),
         _ => bail!("iterator count needs a non-negative integer"),
     }
 }
@@ -640,6 +729,7 @@ fn int_arg(args: &[Value]) -> Result<i64> {
 mod arith;
 mod back;
 mod drive;
+mod extra;
 mod in_place;
 mod reduce;
 

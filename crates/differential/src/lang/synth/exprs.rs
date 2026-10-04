@@ -583,6 +583,7 @@ impl Generator<'_> {
                 ElemReq::Default => candidate.has_default(),
                 ElemReq::Str => matches!(candidate, Ty::Str),
                 ElemReq::Copy => candidate.is_copy(),
+                ElemReq::OrdSilent => candidate.is_ord() && !candidate.contains_trace(),
             };
             if allowed {
                 return Some(candidate);

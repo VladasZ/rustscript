@@ -28,6 +28,9 @@ pub struct Ctx<'r> {
     pub impl_type: Option<&'r str>,
     /// every script function by the index a resolved path carries, for the inference pass
     pub fn_signatures: &'r [syn::Signature],
+    /// the module that declares each function, by the same index. Its signature names types
+    /// as that module sees them.
+    pub fn_modules: &'r [usize],
     /// functions that return one of their `&mut` parameters whole, see `collect_mut_arg_returns`
     pub mut_arg_returns: &'r HashMap<u32, usize>,
     /// `&mut self` method names. A call compiles its receiver as a place split from sharing.

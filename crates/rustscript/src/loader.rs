@@ -215,7 +215,7 @@ fn collect(
         )?;
         modules.push(child);
     }
-    crate::nested_fns::hoist(&mut kept);
+    crate::nested_fns::hoist(&mut kept)?;
     Ok(ModuleSrc {
         path,
         items: kept,

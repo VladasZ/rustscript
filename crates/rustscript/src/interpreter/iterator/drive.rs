@@ -280,6 +280,9 @@ impl Vm {
                 self.skip_then_next(&source, count)
             }
             Step::TakeWhile(source, closure) => self.take_while_next(iterator, &source, &closure),
+            Step::Scan(source, closure, state) => self.scan_next(&source, &closure, state),
+            Step::MapWhile(source, closure) => self.map_while_next(&source, &closure),
+            Step::Cycle(original, current) => self.cycle_next(iterator, &original, &current),
             Step::SkipWhile(source, closure, skipping) => {
                 let mut still_skipping = skipping;
                 loop {
@@ -627,12 +630,17 @@ impl Vm {
             // `Chars::as_str` is the unconsumed tail, the capitalize idiom. Only a char iterator
             // still knows its source.
             BuiltinId::AsStr => match &*iterator.lock() {
-                Native::Iterator(IteratorState::Chars { source, offset }) => {
-                    Value::str(source[*offset..].to_string())
-                }
+                Native::Iterator(IteratorState::Chars {
+                    source,
+                    offset,
+                    back,
+                }) => Value::str(source[*offset..source.len() - *back].to_string()),
                 _ => return Ok(None),
             },
-            _ => return Ok(None),
+            _ => match self.run_extra_method(iterator, method.id, args)? {
+                Some(value) => value,
+                None => return Ok(None),
+            },
         };
         if consumes_iterator(method.id) {
             self.drop_leftovers(iterator)?;
@@ -653,6 +661,10 @@ pub(super) fn consumes_iterator(id: BuiltinId) -> bool {
             | BuiltinId::Min
             | BuiltinId::MaxByKey
             | BuiltinId::MinByKey
+            | BuiltinId::MaxBy
+            | BuiltinId::MinBy
+            | BuiltinId::Unzip
+            | BuiltinId::IsSorted
             | BuiltinId::Collect
             | BuiltinId::ToVec
             | BuiltinId::CollectString

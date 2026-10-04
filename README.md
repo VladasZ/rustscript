@@ -70,7 +70,7 @@ machine without a Rust toolchain.
 
 ## What works
 
-Functions, nested functions, closures, structs, enums, patterns, loops with
+Functions, nested functions and types, closures, structs, enums, patterns, loops with
 labels, iterators, `Vec`, `VecDeque`, strings, maps, sets, `BTreeMap` and
 `BTreeSet` in key order, `Option`, `Result`, `?`, formatting, modules and
 local path crates. Async with `#[tokio::main]`, spawned tasks, timers and HTTP.
@@ -116,6 +116,11 @@ Every feature has a working example under `crates/examples/examples`.
 - Lifetimes and generic bounds mean nothing at runtime.
 - A `use` inside a function body covers the whole body, not only its block. A
   body that imports 2 different items under 1 name is rejected.
+- A type declared inside a function body is known in its whole module. A
+  module with 2 such types of 1 name, or with a module level type of that
+  name, is rejected.
+- A sort with a key closure calls the closure once per item. Real Rust calls it
+  for every comparison, which a key with side effects can see.
 - `HashMap` and `HeaderMap` iterate in insertion order. Real Rust promises no
   order, so a correct script cannot see the difference.
 - `file!()` gives the script path as it was passed to `rust`, where a compiled

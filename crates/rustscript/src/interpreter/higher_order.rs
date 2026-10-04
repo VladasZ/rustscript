@@ -12,9 +12,10 @@ use super::enum_def::{EQUAL, EnumKind, OK, SOME};
 use super::iterator::{as_closure, option_inner};
 use super::methods::ordering_from_value;
 use super::native::Native;
+use super::ops::compare_values;
 use super::shared::usize_value;
 use super::value::{List, Map, MapKey, MapKind, Value, ValueRef};
-use super::vecmap::{SortKey, sort_key};
+use super::vecmap::sort_by_order;
 use super::vm::Vm;
 
 impl Vm {
@@ -95,9 +96,12 @@ impl Vm {
                 continue;
             }
             let removed = map.lock().shift_remove_entry(&key);
-            if let Some((_, value)) = removed
+            if let Some((key, value)) = removed
                 && self.has_drop
             {
+                if key.may_drop() {
+                    self.run_user_drop(key.to_value())?;
+                }
                 self.run_user_drop(value)?;
             }
         }
@@ -116,6 +120,10 @@ impl Vm {
         match name {
             BuiltinId::OrInsertWith | BuiltinId::OrInsertWithKey => {
                 let present = map.lock().contains_key(key);
+                // an occupied entry drops the key it was made with
+                if present && key.may_drop() {
+                    self.run_user_drop(key.to_value())?;
+                }
                 if !present {
                     let clo = as_closure(args.first())?;
                     let call_args = if name == BuiltinId::OrInsertWithKey {
@@ -133,14 +141,12 @@ impl Vm {
                 )))))
             }
             BuiltinId::AndModify => {
-                let current = map.lock().get(key).cloned();
-                if let Some(current) = current {
+                let present = map.lock().contains_key(key);
+                if present {
                     let clo = as_closure(args.first())?;
-                    let updated = self.call_closure_data(&clo, &[current])?;
-                    // a unit return means it mutated in place
-                    if !matches!(updated, Value::Unit) {
-                        map.lock().insert(key.clone(), updated);
-                    }
+                    // `&mut V`, so `*v += 1` in the closure must reach the map
+                    let slot = Value::Ref(Arc::new(ValueRef::map_entry(map.clone(), key.clone())));
+                    self.call_closure_data(&clo, &[slot])?;
                 }
                 // the Entry, so `or_insert` still chains
                 Ok(Some(entry.clone()))
@@ -161,7 +167,26 @@ impl Vm {
         if let Some(v) = self.vec_reduce_ho(items, name, args)? {
             return Ok(Some(v));
         }
-        self.vec_order_ho(items, name, args)
+        if let Some(v) = self.vec_order_ho(items, name, args)? {
+            return Ok(Some(v));
+        }
+        if let Some(v) = self.vec_dedup_ho(items, name, args)? {
+            return Ok(Some(v));
+        }
+        // an eager chain result is a vec here, the lazy only methods walk it as an iterator
+        if matches!(
+            name,
+            BuiltinId::Scan
+                | BuiltinId::MapWhile
+                | BuiltinId::MinBy
+                | BuiltinId::MaxBy
+                | BuiltinId::Cycle
+                | BuiltinId::Unzip
+        ) && let Value::Native(iterator) = super::iterator::value_iter(items.clone())
+        {
+            return self.run_extra_method(&iterator, name, args);
+        }
+        Ok(None)
     }
 
     fn vec_transform_ho(
@@ -350,6 +375,56 @@ impl Vm {
         Ok(Some(out))
     }
 
+    /// `dedup_by_key` and `dedup_by`. `None` for any other method.
+    fn vec_dedup_ho(
+        self: &Arc<Self>,
+        items: &List,
+        name: BuiltinId,
+        args: &[Value],
+    ) -> Result<Option<Value>> {
+        let clo = |i: usize| as_closure(args.get(i));
+        let list = items.lock().clone();
+        let out = match name {
+            // the closure sees each item through a `&mut`, an item whose key repeats the one
+            // before it is the vec's own and drops right there
+            BuiltinId::DedupByKey => {
+                let f = clo(0)?;
+                let mut kept: Vec<(Value, Value)> = Vec::new();
+                for x in list {
+                    let key = self.call_closure_data(&f, from_ref(&x))?;
+                    match kept.last() {
+                        Some((previous, _)) if previous.eq_value(&key) => self.run_user_drop(x)?,
+                        _ => kept.push((key, x)),
+                    }
+                }
+                *items.lock() = kept.into_iter().map(|(_, x)| x).collect();
+                Value::Unit
+            }
+            // `same(a, b)` gets the later item first and the kept one second
+            BuiltinId::DedupBy => {
+                let f = clo(0)?;
+                let mut kept: Vec<Value> = Vec::new();
+                for x in list {
+                    let same = match kept.last() {
+                        Some(previous) => self
+                            .call_closure_data(&f, &[x.clone(), previous.clone()])?
+                            .is_truthy(),
+                        None => false,
+                    };
+                    if same {
+                        self.run_user_drop(x)?;
+                    } else {
+                        kept.push(x);
+                    }
+                }
+                *items.lock() = kept;
+                Value::Unit
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(out))
+    }
+
     fn vec_order_ho(
         self: &Arc<Self>,
         items: &List,
@@ -378,9 +453,9 @@ impl Vm {
                 let mut keyed = Vec::new();
                 for x in list {
                     let k = self.call_closure_data(&f, from_ref(&x))?;
-                    keyed.push((sort_key(&k), x));
+                    keyed.push((k, x));
                 }
-                keyed.sort_by(|a, b| a.0.cmp(&b.0));
+                sort_by_order(&mut keyed, |pair| &pair.0)?;
                 *items.lock() = keyed.into_iter().map(|(_, x)| x).collect();
                 Value::Unit
             }
@@ -409,16 +484,17 @@ impl Vm {
             BuiltinId::MaxByKey | BuiltinId::MinByKey => {
                 let f = clo(0)?;
                 let want_max = name == BuiltinId::MaxByKey;
-                let mut best: Option<(SortKey, Value)> = None;
+                let mut best: Option<(Value, Value)> = None;
                 for x in list {
-                    let k = sort_key(&self.call_closure_data(&f, from_ref(&x))?);
+                    let k = self.call_closure_data(&f, from_ref(&x))?;
                     let take = match &best {
                         None => true,
                         Some((bk, _)) => {
+                            let order = compare_values(&k, bk)?;
                             if want_max {
-                                k >= *bk
+                                order.is_ge()
                             } else {
-                                k < *bk
+                                order.is_lt()
                             }
                         }
                     };

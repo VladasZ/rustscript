@@ -113,7 +113,10 @@ impl Vm {
             }
             Value::Map(map, _) => {
                 let entries = take(&mut *map.lock());
-                for (_, entry) in entries {
+                for (key, entry) in entries {
+                    if key.may_drop() {
+                        self.run_user_drop(key.to_value())?;
+                    }
                     self.run_user_drop(entry)?;
                 }
                 Ok(())

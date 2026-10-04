@@ -2,6 +2,9 @@
 //! every use of its name inside that block is renamed to match. The rest of the interpreter then
 //! sees a plain module function. A nested fn can't capture locals, so moving it keeps its meaning.
 //!
+//! A `struct`, `enum`, `trait`, `type` or `impl` declared inside a block moves to the module
+//! too. It keeps its name, `Debug` prints it. So a name the module already has is refused.
+//!
 //! Items of a block see each other, so the body of a nested fn is renamed with its siblings in
 //! scope. An inner block with an item of the same name shadows the outer one.
 
@@ -11,10 +14,22 @@ use proc_macro2::{Group, TokenStream, TokenTree};
 use syn::visit_mut::{self, VisitMut};
 use syn::{Item, ItemFn, Stmt};
 
-pub fn hoist(items: &mut Vec<Item>) {
+/// The name a type item declares, `None` for an `impl`.
+fn type_name(item: &Item) -> Option<String> {
+    match item {
+        Item::Struct(s) => Some(s.ident.to_string()),
+        Item::Enum(e) => Some(e.ident.to_string()),
+        Item::Trait(t) => Some(t.ident.to_string()),
+        Item::Type(t) => Some(t.ident.to_string()),
+        _ => None,
+    }
+}
+
+pub fn hoist(items: &mut Vec<Item>) -> anyhow::Result<()> {
     let mut hoister = Hoister {
         renames: HashMap::new(),
         hoisted: Vec::new(),
+        types: Vec::new(),
         counter: 0,
     };
     for item in items.iter_mut() {
@@ -30,27 +45,54 @@ pub fn hoist(items: &mut Vec<Item>) {
             _ => {}
         }
     }
+    let mut taken: Vec<String> = items.iter().filter_map(type_name).collect();
+    for item in &hoister.types {
+        if let Some(name) = type_name(item) {
+            if taken.contains(&name) {
+                anyhow::bail!(
+                    "unsupported feature: the type `{name}` is declared inside a function and \
+                     the module has another `{name}`"
+                );
+            }
+            taken.push(name);
+        }
+    }
+    items.extend(hoister.types);
     items.extend(hoister.hoisted.into_iter().map(Item::Fn));
+    Ok(())
 }
 
 struct Hoister {
     /// written name to module name, for the blocks being walked
     renames: HashMap<String, String>,
     hoisted: Vec<ItemFn>,
+    /// the type items and impls taken out of blocks
+    types: Vec<Item>,
     counter: usize,
 }
 
 impl VisitMut for Hoister {
     fn visit_block_mut(&mut self, block: &mut syn::Block) {
         let mut nested = Vec::new();
+        let mut types = Vec::new();
         block.stmts.retain(|stmt| match stmt {
             Stmt::Item(Item::Fn(f)) => {
                 nested.push(f.clone());
                 false
             }
+            Stmt::Item(
+                item @ (Item::Struct(_)
+                | Item::Enum(_)
+                | Item::Trait(_)
+                | Item::Type(_)
+                | Item::Impl(_)),
+            ) => {
+                types.push(item.clone());
+                false
+            }
             _ => true,
         });
-        if nested.is_empty() {
+        if nested.is_empty() && types.is_empty() {
             visit_mut::visit_block_mut(self, block);
             return;
         }
@@ -68,6 +110,10 @@ impl VisitMut for Hoister {
             f.sig.ident = syn::Ident::new(&hidden, f.sig.ident.span());
             self.visit_block_mut(&mut f.block);
             self.hoisted.push(f);
+        }
+        for mut item in types {
+            self.visit_item_mut(&mut item);
+            self.types.push(item);
         }
         visit_mut::visit_block_mut(self, block);
         self.renames = saved;

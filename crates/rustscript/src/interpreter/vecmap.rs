@@ -1,6 +1,5 @@
 //! Builtin methods on `Vec` and `VecDeque`, the map and set methods are in `map_methods`.
 
-use num_traits::AsPrimitive;
 use std::cmp::Ordering;
 use std::mem::{replace, take};
 use std::sync::Arc;
@@ -11,7 +10,7 @@ use parking_lot::Mutex;
 use super::bridge::arg;
 use super::bytecode::{BuiltinId, MethodName, ScalarTy};
 use super::discard::discard;
-use super::enum_def::EnumKind;
+use super::enum_def::{EnumKind, SOME};
 use super::iterator;
 use super::ops::compare_values;
 use super::value::{List, Value};
@@ -40,7 +39,16 @@ pub(super) fn vec_method(v: &List, method: &MethodName, args: &mut [Value]) -> R
         },
         BuiltinId::Insert => {
             let i = usize::try_from(int_arg(args, 0)?)?;
-            v.lock().insert(i, arg(args, 1)?);
+            let mut items = v.lock();
+            if i > items.len() {
+                // the item was handed over, so it drops as the call unwinds
+                discard(arg(args, 1)?);
+                bail!(
+                    "insertion index (is {i}) should be <= len (is {})",
+                    items.len()
+                );
+            }
+            items.insert(i, arg(args, 1)?);
             Value::Unit
         }
         BuiltinId::Remove => {
@@ -79,8 +87,7 @@ pub(super) fn vec_method(v: &List, method: &MethodName, args: &mut [Value]) -> R
         }
         BuiltinId::StartsWith | BuiltinId::EndsWith => vec_affix(v, method, args)?,
         BuiltinId::Sort | BuiltinId::SortUnstable => {
-            let mut items = v.lock();
-            items.sort_by_key(sort_key);
+            sort_by_order(&mut v.lock(), |item| item)?;
             Value::Unit
         }
         BuiltinId::Join => vec_join(v, args),
@@ -302,6 +309,9 @@ fn vec_method_by_name(v: &List, method: &MethodName, args: &mut [Value]) -> Resu
     if let Some(out) = vec_removal(v, method.id, args)? {
         return Ok(out);
     }
+    if let Some(out) = super::vec_edit::vec_edit(v, method.id, args)? {
+        return Ok(out);
+    }
     Ok(match method.id {
         BuiltinId::ToVec | BuiltinId::Collect | BuiltinId::Cloned | BuiltinId::Copied => {
             Value::Vec(v.clone()).deep_clone()
@@ -414,8 +424,7 @@ fn vec_copy_from_slice(v: &List, method: &MethodName, args: &[Value]) -> Result<
     let start = usize::try_from(int_arg(args, 0)?)?;
     let end_raw = int_arg(args, 1)?;
     let src: Vec<Value> = match args.get(2) {
-        // a copy shares no storage with the source, or the drop of the source would empty it
-        Some(Value::Vec(other)) => other.lock().iter().map(Value::deep_clone).collect(),
+        Some(Value::Vec(other)) => other.lock().clone(),
         _ => bail!("{} takes a slice argument", method.text),
     };
     let mut items = v.lock();
@@ -437,11 +446,65 @@ fn vec_copy_from_slice(v: &List, method: &MethodName, args: &[Value]) -> Result<
             src.len()
         );
     }
-    for (k, val) in src.into_iter().enumerate() {
-        // the item a write replaces drops right there, before the next one is written
-        discard(replace(&mut items[start + k], val));
+    for (k, val) in src.iter().enumerate() {
+        if method.id == BuiltinId::CloneFromSlice {
+            clone_from_value(&mut items[start + k], val);
+        } else {
+            // a copy shares no storage with the source, or the drop of the source would
+            // empty it
+            items[start + k] = val.deep_clone();
+        }
     }
     Ok(Value::Unit)
+}
+
+/// `Clone::clone_from` the way std writes it. A `Vec` keeps its storage, it drops the items
+/// past the new length, clones into the ones it keeps and appends the rest. An `Option` that
+/// is `Some` on both sides clones into its payload. Anything else makes the clone first and
+/// then drops the old value.
+pub(super) fn clone_from_value(dst: &mut Value, src: &Value) {
+    let src = unlend(src.clone());
+    if let (Value::Vec(to), Value::Vec(from)) = (&*dst, &src)
+        && !Arc::ptr_eq(to, from)
+    {
+        let from = from.lock().clone();
+        let mut to = to.lock();
+        if to.len() > from.len() {
+            for item in to.drain(from.len()..) {
+                discard(item);
+            }
+        }
+        let kept = to.len();
+        for (slot, item) in to.iter_mut().zip(&from) {
+            clone_from_value(slot, item);
+        }
+        to.extend(from[kept..].iter().map(Value::deep_clone));
+        return;
+    }
+    if let (
+        Value::Enum {
+            def,
+            variant: to_variant,
+            data: to,
+        },
+        Value::Enum {
+            variant: from_variant,
+            data: from,
+            ..
+        },
+    ) = (&*dst, &src)
+        && def.kind == EnumKind::Option
+        && *to_variant == SOME
+        && *from_variant == SOME
+        && !Arc::ptr_eq(to, from)
+    {
+        let from = from.lock().first().cloned();
+        if let (Some(slot), Some(item)) = (to.lock().first_mut(), from) {
+            clone_from_value(slot, &item);
+        }
+        return;
+    }
+    discard(replace(dst, src.deep_clone()));
 }
 
 /// With an argument this is `Ord::max` on 2 whole vecs, without one the iterator reduction.
@@ -550,79 +613,18 @@ pub(super) fn int_arg(args: &[Value], i: usize) -> Result<i64> {
     }
 }
 
-/// Good enough for numbers and strings.
-pub(super) fn sort_key(v: &Value) -> SortKey {
-    match v {
-        Value::Int(i) => SortKey::Int(i128::from(*i)),
-        // the full i128 value, so 2 u64 values past `i64::MAX` still order
-        Value::IntW(..) => match v.int_parts() {
-            Some((i, _)) => SortKey::Int(i),
-            None => SortKey::Str(v.display()),
-        },
-        Value::F32(f) => SortKey::Float(f64::from(*f)),
-        Value::Float(f) => SortKey::Float(*f),
-        Value::Bool(b) => SortKey::Int(i128::from(*b)),
-        Value::Str(s) => SortKey::Str(s.to_string()),
-        Value::Char(c) => SortKey::Str(c.to_string()),
-        Value::Tuple(items) | Value::Vec(items) => {
-            SortKey::List(items.lock().iter().map(sort_key).collect())
+/// A stable sort in the order `compare_values` gives, so an unsigned width, a `Reverse` and a
+/// derived `Ord` sort like real Rust. The first comparison that fails is the error.
+pub(super) fn sort_by_order<T>(items: &mut [T], key: impl Fn(&T) -> &Value) -> Result<()> {
+    let mut failed = None;
+    items.sort_by(|a, b| match compare_values(key(a), key(b)) {
+        Ok(order) => order,
+        Err(error) => {
+            failed.get_or_insert(error);
+            Ordering::Equal
         }
-        // derived `Ord` orders by variant first, then payload, a struct by its fields in
-        // declaration order
-        Value::Enum { variant, data, .. } => {
-            let mut keys = vec![SortKey::Int(i128::from(*variant))];
-            keys.extend(data.lock().iter().map(sort_key));
-            SortKey::List(keys)
-        }
-        Value::Struct(s) => match s.cmp_reverse_inner() {
-            Some(inner) => SortKey::Rev(Box::new(sort_key(&inner))),
-            None => SortKey::List(s.values.lock().iter().map(sort_key).collect()),
-        },
-        other => SortKey::Str(other.display()),
-    }
-}
-
-#[derive(PartialEq)]
-pub(super) enum SortKey {
-    Int(i128),
-    Float(f64),
-    Str(String),
-    List(Vec<SortKey>),
-    /// `std::cmp::Reverse`, orders opposite to its inner key
-    Rev(Box<SortKey>),
-}
-
-impl Eq for SortKey {}
-
-impl PartialOrd for SortKey {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for SortKey {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        use std::cmp::Ordering;
-        match (self, other) {
-            (SortKey::Int(a), SortKey::Int(b)) => a.cmp(b),
-            (SortKey::Float(a), SortKey::Float(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
-            (SortKey::Int(a), SortKey::Float(b)) => AsPrimitive::<f64>::as_(*a)
-                .partial_cmp(b)
-                .unwrap_or(Ordering::Equal),
-            (SortKey::Float(a), SortKey::Int(b)) => a
-                .partial_cmp(&AsPrimitive::<f64>::as_(*b))
-                .unwrap_or(Ordering::Equal),
-            (SortKey::Str(a), SortKey::Str(b)) => a.cmp(b),
-            (SortKey::List(a), SortKey::List(b)) => a.cmp(b),
-            (SortKey::Rev(a), SortKey::Rev(b)) => b.cmp(a),
-            (SortKey::Int(_) | SortKey::Float(_), _)
-            | (SortKey::Str(_), SortKey::List(_) | SortKey::Rev(_))
-            | (SortKey::List(_), SortKey::Rev(_)) => Ordering::Less,
-            (_, SortKey::Int(_) | SortKey::Float(_))
-            | (SortKey::List(_) | SortKey::Rev(_), SortKey::Str(_))
-            | (SortKey::Rev(_), SortKey::List(_)) => Ordering::Greater,
-        }
-    }
+    });
+    failed.map_or(Ok(()), Err)
 }
 
 /// A slice a call hands back sits behind a plain borrow, see `ValueRef::lent`.

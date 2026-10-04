@@ -103,6 +103,7 @@ checked_shl
 checked_shr
 checked_sub
 chunks
+chunks_exact
 clamp
 clear mut
 client
@@ -148,6 +149,7 @@ current_dir
 current_state
 cwd
 cyan
+cycle
 data
 day
 decode
@@ -324,6 +326,7 @@ is_sign_negative
 is_sign_positive
 is_some
 is_some_and
+is_sorted
 is_string
 is_subnormal
 is_subset
@@ -370,12 +373,15 @@ map
 map_err
 map_or
 map_or_else
+map_while
 matches
 max
+max_by
 max_by_key
 metadata
 midpoint
 min
+min_by
 min_by_key
 minute
 mode
@@ -388,6 +394,8 @@ namespace
 nanos
 next
 next_back
+next_if
+next_if_eq
 next_multiple_of
 next_power_of_two
 normal
@@ -463,6 +471,7 @@ random_range
 raw_arg
 raw_os_error
 raw_query
+rchunks
 read
 read_exact
 read_line mut
@@ -507,6 +516,7 @@ saturating_mul
 saturating_pow
 saturating_sub
 save
+scan
 second
 secs
 seek
@@ -630,6 +640,7 @@ unwrap_err
 unwrap_or
 unwrap_or_default
 unwrap_or_else
+unzip
 update
 url_safe
 url_safe_no_pad

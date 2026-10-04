@@ -162,7 +162,11 @@ impl Infer<'_, '_> {
         };
         let holes: Vec<(String, Ty)> = inline_holes(&s.value())
             .into_iter()
-            .filter_map(|name| self.lookup(&name).map(|ty| (name, ty)))
+            .filter_map(|name| {
+                self.lookup(&name)
+                    .or_else(|| self.lookup(&format!("r#{name}")))
+                    .map(|ty| (name, ty))
+            })
             .collect();
         if !holes.is_empty() {
             self.holes.insert(std::ptr::from_ref(template), holes);

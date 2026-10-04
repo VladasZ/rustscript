@@ -1,5 +1,6 @@
 //! `Default` lowering and the return type hints of a function.
 
+use crate::interpreter::shared::field_name;
 use std::sync::Arc;
 
 use super::{Compiler, derives_default, idx16};
@@ -113,7 +114,7 @@ impl Compiler<'_> {
             let name = field
                 .ident
                 .as_ref()
-                .map_or_else(|| index.to_string(), ToString::to_string);
+                .map_or_else(|| index.to_string(), field_name);
             names.push(Arc::<str>::from(name));
             renames
                 .push(crate::interpreter::serde_attrs::serde_rename(field).map(Arc::<str>::from));

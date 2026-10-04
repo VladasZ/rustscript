@@ -23,18 +23,24 @@ pub(super) fn method_op(
     abase: u16,
     argc: u16,
 ) -> Result<Flow> {
-    let flow = method_call(ctx, dst, recv, name, abase, argc)?;
+    let flow = method_call(ctx, dst, recv, name, abase, argc);
     // drained either way, or a script without a `Drop` impl parks values forever
     let parked = take_discarded();
     if ctx.vm.has_drop {
         let owned = ctx.cur.names[name as usize].owned;
         for parked in parked {
-            if owned || !parked.payload {
-                ctx.vm.run_user_drop(parked.value)?;
+            if !owned && parked.payload {
+                continue;
+            }
+            // a native that panics still owned what it parked, so it drops as the call unwinds
+            match (ctx.vm.run_user_drop(parked.value), flow.is_ok()) {
+                (Ok(()), _) => {}
+                (Err(error), true) => return Err(error),
+                (Err(error), false) => eprintln!("panic in drop during unwinding: {error:#}"),
             }
         }
     }
-    Ok(flow)
+    flow
 }
 
 fn method_call(
@@ -186,7 +192,7 @@ fn option_ref_swap(ctx: &StepCtx, recv: usize, new: Value) -> Option<Value> {
 
 fn clone_from(ctx: &mut StepCtx, recv: usize, s: usize) -> Value {
     let src = ctx.stack[s].clone();
-    ctx.stack[ctx.base + recv] = src;
+    super::vecmap::clone_from_value(&mut ctx.stack[ctx.base + recv], &src);
     Value::Unit
 }
 
@@ -341,8 +347,16 @@ fn map_fast(
         } else {
             Value::Unit
         };
+        // std keeps the key it has and drops the one handed in
+        if k.may_drop() && m.lock().contains_key(&k) {
+            discard(k.to_value());
+        }
         let old = m.lock().insert(k, val);
         if dst == u16::MAX {
+            // nobody takes the value the insert pushed out
+            if let Some(old) = old {
+                discard(old);
+            }
             Value::Unit
         } else {
             match old {

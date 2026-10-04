@@ -53,6 +53,7 @@ mod std_bridge;
 mod str_edit;
 mod typeir;
 mod value;
+mod vec_edit;
 mod vecmap;
 mod vm;
 mod vm_method;
@@ -183,6 +184,7 @@ impl Interp {
         scope_local_uses(&mut resolver, &mut pending_fns, &mut pending_methods)?;
 
         let fn_signatures = collect_fn_signatures(&pending_fns);
+        let fn_modules: Vec<usize> = pending_fns.iter().map(|(module, _)| *module).collect();
         let mut_arg_returns = collect_mut_arg_returns(&pending_fns);
 
         let (has_drop, mut_methods) = collect_mut_methods(&pending_methods);
@@ -201,6 +203,7 @@ impl Interp {
             async_mode,
             impl_type: None,
             fn_signatures: &fn_signatures,
+            fn_modules: &fn_modules,
             mut_arg_returns: &mut_arg_returns,
             mut_methods: &mut_methods,
             impl_methods: &impl_methods,

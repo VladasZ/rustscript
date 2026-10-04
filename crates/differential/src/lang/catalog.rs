@@ -142,6 +142,9 @@ pub enum ElemReq {
     Str,
     /// `Copy`, for slice `repeat`
     Copy,
+    /// `Ord` with no drop trace inside. A sort calls its key closure in a sequence std does
+    /// not promise, so a key that prints when it drops would show that sequence.
+    OrdSilent,
 }
 
 impl ElemReq {
@@ -154,6 +157,7 @@ impl ElemReq {
             Self::Default => ty.has_default(),
             Self::Str => matches!(ty, Ty::Str),
             Self::Copy => ty.is_copy(),
+            Self::OrdSilent => ty.is_ord() && !ty.contains_trace(),
         }
     }
 }
@@ -219,7 +223,8 @@ const fn with_fish(method: Method, fish: FishReq) -> Method {
 }
 
 use ElemReq::{
-    Copy as CopyElem, Default as DefaultElem, Key as KeyElem, Num, Ord as OrdElem, Str as StrElem,
+    Copy as CopyElem, Default as DefaultElem, Key as KeyElem, Num, Ord as OrdElem, OrdSilent,
+    Str as StrElem,
 };
 use Fixed::{
     Bool as FBool, Char as FChar, F64 as FF64, Str as FStr, StrRef as FStrRef, U32 as FU32,
@@ -251,15 +256,23 @@ pub static METHODS: LazyLock<Vec<Method>> = LazyLock::new(|| {
         rows_vec::ROWS,
         rows_containers::ROWS,
         rows_lazy::ROWS,
+        rows_iter::ROWS,
+        rows_ordered::ROWS,
+        rows_fmt::ROWS,
+        rows_trace::ROWS,
     ]
     .concat()
 });
 
 mod rows_containers;
+mod rows_fmt;
+mod rows_iter;
 mod rows_lazy;
 mod rows_num;
+mod rows_ordered;
 mod rows_refs;
 mod rows_text;
+mod rows_trace;
 mod rows_vec;
 
 #[derive(Clone, Debug)]

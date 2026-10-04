@@ -143,6 +143,32 @@ documents have missing, extra, wrong typed and duplicate fields and broken synta
 printed as the `Debug` of the `Result`, or written back with `to_string`, so every error
 message and position is compared.
 
+## Rows the way scripts write them
+
+`catalog/rows_iter.rs` has the iterator forms scripts use most. The adapters `scan`,
+`map_while`, `cycle`, `flat_map` and `flatten`, the terminals `unzip`, `partition`, `max_by`,
+`min_by`, `max_by_key`, `min_by_key`, `reduce` and `find`, a `collect` into a `String`, a
+`Result` and an `Option`, a `peekable` driven by `while let`, `next_if`, an iterator kept in a
+binding and pulled with `next`, and `len` on an iterator. Some rows print inside the closure of
+`inspect`, `map`, `filter`, `fold` and `for_each`, so the order the closures run in is output.
+
+`catalog/rows_ordered.rs` builds a `BTreeSet`, a `BTreeMap` and a `VecDeque` from a `Vec`. They
+keep one order, so they print directly. The same file has the sorts with a key and a comparator,
+`dedup_by_key`, `drain`, `split_off`, `insert`, `extend` and `rotate_left`. A cut past the end
+panics. A sort key never holds a drop trace, see `ElemReq::OrdSilent`. A sort calls its key
+closure in a sequence std does not promise, and a key that prints when it drops would show it.
+
+`catalog/rows_fmt.rs` has `format!` with positional, named and inline arguments and nested
+width and precision, `write!` and `writeln!` into a `String`, `+` and `+=` with `&str`, the
+conversions to `String`, and `parse` with `?` and `map_err`.
+
+`catalog/rows_trace.rs` has the evaluation order tracers. A tracer prints the value it gets and
+hands it on. The solver puts one wherever a value of its type is wanted, a call argument, an
+operand, a struct field, an index or the value of an assignment.
+
+A row with a return type no statement asks for is never generated. A pair of vecs is one such
+type, so these rows hand back a `Vec`, a `String` or a `usize`.
+
 ## Commands
 
 ```text
