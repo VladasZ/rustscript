@@ -90,6 +90,18 @@ fn real_main() -> Result<()> {
             println!("ok");
             Ok(())
         }
+        "types" => {
+            let file = all.get(1).ok_or_else(err_usage)?;
+            let source = fs::read_to_string(file)?;
+            let program = loader::load(Path::new(file), &source, file)?;
+            for call in interpreter::untyped_calls(&program.modules, program.tokio_main)? {
+                println!(
+                    "{}:{} {} {}",
+                    call.file, call.line, call.receiver, call.name
+                );
+            }
+            Ok(())
+        }
         "build" => {
             let file = all.get(1).ok_or_else(err_usage)?;
             build_run(file, &all[2..])
@@ -219,6 +231,7 @@ usage:
   rust FILE.rs cmp     compile and run, `cmp` first arg is reserved
   rust build FILE.rs   compile to a native binary, cache it, then run
   rust check FILE.rs   validate with cargo check, does not run
+  rust types FILE.rs   list the calls whose result type the interpreter does not know
   rust supported       list every bridged method per receiver
   rust clean           clear the cache
   rust update [VER]    install a prebuilt release, the newest one by default,

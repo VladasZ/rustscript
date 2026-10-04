@@ -13,10 +13,17 @@ pub(super) const DEFAULT_DEPTH: usize = 8;
 impl Compiler<'_> {
     /// `None` when the type has no `Default` this interpreter can build.
     pub(super) fn default_ir(&mut self, ty: &syn::Type) -> Option<DefaultIr> {
-        self.default_ir_at(ty, 0)
+        self.default_ir_at(ty, self.ctx.module, 0)
     }
 
-    pub(super) fn default_ir_at(&mut self, ty: &syn::Type, depth: usize) -> Option<DefaultIr> {
+    /// `module` is where the type is written. A field type of a struct is read in the module of
+    /// that struct, not in the module of the code that asks for the default.
+    pub(super) fn default_ir_at(
+        &mut self,
+        ty: &syn::Type,
+        module: usize,
+        depth: usize,
+    ) -> Option<DefaultIr> {
         if depth > DEFAULT_DEPTH {
             return None;
         }
@@ -26,18 +33,23 @@ impl Compiler<'_> {
                 let items = t
                     .elems
                     .iter()
-                    .map(|elem| self.default_ir_at(elem, depth + 1))
+                    .map(|elem| self.default_ir_at(elem, module, depth + 1))
                     .collect::<Option<Vec<_>>>()?;
                 Some(DefaultIr::Tuple(items))
             }
-            syn::Type::Paren(p) => self.default_ir_at(&p.elem, depth),
-            syn::Type::Group(g) => self.default_ir_at(&g.elem, depth),
-            syn::Type::Path(p) => self.default_ir_path(&p.path, depth),
+            syn::Type::Paren(p) => self.default_ir_at(&p.elem, module, depth),
+            syn::Type::Group(g) => self.default_ir_at(&g.elem, module, depth),
+            syn::Type::Path(p) => self.default_ir_path(&p.path, module, depth),
             _ => None,
         }
     }
 
-    pub(super) fn default_ir_path(&mut self, path: &syn::Path, depth: usize) -> Option<DefaultIr> {
+    pub(super) fn default_ir_path(
+        &mut self,
+        path: &syn::Path,
+        module: usize,
+        depth: usize,
+    ) -> Option<DefaultIr> {
         let last = path.segments.last()?.ident.to_string();
         if let Some(width) = IntWidth::parse(&last) {
             return Some(DefaultIr::Int(width));
@@ -66,7 +78,7 @@ impl Compiler<'_> {
         {
             segs[0] = ty.to_string();
         }
-        match self.resolve_path_res(&segs).ok()? {
+        match self.ctx.resolver.resolve(module, &segs).ok()? {
             Res::Struct(canon) => self.default_ir_struct(&canon, depth),
             Res::Enum(canon) => self.default_ir_enum(&canon),
             Res::Alias(m, target) => match &*target {
@@ -91,6 +103,7 @@ impl Compiler<'_> {
             return None;
         }
         let ast = def.ast.clone();
+        let module = def.module;
         let mut names = Vec::new();
         let mut renames = Vec::new();
         let mut field_serde = Vec::new();
@@ -105,7 +118,7 @@ impl Compiler<'_> {
             renames
                 .push(crate::interpreter::serde_attrs::serde_rename(field).map(Arc::<str>::from));
             field_serde.push(crate::interpreter::serde_attrs::serde_field(field));
-            fields.push(self.default_ir_at(&field.ty, depth + 1)?);
+            fields.push(self.default_ir_at(&field.ty, module, depth + 1)?);
         }
         let shape = self.shape_for(canon, names, renames, field_serde);
         Some(DefaultIr::Struct { shape, fields })
@@ -150,7 +163,7 @@ impl Compiler<'_> {
     }
 
     pub(super) fn default_ir_path_pub(&mut self, path: &syn::Path) -> Option<DefaultIr> {
-        self.default_ir_path(path, 0)
+        self.default_ir_path(path, self.ctx.module, 0)
     }
 
     /// The error type a `?` converts into.

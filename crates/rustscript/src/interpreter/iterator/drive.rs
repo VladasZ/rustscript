@@ -296,6 +296,8 @@ impl Vm {
                         }
                         return Ok(Some(value));
                     }
+                    // a skipped item is gone, so it drops here
+                    self.discard(&source, value)?;
                     still_skipping = true;
                 }
             }
@@ -601,6 +603,9 @@ impl Vm {
             BuiltinId::Sum => self.iterator_sum(iterator, scalar)?,
             BuiltinId::Product => self.iterator_product(iterator, scalar)?,
             BuiltinId::Max | BuiltinId::Min => self.iterator_extreme(iterator, method.id)?,
+            BuiltinId::Cmp | BuiltinId::PartialCmp if args.len() == 1 => {
+                self.iterator_compare(iterator, method.id, &args[0])?
+            }
             BuiltinId::Collect
             | BuiltinId::ToVec
             | BuiltinId::CollectString

@@ -227,6 +227,7 @@ fn effects(f: &FnState, op: &Op, reads: &mut Vec<Reg>, writes: &mut Vec<Reg>) {
         | Op::LoadBool { dst, .. }
         | Op::LoadUnit { dst }
         | Op::LoadUpvalue { dst, .. }
+        | Op::TakeUpvalue { dst, .. }
         | Op::LoadGlobal { dst, .. }
         | Op::PathValue { dst, .. }
         | Op::MakeMap { dst, .. }
@@ -411,12 +412,13 @@ impl FnState {
                     let child = usize::from(child);
                     let moves = self.children[child].moves;
                     let partial = &self.child_partial[child];
+                    let by_value = &self.child_by_value[child];
                     let takes: Vec<bool> = self.child_caps[child]
                         .iter()
                         .enumerate()
                         .map(|(i, cap)| match cap {
                             CapSource::Local(reg) | CapSource::MutableLocal(reg) => {
-                                moves
+                                (moves || by_value.get(i).copied().unwrap_or(false))
                                     && !live_out(at, *reg)
                                     && !partial.get(i).copied().unwrap_or(false)
                             }

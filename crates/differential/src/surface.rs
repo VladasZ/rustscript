@@ -2,12 +2,16 @@
 //! and the interpreter's bridged surface. The catalog is hand written, so this makes its gaps
 //! measurable.
 
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+use crate::fleet::node::script_files;
+use crate::generator::generate;
 use crate::lang::catalog::{METHODS, RecvClass};
 
 pub const SURFACE_FILE: &str = "crates/differential/std_surface.txt";
@@ -110,6 +114,7 @@ pub const TRAIT_METHODS: &[&str] = &[
     "contains_key",
     "is_empty",
     "from",
+    "peek",
 ];
 
 pub type Surface = BTreeMap<String, BTreeSet<String>>;
@@ -375,6 +380,179 @@ fn interpreter_label(group: &str) -> &'static str {
     }
 }
 
+/// Every method name a source calls, by text. The receiver is not known here.
+pub fn called_names(source: &str) -> BTreeSet<String> {
+    called_list(source).into_iter().collect()
+}
+
+/// The same with every call counted.
+fn called_list(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = source;
+    while let Some(dot) = rest.find('.') {
+        rest = &rest[dot + 1..];
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        let after = &rest[name.len()..];
+        if !name.is_empty() && (after.starts_with('(') || after.starts_with("::<")) {
+            out.push(name);
+        }
+    }
+    out
+}
+
+/// How often the scripts of a repo call each method name. A script is a file that starts with
+/// the interpreter shebang.
+pub struct ScriptCalls {
+    pub scripts: usize,
+    pub counts: BTreeMap<String, usize>,
+}
+
+pub fn script_calls(repo: &Path) -> Result<ScriptCalls> {
+    let files = script_files(repo)?;
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for file in &files {
+        let path = repo.join(file);
+        let text =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        for name in called_list(&text) {
+            *counts.entry(name).or_default() += 1;
+        }
+    }
+    Ok(ScriptCalls {
+        scripts: files.len(),
+        counts,
+    })
+}
+
+/// The method names the programs of these seeds call. The catalog is not the whole generator,
+/// pipes and statements write calls too, so the rendered text is what counts.
+pub fn generated_names(seeds: Range<u64>) -> BTreeSet<String> {
+    // a row with a rare result type may miss a sample, `every_catalog_method_is_reachable` is
+    // what proves the generator can place it
+    let mut out: BTreeSet<String> = METHODS
+        .iter()
+        .flat_map(|method| called_names(method.template))
+        .collect();
+    for seed in seeds {
+        out.extend(called_names(&generate(seed).render()));
+    }
+    out
+}
+
+/// The std methods the interpreter implements on the generator's receiver types that no program
+/// of the sample calls, by group. Each one runs in real scripts and in no differential case.
+pub fn ungenerated(
+    surface: &Surface,
+    listing: &str,
+    generated: &BTreeSet<String>,
+) -> BTreeSet<(String, String)> {
+    let interpreter = interpreter_surface(listing);
+    let mut out = BTreeSet::new();
+    for (group, names) in surface {
+        let Some(implemented) = interpreter.get(interpreter_label(group)) else {
+            continue;
+        };
+        for name in names {
+            if implemented.contains(name) && !generated.contains(name) {
+                out.insert((group.clone(), name.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// The bridge table label of a receiver as the dispatch log names it. The log goes by the
+/// runtime value, the tables go by the std type.
+fn dispatch_label(receiver: &str) -> &str {
+    match receiver {
+        "String" => "String and str",
+        "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet" => "Map",
+        "char" => "Char",
+        "integer" | "float" | "bool" => "any value",
+        other => other,
+    }
+}
+
+/// The bridged methods on the generator's receivers that no interpreted run of the campaign
+/// dispatched, as `receiver name`, and how many there are in all. The text of a program can
+/// name a method the VM never reaches, and a name says nothing of the receiver, so this goes
+/// by the dispatch log.
+pub fn undispatched(listing: &str, log: &BTreeSet<String>) -> (Vec<String>, usize) {
+    let mut ran: BTreeSet<(&str, &str)> = BTreeSet::new();
+    let mut ran_names: BTreeSet<&str> = BTreeSet::new();
+    for line in log {
+        let mut parts = line.split(' ');
+        if let (Some("method"), Some(receiver), Some(name)) =
+            (parts.next(), parts.next(), parts.next())
+        {
+            ran.insert((dispatch_label(receiver), name));
+            ran_names.insert(name);
+        }
+    }
+    let mut missing = Vec::new();
+    let mut total = 0;
+    for (receiver, names) in &interpreter_surface_raw(listing) {
+        if !GENERATED_RECEIVERS.contains(&receiver.as_str()) {
+            continue;
+        }
+        for name in names {
+            total += 1;
+            // a universal row has no receiver of its own
+            let reached = if receiver == "any value" {
+                ran_names.contains(name.as_str())
+            } else {
+                ran.contains(&(receiver.as_str(), name.as_str()))
+            };
+            if !reached {
+                missing.push(format!("{receiver} {name}"));
+            }
+        }
+    }
+    missing.sort();
+    (missing, total)
+}
+
+/// The receivers of the bridge tables the generator writes.
+const GENERATED_RECEIVERS: [&str; 8] = [
+    "Vec",
+    "Map",
+    "Option",
+    "Result",
+    "String and str",
+    "Char",
+    "any value",
+    "Iterator",
+];
+
+pub const SKIPS_FILE: &str = "crates/differential/surface_skips.txt";
+
+/// `Group name reason` per line, the methods the generator leaves out on purpose or for now.
+pub fn load_skips(root: &Path) -> Result<BTreeMap<(String, String), String>> {
+    let path = root.join(SKIPS_FILE);
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let mut out = BTreeMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.splitn(3, ' ');
+        let (Some(group), Some(name)) = (parts.next(), parts.next()) else {
+            bail!("bad skip line `{line}`");
+        };
+        let reason = parts.next().unwrap_or_default().trim();
+        if reason.is_empty() {
+            bail!("skip `{group} {name}` has no reason");
+        }
+        out.insert((group.to_string(), name.to_string()), reason.to_string());
+    }
+    Ok(out)
+}
+
 pub struct Report {
     /// std names the catalog never generates
     pub uncovered_by_catalog: BTreeMap<String, Vec<String>>,
@@ -383,7 +561,12 @@ pub struct Report {
     /// template calls that are not std on any receiver
     pub catalog_not_std: Vec<String>,
     pub std_total: usize,
+    /// set by the caller when a script repo is at hand
+    pub script_calls: Option<ScriptCalls>,
 }
+
+/// How many uncovered methods of one group the script line names.
+const MOST_CALLED: usize = 15;
 
 impl Report {
     pub fn render(&self) -> String {
@@ -411,6 +594,28 @@ impl Report {
                 names.len(),
                 names.join(", ")
             ));
+        }
+        if let Some(calls) = &self.script_calls {
+            out.push_str(&format!(
+                "scripts: {} files, the std methods no catalog row generates that they call most\n",
+                calls.scripts
+            ));
+            for (group, names) in &self.uncovered_by_catalog {
+                let mut called: Vec<(usize, &String)> = names
+                    .iter()
+                    .filter_map(|name| Some((*calls.counts.get(name)?, name)))
+                    .collect();
+                called.sort_by_key(|(count, name)| (Reverse(*count), *name));
+                if called.is_empty() {
+                    continue;
+                }
+                let line: Vec<String> = called
+                    .iter()
+                    .take(MOST_CALLED)
+                    .map(|(count, name)| format!("{name} {count}"))
+                    .collect();
+                out.push_str(&format!("  {group}: {}\n", line.join(", ")));
+            }
         }
         if !self.catalog_not_std.is_empty() {
             out.push_str(&format!(
@@ -466,5 +671,6 @@ pub fn report(surface: &Surface, listing: &str) -> Report {
         missing_in_interpreter,
         catalog_not_std,
         std_total,
+        script_calls: None,
     }
 }

@@ -79,6 +79,9 @@ pub(super) struct FnState {
     /// Per capture of each child, whether the body reads only fields that copy, see
     /// `captures::captures_only_copy_fields`. A `move` closure then never takes the value.
     pub(super) child_partial: Vec<Vec<bool>>,
+    /// Per capture of each child, whether the body moves the value out, see
+    /// `captures::moves_out`. The closure then takes it like a `move` closure does.
+    pub(super) child_by_value: Vec<Vec<bool>>,
     /// filled by the liveness pass, see `liveness.rs`
     pub(super) child_moves: Vec<Arc<[bool]>>,
     pub(super) upvalues: Vec<(String, CapSource)>,
@@ -187,6 +190,7 @@ impl FnState {
             children: Vec::new(),
             child_caps: Vec::new(),
             child_partial: Vec::new(),
+            child_by_value: Vec::new(),
             child_moves: Vec::new(),
             upvalues: Vec::new(),
             mutable_locals: HashSet::new(),

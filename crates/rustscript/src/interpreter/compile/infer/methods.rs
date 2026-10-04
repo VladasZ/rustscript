@@ -26,6 +26,7 @@ impl Infer<'_, '_> {
         };
         let recv_want = receiver_expectation(&name, &wanted);
         let recv = self.expr(&m.receiver, &recv_want);
+        self.note_method(m, &recv);
         let args: Vec<&Expr> = m.args.iter().collect();
         // a script type answers from its own impl
         if let Ty::Struct(canon) | Ty::Enum(canon) = &recv

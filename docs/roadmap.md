@@ -24,6 +24,11 @@ references of phase 1 are done, see `docs/differential.md`. Each phase below end
 `EXPECTED_FEATURES`, the compile guard green, a local campaign, and every
 finding fixed in the interpreter with a promoted regression.
 
+Real use breaks most often in the bridges and in exit codes, so phases 6 and
+3 come before 4 and 5. Width probes, modules in the renderer, the script call
+counts in the surface report and win1 in the fleet are done, see
+`docs/differential.md`.
+
 ### Phase 2, strings, formatting and iterators as scripts write them
 
 - `format!` with positional, named and inline args, nested specs, `write!`
@@ -87,8 +92,8 @@ recursion with a depth.
 
 ### Phase 6, bridged crates and async
 
-The runner links prebuilt rlibs from the examples crate with `--extern`, so
-`serde_json`, `regex`, `chrono` and `tokio` programs compile without cargo
-per case. Then `serde_json::Value` edits, typed `from_str` with inference
-sites, `Regex` captures, `#[tokio::main]` with `spawn`, `join!` and print
+The runner links the bridged crates with `--extern` and a block reads json
+documents into a random struct, both done. Still open are toml and yaml
+documents, a nested struct and an enum as a field type, `serde_json::Value`
+edits, `Regex` captures, and `#[tokio::main]` with `spawn`, `join!` and print
 order. The `join!` flaw from `flaws.md` lives here.

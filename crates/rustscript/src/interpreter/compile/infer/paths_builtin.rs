@@ -28,7 +28,9 @@ impl Infer<'_, '_> {
                 self.walk_args(args);
                 Ty::F32
             }
-            (w, "from") if IntWidth::parse(w).is_some() => {
+            (w, "from" | "from_le_bytes" | "from_be_bytes" | "from_ne_bytes")
+                if IntWidth::parse(w).is_some() =>
+            {
                 self.walk_args(args);
                 Ty::Int(IntWidth::parse(w).expect("checked"))
             }
@@ -66,6 +68,29 @@ impl Infer<'_, '_> {
                     self.expr(arg, &ty);
                 }
                 ty
+            }
+            ("f64" | "f32", "from_le_bytes" | "from_be_bytes" | "from_ne_bytes") => {
+                self.walk_args(args);
+                if owner == "f32" { Ty::F32 } else { Ty::F64 }
+            }
+            // a method named by path, `u32::leading_zeros(x)`, answers from the method table
+            (w, _) if IntWidth::parse(w).is_some() && !args.is_empty() => {
+                let ty = Ty::Int(IntWidth::parse(w).expect("checked"));
+                self.expr(args[0], &ty);
+                let result = self.int_method(&ty, last, &args[1..]);
+                if result.is_unknown() {
+                    return None;
+                }
+                result
+            }
+            ("f64" | "f32", _) if !args.is_empty() => {
+                let ty = if owner == "f32" { Ty::F32 } else { Ty::F64 };
+                self.expr(args[0], &ty);
+                let result = self.float_method(&ty, last, &args[1..]);
+                if result.is_unknown() {
+                    return None;
+                }
+                result
             }
             _ => return None,
         })
@@ -221,7 +246,7 @@ impl Infer<'_, '_> {
                 self.walk_args(args);
                 Ty::result(Ty::named("PathBuf"), Ty::named("io::Error"))
             }
-            ("fs", _) => {
+            ("fs", _) | ("env", "set_current_dir") => {
                 self.walk_args(args);
                 Ty::result(Ty::Unit, Ty::named("io::Error"))
             }
@@ -250,6 +275,23 @@ impl Infer<'_, '_> {
             ("Regex", "new") => {
                 self.walk_args(args);
                 Ty::result(Ty::named("Regex"), Ty::named("regex::Error"))
+            }
+            ("process", "id") => Ty::Int(IntWidth::U32),
+            ("env", "var_os") => {
+                self.walk_args(args);
+                Ty::option(Ty::named("OsString"))
+            }
+            ("env", "set_var" | "remove_var") => {
+                self.walk_args(args);
+                Ty::Unit
+            }
+            ("Stdio", "piped" | "null" | "inherit" | "from") => {
+                self.walk_args(args);
+                Ty::named("Stdio")
+            }
+            ("TcpListener" | "UdpSocket", "bind") | ("TcpStream", "connect") => {
+                self.walk_args(args);
+                Ty::result(Ty::named(owner), Ty::named("io::Error"))
             }
             ("io", "stdin") => Ty::named("Stdin"),
             ("io", "stdout") => Ty::named("Stdout"),
@@ -332,6 +374,18 @@ impl Infer<'_, '_> {
             ("blocking" | "reqwest", "get") => {
                 self.walk_args(args);
                 Ty::result(Ty::named("Response"), Ty::named("reqwest::Error"))
+            }
+            ("which", "which") => {
+                self.walk_args(args);
+                Ty::result(Ty::named("PathBuf"), Ty::named("which::Error"))
+            }
+            ("hex", "encode") | ("regex", "escape") => {
+                self.walk_args(args);
+                Ty::Str
+            }
+            ("Value", "String" | "Number" | "Object" | "Array" | "Bool") => {
+                self.walk_args(args);
+                Ty::Json
             }
             ("HeaderMap", "new") => Ty::named("HeaderMap"),
             ("HeaderValue", "from_static") => {

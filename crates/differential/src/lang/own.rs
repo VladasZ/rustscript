@@ -293,6 +293,11 @@ impl Scope {
             || self.pinned.iter().any(|(held, _)| held == name)
     }
 
+    /// Whether a loop body is being built, so the statement may run more than once.
+    pub fn in_loop(&self) -> bool {
+        self.loop_depth > 0
+    }
+
     pub fn enter_loop(&mut self) {
         self.loop_depth += 1;
     }

@@ -15,7 +15,11 @@ There are 4 steps, all in `crates/rustscript/src`.
    block are renamed to match, see `nested_fns.rs`.
 2. Every file is parsed with [`syn`](https://github.com/dtolnay/syn).
 3. The resolver gives every item a key like `foo::bar` and resolves imports,
-   renames, `crate::`, `self::`, `super::` and re-exports at load time.
+   renames, `crate::`, `self::`, `super::` and re-exports at load time. A
+   glob import of a script module, `use m::*` or `use super::*`, is searched
+   after the names the module declares itself. A `use` inside a function body
+   gives that body a copy of its module with the import added, see
+   `local_uses.rs`.
 4. The compiler in `interpreter/compile` lowers the AST into register
    bytecode once. Variables become register slots, control flow becomes
    jumps, patterns become test and bind ops, macros like `println!` are
@@ -65,6 +69,12 @@ parameter's cell hands its value back to the caller on return. A `move`
 closure takes a value the frame never reads again and drops it at its own
 end, and one that reads only fields that copy takes those fields and leaves
 the value with the frame, like the edition 2021 disjoint capture.
+A closure whose body moves a capture out, `opt.unwrap_or_else(|| fallback)`, takes
+that value like a `move` closure does, when the frame owns it. The moved value leaves a
+borrow behind in the capture cell, which drops nothing, so the closure does not drop it
+again. A closure that is never called drops what it took. The `Option` and `Result`
+methods that take a closure by value drop it when the call ends, and they drop the
+payload no closure took.
 A name inside a macro the scan can not parse, `vec![(1, v.clone()); 3]`, counts as a
 read of the whole value at any bracket depth.
 A `let r = &mut n` and a bare `ref mut r` binding over a variable are aliases of the
@@ -179,6 +189,11 @@ binding like the `port` of `if let Ok(port) = s.parse()`, and a closure local
 whose call site expects a return type. An `if` or `match` branch typed before
 a later branch named the type is walked again with it.
 
+`rust types FILE.rs` lists every call whose result this pass does not know, as
+`file:line receiver name`. A call by path, an imported name included, is typed
+by its full path. The `types_census` test keeps the list of such calls in the
+examples in `tests/untyped_calls.txt`, and a new entry fails it.
+
 The pass is strict where a guess could print a wrong result. A `collect`,
 `parse`, `or_default` or `Default::default` whose target type it can't tell
 stops the script before it runs with an `unsupported` error that asks for a
@@ -289,7 +304,14 @@ A typed `serde_json::from_str`, `toml::from_str` or `serde_yaml::from_str`
 reads straight into the target through the real deserializer of the crate, so
 its errors are the real ones, a missing field included. An integer, float,
 `bool`, `char` or `String` field is read by the serde visitor of that type,
-so `300` into a `u8` is the serde error and the value keeps its width.
+so `300` into a `u8` is the serde error and the value keeps its width. A
+struct, a list and a map take only what the real type takes, see
+`json_typed.rs`. So `null` into a struct is `invalid type: null, expected
+struct Config`, a struct also reads from a list of its fields in order, and a
+key that comes twice is `duplicate field`. An `Option` keeps every level,
+inside another `Option` and inside a `Vec`. The error is a value that prints
+like the real one, `{:?}` gives `Error("missing field `x`", line: 1, column:
+8)`.
 
 A `serde_json::Value` is a plain map, list or string at runtime. The compiler
 knows the type, so `{}`, `{:?}`, `{:#}`, `to_string` and `v["key"]` go

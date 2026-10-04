@@ -253,7 +253,7 @@ fn main() {}
 }
 
 #[test]
-fn glob_import_of_module_errors() {
+fn glob_import_of_module_brings_its_items_in() {
     let dir = fixture(&[
         (
             "main.rs",
@@ -274,7 +274,7 @@ pub fn helper() -> i64 { 1 }
         ),
     ]);
     let out = run_script(&dir.join("main.rs"));
-    assert!(!out.status.success(), "script unexpectedly succeeded");
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("glob import"), "unexpected error: {err}");
+    assert!(out.status.success(), "script failed: {err}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1\n");
 }

@@ -5,7 +5,9 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::lang::expr::{BinOp, Expr, Helper};
+use crate::lang::layout::ModLayout;
 use crate::lang::own::check_block;
+use crate::lang::serde_case::SerdeProbe;
 use crate::lang::stmt::{ClosureSource, Stmt};
 use crate::lang::stmt_render::mark_mutable;
 use crate::lang::ty::Ty;
@@ -251,6 +253,12 @@ pub struct Block {
     /// builtin types the block implements `DiffDescribe` for
     #[serde(default)]
     pub describes: Vec<Ty>,
+    /// the module the items live in, at the top of the file when `None`
+    #[serde(default)]
+    pub layout: Option<ModLayout>,
+    /// reads of json documents into a struct of their own, printed after the statements
+    #[serde(default)]
+    pub serde: Vec<SerdeProbe>,
 }
 
 impl Block {
@@ -266,7 +274,39 @@ impl Block {
         for stmt in &marked {
             out.push_str(&stmt.render(&mutable, 1));
         }
+        let mut out = match self.active_layout() {
+            Some(layout) => layout.qualify_body(&out, &self.item_names(), &self.fn_names()),
+            None => out,
+        };
+        for probe in &self.serde {
+            out.push_str(&probe.render());
+        }
         out
+    }
+
+    /// A layout counts only while the block still has an item to put in the module.
+    fn active_layout(&self) -> Option<&ModLayout> {
+        self.layout
+            .as_ref()
+            .filter(|_| !self.item_names().is_empty())
+    }
+
+    fn fn_names(&self) -> Vec<String> {
+        self.fns.iter().map(|def| def.name.clone()).collect()
+    }
+
+    fn item_names(&self) -> Vec<String> {
+        let types = self.types.iter().map(|def| def.shape.name.clone());
+        let consts = self.consts.iter().map(|def| def.name.clone());
+        types.chain(consts).chain(self.fn_names()).collect()
+    }
+
+    /// The `use` lines the block needs above `main`.
+    pub fn render_uses(&self) -> String {
+        match self.active_layout() {
+            Some(layout) => layout.root_uses(&self.item_names()),
+            None => String::new(),
+        }
     }
 
     /// Every read resolves to a binding it may read, see `own::check_block`.
@@ -277,15 +317,27 @@ impl Block {
     /// The describe impls on builtin types are rendered by the program, once across every block,
     /// because 2 blocks may name the same type.
     pub fn render_items(&self) -> String {
+        let layout = self.active_layout();
+        let vis = if layout.is_some() { "pub " } else { "" };
         let mut out = String::new();
         for def in &self.types {
-            out.push_str(&def.render());
+            out.push_str(&def.render_vis(vis));
         }
         for def in &self.consts {
+            out.push_str(vis);
             out.push_str(&def.render());
         }
         for def in &self.fns {
+            out.push_str(vis);
             out.push_str(&def.render());
+        }
+        let mut out = match layout {
+            Some(layout) => layout.wrap_items(&out, &self.fn_names()),
+            None => out,
+        };
+        // a probe struct stands at the top of the file, `main` names it bare
+        for probe in &self.serde {
+            out.push_str(&probe.render_items());
         }
         out
     }
@@ -357,6 +409,12 @@ impl Block {
         }
         if !self.describes.is_empty() {
             out.insert("lang-trait-impl-builtin");
+        }
+        if let Some(layout) = self.active_layout() {
+            layout.features(out);
+        }
+        for probe in &self.serde {
+            probe.features(out);
         }
     }
 
@@ -484,6 +542,21 @@ impl Block {
     /// the assignment that revived a moved binding leaves the reads after it dangling.
     pub fn shrinks(&self) -> Vec<Self> {
         let mut candidates = Vec::new();
+        if self.layout.is_some() {
+            let mut candidate = self.clone();
+            candidate.layout = None;
+            candidates.push(candidate);
+        }
+        for index in 0..self.serde.len() {
+            let mut candidate = self.clone();
+            candidate.serde.remove(index);
+            candidates.push(candidate);
+            for probe in self.serde[index].shrinks() {
+                let mut candidate = self.clone();
+                candidate.serde[index] = probe;
+                candidates.push(candidate);
+            }
+        }
         for index in 0..self.statements.len() {
             candidates.push(self.without(index));
             for stmt in self.statements[index].shrinks() {
@@ -518,6 +591,8 @@ impl Block {
             consts: self.consts.clone(),
             types: self.types.clone(),
             describes: self.describes.clone(),
+            layout: self.layout.clone(),
+            serde: self.serde.clone(),
         };
         candidate.retain_used();
         candidate.seal();

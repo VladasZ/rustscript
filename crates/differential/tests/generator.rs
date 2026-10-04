@@ -3,6 +3,8 @@ use std::process::Command;
 
 use rustscript_differential::generator::generate;
 use rustscript_differential::lang::expr::Expr as MatchExpr;
+use rustscript_differential::runner::externs;
+use rustscript_differential::workspace_root;
 
 #[test]
 fn generation_includes_replayable_structured_mutations() {
@@ -66,6 +68,8 @@ fn generated_sources_parse_as_rust() {
 #[test]
 fn generated_sources_compile_with_rustc() {
     let directory = tempfile::tempdir().unwrap();
+    // a case may name a bridged crate, the runner links them the same way
+    let externs = externs::build(&workspace_root()).unwrap();
     for seed in (0..100).chain(543_600..543_660) {
         let source = generate(seed).render();
         let source_path = directory.path().join(format!("case_{seed}.rs"));
@@ -74,6 +78,7 @@ fn generated_sources_compile_with_rustc() {
         let output = Command::new("rustc")
             .args(["--edition", "2024", "--emit", "metadata", "-o"])
             .arg(&output_path)
+            .args(&externs)
             .arg(&source_path)
             .output()
             .unwrap();

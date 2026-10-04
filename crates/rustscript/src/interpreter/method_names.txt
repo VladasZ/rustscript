@@ -108,6 +108,7 @@ clear mut
 client
 clone
 clone_from mut
+clone_from_slice mut
 cloned
 close
 cmp

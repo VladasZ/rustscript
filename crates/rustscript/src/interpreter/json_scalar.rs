@@ -3,7 +3,7 @@
 //! and a number keeps the width of its field.
 
 use serde::Deserialize;
-use serde::de::{DeserializeSeed, Error, Visitor};
+use serde::de::{DeserializeSeed, Error};
 
 use super::numeric::IntWidth;
 use super::typeir::ScalarIr;
@@ -12,13 +12,8 @@ use super::value::Value;
 pub(super) fn scalar_seed<'de, D: serde::Deserializer<'de>>(
     d: D,
     scalar: ScalarIr,
-    optional: bool,
 ) -> Result<Value, D::Error> {
-    if optional {
-        d.deserialize_option(OptionalScalar(scalar))
-    } else {
-        Scalar(scalar).deserialize(d)
-    }
+    Scalar(scalar).deserialize(d)
 }
 
 struct Scalar(ScalarIr);
@@ -55,27 +50,4 @@ fn int_of<'de, D: serde::Deserializer<'de>>(d: D, width: IntWidth) -> Result<i12
         IntWidth::I64 => i128::from(i64::deserialize(d)?),
         IntWidth::I128 => i128::deserialize(d)?,
     })
-}
-
-/// An `Option` field. A null is `None`, the struct wraps anything else in `Some`.
-struct OptionalScalar(ScalarIr);
-
-impl<'de> Visitor<'de> for OptionalScalar {
-    type Value = Value;
-
-    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.write_str("option")
-    }
-
-    fn visit_none<E: Error>(self) -> Result<Value, E> {
-        Ok(Value::none())
-    }
-
-    fn visit_unit<E: Error>(self) -> Result<Value, E> {
-        Ok(Value::none())
-    }
-
-    fn visit_some<D: serde::Deserializer<'de>>(self, d: D) -> Result<Value, D::Error> {
-        Scalar(self.0).deserialize(d)
-    }
 }

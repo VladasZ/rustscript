@@ -8,6 +8,7 @@ use anyhow::{Result, anyhow, bail};
 use parking_lot::Mutex;
 
 use super::bytecode::{BuiltinId, MethodName};
+use super::discard::discard;
 use super::iterator;
 use super::native::Native;
 use super::value::{MapKey, MapKind, MapStore, Value};
@@ -93,10 +94,25 @@ pub(super) fn map_method(
             }
             .wrap()
         }
-        BuiltinId::Iter | BuiltinId::IntoIter | BuiltinId::Drain if kind == MapKind::Set => {
-            set_items(m)
+        BuiltinId::Clear => {
+            let entries = m.lock().take_all();
+            for (_, value) in entries {
+                discard(value);
+            }
+            Value::Unit
         }
-        BuiltinId::Iter | BuiltinId::IntoIter | BuiltinId::Drain => map_pairs(m),
+        // `drain` hands every entry out and leaves the map empty
+        BuiltinId::Drain => {
+            let drained = if kind == MapKind::Set {
+                set_items(m)
+            } else {
+                map_pairs(m)
+            };
+            m.lock().clear();
+            drained
+        }
+        BuiltinId::Iter | BuiltinId::IntoIter if kind == MapKind::Set => set_items(m),
+        BuiltinId::Iter | BuiltinId::IntoIter => map_pairs(m),
         // a parsed json object is an Arc shared Map, so the mut accessor hands back the same map
         BuiltinId::AsObject => Value::some(Value::Map(m.clone(), kind)),
         BuiltinId::AsObjectMut => Value::some(Value::Ref(Arc::new(

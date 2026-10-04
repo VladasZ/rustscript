@@ -7,6 +7,7 @@ use rustscript_differential::generator::generate;
 use rustscript_differential::lang::catalog::{METHODS, opt_str_pair, opt_str_ref, solve};
 use rustscript_differential::lang::ty::{INT_WIDTHS, SCALAR_TYPES, StdErr, Ty};
 use rustscript_differential::model::Program;
+use rustscript_differential::parallel::map;
 use rustscript_differential::runner::{Classification, Runner};
 use rustscript_differential::workspace_root;
 
@@ -23,14 +24,16 @@ fn generation_is_deterministic() {
 fn generated_programs_compile() {
     let root = workspace_root();
     let runner = Runner::build(&root, 20_000).expect("build interpreter");
-    let mut rejected = Vec::new();
-    for seed in 0..60u64 {
-        let source = generate(seed).render();
+    let seeds: Vec<u64> = (0..60).collect();
+    let rejected: Vec<(u64, String, String)> = map(&seeds, |seed| {
+        let source = generate(*seed).render();
         let result = runner.run_source(&source).expect("run generated program");
-        if result.classification == Classification::RustcRejected {
-            rejected.push((seed, result.compiler.stderr.clone(), source));
-        }
-    }
+        (result.classification == Classification::RustcRejected)
+            .then(|| (*seed, result.compiler.stderr.clone(), source))
+    })
+    .into_iter()
+    .flatten()
+    .collect();
     assert!(
         rejected.is_empty(),
         "{} of 60 generated programs did not compile. First one, seed {}:\n{}\n\n{}",
@@ -257,6 +260,29 @@ const EXPECTED_FEATURES: &[&str] = &[
     "lang-print-twice",
     "lang-print-width-arg",
     "lang-print-named-width",
+    "lang-width-probe-not",
+    "lang-width-probe-zeros",
+    // modules
+    "lang-mod",
+    "lang-mod-nested",
+    "lang-mod-path",
+    "lang-mod-crate-path",
+    "lang-mod-alias",
+    "lang-mod-use",
+    "lang-mod-glob",
+    "lang-mod-local-use",
+    "lang-mod-shared-fn",
+    // bridged crates
+    "lang-serde-json",
+    "lang-serde-default-attr",
+    "lang-serde-read-fish",
+    "lang-serde-read-annotated",
+    "lang-serde-round-trip",
+    "lang-serde-missing-field",
+    "lang-serde-extra-field",
+    "lang-serde-wrong-type",
+    "lang-serde-duplicate-field",
+    "lang-serde-malformed",
 ];
 
 /// If a feature stops appearing, bugs living there become unfindable again.

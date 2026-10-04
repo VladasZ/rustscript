@@ -57,7 +57,7 @@ impl Vm {
                 self.option_higher_order(*variant, data, name, owned, args)
             }
             Value::Enum { def, variant, data } if def.kind == EnumKind::Result => {
-                self.result_higher_order(*variant, data, name, args)
+                self.result_higher_order(*variant, data, name, owned, args)
             }
             Value::Native(n) if matches!(&*n.lock(), Native::Entry { .. }) => {
                 let (map, key) = match &*n.lock() {
@@ -529,6 +529,7 @@ impl Vm {
             }
             _ => return option_pair(is_some, data, name, args),
         };
+        discard_closures(args);
         Ok(Some(out))
     }
 
@@ -537,21 +538,36 @@ impl Vm {
         variant: u16,
         data: &super::value::List,
         name: BuiltinId,
+        owned: bool,
         args: &[Value],
     ) -> Result<Option<Value>> {
         let is_ok = variant == OK;
         let inner = || Value::payload(data);
         let clo = |i: usize| as_closure(args.get(i));
+        // the payload goes to the closure by value, so it drops there unless moved out
+        let with_payload = |i: usize| self.call_closure_with(&clo(i)?, &[inner()?], owned);
+        // the side no closure takes ends with the receiver
+        let drop_payload = || inner().map(discard_payload);
         let out = match name {
             BuiltinId::IsOkAnd => {
-                Value::Bool(is_ok && self.call_closure_data(&clo(0)?, &[inner()?])?.is_truthy())
+                if is_ok {
+                    Value::Bool(with_payload(0)?.is_truthy())
+                } else {
+                    drop_payload()?;
+                    Value::Bool(false)
+                }
             }
             BuiltinId::IsErrAnd => {
-                Value::Bool(!is_ok && self.call_closure_data(&clo(0)?, &[inner()?])?.is_truthy())
+                if is_ok {
+                    drop_payload()?;
+                    Value::Bool(false)
+                } else {
+                    Value::Bool(with_payload(0)?.is_truthy())
+                }
             }
             BuiltinId::Map => {
                 if is_ok {
-                    Value::ok(self.call_closure_data(&clo(0)?, &[inner()?])?)
+                    Value::ok(with_payload(0)?)
                 } else {
                     Value::err(inner()?)
                 }
@@ -560,12 +576,12 @@ impl Vm {
                 if is_ok {
                     Value::ok(inner()?)
                 } else {
-                    Value::err(self.call_closure_data(&clo(0)?, &[inner()?])?)
+                    Value::err(with_payload(0)?)
                 }
             }
             BuiltinId::AndThen => {
                 if is_ok {
-                    self.call_closure_data(&clo(0)?, &[inner()?])?
+                    with_payload(0)?
                 } else {
                     Value::err(inner()?)
                 }
@@ -573,24 +589,26 @@ impl Vm {
             BuiltinId::MapOr => {
                 let default = arg(args, 0)?;
                 if is_ok {
-                    self.call_closure_data(&clo(1)?, &[inner()?])?
+                    discard(default);
+                    with_payload(1)?
                 } else {
+                    drop_payload()?;
                     default
                 }
             }
             // the fallback gets the error, unlike the Option form
             BuiltinId::MapOrElse => {
                 if is_ok {
-                    self.call_closure_data(&clo(1)?, &[inner()?])?
+                    with_payload(1)?
                 } else {
-                    self.call_closure_data(&clo(0)?, &[inner()?])?
+                    with_payload(0)?
                 }
             }
             BuiltinId::UnwrapOrElse => {
                 if is_ok {
                     inner()?
                 } else {
-                    self.call_closure_data(&clo(0)?, &[inner()?])?
+                    with_payload(0)?
                 }
             }
             BuiltinId::WithContext => {
@@ -603,7 +621,22 @@ impl Vm {
             }
             _ => return Ok(None),
         };
+        discard_closures(args);
         Ok(Some(out))
+    }
+}
+
+/// These methods take their closures by value, so a closure no one else holds ends with the
+/// call, called or not, and the captures it still owns drop with it. A closure a binding still
+/// names has a second handle and stays whole.
+pub(super) fn discard_closures(args: &[Value]) {
+    for arg in args {
+        if let Value::Closure(closure) = arg
+            && Arc::strong_count(closure) == 1
+            && closure.owned.contains(&true)
+        {
+            discard(arg.clone());
+        }
     }
 }
 

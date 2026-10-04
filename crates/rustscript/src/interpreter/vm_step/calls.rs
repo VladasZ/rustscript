@@ -8,6 +8,7 @@ use parking_lot::Mutex;
 
 use super::{CallReq, Flow, StepCtx};
 use crate::interpreter::bytecode::{CapSource, Chunk, PathId, path_call_chunk};
+use crate::interpreter::dispatch_log;
 use crate::interpreter::iterator::FastNext;
 use crate::interpreter::native::Native;
 use crate::interpreter::numeric::IntWidth;
@@ -101,6 +102,9 @@ pub(super) fn call_path(
     let (vm, cur) = (ctx.vm, ctx.cur);
     let (abase, argc) = (abase as usize, argc as usize);
     let path = &cur.paths[path as usize];
+    if dispatch_log::on() {
+        dispatch_log::path(path.id.path());
+    }
     // `::unreachable_match` and friends
     match path.id {
         PathId::UnreachableMatch => bail!("no match arm matched the value"),

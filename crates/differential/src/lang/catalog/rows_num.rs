@@ -2,7 +2,7 @@
 
 use super::{
     BOOL_PAT, Exact, FBool, FStr, FU32, FUSize, Float, Int, Method, SAME, Same, SignedInt,
-    SmallI32, SmallU32, Str, TyPat, U32_PAT, UnsignedInt, m,
+    SmallI32, SmallU32, Str, TyPat, U32_PAT, UnsignedInt, borrowing, m,
 };
 
 pub(super) const ROWS: &[Method] = &[
@@ -370,4 +370,78 @@ pub(super) const ROWS: &[Method] = &[
     ),
     // strings
     m("len", Str, &[], Exact(FUSize), "{r}.len()"),
+    m("sin", Float, &[], Same, "{r}.sin()"),
+    m("cos", Float, &[], Same, "{r}.cos()"),
+    m("tan", Float, &[], Same, "{r}.tan()"),
+    m("asin", Float, &[], Same, "{r}.asin()"),
+    m("acos", Float, &[], Same, "{r}.acos()"),
+    m("atan", Float, &[], Same, "{r}.atan()"),
+    m("atan2", Float, &[Same], Same, "{r}.atan2({0})"),
+    m("sinh", Float, &[], Same, "{r}.sinh()"),
+    m("cosh", Float, &[], Same, "{r}.cosh()"),
+    m("tanh", Float, &[], Same, "{r}.tanh()"),
+    m(
+        "float_to_be_bytes",
+        Float,
+        &[],
+        Exact(FStr),
+        "format!(\"{{:?}}\", {r}.abs().to_be_bytes())",
+    ),
+    m(
+        "float_to_le_bytes",
+        Float,
+        &[],
+        Exact(FStr),
+        "format!(\"{{:?}}\", {r}.abs().to_le_bytes())",
+    ),
+    m(
+        "float_to_ne_bytes",
+        Float,
+        &[],
+        Exact(FU32),
+        "({r}.abs().to_ne_bytes().iter().map(|b| (!*b) as u32).sum::<u32>())",
+    ),
+    // the sign of a computed NaN is open, so a NaN on either side answers nothing
+    m(
+        "total_cmp",
+        Float,
+        &[Same],
+        Exact(FStr),
+        "({{ let [diff_a, diff_b] = [{r}, {0}]; if diff_a.is_nan() || diff_b.is_nan() {{ String::new() }} else {{ format!(\"{{:?}}\", diff_a.total_cmp(&diff_b)) }} }})",
+    ),
+    m(
+        "abs_diff",
+        Int,
+        &[Same],
+        Exact(FU32),
+        "{r}.abs_diff({0}).leading_zeros()",
+    ),
+    m(
+        "int_to_be_bytes",
+        Int,
+        &[],
+        Exact(FStr),
+        "format!(\"{{:?}}\", {r}.to_be_bytes())",
+    ),
+    m(
+        "int_to_le_bytes",
+        Int,
+        &[],
+        Exact(FStr),
+        "format!(\"{{:?}}\", {r}.to_le_bytes())",
+    ),
+    m(
+        "int_to_ne_bytes",
+        Int,
+        &[],
+        Exact(FU32),
+        "({r}.to_ne_bytes().iter().map(|b| (!*b) as u32).sum::<u32>())",
+    ),
+    borrowing(m(
+        "float_partial_cmp",
+        Float,
+        &[Same],
+        Exact(FStr),
+        "format!(\"{{:?}}\", {r}.partial_cmp(&{0}))",
+    )),
 ];

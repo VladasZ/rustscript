@@ -80,6 +80,9 @@ impl Program {
             (false, true) => source.push_str("use std::collections::HashSet;\n\n"),
             (false, false) => {}
         }
+        for block in &self.blocks {
+            source.push_str(&block.render_uses());
+        }
         source.push_str(&items);
         source.push_str("fn main() {\n");
         source.push_str(&body);

@@ -301,6 +301,7 @@ impl Infer<'_, '_> {
             ("Command", "output") | ("Child", "wait_with_output") => io(Ty::named("Output")),
             ("Command", "status") | ("Child", "wait") => io(Ty::named("ExitStatus")),
             ("Command", "spawn") => io(Ty::named("Child")),
+            ("Child", "try_wait") => io(Ty::option(Ty::named("ExitStatus"))),
             ("Output", "status") => Ty::named("ExitStatus"),
             ("Output", "stdout" | "stderr") => Ty::vec(Ty::Int(IntWidth::U8)),
             ("ExitStatus", "code") => Ty::option(Ty::Int(IntWidth::I32)),
