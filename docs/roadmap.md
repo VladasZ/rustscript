@@ -15,6 +15,36 @@ Differential workflow.
 
 ## Open
 
+### A raw identifier field serializes with its `r#` prefix
+
+Found by `build/web/webos.rs` of the hilen build scripts, its `appinfo.json`
+came out with `"r#type"` and the LG packer refused it. The script waits on
+this entry.
+
+```rust
+#!/usr/bin/env rust
+
+use serde::Serialize;
+
+#[derive(Serialize)]
+struct Info {
+    r#type: String,
+}
+
+fn main() {
+    let info = Info {
+        r#type: "web".to_string(),
+    };
+    println!("{}", serde_json::to_string(&info).unwrap());
+}
+```
+
+Compiled: `{"type":"web"}`. Interpreted: `{"r#type":"web"}`.
+
+Likely place: where the interpreter takes the field names of a struct for a
+derived `Serialize`, and most likely `Deserialize` too. A raw identifier
+keeps its `r#` there, rustc drops it, `r#type` and `type` are one name.
+
 ## Generator plan
 
 The differential generator is being brought closer to real Rust in phases,
