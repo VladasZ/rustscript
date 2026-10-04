@@ -1,9 +1,10 @@
 //! The closure taking iterator methods and the reductions.
 
+use std::cmp::Ordering;
 use std::slice::from_ref;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 use super::drive::consumes_iterator;
 use super::{
@@ -12,7 +13,8 @@ use super::{
 };
 use crate::interpreter::bridge::arg;
 use crate::interpreter::bytecode::{BuiltinId, ScalarTy};
-use crate::interpreter::ops::compare_values;
+use crate::interpreter::methods::make_ordering;
+use crate::interpreter::ops::{compare_values, partial_compare};
 use crate::interpreter::shared::usize_value;
 use crate::interpreter::value::{ClosureData, Value};
 use crate::interpreter::vm::Vm;
@@ -72,9 +74,12 @@ impl Vm {
             }
             BuiltinId::FindMap => {
                 let closure = closure(0)?;
+                // the closure takes the item by value, so one it does not hand back drops there
+                let owned = owns_items(iterator);
                 let mut found = Value::none();
                 while let Some(value) = self.iterator_next(iterator)? {
-                    if let Some(inner) = option_inner(&self.call_closure_data(&closure, &[value])?)
+                    if let Some(inner) =
+                        option_inner(&self.call_closure_with(&closure, &[value], owned)?)
                     {
                         found = Value::some(inner);
                         break;
@@ -347,6 +352,41 @@ impl Vm {
             BuiltinId::Any => Value::Bool(false),
             BuiltinId::All => Value::Bool(true),
             _ => unreachable!(),
+        })
+    }
+}
+
+impl Vm {
+    /// `a.cmp(b)` and `a.partial_cmp(b)` over 2 iterators, item by item from the front. The
+    /// first pair that differs decides, and a side that ends first is the smaller one.
+    pub(super) fn iterator_compare(
+        self: &Arc<Self>,
+        left: &Handle,
+        id: BuiltinId,
+        other: &Value,
+    ) -> Result<Value> {
+        let Value::Native(right) = self.iterator_value(other.clone())? else {
+            bail!("an iterator compares against an iterator");
+        };
+        let ordering = loop {
+            let pair = (self.iterator_next(left)?, self.iterator_next(&right)?);
+            match pair {
+                (None, None) => break Some(Ordering::Equal),
+                (None, Some(_)) => break Some(Ordering::Less),
+                (Some(_), None) => break Some(Ordering::Greater),
+                (Some(a), Some(b)) => match partial_compare(&a, &b)? {
+                    Some(Ordering::Equal) => {}
+                    decided => break decided,
+                },
+            }
+        };
+        self.drop_leftovers(left)?;
+        self.drop_leftovers(&right)?;
+        Ok(match (id, ordering) {
+            (BuiltinId::Cmp, Some(ordering)) => make_ordering(ordering),
+            (BuiltinId::Cmp, None) => bail!("cannot order NaN"),
+            (_, Some(ordering)) => Value::some(make_ordering(ordering)),
+            (_, None) => Value::none(),
         })
     }
 }

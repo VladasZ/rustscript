@@ -1,19 +1,23 @@
 use num_traits::AsPrimitive;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::env::var_os;
+use std::fs::read_to_string;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rustscript_differential::artifact::Artifact;
+use rustscript_differential::fleet;
 use rustscript_differential::generator::generate;
 use rustscript_differential::model::Program;
 use rustscript_differential::mutator::mutate;
 use rustscript_differential::reduce::{ReductionProgress, reduce_with_progress};
 use rustscript_differential::runner::{Classification, RunResult, Runner};
+use rustscript_differential::surface::undispatched;
 use rustscript_differential::workspace_root;
 
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
@@ -41,9 +45,11 @@ fn real_main() -> Result<ExitCode> {
         "generate" => generate_one(&args[1..])?,
         "mutate" => mutate_artifact(&args[1..])?,
         "replay" => replay(&args[1..])?,
+        "compare" => compare(&args[1..])?,
         "reduce" => reduce_artifact(&args[1..])?,
         "promote" => promote(&args[1..])?,
         "surface" => surface_report(&args[1..])?,
+        "fleet" => return run_fleet(&args[1..]),
         "help" | "-h" | "--help" => print_usage(),
         other => anyhow::bail!("unknown command `{other}`"),
     }
@@ -55,11 +61,28 @@ struct CampaignOptions {
     cases: usize,
     timeout_ms: u64,
     stop_on_first: bool,
+    /// worker threads, every core when not given
+    jobs: Option<usize>,
 }
 
-/// See `surface`. `--refresh` harvests the list from `rust-src` first.
+/// The repo whose scripts the sweep checks and the surface report counts, `~/dev/thing` when it
+/// is there.
+fn default_script_repo() -> Option<PathBuf> {
+    var_os("HOME")
+        .map(|home| PathBuf::from(home).join("dev/thing"))
+        .filter(|repo| repo.is_dir())
+}
+
+/// See `surface`. `--refresh` harvests the list from `rust-src` first. `--scripts DIR` names the
+/// repo whose scripts are counted.
 fn surface_report(args: &[String]) -> Result<()> {
     let root = workspace_root();
+    let scripts = match args.iter().position(|arg| arg == "--scripts") {
+        Some(index) => Some(PathBuf::from(
+            args.get(index + 1).context("--scripts needs a folder")?,
+        )),
+        None => default_script_repo(),
+    };
     if args.iter().any(|arg| arg == "--refresh") {
         rustscript_differential::surface::refresh(&root)?;
         println!(
@@ -70,11 +93,52 @@ fn surface_report(args: &[String]) -> Result<()> {
     let surface = rustscript_differential::surface::load(&root)?;
     let runner = Runner::build(&root, DEFAULT_TIMEOUT_MS)?;
     let listing = runner.supported_listing()?;
-    print!(
-        "{}",
-        rustscript_differential::surface::report(&surface, &listing).render()
-    );
+    let mut report = rustscript_differential::surface::report(&surface, &listing);
+    if let Some(repo) = &scripts {
+        report.script_calls = Some(rustscript_differential::surface::script_calls(repo)?);
+    }
+    print!("{}", report.render());
     Ok(())
+}
+
+/// The dev check on this machine and every node, see `fleet`. The tests and the sweep over
+/// `~/dev/thing` are part of it unless switched off.
+fn run_fleet(args: &[String]) -> Result<ExitCode> {
+    let mut options = fleet::Options {
+        seed: rand::random::<u32>().into(),
+        cases: 3000,
+        timeout_ms: 10_000,
+        tests: true,
+        sweep: default_script_repo(),
+    };
+    let mut index = 0;
+    while index < args.len() {
+        let option = &args[index];
+        match option.as_str() {
+            "--no-tests" => options.tests = false,
+            "--no-sweep" => options.sweep = None,
+            _ => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| anyhow::anyhow!("missing value after `{option}`"))?;
+                match option.as_str() {
+                    "--seed" => options.seed = value.parse()?,
+                    "--cases" => options.cases = value.parse()?,
+                    "--timeout-ms" => options.timeout_ms = value.parse()?,
+                    "--sweep" => options.sweep = Some(value.into()),
+                    other => anyhow::bail!("unknown fleet option `{other}`"),
+                }
+                index += 1;
+            }
+        }
+        index += 1;
+    }
+    println!("fleet: {} cases from seed {}", options.cases, options.seed);
+    Ok(if fleet::run(&workspace_root(), &options)? {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }
 
 fn parse_campaign_options(args: &[String]) -> Result<CampaignOptions> {
@@ -84,6 +148,7 @@ fn parse_campaign_options(args: &[String]) -> Result<CampaignOptions> {
         cases: 100,
         timeout_ms: DEFAULT_TIMEOUT_MS,
         stop_on_first: false,
+        jobs: None,
     };
     let mut index = 0;
     while index < args.len() {
@@ -100,6 +165,7 @@ fn parse_campaign_options(args: &[String]) -> Result<CampaignOptions> {
             "--seed" => options.seed = value.parse()?,
             "--cases" => options.cases = value.parse()?,
             "--timeout-ms" => options.timeout_ms = value.parse()?,
+            "--jobs" => options.jobs = Some(value.parse()?),
             other => anyhow::bail!("unknown run option `{other}`"),
         }
         index += 2;
@@ -126,7 +192,6 @@ fn record_case(
     result: RunResult,
 ) -> Result<()> {
     let case_seed = program.seed;
-    ctx.report.note_calls(&source);
     match &result.classification {
         Classification::Match => {
             ctx.report.matched += 1;
@@ -177,14 +242,16 @@ fn record_case(
 fn run_campaign(args: &[String]) -> Result<ExitCode> {
     let options = parse_campaign_options(args)?;
     let root = workspace_root();
-    let runner = Runner::build(&root, options.timeout_ms)?;
+    let runner = Runner::build(&root, options.timeout_ms)?
+        .with_dispatch_log(root.join("target/rustscript-differential/dispatch.log"))?;
     let started = Instant::now();
     println!("running {} cases from seed {}", options.cases, options.seed);
 
     let batch_count = options.cases.div_ceil(CAMPAIGN_BATCH_SIZE);
-    let workers = thread::available_parallelism()
-        .map_or(4, std::num::NonZeroUsize::get)
-        .min(batch_count.max(1));
+    let workers = options
+        .jobs
+        .unwrap_or_else(|| thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get))
+        .clamp(1, batch_count.max(1));
     let next_batch = AtomicUsize::new(0);
     let stop = AtomicBool::new(false);
     let (sender, receiver) = mpsc::channel::<(usize, BatchOutcome)>();
@@ -255,13 +322,29 @@ fn run_campaign(args: &[String]) -> Result<ExitCode> {
     })?;
 
     report.print(started.elapsed());
-    report.print_unexercised(&runner.supported_listing()?, &root)?;
+    print_undispatched(&runner, &root)?;
     Ok(if report.bugs.is_empty() {
         ExitCode::SUCCESS
     } else {
         // real divergences fail the run so a scheduled campaign can gate on the exit code
         ExitCode::FAILURE
     })
+}
+
+/// The bridged methods no interpreted run reached, counted and saved as a list.
+fn print_undispatched(runner: &Runner, root: &Path) -> Result<()> {
+    let (missing, total) = undispatched(&runner.supported_listing()?, &runner.dispatched()?);
+    let dir = root.join("target/rustscript-differential");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("undispatched.txt");
+    std::fs::write(&path, missing.join("\n") + "\n")?;
+    println!(
+        "\ninterpreter surface this campaign never dispatched: {} of {} methods, list in {}",
+        missing.len(),
+        total,
+        path.display()
+    );
+    Ok(())
 }
 
 /// Buckets group by the concrete failure, so 2 bugs with the same classification are reported apart.
@@ -285,8 +368,6 @@ struct CampaignReport {
     matched: usize,
     gaps: BTreeMap<String, BugGroup>,
     bugs: BTreeMap<String, BugGroup>,
-    /// every method name called, so the report can list the surface this campaign never touched
-    called: std::collections::BTreeSet<String>,
     /// cases whose 2 native runs disagreed, each a grammar hole
     nondeterministic: BugGroup,
 }
@@ -295,7 +376,7 @@ struct CampaignReport {
 struct BugGroup {
     count: usize,
     seeds: Vec<u64>,
-    artifacts: Vec<std::path::PathBuf>,
+    artifacts: Vec<PathBuf>,
 }
 
 impl CampaignReport {
@@ -305,7 +386,7 @@ impl CampaignReport {
             .is_none_or(|group| group.artifacts.len() < MAX_ARTIFACTS_PER_GAP)
     }
 
-    fn record_gap(&mut self, key: String, seed: u64, path: Option<std::path::PathBuf>) {
+    fn record_gap(&mut self, key: String, seed: u64, path: Option<PathBuf>) {
         let group = self.gaps.entry(key).or_default();
         group.count += 1;
         if group.seeds.len() < MAX_SEEDS_PER_GROUP {
@@ -322,7 +403,7 @@ impl CampaignReport {
             .is_none_or(|group| group.artifacts.len() < MAX_ARTIFACTS_PER_GROUP)
     }
 
-    fn record_bug(&mut self, key: String, seed: u64, path: Option<std::path::PathBuf>) {
+    fn record_bug(&mut self, key: String, seed: u64, path: Option<PathBuf>) {
         let group = self.bugs.entry(key).or_default();
         group.count += 1;
         if group.seeds.len() < MAX_SEEDS_PER_GROUP {
@@ -331,62 +412,6 @@ impl CampaignReport {
         if let Some(path) = path {
             group.artifacts.push(path);
         }
-    }
-
-    fn note_calls(&mut self, source: &str) {
-        let mut rest = source;
-        while let Some(dot) = rest.find('.') {
-            rest = &rest[dot + 1..];
-            let name: String = rest
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                .collect();
-            if !name.is_empty() && rest[name.len()..].starts_with('(') {
-                self.called.insert(name);
-            }
-        }
-    }
-
-    /// The bridged names no generated program called.
-    fn print_unexercised(&self, listing: &str, root: &Path) -> Result<()> {
-        let surface = rustscript_differential::surface::interpreter_surface_raw(listing);
-        let mut unexercised: Vec<String> = Vec::new();
-        let mut total = 0usize;
-        for (recv, names) in &surface {
-            // only the receivers the generator writes count
-            if !matches!(
-                recv.as_str(),
-                "Vec"
-                    | "Map"
-                    | "Option"
-                    | "Result"
-                    | "String and str"
-                    | "Char"
-                    | "any value"
-                    | "Iterator"
-            ) {
-                continue;
-            }
-            for name in names {
-                total += 1;
-                if !self.called.contains(name) {
-                    unexercised.push(format!("{recv} {name}"));
-                }
-            }
-        }
-        unexercised.sort();
-        unexercised.dedup();
-        let dir = root.join("target/rustscript-differential");
-        std::fs::create_dir_all(&dir)?;
-        let path = dir.join("unexercised.txt");
-        std::fs::write(&path, unexercised.join("\n") + "\n")?;
-        println!(
-            "\ninterpreter surface never called by this campaign: {} of {} names, list in {}",
-            unexercised.len(),
-            total,
-            path.display()
-        );
-        Ok(())
     }
 
     fn record_nondeterministic(&mut self, seed: u64) {
@@ -497,7 +522,7 @@ fn mutate_artifact(args: &[String]) -> Result<()> {
         anyhow::bail!("usage: rustscript-differential mutate ARTIFACT --seed SEED");
     }
     let seed = seed.parse()?;
-    let artifact = Artifact::load(&std::path::PathBuf::from(path))?;
+    let artifact = Artifact::load(&PathBuf::from(path))?;
     print!(
         "{}",
         mutate(&artifact.program, artifact.seed, seed, seed).render()
@@ -510,6 +535,18 @@ fn replay(args: &[String]) -> Result<()> {
     let artifact = Artifact::load(&path)?;
     let runner = Runner::build(&workspace_root(), DEFAULT_TIMEOUT_MS)?;
     let result = runner.run_source(&artifact.source)?;
+    println!("{:#?}", result.classification);
+    print_outputs(&result);
+    Ok(())
+}
+
+/// Runs one source file compiled and interpreted, a hand written probe goes the same way a
+/// generated case does.
+fn compare(args: &[String]) -> Result<()> {
+    let path = required_path(args, "compare")?;
+    let source = read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let runner = Runner::build(&workspace_root(), DEFAULT_TIMEOUT_MS)?;
+    let result = runner.run_source(&source)?;
     println!("{:#?}", result.classification);
     print_outputs(&result);
     Ok(())
@@ -580,7 +617,7 @@ fn promote(args: &[String]) -> Result<()> {
     if args.len() != 2 {
         anyhow::bail!("usage: rustscript-differential promote ARTIFACT NAME");
     }
-    let path = std::path::PathBuf::from(&args[0]);
+    let path = PathBuf::from(&args[0]);
     let name = &args[1];
     validate_name(name)?;
     let artifact = Artifact::load(&path)?;
@@ -613,9 +650,9 @@ fn parse_seed(args: &[String]) -> Result<u64> {
     }
 }
 
-fn required_path(args: &[String], command: &str) -> Result<std::path::PathBuf> {
+fn required_path(args: &[String], command: &str) -> Result<PathBuf> {
     match args {
-        [path] => Ok(std::path::PathBuf::from(path)),
+        [path] => Ok(PathBuf::from(path)),
         _ => anyhow::bail!("usage: rustscript-differential {command} ARTIFACT"),
     }
 }
@@ -643,11 +680,13 @@ fn print_usage() {
     println!(
         r"rustscript-differential
 
-  run [--seed N] [--cases N] [--timeout-ms N] [--stop-on-first]
-  surface [--refresh]
+  run [--seed N] [--cases N] [--timeout-ms N] [--jobs N] [--stop-on-first]
+  surface [--refresh] [--scripts DIR]
+  fleet [--seed N] [--cases N] [--timeout-ms N] [--no-tests] [--no-sweep] [--sweep DIR]
   generate --seed N
   mutate ARTIFACT --seed N
   replay ARTIFACT
+  compare FILE
   reduce ARTIFACT
   promote ARTIFACT NAME"
     );

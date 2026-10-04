@@ -218,7 +218,9 @@ const fn with_fish(method: Method, fish: FishReq) -> Method {
     Method { fish, ..method }
 }
 
-use ElemReq::{Default as DefaultElem, Key as KeyElem, Num, Ord as OrdElem, Str as StrElem};
+use ElemReq::{
+    Copy as CopyElem, Default as DefaultElem, Key as KeyElem, Num, Ord as OrdElem, Str as StrElem,
+};
 use Fixed::{
     Bool as FBool, Char as FChar, F64 as FF64, Str as FStr, StrRef as FStrRef, U32 as FU32,
     U64 as FU64, USize as FUSize,
@@ -248,11 +250,13 @@ pub static METHODS: LazyLock<Vec<Method>> = LazyLock::new(|| {
         rows_refs::ROWS,
         rows_vec::ROWS,
         rows_containers::ROWS,
+        rows_lazy::ROWS,
     ]
     .concat()
 });
 
 mod rows_containers;
+mod rows_lazy;
 mod rows_num;
 mod rows_refs;
 mod rows_text;

@@ -1,3 +1,6 @@
+use std::collections::BTreeSet;
+use std::env::var_os;
+use std::ffi::OsString;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -171,6 +174,14 @@ fn normalize_digits(text: &str) -> String {
 
 pub struct Runner {
     interpreter: PathBuf,
+    /// the `--extern` arguments of the bridged crates, see `externs`
+    externs: Vec<OsString>,
+    /// The `rustc` the repo pins. A case compiles in a temp folder, where a bare `rustc`
+    /// would be the default toolchain of the machine, or nothing on a node that has none.
+    rustc: OsString,
+    /// Where every interpreted run of a campaign appends what the VM dispatched, see
+    /// `dispatch_log` in the interpreter.
+    dispatch_log: Option<PathBuf>,
     native_timeout: Duration,
     /// The interpreter gets 4 times the native budget, or near boundary programs report spurious
     /// timeouts. A cold `rustc` shares it.
@@ -212,9 +223,33 @@ impl Runner {
         let native_timeout = Duration::from_millis(timeout_ms);
         Ok(Self {
             interpreter,
+            externs: externs::build(workspace)?,
+            rustc: pinned_rustc(workspace),
+            dispatch_log: None,
             native_timeout,
             interpreted_timeout: native_timeout * INTERPRETED_TIMEOUT_FACTOR,
         })
+    }
+
+    /// Starts the log empty, so it holds this campaign alone.
+    pub fn with_dispatch_log(mut self, path: PathBuf) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&path, "")?;
+        self.dispatch_log = Some(path);
+        Ok(self)
+    }
+
+    /// The lines of the dispatch log, each once. Empty without a log.
+    pub fn dispatched(&self) -> Result<BTreeSet<String>> {
+        let Some(path) = &self.dispatch_log else {
+            return Ok(BTreeSet::new());
+        };
+        Ok(fs::read_to_string(path)?
+            .lines()
+            .map(str::to_string)
+            .collect())
     }
 
     pub fn run_source(&self, source: &str) -> Result<RunResult> {
@@ -225,12 +260,12 @@ impl Runner {
         let binary_path = directory.path().join(executable_name("case"));
         fs::write(&source_path, source)?;
 
-        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
         let compiler = run_command(
-            Command::new(rustc)
+            Command::new(&self.rustc)
                 .args(RUSTC_COMPILE_ARGS)
                 .arg(&binary_path)
                 .arg(&source_path)
+                .args(&self.externs)
                 .current_dir(directory.path()),
             self.interpreted_timeout,
         )?;
@@ -280,12 +315,12 @@ impl Runner {
         let source_paths = write_batch_sources(directory.path(), sources)?;
         fs::write(&bundle_path, render_native_batch(sources)?)?;
 
-        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
         let compiler = run_command(
-            Command::new(rustc)
+            Command::new(&self.rustc)
                 .args(RUSTC_COMPILE_ARGS)
                 .arg(&binary_path)
                 .arg(&bundle_path)
+                .args(&self.externs)
                 .current_dir(directory.path()),
             self.interpreted_timeout,
         )?;
@@ -331,13 +366,33 @@ impl Runner {
     }
 
     fn run_interpreted(&self, source_path: &Path, directory: &Path) -> Result<ProcessOutput> {
-        run_command(
-            Command::new(&self.interpreter)
-                .arg(source_path)
-                .env("RUSTSCRIPT_SKIP_CHECK", "1")
-                .current_dir(directory),
-            self.interpreted_timeout,
-        )
+        let mut command = Command::new(&self.interpreter);
+        command
+            .arg(source_path)
+            .env("RUSTSCRIPT_SKIP_CHECK", "1")
+            .current_dir(directory);
+        if let Some(log) = &self.dispatch_log {
+            command.env("RUSTSCRIPT_DISPATCH_LOG", log);
+        }
+        run_command(&mut command, self.interpreted_timeout)
+    }
+}
+
+/// `RUSTC` when set, else the compiler `rustup` picks inside the workspace, which follows
+/// `rust-toolchain.toml`. Without `rustup` it is the `rustc` on the path.
+fn pinned_rustc(workspace: &Path) -> OsString {
+    if let Some(rustc) = var_os("RUSTC") {
+        return rustc;
+    }
+    let picked = Command::new("rustup")
+        .args(["which", "rustc"])
+        .current_dir(workspace)
+        .output();
+    match picked {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().into()
+        }
+        _ => "rustc".into(),
     }
 }
 
@@ -360,6 +415,9 @@ fn render_native_batch(sources: &[String]) -> Result<String> {
         if module_source == *source {
             bail!("generated source {index} has no main function");
         }
+        // a case is a module of the batch, so its `crate::` paths start one level deeper. Left as
+        // they are, 1 such case fails the batch and every case of it compiles alone.
+        let module_source = module_source.replace("crate::", &format!("crate::case_{index}::"));
         bundle.push_str(&format!("mod case_{index} {{\n{module_source}\n}}\n\n"));
     }
     bundle.push_str(
@@ -611,174 +669,7 @@ fn read_pipe(mut pipe: impl Read) -> Result<String> {
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
+pub mod externs;
+
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn output(status: i32, stderr: &str) -> ProcessOutput {
-        ProcessOutput {
-            status: Some(status),
-            stdout: String::new(),
-            stderr: stderr.to_string(),
-            timed_out: false,
-        }
-    }
-
-    #[test]
-    fn unsupported_errors_are_gaps() {
-        assert_eq!(
-            classify(&output(0, ""), &output(1, "unsupported item: macro")),
-            Classification::InterpreterUnsupported
-        );
-    }
-
-    /// Keying on the first stderr line collapses every gap into 1 bucket.
-    #[test]
-    fn gaps_bucket_by_reason_not_location() {
-        let one = "thread 'main' panicked at case_3.rs:12:\nunknown method `ilog2` on a number\n  at main (case_3.rs:12)\n";
-        let two = "thread 'main' panicked at case_3.rs:12:\nunknown method `leading_ones` on a number\n  at main (case_3.rs:12)\n";
-        assert_eq!(gap_reason(one), "unknown method `ilog2` on a number");
-        assert_eq!(gap_reason(two), "unknown method `leading_ones` on a number");
-        assert_eq!(
-            gap_reason("rust unsupported: macro `todo`"),
-            "rust unsupported: macro `todo`"
-        );
-    }
-
-    #[test]
-    fn different_output_is_a_semantic_failure() {
-        let native = ProcessOutput {
-            stdout: "one".to_string(),
-            ..output(0, "")
-        };
-        let interpreted = ProcessOutput {
-            stdout: "two".to_string(),
-            ..output(0, "")
-        };
-        assert_eq!(
-            classify(&native, &interpreted),
-            Classification::SemanticMismatch
-        );
-    }
-
-    fn panic(payload: &str) -> ProcessOutput {
-        ProcessOutput {
-            status: Some(PANIC_STATUS),
-            stdout: String::new(),
-            stderr: format!(
-                "thread 'main' panicked at case.rs:1:1:\n{payload}\nnote: run with `RUST_BACKTRACE=1`\n"
-            ),
-            timed_out: false,
-        }
-    }
-
-    #[test]
-    fn matching_panics_agree_despite_location_and_backtrace_noise() {
-        assert_eq!(
-            classify(
-                &panic("attempt to add with overflow"),
-                &panic("attempt to add with overflow")
-            ),
-            Classification::Match
-        );
-    }
-
-    #[test]
-    fn interpreter_script_backtrace_is_not_part_of_the_message() {
-        // the interpreter's `at <frame>` lines must not break agreement
-        let native = panic("attempt to multiply with overflow");
-        let interpreted = ProcessOutput {
-            status: Some(PANIC_STATUS),
-            stdout: String::new(),
-            stderr: "thread 'main' panicked at case_0.rs:82:\nattempt to multiply with overflow\n  at main (case_0.rs:82)\n".to_string(),
-            timed_out: false,
-        };
-        assert_eq!(classify(&native, &interpreted), Classification::Match);
-    }
-
-    #[test]
-    fn interpreter_running_past_a_real_panic_is_a_finding() {
-        let native = panic("attempt to add with overflow");
-        let interpreted = ProcessOutput {
-            stdout: "9223372036854775808".to_string(),
-            ..output(0, "")
-        };
-        assert_eq!(
-            classify(&native, &interpreted),
-            Classification::InterpreterMissingPanic
-        );
-    }
-
-    #[test]
-    fn interpreter_panicking_alone_is_a_finding() {
-        assert_eq!(
-            classify(&output(0, ""), &panic("attempt to divide by zero")),
-            Classification::InterpreterSpuriousPanic
-        );
-    }
-
-    #[test]
-    fn a_runtime_gap_panic_is_a_gap() {
-        assert_eq!(
-            classify(
-                &output(0, ""),
-                &panic("unknown method `product` on Iterator")
-            ),
-            Classification::InterpreterUnsupported
-        );
-        assert_eq!(
-            classify(
-                &panic("attempt to add with overflow"),
-                &panic("unsupported constant `f64::LOG2_10`")
-            ),
-            Classification::InterpreterUnsupported
-        );
-    }
-
-    #[test]
-    fn differing_panic_messages_are_a_finding() {
-        assert_eq!(
-            classify(
-                &panic("range end index 5 out of range for slice of length 1"),
-                &panic("slice 0..5 out of bounds (len 1)")
-            ),
-            Classification::PanicMessageMismatch
-        );
-    }
-
-    #[test]
-    fn a_gap_that_hides_a_missing_panic_stays_a_gap() {
-        let native = panic("attempt to add with overflow");
-        let interpreted = output(1, "unsupported item: macro");
-        assert_eq!(
-            classify(&native, &interpreted),
-            Classification::InterpreterUnsupported
-        );
-    }
-
-    #[test]
-    fn large_captured_output_does_not_block() -> Result<()> {
-        let output = run_command(
-            Command::new(std::env::current_exe()?)
-                .args([
-                    "--exact",
-                    "runner::tests::large_output_helper",
-                    "--nocapture",
-                ])
-                .env("RUSTSCRIPT_TEST_LARGE_OUTPUT", "1"),
-            Duration::from_secs(10),
-        )?;
-
-        assert!(!output.timed_out);
-        assert_eq!(output.status, Some(0));
-        assert!(output.stderr.len() >= 1024 * 1024);
-        Ok(())
-    }
-
-    #[test]
-    fn large_output_helper() {
-        if std::env::var_os("RUSTSCRIPT_TEST_LARGE_OUTPUT").is_some() {
-            eprint!("{}", "x".repeat(1024 * 1024));
-        }
-    }
-}
+mod tests;

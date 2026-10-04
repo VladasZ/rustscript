@@ -10,7 +10,7 @@ use anyhow::{Result, bail};
 use super::bytecode::NO_TYPE;
 use super::enum_def::EnumDef;
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(super) struct ModuleSyms {
     pub path: Vec<String>,
     pub parent: Option<usize>,
@@ -23,8 +23,10 @@ pub(super) struct ModuleSyms {
     pub enums: HashMap<String, Arc<str>>,
     pub aliases: HashMap<String, Rc<syn::Type>>,
     pub uses: HashMap<String, Vec<String>>,
-    /// checked against user modules at load
+    /// the prefix of every `use prefix::*`, one that names a script module brings its items in
     pub globs: Vec<Vec<String>>,
+    /// Set on the copy a fn body with a `use` compiles against, the module the fn is written in.
+    pub scope_of: Option<usize>,
 }
 
 pub(super) struct StructDef {
@@ -217,6 +219,11 @@ impl Resolver {
                     other => Ok(other),
                 };
             }
+            // a name the module and its imports do not have may come through a glob import
+            if let Some(owner) = self.glob_owner(m, seg) {
+                m = owner;
+                continue;
+            }
             if anchored || m != start {
                 bail!("cannot find `{seg}` in {}", module_name(syms));
             }
@@ -240,19 +247,77 @@ impl Resolver {
         }
     }
 
-    /// Globs of external crates stay ignored.
-    pub fn reject_module_globs(&self) -> Result<()> {
-        for (m, syms) in self.modules.iter().enumerate() {
-            for prefix in &syms.globs {
-                if let Ok(Res::Module) = self.resolve_use(m, prefix, 0) {
-                    bail!(
-                        "unsupported feature: glob import `use {}::*` of a script module",
-                        prefix.join("::")
-                    );
+    /// The module that declares `name` among the modules `m` imports by glob, `use m::*` and
+    /// `use super::*`. A glob of a glob counts, and 2 modules that glob each other end the walk.
+    /// A glob of an external crate names no script module and is skipped.
+    fn glob_owner(&self, m: usize, name: &str) -> Option<usize> {
+        let mut seen = vec![m];
+        let mut queue = vec![m];
+        while let Some(at) = queue.pop() {
+            for prefix in &self.modules[at].globs {
+                let Some(target) = self.module_index(at, prefix, 0) else {
+                    continue;
+                };
+                if seen.contains(&target) {
+                    continue;
                 }
+                seen.push(target);
+                if self.modules[target].declares(name) {
+                    return Some(target);
+                }
+                queue.push(target);
             }
         }
-        Ok(())
+        None
+    }
+
+    /// The script module a `use` prefix names, read from module `m`.
+    fn module_index(&self, mut m: usize, segs: &[String], depth: usize) -> Option<usize> {
+        if depth > MAX_DEPTH {
+            return None;
+        }
+        for (i, seg) in segs.iter().enumerate() {
+            let syms = &self.modules[m];
+            m = match seg.as_str() {
+                "crate" => self.crate_root_of(m),
+                "self" => m,
+                "super" => match syms.parent {
+                    Some(parent) if !syms.crate_root => parent,
+                    _ => return None,
+                },
+                name => {
+                    if let Some(&child) = syms.children.get(name) {
+                        child
+                    } else if let Some(target) = syms.uses.get(name) {
+                        if target.first() == Some(seg) {
+                            return None;
+                        }
+                        let mut spliced = target.clone();
+                        spliced.extend_from_slice(&segs[i + 1..]);
+                        return self.module_index(m, &spliced, depth + 1);
+                    } else if i == 0 && m != 0 {
+                        // like `resolve_use`, a path that does not start here starts at the root
+                        return self.module_index(0, segs, depth + 1);
+                    } else {
+                        return None;
+                    }
+                }
+            };
+        }
+        Some(m)
+    }
+}
+
+impl ModuleSyms {
+    /// Whether the module itself has an item, a child module or an import of this name.
+    fn declares(&self, name: &str) -> bool {
+        self.fns.contains_key(name)
+            || self.consts.contains_key(name)
+            || self.structs.contains_key(name)
+            || self.enums.contains_key(name)
+            || self.aliases.contains_key(name)
+            || self.children.contains_key(name)
+            || self.uses.contains_key(name)
     }
 }
 

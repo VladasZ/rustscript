@@ -352,6 +352,7 @@ fn writes(op: &Op) -> Option<u16> {
         | Op::MakeMap { dst, .. }
         | Op::LoadGlobal { dst, .. }
         | Op::LoadUpvalue { dst, .. }
+        | Op::TakeUpvalue { dst, .. }
         | Op::LoadCell { dst, .. }
         | Op::CellRef { dst, .. }
         | Op::Index { dst, .. }

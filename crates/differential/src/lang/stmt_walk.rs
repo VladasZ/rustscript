@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::lang::expr::{Expr, Helper};
+use crate::lang::expr::{Expr, Helper, UnOp};
 use crate::lang::pat::Pat;
 
 use super::stmt::{
@@ -590,9 +590,22 @@ impl Stmt {
     /// The features of what a statement prints or writes.
     fn op_features(&self, out: &mut BTreeSet<&'static str>) {
         match self {
-            Self::Print { spec, form, .. } => {
+            Self::Print {
+                expr, spec, form, ..
+            } => {
                 spec.features(out);
                 out.insert(form.feature());
+                match expr {
+                    Expr::Unary {
+                        op: UnOp::Not, ty, ..
+                    } if ty.is_int() => {
+                        out.insert("lang-width-probe-not");
+                    }
+                    Expr::Call { method, .. } if method == "leading_zeros" => {
+                        out.insert("lang-width-probe-zeros");
+                    }
+                    _ => {}
+                }
             }
             Self::Compound { op, .. } => {
                 out.insert(op.feature());

@@ -52,6 +52,7 @@ rust FILE.rs         interpret the script
 rust -e 'CODE'       run a snippet, arguments after CODE go to it
 rust check FILE.rs   validate without running
 rust build FILE.rs   compile, cache, and run a native binary
+rust types FILE.rs   list the calls whose result type is not known
 rust supported       list every bridged method per receiver
 rust clean           clear cached checks and builds
 rust update [VER]    install a release, the newest one by default
@@ -113,7 +114,8 @@ Every feature has a working example under `crates/examples/examples`.
   script started with, like the proxy variables of `reqwest`, `NO_COLOR` for
   `colored` and `TZ` for `chrono`.
 - Lifetimes and generic bounds mean nothing at runtime.
-- Glob imports from script modules are not supported.
+- A `use` inside a function body covers the whole body, not only its block. A
+  body that imports 2 different items under 1 name is rejected.
 - `HashMap` and `HeaderMap` iterate in insertion order. Real Rust promises no
   order, so a correct script cannot see the difference.
 - `file!()` gives the script path as it was passed to `rust`, where a compiled

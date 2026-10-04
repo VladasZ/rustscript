@@ -7,7 +7,9 @@ use anyhow::{Result, bail};
 
 use super::bytecode::{BuiltinId, MethodName};
 use super::discard::{discard, take_discarded};
+use super::dispatch_log;
 use super::enum_def::{EnumKind, OK, SOME};
+use super::higher_order::discard_closures;
 use super::methods::{make_ordering, str_grow};
 use super::value::{MapKind, Value};
 use super::vm_step::{Flow, StepCtx};
@@ -47,6 +49,9 @@ fn method_call(
     let (recv, abase, argc) = (recv as usize, abase as usize, argc as usize);
     let name = &cur.names[name as usize];
     let s = base + abase;
+    if dispatch_log::on() {
+        dispatch_log::method(&ctx.stack[base + recv], &name.text);
+    }
     if let Some(v) = builtin_fast(ctx, recv, name, s, argc, dst) {
         return Ok(ctx.set_opt(dst, v));
     }
@@ -205,7 +210,11 @@ fn option_get_or_insert(ctx: &mut StepCtx, recv: usize, id: BuiltinId, s: usize)
             ctx.vm.call_closure_data(&clo, &[])?
         };
         ctx.stack[slot] = Value::some(value);
+    } else if id == BuiltinId::GetOrInsert {
+        // the value the full option did not need drops inside the call
+        discard(ctx.stack[s].clone());
     }
+    discard_closures(&ctx.stack[s..=s]);
     match &ctx.stack[slot] {
         Value::Enum { data, .. } => Ok(Value::Ref(std::sync::Arc::new(
             super::value::ValueRef::vec_element(data.clone(), 0),

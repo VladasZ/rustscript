@@ -533,8 +533,6 @@ pub(super) fn enum_to_json(
 pub(super) struct EnumVisitor<'a> {
     pub(super) info: &'a Arc<EnumInfo>,
     pub(super) cx: &'a ParseCx<'a>,
-    /// an `Option<Enum>`, where null is `None`
-    pub(super) optional: bool,
 }
 
 impl EnumVisitor<'_> {
@@ -589,9 +587,6 @@ impl<'de> serde::de::Visitor<'de> for EnumVisitor<'_> {
     }
 
     fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<Value, E> {
-        if self.optional {
-            return Ok(Value::none());
-        }
         self.read(Value::none())
     }
 

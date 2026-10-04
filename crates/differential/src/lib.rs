@@ -1,8 +1,10 @@
 pub mod artifact;
+pub mod fleet;
 pub mod generator;
 pub mod lang;
 pub mod model;
 pub mod mutator;
+pub mod parallel;
 pub mod reduce;
 pub mod runner;
 pub mod surface;

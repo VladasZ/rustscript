@@ -117,26 +117,86 @@ candidate that fails it, and the mutator undoes a splice that fails it. The
 rules are a subset of what `rustc` accepts, a scrutinee or a receiver read by
 move counts as moved even where `rustc` would only borrow it.
 
+## Modules
+
+A third of the blocks with items keep their types, consts and fns in a `mod`, see
+`lang/layout.rs`. The module can be nested, and it brings the rest of the file in with
+`use super::*`. `main` reaches the items by path, by a `crate::` path, through an alias, a
+`use` list, a glob, or a `use` inside `main`. With a path access the fns are named by position,
+so 2 blocks of a program declare the same fn name in 2 modules. The layout is a render step,
+the statements and the ownership check never see it. A batch build wraps every case in a
+module, so it rewrites the `crate::` paths of a case.
+
+## Width probes
+
+An integer that lost its width still prints the same digits. So a third of the integer prints
+read the value through `!x` or `x.leading_zeros()`, where the width shows.
+
+## Bridged crates
+
+The runner builds the dependencies of the examples crate once and links `serde`,
+`serde_json`, `toml`, `regex`, `chrono` and `tokio` into every case with `--extern`, see
+`runner/externs.rs`. So a case that names one of them compiles with 1 `rustc` run.
+
+A block in 8 reads json documents into a struct of its own, see `lang/serde_case.rs`. The
+documents have missing, extra, wrong typed and duplicate fields and broken syntax. The read is
+printed as the `Debug` of the `Result`, or written back with `to_string`, so every error
+message and position is compared.
+
 ## Commands
 
 ```text
 cargo run --release -p rustscript-differential -- COMMAND
 
-run [--seed N] [--cases N] [--timeout-ms N] [--stop-on-first]
-surface [--refresh]
+run [--seed N] [--cases N] [--timeout-ms N] [--jobs N] [--stop-on-first]
+fleet [--seed N] [--cases N] [--timeout-ms N] [--no-tests] [--no-sweep] [--sweep DIR]
+surface [--refresh] [--scripts DIR]
 generate --seed N
 mutate ARTIFACT --seed N
 replay ARTIFACT
+compare FILE
 reduce ARTIFACT
 promote ARTIFACT NAME
 ```
 
 `run` drives a campaign. `generate` prints the program of one seed, so any
 finding replays locally. `replay` re-runs a saved artifact, `reduce` shrinks
-it to a minimal failing case, `mutate` grows a variant of it, and `promote`
+it to a minimal failing case, `mutate` grows a variant of it, `compare` runs one hand written
+source file compiled and interpreted, and `promote`
 copies the reduced case into `regressions/` under the given name. A
 `RustcRejected` case keeps its first rustc error through the reduction, so it
 never drifts to another program rustc rejects.
+
+A case compiles with the `rustc` the repo pins in `rust-toolchain.toml`. It
+compiles in a temp folder, where a bare `rustc` would be the default toolchain
+of the machine.
+
+## The fleet
+
+`fleet` is the dev check spread over the homelab. CI never runs it. This
+machine and every Linux and Windows node that beekeeper reports online take
+part.
+
+A node gets the working tree by `rsync`, uncommitted files included, and
+builds it itself. So a run also proves the change on Linux before a push. The
+command installs the pinned Rust version on a node that lacks it. Everything
+on a node runs with `nice` and the idle io class, the nodes host game servers
+and CI runners. The parallel jobs of a node are its cores, capped by its free
+memory at 2 GB per job.
+
+The campaign seeds sit in one queue. Each machine takes a small range, runs
+it, and comes back for more. So a busy machine never holds the run up. The
+3 biggest nodes also take one part of the test suite each, and every machine
+takes a slice of the sweep, `rust check` over the `#!/usr/bin/env rust`
+scripts of `~/dev/thing`. This machine runs the whole test suite too.
+
+The report has one block per machine. The failing cases of a node are copied
+to `target/rustscript-differential/fleet/NODE/`. `RUSTSCRIPT_FLEET_NODES`
+names the nodes by hand, separated by spaces, a Windows node as `name:windows`.
+
+A Windows node has no `rsync`, so the tree goes there as a `tar` stream over `ssh`. Its
+commands run in PowerShell in the idle priority class. It takes the whole test suite, not a
+part, since it is the only machine of its kind.
 
 ## Seeds
 
@@ -166,7 +226,27 @@ included, so a fixed bug stays fixed. Fixing a new finding ends with a
 
 `surface` compares the std surface against the method catalog and the
 interpreter listing, so the methods neither side knows are in the log of
-every run. `--refresh` re-harvests the std listing.
+every run. `--refresh` re-harvests the std listing. With a script repo at hand, `~/dev/thing`
+or the one `--scripts DIR` names, the report also counts the method calls of its scripts and
+lists the std methods no catalog row generates by how often the scripts call them. So the next
+catalog rows are the ones scripts use most.
+
+The `surface` test is a gate on the reach of the generator. A std method the
+interpreter implements on a type the generator writes must show up in the
+generated programs, or stand in `surface_skips.txt` with a reason. A stale
+skip fails too. So a new bridge method can not land without a differential
+case that calls it.
+
+A campaign also sets `RUSTSCRIPT_DISPATCH_LOG` for every interpreted run. The
+VM then writes each receiver kind and method it really dispatched. The
+campaign ends with the count of bridged methods no run reached, and the list
+in `target/rustscript-differential/undispatched.txt`. A name in the text of a
+program says nothing of the receiver, the log does.
+
+The catalog rows in `catalog/rows_lazy.rs` hand closures to `Option`, `Result`
+and iterator methods. An argument is bound by a `let` after the receiver, and
+the closure reads that binding. An argument written inside the closure would
+not compile when it holds a `?`.
 
 Rust leaves the sign of a computed NaN open, so it can differ between two
 builds of the same program. The `is_sign_positive`, `is_sign_negative` and

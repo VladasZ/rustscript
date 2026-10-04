@@ -7,8 +7,9 @@ use syn::{Expr, Pat};
 
 use crate::interpreter::bytecode::{CapSource, Op, Reg};
 
+use super::infer::Ty;
 use super::place::{self, copies};
-use super::{Compiler, FnState, NameLoc, captures, idx16, numeric_annotation};
+use super::{Compiler, FnState, NameLoc, captures, derives_copy, idx16, numeric_annotation};
 
 impl Compiler<'_> {
     /// The callee worked on the arg window copy and the VM hands it back on return. Only for calls
@@ -186,6 +187,7 @@ impl Compiler<'_> {
             .expect("the closure frame was just pushed");
         let caps: Vec<CapSource> = child.upvalues.iter().map(|(_, s)| *s).collect();
         let partial = vec![false; caps.len()];
+        let by_value = vec![false; caps.len()];
         let mut chunk = child.into_chunk(self.ctx.file.clone())?;
         chunk.module = idx16(self.ctx.module);
         chunk.moves = moves;
@@ -194,11 +196,60 @@ impl Compiler<'_> {
         parent.children.push(Arc::new(chunk));
         parent.child_caps.push(caps);
         parent.child_partial.push(partial);
+        parent.child_by_value.push(by_value);
         self.emit(Op::Spawn {
             dst,
             child: child_idx,
         });
         Ok(())
+    }
+
+    /// Whether no value of the type is `Copy`, so a by value use of it is always a move. A
+    /// bridge type is left out, the pass does not know which of them copy.
+    pub(super) fn never_copies(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Str | Ty::Vec(_) | Ty::Set(..) | Ty::Map(..) => true,
+            Ty::Struct(canon) => self.is_non_copy_name(canon),
+            Ty::Enum(canon) => self
+                .ctx
+                .resolver
+                .enums
+                .get(canon)
+                .is_some_and(|e| !derives_copy(&e.attrs)),
+            Ty::Option(inner) => self.never_copies(inner),
+            Ty::Result(ok, err) => self.never_copies(ok) || self.never_copies(err),
+            Ty::Tuple(items) => items.iter().any(|item| self.never_copies(item)),
+            _ => false,
+        }
+    }
+
+    /// Whether the frame owns the value in this register. The inferred type of a reference is
+    /// its referent, so the type alone can't tell `v` from `&v`. A reference local or
+    /// parameter only forwards a handle, and a parameter of a closure is owned or lent as its
+    /// caller decides, so neither is the frame's to give away.
+    fn frame_owns(frame: &FnState, reg: Reg) -> bool {
+        let closure_param = frame.name == "<closure>" && (reg as usize) < frame.num_params;
+        !frame.shares_only(reg) && !closure_param
+    }
+
+    /// `frame_owns` for a capture of the closure just compiled, asked on its parent.
+    fn owns_local(&self, source: CapSource) -> bool {
+        let (CapSource::Local(reg) | CapSource::MutableLocal(reg)) = source else {
+            return false;
+        };
+        self.frames
+            .last()
+            .is_some_and(|frame| Self::frame_owns(frame, reg))
+    }
+
+    /// `frame_owns` for a name the closure being compiled captures from the frame around it.
+    pub(super) fn parent_owns(&self, name: &str) -> bool {
+        let Some(parent) = self.frames.len().checked_sub(2).map(|i| &self.frames[i]) else {
+            return false;
+        };
+        parent
+            .local_reg(name)
+            .is_some_and(|reg| Self::frame_owns(parent, reg))
     }
 
     pub(super) fn compile_closure(&mut self, dst: Reg, c: &syn::ExprClosure) -> Result<()> {
@@ -286,6 +337,16 @@ impl Compiler<'_> {
                 captures::captures_only_copy_fields(&c.body, name, &|e| copies(&self.types.of(e)))
             })
             .collect();
+        let by_value: Vec<bool> = child
+            .upvalues
+            .iter()
+            .map(|(name, source)| {
+                self.owns_local(*source)
+                    && captures::moves_out(&c.body, name, &|e| {
+                        !self.never_copies(&self.types.of(e))
+                    })
+            })
+            .collect();
         let mut chunk = child.into_chunk(self.ctx.file.clone())?;
         chunk.module = idx16(self.ctx.module);
         chunk.moves = c.capture.is_some();
@@ -295,6 +356,7 @@ impl Compiler<'_> {
         parent.children.push(chunk);
         parent.child_caps.push(caps);
         parent.child_partial.push(partial);
+        parent.child_by_value.push(by_value);
         self.emit(Op::MakeClosure {
             dst,
             child: child_idx,

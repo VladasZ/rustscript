@@ -4,6 +4,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fmt::{Debug, Display};
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
@@ -11,6 +12,8 @@ use rustc_hash::FxHashMap;
 
 use super::bytecode::PathId;
 use super::enum_def::{EnumKind, OK};
+use super::json_typed::{OptVisitor, TypedVisitor};
+use super::native::Native;
 use super::numeric::IntWidth;
 use super::serde_types::{DataError, EnumInfo};
 use super::typeir::{ScalarIr, TypeIr};
@@ -29,6 +32,16 @@ pub struct StructInfo {
     pub key_map: FxHashMap<String, usize>,
     /// per field, the `#[serde(default)]` chunk that makes a missing value
     pub defaults: Vec<Option<Arc<super::bytecode::Chunk>>>,
+}
+
+impl StructInfo {
+    /// The key the input names the field by, `rename` applied.
+    fn key_of(&self, slot: usize) -> &str {
+        self.key_map
+            .iter()
+            .find(|(_, s)| **s == slot)
+            .map_or("?", |(k, _)| k.as_str())
+    }
 }
 
 pub type Structs = HashMap<Arc<str>, Arc<StructInfo>>;
@@ -212,7 +225,7 @@ impl Vm {
     ) -> JsonPlan {
         match ty {
             TypeIr::Dynamic => JsonPlan::Dynamic,
-            TypeIr::Scalar(s) => JsonPlan::Scalar(*s, false),
+            TypeIr::Scalar(s) => JsonPlan::Scalar(*s),
             TypeIr::Generic(name) => match tenv.iter().find(|(n, _)| **n == **name) {
                 Some((_, bound)) => self.json_plan(bound, building, tenv),
                 None => JsonPlan::Dynamic,
@@ -221,16 +234,12 @@ impl Vm {
             TypeIr::Set(inner, sorted) => {
                 JsonPlan::Set(Box::new(self.json_plan(inner, building, tenv)), *sorted)
             }
-            TypeIr::Option(inner) => match self.json_plan(inner, building, tenv) {
-                JsonPlan::Enum(info, _) => JsonPlan::Enum(info, true),
-                JsonPlan::Scalar(s, _) => JsonPlan::Scalar(s, true),
-                plan => plan,
-            },
+            TypeIr::Option(inner) => JsonPlan::Opt(Box::new(self.json_plan(inner, building, tenv))),
             TypeIr::MapValue(inner, sorted) => {
                 JsonPlan::Map(Box::new(self.json_plan(inner, building, tenv)), *sorted)
             }
             TypeIr::Enum(canon) => match self.serde_enums.get(&**canon) {
-                Some(info) => JsonPlan::Enum(info.clone(), false),
+                Some(info) => JsonPlan::Enum(info.clone()),
                 None => JsonPlan::Dynamic,
             },
             TypeIr::Struct(canon) => {
@@ -277,21 +286,31 @@ impl Vm {
         let parsed = match format {
             PathId::TomlFromStr => toml::Deserializer::parse(text)
                 .and_then(|de| parse_planned(de, &plan, self))
-                .map_err(|e| e.to_string()),
+                .map_err(|e| parse_error(&e)),
             PathId::SerdeYamlFromStr => {
                 parse_planned(serde_yaml::Deserializer::from_str(text), &plan, self)
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| parse_error(&e))
             }
-            _ => parse_json_planned(text, &plan, self).map_err(|e| e.to_string()),
+            _ => parse_json_planned(text, &plan, self).map_err(|e| parse_error(&e)),
         };
         Ok(match parsed {
             Ok(v) => Value::ok(v),
-            Err(e) => Value::err(Value::str(e)),
+            Err(e) => Value::err(e),
         })
     }
 }
 
 // parsing
+
+/// The error of a parse as a value. `{}` and `{:?}` print what the real error prints,
+/// `Error("missing field `x`", line: 1, column: 8)` for `serde_json`.
+pub(super) fn parse_error(error: &(impl Display + Debug)) -> Value {
+    Native::ParseErr {
+        display: error.to_string(),
+        debug: format!("{error:?}"),
+    }
+    .wrap()
+}
 
 pub(super) enum JsonPlan {
     Dynamic,
@@ -301,17 +320,38 @@ pub(super) enum JsonPlan {
     /// the flag is a `BTreeMap`
     Map(Box<JsonPlan>, bool),
     Struct(Arc<StructPlan>),
-    /// read as a plain json tree first, see `serde_types`. The flag is an `Option` around it,
-    /// where a json null is `None` before any variant sees it.
-    Enum(Arc<EnumInfo>, bool),
-    /// read with the real serde visitor of the primitive, see `scalar_seed`. The flag is an
-    /// `Option` around it, where a null is `None`.
-    Scalar(ScalarIr, bool),
+    /// read as a plain json tree first, see `serde_types`
+    Enum(Arc<EnumInfo>),
+    /// read with the real serde visitor of the primitive, see `scalar_seed`
+    Scalar(ScalarIr),
+    /// `Option<T>`, a null is `None` before the inner plan sees it, see `OptVisitor`
+    Opt(Box<JsonPlan>),
 }
 
 pub(super) struct StructPlan {
     info: Arc<StructInfo>,
     fields: Vec<JsonPlan>,
+}
+
+impl StructPlan {
+    pub(super) fn info(&self) -> &Arc<StructInfo> {
+        &self.info
+    }
+
+    pub(super) fn fields(&self) -> &[JsonPlan] {
+        &self.fields
+    }
+
+    /// What the field holds for a value its plan read. An `Opt` plan already made the `Some`. An
+    /// `Option` field whose inner type has no plan wraps here.
+    pub(super) fn field_value(&self, slot: usize, value: Value) -> Value {
+        let planned = matches!(self.fields[slot], JsonPlan::Opt(_));
+        if self.info.optional[slot] && !planned && !value.is_none_value() {
+            Value::some(value)
+        } else {
+            value
+        }
+    }
 }
 
 /// Object keys repeat for every array element, so each parse interns them. The parse runs on 1
@@ -367,9 +407,9 @@ pub(super) struct ParseCx<'v> {
     pub(super) vm: Option<&'v Arc<Vm>>,
 }
 
-struct PlanSeed<'a> {
-    plan: &'a JsonPlan,
-    cx: &'a ParseCx<'a>,
+pub(super) struct PlanSeed<'a> {
+    pub(super) plan: &'a JsonPlan,
+    pub(super) cx: &'a ParseCx<'a>,
 }
 
 impl<'de> serde::de::DeserializeSeed<'de> for PlanSeed<'_> {
@@ -381,7 +421,10 @@ impl<'de> serde::de::DeserializeSeed<'de> for PlanSeed<'_> {
     ) -> std::result::Result<Value, D::Error> {
         // serde buffers an untagged enum and tries the variants after the value is read, so its
         // error carries no position of its own
-        if let JsonPlan::Enum(info, optional) = self.plan
+        if let JsonPlan::Opt(inner) = self.plan {
+            return d.deserialize_option(OptVisitor { inner, cx: self.cx });
+        }
+        if let JsonPlan::Enum(info) = self.plan
             && matches!(info.def.serde.repr, super::enum_def::SerdeRepr::Untagged)
         {
             let raw = d.deserialize_any(PlanVisitor {
@@ -389,27 +432,32 @@ impl<'de> serde::de::DeserializeSeed<'de> for PlanSeed<'_> {
                 cx: self.cx,
             })?;
             return match self.cx.vm {
-                Some(_) if *optional && raw.is_none_value() => Ok(raw),
                 Some(vm) => vm
                     .enum_from_json(info, raw)
                     .map_err(serde::de::Error::custom),
                 None => Ok(raw),
             };
         }
-        if let JsonPlan::Scalar(scalar, optional) = self.plan {
-            return super::json_scalar::scalar_seed(d, *scalar, *optional);
-        }
-        if let JsonPlan::Enum(info, optional) = self.plan {
-            return d.deserialize_any(super::serde_types::EnumVisitor {
-                info,
-                cx: self.cx,
-                optional: *optional,
-            });
-        }
-        d.deserialize_any(PlanVisitor {
+        let typed = TypedVisitor {
             plan: self.plan,
             cx: self.cx,
-        })
+        };
+        match self.plan {
+            JsonPlan::Scalar(scalar) => super::json_scalar::scalar_seed(d, *scalar),
+            JsonPlan::Enum(info) => {
+                d.deserialize_any(super::serde_types::EnumVisitor { info, cx: self.cx })
+            }
+            // a tuple struct has no named field and keeps the loose read
+            JsonPlan::Struct(sp) if !sp.info.shape.fields.is_empty() => {
+                d.deserialize_struct("", &[], typed)
+            }
+            JsonPlan::Vec(_) | JsonPlan::Set(..) => d.deserialize_seq(typed),
+            JsonPlan::Map(..) => d.deserialize_map(typed),
+            _ => d.deserialize_any(PlanVisitor {
+                plan: self.plan,
+                cx: self.cx,
+            }),
+        }
     }
 }
 
@@ -509,14 +557,18 @@ fn fill_flattened<E: serde::de::Error>(
         if !attrs.flatten {
             continue;
         }
-        let plan = &sp.fields[slot];
+        // an `Option` around a flattened field reads the inner type from the same keys
+        let (plan, optional) = match &sp.fields[slot] {
+            JsonPlan::Opt(inner) => (&**inner, true),
+            plan => (plan, sp.info.optional[slot]),
+        };
         let v = PlanSeed { plan, cx }
             .deserialize(serde_json::Value::Object(rest.clone()))
             .map_err(E::custom)?;
         if let JsonPlan::Struct(inner) = plan {
             rest.retain(|k, _| !inner.info.key_map.contains_key(k));
         }
-        values[slot] = if sp.info.optional[slot] && !v.is_none_value() {
+        values[slot] = if optional && !v.is_none_value() {
             Value::some(v)
         } else {
             v
@@ -614,16 +666,18 @@ impl<'de> serde::de::Visitor<'de> for PlanVisitor<'_> {
                             rest.insert(key, access.next_value()?);
                         }
                         FieldKey::Slot(i) => {
+                            // a derived struct refuses a key it already read, before its value
+                            if filled[i] {
+                                let key = sp.info.key_of(i);
+                                return Err(serde::de::Error::custom(format!(
+                                    "duplicate field `{key}`"
+                                )));
+                            }
                             let v = access.next_value_seed(PlanSeed {
                                 plan: &sp.fields[i],
                                 cx: self.cx,
                             })?;
-                            // an Option field wraps a present value in Some
-                            values[i] = if sp.info.optional[i] && !v.is_none_value() {
-                                Value::some(v)
-                            } else {
-                                v
-                            };
+                            values[i] = sp.field_value(i, v);
                             filled[i] = true;
                         }
                         FieldKey::Skip => {
@@ -685,11 +739,7 @@ fn fill_missing<E: serde::de::Error>(
         if info.optional.get(slot).copied().unwrap_or(false) {
             continue;
         }
-        let key = info
-            .key_map
-            .iter()
-            .find(|(_, s)| **s == slot)
-            .map_or("?", |(k, _)| k.as_str());
+        let key = info.key_of(slot);
         return Err(E::custom(format!("missing field `{key}`")));
     }
     Ok(())

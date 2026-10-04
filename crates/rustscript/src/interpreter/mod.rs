@@ -11,6 +11,7 @@ pub mod coverage;
 mod crates_bridge;
 mod debug_fmt;
 mod discard;
+mod dispatch_log;
 mod ed25519_bridge;
 mod enum_def;
 mod env_overlay;
@@ -24,7 +25,9 @@ mod json_bridge;
 mod json_paths;
 mod json_scalar;
 mod json_serialize;
+mod json_typed;
 mod jwt_bridge;
+mod local_uses;
 mod map_methods;
 mod methods;
 mod native;
@@ -70,7 +73,9 @@ use anyhow::{Result, anyhow};
 
 use crate::loader::ModuleSrc;
 use bytecode::Chunk;
+use compile::infer::census::{self, Untyped};
 use compile::{Compiler, Ctx};
+use local_uses::scope_local_uses;
 use register::{
     PendingConst, build_fn_index, build_impl_table, build_module_tree, collect_const_types,
     collect_fn_signatures, collect_impl_items, collect_mut_arg_returns, collect_mut_methods,
@@ -120,11 +125,19 @@ pub(crate) fn script_args() -> Vec<String> {
 
 /// `async_mode` means the script has `#[tokio::main]`.
 pub fn run(modules: &[ModuleSrc], async_mode: bool) -> Result<()> {
+    dispatch_log::init();
     let interp = Interp::load(modules, async_mode)?;
     // Coverage walk first. Otherwise an unchecked script can die on a cold branch after doing
     // half of its side effects. Costs well under a millisecond.
     interp.coverage_gate()?;
     interp.run()
+}
+
+/// The calls of the script whose result type the inference pass does not know, see `census`.
+pub fn untyped_calls(modules: &[ModuleSrc], async_mode: bool) -> Result<Vec<Untyped>> {
+    census::enable();
+    Interp::load(modules, async_mode)?;
+    Ok(census::found())
 }
 
 /// Compiled once, evaluated on first read.
@@ -164,10 +177,10 @@ impl Interp {
             &mut pending_impls,
             &mut pending_consts,
         )?;
-        resolver.reject_module_globs()?;
 
-        let pending_methods =
+        let mut pending_methods =
             collect_impl_items(&mut resolver, &pending_impls, &traits, &mut pending_consts)?;
+        scope_local_uses(&mut resolver, &mut pending_fns, &mut pending_methods)?;
 
         let fn_signatures = collect_fn_signatures(&pending_fns);
         let mut_arg_returns = collect_mut_arg_returns(&pending_fns);

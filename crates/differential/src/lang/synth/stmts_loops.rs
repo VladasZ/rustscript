@@ -2,12 +2,12 @@
 
 use rand::RngExt;
 
-use crate::lang::expr::{Expr, ReadMode};
+use crate::lang::expr::{Expr, ReadMode, UnOp, unbare_deep};
 use crate::lang::fmt::{Align, FmtSpec, FmtTrait};
 use crate::lang::pat::Pat;
 use crate::lang::stmt::{MutOp, PrintForm, Stmt};
 use crate::lang::synth::Generator;
-use crate::lang::ty::Ty;
+use crate::lang::ty::{IntWidth, Ty};
 
 impl Generator<'_> {
     pub(super) fn if_stmt(&mut self) -> Stmt {
@@ -185,7 +185,7 @@ impl Generator<'_> {
                     9 => MutOp::VecClear,
                     // `v.extend(v.clone())` doubles the vec, and nested loops over a long vec
                     // run it until the output is gigabytes
-                    _ if self.in_loop => self.op_without(name, |inner| {
+                    _ if self.repeats() => self.op_without(name, |inner| {
                         MutOp::VecExtend(inner.expr(&Ty::vec_of(elem), 1))
                     }),
                     _ => MutOp::VecExtend(self.expr(&Ty::vec_of(elem), 1)),
@@ -194,6 +194,10 @@ impl Generator<'_> {
             Ty::Str => match self.rng.random_range(0..3) {
                 0 => MutOp::StrPush(self.expr(&Ty::Char, 1)),
                 1 => MutOp::StrClear,
+                // a string that appends itself doubles the same way
+                _ if self.repeats() => {
+                    self.op_without(name, |inner| MutOp::StrPushStr(inner.expr(&Ty::Str, 1)))
+                }
                 _ => MutOp::StrPushStr(self.expr(&Ty::Str, 1)),
             },
             Ty::Opt(elem) => {
@@ -358,6 +362,7 @@ impl Generator<'_> {
     // observations
 
     pub(super) fn print_stmt(&mut self, expr: Expr) -> Stmt {
+        let expr = self.width_probe(expr);
         let label = self.next_label();
         let observed = match expr.ty() {
             Ty::Map(key, value) => Ty::vec_of(Ty::Tuple(vec![*key, *value])),
@@ -377,6 +382,30 @@ impl Generator<'_> {
             expr,
             spec,
             form,
+        }
+    }
+
+    /// An integer that lost its width still prints the same digits. `!x` and `x.leading_zeros()`
+    /// do not, so a third of the integer prints read the value through one of them.
+    fn width_probe(&mut self, expr: Expr) -> Expr {
+        let ty = expr.ty();
+        if !ty.is_int() || !self.chance(0.3) {
+            return expr;
+        }
+        if self.chance(0.6) {
+            return Expr::Unary {
+                op: UnOp::Not,
+                value: Box::new(expr),
+                ty,
+            };
+        }
+        // a bare literal has no type for a method call to resolve on
+        Expr::Call {
+            method: "leading_zeros".to_string(),
+            recv: Box::new(unbare_deep(expr)),
+            args: Vec::new(),
+            fish: None,
+            ty: Ty::Int(IntWidth::U32),
         }
     }
 

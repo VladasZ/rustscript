@@ -218,7 +218,7 @@ pub(super) fn generic_method(recv: &Value, method: &MethodName, args: &[Value]) 
             discard(arg(args, 0)?);
             Value::none()
         }),
-        (Value::Vec(v), BuiltinId::AsArray) => Ok(Value::some(Value::vec(v.lock().clone()))),
+        (Value::Vec(v), BuiltinId::AsArray) => Ok(super::vecmap::as_array(v, args)),
         // `_mut` accessors return a borrow, so the mutation split never applies
         (Value::Vec(v), BuiltinId::AsArrayMut) => Ok(Value::some(Value::Ref(Arc::new(
             ValueRef::borrowed(Value::Vec(v.clone())),
@@ -598,7 +598,12 @@ pub(super) fn res_method(recv: &Value, method: &MethodName, args: &[Value]) -> R
             if is_ok {
                 inner
             } else {
-                bail!("{}", args.first().map(Value::display).unwrap_or_default());
+                // the std message carries the error after the text
+                bail!(
+                    "{}: {}",
+                    args.first().map(Value::display).unwrap_or_default(),
+                    inner.debug()
+                );
             }
         }
         BuiltinId::IntoIter | BuiltinId::Iter => {

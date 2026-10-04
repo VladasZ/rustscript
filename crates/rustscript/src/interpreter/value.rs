@@ -112,6 +112,29 @@ impl Upvalue {
         };
         Some(std::mem::replace(&mut *cell.lock(), value))
     }
+
+    /// The value moved out by the closure body. A capture cell keeps a borrow of it behind,
+    /// which drops nothing, so the closure does not drop the value again at its own end. The
+    /// borrow still reads as the value, the pass can take a `&str` capture for an owned one,
+    /// and a closure over that is called more than once. A shared capture is copied.
+    pub fn move_out(&self) -> Value {
+        let Self::Mutable(cell) = self else {
+            return self.get().deep_clone();
+        };
+        let mut slot = cell.lock();
+        let value = slot.clone();
+        if matches!(
+            value,
+            Value::Vec(_)
+                | Value::Tuple(_)
+                | Value::Map(..)
+                | Value::Struct(_)
+                | Value::Enum { .. }
+        ) {
+            *slot = Value::Ref(Arc::new(ValueRef::borrowed(value.clone())));
+        }
+        value
+    }
 }
 
 pub struct ClosureData {

@@ -48,8 +48,14 @@ impl Compiler<'_> {
                 self.emit(Op::MacroCall { kind, dst, spec });
             }
             "format" => {
+                // `format!` expands to a block with a statement of its own, so the temporaries
+                // of its arguments end with it, before the rest of the outer statement runs
+                let guard_mark = self.cur().guard_temps.len();
+                let temp_mark = self.cur().owned_temps.len();
                 let spec = self.build_fmt_spec(mac)?;
                 self.emit(Op::Fmt { dst, spec });
+                self.drop_temps(temp_mark, Some(dst));
+                self.release_guard_temps(guard_mark, Some(dst));
             }
             // `write!` lowers to build the string then `write_all`, so every writer the bridge
             // supports works and the `io::Result` is real

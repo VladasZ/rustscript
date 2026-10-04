@@ -36,6 +36,12 @@ pub enum Op {
         dst: Reg,
         idx: u16,
     },
+    /// The closure body moves a capture out, `|| fallback`. A capture cell is left empty, so the
+    /// closure does not drop the value again. A shared immutable capture is copied.
+    TakeUpvalue {
+        dst: Reg,
+        idx: u16,
+    },
     LoadCell {
         dst: Reg,
         cell: Reg,

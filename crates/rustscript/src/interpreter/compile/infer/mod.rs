@@ -7,6 +7,7 @@
 //! closures and constructor arguments, and a literal nothing types ends as `i32` or `f64`.
 
 mod arrays;
+pub(crate) mod census;
 mod exprs;
 mod json_mask;
 mod macros;
@@ -198,6 +199,8 @@ struct Infer<'c, 'r> {
     /// the value type of each enclosing `loop`, for `break v`
     loops: Vec<Ty>,
     generics: Vec<Arc<str>>,
+    /// the calls `rust types` checks, empty outside the census
+    call_sites: Vec<census::Site>,
 }
 
 impl<'c, 'r> Infer<'c, 'r> {
@@ -220,10 +223,12 @@ impl<'c, 'r> Infer<'c, 'r> {
             ret: Ty::Unit,
             loops: Vec::new(),
             generics: Vec::new(),
+            call_sites: Vec::new(),
         }
     }
 
     fn finish(self) -> Types {
+        self.report_untyped();
         let exprs = self
             .types
             .iter()

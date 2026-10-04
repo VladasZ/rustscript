@@ -553,6 +553,13 @@ impl Compiler<'_> {
                         });
                         return Ok(());
                     }
+                    // a capture of a type that can't be `Copy` moves out of the closure
+                    NameLoc::Upvalue(idx)
+                        if self.parent_owns(&name) && self.never_copies(&self.types.of(expr)) =>
+                    {
+                        self.emit(Op::TakeUpvalue { dst, idx });
+                        return Ok(());
+                    }
                     NameLoc::Upvalue(_) => {
                         self.compile_into(dst, expr)?;
                         self.emit(Op::Own {

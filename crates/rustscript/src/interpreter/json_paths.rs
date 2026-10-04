@@ -4,7 +4,7 @@ use anyhow::{Result, bail};
 
 use super::bridge::arg;
 use super::bytecode::PathId;
-use super::json_bridge::{json_to_pvalue, parse_json, pvalue_to_json};
+use super::json_bridge::{json_to_pvalue, parse_error, parse_json, pvalue_to_json};
 use super::value::Value;
 
 /// The dynamic path, `from_str` with no type plus `to_string` and `to_string_pretty`.
@@ -22,7 +22,7 @@ pub(super) fn bridge_serde_json(id: PathId, args: &[Value]) -> Result<Value> {
             };
             match parse_json(s) {
                 Ok(v) => Ok(Value::ok(v)),
-                Err(e) => Ok(Value::err(Value::str(e.to_string()))),
+                Err(e) => Ok(Value::err(parse_error(&e))),
             }
         }
         PathId::SerdeJsonToString | PathId::SerdeJsonToStringPretty => {

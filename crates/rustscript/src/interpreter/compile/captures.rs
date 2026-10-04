@@ -8,6 +8,8 @@ use syn::visit::{self, Visit};
 use syn::{Block, Expr, Pat};
 
 use super::is_assign_op;
+use super::method::consumes_receiver;
+use super::walks::unparen;
 
 /// The names the closures and `async` blocks inside `body` write, through an assignment, a
 /// `&mut` borrow, a mutating method or a `write!`. A name a closure declares itself is left
@@ -229,6 +231,116 @@ impl<'ast> Visit<'ast> for Uses<'_> {
             }
             self.visit_expr(arg);
         }
+    }
+}
+
+/// Whether the closure body moves `name` out of itself. rustc then captures the value by move
+/// even with no `move` keyword, `opt.unwrap_or_else(|| fallback)`, so the closure owns it and
+/// the frame must not drop it again. A mention counts where a value is taken, a tail, an
+/// argument, a `let`, a literal part, a `return`, or the receiver of a method that takes `self`.
+pub(super) fn moves_out(body: &Expr, name: &str, copies: &dyn Fn(&Expr) -> bool) -> bool {
+    let mut scan = Moves {
+        name,
+        copies,
+        moved: false,
+    };
+    scan.value(body);
+    scan.visit_expr(body);
+    scan.moved
+}
+
+struct Moves<'a> {
+    name: &'a str,
+    copies: &'a dyn Fn(&Expr) -> bool,
+    moved: bool,
+}
+
+impl Moves<'_> {
+    /// An expression in a position that takes its value.
+    fn value(&mut self, expr: &Expr) {
+        let inner = unparen(expr);
+        if is_name(inner, self.name) && !(self.copies)(inner) {
+            self.moved = true;
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for Moves<'_> {
+    fn visit_block(&mut self, block: &'ast Block) {
+        if let Some(syn::Stmt::Expr(tail, None)) = block.stmts.last() {
+            self.value(tail);
+        }
+        visit::visit_block(self, block);
+    }
+
+    fn visit_local(&mut self, local: &'ast syn::Local) {
+        if let Some(init) = &local.init {
+            self.value(&init.expr);
+        }
+        visit::visit_local(self, local);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        for arg in &call.args {
+            self.value(arg);
+        }
+        visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
+        for arg in &m.args {
+            self.value(arg);
+        }
+        if consumes_receiver(&m.method.to_string()) {
+            self.value(&m.receiver);
+        }
+        visit::visit_expr_method_call(self, m);
+    }
+
+    fn visit_expr_return(&mut self, r: &'ast syn::ExprReturn) {
+        if let Some(expr) = &r.expr {
+            self.value(expr);
+        }
+        visit::visit_expr_return(self, r);
+    }
+
+    fn visit_expr_break(&mut self, b: &'ast syn::ExprBreak) {
+        if let Some(expr) = &b.expr {
+            self.value(expr);
+        }
+        visit::visit_expr_break(self, b);
+    }
+
+    fn visit_expr_struct(&mut self, s: &'ast syn::ExprStruct) {
+        for field in &s.fields {
+            self.value(&field.expr);
+        }
+        visit::visit_expr_struct(self, s);
+    }
+
+    fn visit_expr_tuple(&mut self, t: &'ast syn::ExprTuple) {
+        for elem in &t.elems {
+            self.value(elem);
+        }
+        visit::visit_expr_tuple(self, t);
+    }
+
+    fn visit_expr_array(&mut self, a: &'ast syn::ExprArray) {
+        for elem in &a.elems {
+            self.value(elem);
+        }
+        visit::visit_expr_array(self, a);
+    }
+
+    fn visit_arm(&mut self, arm: &'ast syn::Arm) {
+        self.value(&arm.body);
+        visit::visit_arm(self, arm);
+    }
+
+    /// A closure inside that moves the name takes it from this one.
+    fn visit_expr_closure(&mut self, c: &'ast syn::ExprClosure) {
+        self.value(&c.body);
+        visit::visit_expr_closure(self, c);
     }
 }
 

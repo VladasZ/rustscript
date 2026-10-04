@@ -583,8 +583,13 @@ impl Generator<'_> {
         } else {
             ty
         };
-        // the target is borrowed for the write, so the right side can't take it
-        let expr = self.holding(&name, |inner| inner.expr(&rhs_ty, MAX_EXPR_DEPTH - 1));
+        let expr = if rhs_ty == Ty::Str && self.repeats() {
+            // `s += &s.clone()` doubles the string on every pass, see `collection_op`
+            self.without_binding(&name, |inner| inner.expr(&rhs_ty, MAX_EXPR_DEPTH - 1))
+        } else {
+            // the target is borrowed for the write, so the right side can't take it
+            self.holding(&name, |inner| inner.expr(&rhs_ty, MAX_EXPR_DEPTH - 1))
+        };
         Some(Stmt::Compound { name, op, expr })
     }
 

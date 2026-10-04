@@ -24,7 +24,8 @@ pub(crate) enum NumOut {
     SomeFloat(f64),
     Nothing,
     Ordering(Ordering),
-    SomeOrdering(Ordering),
+    /// `partial_cmp`, `None` when a side is NaN
+    PartialOrdering(Option<Ordering>),
 }
 
 pub(crate) fn num_core(recv: Num, name: BuiltinId, args: &impl Args) -> Result<Option<NumOut>> {
@@ -126,11 +127,9 @@ pub(crate) fn num_core(recv: Num, name: BuiltinId, args: &impl Args) -> Result<O
         (Int(a), BuiltinId::SaturatingAdd) => NumOut::Int(a.saturating_add(int_arg(args, 0)?)),
         (Int(a), BuiltinId::SaturatingMul) => NumOut::Int(a.saturating_mul(int_arg(args, 0)?)),
         (Int(a), BuiltinId::Cmp) => NumOut::Ordering(a.cmp(&int_arg(args, 0)?)),
-        (_, BuiltinId::PartialCmp) => NumOut::SomeOrdering(
-            as_f()
-                .partial_cmp(&float_arg(args, 0)?)
-                .unwrap_or(Ordering::Equal),
-        ),
+        (_, BuiltinId::PartialCmp) => {
+            NumOut::PartialOrdering(as_f().partial_cmp(&float_arg(args, 0)?))
+        }
         _ => return float_extra(recv, name, args),
     }))
 }
@@ -165,7 +164,8 @@ pub(crate) enum F32Out {
     Bool(bool),
     Bytes(Vec<u8>),
     Ordering(Ordering),
-    SomeOrdering(Ordering),
+    /// `partial_cmp`, `None` when a side is NaN
+    PartialOrdering(Option<Ordering>),
 }
 
 /// Computed in real f32. Through the f64 core `sqrt` double rounds and `{:?}` prints
@@ -232,10 +232,7 @@ pub(crate) fn f32_core(recv: f32, name: BuiltinId, args: &impl Args) -> Result<O
         BuiltinId::IsNan => F32Out::Bool(recv.is_nan()),
         BuiltinId::IsFinite => F32Out::Bool(recv.is_finite()),
         BuiltinId::IsInfinite => F32Out::Bool(recv.is_infinite()),
-        // same as the f64 core
-        BuiltinId::PartialCmp => {
-            F32Out::SomeOrdering(recv.partial_cmp(&arg(0)?).unwrap_or(Ordering::Equal))
-        }
+        BuiltinId::PartialCmp => F32Out::PartialOrdering(recv.partial_cmp(&arg(0)?)),
         _ => return Ok(None),
     }))
 }

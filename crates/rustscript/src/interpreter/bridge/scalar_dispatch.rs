@@ -105,7 +105,9 @@ pub(super) fn f32_method(recv: f32, name: BuiltinId, args: &[Value]) -> Result<O
             F32Out::Bool(value) => Value::Bool(value),
             F32Out::Bytes(bytes) => Value::vec(bytes.into_iter().map(Value::byte).collect()),
             F32Out::Ordering(ordering) => make_ordering(ordering),
-            F32Out::SomeOrdering(ordering) => Value::some(make_ordering(ordering)),
+            F32Out::PartialOrdering(ordering) => {
+                ordering.map_or_else(Value::none, |o| Value::some(make_ordering(o)))
+            }
         }),
     )
 }
@@ -216,6 +218,6 @@ pub(super) fn num_out(out: NumOut) -> Value {
         NumOut::SomeFloat(f) => Value::some(Value::Float(f)),
         NumOut::Nothing => Value::none(),
         NumOut::Ordering(o) => make_ordering(o),
-        NumOut::SomeOrdering(o) => Value::some(make_ordering(o)),
+        NumOut::PartialOrdering(o) => o.map_or_else(Value::none, |o| Value::some(make_ordering(o))),
     }
 }

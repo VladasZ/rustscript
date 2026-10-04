@@ -128,6 +128,7 @@ pub(super) fn step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
         | Op::LoadUnit { .. }
         | Op::LoadGlobal { .. }
         | Op::LoadUpvalue { .. }
+        | Op::TakeUpvalue { .. }
         | Op::LoadCell { .. }
         | Op::CellRef { .. }
         | Op::StoreCell { .. }
@@ -334,6 +335,10 @@ fn load_step(ctx: &mut StepCtx, op: &Op) -> Result<Flow> {
         Op::LoadUnit { dst } => ctx.set(*dst, Value::Unit),
         Op::LoadGlobal { dst, idx } => ctx.set(*dst, ctx.vm.global(*idx as usize)?),
         Op::LoadUpvalue { dst, idx } => ctx.set(*dst, ctx.upvalues()[*idx as usize].get()),
+        Op::TakeUpvalue { dst, idx } => {
+            let value = ctx.upvalues()[*idx as usize].move_out();
+            ctx.set(*dst, value)
+        }
         Op::LoadCell { dst, cell } => load_cell(ctx, *dst, *cell),
         Op::CellRef { dst, cell } => cell_ref(ctx, *dst, *cell),
         Op::StoreCell { cell, src } => store_cell(ctx, *cell, *src)?,

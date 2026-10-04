@@ -183,13 +183,18 @@ impl UserDef {
     }
 
     pub fn render(&self) -> String {
+        self.render_vis("")
+    }
+
+    /// `vis` is `pub ` for a type that lives in a module, and empty at the top of the file.
+    pub fn render_vis(&self, vis: &str) -> String {
         let mut out = String::new();
-        out.push_str(&self.render_decl());
+        out.push_str(&self.render_decl(vis));
         if let Some(display) = &self.display {
             out.push_str(&self.render_display(display));
         }
         if !self.methods.is_empty() {
-            out.push_str(&self.render_methods());
+            out.push_str(&self.render_methods(vis));
         }
         for from in &self.froms {
             out.push_str(&self.render_from(from));
@@ -222,18 +227,18 @@ impl UserDef {
         format!("#[derive({})]\n", names.join(", "))
     }
 
-    fn render_decl(&self) -> String {
+    fn render_decl(&self, vis: &str) -> String {
         let mut out = self.derive_line();
         match &self.shape.kind {
             UserKind::Struct(fields) => {
-                out.push_str(&format!("struct {} {{\n", self.shape.name));
+                out.push_str(&format!("{vis}struct {} {{\n", self.shape.name));
                 for field in fields {
-                    out.push_str(&format!("    {}: {},\n", field.name, field.ty.rust()));
+                    out.push_str(&format!("    {vis}{}: {},\n", field.name, field.ty.rust()));
                 }
                 out.push_str("}\n\n");
             }
             UserKind::Enum(variants) => {
-                out.push_str(&format!("enum {} {{\n", self.shape.name));
+                out.push_str(&format!("{vis}enum {} {{\n", self.shape.name));
                 for (index, variant) in variants.iter().enumerate() {
                     // the first unit variant carries the derived `Default`
                     if index == 0 && self.shape.derives.default {
@@ -294,7 +299,7 @@ impl UserDef {
         out
     }
 
-    fn render_methods(&self) -> String {
+    fn render_methods(&self, vis: &str) -> String {
         let mut out = format!("impl {} {{\n", self.shape.name);
         for method in &self.methods {
             let mut params = Vec::new();
@@ -309,7 +314,7 @@ impl UserDef {
                 Ret::Ty(ty) => ty.rust(),
             };
             out.push_str(&format!(
-                "    fn {}({}) -> {ret} {{\n        {}\n    }}\n",
+                "    {vis}fn {}({}) -> {ret} {{\n        {}\n    }}\n",
                 method.sig.name,
                 params.join(", "),
                 method.body.render()

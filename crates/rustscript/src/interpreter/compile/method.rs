@@ -172,7 +172,7 @@ impl Compiler<'_> {
 
     pub(super) fn compile_method(&mut self, dst: Reg, m: &syn::ExprMethodCall) -> Result<()> {
         self.check_target_known(m)?;
-        if m.method == "copy_from_slice" {
+        if m.method == "copy_from_slice" || m.method == "clone_from_slice" {
             return self.compile_copy_from_slice(dst, m);
         }
         if self.compile_sorted_range(dst, m)? {
@@ -244,6 +244,7 @@ impl Compiler<'_> {
         };
         let place = mutating && place::is_place_expr(&m.receiver);
         let base = self.compile_method_args(m, &method_text)?;
+        let (base, argc) = self.array_len_arg(m, &method_text, base);
         self.cur().close_operands(held);
         let (method, scalar) = self.method_name_and_scalar(m);
         let default = if matches!(method.as_str(), "unwrap_or_default" | "or_default") {
@@ -262,7 +263,7 @@ impl Compiler<'_> {
             recv,
             name,
             base,
-            argc: idx16(m.args.len()),
+            argc: idx16(argc),
         });
         // the call took it, so a later panic in this frame must not drop it again
         if unwinds_receiver {
@@ -393,13 +394,13 @@ impl Compiler<'_> {
         m: &syn::ExprMethodCall,
     ) -> Result<()> {
         let Expr::Index(ix) = &*m.receiver else {
-            bail!("copy_from_slice is only supported on a `v[a..b]` receiver");
+            bail!("{} is only supported on a `v[a..b]` receiver", m.method);
         };
         let Expr::Range(r) = &*ix.index else {
-            bail!("copy_from_slice is only supported on a `v[a..b]` receiver");
+            bail!("{} is only supported on a `v[a..b]` receiver", m.method);
         };
         let Some(src) = m.args.first() else {
-            bail!("copy_from_slice takes the source slice");
+            bail!("{} takes the source slice", m.method);
         };
         let recv = self.compile_expr(&ix.expr)?;
         let base = self.cur().reg_top;
@@ -427,8 +428,15 @@ impl Compiler<'_> {
                 v: i64::MAX,
             }),
         }
-        self.compile_into(base + 2, src)?;
-        let name = self.add_name("copy_from_slice".to_string());
+        self.compile_owned_into(base + 2, src)?;
+        // a source like `&[T::new()]` is a temporary that ends with the statement
+        if self.ctx.has_drop
+            && let Expr::Reference(r) = src
+            && self.temp_owned(&r.expr)
+        {
+            self.cur().owned_temps.push(base + 2);
+        }
+        let name = self.add_name(m.method.to_string());
         self.set_line(m.method.span());
         self.emit(Op::Method {
             dst,
@@ -438,6 +446,20 @@ impl Compiler<'_> {
             argc: 3,
         });
         Ok(())
+    }
+
+    /// `v.as_array::<N>()`, the length is part of the type, so it rides as an argument. Any
+    /// other call keeps its own window.
+    fn array_len_arg(&mut self, m: &syn::ExprMethodCall, method: &str, base: Reg) -> (Reg, usize) {
+        if method == "as_array"
+            && m.args.is_empty()
+            && let Some(len) = turbofish_len(m.turbofish.as_ref())
+        {
+            let reg = self.alloc();
+            self.emit(Op::LoadInt { dst: reg, v: len });
+            return (reg, 1);
+        }
+        (base, m.args.len())
     }
 
     /// `collect` into a String renames to `collect_string`, a map to `collect_map`, a set to
@@ -509,6 +531,17 @@ pub(super) fn turbofish_scalar(
             _ => None,
         })
         .and_then(ScalarTy::lower)
+}
+
+/// The `N` of a const turbofish, `as_array::<4>()`.
+fn turbofish_len(args: Option<&syn::AngleBracketedGenericArguments>) -> Option<i64> {
+    args?.args.iter().find_map(|arg| match arg {
+        syn::GenericArgument::Const(Expr::Lit(lit)) => match &lit.lit {
+            syn::Lit::Int(n) => n.base10_parse().ok(),
+            _ => None,
+        },
+        _ => None,
+    })
 }
 
 /// Methods that take `self` by value. The receiver temporary is theirs, so its drop, if any, is

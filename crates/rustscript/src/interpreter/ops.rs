@@ -260,7 +260,7 @@ pub(super) fn values_equal(l: &Value, r: &Value) -> bool {
 
 /// `PartialOrd` semantics, NaN makes every comparison false. Sorting goes through
 /// `compare_values` and rejects NaN.
-fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
+pub(super) fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> {
     Ok(match (l, r) {
         (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
         (Value::Big(a, wa), Value::Big(b, _)) => Some(if *wa == super::numeric::IntWidth::U128 {

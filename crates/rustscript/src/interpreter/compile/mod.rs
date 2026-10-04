@@ -633,7 +633,7 @@ mod expr;
 mod flow;
 mod fn_state;
 mod guards;
-mod infer;
+pub(super) mod infer;
 mod json_macro;
 mod liveness;
 mod macros;
@@ -772,9 +772,11 @@ impl<'r> Ctx<'r> {
         modules: &[crate::loader::ModuleSrc],
         impl_type: Option<&'r str>,
     ) -> Ctx<'r> {
+        // a fn body with a `use` compiles against a copy of its module, the file is the same
+        let source = self.resolver.modules[module].scope_of.unwrap_or(module);
         Ctx {
             module,
-            file: modules[module].file.clone(),
+            file: modules[source].file.clone(),
             impl_type,
             ..*self
         }

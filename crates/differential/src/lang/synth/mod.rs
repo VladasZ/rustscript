@@ -19,7 +19,9 @@ use rand::rngs::StdRng;
 
 use crate::lang::block::{Block, ConstDef, FnDef};
 use crate::lang::expr::{Expr, ReadMode};
+use crate::lang::layout::{Access, ModLayout};
 use crate::lang::own::{BindKind, OwnState, RefRules, Scope, Snapshot};
+use crate::lang::serde_case::SerdeProbe;
 use crate::lang::ty::{
     FLOAT_WIDTHS, FloatWidth, INT_WIDTHS, IntWidth, MAX_TY_DEPTH, SCALAR_TYPES, StdErr, Ty,
 };
@@ -27,6 +29,9 @@ use crate::lang::user::UserDef;
 
 /// Enough for a call whose receiver is a call whose argument is an operator.
 pub(super) const MAX_EXPR_DEPTH: usize = 3;
+
+/// How many blocks read json documents into a struct, see `serde_case`.
+const SERDE_CHANCE: f64 = 0.12;
 
 /// How often a read that may move does. The rest clone, so a binding usually survives to the
 /// prints at the end of the block.
@@ -191,6 +196,12 @@ impl<'a> Generator<'a> {
         }
     }
 
+    /// Whether the statement being built may run more than once, in a `loop` or in a `for` over
+    /// a collection. A value that grows by its own size must not be written there.
+    pub(super) fn repeats(&self) -> bool {
+        self.in_loop || self.scope.in_loop()
+    }
+
     pub(super) fn trace_id(&mut self) -> i64 {
         self.traces += 1;
         i64::try_from(self.tag * 1000 + usize::try_from(self.traces).unwrap_or(0))
@@ -235,7 +246,14 @@ impl<'a> Generator<'a> {
             consts: std::mem::take(&mut self.consts),
             types: std::mem::take(&mut self.types),
             describes: std::mem::take(&mut self.describes),
+            layout: None,
+            serde: Vec::new(),
         };
+        block.layout = self.layout(&block);
+        if self.chance(SERDE_CHANCE) {
+            let name = format!("DiffSerde{}", self.tag);
+            block.serde.push(SerdeProbe::generate(self.rng, name));
+        }
         block.fix_apply_borrows();
         block.seal();
         if let Err(fault) = crate::lang::own::check_block(&block) {
@@ -246,6 +264,32 @@ impl<'a> Generator<'a> {
             );
         }
         block
+    }
+
+    /// A third of the blocks with items keep them in a module. A path access names the fns by
+    /// position more often than not, so 2 blocks of a program declare the same fn name.
+    fn layout(&mut self, block: &Block) -> Option<ModLayout> {
+        if block.types.is_empty() && block.consts.is_empty() && block.fns.is_empty() {
+            return None;
+        }
+        if !self.chance(0.35) {
+            return None;
+        }
+        let access = *self.pick(&[
+            Access::Path,
+            Access::Path,
+            Access::CratePath,
+            Access::Alias,
+            Access::UseItems,
+            Access::UseGlob,
+            Access::LocalUse,
+        ]);
+        Some(ModLayout {
+            tag: self.tag,
+            nested: self.chance(0.3),
+            access,
+            shared_fns: access.by_path() && self.chance(0.7),
+        })
     }
 
     // names and draws

@@ -243,7 +243,15 @@ impl Infer<'_, '_> {
                 let name = segs.last().cloned().unwrap_or_default();
                 self.assoc_call(&owner, &name, &path.path, c, expected)
             }
-            _ => self.external_call(&segs, &path.path, &args, expected),
+            // an imported name, `use std::fs::read_to_string`, is typed by its full path
+            Ok(Res::External(full)) => {
+                self.note_path_call(c, &full);
+                self.external_call(&full, &path.path, &args, expected)
+            }
+            _ => {
+                self.note_path_call(c, &segs);
+                self.external_call(&segs, &path.path, &args, expected)
+            }
         }
     }
 

@@ -2,7 +2,7 @@
 
 use num_traits::AsPrimitive;
 use std::cmp::Ordering;
-use std::mem::take;
+use std::mem::{replace, take};
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
@@ -334,7 +334,9 @@ fn vec_method_by_name(v: &List, method: &MethodName, args: &mut [Value]) -> Resu
             v.lock().reverse();
             Value::Unit
         }
-        BuiltinId::CopyFromSlice => return vec_copy_from_slice(v, args),
+        BuiltinId::CopyFromSlice | BuiltinId::CloneFromSlice => {
+            return vec_copy_from_slice(v, method, args);
+        }
         BuiltinId::SwapRemove => {
             let i = usize::try_from(int_arg(args, 0)?)?;
             let mut items = v.lock();
@@ -393,7 +395,7 @@ fn vec_method_by_name(v: &List, method: &MethodName, args: &mut [Value]) -> Resu
         }
         BuiltinId::Max | BuiltinId::Min => return vec_min_max(v, method, args),
         // a parsed json array is a plain Vec
-        BuiltinId::AsArray => Value::some(Value::vec(v.lock().clone())),
+        BuiltinId::AsArray => as_array(v, args),
         // the mut accessor hands back the same list, so a push reaches the original
         BuiltinId::AsArrayMut => Value::some(Value::Ref(Arc::new(
             super::value::ValueRef::borrowed(Value::Vec(v.clone())),
@@ -406,14 +408,15 @@ fn vec_method_by_name(v: &List, method: &MethodName, args: &mut [Value]) -> Resu
     })
 }
 
-/// `v[a..b].copy_from_slice(src)` with the bounds as leading args, so the write reaches the base
-/// vec. An open end arrives as the max sentinel.
-fn vec_copy_from_slice(v: &List, args: &[Value]) -> Result<Value> {
+/// `v[a..b].copy_from_slice(src)` and `clone_from_slice` with the bounds as leading args, so the
+/// write reaches the base vec. An open end arrives as the max sentinel.
+fn vec_copy_from_slice(v: &List, method: &MethodName, args: &[Value]) -> Result<Value> {
     let start = usize::try_from(int_arg(args, 0)?)?;
     let end_raw = int_arg(args, 1)?;
     let src: Vec<Value> = match args.get(2) {
-        Some(Value::Vec(other)) => other.lock().clone(),
-        _ => bail!("copy_from_slice takes a slice argument"),
+        // a copy shares no storage with the source, or the drop of the source would empty it
+        Some(Value::Vec(other)) => other.lock().iter().map(Value::deep_clone).collect(),
+        _ => bail!("{} takes a slice argument", method.text),
     };
     let mut items = v.lock();
     let end = if end_raw == i64::MAX {
@@ -435,7 +438,8 @@ fn vec_copy_from_slice(v: &List, args: &[Value]) -> Result<Value> {
         );
     }
     for (k, val) in src.into_iter().enumerate() {
-        items[start + k] = val;
+        // the item a write replaces drops right there, before the next one is written
+        discard(replace(&mut items[start + k], val));
     }
     Ok(Value::Unit)
 }
@@ -652,4 +656,14 @@ fn vec_affix(v: &List, method: &MethodName, args: &[Value]) -> Result<Value> {
             .zip(&needle)
             .all(|(x, n)| x.eq_value(n)),
     ))
+}
+
+/// The slice `as_array::<N>()` carries its `N` as an argument and is `None` for another length.
+/// The json accessor of the same name carries none.
+pub(super) fn as_array(v: &List, args: &[Value]) -> Value {
+    let items = v.lock();
+    match args.first() {
+        Some(Value::Int(len)) if usize::try_from(*len).ok() != Some(items.len()) => Value::none(),
+        _ => Value::some(Value::vec(items.clone())),
+    }
 }

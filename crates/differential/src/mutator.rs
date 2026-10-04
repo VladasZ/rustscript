@@ -95,7 +95,7 @@ fn is_portable(expr: &Expr) -> bool {
 fn mentions_user(ty: &Ty) -> bool {
     match ty {
         Ty::User(_) => true,
-        Ty::Vec(inner) | Ty::Opt(inner) | Ty::Set(inner) => mentions_user(inner),
+        Ty::Vec(inner) | Ty::Opt(inner) | Ty::Set(inner) | Ty::Slice(inner) => mentions_user(inner),
         Ty::Map(key, value) | Ty::Res(key, value) => mentions_user(key) || mentions_user(value),
         Ty::Tuple(items) => items.iter().any(mentions_user),
         _ => false,

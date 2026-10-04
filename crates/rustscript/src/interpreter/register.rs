@@ -549,7 +549,7 @@ fn foreign_impl_key(path: &syn::Path) -> String {
         .collect()
 }
 
-fn collect_use_tree(
+pub(super) fn collect_use_tree(
     tree: &syn::UseTree,
     prefix: &mut Vec<String>,
     out: &mut HashMap<String, Vec<String>>,
