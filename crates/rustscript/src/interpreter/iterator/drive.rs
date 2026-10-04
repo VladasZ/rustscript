@@ -182,6 +182,24 @@ impl Vm {
         left: &Handle,
         right: &Handle,
     ) -> Result<Option<Value>> {
+        // std zips an endless `repeat` by index, so it makes no clone the right side has no
+        // partner for
+        let endless = matches!(
+            &*left.lock(),
+            Native::Iterator(IteratorState::Repeat {
+                remaining: None,
+                ..
+            })
+        );
+        if endless {
+            let Some(second) = self.iterator_next(right)? else {
+                return Ok(None);
+            };
+            let Some(first) = self.iterator_next(left)? else {
+                return Ok(None);
+            };
+            return Ok(Some(Value::tuple(vec![first, second])));
+        }
         let Some(first) = self.iterator_next(left)? else {
             return Ok(None);
         };

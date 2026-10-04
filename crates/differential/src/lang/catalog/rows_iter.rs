@@ -5,8 +5,7 @@
 //! float item would print the sign of a NaN, which real Rust leaves open.
 
 use super::{
-    ELEM, Elem, Exact, FStr, FUSize, Method, OrdElem, SAME, Same, StrElem, TyPat, VecRecv, m,
-    with_elem,
+    ELEM, Elem, Exact, FStr, FUSize, Method, OrdElem, Same, StrElem, TyPat, VecRecv, m, with_elem,
 };
 
 pub(super) const ROWS: &[Method] = &[
@@ -179,8 +178,8 @@ pub(super) const ROWS: &[Method] = &[
         "iter_rchunks",
         VecRecv,
         &[],
-        TyPat::Vec(SAME),
-        "{r}.rchunks(2).map(|c| c.to_vec()).collect::<Vec<Vec<{E}>>>()",
+        Same,
+        "{r}.rchunks(2).map(|c| c.to_vec()).collect::<Vec<Vec<{E}>>>().concat()",
     ),
     m(
         "iter_range_rev_step",
