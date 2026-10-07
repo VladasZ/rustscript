@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail};
 
 use asset::{Asset, asset_exists, download, download_url, extract, fetch_text, verify_checksum};
 use install::{
-    BINARY, cargo_home, cleanup_stale_binaries, move_aside, restore, swap, verify, warn_if_shadowed,
+    Place, cleanup_stale_binaries, move_aside, place, restore, swap, verify, warn_if_shadowed,
 };
 use records::{install_key, record};
 use release::{
@@ -48,8 +48,8 @@ impl Request {
 
 pub fn update(args: &[String]) -> Result<()> {
     let request = Request::parse(args)?;
-    let home = cargo_home()?;
-    let target = home.join("bin").join(BINARY);
+    let place = place()?;
+    let target = place.target();
     if cfg!(windows) {
         cleanup_stale_binaries(&target);
     }
@@ -91,8 +91,14 @@ pub fn update(args: &[String]) -> Result<()> {
     println!("updating rustscript from v{INSTALLED} to {}", release.tag);
 
     match asset {
-        Some(asset) => install_asset(&release, &asset, &home, &target)?,
-        None => install_from_source(&release.tag, &target)?,
+        Some(asset) => install_asset(&release, &asset, &place, &target)?,
+        None => match &place {
+            Place::Cargo(_) => install_from_source(&release.tag, &target)?,
+            Place::Beside(_) => bail!(
+                "building {} from source needs cargo, and this machine has none",
+                release.tag
+            ),
+        },
     }
 
     println!("updated rustscript to {}", release.tag);
@@ -113,7 +119,7 @@ fn asset_for(release: &Release, from_source: bool) -> Option<Asset> {
 }
 
 /// Prove the binary works before touching the installed one.
-fn install_asset(release: &Release, asset: &Asset, home: &Path, target: &Path) -> Result<()> {
+fn install_asset(release: &Release, asset: &Asset, place: &Place, target: &Path) -> Result<()> {
     println!("downloading {}", asset.name);
     let archive = download(&download_url(&release.tag, &asset.name))?;
     let sums = fetch_text(&download_url(&release.tag, "SHA256SUMS"))?;
@@ -133,11 +139,14 @@ fn install_asset(release: &Release, asset: &Asset, home: &Path, target: &Path) -
     }
     swap(&staged, target)?;
 
-    if let Err(error) = record(
-        home,
-        &install_key(&release.tag, &release.commit),
-        asset.target,
-    ) {
+    // The install list belongs to cargo, there is none without it.
+    if let Place::Cargo(home) = place
+        && let Err(error) = record(
+            home,
+            &install_key(&release.tag, &release.commit),
+            asset.target,
+        )
+    {
         eprintln!(
             "warning: rustscript is installed but cargo's install list was not updated: {error:#}"
         );

@@ -362,7 +362,7 @@ impl Infer<'_, '_> {
                 }
                 Ty::Unit
             }
-            "sort_by" | "sort_unstable_by" => {
+            "sort_by" | "sort_unstable_by" | "dedup_by" => {
                 self.closure_ret(args, 0, vec![item.clone(), item.clone()]);
                 Ty::Unit
             }
@@ -373,10 +373,6 @@ impl Infer<'_, '_> {
             | "retain_mut"
             | "dedup_by_key" => {
                 self.closure_ret(args, 0, vec![item.clone()]);
-                Ty::Unit
-            }
-            "dedup_by" => {
-                self.closure_ret(args, 0, vec![item.clone(), item.clone()]);
                 Ty::Unit
             }
             "join" => {

@@ -87,6 +87,20 @@ impl IteratorState {
                 inclusive: *inclusive,
                 width: *width,
             },
+            IteratorState::Repeat { value, remaining } => IteratorState::Repeat {
+                value: value.deep_clone(),
+                remaining: *remaining,
+            },
+            IteratorState::MutableValues { .. } | IteratorState::DrainingValues { .. } => {
+                bail!("an iterator over `&mut` items can not be cloned for `cycle`")
+            }
+            other => other.fork_text()?,
+        })
+    }
+
+    /// The iterators over a string, they share their source.
+    fn fork_text(&self) -> Result<IteratorState> {
+        Ok(match self {
             IteratorState::Bytes { source, index } => IteratorState::Bytes {
                 source: source.clone(),
                 index: *index,
@@ -126,13 +140,6 @@ impl IteratorState {
                 source: source.clone(),
                 offset: *offset,
             },
-            IteratorState::Repeat { value, remaining } => IteratorState::Repeat {
-                value: value.deep_clone(),
-                remaining: *remaining,
-            },
-            IteratorState::MutableValues { .. } | IteratorState::DrainingValues { .. } => {
-                bail!("an iterator over `&mut` items can not be cloned for `cycle`")
-            }
             adapter => adapter.fork_adapter()?,
         })
     }

@@ -280,7 +280,6 @@ impl Infer<'_, '_> {
                 self.arg_ty(args, 0, item);
                 Ty::option(item.clone())
             }
-            "is_sorted" => Ty::Bool,
             "position" | "rposition" => {
                 self.closure_ret(args, 0, vec![item.clone()]);
                 Ty::option(Ty::usize())
@@ -298,7 +297,7 @@ impl Infer<'_, '_> {
                 Ty::Unit
             }
             "count" | "len" | "size_hint" => Ty::usize(),
-            "is_empty" => Ty::Bool,
+            "is_empty" | "is_sorted" => Ty::Bool,
             "join" => {
                 self.walk_all(args);
                 Ty::Str
