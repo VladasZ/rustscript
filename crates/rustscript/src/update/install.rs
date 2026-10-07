@@ -1,4 +1,4 @@
-use std::env::var_os;
+use std::env::{current_exe, var_os};
 use std::fs::{remove_file, rename};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -9,22 +9,49 @@ use which::which;
 
 pub const BINARY: &str = if cfg!(windows) { "rust.exe" } else { "rust" };
 
-/// `RustScript` needs cargo anyway, so a missing cargo dir is a broken setup.
-pub fn cargo_home() -> Result<PathBuf> {
+/// Where an update puts the binary.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Place {
+    /// The `bin` folder of this cargo home. Cargo keeps its install list there.
+    Cargo(PathBuf),
+    /// The folder of the running binary, on a machine with no cargo.
+    Beside(PathBuf),
+}
+
+impl Place {
+    pub fn target(&self) -> PathBuf {
+        match self {
+            Self::Cargo(home) => home.join("bin").join(BINARY),
+            Self::Beside(folder) => folder.join(BINARY),
+        }
+    }
+}
+
+/// A script runs with no cargo on the machine, so the update must not need
+/// one either.
+pub fn place() -> Result<Place> {
     let home = match var_os("CARGO_HOME") {
         Some(value) if !value.is_empty() => PathBuf::from(value),
         _ => home_dir()
             .context("could not find the home directory")?
             .join(".cargo"),
     };
-    let bin = home.join("bin");
-    if !bin.is_dir() {
-        bail!(
-            "{} does not exist, RustScript needs a working cargo installation",
-            bin.display()
-        );
+    let running = current_exe().context("could not find the running rust binary")?;
+    place_for(&home, &running)
+}
+
+fn place_for(cargo_home: &Path, running: &Path) -> Result<Place> {
+    if cargo_home.join("bin").is_dir() {
+        return Ok(Place::Cargo(cargo_home.to_path_buf()));
     }
-    Ok(home)
+    // A link in a folder on PATH must not get a real file in its place.
+    let real = running
+        .canonicalize()
+        .with_context(|| format!("could not resolve {}", running.display()))?;
+    let folder = real
+        .parent()
+        .with_context(|| format!("{} has no folder", real.display()))?;
+    Ok(Place::Beside(folder.to_path_buf()))
 }
 
 /// An older copy earlier on PATH keeps winning after an update, so say
@@ -166,13 +193,39 @@ pub fn restore(old: &Path, target: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::{read_to_string, write};
+    use std::fs::{create_dir_all, read_to_string, write};
     use std::path::Path;
 
     use pretty_assertions::assert_eq;
     use tempfile::tempdir;
 
-    use super::{move_aside, old_path, restore, swap};
+    use super::{Place, move_aside, old_path, place_for, restore, swap};
+
+    #[test]
+    fn a_cargo_home_with_a_bin_folder_takes_the_update() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().join("cargo");
+        create_dir_all(home.join("bin")).unwrap();
+        let running = dir.path().join("elsewhere").join("rust");
+
+        assert_eq!(place_for(&home, &running).unwrap(), Place::Cargo(home));
+    }
+
+    /// The failure this prevents: `rust update` stops on a machine with no
+    /// cargo, where the binary sits in a folder like `~/.local/bin`.
+    #[test]
+    fn without_cargo_the_update_goes_next_to_the_running_binary() {
+        let dir = tempdir().unwrap();
+        let folder = dir.path().canonicalize().unwrap().join("local-bin");
+        create_dir_all(&folder).unwrap();
+        let running = folder.join("rust");
+        write(&running, "running").unwrap();
+
+        let place = place_for(&dir.path().join("no-cargo"), &running).unwrap();
+
+        assert_eq!(place, Place::Beside(folder.clone()));
+        assert_eq!(place.target(), folder.join(super::BINARY));
+    }
 
     #[test]
     fn old_paths_are_stable() {

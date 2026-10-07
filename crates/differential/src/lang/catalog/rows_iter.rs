@@ -20,8 +20,8 @@ pub(super) const ROWS: &[Method] = &[
         "iter_scan_running",
         VecRecv,
         &[],
-        Exact(FUSize),
-        "{r}.iter().scan(1usize, |n, _| {{ *n += 3; Some(*n) }}).last().unwrap_or(0)",
+        Same,
+        "({{ let diff_r = {r}; let diff_n = diff_r.iter().scan(1usize, |n, _| {{ *n += 3; Some(*n) }}).last().unwrap_or(0); diff_r.into_iter().take(diff_n % 4).collect::<Vec<{E}>>() }})",
     ),
     m(
         "iter_map_while",
