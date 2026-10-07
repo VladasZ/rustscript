@@ -545,6 +545,11 @@ pub(super) fn dir_entry_method(s: &Arc<StructData>, method: &MethodName) -> Resu
         BuiltinId::Path => make_path(path),
         BuiltinId::FileName => make_path(path_string(s, "name")),
         BuiltinId::FileType => Value::ok(make_file_type(std::path::Path::new(&path))),
+        // `DirEntry::metadata` does not follow a symlink, like real std
+        BuiltinId::Metadata => match std::fs::symlink_metadata(&path) {
+            Ok(m) => Value::ok(make_metadata(&m)),
+            Err(e) => Value::err(super::native::io_error_value(&e)),
+        },
         _ => bail!("unknown method `{method}` on DirEntry"),
     })
 }

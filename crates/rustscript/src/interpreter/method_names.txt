@@ -38,6 +38,7 @@ as_os_str
 as_path
 as_ref
 as_secs
+as_secs_f32
 as_secs_f64
 as_slice
 as_str

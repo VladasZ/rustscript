@@ -46,6 +46,7 @@ DELETE
 DateTime::from_timestamp
 DateTime::parse_from_rfc3339
 Document::load
+Duration::ZERO
 Duration::days
 Duration::from_micros
 Duration::from_millis
@@ -70,6 +71,7 @@ Err
 File::create
 File::create_new
 File::open
+File::options
 HKEY_CLASSES_ROOT
 HKEY_CURRENT_CONFIG
 HKEY_CURRENT_USER

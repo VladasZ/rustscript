@@ -266,6 +266,7 @@ impl Infer<'_, '_> {
                 self.walk_args(args);
                 Ty::named("Duration")
             }
+            ("File", "options") => Ty::named("OpenOptions"),
             ("Instant", "now") => Ty::named("Instant"),
             ("SystemTime", "now") => Ty::named("SystemTime"),
             ("Command", "new") => {
@@ -405,12 +406,15 @@ impl Infer<'_, '_> {
     }
 }
 
-/// `i32::MAX`, `u8::MIN`, `f64::EPSILON`, `f64::consts::PI` and the like.
+/// `i32::MAX`, `u8::MIN`, `f64::EPSILON`, `f64::consts::PI` and the like, and `Duration::ZERO`.
 pub(super) fn numeric_constant(segs: &[String]) -> Option<Ty> {
     let (owner, name) = match segs {
         [.., owner, name] => (owner.as_str(), name.as_str()),
         _ => return None,
     };
+    if (owner, name) == ("Duration", "ZERO") {
+        return Some(Ty::named("Duration"));
+    }
     let owner = if owner == "consts" {
         match segs.len().checked_sub(3).and_then(|i| segs.get(i)) {
             Some(o) => o.as_str(),

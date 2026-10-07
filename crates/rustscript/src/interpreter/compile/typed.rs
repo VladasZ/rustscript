@@ -6,7 +6,7 @@ use std::sync::Arc;
 use super::infer::Ty;
 use super::{CollectInner, CollectTarget, Compiler};
 use crate::interpreter::bytecode::{DefaultIr, ScalarTy};
-use crate::interpreter::typeir::TypeIr;
+use crate::interpreter::typeir::{ScalarIr, TypeIr};
 
 impl Compiler<'_> {
     /// The path of the `From` impl on `canon` for a value of type `source`, keyed the way
@@ -96,7 +96,9 @@ impl Compiler<'_> {
             Ty::Set(t, sorted) => TypeIr::Set(Arc::new(Self::type_ir_of(t)), *sorted),
             Ty::Option(t) => TypeIr::Option(Arc::new(Self::type_ir_of(t))),
             Ty::Struct(canon) => TypeIr::Struct(canon.clone()),
+            Ty::Enum(canon) => TypeIr::Enum(canon.clone()),
             Ty::Generic(name) => TypeIr::Generic(name.clone()),
+            ty if *ty == Ty::named("PathBuf") => TypeIr::Scalar(ScalarIr::Path),
             _ => TypeIr::Dynamic,
         }
     }

@@ -636,6 +636,8 @@ impl Value {
                         ) => da == db,
                         (Native::SocketAddr(x), Native::SocketAddr(y)) => x == y,
                         (Native::IpAddr(x), Native::IpAddr(y)) => x == y,
+                        (Native::SystemTime(x), Native::SystemTime(y)) => x == y,
+                        (Native::Instant(x), Native::Instant(y)) => x == y,
                         _ => false,
                     }
             }

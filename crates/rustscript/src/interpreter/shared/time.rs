@@ -13,6 +13,7 @@ use super::Args;
 pub(crate) enum DurOut {
     Int(i128, IntWidth),
     Float(f64),
+    F32(f32),
     Bool(bool),
 }
 
@@ -43,6 +44,9 @@ pub(crate) fn duration_core(name: BuiltinId, secs: u64, nanos: u32) -> Option<Du
         BuiltinId::SubsecMicros => sub(nanos / 1_000),
         BuiltinId::AsSecsF64 => {
             DurOut::Float(AsPrimitive::<f64>::as_(secs) + f64::from(nanos) / 1e9)
+        }
+        BuiltinId::AsSecsF32 => {
+            DurOut::F32(AsPrimitive::<f32>::as_(secs) + AsPrimitive::<f32>::as_(nanos) / 1e9)
         }
         BuiltinId::IsZero => DurOut::Bool(total == 0),
         _ => return None,

@@ -2,11 +2,13 @@
 
 use num_traits::AsPrimitive;
 use std::cmp::Ordering;
+use std::time::{Instant, SystemTime};
 
 use anyhow::{Result, anyhow, bail};
 
 use super::bytecode::{BinKind, UnKind};
 use super::enum_def::{ERR, EnumDef, EnumKind, NONE, OK, SOME};
+use super::native::Native;
 use super::numeric::{
     IntWidth, float_arith, i64_arith, int_arith, int_bit, int_neg, int_not, int_shift, u64_arith,
     unify,
@@ -172,6 +174,12 @@ fn arith(op: BinKind, l: &Value, r: &Value) -> Result<Value> {
             return Ok(make_duration(duration_arith(op, a, b)?));
         }
     }
+    if let Value::Native(handle) = l {
+        let point = time_point(&handle.lock());
+        if let Some(out) = point.and_then(|point| time_arith(op, point, r)) {
+            return out;
+        }
+    }
     if let Some(width) = big_operands(l, r) {
         let (a, b) = (big_bits(l), big_bits(r));
         return Ok(Value::Big(
@@ -333,8 +341,55 @@ pub(super) fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> 
             let b = b.values.lock().clone();
             lexicographic(&a, &b)?
         }
+        // 2 statements on purpose, a time against itself is the same handle on both sides
+        (Value::Native(a), Value::Native(b)) => {
+            let a = time_point(&a.lock());
+            let b = time_point(&b.lock());
+            match (a, b) {
+                (Some(TimePoint::System(a)), Some(TimePoint::System(b))) => Some(a.cmp(&b)),
+                (Some(TimePoint::Instant(a)), Some(TimePoint::Instant(b))) => Some(a.cmp(&b)),
+                _ => bail!("cannot compare {} and {}", l.type_name(), r.type_name()),
+            }
+        }
         (a, b) => bail!("cannot compare {} and {}", a.type_name(), b.type_name()),
     })
+}
+
+/// The 2 native values that have an order, a `SystemTime` and an `Instant`.
+enum TimePoint {
+    System(SystemTime),
+    Instant(Instant),
+}
+
+/// A time moved by a `Duration`, and the `Duration` between 2 `Instant` values. The panic
+/// messages are the ones std gives.
+fn time_arith(op: BinKind, point: TimePoint, r: &Value) -> Option<Result<Value>> {
+    if let (TimePoint::Instant(a), BinKind::Sub, Value::Native(other)) = (&point, op, r)
+        && let Some(TimePoint::Instant(b)) = time_point(&other.lock())
+    {
+        return Some(Ok(make_duration(a.duration_since(b))));
+    }
+    let by = duration_from_value(r)?;
+    let moved = match (point, op) {
+        (TimePoint::System(t), BinKind::Add) => t.checked_add(by).map(Native::SystemTime),
+        (TimePoint::System(t), BinKind::Sub) => t.checked_sub(by).map(Native::SystemTime),
+        (TimePoint::Instant(t), BinKind::Add) => t.checked_add(by).map(Native::Instant),
+        (TimePoint::Instant(t), BinKind::Sub) => t.checked_sub(by).map(Native::Instant),
+        _ => return None,
+    };
+    Some(match (moved, op) {
+        (Some(native), _) => Ok(native.wrap()),
+        (None, BinKind::Add) => Err(anyhow!("overflow when adding duration to instant")),
+        (None, _) => Err(anyhow!("overflow when subtracting duration from instant")),
+    })
+}
+
+fn time_point(native: &Native) -> Option<TimePoint> {
+    match native {
+        Native::SystemTime(time) => Some(TimePoint::System(*time)),
+        Native::Instant(time) => Some(TimePoint::Instant(*time)),
+        _ => None,
+    }
 }
 
 /// Element by element, a longer sequence past a common prefix is greater.

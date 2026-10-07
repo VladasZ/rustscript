@@ -2,10 +2,13 @@
 //! value that does not fit, `300` for a `u8` or a string for a number, is the error serde gives,
 //! and a number keeps the width of its field.
 
+use std::path::PathBuf;
+
 use serde::Deserialize;
 use serde::de::{DeserializeSeed, Error};
 
 use super::numeric::IntWidth;
+use super::std_bridge::make_path;
 use super::typeir::ScalarIr;
 use super::value::Value;
 
@@ -29,6 +32,7 @@ impl<'de> DeserializeSeed<'de> for Scalar {
             ScalarIr::Bool => Value::Bool(bool::deserialize(d)?),
             ScalarIr::Char => Value::Char(char::deserialize(d)?),
             ScalarIr::Str => Value::str(String::deserialize(d)?),
+            ScalarIr::Path => make_path(PathBuf::deserialize(d)?.to_string_lossy()),
         })
     }
 }

@@ -382,7 +382,7 @@ fn fs_process_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
             &arg_str(args, 0),
             std::fs::OpenOptions::new().write(true).create_new(true),
         ),
-        PathId::OpenOptionsNew => Value::struct_of(
+        PathId::OpenOptionsNew | PathId::FileOptions => Value::struct_of(
             "OpenOptions",
             [
                 "read",
