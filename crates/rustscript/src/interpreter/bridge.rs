@@ -5,6 +5,7 @@ use num_traits::AsPrimitive;
 use std::f64::consts::{E, PI, TAU};
 use std::mem::take;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use parking_lot::Mutex;
@@ -560,6 +561,7 @@ enum NativeFamily {
 fn path_constant(id: PathId) -> Option<Value> {
     let text = match id {
         PathId::UnixEpoch => return Some(Native::SystemTime(std::time::UNIX_EPOCH).wrap()),
+        PathId::DurationZero => return Some(super::std_bridge::make_duration(Duration::ZERO)),
         // a json null is None, same mapping as the parser
         PathId::ValueNull => return Some(Value::none()),
         PathId::ConstsPi => return Some(Value::Float(PI)),

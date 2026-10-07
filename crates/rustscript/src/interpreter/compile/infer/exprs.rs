@@ -403,6 +403,12 @@ impl Infer<'_, '_> {
                 }
                 match (&left, &right) {
                     (Ty::Str, _) => Ty::Str,
+                    // the time between 2 instants
+                    (Ty::Named(a, _), Ty::Named(b, _))
+                        if &**a == "Instant" && &**b == "Instant" =>
+                    {
+                        Ty::named("Duration")
+                    }
                     (Ty::Unknown, other) => other.clone(),
                     (known, _) => known.clone(),
                 }

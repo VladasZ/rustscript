@@ -53,6 +53,8 @@ pub enum ScalarIr {
     Bool,
     Char,
     Str,
+    /// a `PathBuf`, serde reads it from a string
+    Path,
 }
 
 impl ScalarIr {
@@ -63,6 +65,7 @@ impl ScalarIr {
             "bool" => ScalarIr::Bool,
             "char" => ScalarIr::Char,
             "String" => ScalarIr::Str,
+            "PathBuf" => ScalarIr::Path,
             other => ScalarIr::Int(IntWidth::parse(other)?),
         })
     }
@@ -85,17 +88,16 @@ pub enum TypeIr {
     Enum(Arc<str>),
     /// bound by the caller's turbofish through the type environment
     Generic(Arc<str>),
-    /// coercion leaves it alone, a typed parse checks it
+    /// coercion leaves it alone, a typed parse checks it. Only a `PathBuf` is coerced, parsed
+    /// text becomes a path.
     Scalar(ScalarIr),
 }
 
 impl TypeIr {
     pub fn is_active(&self) -> bool {
         match self {
-            TypeIr::Dynamic
-            | TypeIr::Generic(_)
-            | TypeIr::Scalar(_)
-            | TypeIr::MapValue(_, false) => false,
+            TypeIr::Dynamic | TypeIr::Generic(_) | TypeIr::MapValue(_, false) => false,
+            TypeIr::Scalar(scalar) => *scalar == ScalarIr::Path,
             TypeIr::Struct(_) | TypeIr::Enum(_) | TypeIr::Set(..) | TypeIr::MapValue(_, true) => {
                 true
             }

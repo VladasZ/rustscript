@@ -62,7 +62,7 @@ The `supported_page_is_current` test enforces it.
 
 ## DirEntry
 
-`file_name`, `file_type`, `name`, `path`
+`file_name`, `file_type`, `metadata`, `name`, `path`
 
 ## Document
 
@@ -70,7 +70,7 @@ The `supported_page_is_current` test enforces it.
 
 ## Duration
 
-`as_micros`, `as_millis`, `as_nanos`, `as_secs`, `as_secs_f64`, `checked_add`, `checked_sub`, `is_zero`, `subsec_micros`, `subsec_millis`, `subsec_nanos`
+`as_micros`, `as_millis`, `as_nanos`, `as_secs`, `as_secs_f32`, `as_secs_f64`, `checked_add`, `checked_sub`, `is_zero`, `subsec_micros`, `subsec_millis`, `subsec_nanos`
 
 ## Element
 

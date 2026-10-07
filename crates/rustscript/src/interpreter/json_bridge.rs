@@ -51,6 +51,10 @@ pub type Structs = HashMap<Arc<str>, Arc<StructInfo>>;
 impl Vm {
     pub(super) fn coerce_value(self: &Arc<Self>, value: Value, ty: &TypeIr) -> Result<Value> {
         Ok(match ty {
+            TypeIr::Scalar(ScalarIr::Path) => match &value {
+                Value::Str(text) => super::std_bridge::make_path(text.to_string()),
+                _ => value,
+            },
             TypeIr::Dynamic
             | TypeIr::Generic(_)
             | TypeIr::Scalar(_)
@@ -148,6 +152,7 @@ impl Vm {
             | TypeIr::Option(_)
             | TypeIr::Set(..)
             | TypeIr::Enum(_)
+            | TypeIr::Scalar(ScalarIr::Path)
             | TypeIr::MapValue(_, true) => {
                 let items = items.lock().clone();
                 let mut out = Vec::with_capacity(items.len());

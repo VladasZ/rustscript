@@ -284,6 +284,7 @@ pub(super) fn duration_method(
     match shared::duration_core(m, secs, nanos) {
         Some(shared::DurOut::Int(n, width)) => Ok(Value::int_of_width(n, width)),
         Some(shared::DurOut::Float(f)) => Ok(Value::Float(f)),
+        Some(shared::DurOut::F32(f)) => Ok(Value::F32(f)),
         Some(shared::DurOut::Bool(b)) => Ok(Value::Bool(b)),
         None => bail!("unknown method `{}` on Duration", name.text),
     }

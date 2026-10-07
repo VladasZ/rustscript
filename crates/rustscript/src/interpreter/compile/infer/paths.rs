@@ -41,6 +41,9 @@ impl Infer<'_, '_> {
         if let Some(ty) = numeric_constant(&segs) {
             return ty;
         }
+        if segs.last().is_some_and(|name| name == "UNIX_EPOCH") {
+            return Ty::named("SystemTime");
+        }
         let segs = self.self_prefixed(segs);
         match self.ctx.resolver.resolve(self.ctx.module, &segs) {
             Ok(Res::Const(_)) => self

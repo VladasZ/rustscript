@@ -259,8 +259,8 @@ impl Infer<'_, '_> {
                 Ty::Unit
             }
             ("Path" | "PathBuf", "read_dir") => io(Ty::iter(io(Ty::named("DirEntry")))),
-            ("Path" | "PathBuf", "metadata") => io(Ty::named("Metadata")),
-            ("DirEntry", "file_type" | "metadata") => io(Ty::named(name)),
+            ("Path" | "PathBuf" | "DirEntry", "metadata") => io(Ty::named("Metadata")),
+            ("DirEntry", "file_type") => io(Ty::named("FileType")),
             ("Metadata", "len") | ("Duration", "as_secs") => Ty::Int(IntWidth::U64),
             ("Metadata", "modified" | "created" | "accessed") => io(Ty::named("SystemTime")),
             _ => return None,
@@ -298,6 +298,11 @@ impl Infer<'_, '_> {
                 "arg" | "args" | "current_dir" | "env" | "envs" | "stdin" | "stdout" | "stderr"
                 | "env_remove" | "env_clear" | "raw_arg",
             ) => Ty::named("Command"),
+            ("OpenOptions", "read" | "write" | "append" | "create" | "truncate" | "create_new") => {
+                Ty::named("OpenOptions")
+            }
+            ("OpenOptions", "open") => io(Ty::named("File")),
+            ("File", "set_modified") => io(Ty::Unit),
             ("Command", "output") | ("Child", "wait_with_output") => io(Ty::named("Output")),
             ("Command", "status") | ("Child", "wait") => io(Ty::named("ExitStatus")),
             ("Command", "spawn") => io(Ty::named("Child")),

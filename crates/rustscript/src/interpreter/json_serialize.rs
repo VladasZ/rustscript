@@ -101,6 +101,10 @@ pub(super) fn pvalue_to_json(v: &Value) -> Result<serde_json::Value> {
             }
             JsonValue::Object(obj)
         }
+        // serde writes a path as its text, not as the bridge struct
+        Value::Struct(s) if matches!(&**s.name(), "Path" | "PathBuf") => {
+            JsonValue::String(super::std_bridge::path_like(v))
+        }
         Value::Struct(s) => struct_to_json(s)?,
         Value::Enum { def, variant, data } if def.user => {
             super::serde_types::user_enum_to_json(def, *variant, &data.lock())?
