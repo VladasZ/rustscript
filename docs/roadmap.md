@@ -15,6 +15,32 @@ Differential workflow.
 
 ## Open
 
+### `rust update` needs a cargo folder
+
+**Current.** `rust update` installs the release only into the `bin` folder
+of cargo, and stops when that folder is missing:
+
+```
+$ ls ~/.cargo
+ls: /Users/vladas/.cargo: No such file or directory
+$ rust update
+Error: /Users/vladas/.cargo/bin does not exist, RustScript needs a working cargo installation
+```
+
+The work mac of thing has no Rust toolchain since 2026-10-07, its
+interpreter is `~/.local/bin/rust`. A script runs there, only the update
+does not. Until this is fixed thing updates it with its own
+`shell/sh/install-rust.sh`, which downloads the same release file.
+
+**Needed.** Install next to the running program, the folder of
+`current_exe`, when it is not in a cargo folder. No write to the install
+list of cargo then. The place is `cargo_home` in
+`crates/rustscript/src/update/install.rs` and its callers in
+`update/mod.rs`. `--from-source` still needs cargo and says so.
+
+**Blocks.** Deleting `install-rust.sh` from thing, and `rust update` in
+`hi` on a machine with no toolchain.
+
 ## Generator plan
 
 The differential generator is being brought closer to real Rust in phases,
