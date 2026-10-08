@@ -218,7 +218,7 @@ impl Infer<'_, '_> {
             | (
                 "Path" | "PathBuf",
                 "exists" | "is_dir" | "is_file" | "is_absolute" | "is_relative" | "starts_with"
-                | "ends_with" | "is_symlink",
+                | "ends_with" | "is_symlink" | "set_extension" | "pop",
             )
             | ("Metadata", "is_dir" | "is_file" | "is_symlink")
             | ("FileType", _)
@@ -255,9 +255,7 @@ impl Infer<'_, '_> {
             ("Path" | "PathBuf", "strip_prefix") => {
                 Ty::result(Ty::named("Path"), Ty::named("StripPrefixError"))
             }
-            ("Path" | "PathBuf", "push" | "set_extension" | "pop") | ("JoinHandle", "abort") => {
-                Ty::Unit
-            }
+            ("Path" | "PathBuf", "push" | "set_file_name") | ("JoinHandle", "abort") => Ty::Unit,
             ("Path" | "PathBuf", "read_dir") => io(Ty::iter(io(Ty::named("DirEntry")))),
             ("Path" | "PathBuf" | "DirEntry", "metadata") => io(Ty::named("Metadata")),
             ("DirEntry", "file_type") => io(Ty::named("FileType")),

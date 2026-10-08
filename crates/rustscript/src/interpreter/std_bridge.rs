@@ -435,8 +435,14 @@ pub(super) fn path_method(
         Some(v) => Value::some(Value::str(v.to_string_lossy().into_owned())),
         None => Value::none(),
     };
-    // the other path is a `&str`, a `String` or a `Path`
-    let other = || args.first().map(path_like).unwrap_or_default();
+    // the other path is a `&str`, a `String`, a `Path` or a `Component`
+    let other = || {
+        args.first()
+            .map(|v| component_text(v).unwrap_or_else(|| path_like(v)))
+            .unwrap_or_default()
+    };
+    // the `&mut self` methods write the new text into the receiver itself
+    let store = |path: std::path::PathBuf| st.set("s", Value::str(path.display().to_string()));
     Ok(match method.id {
         BuiltinId::Display | BuiltinId::ToStringLossy => Value::str(s.clone()),
         BuiltinId::ToStr => Value::some(Value::str(s.clone())),
@@ -472,9 +478,28 @@ pub(super) fn path_method(
                 .collect(),
         ),
         BuiltinId::Components => Value::vec(p.components().map(make_component).collect()),
-        BuiltinId::Join | BuiltinId::Push => {
-            let joined = p.join(other());
-            make_path(joined.display().to_string())
+        BuiltinId::Join => make_path(p.join(other()).display().to_string()),
+        BuiltinId::Push => {
+            store(p.join(other()));
+            Value::Unit
+        }
+        BuiltinId::Pop => {
+            let mut path = p.to_path_buf();
+            let popped = path.pop();
+            store(path);
+            Value::Bool(popped)
+        }
+        BuiltinId::SetExtension => {
+            let mut path = p.to_path_buf();
+            let set = path.set_extension(other());
+            store(path);
+            Value::Bool(set)
+        }
+        BuiltinId::SetFileName => {
+            let mut path = p.to_path_buf();
+            path.set_file_name(other());
+            store(path);
+            Value::Unit
         }
         // Path compares whole components, so "/a/bc" doesn't start with "/a/b"
         BuiltinId::StartsWith => Value::Bool(p.starts_with(other())),
