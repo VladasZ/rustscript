@@ -244,6 +244,21 @@ closure parameter type or the return type of the function. `into()` picks the
 `From` impl by the source type. A value that already is the target type
 needs no conversion, so `?` on the same error type is identity.
 
+A `parse` into a type of a bridged crate compiles to the path call
+`T::from_str(s)`, which runs the real `FromStr` of that crate, see
+`from_str_bridge.rs`. So `text.parse::<toml::Table>()`, `"1.2.3.4".parse::<IpAddr>()`
+and `NaiveDate::from_str(text)` give the value and the error of the crate.
+The types are `toml::Table`, `toml::Value`, `serde_json::Value`, `NaiveDate`,
+`NaiveDateTime`, `DateTime` of `Utc`, `FixedOffset` and `Local`, `IpAddr`,
+`SocketAddr`, `PathBuf`, `Regex`, `HeaderValue`, `StatusCode` and `Algorithm`.
+A type with no such path stops the script as a missing path does. The builtin
+`parse` reads only the std scalars and a script type with its own `from_str`.
+
+A `toml::Table` and a `toml::Value` are held like json, as plain maps, lists
+and scalars. Only their type, `toml::Table` and `toml::Value` in the
+inference, says that a format argument prints the toml way, a string in
+quotes and a table as a document, and that `as_str` gives an `Option`.
+
 An untyped parse such as `serde_json::from_str` takes its target from the
 annotation above it. The annotation reaches through `?`, `unwrap`, `expect`
 and an error only `map_err`, and into the scrutinee of a `match` whose arm

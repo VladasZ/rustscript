@@ -1,12 +1,17 @@
 ::assert_failed
+::datetime_local_from_str
+::datetime_utc_from_str
 ::ensure_fail
 ::json_array
+::json_as_str
 ::json_index
 ::json_null
 ::json_object
 ::json_to_string
 ::json_value
+::toml_value_to_string
 ::unreachable_match
+Algorithm::from_str
 Arc::clone
 Arc::new
 Arc::strong_count
@@ -43,6 +48,7 @@ Constraint::Min
 Constraint::Percentage
 Constraint::Ratio
 DELETE
+DateTime::from_str
 DateTime::from_timestamp
 DateTime::parse_from_rfc3339
 Document::load
@@ -89,6 +95,7 @@ HeaderMap::new
 HeaderValue::from_static
 HeaderValue::from_str
 Instant::now
+IpAddr::from_str
 KEY_ALL_ACCESS
 KEY_CREATE_SUB_KEY
 KEY_ENUMERATE_SUB_KEYS
@@ -114,7 +121,9 @@ Modifier::REVERSED
 Modifier::SLOW_BLINK
 Modifier::UNDERLINED
 Mutex::new
+NaiveDate::from_str
 NaiveDate::parse_from_str
+NaiveDateTime::from_str
 NaiveDateTime::parse_from_str
 NamedTempFile::new
 Ok
@@ -125,6 +134,7 @@ Padding::zero
 Path::from
 Path::new
 PathBuf::from
+PathBuf::from_str
 PathBuf::new
 Permissions::from_mode
 QUERY_CONFIG
@@ -142,6 +152,7 @@ Rc::strong_count
 Rect::new
 RefCell::new
 RegKey::predef
+Regex::from_str
 Regex::new
 Row::new
 STANDARD
@@ -159,11 +170,13 @@ Signature::from_bytes
 Signature::from_slice
 SigningKey::from_bytes
 SigningKey::try_from
+SocketAddr::from_str
 Some
 Span::raw
 Span::styled
 Sparkline::default
 Sparkline::new
+StatusCode::from_str
 Stdio::from
 Stdio::inherit
 Stdio::null
@@ -176,6 +189,7 @@ String::with_capacity
 Style::default
 Style::new
 SystemTime::now
+Table::from_str
 Table::new
 TcpListener::bind
 TcpStream::connect
@@ -363,6 +377,7 @@ reqwest::blocking::Client::builder
 reqwest::blocking::Client::new
 reqwest::blocking::get
 reqwest::get
+serde_json::Value::from_str
 serde_json::from_str
 serde_json::from_value
 serde_json::to_string
@@ -378,6 +393,7 @@ terminal_light::luma
 thread::sleep
 time::sleep
 tokio::sync::Mutex::new
+toml::Value::from_str
 toml::from_str
 toml::to_string
 toml::to_string_pretty

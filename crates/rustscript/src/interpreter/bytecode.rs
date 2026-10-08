@@ -452,6 +452,10 @@ pub struct FmtSpec {
 pub enum JsonMask {
     /// the whole value
     Here,
+    /// the whole value is a `toml::Value`, which prints unlike json
+    Toml,
+    /// the whole value is a `toml::Table`, which prints as a document
+    TomlTable,
     /// every item of a vec
     Items(Box<JsonMask>),
     /// every value of a map

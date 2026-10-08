@@ -1,5 +1,6 @@
 //! Format template rendering for the `Fmt` op.
 
+use std::fmt::{Debug, Display};
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
@@ -178,21 +179,27 @@ fn star_precision(
     Ok(fmt.replace(".*", &format!(".{precision}")))
 }
 
-/// A `serde_json::Value` argument, see `render_fmt`. `serde_json` writes its text straight out, so
+/// A `serde_json::Value` or toml argument, see `render_fmt`. `serde_json` writes its text straight out, so
 /// a width does nothing, like in real Rust.
 fn json_text(value: &Value, fmt: &str) -> Option<String> {
     let Value::Native(n) = value else {
         return None;
     };
-    let Native::Json(json) = &*n.lock() else {
-        return None;
-    };
-    Some(match (fmt.contains('?'), fmt.contains('#')) {
-        (true, true) => format!("{json:#?}"),
-        (true, false) => format!("{json:?}"),
-        (false, true) => format!("{json:#}"),
-        (false, false) => json.to_string(),
-    })
+    match &*n.lock() {
+        Native::Json(json) => Some(styled(json, fmt)),
+        Native::Toml(value) => Some(styled(value, fmt)),
+        Native::TomlTable(table) => Some(styled(table, fmt)),
+        _ => None,
+    }
+}
+
+fn styled(value: &(impl Display + Debug), fmt: &str) -> String {
+    match (fmt.contains('?'), fmt.contains('#')) {
+        (true, true) => format!("{value:#?}"),
+        (true, false) => format!("{value:?}"),
+        (false, true) => format!("{value:#}"),
+        (false, false) => value.to_string(),
+    }
 }
 
 pub(super) fn resolve_arg(

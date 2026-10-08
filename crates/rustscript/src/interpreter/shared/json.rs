@@ -39,6 +39,7 @@ pub(crate) fn json_accessor(name: BuiltinId) -> bool {
         name,
         BuiltinId::AsStr
             | BuiltinId::AsI64
+            | BuiltinId::AsInteger
             | BuiltinId::AsU64
             | BuiltinId::AsF64
             | BuiltinId::AsBool

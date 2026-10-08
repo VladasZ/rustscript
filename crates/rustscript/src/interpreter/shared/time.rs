@@ -99,6 +99,7 @@ pub(crate) fn datetime_core(
         BuiltinId::Year => DateOut::Int(i64::from(view.year())),
         BuiltinId::Month => DateOut::Int(i64::from(view.month())),
         BuiltinId::Day => DateOut::Int(i64::from(view.day())),
+        BuiltinId::Ordinal => DateOut::Int(i64::from(view.ordinal())),
         BuiltinId::Hour => DateOut::Int(i64::from(view.hour())),
         BuiltinId::Minute => DateOut::Int(i64::from(view.minute())),
         BuiltinId::Second => DateOut::Int(i64::from(view.second())),

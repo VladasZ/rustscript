@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
-use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Timelike};
+use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, Timelike};
 
 use super::bridge::arg;
 use super::bytecode::{BuiltinId, MethodName, PathId};
@@ -120,6 +120,33 @@ pub(super) fn chrono_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
                 Err(e) => parse_error(e),
             }
         }
+        PathId::NaiveDateFromStr => match text(0)?.parse::<NaiveDate>() {
+            Ok(d) => Value::ok(naive_date_struct(d)),
+            Err(e) => parse_error(e),
+        },
+        PathId::NaiveDateTimeFromStr => match text(0)?.parse::<NaiveDateTime>() {
+            Ok(dt) => Value::ok(naive_datetime_struct(dt)),
+            Err(e) => parse_error(e),
+        },
+        // `DateTime<FixedOffset>` keeps the offset the text names, `DateTime<Utc>` and
+        // `DateTime<Local>` keep only the instant
+        PathId::DateTimeFromStr | PathId::DatetimeUtcFromStr | PathId::DatetimeLocalFromStr => {
+            match text(0)?.parse::<DateTime<FixedOffset>>() {
+                Ok(dt) => {
+                    let offset = match id {
+                        PathId::DateTimeFromStr => dt.offset().local_minus_utc(),
+                        _ => 0,
+                    };
+                    Value::ok(datetime_struct(
+                        dt.timestamp(),
+                        dt.timestamp_subsec_nanos(),
+                        id == PathId::DatetimeLocalFromStr,
+                        offset,
+                    ))
+                }
+                Err(e) => parse_error(e),
+            }
+        }
         PathId::DateTimeFromTimestamp => {
             let secs = int(0)?;
             let nanos = u32::try_from(int(1)?).ok();
@@ -182,6 +209,7 @@ pub(super) fn naive_date_method(
         BuiltinId::Year => Value::Int(i64::from(date.year())),
         BuiltinId::Month => Value::Int(i64::from(date.month())),
         BuiltinId::Day => Value::Int(i64::from(date.day())),
+        BuiltinId::Ordinal => Value::Int(i64::from(date.ordinal())),
         BuiltinId::Weekday => weekday_struct(date.weekday()),
         _ => bail!("unknown method `{name}` on NaiveDate"),
     })

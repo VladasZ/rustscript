@@ -451,6 +451,10 @@ impl Infer<'_, '_> {
                 self.expr(&ix.index, &Ty::Unknown);
                 Ty::Json
             }
+            Ty::Named(name, _) if matches!(&**name, "toml::Table" | "toml::Value") => {
+                self.expr(&ix.index, &Ty::Unknown);
+                Ty::named("toml::Value")
+            }
             // everything else indexes by position, regex captures and slices included
             _ => {
                 let key = if by_range {

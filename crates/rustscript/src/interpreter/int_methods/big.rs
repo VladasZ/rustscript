@@ -133,7 +133,9 @@ macro_rules! big_methods {
                 BuiltinId::ToLeBytes => Ok(IntOut::Bytes(recv.to_le_bytes().to_vec())),
                 BuiltinId::ToBeBytes => Ok(IntOut::Bytes(recv.to_be_bytes().to_vec())),
                 BuiltinId::ToNeBytes => Ok(IntOut::Bytes(recv.to_ne_bytes().to_vec())),
-                BuiltinId::AsI64 => Ok(IntOut::Checked(i64::try_from(recv).ok().map(i128::from))),
+                BuiltinId::AsI64 | BuiltinId::AsInteger => {
+                    Ok(IntOut::Checked(i64::try_from(recv).ok().map(i128::from)))
+                }
                 BuiltinId::AsU64 => Ok(IntOut::Checked(u64::try_from(recv).ok().map(i128::from))),
                 BuiltinId::AsF64 => Ok(IntOut::SomeFloat(AsPrimitive::<f64>::as_(recv))),
                 _ => return None,
