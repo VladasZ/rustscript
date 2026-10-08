@@ -189,6 +189,12 @@ the end never runs the closure. `sum` and `product` fold one element at a
 time as they pull, so an overflow of the running total panics before the
 source makes the next element.
 
+`by_ref` hands out a borrowed view of the iterator. An adapter over the view, like `take`,
+pulls from the iterator and holds nothing itself, so the rest stays in the iterator when the
+adapter goes away. A range in a binding is a plain value. The first `next`, `next_back`, `nth`
+or `by_ref` on it turns the binding into the iterator itself, so the binding moves on like in
+std.
+
 Arithmetic and comparisons on operands the inference pass typed compile to
 typed ops that skip the generic dispatch. There is no hot loop tier any more,
 the old one guessed types at runtime and fell back on a miss. A typed tier on

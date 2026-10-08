@@ -149,7 +149,12 @@ fn map_remove(m: &Arc<Mutex<MapStore>>, kind: MapKind, args: &[Value]) -> Result
 /// The combinations iterate this set's elements then the other's. Real Rust doesn't promise any
 /// order here.
 fn set_relation(m: &Arc<Mutex<MapStore>>, id: BuiltinId, args: &[Value]) -> Result<Value> {
-    let Some(Value::Map(other, MapKind::Set)) = args.first() else {
+    // a set of references sits behind a borrow, see `keep_lent`
+    let other = match args.first() {
+        Some(Value::Ref(reference)) => reference.get(),
+        other => other.cloned(),
+    };
+    let Some(Value::Map(other, MapKind::Set)) = other else {
         bail!("set operation needs a set argument");
     };
     // snapshots, a set compared with itself would relock
@@ -349,8 +354,24 @@ fn map_into_iterator(m: &Arc<Mutex<MapStore>>, keys: bool) -> Value {
     super::iterator::owned_iterator(items)
 }
 
+/// A set or a map collected from a borrowing iterator holds references. Its keys are plain
+/// copies here, so the whole collection sits behind a borrow and drops nothing of the source.
+/// Only keys that can run a `Drop` need it.
+fn keep_lent(collection: Value, lent: bool) -> Value {
+    if lent {
+        Value::Ref(Arc::new(super::value::ValueRef::borrowed(collection)))
+    } else {
+        collection
+    }
+}
+
 /// `sorted` builds a `BTreeMap`.
 pub(super) fn collect_map(items: Vec<Value>, sorted: bool) -> Result<Value> {
+    collect_map_of(items, sorted, false)
+}
+
+/// `lent` says the keys are references into another collection.
+pub(super) fn collect_map_of(items: Vec<Value>, sorted: bool, lent: bool) -> Result<Value> {
     let mut map = if sorted {
         MapStore::sorted()
     } else {
@@ -371,21 +392,25 @@ pub(super) fn collect_map(items: Vec<Value>, sorted: bool) -> Result<Value> {
             .ok_or_else(|| anyhow!("invalid map key"))?;
         entries.push((key, value));
     }
-    fill(&mut map, entries, sorted);
-    Ok(Value::map_of(map))
+    let lent = lent && entries.iter().any(|(key, _)| key.may_drop());
+    fill(&mut map, entries, sorted, lent);
+    Ok(keep_lent(Value::map_of(map), lent))
 }
 
 /// Puts collected entries into an empty store and drops what a repeated key pushes out. A
 /// `BTreeMap` sorts the entries first and keeps the last of equal keys, so the earlier ones
 /// drop in key order. A `HashMap` inserts one by one, it keeps the first key, drops the new
-/// one and drops the value it replaces.
-fn fill(store: &mut MapStore, mut entries: Vec<(MapKey, Value)>, sorted: bool) {
+/// one and drops the value it replaces. `lent` keys are references into another collection, a
+/// repeated one drops nothing.
+fn fill(store: &mut MapStore, mut entries: Vec<(MapKey, Value)>, sorted: bool, lent: bool) {
     if sorted {
         entries.sort_by(|a, b| a.0.cmp(&b.0));
         let mut entries = entries.into_iter().peekable();
         while let Some((key, value)) = entries.next() {
             if entries.peek().is_some_and(|next| next.0 == key) {
-                discard_key(&key);
+                if !lent {
+                    discard_key(&key);
+                }
                 discard(value);
             } else {
                 store.insert(key, value);
@@ -394,7 +419,12 @@ fn fill(store: &mut MapStore, mut entries: Vec<(MapKey, Value)>, sorted: bool) {
         return;
     }
     for (key, value) in entries {
-        insert_or_replace(store, key, value);
+        if !lent && store.contains_key(&key) {
+            discard_key(&key);
+        }
+        if let Some(old) = store.insert(key, value) {
+            discard(old);
+        }
     }
 }
 
@@ -411,6 +441,11 @@ fn insert_or_replace(store: &mut MapStore, key: MapKey, value: Value) {
 
 /// `sorted` builds a `BTreeSet`.
 pub(super) fn collect_set(items: Vec<Value>, sorted: bool) -> Result<Value> {
+    collect_set_of(items, sorted, false)
+}
+
+/// `lent` says the items are references into another collection.
+pub(super) fn collect_set_of(items: Vec<Value>, sorted: bool, lent: bool) -> Result<Value> {
     let mut set = if sorted {
         MapStore::sorted()
     } else {
@@ -421,8 +456,9 @@ pub(super) fn collect_set(items: Vec<Value>, sorted: bool) -> Result<Value> {
         let key = item.into_key().ok_or_else(|| anyhow!("invalid set key"))?;
         entries.push((key, Value::Unit));
     }
-    fill(&mut set, entries, sorted);
-    Ok(Value::set_of(set))
+    let lent = lent && entries.iter().any(|(key, _)| key.may_drop());
+    fill(&mut set, entries, sorted, lent);
+    Ok(keep_lent(Value::set_of(set), lent))
 }
 
 /// A `&mut V` into the entry of `key`.

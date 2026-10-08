@@ -379,6 +379,7 @@ impl<'c, 'r> Infer<'c, 'r> {
             "char" => Ty::Char,
             "String" | "str" | "OsString" | "OsStr" => Ty::Str,
             "Vec" | "VecDeque" => Ty::vec(arg(0)),
+            "Range" | "RangeInclusive" => Ty::Range(Box::new(arg(0))),
             "HashSet" => Ty::Set(Box::new(arg(0)), false),
             "BTreeSet" => Ty::Set(Box::new(arg(0)), true),
             "HashMap" | "IndexMap" => Ty::Map(Box::new(arg(0)), Box::new(arg(1)), false),

@@ -3,8 +3,8 @@
 use rand::RngExt;
 
 use crate::lang::catalog::{
-    ElemReq, FishReq, METHODS, Method, RecvClass, Solved, TyPat, arg_ty, fish_allows, opt_str_pair,
-    opt_str_ref, solve,
+    ElemReq, FishReq, METHODS, Method, RecvClass, Solved, TyPat, WEIGHTS, arg_ty, fish_allows,
+    opt_str_pair, opt_str_ref, solve,
 };
 use crate::lang::expr::{BinOp, BorrowKind, Expr, MemKind, ReadMode, VecTakeKind, unbare_deep};
 use crate::lang::own::{BindKind, OwnState, root_binding};
@@ -401,15 +401,32 @@ impl Generator<'_> {
 
     pub(super) fn call(&mut self, want: &Ty, depth: usize) -> Option<Expr> {
         // solving touches no generator state, so it runs first
+        let mut weights = Vec::new();
         let solved: Vec<(&'static Method, Solved)> = METHODS
             .iter()
-            .filter_map(|method| Some((method, solve(method, want)?)))
+            .zip(WEIGHTS.iter())
+            .filter_map(|(method, weight)| {
+                let pinned = solve(method, want)?;
+                weights.push(*weight);
+                Some((method, pinned))
+            })
             .collect();
         if solved.is_empty() {
             return None;
         }
+        let total: usize = weights.iter().sum();
         for _ in 0..4 {
-            let index = self.rng.random_range(0..solved.len());
+            let mut draw = self.rng.random_range(0..total);
+            let index = weights
+                .iter()
+                .position(|weight| {
+                    if draw < *weight {
+                        return true;
+                    }
+                    draw -= weight;
+                    false
+                })
+                .unwrap_or(0);
             let (method, pinned) = solved[index].clone();
             let Some(recv_ty) = (match pinned.recv {
                 Some(ty) => Some(ty),

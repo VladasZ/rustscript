@@ -6,6 +6,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use super::format::{SpecNumber, apply_spec};
+use super::iterator::IteratorState;
 use super::native::Native;
 use super::value::{CellKind, MapKind, StructData, Value, big_text, format_float_debug};
 
@@ -146,6 +147,17 @@ fn write_value(value: &Value, opts: &DebugOpts, indent: usize, out: &mut String)
             Native::TomlTable(table) => out.push_str(&format!("{table:?}")),
             Native::SocketAddr(a) => out.push_str(&format!("{a:?}")),
             Native::IpAddr(a) => out.push_str(&format!("{a:?}")),
+            // a range binding that was advanced, what is left of it
+            Native::Iterator(IteratorState::Range {
+                next,
+                end,
+                inclusive,
+                ..
+            }) => out.push_str(&match (*inclusive, next > end) {
+                (false, _) => format!("{next}..{end}"),
+                (true, false) => format!("{next}..={end}"),
+                (true, true) => format!("{end}..={end} (exhausted)"),
+            }),
             other => out.push_str(&format!("<{}>", other.type_name())),
         },
         Value::Enum { def, variant, data } => {

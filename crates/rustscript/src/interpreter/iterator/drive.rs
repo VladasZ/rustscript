@@ -8,8 +8,8 @@ use anyhow::{Result, anyhow, bail};
 use super::back::supports_back;
 use super::in_place;
 use super::{
-    Handle, IteratorState, Step, chars, int_arg, lines_next, option_inner, owns_items, value_iter,
-    wrap,
+    Handle, IteratorState, Step, chars, int_arg, lends_vec_items, lines_next, option_inner,
+    owns_items, value_iter, wrap,
 };
 use crate::interpreter::bytecode::{BuiltinId, DefaultIr, MethodName};
 use crate::interpreter::enum_def::{EnumKind, OK, SOME};
@@ -517,15 +517,19 @@ impl Vm {
                     .collect::<String>(),
             ),
             BuiltinId::CollectMap | BuiltinId::CollectBtreeMap => {
-                crate::interpreter::vecmap::collect_map(
+                let lent = lends_vec_items(iterator);
+                crate::interpreter::vecmap::collect_map_of(
                     self.drain_iterator(iterator)?,
                     method.id == BuiltinId::CollectBtreeMap,
+                    lent,
                 )?
             }
             BuiltinId::CollectSet | BuiltinId::CollectBtreeSet => {
-                crate::interpreter::vecmap::collect_set(
+                let lent = lends_vec_items(iterator);
+                crate::interpreter::vecmap::collect_set_of(
                     self.drain_iterator(iterator)?,
                     method.id == BuiltinId::CollectBtreeSet,
+                    lent,
                 )?
             }
             BuiltinId::CollectResult | BuiltinId::CollectOption => {
@@ -601,8 +605,11 @@ impl Vm {
             BuiltinId::Cloned | BuiltinId::Copied => wrap(IteratorState::Cloned {
                 source: iterator.clone(),
             }),
-            // iterators are shared handles, so handing the same one back is the `by_ref` borrow
-            BuiltinId::ByRef => Value::Native(iterator.clone()),
+            // an iterator is its own `IntoIterator`
+            BuiltinId::IntoIter => Value::Native(iterator.clone()),
+            BuiltinId::ByRef => wrap(IteratorState::ByRef {
+                source: iterator.clone(),
+            }),
             BuiltinId::Next => self
                 .iterator_next(iterator)?
                 .map_or_else(Value::none, Value::some),

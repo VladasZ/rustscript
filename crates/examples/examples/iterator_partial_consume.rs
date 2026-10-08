@@ -36,6 +36,43 @@ fn main() {
     println!("by_ref head: {head:?}");
     println!("by_ref tail: {tail:?}");
 
+    // an adapter over `by_ref` that goes away leaves the rest in the iterator
+    let mut numbers = vec![1, 2, 3, 4].into_iter();
+    let head = numbers.by_ref().take(1).collect::<Vec<i32>>();
+    println!(
+        "vec head: {head:?}, rest: {:?}",
+        numbers.collect::<Vec<i32>>()
+    );
+
+    let mut numbers = vec![1, 2, 3, 4].into_iter();
+    let head: Vec<i32> = numbers.by_ref().take(2).collect();
+    println!("vec head: {head:?}, next: {:?}", numbers.next());
+
+    let mut numbers = vec![1, 2, 3, 4].into_iter();
+    let small = numbers.by_ref().take_while(|x| *x < 2).count();
+    println!("small: {small}, rest: {:?}", numbers.collect::<Vec<i32>>());
+
+    let mut numbers = vec![1, 2, 3, 4].into_iter();
+    let second: Vec<i32> = numbers.by_ref().skip(1).take(1).collect();
+    println!(
+        "second: {second:?}, rest: {:?}",
+        numbers.collect::<Vec<i32>>()
+    );
+
+    let mut numbers = vec![1, 2, 3, 4].into_iter();
+    let count = numbers.by_ref().take(1).count();
+    println!("count: {count}, next: {:?}", numbers.next());
+
+    let mut numbers = vec![1, 2, 3, 4].into_iter();
+    let mapped = numbers.by_ref().map(|x| x + 1).next();
+    println!("mapped: {mapped:?}, next: {:?}", numbers.next());
+
+    let mut numbers = vec![1, 2, 3, 4].into_iter();
+    for number in numbers.by_ref().take(2) {
+        print!("{number} ");
+    }
+    println!("then {:?}", numbers.collect::<Vec<i32>>());
+
     let mut empty = "".split(' ');
     println!("empty first: {:?}", empty.next());
     println!("empty again: {:?}", empty.next());

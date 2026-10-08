@@ -9,6 +9,7 @@ use crate::interpreter::bytecode::{BuiltinId, ScalarTy};
 use crate::interpreter::numeric::IntWidth;
 
 use super::{Args, int_arg, usize_arg};
+use crate::interpreter::ops::char_boundary_error;
 
 pub(crate) enum CharOut {
     Bool(bool),
@@ -86,7 +87,22 @@ pub(crate) enum StrOut {
     OptOwned(Option<String>),
     OptInt(Option<usize>),
     OptPair(Option<(String, String)>),
+    Pair(String, String),
     Ordering(Ordering),
+}
+
+/// `split_at` fails like the slice `&s[..mid]` does.
+fn str_split_at(s: &str, mid: usize) -> Result<StrOut> {
+    if mid > s.len() {
+        bail!(
+            "end byte index {mid} is out of bounds for string of length {}",
+            s.len()
+        );
+    }
+    match s.split_at_checked(mid) {
+        Some((head, tail)) => Ok(StrOut::Pair(head.to_string(), tail.to_string())),
+        None => Err(char_boundary_error(s, 0, mid)),
+    }
 }
 
 /// `repeat` past `isize::MAX` must be a script panic, not an interpreter death with a different
@@ -167,6 +183,7 @@ pub(crate) fn str_core(s: &str, name: BuiltinId, args: &impl Args) -> Result<Opt
             s.split_once(&a(0))
                 .map(|(x, y)| (x.to_string(), y.to_string())),
         ),
+        BuiltinId::SplitAt => str_split_at(s, usize_arg(args, 0)?)?,
         BuiltinId::RsplitOnce => StrOut::OptPair(
             s.rsplit_once(&a(0))
                 .map(|(x, y)| (x.to_string(), y.to_string())),

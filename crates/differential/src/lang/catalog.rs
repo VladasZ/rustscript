@@ -4,7 +4,7 @@
 
 use std::sync::LazyLock;
 
-use crate::lang::ty::{FloatWidth, IntWidth, Ty};
+use crate::lang::ty::{FloatWidth, IntWidth, SCALAR_TYPES, Ty};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecvClass {
@@ -263,6 +263,45 @@ pub static METHODS: LazyLock<Vec<Method>> = LazyLock::new(|| {
     ]
     .concat()
 });
+
+/// How much `call` favours each row of `METHODS`. A row whose result follows its receiver fits
+/// many wanted types and a row with a fixed result fits 1, so an even pick among the rows
+/// that fit leaves the fixed rows rare. The weight goes down as the fits go up.
+pub static WEIGHTS: LazyLock<Vec<usize>> = LazyLock::new(|| {
+    let wants = sample_wants();
+    METHODS
+        .iter()
+        .map(|method| {
+            let fits = wants
+                .iter()
+                .filter(|want| solve(method, want).is_some())
+                .count();
+            (WEIGHT_SPAN / fits.max(1)).clamp(1, MAX_WEIGHT)
+        })
+        .collect()
+});
+
+/// A row that fits this many sample types or more has weight 1.
+const WEIGHT_SPAN: usize = 42;
+
+/// A higher weight would push the rows that follow their receiver out of `usize` and `String`.
+const MAX_WEIGHT: usize = 16;
+
+/// One of each kind of type a statement asks for, to count how many a row fits.
+fn sample_wants() -> Vec<Ty> {
+    let mut wants: Vec<Ty> = SCALAR_TYPES.to_vec();
+    wants.extend([Ty::StrRef, opt_str_ref(), opt_str_pair()]);
+    for scalar in SCALAR_TYPES {
+        wants.push(Ty::vec_of(scalar.clone()));
+        wants.push(Ty::opt_of(scalar.clone()));
+        wants.push(Ty::vec_of(Ty::vec_of(scalar.clone())));
+        wants.push(Ty::res_of(scalar.clone(), Ty::Str));
+        wants.push(Ty::Tuple(vec![scalar.clone(), Ty::Bool]));
+        wants.push(Ty::opt_of(Ty::Tuple(vec![scalar.clone(), scalar.clone()])));
+        wants.push(Ty::vec_of(Ty::Tuple(vec![scalar.clone(), scalar.clone()])));
+    }
+    wants
+}
 
 mod rows_containers;
 mod rows_fmt;

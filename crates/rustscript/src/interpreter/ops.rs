@@ -351,7 +351,22 @@ pub(super) fn partial_compare(l: &Value, r: &Value) -> Result<Option<Ordering>> 
                 _ => bail!("cannot compare {} and {}", l.type_name(), r.type_name()),
             }
         }
+        // an operand a generic function handed back can still be the reference it was given
+        (Value::Ref(_) | Value::Cell(..), _) | (_, Value::Ref(_) | Value::Cell(..)) => {
+            partial_compare(&referent(l)?, &referent(r)?)?
+        }
         (a, b) => bail!("cannot compare {} and {}", a.type_name(), b.type_name()),
+    })
+}
+
+/// The value behind a reference or a shared slot, any other value as it is.
+fn referent(value: &Value) -> Result<Value> {
+    Ok(match value {
+        Value::Ref(reference) => reference
+            .get()
+            .ok_or_else(|| anyhow!("compare through a dangling reference"))?,
+        Value::Cell(_, slot) => slot.lock().clone(),
+        other => other.clone(),
     })
 }
 

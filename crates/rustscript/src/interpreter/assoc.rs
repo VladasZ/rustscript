@@ -127,7 +127,7 @@ fn int_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
         | PathId::U16From
         | PathId::U32From
         | PathId::U64From
-        | PathId::UsizeFrom => Value::Int(int_from_arg(id, args.first())?),
+        | PathId::UsizeFrom => target_int(id, int_from_arg(id, args.first())?),
         PathId::F32From | PathId::F64From => match args.first() {
             Some(Value::Float(f)) => Value::Float(*f),
             Some(Value::Int(n)) => Value::Float(AsPrimitive::<f64>::as_(*n)),
@@ -149,7 +149,7 @@ fn int_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
         | PathId::UsizeTryFrom => {
             let n = int_from_arg(id, args.first())?;
             if int_fits(id, n) {
-                Value::ok(Value::Int(n))
+                Value::ok(target_int(id, n))
             } else {
                 Value::err(Value::str(
                     "out of range integral type conversion attempted",
@@ -512,6 +512,15 @@ fn byte_array(id: PathId, arg: Option<&Value>) -> Result<Vec<i128>> {
         out.push(value);
     }
     Ok(out)
+}
+
+/// The integer a `T::from` or `T::try_from` makes, with the width of `T`. A conversion passed
+/// by name, `.map(u64::from)`, has no call site that could stamp the width later.
+fn target_int(id: PathId, n: i64) -> Value {
+    match IntWidth::parse(id.namespace()) {
+        Some(width) => Value::int_of_width(i128::from(n), width),
+        None => Value::Int(n),
+    }
 }
 
 fn int_fits(id: PathId, n: i64) -> bool {

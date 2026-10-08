@@ -552,7 +552,9 @@ sort_unstable_by mut
 sort_unstable_by_key mut
 spawn
 split
+split_at
 split_first
+split_last
 split_off mut
 split_once
 split_whitespace

@@ -166,8 +166,23 @@ conversions to `String`, and `parse` with `?` and `map_err`.
 hands it on. The solver puts one wherever a value of its type is wanted, a call argument, an
 operand, a struct field, an index or the value of an assignment.
 
-A row with a return type no statement asks for is never generated. A pair of vecs is one such
-type, so these rows hand back a `Vec`, a `String` or a `usize`.
+## How often a row is made
+
+A row is made only when a statement asks for its result type. `shape_ty` in `synth/mod.rs`
+makes the result types no other picker makes, like the pair of vecs of `split_at`, the
+`Option` of a pair of `zip` and `split_once`, and the `Result<usize, usize>` of
+`binary_search`. `any_ty` picks one of them now and then.
+
+`call` picks among the rows that fit the wanted type by weight, see `WEIGHTS` in `catalog.rs`.
+A row whose result follows its receiver, like `wrapping_add`, fits every integer type. A row
+with a fixed result, like `len`, fits 1 type. An even pick left the 31 rows with a plain
+`usize` result rare, 71 rows fit a wanted `usize`. So the weight of a row goes down as the
+count of types it fits goes up.
+
+2 tests in `tests/lang.rs` hold this. They count over 3000 seeds how many programs have each
+feature. `generation_covers_the_language` fails for a name in `EXPECTED_FEATURES` under the
+floor, `every_catalog_row_is_generated` for a catalog row under it. Both print the counts. The
+floor is 5, so a feature that gets rare fails before it falls to 0 by chance.
 
 ## Commands
 

@@ -15,38 +15,44 @@ Differential workflow.
 
 ## Open
 
-### The generator never makes 9 rows, and 2 expected features are near the edge
+### A set or map of references to a type with `Drop` drops the borrowed items
 
-**Current.** The solver picks with the same chance among all catalog rows
-that fit the wanted type, in `synth/exprs.rs` near line 402. A type that
-few statements ask for, or that many rows give, makes a row rare or never
-picked. Measured on 2026-10-07 with a probe test over the seeds 0 to 6000:
+**Current.** Found on 2026-10-08 while fixing the plain form. The plain form is right now,
+`v.iter().collect::<BTreeSet<_>>()` and the same with `HashSet` drop nothing. These 2 forms
+are still wrong:
 
-- 9 rows had 0 hits: `iter_by_ref`, `opt_zip`, `osp_map_strings`,
-  `split_once`, `vec_binary_search`, `vec_enumerate`, `vec_split_at`,
-  `vec_split_first` and `vec_split_last`. Their results are tuples or pairs
-  that no statement seems to ask for. They are not in `EXPECTED_FEATURES`,
-  so no test is red for them, and `every_catalog_method_is_reachable`
-  accepts them.
-- All 31 rows with a plain `usize` result are rare, 44 to 88 hits in 6000
-  seeds and 0 to 10 in the 400 seeds of `generation_covers_the_language`.
-  71 rows fit a wanted `usize`. `sl_len` has 0 hits in 400.
-- After the fix of `iter_scan_running`, `str_bytes_lower_count` has 1 hit
-  in 400 seeds and `iter_fold_print` has 3. Each change of a row shifts
-  what every seed makes, so one of them can fall to 0 by chance.
+```rust
+use std::collections::{BTreeMap, BTreeSet};
 
-`iter_scan_running` was red this way from 2026-10-04, its first seed was
-415. It gives back the receiver type now, like `iter_rchunks`, and has 31
-hits in 400.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct T(i64);
 
-**Needed.** A statement form that asks for the pair and tuple results of
-the 9 rows, or those rows moved to a result the solver asks for. For the
-rare class, a weight or a pick by result type first, so one row does not
-share its chance with 70 others. Then a floor in the coverage test, a
-feature with fewer than a few hits in 400 seeds fails with its count.
+impl Drop for T {
+    fn drop(&mut self) {
+        println!("drop {}", self.0);
+    }
+}
 
-**Blocks.** Bugs in those 9 methods cannot be found by the generator. The
-coverage test can go red by chance at any generator change.
+fn main() {
+    let v = vec![T(5), T(4), T(5)];
+    let set: BTreeSet<&T> = v.iter().collect();
+    println!("{}", set.len());
+    let map = v.iter().map(|t| (t, t.0)).collect::<BTreeMap<_, _>>();
+    println!("{}", map.len());
+    println!("end");
+}
+```
+
+Compiled it prints `2`, `2`, `end`, then `drop 5`, `drop 4`, `drop 5`. Interpreted it
+prints a `drop 5` before each `2`, the repeated key is dropped as if the collection owned
+it. After `end` the map drops its keys too. With a later use of `v` the script can panic
+with `no field 0`, the drop took the fields out of the shared struct.
+
+**Needed.** The `let` with a written type takes another collect path than the turbofish.
+Find it and pass the borrowed flag like `collect_set_of` and `collect_map_of` in
+`map_methods.rs` get it from `collect_terminal` in `iterator/drive.rs`. A reference that
+goes through a closure, `|t| (t, t.0)`, comes out of a `Map` state, and `owns_items` says
+that state owns its items. A key that is a reference must stay a reference there.
 
 ## Generator plan
 

@@ -58,6 +58,34 @@ fn method_call(
     if dispatch_log::on() {
         dispatch_log::method(&ctx.stack[base + recv], &name.text);
     }
+    // A range is a plain value, so a call on it works on a copy. These methods take `&mut self`
+    // and must advance the binding, so the binding becomes the iterator itself, a shared handle.
+    if name.place
+        && matches!(
+            name.id,
+            BuiltinId::Next | BuiltinId::NextBack | BuiltinId::Nth | BuiltinId::ByRef
+        )
+    {
+        match &ctx.stack[base + recv] {
+            Value::Range { .. } => {
+                let range = take(&mut ctx.stack[base + recv]);
+                ctx.stack[base + recv] = vm.iterator_value(range)?;
+            }
+            // a `&mut Range` parameter, the range of the caller turns into the iterator
+            Value::Ref(reference) => {
+                let turned = reference.update(|slot| {
+                    if matches!(slot, Value::Range { .. }) {
+                        *slot = vm.iterator_value(take(slot))?;
+                    }
+                    Ok(())
+                });
+                if let Some(Err(error)) = turned {
+                    return Err(error);
+                }
+            }
+            _ => {}
+        }
+    }
     if let Some(v) = builtin_fast(ctx, recv, name, s, argc, dst) {
         return Ok(ctx.set_opt(dst, v));
     }
