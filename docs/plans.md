@@ -3,7 +3,8 @@
 Planned work on [RustScript](https://github.com/VladasZ/rustscript), the
 interpreter at `~/dev/rustscript`. Each entry says what, why, and what it
 depends on. Reproduced bugs live in [flaws.md](flaws.md),
-not here.
+not here. The plan for robustness as a whole is in
+[robustness.md](robustness.md).
 
 ## Declarative bridge registry
 
