@@ -15,6 +15,47 @@ Differential workflow.
 
 ## Open
 
+### `PathBuf::push` does nothing
+
+**Current.** A `push` on a `PathBuf` runs with no error and leaves the path
+as it was. Found on 2026-10-08 in `build/shared/src/hot.rs` of hilen, the
+function `relative`, which builds a path with `push` in a loop. It gave an
+empty path, and the cargo line made from it named the wrong folder. The unit
+test of that function passes, it is compiled.
+
+```rust
+use std::path::PathBuf;
+
+fn main() {
+    let mut a = PathBuf::new();
+    a.push("x");
+    println!("a `{}`", a.display());
+
+    let mut b = PathBuf::from("x");
+    b.push("y");
+    println!("b `{}`", b.display());
+
+    let mut c = PathBuf::from("x");
+    c.push("..");
+    println!("c `{}`", c.display());
+}
+```
+
+```
+compiled       interpreted
+a `x`          a ``
+b `x/y`        b `x`
+c `x/..`       c `x`
+```
+
+`String::push_str` in the same kind of loop is right. The likely place is
+where the method `push` is resolved by the type of its receiver,
+`interpreter/compile/infer/methods.rs`, a `PathBuf` may fall into a branch
+that has no write back to the variable.
+
+**Blocks.** `make swap` of hilen for an app outside the hilen repo, the
+script `build/ios/swap.rs`.
+
 ### The generator never makes 9 rows, and 2 expected features are near the edge
 
 **Current.** The solver picks with the same chance among all catalog rows
