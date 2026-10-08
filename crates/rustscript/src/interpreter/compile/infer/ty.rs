@@ -111,6 +111,9 @@ impl Ty {
             | Ty::Result(t, _) => (**t).clone(),
             Ty::Map(k, v, _) => Ty::Tuple(vec![(**k).clone(), (**v).clone()]),
             Ty::Str => Ty::Char,
+            Ty::Named(name, _) if &**name == "toml::Table" => {
+                Ty::Tuple(vec![Ty::Str, Ty::named("toml::Value")])
+            }
             _ => Ty::Unknown,
         }
     }

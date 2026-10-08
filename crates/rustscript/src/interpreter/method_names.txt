@@ -28,6 +28,7 @@ as_f64
 as_i128
 as_i64
 as_int
+as_integer
 as_micros
 as_millis
 as_mut
@@ -426,6 +427,7 @@ or_else
 or_insert
 or_insert_with
 or_insert_with_key
+ordinal
 output
 overflowing_add
 overflowing_mul

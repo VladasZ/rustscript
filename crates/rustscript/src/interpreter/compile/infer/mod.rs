@@ -393,6 +393,8 @@ impl<'c, 'r> Infer<'c, 'r> {
                 Ty::result(arg(0), err)
             }
             "Box" | "Rc" | "Arc" | "RefCell" | "Cell" | "Mutex" | "Cow" => arg(0),
+            "Table" if self.names_toml(&p.path, module) => Ty::named("toml::Table"),
+            "Value" if self.names_toml(&p.path, module) => Ty::named("toml::Value"),
             "Value" if p.path.segments.len() == 1 || segment_is(&p.path, "serde_json") => Ty::Json,
             "Self" => self.self_ty(),
             _ => {
@@ -416,6 +418,19 @@ impl<'c, 'r> Infer<'c, 'r> {
                 }
             }
         }
+    }
+
+    /// Whether a type path is one of the `toml` crate, written out or through an import. A toml
+    /// value prints and reads unlike a `serde_json` one, so it keeps its crate in its name.
+    fn names_toml(&self, path: &syn::Path, module: usize) -> bool {
+        if segment_is(path, "toml") {
+            return true;
+        }
+        let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        matches!(
+            self.ctx.resolver.resolve(module, &segs),
+            Ok(Res::External(full)) if full.first().is_some_and(|root| root == "toml")
+        )
     }
 
     /// The declared type of a struct field, lowered in the struct's own module.

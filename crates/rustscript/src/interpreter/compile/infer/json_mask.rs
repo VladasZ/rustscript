@@ -18,6 +18,8 @@ impl Infer<'_, '_> {
         let boxed = |m: JsonMask| Box::new(m);
         match ty {
             Ty::Json => Some(JsonMask::Here),
+            Ty::Named(name, _) if &**name == "toml::Value" => Some(JsonMask::Toml),
+            Ty::Named(name, _) if &**name == "toml::Table" => Some(JsonMask::TomlTable),
             Ty::Vec(item) => self.mask(item, seen).map(|m| JsonMask::Items(boxed(m))),
             Ty::Map(_, value, _) => self.mask(value, seen).map(|m| JsonMask::Values(boxed(m))),
             Ty::Option(inner) => self.mask(inner, seen).map(|m| JsonMask::Some(boxed(m))),

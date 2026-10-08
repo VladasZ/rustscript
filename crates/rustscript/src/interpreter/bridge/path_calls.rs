@@ -145,6 +145,9 @@ pub(super) fn bridge_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     if let Some(v) = crate::interpreter::chrono_bridge::chrono_call(id, args)? {
         return Ok(Some(v));
     }
+    if let Some(v) = crate::interpreter::from_str_bridge::from_str_call(id, args)? {
+        return Ok(Some(v));
+    }
     if let Some(v) = crate::interpreter::ratatui::ratatui_assoc(id, args) {
         return Ok(Some(v));
     }

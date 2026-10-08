@@ -193,6 +193,14 @@ pub(super) fn mark_json(v: &Value, mask: &JsonMask) -> Value {
             Ok(json) => Native::Json(json).wrap(),
             Err(_) => v.clone(),
         },
+        (JsonMask::Toml, _) => match pvalue_to_json(v).map(toml::Value::try_from) {
+            Ok(Ok(value)) => Native::Toml(value).wrap(),
+            _ => v.clone(),
+        },
+        (JsonMask::TomlTable, _) => match pvalue_to_json(v).map(toml::Table::try_from) {
+            Ok(Ok(table)) => Native::TomlTable(table).wrap(),
+            _ => v.clone(),
+        },
         (JsonMask::Items(m), Value::Vec(items)) => {
             Value::vec(items.lock().iter().map(|x| mark_json(x, m)).collect())
         }

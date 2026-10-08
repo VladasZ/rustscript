@@ -155,6 +155,7 @@ pub(super) fn scalar_method(recv: &Value, name: &MethodName, args: &[Value]) -> 
         m,
         BuiltinId::AsStr
             | BuiltinId::AsI64
+            | BuiltinId::AsInteger
             | BuiltinId::AsU64
             | BuiltinId::AsF64
             | BuiltinId::AsBool
@@ -166,7 +167,10 @@ pub(super) fn scalar_method(recv: &Value, name: &MethodName, args: &[Value]) -> 
         let matched = match (recv, m) {
             (Value::Bool(_), BuiltinId::AsBool)
             | (Value::Str(_), BuiltinId::AsStr)
-            | (Value::Int(_) | Value::IntW(..), BuiltinId::AsI64 | BuiltinId::AsU64)
+            | (
+                Value::Int(_) | Value::IntW(..),
+                BuiltinId::AsI64 | BuiltinId::AsInteger | BuiltinId::AsU64,
+            )
             | (Value::Float(_), BuiltinId::AsF64) => true,
             (Value::Int(i), BuiltinId::AsF64) => {
                 return Ok(Value::some(Value::Float(AsPrimitive::<f64>::as_(*i))));

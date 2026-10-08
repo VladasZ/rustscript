@@ -523,6 +523,7 @@ impl Compiler<'_> {
         path: PathRef,
         argc: u16,
     ) -> Result<Option<PathRef>> {
+        let path = Self::zoned_from_str(path, &self.types.of_node(c).payload());
         // Only `Box::new` is a pass through, a box is pure ownership. `Rc`, `Arc`, `RefCell`,
         // `Cell` and `Mutex` build real shared cells.
         if path.id == PathId::BoxNew && c.args.len() == 1 {

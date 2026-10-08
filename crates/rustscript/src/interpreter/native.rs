@@ -94,6 +94,9 @@ pub enum Native {
     /// a `serde_json::Value` format argument, rebuilt from its runtime map or list so it prints
     /// as json, see `render_fmt`
     Json(serde_json::Value),
+    /// the same for a `toml::Value` and a `toml::Table`
+    Toml(toml::Value),
+    TomlTable(toml::Table),
     /// left behind after a task is taken to await or a stdin pipe is closed
     Taken,
 }
@@ -136,7 +139,8 @@ impl Native {
             Native::JoinErr { .. } => "JoinError",
             Native::Fmt { .. } => "Formatter",
             Native::Anyhow(_) => "Error",
-            Native::Json(_) => "Value",
+            Native::Json(_) | Native::Toml(_) => "Value",
+            Native::TomlTable(_) => "Table",
             Native::Taken => "Taken",
         }
     }

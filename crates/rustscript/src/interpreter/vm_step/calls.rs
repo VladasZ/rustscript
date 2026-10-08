@@ -126,6 +126,27 @@ pub(super) fn call_path(
             )?;
             return Ok(ctx.set(dst, Value::str(json.to_string())));
         }
+        // `to_string` on a `toml::Value`, a string keeps its quotes
+        PathId::TomlValueToString => {
+            let parts = ctx.take_range(abase, argc);
+            let json = crate::interpreter::json_bridge::pvalue_to_json(
+                parts.first().unwrap_or(&Value::Unit),
+            )?;
+            return Ok(ctx.set(dst, Value::str(toml::Value::try_from(json)?.to_string())));
+        }
+        // `as_str` on a json or toml value is an `Option`, a string is held as plain text
+        PathId::JsonAsStr => {
+            let parts = ctx.take_range(abase, argc);
+            let text = match parts.first() {
+                Some(Value::Ref(reference)) => reference.get(),
+                other => other.cloned(),
+            };
+            let found = match text {
+                Some(text @ Value::Str(_)) => Value::some(text),
+                _ => Value::none(),
+            };
+            return Ok(ctx.set(dst, found));
+        }
         PathId::JsonValue | PathId::JsonArray | PathId::JsonObject => {
             let parts = ctx.take_range(abase, argc);
             return Ok(ctx.set(

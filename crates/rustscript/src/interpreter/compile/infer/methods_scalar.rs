@@ -265,6 +265,32 @@ impl Infer<'_, '_> {
         })
     }
 
+    /// The net and toml types a `parse` lands in.
+    fn parsed_named_method(kind: &str, name: &str) -> Option<Ty> {
+        let value = || Ty::named("toml::Value");
+        Some(match (kind, name) {
+            (
+                "IpAddr",
+                "is_ipv4" | "is_ipv6" | "is_loopback" | "is_unspecified" | "is_multicast",
+            )
+            | ("SocketAddr", "is_ipv4" | "is_ipv6")
+            | ("toml::Table", "contains_key" | "is_empty") => Ty::Bool,
+            ("SocketAddr", "ip") => Ty::named("IpAddr"),
+            ("SocketAddr", "port") => Ty::Int(IntWidth::U16),
+            ("NaiveDateTime", "and_utc") => Ty::named("DateTime"),
+            ("toml::Table", "len") => Ty::usize(),
+            ("toml::Table" | "toml::Value", "get") => Ty::option(value()),
+            ("toml::Table", "keys") => Ty::iter(Ty::Str),
+            ("toml::Table", "values") => Ty::iter(value()),
+            ("toml::Table", "iter") => Ty::iter(Ty::named("toml::Table").item()),
+            ("toml::Value", "as_str") => Ty::option(Ty::Str),
+            ("toml::Value", "as_integer") => Ty::option(Ty::Int(IntWidth::I64)),
+            ("toml::Value", "as_bool") => Ty::option(Ty::Bool),
+            ("toml::Value", "as_array") => Ty::option(Ty::vec(value())),
+            _ => return None,
+        })
+    }
+
     /// The bridge types, grouped by what a method gives back.
     pub(super) fn named_method(
         &mut self,
@@ -274,7 +300,9 @@ impl Infer<'_, '_> {
         expected: &Ty,
     ) -> Ty {
         let io = |ok: Ty| Ty::result(ok, Ty::named("io::Error"));
-        if let Some(ty) = Self::file_named_method(kind, name) {
+        if let Some(ty) =
+            Self::file_named_method(kind, name).or_else(|| Self::parsed_named_method(kind, name))
+        {
             self.walk_all(args);
             return ty;
         }
@@ -284,9 +312,8 @@ impl Infer<'_, '_> {
             ("Duration", "as_secs_f32") => Ty::F32,
             ("Duration", "subsec_millis" | "subsec_micros" | "subsec_nanos")
             | ("Child", "id")
-            | ("DateTime", "month" | "day" | "hour" | "minute" | "second" | "ordinal") => {
-                Ty::Int(IntWidth::U32)
-            }
+            | ("DateTime", "month" | "day" | "hour" | "minute" | "second" | "ordinal")
+            | ("NaiveDate", "month" | "day" | "ordinal") => Ty::Int(IntWidth::U32),
             ("Instant", "elapsed" | "duration_since") => Ty::named("Duration"),
             ("SystemTime", "duration_since" | "elapsed") => {
                 Ty::result(Ty::named("Duration"), Ty::named("SystemTimeError"))
@@ -347,9 +374,9 @@ impl Infer<'_, '_> {
                 Ty::result(Ty::named("Client"), Ty::named("reqwest::Error"))
             }
             ("ClientBuilder", _) => Ty::named("ClientBuilder"),
-            ("DateTime", "format") => Ty::named("DelayedFormat"),
+            ("DateTime" | "NaiveDate", "format") => Ty::named("DelayedFormat"),
             ("DateTime", "timestamp" | "timestamp_millis") => Ty::Int(IntWidth::I64),
-            ("DateTime", "year") => Ty::Int(IntWidth::I32),
+            ("DateTime" | "NaiveDate", "year") => Ty::Int(IntWidth::I32),
             ("Ordering", "then" | "then_with" | "reverse") => Ty::named("Ordering"),
             _ => Ty::Unknown,
         };

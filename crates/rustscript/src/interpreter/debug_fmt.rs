@@ -134,6 +134,16 @@ fn write_value(value: &Value, opts: &DebugOpts, indent: usize, out: &mut String)
                 out.push_str(&text.replace('\n', &format!("\n{}", pad(indent))));
             }
             Native::Json(json) => out.push_str(&format!("{json:?}")),
+            Native::Toml(value) if opts.pretty => {
+                let text = format!("{value:#?}");
+                out.push_str(&text.replace('\n', &format!("\n{}", pad(indent))));
+            }
+            Native::Toml(value) => out.push_str(&format!("{value:?}")),
+            Native::TomlTable(table) if opts.pretty => {
+                let text = format!("{table:#?}");
+                out.push_str(&text.replace('\n', &format!("\n{}", pad(indent))));
+            }
+            Native::TomlTable(table) => out.push_str(&format!("{table:?}")),
             Native::SocketAddr(a) => out.push_str(&format!("{a:?}")),
             Native::IpAddr(a) => out.push_str(&format!("{a:?}")),
             other => out.push_str(&format!("<{}>", other.type_name())),

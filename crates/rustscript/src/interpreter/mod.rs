@@ -16,6 +16,7 @@ mod ed25519_bridge;
 mod enum_def;
 mod env_overlay;
 mod format;
+mod from_str_bridge;
 mod higher_order;
 mod http;
 mod impls;

@@ -567,7 +567,9 @@ fn int_query_method(
     let out = match name {
         // from the real value, not the saturated image, serde checks by range so a negative
         // number is not a u64
-        BuiltinId::AsI64 => Ok(IntOut::Checked(i64::try_from(recv).ok().map(i128::from))),
+        BuiltinId::AsI64 | BuiltinId::AsInteger => {
+            Ok(IntOut::Checked(i64::try_from(recv).ok().map(i128::from)))
+        }
         BuiltinId::AsU64 => Ok(IntOut::Checked(u64::try_from(recv).ok().map(i128::from))),
         BuiltinId::AsF64 => Ok(IntOut::SomeFloat(AsPrimitive::<f64>::as_(recv))),
         BuiltinId::Min => arg(args, 0).map(|b| IntOut::Same(recv.min(b))),

@@ -5,12 +5,12 @@ use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens;
 use syn::Expr;
 
-use crate::interpreter::bytecode::{BinKind, DISCARD, Op, PathRef, Reg, ScalarTy};
+use crate::interpreter::bytecode::{BinKind, DISCARD, Op, PathId, PathRef, Reg, ScalarTy};
 
 use super::infer::Ty;
 use super::place;
 use super::walks::unparen;
-use super::{CollectInner, CollectTarget, Compiler, NameLoc, idx16};
+use super::{CollectInner, CollectTarget, Compiler, NameLoc, Res, idx16};
 use crate::interpreter::bytecode::DefaultIr;
 
 impl Compiler<'_> {
@@ -206,7 +206,10 @@ impl Compiler<'_> {
             });
             return Ok(());
         }
-        if self.compile_into_conversion(dst, m)? || self.compile_parse_user(dst, m)? {
+        if self.compile_into_conversion(dst, m)?
+            || self.compile_parse_user(dst, m)?
+            || self.compile_parse_bridged(dst, m)?
+        {
             return Ok(());
         }
         if self.compile_json_to_string(dst, m)? {
@@ -285,14 +288,23 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    /// `to_string` on a `serde_json::Value`. A json value is a plain map, list or string at
-    /// runtime, only the type says it prints as json.
+    /// `to_string` and `as_str` on a `serde_json::Value` or a `toml::Value`. Such a value is a
+    /// plain map, list or string at runtime, only the type says it prints as json or toml and
+    /// that `as_str` gives an `Option`.
     fn compile_json_to_string(&mut self, dst: Reg, m: &syn::ExprMethodCall) -> Result<bool> {
-        if m.method != "to_string" || !m.args.is_empty() || self.types.of(&m.receiver) != Ty::Json {
+        if !m.args.is_empty() {
             return Ok(false);
         }
-        let base = self.compile_args(std::iter::once(&*m.receiver))?;
-        let path = self.add_path(PathRef::new(vec!["::json_to_string".to_string()], None));
+        let recv = self.types.of(&m.receiver);
+        let toml = recv == Ty::named("toml::Value");
+        let hidden = match m.method.to_string().as_str() {
+            "to_string" if recv == Ty::Json => "::json_to_string",
+            "to_string" if toml => "::toml_value_to_string",
+            "as_str" if toml || recv == Ty::Json => "::json_as_str",
+            _ => return Ok(false),
+        };
+        let base = self.compile_shared_args(std::iter::once(&*m.receiver))?;
+        let path = self.add_path(PathRef::new(vec![hidden.to_string()], None));
         self.emit(Op::CallPath {
             dst,
             path,
@@ -351,6 +363,81 @@ impl Compiler<'_> {
             argc: 1,
         });
         Ok(true)
+    }
+
+    /// `s.parse::<T>()` into a type of a bridged crate is `T::from_str(s)` too, the path that
+    /// runs the real impl of the crate. The builtin `parse` knows only the std scalars. A type
+    /// with no such path fails as a missing path does, and never as an `Err` of a parse that was
+    /// not tried. True when the call was emitted here.
+    fn compile_parse_bridged(&mut self, dst: Reg, m: &syn::ExprMethodCall) -> Result<bool> {
+        if m.method != "parse" || !m.args.is_empty() {
+            return Ok(false);
+        }
+        let target = self.types.of_node(m).payload();
+        let Some(mut segs) = self.parse_target_path(m, &target) else {
+            return Ok(false);
+        };
+        segs.push("from_str".to_string());
+        let path = Self::zoned_from_str(self.external_path(segs, None), &target);
+        let p = self.add_path(path);
+        let base = self.compile_args(std::iter::once(&*m.receiver))?;
+        self.set_line(m.method.span());
+        self.emit(Op::CallPath {
+            dst,
+            path: p,
+            base,
+            argc: 1,
+        });
+        Ok(true)
+    }
+
+    /// The path of the bridge type a `parse` lands in. The type written in the turbofish keeps
+    /// its crate through the imports. An inferred type is the name the inference gave it, a
+    /// last segment for most and `toml::Table` for the types of `toml`.
+    fn parse_target_path(&self, m: &syn::ExprMethodCall, target: &Ty) -> Option<Vec<String>> {
+        if !matches!(target, Ty::Json | Ty::Named(..)) {
+            return None;
+        }
+        let written = m.turbofish.as_ref().and_then(|turbofish| {
+            turbofish.args.iter().find_map(|arg| match arg {
+                syn::GenericArgument::Type(syn::Type::Path(p)) if p.qself.is_none() => {
+                    Some(&p.path)
+                }
+                _ => None,
+            })
+        });
+        if let Some(path) = written {
+            let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+            match self.ctx.resolver.resolve(self.ctx.module, &segs) {
+                Ok(Res::External(full)) => return Some(full),
+                // a `type` alias, the inferred type below already followed it
+                Ok(_) => {}
+                Err(_) => return Some(segs),
+            }
+        }
+        Some(match target {
+            Ty::Json => vec!["serde_json".to_string(), "Value".to_string()],
+            Ty::Named(name, _) => name.split("::").map(str::to_string).collect(),
+            _ => return None,
+        })
+    }
+
+    /// `DateTime<Utc>` and `DateTime<Local>` share the `from_str` path of `DateTime<FixedOffset>`
+    /// by name and keep only the instant, so each gets its own hidden path.
+    pub(super) fn zoned_from_str(path: PathRef, parsed: &Ty) -> PathRef {
+        if path.id != PathId::DateTimeFromStr {
+            return path;
+        }
+        let zone = match parsed {
+            Ty::Named(_, args) => args.first(),
+            _ => None,
+        };
+        let hidden = match zone {
+            Some(Ty::Named(zone, _)) if &**zone == "Utc" => "::datetime_utc_from_str",
+            Some(Ty::Named(zone, _)) if &**zone == "Local" => "::datetime_local_from_str",
+            _ => return path,
+        };
+        PathRef::new(vec![hidden.to_string()], None)
     }
 
     /// `v.rem_euclid(replace(&mut v, 1))` reads `v` before the argument writes it. A scalar

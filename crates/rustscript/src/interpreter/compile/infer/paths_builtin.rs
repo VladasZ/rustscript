@@ -306,6 +306,32 @@ impl Infer<'_, '_> {
         })
     }
 
+    /// What the `FromStr` of a bridge type gives, the same path a `parse` into it compiles to.
+    /// `None` for an owner with no such path.
+    fn target_of_from_str(
+        &self,
+        owner: &str,
+        segs: &[String],
+        owner_seg: Option<&syn::PathSegment>,
+    ) -> Option<Ty> {
+        Some(match owner {
+            "NaiveDate" | "NaiveDateTime" | "IpAddr" | "SocketAddr" | "PathBuf" | "Regex"
+            | "StatusCode" | "Algorithm" => Ty::named(owner),
+            "DateTime" => {
+                let zone = owner_seg
+                    .and_then(|seg| type_arg(seg, 0))
+                    .map(|t| self.lower(t))
+                    .into_iter()
+                    .collect();
+                Ty::Named(Arc::from("DateTime"), zone)
+            }
+            "Table" => Ty::named("toml::Table"),
+            "Value" if segs.iter().any(|seg| seg == "toml") => Ty::named("toml::Value"),
+            "Value" => Ty::Json,
+            _ => return None,
+        })
+    }
+
     /// Calls into the bridges, by the last segments of the path.
     pub(super) fn external_call(
         &mut self,
@@ -332,6 +358,12 @@ impl Infer<'_, '_> {
             .last()
             .and_then(|seg| type_arg(seg, 0))
             .map(|t| self.lower(t));
+        if last == "from_str"
+            && let Some(parsed) = self.target_of_from_str(owner, segs, owner_seg)
+        {
+            self.walk_args(args);
+            return Ty::result(parsed, Ty::named("ParseError"));
+        }
         let item_want = turbofish.clone().unwrap_or_else(|| expected.item());
         if let Some(ty) = self.ctor_call(
             owner,
