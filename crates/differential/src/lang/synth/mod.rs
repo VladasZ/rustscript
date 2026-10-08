@@ -451,16 +451,35 @@ impl<'a> Generator<'a> {
     // types
 
     pub(super) fn any_ty(&mut self) -> Ty {
-        match self.rng.random_range(0..16) {
+        match self.rng.random_range(0..19) {
+            16 | 17 => self.shape_ty(),
             0 | 1 => Ty::vec_of(self.elem_ty()),
             2 => Ty::opt_of(self.elem_ty()),
-            3 => self.map_ty(),
+            3 | 18 => self.map_ty(),
             4 => self.set_ty(),
             5 => self.tuple_ty(),
             6 => self.res_ty(),
             7 | 8 => self.user_ty().unwrap_or_else(|| self.scalar_ty()),
             9 => Ty::Trace,
             _ => self.scalar_ty(),
+        }
+    }
+
+    /// The result shapes of catalog rows that no other picker makes, like the pair of vecs of
+    /// `split_at`. Without them no statement ever asks for those rows.
+    pub(super) fn shape_ty(&mut self) -> Ty {
+        let elem = self.scalar_ty();
+        match self.rng.random_range(0..10) {
+            8 => Ty::opt_of(self.pick(&[Ty::USIZE, Ty::U32, Ty::Str]).clone()),
+            9 => Ty::vec_of(Ty::Tuple(vec![self.key_ty(), elem])),
+            0 => Ty::Tuple(vec![Ty::vec_of(elem.clone()), Ty::vec_of(elem)]),
+            1 => Ty::opt_of(Ty::Tuple(vec![elem.clone(), elem])),
+            2 => Ty::opt_of(Ty::Tuple(vec![Ty::Str, Ty::Str])),
+            3 => Ty::opt_of(Ty::Tuple(vec![elem.clone(), Ty::vec_of(elem)])),
+            4 => Ty::vec_of(Ty::Tuple(vec![Ty::USIZE, elem])),
+            5 => Ty::vec_of(Ty::Tuple(vec![elem.clone(), elem])),
+            6 => Ty::Tuple(vec![Ty::Int(self.int_width()), Ty::Bool]),
+            _ => Ty::res_of(Ty::USIZE, Ty::USIZE),
         }
     }
 

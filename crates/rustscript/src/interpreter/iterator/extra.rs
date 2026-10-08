@@ -94,6 +94,9 @@ impl IteratorState {
             IteratorState::MutableValues { .. } | IteratorState::DrainingValues { .. } => {
                 bail!("an iterator over `&mut` items can not be cloned for `cycle`")
             }
+            IteratorState::ByRef { .. } => {
+                bail!("a `by_ref` borrow of an iterator can not be cloned for `cycle`")
+            }
             other => other.fork_text()?,
         })
     }
@@ -282,6 +285,7 @@ impl IteratorState {
             | IteratorState::Inspect { source, .. }
             | IteratorState::Enumerate { source, .. }
             | IteratorState::Cloned { source }
+            | IteratorState::ByRef { source }
             | IteratorState::Rev { source } => exact_len_of(source),
             IteratorState::Take { source, remaining } => {
                 Some(exact_len_of(source)?.min(*remaining))
@@ -410,6 +414,15 @@ impl Vm {
                 Some(len) => usize_value(len),
                 None => return Ok(None),
             },
+            // `Range::is_empty` on a range binding that was advanced
+            BuiltinId::IsEmpty
+                if matches!(
+                    &*iterator.lock(),
+                    Native::Iterator(IteratorState::Range { .. })
+                ) =>
+            {
+                Value::Bool(exact_len_of(iterator) == Some(0))
+            }
             BuiltinId::Unzip => self.unzip(iterator)?,
             BuiltinId::IsSorted => self.is_sorted(iterator)?,
             _ => return Ok(None),

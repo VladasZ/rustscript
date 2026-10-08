@@ -186,7 +186,7 @@ pub(super) const ROWS: &[Method] = &[
         VecRecv,
         &[SmallUsize],
         TyPat::Tuple2(SAME, SAME),
-        "({{ let (a, b) = {r}.split_at({0}); (a.to_vec(), b.to_vec()) }})",
+        "({{ let diff_v = {r}; let (a, b) = diff_v.split_at({0}); (a.to_vec(), b.to_vec()) }})",
     ),
     m(
         "vec_split_first",

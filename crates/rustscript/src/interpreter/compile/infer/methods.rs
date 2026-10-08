@@ -61,49 +61,61 @@ impl Infer<'_, '_> {
             full.extend(args.iter().copied());
             return self.sig_call(&sig, Some(&recv), &full, expected);
         }
-        if let Some(ty) = self.common_method(&recv, &name, &args, turbofish.as_ref(), expected) {
+        self.builtin_method(&recv, &name, &args, turbofish, expected)
+    }
+
+    /// A method of a bridged or built in type, by the type of its receiver.
+    pub(super) fn builtin_method(
+        &mut self,
+        recv: &Ty,
+        name: &str,
+        args: &[&Expr],
+        turbofish: Option<Ty>,
+        expected: &Ty,
+    ) -> Ty {
+        if let Some(ty) = self.common_method(recv, name, args, turbofish.as_ref(), expected) {
             return ty;
         }
-        match &recv {
-            Ty::Str => self.str_method(&name, &args, turbofish, expected),
+        match recv {
+            Ty::Str => self.str_method(name, args, turbofish, expected),
             Ty::Vec(item) => {
                 let item = (**item).clone();
-                self.vec_method(&recv, &item, &name, &args, turbofish, expected)
+                self.vec_method(recv, &item, name, args, turbofish, expected)
             }
             Ty::Set(item, _) => {
                 let item = (**item).clone();
-                self.set_method(&recv, &item, &name, &args)
+                self.set_method(recv, &item, name, args)
             }
             Ty::Map(key, value, _) => {
                 let (key, value) = ((**key).clone(), (**value).clone());
-                self.map_method(&recv, &key, &value, &name, &args)
+                self.map_method(recv, &key, &value, name, args)
             }
             Ty::Entry(value) => {
                 let value = (**value).clone();
-                self.entry_method(&recv, &value, &name, &args)
+                self.entry_method(recv, &value, name, args)
             }
             Ty::Option(payload) => {
                 let payload = (**payload).clone();
-                self.option_method(&recv, &payload, &name, &args, expected)
+                self.option_method(recv, &payload, name, args, expected)
             }
             Ty::Result(ok, err) => {
                 let (ok, err) = ((**ok).clone(), (**err).clone());
-                self.result_method(&recv, &ok, &err, &name, &args, expected)
+                self.result_method(recv, &ok, &err, name, args, expected)
             }
             Ty::Iter(item) | Ty::Range(item) => {
                 let item = (**item).clone();
-                self.iter_method(&recv, &item, &name, &args, turbofish, expected)
+                self.iter_method(recv, &item, name, args, turbofish, expected)
             }
-            Ty::Int(_) | Ty::IntVar(_) => self.int_method(&recv, &name, &args),
-            Ty::F32 | Ty::F64 | Ty::FloatVar(_) => self.float_method(&recv, &name, &args),
-            Ty::Char => self.char_method(&name, &args),
-            Ty::Json => self.json_method(&name, &args),
-            Ty::Bool => self.bool_method(&name, &args, expected),
+            Ty::Int(_) | Ty::IntVar(_) => self.int_method(recv, name, args),
+            Ty::F32 | Ty::F64 | Ty::FloatVar(_) => self.float_method(recv, name, args),
+            Ty::Char => self.char_method(name, args),
+            Ty::Json => self.json_method(name, args),
+            Ty::Bool => self.bool_method(name, args, expected),
             Ty::Named(kind, _) => {
                 let kind = kind.clone();
-                self.named_method(&kind, &name, &args, expected)
+                self.named_method(&kind, name, args, expected)
             }
-            _ => self.walk_all(&args),
+            _ => self.walk_all(args),
         }
     }
 

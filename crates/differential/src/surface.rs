@@ -444,8 +444,8 @@ pub fn script_calls(repo: &Path) -> Result<ScriptCalls> {
 /// The method names the programs of these seeds call. The catalog is not the whole generator,
 /// pipes and statements write calls too, so the rendered text is what counts.
 pub fn generated_names(seeds: Range<u64>) -> BTreeSet<String> {
-    // a row with a rare result type may miss a sample, `every_catalog_method_is_reachable` is
-    // what proves the generator can place it
+    // a row with a rare result type may miss a sample, `every_catalog_row_is_generated` is
+    // what proves the generator places it
     let mut out: BTreeSet<String> = METHODS
         .iter()
         .flat_map(|method| called_names(method.template))

@@ -15,7 +15,9 @@ use super::iterator;
 use super::ops::compare_values;
 use super::value::{List, Value};
 
-pub(super) use super::map_methods::{collect_map, collect_set, map_method};
+pub(super) use super::map_methods::{
+    collect_map, collect_map_of, collect_set, collect_set_of, map_method,
+};
 
 pub(super) fn vec_method(v: &List, method: &MethodName, args: &mut [Value]) -> Result<Value> {
     if let Some(out) = deque_method(v, method.id, args)? {
@@ -81,6 +83,7 @@ pub(super) fn vec_method(v: &List, method: &MethodName, args: &mut [Value]) -> R
             }
             None => Value::none(),
         },
+        BuiltinId::SplitLast | BuiltinId::SplitAt => split_edge(v, method.id, args)?,
         BuiltinId::Contains => {
             let needle = arg(args, 0)?;
             Value::Bool(v.lock().iter().any(|x| x.eq_value(&needle)))
@@ -183,19 +186,50 @@ fn deque_method(v: &List, id: BuiltinId, args: &mut [Value]) -> Result<Option<Va
     }))
 }
 
-/// `Ok(index)` of a match, `Err(index)` where it would go. Elements are compared with the value
-/// order, so a mixed list reports its error like a comparison would.
-fn binary_search(items: &[Value], needle: &Value) -> Result<Value> {
-    let (mut lo, mut hi) = (0usize, items.len());
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        match compare_values(&items[mid], needle)? {
-            Ordering::Less => lo = mid + 1,
-            Ordering::Greater => hi = mid,
-            Ordering::Equal => return Ok(Value::ok(super::shared::usize_value(mid))),
-        }
+/// `split_last` and `split_at`, the parts are copies like every slice a call hands back.
+fn split_edge(v: &List, id: BuiltinId, args: &[Value]) -> Result<Value> {
+    let items = v.lock();
+    if id == BuiltinId::SplitLast {
+        return Ok(match items.split_last() {
+            Some((tail, rest)) => {
+                Value::some(Value::tuple(vec![tail.clone(), Value::vec(rest.to_vec())]))
+            }
+            None => Value::none(),
+        });
     }
-    Ok(Value::err(super::shared::usize_value(lo)))
+    let mid = usize::try_from(int_arg(args, 0)?)?;
+    if mid > items.len() {
+        bail!("mid > len");
+    }
+    let (head, tail) = items.split_at(mid);
+    Ok(Value::tuple(vec![
+        Value::vec(head.to_vec()),
+        Value::vec(tail.to_vec()),
+    ]))
+}
+
+/// `Ok(index)` of a match, `Err(index)` where it would go. The steps are the ones of std, so
+/// among equal items it lands on the same index. Elements are compared with the value order, so
+/// a mixed list reports its error like a comparison would.
+fn binary_search(items: &[Value], needle: &Value) -> Result<Value> {
+    let mut size = items.len();
+    if size == 0 {
+        return Ok(Value::err(super::shared::usize_value(0)));
+    }
+    let mut base = 0usize;
+    while size > 1 {
+        let half = size / 2;
+        let mid = base + half;
+        if compare_values(&items[mid], needle)? != Ordering::Greater {
+            base = mid;
+        }
+        size -= half;
+    }
+    Ok(match compare_values(&items[base], needle)? {
+        Ordering::Equal => Value::ok(super::shared::usize_value(base)),
+        Ordering::Less => Value::err(super::shared::usize_value(base + 1)),
+        Ordering::Greater => Value::err(super::shared::usize_value(base)),
+    })
 }
 
 fn edge_element_ref(v: &List, first: bool) -> Value {

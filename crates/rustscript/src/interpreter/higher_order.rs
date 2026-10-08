@@ -385,19 +385,28 @@ impl Vm {
         let clo = |i: usize| as_closure(args.get(i));
         let list = items.lock().clone();
         let out = match name {
-            // the closure sees each item through a `&mut`, an item whose key repeats the one
-            // before it is the vec's own and drops right there
+            // std compares `key(later) == key(kept)` and calls the closure for both sides each
+            // time, the later item first. A closure that counts its calls shows that. An item
+            // whose key repeats is the vec's own and drops right there
             BuiltinId::DedupByKey => {
                 let f = clo(0)?;
-                let mut kept: Vec<(Value, Value)> = Vec::new();
+                let mut kept: Vec<Value> = Vec::new();
                 for x in list {
-                    let key = self.call_closure_data(&f, from_ref(&x))?;
-                    match kept.last() {
-                        Some((previous, _)) if previous.eq_value(&key) => self.run_user_drop(x)?,
-                        _ => kept.push((key, x)),
+                    let same = match kept.last() {
+                        Some(previous) => {
+                            let later = self.call_closure_data(&f, from_ref(&x))?;
+                            let before = self.call_closure_data(&f, from_ref(previous))?;
+                            later.eq_value(&before)
+                        }
+                        None => false,
+                    };
+                    if same {
+                        self.run_user_drop(x)?;
+                    } else {
+                        kept.push(x);
                     }
                 }
-                *items.lock() = kept.into_iter().map(|(_, x)| x).collect();
+                *items.lock() = kept;
                 Value::Unit
             }
             // `same(a, b)` gets the later item first and the kept one second

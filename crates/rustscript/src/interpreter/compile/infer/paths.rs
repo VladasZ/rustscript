@@ -84,8 +84,38 @@ impl Infer<'_, '_> {
                 Some(sig) => self.fn_value(&sig.clone(), None),
                 None => Ty::Unknown,
             },
-            _ => Ty::Unknown,
+            _ => self.std_fn_value(&segs, expected),
         }
+    }
+
+    /// A std function as a closure value, `.map(String::from)` or `.map(str::len)`. Without its
+    /// return type an integer behind it loses its width.
+    fn std_fn_value(&mut self, segs: &[String], expected: &Ty) -> Ty {
+        let (Ty::Closure(params, want), [owner, name]) = (expected, segs) else {
+            return Ty::Unknown;
+        };
+        let ret = if matches!(name.as_str(), "from" | "try_from") {
+            let made = match syn::parse_str::<syn::Type>(owner) {
+                Ok(ty) => self.lower(&ty),
+                Err(_) => Ty::Unknown,
+            };
+            match (made, name.as_str()) {
+                (Ty::Unknown, _) => Ty::Unknown,
+                (made, "try_from") => Ty::result(made, Ty::Unknown),
+                (made, _) => made,
+            }
+        } else {
+            match params.first() {
+                Some(recv) if *recv != Ty::Unknown => {
+                    self.builtin_method(&recv.clone(), name, &[], None, &want.clone())
+                }
+                _ => Ty::Unknown,
+            }
+        };
+        if ret == Ty::Unknown {
+            return Ty::Unknown;
+        }
+        Ty::Closure(params.clone(), Box::new(ret))
     }
 
     /// A function as a closure value.

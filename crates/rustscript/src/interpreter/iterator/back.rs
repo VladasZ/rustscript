@@ -20,6 +20,7 @@ enum Back {
     FilterMap(Handle, Arc<ClosureData>),
     Inspect(Handle, Arc<ClosureData>),
     Cloned(Handle),
+    Plain(Handle),
     Enumerate(Handle, usize),
     Skip(Handle, usize),
     Take(Handle, usize),
@@ -45,6 +46,7 @@ pub(super) fn supports_back(iterator: &Handle) -> bool {
         | IteratorState::FilterMap { source, .. }
         | IteratorState::Inspect { source, .. }
         | IteratorState::Cloned { source }
+        | IteratorState::ByRef { source }
         | IteratorState::Rev { source } => supports_back(source),
         // these need the exact length of what is left
         IteratorState::Enumerate { source, .. }
@@ -90,6 +92,7 @@ pub(super) fn iterator_len(iterator: &Handle) -> Option<usize> {
         IteratorState::Map { source, .. }
         | IteratorState::Inspect { source, .. }
         | IteratorState::Cloned { source }
+        | IteratorState::ByRef { source }
         | IteratorState::Enumerate { source, .. }
         | IteratorState::Rev { source } => iterator_len(source),
         IteratorState::Skip { source, remaining } => {
@@ -160,6 +163,7 @@ fn back_step(state: &mut IteratorState) -> Result<Back> {
             Back::Inspect(source.clone(), closure.clone())
         }
         IteratorState::Cloned { source } => Back::Cloned(source.clone()),
+        IteratorState::ByRef { source } => Back::Plain(source.clone()),
         IteratorState::Enumerate { source, index } => Back::Enumerate(source.clone(), *index),
         IteratorState::Skip { source, remaining } => Back::Skip(source.clone(), *remaining),
         IteratorState::Take { source, remaining } => {
@@ -236,6 +240,7 @@ impl Vm {
                 None => Ok(None),
             },
             Back::Cloned(source) => Ok(self.iterator_next_back(&source)?.map(|v| v.deep_clone())),
+            Back::Plain(source) => self.iterator_next_back(&source),
             Back::Forward(source) => self.iterator_next(&source),
             Back::Chain(left, right) => match self.iterator_next_back(&right)? {
                 Some(value) => Ok(Some(value)),

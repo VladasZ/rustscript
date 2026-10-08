@@ -1,7 +1,8 @@
 //! Guards for the type directed generator. The one that matters most is `generated_programs_compile`,
 //! a rejected program turns a campaign into noise about the harness.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::LazyLock;
 
 use rustscript_differential::generator::generate;
 use rustscript_differential::lang::catalog::{METHODS, opt_str_pair, opt_str_ref, solve};
@@ -63,6 +64,13 @@ fn once_rejected_seeds_compile() {
         );
     }
 }
+
+/// Enough seeds that a count near the floor is not chance. With 400 a rare feature moved
+/// between 0 and 3 at every generator change.
+const COVERAGE_SEEDS: u64 = 3000;
+
+/// The fewest of those seeds that must make an expected feature or a catalog row.
+const COVERAGE_FLOOR: usize = 5;
 
 /// Every shape that can hide a real divergence. See `generation_covers_the_language`.
 const EXPECTED_FEATURES: &[&str] = &[
@@ -359,20 +367,47 @@ const EXPECTED_FEATURES: &[&str] = &[
     "lang-serde-malformed",
 ];
 
-/// If a feature stops appearing, bugs living there become unfindable again.
+/// How many of the seeds made each feature.
+static FEATURE_COUNTS: LazyLock<BTreeMap<&'static str, usize>> = LazyLock::new(|| {
+    let mut counts = BTreeMap::new();
+    for seed in 0..COVERAGE_SEEDS {
+        for feature in generate(seed).structural_features() {
+            *counts.entry(feature).or_insert(0) += 1;
+        }
+    }
+    counts
+});
+
+/// The names with fewer hits than the floor, the rarest first.
+fn below_floor<'a>(names: impl Iterator<Item = &'a str>) -> Vec<(&'a str, usize)> {
+    let mut thin: Vec<(&str, usize)> = names
+        .map(|name| (name, FEATURE_COUNTS.get(name).copied().unwrap_or(0)))
+        .filter(|(_, count)| *count < COVERAGE_FLOOR)
+        .collect();
+    thin.sort_by_key(|(_, count)| *count);
+    thin
+}
+
+/// If a feature stops appearing, bugs living there become unfindable again. A feature near 0
+/// falls to 0 by chance at the next generator change, so the floor fails it with its count
+/// while it is still there.
 #[test]
 fn generation_covers_the_language() {
-    let mut features = BTreeSet::new();
-    for seed in 0..400u64 {
-        features.extend(generate(seed).structural_features());
-    }
-    let expected = EXPECTED_FEATURES;
-    let missing: Vec<&str> = expected
-        .iter()
-        .copied()
-        .filter(|name| !features.contains(name))
-        .collect();
-    assert!(missing.is_empty(), "never generated: {missing:?}");
+    let thin = below_floor(EXPECTED_FEATURES.iter().copied());
+    assert!(
+        thin.is_empty(),
+        "made by fewer than {COVERAGE_FLOOR} of {COVERAGE_SEEDS} seeds: {thin:?}"
+    );
+}
+
+/// A row the generator never places hides every bug of its method.
+#[test]
+fn every_catalog_row_is_generated() {
+    let thin = below_floor(METHODS.iter().map(|method| method.name));
+    assert!(
+        thin.is_empty(),
+        "catalog rows made by fewer than {COVERAGE_FLOOR} of {COVERAGE_SEEDS} seeds: {thin:?}"
+    );
 }
 
 /// A method no wanted type can solve against is dead weight, the generator can never place a call to it.

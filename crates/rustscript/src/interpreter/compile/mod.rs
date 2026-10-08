@@ -415,6 +415,12 @@ impl<'a> Compiler<'a> {
     /// on an integer, so an integer receiver is only read.
     pub(super) fn method_mutates(&self, m: &syn::ExprMethodCall) -> bool {
         let name = m.method.to_string();
+        // a range binding is advanced by the `&mut self` methods of `Iterator`
+        if matches!(name.as_str(), "next" | "next_back" | "nth" | "by_ref")
+            && matches!(self.types.of(&m.receiver), infer::Ty::Range(_))
+        {
+            return true;
+        }
         (BuiltinId::resolve(&name).mutates() || self.ctx.mut_methods.contains(&name))
             && !(matches!(name.as_str(), "rotate_left" | "rotate_right")
                 && matches!(self.types.of(&m.receiver), infer::Ty::Int(_)))

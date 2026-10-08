@@ -463,6 +463,7 @@ fn str_out(s: &RsStr, out: StrOut) -> Value {
             Some((x, y)) => Value::some(Value::tuple(vec![Value::str(x), Value::str(y)])),
             None => Value::none(),
         },
+        StrOut::Pair(x, y) => Value::tuple(vec![Value::str(x), Value::str(y)]),
         StrOut::Ordering(o) => make_ordering(o),
     }
 }

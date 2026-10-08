@@ -115,6 +115,11 @@ pub enum IteratorState {
     Cloned {
         source: Handle,
     },
+    /// `by_ref`, a `&mut` to the iterator below. It pulls from it and holds nothing itself, so
+    /// an adapter over it that goes away leaves the rest in the borrowed iterator.
+    ByRef {
+        source: Handle,
+    },
     Skip {
         source: Handle,
         remaining: usize,
@@ -343,6 +348,28 @@ pub(super) fn owns_items(handle: &Handle) -> bool {
     }
 }
 
+/// Whether the items are references into a vec, the `iter()` of a vec with nothing in between
+/// that makes new values. A collection built from them holds references. `owns_items` is not
+/// the same question, a map never owns there and still hands its entries over.
+pub(super) fn lends_vec_items(handle: &Handle) -> bool {
+    match &*handle.lock() {
+        Native::Iterator(IteratorState::Values { owned, .. }) => !*owned,
+        Native::Iterator(
+            IteratorState::Filter { source, .. }
+            | IteratorState::Inspect { source, .. }
+            | IteratorState::Take { source, .. }
+            | IteratorState::Skip { source, .. }
+            | IteratorState::Rev { source }
+            | IteratorState::StepBy { source, .. }
+            | IteratorState::TakeWhile { source, .. }
+            | IteratorState::SkipWhile { source, .. }
+            | IteratorState::ByRef { source }
+            | IteratorState::Peekable { source, .. },
+        ) => lends_vec_items(source),
+        _ => false,
+    }
+}
+
 fn take_remaining_of(handle: &Handle) -> Vec<Value> {
     match &mut *handle.lock() {
         Native::Iterator(state) => state.take_remaining(),
@@ -387,6 +414,7 @@ impl IteratorState {
             | IteratorState::StepBy { source, .. }
             | IteratorState::TakeWhile { source, .. }
             | IteratorState::SkipWhile { source, .. }
+            | IteratorState::ByRef { source }
             | IteratorState::Peekable { source, .. } => owns_items(source),
         }
     }
@@ -609,6 +637,7 @@ impl IteratorState {
                 left_done,
             } => Step::Chain(left.clone(), right.clone(), *left_done),
             IteratorState::Cloned { source } => Step::Cloned(source.clone()),
+            IteratorState::ByRef { source } => Step::Take(source.clone()),
             IteratorState::Take { source, remaining } => {
                 if *remaining == 0 {
                     Step::Ready(None)
