@@ -154,7 +154,7 @@ The `supported_page_is_current` test enforces it.
 
 ## Path
 
-`ancestors`, `as_os_str`, `as_path`, `canonicalize`, `clone`, `components`, `display`, `ends_with`, `exists`, `extension`, `file_name`, `file_stem`, `into_os_string`, `into_string`, `is_absolute`, `is_dir`, `is_file`, `join`, `parent`, `push`, `starts_with`, `strip_prefix`, `to_owned`, `to_path_buf`, `to_str`, `to_string_lossy`, `with_extension`
+`ancestors`, `as_os_str`, `as_path`, `canonicalize`, `clone`, `components`, `display`, `ends_with`, `exists`, `extension`, `file_name`, `file_stem`, `into_os_string`, `into_string`, `is_absolute`, `is_dir`, `is_file`, `join`, `parent`, `pop`, `push`, `set_extension`, `set_file_name`, `starts_with`, `strip_prefix`, `to_owned`, `to_path_buf`, `to_str`, `to_string_lossy`, `with_extension`
 
 ## RegKey
 

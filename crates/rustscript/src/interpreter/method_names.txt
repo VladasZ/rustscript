@@ -526,6 +526,8 @@ send_to
 service_type
 set
 set_broadcast
+set_extension mut
+set_file_name mut
 set_len
 set_modified
 set_raw_value
