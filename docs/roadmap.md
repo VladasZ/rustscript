@@ -15,6 +15,25 @@ Differential workflow.
 
 ## Open
 
+### `Path::metadata` is an unknown method
+
+**Current.** Found on 2026-10-11 in `build/shared/src/swap.rs` of hilen. The script was
+changed to `std::fs::metadata(&path)`, which works.
+
+```rust
+use std::path::Path;
+
+fn main() {
+    let found = Path::new("Cargo.toml").metadata().is_ok();
+    println!("{found}");
+}
+```
+
+Compiled: `true`. Interpreted: a panic, `unknown method metadata on Path`.
+
+**Needed.** `Path::metadata` and `PathBuf::metadata`, the same result as `fs::metadata`.
+Likely next to the other `Path` methods of the interpreter.
+
 ### A set or map of references to a type with `Drop` drops the borrowed items
 
 **Current.** Found on 2026-10-08 while fixing the plain form. The plain form is right now,
