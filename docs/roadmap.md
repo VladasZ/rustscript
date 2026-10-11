@@ -15,6 +15,24 @@ Differential workflow.
 
 ## Open
 
+### `first_chunk` is an unknown method on `Vec`
+
+**Current.** Found on 2026-10-11 in `build/shared/src/device.rs` of hilen. The script was
+changed to plain indexing after a length check.
+
+```rust
+fn main() {
+    let parts = vec!["a", "b", "c", "d"];
+    if let Some(&[first, second, third]) = parts.first_chunk::<3>() {
+        println!("{first} {second} {third}");
+    }
+}
+```
+
+Compiled: `a b c`. Interpreted: a panic, `unknown method first_chunk on Vec`.
+
+**Needed.** `first_chunk` and `last_chunk` of a slice, also through a `Vec`.
+
 ### `Path::metadata` is an unknown method
 
 **Current.** Found on 2026-10-11 in `build/shared/src/swap.rs` of hilen. The script was
