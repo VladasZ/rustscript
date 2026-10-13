@@ -18,6 +18,8 @@ pub enum MapKey {
     Int(i64),
     /// hashes and compares like `Int`, 1 real map never mixes widths
     Wide(i64, IntWidth),
+    /// i128 as is, u128 as reinterpreted bits
+    Big(i128, IntWidth),
     Char(char),
     Str(RsStr),
     Unit,
@@ -34,6 +36,7 @@ impl PartialEq for MapKey {
         match (self, other) {
             (MapKey::Bool(a), MapKey::Bool(b)) => a == b,
             (MapKey::Int(a) | MapKey::Wide(a, _), MapKey::Int(b) | MapKey::Wide(b, _)) => a == b,
+            (MapKey::Big(a, _), MapKey::Big(b, _)) => a == b,
             (MapKey::Char(a), MapKey::Char(b)) => a == b,
             (MapKey::Str(a), MapKey::Str(b)) => a == b,
             (MapKey::Unit, MapKey::Unit) => true,
@@ -60,6 +63,10 @@ impl Ord for MapKey {
             (MapKey::Int(_) | MapKey::Wide(..), MapKey::Int(_) | MapKey::Wide(..)) => {
                 self.int_value().cmp(&other.int_value())
             }
+            (MapKey::Big(a, IntWidth::U128), MapKey::Big(b, _)) => {
+                a.cast_unsigned().cmp(&b.cast_unsigned())
+            }
+            (MapKey::Big(a, _), MapKey::Big(b, _)) => a.cmp(b),
             (MapKey::Char(a), MapKey::Char(b)) => a.cmp(b),
             (MapKey::Str(a), MapKey::Str(b)) => (**a).cmp(&**b),
             (MapKey::Unit, MapKey::Unit) => Ordering::Equal,
@@ -102,6 +109,7 @@ impl MapKey {
             MapKey::Vec(_) => 7,
             MapKey::Struct(..) => 8,
             MapKey::Enum(..) => 9,
+            MapKey::Big(..) => 10,
         }
     }
 }
@@ -149,6 +157,10 @@ impl Hash for MapKey {
                 variant.hash(state);
                 payload.hash(state);
             }
+            MapKey::Big(i, _) => {
+                state.write_u8(10);
+                i.hash(state);
+            }
         }
     }
 }
@@ -173,6 +185,7 @@ impl MapKey {
             MapKey::Bool(b) => Value::Bool(*b),
             MapKey::Int(i) => Value::Int(*i),
             MapKey::Wide(v, w) => Value::IntW(*v, *w),
+            MapKey::Big(v, w) => Value::Big(*v, *w),
             MapKey::Char(c) => Value::Char(*c),
             MapKey::Str(s) => Value::Str(s.clone()),
             MapKey::Unit => Value::Unit,

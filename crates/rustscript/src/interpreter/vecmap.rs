@@ -93,7 +93,7 @@ pub(super) fn vec_method(v: &List, method: &MethodName, args: &mut [Value]) -> R
             sort_by_order(&mut v.lock(), |item| item)?;
             Value::Unit
         }
-        BuiltinId::Join => vec_join(v, args),
+        BuiltinId::Join => vec_join(v, args, method.scalar.as_ref()),
         BuiltinId::Concat => vec_concat(v, method.scalar.as_ref()),
         BuiltinId::Sum => return vec_sum(v, method),
         BuiltinId::Product => return vec_product(v, method),
@@ -274,7 +274,18 @@ fn vec_concat(v: &List, element: Option<&ScalarTy>) -> Value {
     }
 }
 
-fn vec_join(v: &List, args: &[Value]) -> Value {
+/// Strings join into a string. The rows of a `Vec<Vec<T>>` join into one flat vec with the
+/// separator between them, one `T` or a slice of `T`. An empty receiver goes by the written
+/// element type, like `concat`.
+fn vec_join(v: &List, args: &[Value], element: Option<&ScalarTy>) -> Value {
+    let rows: Vec<Value> = v.lock().iter().cloned().map(unlend).collect();
+    let nested = match rows.first() {
+        Some(row) => matches!(row, Value::Vec(_)),
+        None => matches!(element, Some(ScalarTy::List(_))),
+    };
+    if nested {
+        return join_rows(&rows, args.first().cloned().map(unlend), element);
+    }
     let sep = args.first().map(Value::display).unwrap_or_default();
     let joined = v
         .lock()
@@ -283,6 +294,54 @@ fn vec_join(v: &List, args: &[Value]) -> Value {
         .collect::<Vec<_>>()
         .join(&sep);
     Value::str(joined)
+}
+
+fn join_rows(rows: &[Value], sep: Option<Value>, element: Option<&ScalarTy>) -> Value {
+    // how deep one `T` nests, from the written type, or from the first item of a row
+    let item_depth = match element {
+        Some(ScalarTy::List(item)) => scalar_depth(item),
+        _ => rows
+            .iter()
+            .find_map(|row| match row {
+                Value::Vec(items) => items.lock().first().map(value_depth),
+                _ => None,
+            })
+            .unwrap_or(0),
+    };
+    let between: Vec<Value> = match sep {
+        // a slice of `T` nests one level deeper than a `T`
+        Some(Value::Vec(items)) if value_depth(&Value::Vec(items.clone())) > item_depth => {
+            items.lock().clone()
+        }
+        Some(one) => vec![one],
+        None => Vec::new(),
+    };
+    let mut out = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        if i > 0 {
+            out.extend(between.iter().map(Value::deep_clone));
+        }
+        // the rows are borrowed, so the flat vec clones what it copies out of them
+        if let Value::Vec(items) = row {
+            out.extend(items.lock().iter().map(Value::deep_clone));
+        }
+    }
+    Value::vec(out)
+}
+
+fn scalar_depth(ty: &ScalarTy) -> usize {
+    match ty {
+        ScalarTy::List(item) => 1 + scalar_depth(item),
+        _ => 0,
+    }
+}
+
+/// An empty vec counts as 1 level, it has no item to look into.
+fn value_depth(value: &Value) -> usize {
+    match value {
+        Value::Vec(items) => 1 + items.lock().first().map_or(0, value_depth),
+        _ => 0,
+    }
 }
 
 /// The mutations that throw items away. The removed items are the vec's own, so they drop

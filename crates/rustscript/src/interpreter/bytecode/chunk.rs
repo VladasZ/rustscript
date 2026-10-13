@@ -506,6 +506,11 @@ pub struct Chunk {
     /// index, local register). An unwind through the callee hands the value back to the local
     /// before the caller frame drops, so it drops where it was declared.
     pub lent_writebacks: Arc<[(u32, u16, Reg)]>,
+    /// The tuple and array literals a store holds while its place is evaluated, as (register,
+    /// first op, op past the store). Real Rust has not built the value at that point, each
+    /// element is a temporary of its own. So an unwind from an op in the range drops the
+    /// elements newest first.
+    pub unbuilt: Arc<[(Reg, u32, u32)]>,
     pub call_type_args: Vec<Arc<[TypeIr]>>,
     /// A forwarder's arity is a guess, a call with a different count rebuilds it.
     pub path_forwarder: bool,
@@ -547,6 +552,7 @@ impl Chunk {
             droppable: Arc::from(Vec::new()),
             lent_params: Arc::from(Vec::new()),
             lent_writebacks: Arc::from(Vec::new()),
+            unbuilt: Arc::from(Vec::new()),
             call_type_args: Vec::new(),
             path_forwarder: false,
             clears_frame: false,

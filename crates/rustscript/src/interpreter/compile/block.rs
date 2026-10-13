@@ -6,10 +6,13 @@ use syn::{Block, Expr, Pat, Stmt};
 
 use crate::interpreter::bytecode::{DISCARD, Op, Reg};
 
+use super::infer::Ty;
 use super::pattern::is_wild;
 use super::place::is_place_expr;
 use super::scrutinee::ShellHome;
-use super::support::{init_is_unique, pattern_borrows, pattern_owns};
+use super::support::{
+    collects_refs, init_is_unique, makes_no_temp, pattern_borrows, pattern_owns, type_holds_ref,
+};
 use super::walks::{from_str_root, unparen};
 use super::{Compiler, macro_yields_value, numeric_annotation};
 
@@ -269,8 +272,8 @@ impl Compiler<'_> {
     }
 
     /// `let r = &make()` keeps the temporary alive to the end of the scope and drops it there
-    /// like a local declared at the `let`. `&mut make()` and `&make().f` keep the whole
-    /// temporary, which is the newest the init made.
+    /// like a local declared at the `let`. `&mut make()`, `&make().f` and `&make()[1..]` keep
+    /// the whole temporary, which is the newest the init made.
     fn extend_let_temp(&mut self, init: &Expr, val: Reg, temp_mark: usize) {
         if !self.ctx.has_drop {
             return;
@@ -280,8 +283,12 @@ impl Compiler<'_> {
         };
         let mut root = unparen(&r.expr);
         let mut direct = r.mutability.is_none();
-        while let Expr::Field(f) = root {
-            root = unparen(&f.base);
+        loop {
+            root = match root {
+                Expr::Field(f) => unparen(&f.base),
+                Expr::Index(ix) if makes_no_temp(&ix.index) => unparen(&ix.expr),
+                _ => break,
+            };
             direct = false;
         }
         if !self.temp_owned(root) {
@@ -323,6 +330,20 @@ impl Compiler<'_> {
         }
     }
 
+    /// Whether the `let` binds a reference or a collection of references. A cast, an accessor
+    /// like `as_slice` and a branch hand a reference out, a chain that only lends its items
+    /// collects references, and a written type like `Vec<&T>` says so itself. Only a program
+    /// with a `Drop` impl can tell these from a value.
+    fn holds_refs(&self, local: &syn::Local) -> bool {
+        let typed = matches!(&local.pat, Pat::Type(t)
+            if matches!(&*t.pat, Pat::Ident(_)) && type_holds_ref(&t.ty));
+        typed
+            || local.init.as_ref().is_some_and(|init| {
+                self.is_shared_ref(&init.expr, true)
+                    || (collects_refs(&init.expr) && self.types.of(&init.expr) != Ty::Str)
+            })
+    }
+
     /// Binds the pattern and records which bindings own their value, so scope end drops only
     /// those.
     fn bind_let(&mut self, local: &syn::Local, val: Reg, parsed: bool) -> Result<Option<u16>> {
@@ -353,19 +374,32 @@ impl Compiler<'_> {
             .init
             .as_ref()
             .is_none_or(|init| self.init_owned(&init.expr));
+        let holds = self.ctx.has_drop && self.holds_refs(local);
+        // An `Option<&T>` or a tuple of references is a value that copies. Shared like a plain
+        // reference it would be emptied by the drop of a branch value it flowed into.
+        let plain = !matches!(
+            local.init.as_ref().map(|init| self.types.of(&init.expr)),
+            Some(Ty::Option(_) | Ty::Result(..) | Ty::Tuple(_))
+        ) && !matches!(&local.pat, Pat::Type(t) if !matches!(&*t.ty, syn::Type::Reference(_)));
         let borrowed = local
             .init
             .as_ref()
-            .is_some_and(|init| matches!(unparen(&init.expr), Expr::Reference(_)));
-        if !owned || borrowed {
-            let bound: Vec<Reg> = self
-                .cur()
-                .scope_order
-                .last()
-                .map_or(Vec::new(), |regs| regs[before..].to_vec());
+            .is_some_and(|init| matches!(unparen(&init.expr), Expr::Reference(_)))
+            || (holds && plain && !local.init.as_ref().is_some_and(|i| collects_refs(&i.expr)));
+        if !owned || borrowed || holds {
             let f = self.cur();
+            // a name behind a `&` pattern holds a copy, `let &y = &o`, it borrows nothing
+            let bound: Vec<Reg> = f.scope_order.last().map_or(Vec::new(), |regs| {
+                regs[before..]
+                    .iter()
+                    .copied()
+                    .filter(|reg| !f.own_copies.contains(reg))
+                    .collect()
+            });
             if borrowed {
                 f.ref_locals.extend(bound.iter().copied());
+            } else if holds {
+                f.ref_holders.extend(bound.iter().copied());
             }
             f.drop_exempt.extend(bound);
         }

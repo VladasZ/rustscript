@@ -284,7 +284,7 @@ impl Compiler<'_> {
         }
         // `read_line` and friends write into the arg window copy, so move the result back into
         // the variable
-        self.emit_mut_arg_writebacks(m.args.iter(), base)?;
+        self.emit_method_arg_writebacks(m.args.iter(), base)?;
         Ok(())
     }
 

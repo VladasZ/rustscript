@@ -32,13 +32,15 @@ pub(super) fn try_bind(
 ) -> bool {
     match pat {
         PPat::Wild | PPat::Rest => true,
-        PPat::Ident { name, sub, .. } => {
+        PPat::Ident {
+            name, sub, copy, ..
+        } => {
             if let Some(s) = sub
                 && !try_bind(s, val, consts, define)
             {
                 return false;
             }
-            define(name, val.clone());
+            define(name, if *copy { val.deep_clone() } else { val.clone() });
             true
         }
         PPat::Lit(l) => plit_eq(l, val),
@@ -355,8 +357,8 @@ pub(super) fn bind_pattern_refs(
 /// caller then clears.
 pub(super) fn take_bound(pat: &PPat, val: &Value, consts: &[Value]) -> bool {
     match pat {
-        // a `ref` binding lends its part, the shell keeps it
-        PPat::Ident { by_ref, .. } => !by_ref,
+        // a `ref` binding lends its part and a copy takes nothing, the shell keeps it
+        PPat::Ident { by_ref, copy, .. } => !by_ref && !copy,
         PPat::Tuple(elems) => {
             if let Value::Tuple(items) = val {
                 take_seq(elems, items, consts);

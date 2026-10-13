@@ -5,8 +5,8 @@ use syn::{Expr, Pat};
 
 use super::super::bytecode::Reg;
 use super::place::{copies, single_path_name};
-use super::walks::unparen;
-use super::{Compiler, NameLoc};
+use super::walks::{block_tail, first_arm, then_tail, unparen};
+use super::{Compiler, FnState, NameLoc};
 
 /// Where a scrutinee's shell drops after its bound parts moved out, see `shell_home`.
 #[derive(Clone, Copy)]
@@ -42,6 +42,47 @@ impl Compiler<'_> {
             }
             other => self.init_owned(other),
         }
+    }
+
+    /// Whether the expression hands out a reference the frame already holds, a reference
+    /// local, a borrow parameter or a binding that only holds a borrowed handle by its name,
+    /// also as the value of an `if`, a `match` or a block, `if c { r } else { q }`. Nothing
+    /// made here owns the storage behind it.
+    pub(super) fn forwards_ref(&self, expr: &Expr) -> bool {
+        match unparen(expr) {
+            Expr::If(i) => then_tail(i).is_some_and(|e| self.forwards_ref(e)),
+            Expr::Match(m) => first_arm(m).is_some_and(|e| self.forwards_ref(e)),
+            Expr::Block(b) if b.label.is_none() => {
+                block_tail(&b.block).is_some_and(|e| self.forwards_ref(e))
+            }
+            other => self
+                .named_local(other)
+                .is_some_and(|(f, reg)| f.shares_only(reg) || f.drop_exempt.contains(&reg)),
+        }
+    }
+
+    /// Whether the name is a binding that holds a reference, a borrow parameter, a reference
+    /// local or a value with references inside.
+    pub(super) fn names_ref(&self, expr: &Expr) -> bool {
+        self.named_local(expr)
+            .is_some_and(|(f, reg)| f.shares_only(reg) || f.ref_holders.contains(&reg))
+    }
+
+    /// Whether the name is a borrow parameter that still sits in its own register.
+    pub(super) fn names_ref_param(&self, expr: &Expr) -> bool {
+        self.named_local(expr).is_some_and(|(f, reg)| {
+            f.borrow_params.contains(&reg) && !f.mutable_locals.contains(&reg)
+        })
+    }
+
+    /// The local a bare name reads and its frame, `None` for an alias and anything else.
+    fn named_local(&self, expr: &Expr) -> Option<(&FnState, Reg)> {
+        let name = single_path_name(unparen(expr))?;
+        let f = self.frames.last()?;
+        if f.aliases.contains_key(&name) {
+            return None;
+        }
+        f.local_reg(&name).map(|reg| (f, reg))
     }
 
     /// A scrutinee a pattern may take parts of. `(make()).f` moves its field out of the

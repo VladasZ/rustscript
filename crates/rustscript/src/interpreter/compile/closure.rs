@@ -9,6 +9,8 @@ use crate::interpreter::bytecode::{CapSource, Op, Reg};
 
 use super::infer::Ty;
 use super::place::{self, copies};
+use super::support::chain_lends;
+use super::walks::{block_tail, first_arm, then_tail, unparen};
 use super::{Compiler, FnState, NameLoc, captures, derives_copy, idx16, numeric_annotation};
 
 impl Compiler<'_> {
@@ -29,11 +31,35 @@ impl Compiler<'_> {
         base: Reg,
         skip: &[bool],
     ) -> Result<()> {
+        self.emit_arg_writebacks(args, base, skip, true)
+    }
+
+    /// The writebacks after a method call. Nothing emptied the registers of its borrowed
+    /// arguments, see `emit_borrow_takes`, so their window slots are only cleared. A native
+    /// that keeps its argument, `held.push(&text)`, took the slot, and a move back would
+    /// store unit over the caller's value.
+    pub(super) fn emit_method_arg_writebacks<'e>(
+        &mut self,
+        args: impl Iterator<Item = &'e Expr>,
+        base: Reg,
+    ) -> Result<()> {
+        self.emit_arg_writebacks(args, base, &[], false)
+    }
+
+    /// `lent` says the call emptied the registers of its borrowed arguments, so each one
+    /// comes back out of its window slot.
+    fn emit_arg_writebacks<'e>(
+        &mut self,
+        args: impl Iterator<Item = &'e Expr>,
+        base: Reg,
+        skip: &[bool],
+        lent: bool,
+    ) -> Result<()> {
         for (i, arg) in args.enumerate() {
             if skip.get(i).copied().unwrap_or(false) {
                 continue;
             }
-            if let Expr::Reference(r) = arg
+            if let Expr::Reference(r) = unparen(arg)
                 && r.mutability.is_some()
                 && let Expr::Path(p) = &*r.expr
                 && p.path.segments.len() == 1
@@ -53,10 +79,12 @@ impl Compiler<'_> {
             }
             // the window slot clears after the move, a stale copy would inflate `Rc::strong_count`
             if let Some(reg) = self.borrowed_local(arg) {
-                self.emit(Op::Move {
-                    dst: reg,
-                    src: base + idx16(i),
-                });
+                if lent {
+                    self.emit(Op::Move {
+                        dst: reg,
+                        src: base + idx16(i),
+                    });
+                }
                 self.emit(Op::LoadUnit {
                     dst: base + idx16(i),
                 });
@@ -75,7 +103,7 @@ impl Compiler<'_> {
             .enumerate()
             .map(|(i, arg)| {
                 by_value.get(i).copied().unwrap_or(false)
-                    && !matches!(arg, Expr::Reference(_))
+                    && !matches!(unparen(arg), Expr::Reference(_))
                     && self.borrowed_local(arg).is_some()
             })
             .collect()
@@ -104,29 +132,129 @@ impl Compiler<'_> {
             return Vec::new();
         }
         let by_value = self.by_value_params(func);
+        let generic = self.generic_params(func);
         call.args
             .iter()
             .enumerate()
             .map(|(i, arg)| {
                 by_value.get(i).copied().unwrap_or(false)
-                    && match arg {
-                        Expr::Reference(r) => r.mutability.is_none(),
-                        Expr::MethodCall(m) => {
-                            m.args.is_empty()
-                                && matches!(
-                                    m.method.to_string().as_str(),
-                                    "as_slice" | "as_str" | "as_ref"
-                                )
-                        }
-                        other => self.borrowed_local(other).is_some(),
-                    }
+                    && self.is_shared_ref(arg, generic.get(i).copied().unwrap_or(false))
             })
             .collect()
     }
 
+    /// Which parameters of the script function have a bare type parameter or an `impl Trait`
+    /// as their type, the only by value ones a reference fits.
+    fn generic_params(&self, func: u32) -> Vec<bool> {
+        let Some(sig) = self.fn_signature(func) else {
+            return Vec::new();
+        };
+        let any_type =
+            |ty: &syn::Type| matches!(ty, syn::Type::ImplTrait(_)) || type_param(sig, ty).is_some();
+        sig.inputs
+            .iter()
+            .map(|input| matches!(input, syn::FnArg::Typed(t) if any_type(&t.ty)))
+            .collect()
+    }
+
+    /// Whether a call of a script function hands out storage someone else owns, so nothing
+    /// drops its result here. It returns a reference, or a bare type parameter that an
+    /// argument fills with a reference, `pick(&a, &b)`.
+    pub(super) fn call_lends(&self, call: &syn::ExprCall) -> bool {
+        let Expr::Path(path) = &*call.func else {
+            return false;
+        };
+        let Some(sig) = self
+            .script_fn(&path.path)
+            .and_then(|func| self.fn_signature(func))
+        else {
+            return false;
+        };
+        let syn::ReturnType::Type(_, ret) = &sig.output else {
+            return false;
+        };
+        if matches!(&**ret, syn::Type::Reference(_)) {
+            return true;
+        }
+        let Some(param) = type_param(sig, ret) else {
+            return false;
+        };
+        self.ctx.has_drop
+            && sig.inputs.iter().zip(&call.args).any(|(input, arg)| {
+                matches!(input, syn::FnArg::Typed(t) if type_param(sig, &t.ty) == Some(param))
+                    && self.is_shared_ref(arg, true)
+            })
+    }
+
+    /// Whether the expression is a shared reference by its form. `&x`, a cast to a reference
+    /// like `&[] as &[T]`, a borrowing accessor, a reference the frame holds, and an `if`, a
+    /// `match` or a block that hands one of these out. `generic` says the place it goes into
+    /// takes any type, a type parameter or a `let`.
+    pub(super) fn is_shared_ref(&self, expr: &Expr, generic: bool) -> bool {
+        match unparen(expr) {
+            Expr::Reference(r) => r.mutability.is_none(),
+            Expr::Cast(c) => {
+                matches!(&*c.ty, syn::Type::Reference(r) if r.mutability.is_none())
+            }
+            Expr::MethodCall(m)
+                if m.args.is_empty()
+                    && matches!(
+                        m.method.to_string().as_str(),
+                        "as_slice" | "as_str" | "as_ref"
+                    ) =>
+            {
+                true
+            }
+            Expr::If(i) => then_tail(i).is_some_and(|e| self.is_shared_ref(e, generic)),
+            Expr::Match(m) => first_arm(m).is_some_and(|e| self.is_shared_ref(e, generic)),
+            Expr::Block(b) if b.label.is_none() => {
+                block_tail(&b.block).is_some_and(|e| self.is_shared_ref(e, generic))
+            }
+            // a binding that holds a reference and an accessor that hands one out fit a
+            // place of any type, where the callee would drop them at its end
+            other => {
+                self.names_ref_param(other)
+                    || (generic && (self.names_ref(other) || self.lends_item(other)))
+            }
+        }
+    }
+
+    /// The accessors `first`, `last` and `get` hand out a reference to an item of the
+    /// collection, an `Option<&T>`, and so does a terminal like `next` or `max_by_key` over
+    /// a chain that starts at `iter` and only passes its items on. An item with nothing to
+    /// drop stays a plain value.
+    fn lends_item(&self, expr: &Expr) -> bool {
+        let Expr::MethodCall(m) = expr else {
+            return false;
+        };
+        let name = m.method.to_string();
+        let lends = match self.types.of(&m.receiver) {
+            Ty::Vec(_) | Ty::Map(..) => matches!(name.as_str(), "first" | "last" | "get"),
+            Ty::Iter(_) => {
+                matches!(
+                    name.as_str(),
+                    "next"
+                        | "next_back"
+                        | "last"
+                        | "nth"
+                        | "max"
+                        | "min"
+                        | "max_by"
+                        | "min_by"
+                        | "max_by_key"
+                        | "min_by_key"
+                        | "find"
+                        | "reduce"
+                ) && chain_lends(&m.receiver)
+            }
+            _ => false,
+        };
+        lends && self.has_parts_to_drop(expr)
+    }
+
     /// A mutable local lives in a cell and a `&mut` alias points elsewhere, so both stay out.
     pub(super) fn borrowed_local(&mut self, arg: &Expr) -> Option<Reg> {
-        let (name, forwarded) = match arg {
+        let (name, forwarded) = match unparen(arg) {
             Expr::Reference(r) => (place::single_path_name(&r.expr)?, false),
             other => (place::single_path_name(other)?, true),
         };
@@ -220,6 +348,55 @@ impl Compiler<'_> {
             Ty::Result(ok, err) => self.never_copies(ok) || self.never_copies(err),
             Ty::Tuple(items) => items.iter().any(|item| self.never_copies(item)),
             _ => false,
+        }
+    }
+
+    /// Whether every value of the type is `Copy`, a `Copy` struct or enum included.
+    fn always_copies(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Struct(canon) => self
+                .ctx
+                .resolver
+                .structs
+                .get(canon.as_ref())
+                .is_some_and(|def| derives_copy(&def.ast.attrs)),
+            Ty::Enum(canon) => self
+                .ctx
+                .resolver
+                .enums
+                .get(canon)
+                .is_some_and(|e| derives_copy(&e.attrs)),
+            Ty::Option(inner) => self.always_copies(inner),
+            Ty::Tuple(items) => items.iter().all(|item| self.always_copies(item)),
+            other => copies(other),
+        }
+    }
+
+    /// Whether the type is `Copy` and its value keeps storage of its own, a tuple, an
+    /// `Option` or a `Copy` struct. A second handle to such a value must be a copy. A scalar
+    /// has no storage to share.
+    pub(super) fn copies_storage(&self, ty: &Ty) -> bool {
+        matches!(
+            ty,
+            Ty::Option(_) | Ty::Tuple(_) | Ty::Struct(_) | Ty::Enum(_)
+        ) && self.always_copies(ty)
+    }
+
+    /// An owned read of a binding that lives in a capture cell. A `Copy` value leaves the
+    /// cell full for a closure that reads it later. A tuple or an `Option` has storage, and
+    /// the handle out of the cell shares it, so the read copies. A callee that drops its copy
+    /// would empty the cell too. Any other value moves out when this is its last use.
+    pub(super) fn own_cell_read(&mut self, dst: Reg, cell: Reg, expr: &Expr) {
+        self.emit(Op::LoadCell { dst, cell });
+        let ty = self.types.of(expr);
+        if !copies(&ty) {
+            self.emit(Op::Own {
+                dst,
+                src: dst,
+                root: cell,
+            });
+        } else if self.copies_storage(&ty) {
+            self.emit(Op::Copy { dst, src: dst });
         }
     }
 
@@ -365,4 +542,17 @@ impl Compiler<'_> {
     }
 
     // assignment
+}
+
+/// The type parameter of the function that a written type names bare, `X` in
+/// `fn pick<X>(a: X)`.
+fn type_param<'s>(sig: &'s syn::Signature, ty: &syn::Type) -> Option<&'s syn::Ident> {
+    let syn::Type::Path(path) = ty else {
+        return None;
+    };
+    let name = path.path.get_ident()?;
+    sig.generics
+        .type_params()
+        .map(|param| &param.ident)
+        .find(|ident| *ident == name)
 }

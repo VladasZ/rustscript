@@ -96,6 +96,12 @@ pub(super) struct FnState {
     pub(super) borrow_params: HashSet<Reg>,
     /// `let r = &place` bindings, shared like a borrow parameter
     pub(super) ref_locals: HashSet<Reg>,
+    /// Bindings a `&` pattern copied out of a reference. They are values of their own, where
+    /// the other bindings of a borrowed scrutinee share it.
+    pub(super) own_copies: HashSet<Reg>,
+    /// Bindings that hold a value with references inside, an `Option<&T>` or a `Vec<&T>`.
+    /// The value is a copy of its own, what it points at is not.
+    pub(super) ref_holders: HashSet<Reg>,
     /// Bindings that hold a borrowed handle, so scope end must not drop them.
     pub(super) drop_exempt: HashSet<Reg>,
     /// Bindings that hold an iterator over items of its own, so what `next` hands out drops.
@@ -119,6 +125,8 @@ pub(super) struct FnState {
     pub(super) lent_params: Vec<Reg>,
     /// see `Chunk::lent_writebacks`, the op index is remapped with every insertion
     pub(super) lent_writebacks: Vec<(u32, u16, Reg)>,
+    /// see `Chunk::unbuilt`, the op indexes are remapped with every insertion
+    pub(super) unbuilt: Vec<(Reg, u32, u32)>,
     /// `borrow` results not yet released, see `release_guard_temps`
     pub(super) guard_temps: Vec<Reg>,
     /// Temporaries that own a fresh value, dropped at the end of their statement, see
@@ -198,6 +206,8 @@ impl FnState {
             binding_sites: Vec::new(),
             borrow_params: HashSet::new(),
             ref_locals: HashSet::new(),
+            own_copies: HashSet::new(),
+            ref_holders: HashSet::new(),
             drop_exempt: HashSet::new(),
             owning_iters: HashSet::new(),
             aliases: HashMap::default(),
@@ -210,6 +220,7 @@ impl FnState {
             drop_lists: Vec::new(),
             lent_params: Vec::new(),
             lent_writebacks: Vec::new(),
+            unbuilt: Vec::new(),
             reg_top: 0,
             max_reg: 0,
             num_params: 0,
@@ -277,13 +288,22 @@ impl FnState {
         }
         moved.push(u32::try_from(code.len())?);
         retarget_jumps(&mut code, &moved);
-        for (ip, _, _) in &mut self.lent_writebacks {
-            *ip = moved[*ip as usize];
-        }
+        self.remap_op_indexes(&moved);
         self.code = code;
         self.lines = lines;
         self.cols = cols;
         Ok(())
+    }
+
+    /// The side tables that name an op by its index follow the ops to their new places.
+    fn remap_op_indexes(&mut self, moved: &[u32]) {
+        for (ip, _, _) in &mut self.lent_writebacks {
+            *ip = moved[*ip as usize];
+        }
+        for (_, from, to) in &mut self.unbuilt {
+            *from = moved[*from as usize];
+            *to = moved[*to as usize];
+        }
     }
 
     /// Drops the ops flagged in `dead` and retargets every jump.
@@ -307,9 +327,7 @@ impl FnState {
         }
         moved.push(u32::try_from(code.len())?);
         retarget_jumps(&mut code, &moved);
-        for (ip, _, _) in &mut self.lent_writebacks {
-            *ip = moved[*ip as usize];
-        }
+        self.remap_op_indexes(&moved);
         self.code = code;
         self.lines = lines;
         self.cols = cols;
@@ -406,6 +424,7 @@ impl FnState {
             droppable: droppable.into(),
             lent_params: self.lent_params.into(),
             lent_writebacks: self.lent_writebacks.into(),
+            unbuilt: self.unbuilt.into(),
             call_type_args: self.call_type_args,
             path_forwarder: false,
             clears_frame: self.has_guards,

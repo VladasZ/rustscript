@@ -55,8 +55,8 @@ Likely next to the other `Path` methods of the interpreter.
 ### A set or map of references to a type with `Drop` drops the borrowed items
 
 **Current.** Found on 2026-10-08 while fixing the plain form. The plain form is right now,
-`v.iter().collect::<BTreeSet<_>>()` and the same with `HashSet` drop nothing. These 2 forms
-are still wrong:
+`v.iter().collect::<BTreeSet<_>>()` and the same with `HashSet` drop nothing. Since
+2026-10-13 the `let set: BTreeSet<&T>` form below is right too. The map form is still wrong:
 
 ```rust
 use std::collections::{BTreeMap, BTreeSet};
@@ -81,15 +81,14 @@ fn main() {
 ```
 
 Compiled it prints `2`, `2`, `end`, then `drop 5`, `drop 4`, `drop 5`. Interpreted it
-prints a `drop 5` before each `2`, the repeated key is dropped as if the collection owned
+prints a `drop 5` before the second `2`, the repeated key is dropped as if the map owned
 it. After `end` the map drops its keys too. With a later use of `v` the script can panic
 with `no field 0`, the drop took the fields out of the shared struct.
 
-**Needed.** The `let` with a written type takes another collect path than the turbofish.
-Find it and pass the borrowed flag like `collect_set_of` and `collect_map_of` in
-`map_methods.rs` get it from `collect_terminal` in `iterator/drive.rs`. A reference that
-goes through a closure, `|t| (t, t.0)`, comes out of a `Map` state, and `owns_items` says
-that state owns its items. A key that is a reference must stay a reference there.
+**Needed.** A reference that goes through a closure, `|t| (t, t.0)`, comes out of a `Map`
+state, and `owns_items` says that state owns its items. A key that is a reference must
+stay a reference there, like `collect_map_of` in `map_methods.rs` gets the borrowed flag
+from `collect_terminal` in `iterator/drive.rs`.
 
 ## Generator plan
 

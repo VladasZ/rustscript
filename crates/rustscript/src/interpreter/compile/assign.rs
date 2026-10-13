@@ -12,6 +12,16 @@ use super::place;
 use super::walks::unparen;
 use super::{Compiler, NameLoc, idx16, int_literal};
 
+/// What `hold_for_unwind` hands to `release_from_unwind`.
+struct HeldStore {
+    /// the length of `unwind_temps` before the value was held
+    operands: usize,
+    /// the first op after the value was made
+    from: usize,
+    /// the value is a tuple or an array literal, see `Chunk::unbuilt`
+    unbuilt: bool,
+}
+
 impl Compiler<'_> {
     /// `*seq` for a `seq: &mut usize` parameter. A cell promoted or captured name keeps the strict op.
     pub(super) fn deref_param_reg(&self, expr: &Expr) -> Option<Reg> {
@@ -85,20 +95,30 @@ impl Compiler<'_> {
 
     /// An owned value a store is about to take. A panic before the store drops it.
     /// The mark goes back to `release_from_unwind`.
-    fn hold_for_unwind(&mut self, val: Reg) -> usize {
-        let held = self.cur().unwind_temps.len();
+    fn hold_for_unwind(&mut self, val: Reg, value: &Expr) -> HeldStore {
+        let operands = self.cur().unwind_temps.len();
         if self.ctx.has_drop {
             self.cur().hold_operand(val);
         }
-        held
+        HeldStore {
+            operands,
+            from: self.here(),
+            unbuilt: matches!(unparen(value), Expr::Tuple(_) | Expr::Array(_)),
+        }
     }
 
     /// The store cloned the value into its place, so the register must not hold it any more.
-    fn release_from_unwind(&mut self, val: Reg, held: usize) {
-        if self.ctx.has_drop {
-            self.cur().close_operands(held);
-            self.emit(Op::LoadUnit { dst: val });
+    fn release_from_unwind(&mut self, val: Reg, held: &HeldStore) -> Result<()> {
+        if !self.ctx.has_drop {
+            return Ok(());
         }
+        self.cur().close_operands(held.operands);
+        if held.unbuilt {
+            let range = (val, u32::try_from(held.from)?, u32::try_from(self.here())?);
+            self.cur().unbuilt.push(range);
+        }
+        self.emit(Op::LoadUnit { dst: val });
+        Ok(())
     }
 
     pub(super) fn compile_assign(&mut self, target: &Expr, value: &Expr) -> Result<()> {
@@ -114,20 +134,20 @@ impl Compiler<'_> {
             // container, so the register is cleared after, or a later panic would drop it twice.
             Expr::Index(idx) => {
                 let val = self.compile_stored_value(value)?;
-                let held = self.hold_for_unwind(val);
+                let held = self.hold_for_unwind(val, value);
                 let base = self.compile_place_base(&idx.expr)?;
                 let key = self.compile_expr(&idx.index)?;
                 self.set_line(idx.bracket_token.span.open());
                 self.emit(Op::SetIndex { base, key, val });
-                self.release_from_unwind(val, held);
+                self.release_from_unwind(val, &held)?;
             }
             Expr::Field(f) => {
                 let val = self.compile_stored_value(value)?;
-                let held = self.hold_for_unwind(val);
+                let held = self.hold_for_unwind(val, value);
                 let base = self.compile_place_base(&f.base)?;
                 let member = self.member_of(&f.member);
                 self.emit(Op::SetField { base, member, val });
-                self.release_from_unwind(val, held);
+                self.release_from_unwind(val, &held)?;
             }
             Expr::Unary(u) if matches!(u.op, UnOp::Deref(_)) => {
                 if let Some(place) = self.returned_mut_arg(&u.expr) {
@@ -157,8 +177,12 @@ impl Compiler<'_> {
                 } else if let Some(target) = self.deref_param_reg(&u.expr) {
                     self.emit(Op::SetDerefParam { target, val });
                 } else {
+                    // the place may panic, `*v.get_mut(9).unwrap() = x`, and the value is
+                    // already made
+                    let held = self.hold_for_unwind(val, value);
                     let target = self.compile_expr(&u.expr)?;
                     self.emit(Op::SetDeref { target, val });
+                    self.release_from_unwind(val, &held)?;
                 }
             }
             Expr::Paren(p) => self.compile_assign(&p.expr, value)?,

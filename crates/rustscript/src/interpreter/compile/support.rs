@@ -406,6 +406,41 @@ pub(super) fn temp_is_owned(expr: &Expr, binding_owns: BindingOwns) -> bool {
     }
 }
 
+/// An index that makes no temporary of its own, a literal, a name or a range of those.
+pub(super) fn makes_no_temp(index: &Expr) -> bool {
+    match index {
+        Expr::Paren(p) => makes_no_temp(&p.expr),
+        Expr::Group(g) => makes_no_temp(&g.expr),
+        Expr::Lit(_) | Expr::Path(_) => true,
+        Expr::Cast(c) => makes_no_temp(&c.expr),
+        Expr::Range(r) => {
+            r.start.as_deref().is_none_or(makes_no_temp)
+                && r.end.as_deref().is_none_or(makes_no_temp)
+        }
+        _ => false,
+    }
+}
+
+/// Whether a written type holds a reference below its top, `Option<&T>` or `(&A, &B)`. A
+/// value of it has borrowed parts, which its holder must not drop.
+pub(super) fn type_holds_ref(ty: &syn::Type) -> bool {
+    match ty {
+        syn::Type::Reference(_) => true,
+        syn::Type::Paren(p) => type_holds_ref(&p.elem),
+        syn::Type::Group(g) => type_holds_ref(&g.elem),
+        syn::Type::Tuple(t) => t.elems.iter().any(type_holds_ref),
+        syn::Type::Array(a) => type_holds_ref(&a.elem),
+        syn::Type::Slice(s) => type_holds_ref(&s.elem),
+        syn::Type::Path(p) => p.path.segments.iter().any(|seg| match &seg.arguments {
+            syn::PathArguments::AngleBracketed(args) => args.args.iter().any(
+                |arg| matches!(arg, syn::GenericArgument::Type(inner) if type_holds_ref(inner)),
+            ),
+            _ => false,
+        }),
+        _ => false,
+    }
+}
+
 /// Whether `rustc` promotes the expression to a static, an array or a tuple of literals. A
 /// borrow of it outlives the statement, `let it = [1, 2].iter();`, and it has nothing to drop.
 fn is_promoted(expr: &Expr) -> bool {
@@ -454,6 +489,34 @@ pub(super) fn chain_owns_items(expr: &Expr, binding_owns: BindingOwns) -> bool {
             _ => false,
         },
         Expr::Range(_) => true,
+        _ => false,
+    }
+}
+
+/// Whether an iterator chain starts at `iter` and only passes its items on, so what it hands
+/// out is a reference into the collection. A chain that starts at a binding is not known here.
+pub(super) fn chain_lends(expr: &Expr) -> bool {
+    match expr {
+        Expr::Paren(p) => chain_lends(&p.expr),
+        Expr::Group(g) => chain_lends(&g.expr),
+        Expr::MethodCall(m) => match m.method.to_string().as_str() {
+            "iter" | "values" | "keys" => true,
+            "filter" | "rev" | "skip" | "take" | "step_by" | "skip_while" | "take_while"
+            | "peekable" | "inspect" | "fuse" | "enumerate" => chain_lends(&m.receiver),
+            "zip" | "chain" => chain_lends(&m.receiver) && m.args.iter().all(chain_lends),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// Whether the expression collects a chain that only lends its items, into a collection of
+/// references.
+pub(super) fn collects_refs(expr: &Expr) -> bool {
+    match expr {
+        Expr::Paren(p) => collects_refs(&p.expr),
+        Expr::Group(g) => collects_refs(&g.expr),
+        Expr::MethodCall(m) => m.method == "collect" && chain_lends(&m.receiver),
         _ => false,
     }
 }
@@ -537,10 +600,14 @@ pub(super) fn init_is_owned(expr: &Expr, binding_owns: BindingOwns) -> bool {
         Expr::Group(g) => init_is_owned(&g.expr, binding_owns),
         Expr::Try(t) => init_is_owned(&t.expr, binding_owns),
         Expr::Await(a) => init_is_owned(&a.base, binding_owns),
-        Expr::Reference(_) => false,
+        // a cast yields a scalar or a reference, `&[] as &[T]`, never a value with parts to drop
+        Expr::Reference(_) | Expr::Cast(_) => false,
         Expr::MethodCall(m) => match m.method.to_string().as_str() {
-            "clone" | "cloned" | "copied" | "to_vec" | "to_owned" | "to_string" | "collect"
-            | "pop" | "pop_front" | "pop_back" | "pop_first" | "pop_last" | "remove" | "take"
+            // a chain that only lends its items collects references, `v.iter().collect()`,
+            // and a collection of references owns no item
+            "collect" => !chain_lends(&m.receiver),
+            "clone" | "cloned" | "copied" | "to_vec" | "to_owned" | "to_string" | "pop"
+            | "pop_front" | "pop_back" | "pop_first" | "pop_last" | "remove" | "take"
             | "replace" | "swap_remove" | "split_off" | "into_inner" | "new" | "default"
             | "with_capacity" | "borrow" | "borrow_mut" | "try_borrow" | "try_borrow_mut"
             | "lock" | "concat" | "repeat" | "join" | "into_iter" | "into_keys" | "into_values"

@@ -516,6 +516,9 @@ pub enum PPat {
         sub: Option<Box<PPat>>,
         /// a `ref` binding, which lends its part of an owned scrutinee and never takes it
         by_ref: bool,
+        /// a by value binding behind a `&` pattern, of a `Copy` value with storage of its own.
+        /// It binds a copy, so it shares nothing with the scrutinee
+        copy: bool,
     },
     Lit(PLit),
     /// A named constant, compared by value. The index picks the register in `PatInfo::consts`.
