@@ -182,11 +182,14 @@ impl Infer<'_, '_> {
             ("f64", "default") => Ty::F64,
             ("f32", "default") => Ty::F32,
             ("bool", "default") => Ty::Bool,
-            ("cmp" | "std::cmp", "min" | "max") => {
+            ("cmp" | "std::cmp" | "Ord", "min" | "max") => {
                 let a = self.arg(args, 0, expected);
                 let b = self.arg(args, 1, &a);
                 self.vars.unify(&a, &b);
                 a
+            }
+            ("cmp" | "std::cmp", "min_by" | "max_by" | "min_by_key" | "max_by_key") => {
+                self.cmp_by_call(last, args, expected)
             }
             ("mem", "replace") => {
                 let got = self.arg(args, 0, expected);
@@ -304,6 +307,20 @@ impl Infer<'_, '_> {
             ("iter", "empty") => Ty::iter(expected.item()),
             _ => return None,
         })
+    }
+
+    /// `cmp::max_by(a, b, compare)` and its 3 siblings, the closure sees the type of `a`.
+    fn cmp_by_call(&mut self, last: &str, args: &[&Expr], expected: &Ty) -> Ty {
+        let a = self.arg(args, 0, expected);
+        let b = self.arg(args, 1, &a);
+        self.vars.unify(&a, &b);
+        let params = if last.ends_with("_key") {
+            vec![a.clone()]
+        } else {
+            vec![a.clone(), a.clone()]
+        };
+        self.arg(args, 2, &Ty::Closure(params, Box::new(Ty::Unknown)));
+        a
     }
 
     /// What the `FromStr` of a bridge type gives, the same path a `parse` into it compiles to.

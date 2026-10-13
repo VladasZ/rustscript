@@ -10,7 +10,7 @@ use super::discard::{discard, take_discarded};
 use super::dispatch_log;
 use super::enum_def::{EnumKind, OK, SOME};
 use super::higher_order::discard_closures;
-use super::methods::{make_ordering, str_grow};
+use super::methods::{make_ordering, option_cloned, str_grow};
 use super::value::{MapKind, Value};
 use super::vm_step::{Flow, StepCtx};
 
@@ -329,8 +329,11 @@ fn option_fast(
     };
     match id {
         // `copied` and `cloned` return the Option itself
-        BuiltinId::Copied | BuiltinId::Cloned if kind == EnumKind::Option => {
+        BuiltinId::Copied if kind == EnumKind::Option => {
             Some(ctx.stack[ctx.base + recv].deep_clone())
+        }
+        BuiltinId::Cloned if kind == EnumKind::Option => {
+            Some(option_cloned(&ctx.stack[ctx.base + recv]))
         }
         BuiltinId::Unwrap | BuiltinId::UnwrapOr if success => {
             let Value::Enum { data, .. } = &ctx.stack[ctx.base + recv] else {

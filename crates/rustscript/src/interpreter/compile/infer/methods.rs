@@ -187,6 +187,16 @@ impl Infer<'_, '_> {
                 self.arg_ty(args, 0, recv);
                 Ty::Bool
             }
+            // the provided methods of `Ord` on a type that has no methods of its own here
+            "max" | "min" | "clamp"
+                if matches!(recv, Ty::Struct(_) | Ty::Enum(_) | Ty::Tuple(_))
+                    && args.len() == usize::from(name == "clamp") + 1 =>
+            {
+                for arg in args {
+                    self.expr(arg, recv);
+                }
+                recv.clone()
+            }
             "cmp" | "partial_cmp" | "total_cmp" => {
                 self.arg_ty(args, 0, recv);
                 if name == "partial_cmp" {
@@ -403,6 +413,11 @@ impl Infer<'_, '_> {
                 _ => Ty::Unknown,
             },
             "split_first" | "split_last" => Ty::option(Ty::Tuple(vec![item.clone(), recv.clone()])),
+            // the array is a vec of the same items, the length rides as an argument
+            "first_chunk" | "last_chunk" | "as_array" => Ty::option(recv.clone()),
+            "split_first_chunk" | "split_last_chunk" => {
+                Ty::option(Ty::Tuple(vec![recv.clone(), recv.clone()]))
+            }
             "split_at" => {
                 self.arg_ty(args, 0, &Ty::usize());
                 Ty::Tuple(vec![recv.clone(), recv.clone()])

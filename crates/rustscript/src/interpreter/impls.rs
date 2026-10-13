@@ -88,6 +88,14 @@ impl TypeMethods {
         }
     }
 
+    /// The script method behind a name a bridge knows too, the `partial_cmp` of the type.
+    pub fn builtin(&self, id: BuiltinId) -> Option<&Arc<Chunk>> {
+        self.by_builtin
+            .binary_search_by_key(&(id as u16), |(known, _)| *known as u16)
+            .ok()
+            .map(|index| &self.by_builtin[index].1)
+    }
+
     pub fn bin(&self, op: BinKind) -> Option<&Arc<Chunk>> {
         self.bin[bin_slot(op)?].as_ref()
     }

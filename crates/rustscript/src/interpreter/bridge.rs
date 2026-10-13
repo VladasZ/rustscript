@@ -114,6 +114,9 @@ impl Vm {
         if let Some(d) = super::std_bridge::duration_ctor(path.id, &args)? {
             return Ok(d);
         }
+        if let Some(picked) = self.cmp_call(path.id, &args)? {
+            return Ok(picked);
+        }
         // these keep their argument as a value, so it keeps its width tag
         match path.id {
             PathId::Some => return Ok(Value::some(one(args)?)),
@@ -274,6 +277,11 @@ impl Vm {
         if let Some(v) = self.user_impl_method(recv, name, args)? {
             return Ok(v);
         }
+        if matches!(name.id, BuiltinId::Max | BuiltinId::Min | BuiltinId::Clamp)
+            && let Some(v) = self.ord_method(recv, name.id, args)?
+        {
+            return Ok(v);
+        }
         if let Some(v) = self.any_receiver_method(recv, name, args)? {
             return Ok(v);
         }
@@ -403,7 +411,7 @@ impl Vm {
                     && let Some(first) = args.first()
                     && !matches!(first, Value::Vec(_))
                 {
-                    let items = self.drain_items(first.clone())?;
+                    let items = self.drain_extend_items(first.clone())?;
                     args[0] = Value::vec(items);
                 }
                 super::vecmap::map_method(map, *kind, name, args)
@@ -743,6 +751,7 @@ fn deref_receiver(
     Ok(RefRead::Value(value))
 }
 
+mod cmp_calls;
 mod fmt_drop;
 mod path_calls;
 mod scalar_dispatch;

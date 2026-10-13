@@ -10,7 +10,7 @@ use crate::interpreter::numeric::IntWidth;
 /// Stamps the native method body for 1 128 bit type. New names must go into both this and the
 /// i128 pipeline, the harvest reads the pipeline.
 macro_rules! big_methods {
-    ($fn_name:ident, $query_name:ident, $ty:ty, $decode:expr, $encode:expr) => {
+    ($fn_name:ident, $query_name:ident, $extra_name:ident, $ty:ty, $decode:expr, $encode:expr) => {
         fn $fn_name(name: BuiltinId, recv_bits: i128, args: &[i128]) -> Option<Result<IntOut>> {
             let decode = $decode;
             let encode = $encode;
@@ -138,6 +138,62 @@ macro_rules! big_methods {
                 }
                 BuiltinId::AsU64 => Ok(IntOut::Checked(u64::try_from(recv).ok().map(i128::from))),
                 BuiltinId::AsF64 => Ok(IntOut::SomeFloat(AsPrimitive::<f64>::as_(recv))),
+                _ => return $extra_name(name, recv_bits, args),
+            };
+            Some(out)
+        }
+
+        /// the divisions that saturate or wrap, the logarithm with a base and the endian half
+        fn $extra_name(name: BuiltinId, recv_bits: i128, args: &[i128]) -> Option<Result<IntOut>> {
+            let decode = $decode;
+            let encode = $encode;
+            let recv: $ty = decode(recv_bits);
+            let val = |i: usize| -> Result<$ty> { Ok(decode(arg(args, i)?)) };
+            let same = |v: $ty| IntOut::Same(encode(v));
+            let divisor = |i: usize, message: &str| -> Result<$ty> {
+                let b = val(i)?;
+                if b == 0 {
+                    bail!("{message}");
+                }
+                Ok(b)
+            };
+            let out: Result<IntOut> = match name {
+                BuiltinId::AbsDiff => {
+                    val(0).map(|b| IntOut::Unsigned(recv.abs_diff(b).cast_signed()))
+                }
+                BuiltinId::SaturatingDiv => {
+                    divisor(0, DIVIDE_BY_ZERO).map(|b| same(recv.saturating_div(b)))
+                }
+                BuiltinId::WrappingDiv => {
+                    divisor(0, DIVIDE_BY_ZERO).map(|b| same(recv.wrapping_div(b)))
+                }
+                BuiltinId::WrappingDivEuclid => {
+                    divisor(0, DIVIDE_BY_ZERO).map(|b| same(recv.wrapping_div_euclid(b)))
+                }
+                BuiltinId::WrappingRem => {
+                    divisor(0, REMAINDER_BY_ZERO).map(|b| same(recv.wrapping_rem(b)))
+                }
+                BuiltinId::WrappingRemEuclid => {
+                    divisor(0, REMAINDER_BY_ZERO).map(|b| same(recv.wrapping_rem_euclid(b)))
+                }
+                BuiltinId::CheckedDivEuclid => {
+                    val(0).map(|b| IntOut::Checked(recv.checked_div_euclid(b).map(encode)))
+                }
+                BuiltinId::CheckedIlog10 => Ok(IntOut::CheckedCount(recv.checked_ilog10())),
+                BuiltinId::Ilog => val(0).and_then(|base| {
+                    if base < 2 {
+                        bail!("base of integer logarithm must be at least 2");
+                    }
+                    match recv.checked_ilog(base) {
+                        Some(count) => Ok(IntOut::Count(count)),
+                        None => bail!("argument of integer logarithm must be positive"),
+                    }
+                }),
+                BuiltinId::CheckedIlog => {
+                    val(0).map(|base| IntOut::CheckedCount(recv.checked_ilog(base)))
+                }
+                BuiltinId::ToBe => Ok(same(recv.to_be())),
+                BuiltinId::ToLe => Ok(same(recv.to_le())),
                 _ => return None,
             };
             Some(out)
@@ -145,9 +201,13 @@ macro_rules! big_methods {
     };
 }
 
+const DIVIDE_BY_ZERO: &str = "attempt to divide by zero";
+const REMAINDER_BY_ZERO: &str = "attempt to calculate the remainder with a divisor of zero";
+
 big_methods!(
     u128_method,
     u128_query,
+    u128_extra,
     u128,
     |bits: i128| bits.cast_unsigned(),
     |v: u128| { v.cast_signed() }
@@ -155,6 +215,7 @@ big_methods!(
 big_methods!(
     i128_method,
     i128_query,
+    i128_extra,
     i128,
     |bits: i128| bits,
     |v: i128| v
@@ -208,6 +269,7 @@ pub fn big_int_method(
                     None => bail!("attempt to add with overflow"),
                 }
             })),
+            BuiltinId::CastSigned => Some(Ok(IntOut::Signed(recv))),
             _ => u128_method(name, recv, args),
         },
         IntWidth::I128 => match name {
@@ -228,6 +290,10 @@ pub fn big_int_method(
             BuiltinId::IsNegative => Some(Ok(IntOut::Bool(recv.is_negative()))),
             BuiltinId::WrappingAbs => Some(Ok(IntOut::Same(recv.wrapping_abs()))),
             BuiltinId::CheckedAbs => Some(Ok(IntOut::Checked(recv.checked_abs()))),
+            BuiltinId::UnsignedAbs => Some(Ok(IntOut::Unsigned(recv.unsigned_abs().cast_signed()))),
+            BuiltinId::SaturatingAbs => Some(Ok(IntOut::Same(recv.saturating_abs()))),
+            BuiltinId::SaturatingNeg => Some(Ok(IntOut::Same(recv.saturating_neg()))),
+            BuiltinId::CastUnsigned => Some(Ok(IntOut::Unsigned(recv))),
             _ => i128_method(name, recv, args),
         },
         _ => None,

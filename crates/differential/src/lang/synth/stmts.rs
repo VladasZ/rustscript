@@ -260,8 +260,9 @@ impl Generator<'_> {
             Expr::Block { stmts, .. } => stmts.iter().flat_map(Stmt::declared_targets).collect(),
             _ => Vec::new(),
         };
+        let held = self.closures_called_by(&body);
         let mut lifted = Vec::new();
-        for name in &hidden {
+        for name in hidden.iter().chain(&held) {
             if let Some(slot) = self.scope.hide(name) {
                 lifted.push(slot);
             }
@@ -391,6 +392,20 @@ impl Generator<'_> {
             source: ClosureSource::Factory { fn_name, arg, ty },
             calls,
         }
+    }
+
+    /// A closure the body calls is held by `&mut` until the last call of the closure around it,
+    /// so no argument of that one may call it either.
+    fn closures_called_by(&self, body: &Expr) -> Vec<String> {
+        referenced(body)
+            .into_iter()
+            .filter(|called| {
+                matches!(
+                    self.scope.slot(called).map(|slot| &slot.kind),
+                    Some(BindKind::Closure { .. })
+                )
+            })
+            .collect()
     }
 
     /// The calls printed right after a closure binding. A closure over its own return type also

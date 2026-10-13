@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 use crate::interpreter::enum_def::EnumDef;
 use crate::interpreter::numeric::IntWidth;
 
-use super::{RsStr, StructShape, Value};
+use super::{RsStr, StructShape, Value, ValueRef};
 
 /// Manual `Hash` so the exact bytes per variant are fixed.
 #[derive(Clone)]
@@ -29,11 +29,16 @@ pub enum MapKey {
     /// the shape is kept to rebuild the value
     Struct(Arc<StructShape>, Vec<MapKey>),
     Enum(Arc<EnumDef>, u16, Vec<MapKey>),
+    /// A key that is a reference to a value another owner holds, the `&T` of a
+    /// `BTreeMap<&T, V>`. It compares, sorts and hashes as the key behind it, and the map
+    /// never drops it.
+    Lent(Box<MapKey>),
 }
 
 impl PartialEq for MapKey {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
+            (MapKey::Lent(lent), key) | (key, MapKey::Lent(lent)) => **lent == *key,
             (MapKey::Bool(a), MapKey::Bool(b)) => a == b,
             (MapKey::Int(a) | MapKey::Wide(a, _), MapKey::Int(b) | MapKey::Wide(b, _)) => a == b,
             (MapKey::Big(a, _), MapKey::Big(b, _)) => a == b,
@@ -59,6 +64,8 @@ impl Eq for MapKey {}
 impl Ord for MapKey {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
+            (MapKey::Lent(lent), key) => (**lent).cmp(key),
+            (key, MapKey::Lent(lent)) => key.cmp(lent),
             (MapKey::Bool(a), MapKey::Bool(b)) => a.cmp(b),
             (MapKey::Int(_) | MapKey::Wide(..), MapKey::Int(_) | MapKey::Wide(..)) => {
                 self.int_value().cmp(&other.int_value())
@@ -110,6 +117,7 @@ impl MapKey {
             MapKey::Struct(..) => 8,
             MapKey::Enum(..) => 9,
             MapKey::Big(..) => 10,
+            MapKey::Lent(lent) => lent.rank(),
         }
     }
 }
@@ -161,6 +169,7 @@ impl Hash for MapKey {
                 state.write_u8(10);
                 i.hash(state);
             }
+            MapKey::Lent(lent) => lent.hash(state),
         }
     }
 }
@@ -170,7 +179,18 @@ pub(super) fn keys_of(values: &[Value]) -> Option<Vec<MapKey>> {
 }
 
 impl MapKey {
-    /// Whether the key holds a user type, the only kind that can have a `Drop` impl.
+    /// A key that is a reference, see `MapKey::Lent`. Only a key that can run a `Drop` needs
+    /// the mark.
+    pub fn lent(self) -> Self {
+        if self.may_drop() {
+            MapKey::Lent(Box::new(self))
+        } else {
+            self
+        }
+    }
+
+    /// Whether the key holds a user type, the only kind that can have a `Drop` impl. A lent
+    /// key is not the map's to drop.
     pub fn may_drop(&self) -> bool {
         match self {
             MapKey::Struct(..) | MapKey::Enum(..) => true,
@@ -201,6 +221,7 @@ impl MapKey {
                 variant: *variant,
                 data: Arc::new(Mutex::new(payload.iter().map(MapKey::to_value).collect())),
             },
+            MapKey::Lent(lent) => Value::Ref(Arc::new(ValueRef::borrowed(lent.to_value()))),
         }
     }
 }

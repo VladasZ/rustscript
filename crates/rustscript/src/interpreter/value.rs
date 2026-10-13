@@ -345,11 +345,7 @@ impl Value {
             Value::Vec(list) => Value::vec(items(list)),
             Value::Tuple(list) => Value::tuple(items(list)),
             Value::Map(map, kind) => {
-                let copy = map
-                    .lock()
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.deep_clone()))
-                    .collect();
+                let copy = map.lock().with_values(Value::deep_clone);
                 Value::Map(Arc::new(Mutex::new(copy)), *kind)
             }
             Value::Struct(data) => Value::structure(data.shape.clone(), items(&data.values)),
@@ -516,7 +512,16 @@ impl Value {
             Value::Enum { def, variant, data } => {
                 MapKey::Enum(def.clone(), *variant, keys_of(&data.lock())?)
             }
-            Value::Ref(reference) => return reference.get()?.as_key(),
+            // a plain borrow is the `&T` of a map of references, any other reference is a
+            // place the key is read out of
+            Value::Ref(reference) => {
+                let key = reference.get()?.as_key()?;
+                return Some(if reference.lent().is_some() {
+                    key.lent()
+                } else {
+                    key
+                });
+            }
             _ => return None,
         })
     }

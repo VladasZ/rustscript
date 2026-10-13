@@ -1,10 +1,14 @@
 //! How a pattern owns its scrutinee, whether its bindings take parts out of a value of its
 //! own, and where the rest of that value drops once they did.
 
+use std::ptr::from_ref;
+
 use syn::{Expr, Pat};
 
 use super::super::bytecode::Reg;
+use super::infer::Ty;
 use super::place::{copies, single_path_name};
+use super::support::{chain_lends, returns_borrow};
 use super::walks::{block_tail, first_arm, then_tail, unparen};
 use super::{Compiler, FnState, NameLoc};
 
@@ -73,6 +77,121 @@ impl Compiler<'_> {
         self.named_local(expr).is_some_and(|(f, reg)| {
             f.borrow_params.contains(&reg) && !f.mutable_locals.contains(&reg)
         })
+    }
+
+    /// Whether the name is a binding that holds a reference to an item of a collection, see
+    /// `FnState::lent_binds`, and the item has parts a holder could drop.
+    pub(super) fn names_lent_item(&self, expr: &Expr) -> bool {
+        self.named_local(expr)
+            .is_some_and(|(f, reg)| f.lent_binds.contains(&reg))
+            && self.has_parts_to_drop(expr)
+    }
+
+    /// The bindings a `for` loop made since `before` over a source that is not its own. The
+    /// loop end drops none of them. Over a borrowed collection, or over a chain that only
+    /// lends its items, they are references to those items.
+    pub(super) fn lend_loop_binds(&mut self, source: &Expr, borrowed: bool, before: usize) {
+        let lends = self.ctx.has_drop
+            && (borrowed
+                || matches!(unparen(source), Expr::Reference(r) if r.mutability.is_none())
+                || chain_lends(source));
+        let f = self.cur();
+        let bound: Vec<Reg> = f
+            .scope_order
+            .last()
+            .map_or(Vec::new(), |regs| regs[before..].to_vec());
+        if lends {
+            let lent: Vec<Reg> = bound
+                .iter()
+                .copied()
+                .filter(|reg| !f.own_copies.contains(reg))
+                .collect();
+            f.lent_binds.extend(lent);
+        }
+        f.drop_exempt.extend(bound);
+    }
+
+    /// A call of a script function or method that returns a reference, or a value with a
+    /// reference inside, hands out storage someone else owns, so nothing drops it here.
+    pub(super) fn lends_result(&self, expr: &Expr) -> bool {
+        match unparen(expr) {
+            Expr::Call(call) => self.call_lends(call),
+            Expr::MethodCall(m) => {
+                let name = m.method.to_string();
+                let mut sigs = self
+                    .ctx
+                    .impl_sigs
+                    .iter()
+                    .filter(|((_, method), _)| *method == name)
+                    .peekable();
+                sigs.peek().is_some() && sigs.all(|(_, sig)| returns_borrow(sig))
+            }
+            _ => false,
+        }
+    }
+
+    /// What a method call does with references to items, noted right before its arguments
+    /// compile. An iterator method over a chain that only lends its items hands its closure
+    /// a reference, so that parameter is marked for `lent_closure_param`. And a method that
+    /// takes its argument by value keeps it, hands it back or throws it away, `push`,
+    /// `insert`, `unwrap_or` and `then_some`. So a borrow, `held.push(&x)`, goes in behind a
+    /// reference value that drops nothing, like an element of a tuple literal, see
+    /// `compile_elems`.
+    pub(super) fn note_lent_refs(&mut self, m: &syn::ExprMethodCall, method: &str) {
+        if !self.ctx.has_drop {
+            return;
+        }
+        let param = match method {
+            "map" | "filter_map" | "flat_map" | "map_while" | "for_each" | "find_map" | "any"
+            | "all" => Some(0),
+            "fold" | "scan" => Some(1),
+            _ => None,
+        };
+        if let Some(index) = param
+            && chain_lends(&m.receiver)
+            && let Some(Expr::Closure(c)) = m.args.last().map(unparen)
+        {
+            self.cur().next_call.lent_closure = Some((from_ref(c).addr(), index));
+        }
+        let receiver = self.types.of(&m.receiver);
+        let collection = matches!(receiver, Ty::Vec(_) | Ty::Set(..) | Ty::Map(..));
+        let option = matches!(receiver, Ty::Option(_));
+        let by_value = match method {
+            "push" | "push_back" | "push_front" | "entry" => collection,
+            "insert" => collection || option,
+            "unwrap_or" | "or" | "get_or_insert" | "replace" | "map_or" => option,
+            "then_some" => receiver == Ty::Bool,
+            _ => false,
+        };
+        if by_value {
+            let lent: Vec<bool> = m.args.iter().map(|arg| self.lends_storage(arg)).collect();
+            if lent.contains(&true) {
+                self.cur().next_call.value_refs = lent;
+            }
+        }
+    }
+
+    /// The index of the parameter of this closure that gets a reference to an item, when
+    /// the method call around it said so, see `note_lent_refs`.
+    pub(super) fn lent_closure_param(&mut self, c: &syn::ExprClosure) -> Option<usize> {
+        let (addr, index) = self.cur().next_call.lent_closure?;
+        if addr != from_ref(c).addr() {
+            return None;
+        }
+        self.cur().next_call.lent_closure = None;
+        Some(index)
+    }
+
+    /// The bindings the open scope made since `before` are a closure parameter that holds a
+    /// reference to an item. The closure neither owns nor drops them.
+    pub(super) fn note_lent_param(&mut self, before: usize) {
+        let f = self.cur();
+        let bound: Vec<Reg> = f
+            .scope_order
+            .last()
+            .map_or(Vec::new(), |regs| regs[before..].to_vec());
+        f.lent_binds.extend(bound.iter().copied());
+        f.drop_exempt.extend(bound);
     }
 
     /// The local a bare name reads and its frame, `None` for an alias and anything else.

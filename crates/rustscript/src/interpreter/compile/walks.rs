@@ -74,6 +74,14 @@ pub(super) fn unparen(expr: &Expr) -> &Expr {
     }
 }
 
+/// The expression behind every `&` of a nested shared borrow, `T(8)` in `&&T(8)`.
+pub(super) fn behind_refs(expr: &Expr) -> &Expr {
+    match unparen(expr) {
+        Expr::Reference(r) if r.mutability.is_none() => behind_refs(&r.expr),
+        other => other,
+    }
+}
+
 /// The expression a block hands out, `None` when it ends in a statement. Also `None` when
 /// the block declares anything, its tail may then name a binding of the block itself, which
 /// a lookup from outside the block takes for an outer one of the same name.

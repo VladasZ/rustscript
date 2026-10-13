@@ -7,16 +7,74 @@ use syn::Expr;
 use super::{Infer, Ty};
 use crate::interpreter::numeric::IntWidth;
 
+/// The integer methods whose result is an integer, see `int_result` for its width.
+fn answers_in_an_int(name: &str) -> bool {
+    matches!(
+        name,
+        "abs"
+            | "pow"
+            | "signum"
+            | "isqrt"
+            | "saturating_add"
+            | "saturating_sub"
+            | "saturating_mul"
+            | "saturating_pow"
+            | "wrapping_add"
+            | "wrapping_sub"
+            | "wrapping_mul"
+            | "wrapping_neg"
+            | "wrapping_pow"
+            | "wrapping_shl"
+            | "wrapping_shr"
+            | "rotate_left"
+            | "rotate_right"
+            | "rem_euclid"
+            | "div_euclid"
+            | "midpoint"
+            | "min"
+            | "max"
+            | "clamp"
+            | "swap_bytes"
+            | "reverse_bits"
+            | "to_be"
+            | "to_le"
+            | "abs_diff"
+            | "next_power_of_two"
+            | "ilog2"
+            | "ilog10"
+            | "div_ceil"
+            | "next_multiple_of"
+            | "unsigned_abs"
+            | "saturating_abs"
+            | "saturating_neg"
+            | "saturating_div"
+            | "wrapping_div"
+            | "wrapping_rem"
+            | "wrapping_div_euclid"
+            | "wrapping_rem_euclid"
+            | "ilog"
+            | "cast_signed"
+            | "cast_unsigned"
+    )
+}
+
+/// What an integer method that answers in an integer hands back, the receiver type when
+/// nothing else is said.
+fn int_result(name: &str, recv: &Ty) -> Ty {
+    match (name, recv) {
+        ("ilog2" | "ilog10" | "ilog", _) => Ty::Int(IntWidth::U32),
+        ("abs_diff" | "unsigned_abs" | "cast_unsigned", Ty::Int(width)) => {
+            Ty::Int(width.unsigned())
+        }
+        ("cast_signed", Ty::Int(width)) => Ty::Int(width.signed()),
+        _ => recv.clone(),
+    }
+}
+
 impl Infer<'_, '_> {
     pub(super) fn int_method(&mut self, recv: &Ty, name: &str, args: &[&Expr]) -> Ty {
         match name {
-            "abs" | "pow" | "signum" | "isqrt" | "saturating_add" | "saturating_sub"
-            | "saturating_mul" | "saturating_pow" | "wrapping_add" | "wrapping_sub"
-            | "wrapping_mul" | "wrapping_neg" | "wrapping_pow" | "wrapping_shl"
-            | "wrapping_shr" | "rotate_left" | "rotate_right" | "rem_euclid" | "div_euclid"
-            | "midpoint" | "min" | "max" | "clamp" | "swap_bytes" | "reverse_bits" | "to_be"
-            | "to_le" | "abs_diff" | "next_power_of_two" | "ilog2" | "ilog10" | "div_ceil"
-            | "next_multiple_of" | "unsigned_abs" => {
+            _ if answers_in_an_int(name) => {
                 let want = if matches!(
                     name,
                     "pow"
@@ -34,11 +92,7 @@ impl Infer<'_, '_> {
                 for arg in args {
                     self.expr(arg, &want);
                 }
-                match (name, recv) {
-                    ("ilog2" | "ilog10", _) => Ty::Int(IntWidth::U32),
-                    ("abs_diff", Ty::Int(width)) => Ty::Int(width.unsigned()),
-                    _ => recv.clone(),
-                }
+                int_result(name, recv)
             }
             "checked_add"
             | "checked_sub"
@@ -52,9 +106,7 @@ impl Infer<'_, '_> {
             | "checked_shr"
             | "checked_div_euclid"
             | "checked_rem_euclid"
-            | "checked_next_power_of_two"
-            | "checked_ilog2"
-            | "checked_ilog10" => {
+            | "checked_next_power_of_two" => {
                 let want = if matches!(name, "checked_pow" | "checked_shl" | "checked_shr") {
                     Ty::Int(IntWidth::U32)
                 } else {
@@ -64,6 +116,12 @@ impl Infer<'_, '_> {
                     self.expr(arg, &want);
                 }
                 Ty::option(recv.clone())
+            }
+            "checked_ilog2" | "checked_ilog10" | "checked_ilog" => {
+                for arg in args {
+                    self.expr(arg, recv);
+                }
+                Ty::option(Ty::Int(IntWidth::U32))
             }
             "overflowing_add" | "overflowing_sub" | "overflowing_mul" => {
                 for arg in args {
@@ -257,7 +315,8 @@ impl Infer<'_, '_> {
             }
             ("Path" | "PathBuf", "push" | "set_file_name") | ("JoinHandle", "abort") => Ty::Unit,
             ("Path" | "PathBuf", "read_dir") => io(Ty::iter(io(Ty::named("DirEntry")))),
-            ("Path" | "PathBuf" | "DirEntry", "metadata") => io(Ty::named("Metadata")),
+            ("Path" | "PathBuf" | "DirEntry", "metadata")
+            | ("Path" | "PathBuf", "symlink_metadata") => io(Ty::named("Metadata")),
             ("DirEntry", "file_type") => io(Ty::named("FileType")),
             ("Metadata", "len") | ("Duration", "as_secs") => Ty::Int(IntWidth::U64),
             ("Metadata", "modified" | "created" | "accessed") => io(Ty::named("SystemTime")),

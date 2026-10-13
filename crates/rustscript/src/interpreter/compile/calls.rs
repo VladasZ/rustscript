@@ -11,7 +11,7 @@ use crate::interpreter::typeir::CastIr;
 
 use super::infer::Ty;
 use super::place;
-use super::walks::unparen;
+use super::walks::{behind_refs, unparen};
 use super::{Compiler, NameLoc, Res, TypeIr, first_generic_type, idx16};
 
 impl Compiler<'_> {
@@ -60,6 +60,8 @@ impl Compiler<'_> {
         let borrows = match unparen(elem) {
             Expr::Reference(r) => r.mutability.is_none(),
             Expr::MethodCall(_) => !self.arg_owned(elem),
+            // a binding that holds a borrowed handle, `[b, a]` after `let (a, b) = w.split_at(1)`
+            Expr::Path(_) => self.names_lent_item(elem) || self.forwards_ref(elem),
             _ => false,
         };
         borrows && self.has_parts_to_drop(elem)
@@ -127,7 +129,7 @@ impl Compiler<'_> {
             // `f(&T::new())` lends a temporary that ends with the statement. A callee hands a
             // lent argument back into the window on return, so the drop finds it there.
             if let Expr::Reference(r) = unparen(a)
-                && self.temp_owned(&r.expr)
+                && self.temp_owned(behind_refs(&r.expr))
             {
                 self.cur().owned_temps.push(reg);
             }
@@ -558,6 +560,14 @@ impl Compiler<'_> {
         if self.compile_builtin_ctor(dst, c, &path, argc)? {
             return Ok(None);
         }
+        // `max(&a, &b)` hands one of its references back and drops the other, so a borrowed
+        // argument goes in behind a borrow that drops nothing, like in `compile_elems`
+        if self.ctx.has_drop && hands_an_argument_back(path.id) {
+            let lent: Vec<bool> = c.args.iter().map(|a| self.lends_storage(a)).collect();
+            if lent.contains(&true) {
+                self.cur().next_call.value_refs = lent;
+            }
+        }
         Ok(Some(path))
     }
 
@@ -647,6 +657,19 @@ pub(super) fn numeric_from_cast(id: PathId, argc: usize) -> Option<CastIr> {
 }
 
 /// `tokio::spawn` or `tokio::task::spawn`
+/// The `std::cmp` functions that pick 1 of their 2 first arguments.
+fn hands_an_argument_back(id: PathId) -> bool {
+    matches!(
+        id,
+        PathId::CmpMax
+            | PathId::CmpMin
+            | PathId::CmpMaxBy
+            | PathId::CmpMinBy
+            | PathId::CmpMaxByKey
+            | PathId::CmpMinByKey
+    )
+}
+
 pub(super) fn is_tokio_spawn(path: &syn::Path) -> bool {
     let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
     segs.last().map(String::as_str) == Some("spawn") && segs.iter().any(|s| s == "tokio")

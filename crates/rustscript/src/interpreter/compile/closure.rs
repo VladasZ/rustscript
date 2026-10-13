@@ -9,7 +9,7 @@ use crate::interpreter::bytecode::{CapSource, Op, Reg};
 
 use super::infer::Ty;
 use super::place::{self, copies};
-use super::support::chain_lends;
+use super::support::{chain_lends, returns_borrow};
 use super::walks::{block_tail, first_arm, then_tail, unparen};
 use super::{Compiler, FnState, NameLoc, captures, derives_copy, idx16, numeric_annotation};
 
@@ -170,12 +170,12 @@ impl Compiler<'_> {
         else {
             return false;
         };
+        if returns_borrow(sig) {
+            return true;
+        }
         let syn::ReturnType::Type(_, ret) = &sig.output else {
             return false;
         };
-        if matches!(&**ret, syn::Type::Reference(_)) {
-            return true;
-        }
         let Some(param) = type_param(sig, ret) else {
             return false;
         };
@@ -430,13 +430,14 @@ impl Compiler<'_> {
     }
 
     pub(super) fn compile_closure(&mut self, dst: Reg, c: &syn::ExprClosure) -> Result<()> {
+        let lent = self.lent_closure_param(c);
         self.frames.push(FnState::new("<closure>".to_string()));
         let params: Vec<&Pat> = c.inputs.iter().collect();
         self.cur().num_params = params.len();
         // a pattern param binds more registers, so every param slot is claimed before any binding
         let regs: Vec<Reg> = params.iter().map(|_| self.alloc()).collect();
         self.scan_captures_expr(&c.body);
-        for (p, reg) in params.iter().zip(regs) {
+        for (i, (p, reg)) in params.iter().zip(regs).enumerate() {
             // a reference param shares the caller's storage, so it never splits
             if let Pat::Type(t) = p
                 && matches!(&*t.ty, syn::Type::Reference(_))
@@ -455,24 +456,18 @@ impl Compiler<'_> {
             {
                 self.emit(Op::Copy { dst: reg, src: reg });
             }
-            // a numeric annotation retags the value like a fn param
-            if let Pat::Type(t) = p
-                && numeric_annotation(&t.ty).is_some()
-            {
-                let idx = self.add_cast(&t.ty);
-                self.emit(Op::Cast {
-                    dst: reg,
-                    src: reg,
-                    ty: idx,
-                });
-            }
+            self.retag_numeric_param(p, reg);
             // the binding comes last, a capture cell made at it must hold the retagged copy
+            let before = self.cur().scope_order.last().map_or(0, Vec::len);
             match p {
                 Pat::Ident(id) if id.subpat.is_none() => self.define(&id.ident.to_string(), reg),
                 _ => {
                     self.bind_pattern_irrefutable(p, reg)?;
                     self.hold_wild_param(p, reg);
                 }
+            }
+            if lent == Some(i) {
+                self.note_lent_param(before);
             }
         }
         if let syn::ReturnType::Type(_, ty) = &c.output
@@ -539,6 +534,20 @@ impl Compiler<'_> {
             child: child_idx,
         });
         Ok(())
+    }
+
+    /// A numeric annotation retags the value of a closure parameter like a fn param.
+    fn retag_numeric_param(&mut self, p: &Pat, reg: Reg) {
+        if let Pat::Type(t) = p
+            && numeric_annotation(&t.ty).is_some()
+        {
+            let idx = self.add_cast(&t.ty);
+            self.emit(Op::Cast {
+                dst: reg,
+                src: reg,
+                ty: idx,
+            });
+        }
     }
 
     // assignment

@@ -82,6 +82,8 @@ bytes
 canonicalize
 captures
 captures_iter
+cast_signed
+cast_unsigned
 cbrt
 ceil
 cell
@@ -94,6 +96,9 @@ chars
 checked_abs
 checked_add
 checked_div
+checked_div_euclid
+checked_ilog
+checked_ilog10
 checked_ilog2
 checked_mul
 checked_neg
@@ -210,6 +215,7 @@ find
 find_iter
 find_map
 first
+first_chunk
 first_key_value
 first_mut mut
 flags
@@ -246,6 +252,7 @@ height
 hour
 hypot
 id
+ilog
 ilog10
 ilog2
 incoming
@@ -353,6 +360,7 @@ keys_len
 kill
 kind
 last
+last_chunk
 last_key_value
 last_mut mut
 leading_ones
@@ -514,8 +522,11 @@ rposition
 rsplit
 rsplit_once
 rsplitn
+saturating_abs
 saturating_add
+saturating_div
 saturating_mul
+saturating_neg
 saturating_pow
 saturating_sub
 save
@@ -554,7 +565,9 @@ spawn
 split
 split_at
 split_first
+split_first_chunk
 split_last
+split_last_chunk
 split_off mut
 split_once
 split_whitespace
@@ -585,6 +598,7 @@ swap mut
 swap_bytes
 swap_remove mut
 symbol
+symlink_metadata
 symmetric_difference
 sync_all
 sync_data
@@ -603,10 +617,12 @@ timestamp_millis
 title
 to_ascii_lowercase
 to_ascii_uppercase
+to_be
 to_be_bytes
 to_bytes
 to_degrees
 to_digit
+to_le
 to_le_bytes
 to_lowercase
 to_ne_bytes
@@ -642,6 +658,7 @@ uid
 underline
 underlined
 union
+unsigned_abs
 unwrap
 unwrap_err
 unwrap_or
@@ -669,9 +686,13 @@ with_extension
 with_timezone
 wrapping_abs
 wrapping_add
+wrapping_div
+wrapping_div_euclid
 wrapping_mul
 wrapping_neg
 wrapping_pow
+wrapping_rem
+wrapping_rem_euclid
 wrapping_shl
 wrapping_shr
 wrapping_sub

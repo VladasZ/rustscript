@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 
+use super::lending::{cloned_item, handed_on};
 use super::{Handle, IteratorState, option_inner, owns_items};
 use crate::interpreter::native::Native;
 use crate::interpreter::numeric::IntWidth;
@@ -208,7 +209,9 @@ impl Vm {
             Back::Map(source, closure) => match self.iterator_next_back(&source)? {
                 Some(value) => {
                     let owned = owns_items(&source);
-                    Ok(Some(self.call_closure_with(&closure, &[value], owned)?))
+                    let lent = self.lent_item(&value, owned);
+                    let out = self.call_closure_with(&closure, &[value], owned)?;
+                    Ok(Some(handed_on(out, lent.as_ref())))
                 }
                 None => Ok(None),
             },
@@ -226,10 +229,11 @@ impl Vm {
                     return Ok(None);
                 };
                 let owned = owns_items(&source);
+                let lent = self.lent_item(&value, owned);
                 if let Some(inner) =
                     option_inner(&self.call_closure_with(&closure, &[value], owned)?)
                 {
-                    return Ok(Some(inner));
+                    return Ok(Some(handed_on(inner, lent.as_ref())));
                 }
             },
             Back::Inspect(source, closure) => match self.iterator_next_back(&source)? {
@@ -239,7 +243,12 @@ impl Vm {
                 }
                 None => Ok(None),
             },
-            Back::Cloned(source) => Ok(self.iterator_next_back(&source)?.map(|v| v.deep_clone())),
+            Back::Cloned(source) => {
+                let owned = owns_items(&source);
+                Ok(self
+                    .iterator_next_back(&source)?
+                    .map(|v| cloned_item(&v, owned)))
+            }
             Back::Plain(source) => self.iterator_next_back(&source),
             Back::Forward(source) => self.iterator_next(&source),
             Back::Chain(left, right) => match self.iterator_next_back(&right)? {

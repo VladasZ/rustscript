@@ -1,5 +1,5 @@
-//! `Vec` methods that cut the vec apart, `drain`, `split_off`, `chunks_exact` and `rchunks`,
-//! and `is_sorted`.
+//! `Vec` methods that cut the vec apart, `drain`, `split_off`, `chunks_exact`, `rchunks` and
+//! the `first_chunk` family, and `is_sorted`.
 
 use std::cmp::Ordering;
 use std::sync::Arc;
@@ -96,6 +96,10 @@ pub(super) fn vec_edit(v: &List, id: BuiltinId, args: &[Value]) -> Result<Option
             }
             Value::Unit
         }
+        BuiltinId::FirstChunk
+        | BuiltinId::LastChunk
+        | BuiltinId::SplitFirstChunk
+        | BuiltinId::SplitLastChunk => chunk_edge(v, id, args)?,
         BuiltinId::IsSorted => {
             let items = v.lock();
             let mut sorted = true;
@@ -111,5 +115,33 @@ pub(super) fn vec_edit(v: &List, id: BuiltinId, args: &[Value]) -> Result<Option
             Value::Bool(sorted)
         }
         _ => return Ok(None),
+    }))
+}
+
+/// `first_chunk::<N>()` and its 3 siblings. The `N` is part of the type, so the compiler hands
+/// it over as the argument. `None` when the slice is shorter than `N`. The parts are copies like
+/// every slice a call hands back.
+fn chunk_edge(v: &List, id: BuiltinId, args: &[Value]) -> Result<Value> {
+    let Some(len) = args.first().and_then(Value::int_parts) else {
+        bail!("the length of the chunk must stand in a turbofish, like `first_chunk::<2>()`");
+    };
+    let len = usize::try_from(len.0)?;
+    let items = v.lock();
+    let front = matches!(id, BuiltinId::FirstChunk | BuiltinId::SplitFirstChunk);
+    let mid = if front {
+        (len <= items.len()).then_some(len)
+    } else {
+        items.len().checked_sub(len)
+    };
+    let Some(mid) = mid else {
+        return Ok(Value::none());
+    };
+    let (head, tail) = items.split_at(mid);
+    let (head, tail) = (Value::vec(head.to_vec()), Value::vec(tail.to_vec()));
+    Ok(Value::some(match id {
+        BuiltinId::FirstChunk => head,
+        BuiltinId::LastChunk => tail,
+        // the chunk comes first out of `split_first_chunk` and last out of `split_last_chunk`
+        _ => Value::tuple(vec![head, tail]),
     }))
 }

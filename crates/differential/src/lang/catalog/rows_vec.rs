@@ -195,6 +195,71 @@ pub(super) const ROWS: &[Method] = &[
         TyPat::Opt(&TyPat::Tuple2(ELEM, SAME)),
         "{r}.split_first().map(|(a, b)| (a.clone(), b.to_vec()))",
     ),
+    // The array is shorter than some vecs and longer than others, so both answers come up. The
+    // chunk goes through an iterator, the interpreter loses the drop of what an `Option::map`
+    // builds over a temporary vec.
+    m(
+        "first_chunk",
+        VecRecv,
+        &[],
+        Same,
+        "{r}.first_chunk::<2>().into_iter().flatten().cloned().collect::<Vec<{E}>>()",
+    ),
+    m(
+        "last_chunk",
+        VecRecv,
+        &[],
+        Same,
+        "{r}.last_chunk::<2>().into_iter().flatten().cloned().collect::<Vec<{E}>>()",
+    ),
+    m(
+        "split_first_chunk",
+        VecRecv,
+        &[],
+        Same,
+        "{r}.split_first_chunk::<1>().into_iter().flat_map(|(a, b)| b.iter().chain(a.iter())).cloned().collect::<Vec<{E}>>()",
+    ),
+    m(
+        "split_last_chunk",
+        VecRecv,
+        &[],
+        Same,
+        "{r}.split_last_chunk::<2>().into_iter().flat_map(|(a, b)| b.iter().chain(a.iter())).cloned().collect::<Vec<{E}>>()",
+    ),
+    with_elem(
+        m(
+            "vec_cmp_max",
+            VecRecv,
+            &[Same],
+            Same,
+            "std::cmp::max({r}, {0})",
+        ),
+        OrdElem,
+    ),
+    with_elem(
+        m(
+            "vec_cmp_min",
+            VecRecv,
+            &[Same],
+            Same,
+            "std::cmp::min({r}, {0})",
+        ),
+        OrdElem,
+    ),
+    m(
+        "vec_cmp_max_by_key",
+        VecRecv,
+        &[Same],
+        Same,
+        "std::cmp::max_by_key({r}, {0}, |v| v.len())",
+    ),
+    m(
+        "vec_cmp_min_by",
+        VecRecv,
+        &[Same],
+        Same,
+        "std::cmp::min_by({r}, {0}, |a, b| a.len().cmp(&b.len()))",
+    ),
     m(
         "vec_split_last",
         VecRecv,

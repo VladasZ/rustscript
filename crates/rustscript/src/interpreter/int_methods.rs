@@ -27,6 +27,8 @@ pub enum IntOut {
     CheckedCount(Option<u32>),
     /// `abs_diff`, the unsigned type of the receiver's size
     Unsigned(i128),
+    /// `cast_signed`, the signed type of the receiver's size
+    Signed(i128),
 }
 
 /// `Ne` is the host's own order.
@@ -223,7 +225,9 @@ pub fn int_method(
     recv: i128,
     args: &[i128],
 ) -> Option<Result<IntOut>> {
-    int_arith_method(name, width, recv, args).or_else(|| int_query_method(name, width, recv, args))
+    int_arith_method(name, width, recv, args)
+        .or_else(|| int_query_method(name, width, recv, args))
+        .or_else(|| extra::int_extra_family(name, width, recv, args))
 }
 
 fn int_arith_method(
@@ -688,6 +692,7 @@ fn swap_bytes(width: IntWidth, value: i128) -> u128 {
 
 mod ascii;
 mod big;
+mod extra;
 
 pub use big::big_int_method;
 

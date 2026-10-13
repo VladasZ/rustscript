@@ -116,6 +116,7 @@ impl Compiler<'_> {
     /// The argument compiles as written, a quoted `(arg).into_iter()` would be a node the type
     /// table does not know.
     fn compile_method_args(&mut self, m: &syn::ExprMethodCall, method: &str) -> Result<Reg> {
+        self.note_lent_refs(m, method);
         match m.args.first() {
             Some(arg)
                 if self.ctx.has_drop
@@ -146,6 +147,17 @@ impl Compiler<'_> {
             return Ok(());
         }
         let method = m.method.to_string();
+        // the length of the array is a part of the type, and only a turbofish says it here
+        if is_chunk_edge(&method)
+            && matches!(self.types.of(&m.receiver), Ty::Vec(_))
+            && turbofish_len(m.turbofish.as_ref()).is_none()
+        {
+            let line = m.method.span().start().line;
+            bail!(
+                "unsupported: line {line} of {}, write the length of `{method}` as a number in a turbofish, `{method}::<2>()`",
+                self.ctx.file
+            );
+        }
         let ty = self.types.of_node(m);
         let unknown = match method.as_str() {
             "collect" => {
@@ -193,6 +205,8 @@ impl Compiler<'_> {
             && let Expr::MethodCall(g) = &*c.receiver
             && g.method == "get"
             && g.args.len() == 1
+            // a borrowed default must not drop when it goes unused, see `note_lent_refs`
+            && !(self.ctx.has_drop && self.lends_storage(&m.args[0]))
         {
             let recv = self.compile_expr(&g.receiver)?;
             let key = self.compile_expr(&g.args[0])?;
@@ -535,10 +549,10 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    /// `v.as_array::<N>()`, the length is part of the type, so it rides as an argument. Any
-    /// other call keeps its own window.
+    /// `v.as_array::<N>()` and `v.first_chunk::<N>()`, the length is part of the type, so it
+    /// rides as an argument. Any other call keeps its own window.
     fn array_len_arg(&mut self, m: &syn::ExprMethodCall, method: &str, base: Reg) -> (Reg, usize) {
-        if method == "as_array"
+        if (method == "as_array" || is_chunk_edge(method))
             && m.args.is_empty()
             && let Some(len) = turbofish_len(m.turbofish.as_ref())
         {
@@ -618,6 +632,13 @@ pub(super) fn turbofish_scalar(
             _ => None,
         })
         .and_then(ScalarTy::lower)
+}
+
+fn is_chunk_edge(method: &str) -> bool {
+    matches!(
+        method,
+        "first_chunk" | "last_chunk" | "split_first_chunk" | "split_last_chunk"
+    )
 }
 
 /// The `N` of a const turbofish, `as_array::<4>()`.
