@@ -1,23 +1,29 @@
 //! Every pipe built here passes `is_valid`, asserted not assumed.
 
-use std::collections::BTreeSet;
-
 use rand::RngExt;
 
 use crate::lang::expr::Expr;
-use crate::lang::own::referenced;
 use crate::lang::pipe::{
-    Access, Bind, Item, ParamAnn, Pipe, Site, Source, Stage, Term, fallible_pending,
+    Access, Bind, Item, ParamAnn, Pipe, Site, Source, Stage, Term, fallible_pending, held_names,
 };
 use crate::lang::ref_param::RefParam;
 use crate::lang::synth::Generator;
 use crate::lang::ty::Ty;
+
+/// How many pipes are built stage by stage, see `pipes_compose`. The rest keep one of the
+/// fixed shapes below, which also reach the map and set sources no free chain starts from.
+const COMPOSE_CHANCE: f64 = 0.5;
 
 impl Generator<'_> {
     /// `site` is where a `collect`, `sum` or `product` states its target.
     pub(super) fn pipe_collect(&mut self, want: &Ty, site: Site, depth: usize) -> Option<Expr> {
         if depth == 0 {
             return None;
+        }
+        if self.chance(COMPOSE_CHANCE)
+            && let Some(pipe) = self.compose_pipe(want, site, depth)
+        {
+            return Some(Expr::Pipe(Box::new(pipe)));
         }
         let pipe = match want {
             Ty::Vec(elem) | Ty::Set(elem) => {
@@ -37,7 +43,7 @@ impl Generator<'_> {
         Some(Expr::Pipe(Box::new(pipe)))
     }
 
-    fn param_ann(&mut self) -> ParamAnn {
+    pub(super) fn param_ann(&mut self) -> ParamAnn {
         if self.chance(0.35) {
             ParamAnn::Inferred
         } else {
@@ -45,7 +51,7 @@ impl Generator<'_> {
         }
     }
 
-    fn scalar_source(&mut self, depth: usize) -> (Source, bool) {
+    pub(super) fn scalar_source(&mut self, depth: usize) -> (Source, bool) {
         match self.rng.random_range(0..6) {
             0 => {
                 let start = self.rng.random_range(-20..=20);
@@ -87,7 +93,7 @@ impl Generator<'_> {
         }
     }
 
-    fn fresh_bind(&mut self) -> String {
+    pub(super) fn fresh_bind(&mut self) -> String {
         self.fresh("diff_x")
     }
 
@@ -104,21 +110,32 @@ impl Generator<'_> {
 
     /// The predicate of a closure that is handed `&item`, with the way it names the item.
     pub(super) fn pred_by(&mut self, bind: &str, item: &Ty, depth: usize) -> (RefParam, Expr) {
+        self.body_by(bind, item, &Ty::Bool, depth)
+    }
+
+    /// The body of a closure that is handed `&item` and makes a `want`.
+    pub(super) fn body_by(
+        &mut self,
+        bind: &str,
+        item: &Ty,
+        want: &Ty,
+        depth: usize,
+    ) -> (RefParam, Expr) {
         let by = match self.rng.random_range(0..10) {
             0..4 => RefParam::Cloned,
             4..7 if item.is_copy() => RefParam::Pat,
             _ => RefParam::Deref,
         };
         let locals = [(by.local(bind), item.clone())];
-        let pred = self.closure_body(|inner| {
-            let build = |inner: &mut Self| inner.typed_only(|inner| inner.expr(&Ty::Bool, depth));
+        let body = self.closure_body(|inner| {
+            let build = |inner: &mut Self| inner.typed_only(|inner| inner.expr(want, depth));
             if by == RefParam::Deref {
                 inner.with_borrowed(&locals, build)
             } else {
                 inner.with_locals(&locals, build)
             }
         });
-        (by, pred)
+        (by, body)
     }
 
     fn pipe_to_scalar_collect(
@@ -348,7 +365,13 @@ impl Generator<'_> {
 
     /// `.fold(init, |acc, x| body)`. A pair accumulator is taken apart in the parameter list,
     /// `|(lo, hi), x|`.
-    fn fold_term(&mut self, want: &Ty, item: &Ty, stages: &[Stage], depth: usize) -> Term {
+    pub(super) fn fold_term(
+        &mut self,
+        want: &Ty,
+        item: &Ty,
+        stages: &[Stage],
+        depth: usize,
+    ) -> Term {
         let (acc, mut locals) = match want {
             Ty::Tuple(parts) if parts.len() == 2 && self.chance(0.5) => {
                 let first = self.fresh_bind();
@@ -369,14 +392,7 @@ impl Generator<'_> {
         locals.push((bind.clone(), item.clone()));
         // the stage closures hold what they name until the fold runs, so the init can't
         // take any of it. A bare literal init leaves a `{float}` no method can be called on.
-        let held: Vec<String> = stages
-            .iter()
-            .flat_map(|stage| match stage {
-                Stage::Map { body, .. } | Stage::PairWith { body, .. } => referenced(body),
-                Stage::Filter { pred, .. } => referenced(pred),
-                _ => BTreeSet::new(),
-            })
-            .collect();
+        let held = held_names(stages);
         for name in &held {
             self.scope.freeze(name);
         }

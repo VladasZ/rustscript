@@ -78,6 +78,35 @@ order real Rust randomizes, so the body only pushes one value per entry, a value
 neither panic nor print a drop, and the statement sorts the vec after the loop. An
 `iter_mut` loop writes each element with `*r = x`, `*r += x` or a method like `r.push(x)`.
 
+## Pipes
+
+A pipe is a source, stages and a terminal, see `lang/pipe.rs`. Half of the pipes keep one of
+the fixed shapes in `synth/pipes.rs`. The other half are composed in `synth/pipes_compose.rs`.
+The solver picks a terminal for the wanted type, then a source, then up to 2 free stages, 1
+stage that brings the item to the type the terminal takes, and up to 2 stages that keep the
+type. Each is picked from the ones that fit the chain so far. A `fold` fits every type, so
+any wanted type can get a pipe.
+
+The sources are a vec, set or map by value, a range, `v.iter()` with `cloned` or `copied`,
+`s.chars()`, `s.bytes()`, `s.lines()`, `s.split(c)`, `v.windows(n)` and `v.chunks(n)`. A
+borrowed source is a `&str` or `&[T]` expression, so the binding behind it is held like for
+any other reference. The stages are `map`, `filter`, `filter_map`, `flat_map`, `flatten`,
+`chain`, `zip`, `enumerate`, `rev`, `take`, `skip`, `step_by`, `take_while`, `skip_while`,
+`inspect` with a print, `scan`, `peekable` and `by_ref`. The terminals are `collect` into a
+vec, a set, a map, a `String` or a `Result`, `sum`, `product`, `count`, `min`, `max`, `last`,
+`nth`, `any`, `all`, `position`, `rposition`, `fold`, `reduce`, `find`, `find_map`,
+`max_by_key`, `min_by_key`, `partition`, `unzip` and `for_each`.
+
+`Pipe::is_valid` holds 3 rules. A map or set source sorts before anything that depends on
+order. A body that shows in the output never stands before a `skip`, std may not run it
+there. And the chain has the form `rustc` takes: `Caps` follows whether the chain is double
+ended, knows its length and owns its data. `rev` needs the first, `rposition` the first 2,
+and `by_ref`, which puts the chain into a `let`, the last.
+
+An expression that runs when the chain is built, the vec of `chain` and `zip` or the first
+state of `scan` and `fold`, takes no binding that a closure before it names. The closure
+holds that binding for as long as the chain lives, see `held_names`.
+
 ## Mutable references
 
 A `&mut` statement borrows one binding for its whole body, so nothing in it names that

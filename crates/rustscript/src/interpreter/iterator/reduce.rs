@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 
+use super::back::{iterator_len, supports_back};
 use super::drive::consumes_iterator;
 use super::{
     Handle, IteratorState, Reducer, as_closure, option_inner, owns_items, product_reducer,
@@ -131,30 +132,23 @@ impl Vm {
                 }
                 Value::some(accumulator)
             }
-            BuiltinId::FlatMap => {
-                let closure = closure(0)?;
-                let owned = owns_items(iterator);
-                let mut output = Vec::new();
-                while let Some(value) = self.iterator_next(iterator)? {
-                    let mapped = self.call_closure_with(&closure, &[value], owned)?;
-                    output.extend(self.drain_items(mapped)?);
-                }
-                Value::vec(output)
-            }
+            // a closure makes values of its own until the first inner iterator says otherwise
+            BuiltinId::FlatMap => wrap(IteratorState::Flatten {
+                source: iterator.clone(),
+                closure: Some(closure(0)?),
+                front: None,
+                back: None,
+                owned: true,
+            }),
             // the flattened items stay the iterator's own when the source owned them, so a
             // `count` drops what it throws away
-            BuiltinId::Flatten => {
-                let owned = owns_items(iterator);
-                let mut output = Vec::new();
-                while let Some(value) = self.iterator_next(iterator)? {
-                    output.extend(self.drain_items(value)?);
-                }
-                wrap(IteratorState::Owned {
-                    values: output,
-                    index: 0,
-                    vec: owned,
-                })
-            }
+            BuiltinId::Flatten => wrap(IteratorState::Flatten {
+                source: iterator.clone(),
+                closure: None,
+                front: None,
+                back: None,
+                owned: owns_items(iterator),
+            }),
             BuiltinId::Partition => self.partition(iterator, &closure(0)?)?,
             BuiltinId::MaxByKey | BuiltinId::MinByKey => {
                 self.extreme_by_key(iterator, name, &closure(0)?)?
@@ -323,9 +317,15 @@ impl Vm {
         name: BuiltinId,
         closure: &Arc<ClosureData>,
     ) -> Result<Value> {
+        if name == BuiltinId::Rposition
+            && supports_back(iterator)
+            && let Some(len) = iterator_len(iterator)
+        {
+            return self.rposition_back(iterator, closure, len);
+        }
         let mut index = 0usize;
-        // `rposition` walks to the end and keeps the last match, same index without a reversible
-        // iterator
+        // without a back step `rposition` walks to the end and keeps the last match, the same
+        // index
         let mut last_match = None;
         // `find` looks at each item and keeps the match, the others take theirs by value
         let by_value = name != BuiltinId::Find && owns_items(iterator);
@@ -357,6 +357,28 @@ impl Vm {
 }
 
 impl Vm {
+    /// std pulls from the back and counts down from the length, so the closure sees the last
+    /// item first and nothing before the match.
+    fn rposition_back(
+        self: &Arc<Self>,
+        iterator: &Handle,
+        closure: &Arc<ClosureData>,
+        len: usize,
+    ) -> Result<Value> {
+        let by_value = owns_items(iterator);
+        let mut index = len;
+        while let Some(value) = self.iterator_next_back(iterator)? {
+            index -= 1;
+            if self
+                .call_closure_with(closure, from_ref(&value), by_value)?
+                .is_truthy()
+            {
+                return Ok(Value::some(usize_value(index)));
+            }
+        }
+        Ok(Value::none())
+    }
+
     /// `a.cmp(b)` and `a.partial_cmp(b)` over 2 iterators, item by item from the front. The
     /// first pair that differs decides, and a side that ends first is the smaller one.
     pub(super) fn iterator_compare(

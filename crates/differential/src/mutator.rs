@@ -10,7 +10,7 @@ use rand::rngs::StdRng;
 
 use crate::generator::generate_base;
 use crate::lang::expr::{Expr, ReadMode, minimal};
-use crate::lang::pipe::{Bind, Stage, Term};
+use crate::lang::pipe::Bind;
 use crate::lang::stmt::{Ann, Stmt};
 use crate::lang::ty::Ty;
 use crate::model::{MutationOperation, MutationOrigin, Program};
@@ -107,25 +107,8 @@ fn binders(expr: &Expr, out: &mut BTreeSet<String>) {
     for node in expr.nodes() {
         match node {
             Expr::Pipe(pipe) => {
-                for stage in &pipe.stages {
-                    match stage {
-                        Stage::Map { bind, .. }
-                        | Stage::PairWith { bind, .. }
-                        | Stage::Filter { bind, .. } => bind_names(bind, out),
-                        _ => {}
-                    }
-                }
-                match &pipe.term {
-                    Term::Any { bind, .. }
-                    | Term::All { bind, .. }
-                    | Term::Position { bind, .. } => {
-                        bind_names(bind, out);
-                    }
-                    Term::Fold { acc, bind, .. } => {
-                        bind_names(acc, out);
-                        bind_names(bind, out);
-                    }
-                    _ => {}
+                for bind in pipe.binds() {
+                    bind_names(bind, out);
                 }
             }
             Expr::Match { arms, .. } => {

@@ -513,12 +513,27 @@ pub(super) fn chain_owns_items(expr: &Expr, binding_owns: BindingOwns) -> bool {
             }
             "zip" | "chain" => {
                 chain_owns_items(&m.receiver, binding_owns)
-                    && m.args.iter().all(|arg| chain_owns_items(arg, binding_owns))
+                    && m.args
+                        .iter()
+                        .all(|arg| joined_owns_items(arg, binding_owns))
             }
             _ => false,
         },
         Expr::Range(_) => true,
         _ => false,
+    }
+}
+
+/// The argument of a `zip` or a `chain` is taken by value like the source of a `for`, so a
+/// fresh collection hands its items over too, `a.zip(vec![..])` or `a.chain(make())`. A
+/// binding may be a vec that is moved in or an iterator that lends, which only its `let`
+/// knows.
+fn joined_owns_items(arg: &Expr, binding_owns: BindingOwns) -> bool {
+    match arg {
+        Expr::Paren(p) => joined_owns_items(&p.expr, binding_owns),
+        Expr::Group(g) => joined_owns_items(&g.expr, binding_owns),
+        Expr::Path(_) | Expr::Reference(_) | Expr::Range(_) => chain_owns_items(arg, binding_owns),
+        _ => chain_owns_items(arg, binding_owns) || init_is_owned(arg, binding_owns),
     }
 }
 

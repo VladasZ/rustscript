@@ -15,6 +15,34 @@ Differential workflow.
 
 ## Open
 
+### A vec binding moved into `zip` is not owned by what `unzip` makes
+
+```rust
+#[derive(Debug)]
+struct T(i64);
+
+impl Drop for T {
+    fn drop(&mut self) {
+        println!("drop {}", self.0);
+    }
+}
+
+fn main() {
+    let right = vec![T(3), T(4)];
+    {
+        let out: (Vec<T>, Vec<T>) = vec![T(1), T(2)].into_iter().zip(right).unzip();
+        println!("{out:?}");
+    }
+    println!("end");
+}
+```
+
+Compiled it prints `drop 1` to `drop 4` before `end`. Interpreted it prints no drop line.
+`joined_owns_items` in `compile/support.rs` takes a fresh argument of `zip` and `chain` as
+owned, `zip(vec![..])` or `zip(make())`. A plain binding can be a vec that is moved in or an
+iterator that only lends, and the rule has only the syntax, so it says not owned. It needs the
+inferred type of the binding. The generator makes this case, so a campaign reports it.
+
 ## Generator plan
 
 The differential generator is being brought closer to real Rust in phases,
@@ -31,15 +59,12 @@ counts in the surface report and win1 in the fleet are done, see
 
 ### Phase 2, the rest
 
-The catalog rows of this phase are done, see `docs/differential.md`. A row is one fixed
-template. Still open are the same forms as tree nodes the solver composes.
+The catalog rows of this phase are done, and so are the pipe sources, stages and terminals as
+tree nodes the solver composes, see `docs/differential.md`. Still open:
 
-- Pipe sources from `iter()`, `chars()`, `bytes()`, `lines()`, `split()`, `windows`,
-  `chunks`, and ranges with `rev` and `step_by`. Pipe stages `filter_map`, `flat_map`,
-  `flatten`, `chain`, `zip`, `take_while`, `skip_while`, `inspect` with a print, `scan`,
-  `peekable` and `by_ref`. Pipe terminals `find`, `find_map`, `max_by_key`, `min_by_key`,
-  `partition`, `unzip`, `for_each`, `reduce`, `rposition`, `collect::<String>` and
-  `collect::<Result<Vec<_>, _>>`. Each with a generated closure body.
+- A campaign of 6000 cases over the composed pipes found 188 failing cases. Their causes
+  were fixed and the probes for them agree, but no campaign has run since. Run one and fix
+  what is left, the entry in `## Open` is known.
 - `BTreeMap`, `BTreeSet` and `VecDeque` as types a binding holds, so every statement form
   reads and writes them.
 - `write!` and `writeln!` as statements over a `String` binding, and a `format!` whose

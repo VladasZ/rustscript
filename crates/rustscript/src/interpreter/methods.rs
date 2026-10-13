@@ -439,8 +439,8 @@ fn str_out(s: &RsStr, out: StrOut) -> Value {
         StrOut::Owned(o) => Value::str(o),
         StrOut::Keep => Value::Str(s.clone()),
         StrOut::OkKeep => Value::ok(Value::Str(s.clone())),
-        StrOut::Strs(v) => Value::vec(v.into_iter().map(Value::str).collect()),
-        StrOut::CharIdx(v) => Value::vec(
+        StrOut::Strs(v) => iterator::pieces(v.into_iter().map(Value::str).collect()),
+        StrOut::CharIdx(v) => iterator::pieces(
             v.into_iter()
                 .map(|(i, c)| Value::tuple(vec![shared::usize_value(i), Value::Char(c)]))
                 .collect(),
@@ -676,12 +676,12 @@ pub(super) fn split_value(s: &RsStr, pattern: Option<&Value>) -> Value {
                 _ => None,
             })
             .collect();
-        return Value::vec(
+        return iterator::pieces(
             s.split(|c: char| chars.contains(&c))
                 .map(Value::str)
                 .collect(),
         );
     }
     let sep = pattern.map(Value::display).unwrap_or_default();
-    Value::vec(s.split(&sep).map(Value::str).collect())
+    iterator::pieces(s.split(&sep).map(Value::str).collect())
 }
