@@ -1,16 +1,22 @@
 //! Replays a finished block against the ownership rules of `own`, see `check_block`.
 
-use std::collections::BTreeSet;
-
 use crate::lang::block::{Block, FnKind};
 use crate::lang::expr::{Expr, MemKind, ReadMode};
 use crate::lang::own::{BindKind, RefRules, Scope, referenced};
 use crate::lang::pat::Pat;
-use crate::lang::pipe::{Bind, Item, Pipe, Source, Stage, Term};
+use crate::lang::pipe::{Bind, Item, Pipe, Source, Stage, Term, held_names};
 use crate::lang::ref_param::RefParam;
 use crate::lang::stmt::{ClosureSource, MutOp, Stmt};
 use crate::lang::ty::Ty;
 use crate::lang::user::MethodKind;
+
+/// The name a body reads a value by that it has behind a reference.
+fn deref_name(bind: &Bind) -> String {
+    match bind {
+        Bind::One(name) => format!("(*{name})"),
+        Bind::Pair(first, _) => format!("(*{first})"),
+    }
+}
 
 /// Whether every read in the block resolves to a binding it may read, or the first one that
 /// does not. Every item body is checked with its parameters in scope.
@@ -649,38 +655,54 @@ impl Checker {
             self.expr(expr);
         }
         let mut item = pipe.source.item();
-        for stage in &pipe.stages {
+        for (index, stage) in pipe.stages.iter().enumerate() {
+            let before = &pipe.stages[..index];
             match stage {
-                Stage::Map { bind, body, .. } | Stage::PairWith { bind, body } => {
-                    self.pipe_body(bind, &item, body);
-                }
-                Stage::Filter {
-                    bind: Bind::One(name),
-                    pred,
-                    by: RefParam::Deref,
-                    ..
+                Stage::Map { bind, body, .. }
+                | Stage::PairWith { bind, body }
+                | Stage::FilterMap { bind, body, .. }
+                | Stage::FlatMap { bind, body, .. } => self.pipe_body(bind, &item, body),
+                Stage::Filter { bind, pred, by, .. }
+                | Stage::TakeWhile { bind, pred, by }
+                | Stage::SkipWhile { bind, pred, by } => self.ref_body(bind, *by, &item, pred),
+                Stage::Chain { other } | Stage::Zip { other } => self.built_with(before, other),
+                Stage::Scan {
+                    acc,
+                    bind,
+                    init,
+                    body,
                 } => {
-                    // the item stays behind the reference, so the body only reads it
-                    let ty = match &item {
-                        Item::Scalar(ty) => ty.clone(),
-                        Item::Pair(key, value) => Ty::Tuple(vec![key.clone(), value.clone()]),
-                    };
-                    self.scope.enter_closure();
-                    let depth = self.scope.depth();
-                    let mark = self.scope.enter_scope();
-                    self.scope.push_borrowed(format!("(*{name})"), ty);
-                    self.crossing(depth, |inner| inner.expr(pred));
-                    self.scope.exit_scope(mark);
-                    self.scope.leave_closure();
+                    self.built_with(before, init);
+                    let state = init.ty();
+                    self.in_closure(body, |inner| {
+                        // the state stays behind the `&mut`, so the body only reads it
+                        inner.scope.push_borrowed(deref_name(acc), state);
+                        inner.push_bind(bind, &item);
+                    });
                 }
-                Stage::Filter { bind, pred, .. } => self.pipe_body(bind, &item, pred),
                 _ => {}
             }
             item = stage.out(&item);
         }
         match &pipe.term {
-            Term::Any { bind, pred } | Term::All { bind, pred } | Term::Position { bind, pred } => {
-                self.pipe_body(bind, &item, pred);
+            Term::Any { bind, pred }
+            | Term::All { bind, pred }
+            | Term::Position { bind, pred }
+            | Term::Rposition { bind, pred } => self.pipe_body(bind, &item, pred),
+            Term::FindMap { bind, body } | Term::ForEach { bind, body } => {
+                self.pipe_body(bind, &item, body);
+            }
+            Term::Find { bind, pred, by } | Term::Partition { bind, pred, by } => {
+                self.ref_body(bind, *by, &item, pred);
+            }
+            Term::MaxByKey { bind, key, by } | Term::MinByKey { bind, key, by } => {
+                self.ref_body(bind, *by, &item, key);
+            }
+            Term::Reduce { acc, bind, body } => {
+                self.in_closure(body, |inner| {
+                    inner.push_bind(acc, &item);
+                    inner.push_bind(bind, &item);
+                });
             }
             Term::Fold {
                 acc,
@@ -688,50 +710,61 @@ impl Checker {
                 init,
                 body,
             } => {
-                // the stage closures hold what they name while the init runs
-                let held: Vec<String> = pipe
-                    .stages
-                    .iter()
-                    .flat_map(|stage| match stage {
-                        Stage::Map { body, .. } | Stage::PairWith { body, .. } => referenced(body),
-                        Stage::Filter { pred, .. } => referenced(pred),
-                        _ => BTreeSet::new(),
-                    })
-                    .collect();
-                for name in &held {
-                    self.scope.freeze(name);
-                }
-                self.expr(init);
-                for _ in &held {
-                    self.scope.unfreeze();
-                }
+                self.built_with(&pipe.stages, init);
                 let acc_item = match init.ty() {
                     Ty::Tuple(parts) if parts.len() == 2 => {
                         Item::Pair(parts[0].clone(), parts[1].clone())
                     }
                     other => Item::Scalar(other),
                 };
-                self.scope.enter_closure();
-                let depth = self.scope.depth();
-                let mark = self.scope.enter_scope();
-                self.push_bind(acc, &acc_item);
-                self.push_bind(bind, &item);
-                self.crossing(depth, |inner| inner.expr(body));
-                self.scope.exit_scope(mark);
-                self.scope.leave_closure();
+                self.in_closure(body, |inner| {
+                    inner.push_bind(acc, &acc_item);
+                    inner.push_bind(bind, &item);
+                });
             }
             _ => {}
         }
     }
 
-    fn pipe_body(&mut self, bind: &Bind, item: &Item, body: &Expr) {
+    /// An expression that runs when the chain is built. The closures of the stages before it
+    /// hold what they name, so it takes none of that.
+    fn built_with(&mut self, before: &[Stage], expr: &Expr) {
+        let held = held_names(before);
+        for name in &held {
+            self.scope.freeze(name);
+        }
+        self.expr(expr);
+        for _ in &held {
+            self.scope.unfreeze();
+        }
+    }
+
+    /// A closure body, with the bindings `declare` pushes in scope.
+    fn in_closure(&mut self, body: &Expr, declare: impl FnOnce(&mut Self)) {
         self.scope.enter_closure();
         let depth = self.scope.depth();
         let mark = self.scope.enter_scope();
-        self.push_bind(bind, item);
+        declare(self);
         self.crossing(depth, |inner| inner.expr(body));
         self.scope.exit_scope(mark);
         self.scope.leave_closure();
+    }
+
+    fn pipe_body(&mut self, bind: &Bind, item: &Item, body: &Expr) {
+        self.in_closure(body, |inner| inner.push_bind(bind, item));
+    }
+
+    /// The body of a closure that is handed `&item`.
+    fn ref_body(&mut self, bind: &Bind, by: RefParam, item: &Item, body: &Expr) {
+        match (bind, by) {
+            // the item stays behind the reference, so the body only reads it
+            (Bind::One(_), RefParam::Deref) => {
+                self.in_closure(body, |inner| {
+                    inner.scope.push_borrowed(deref_name(bind), item.ty());
+                });
+            }
+            _ => self.pipe_body(bind, item, body),
+        }
     }
 
     fn push_bind(&mut self, bind: &Bind, item: &Item) {

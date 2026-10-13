@@ -231,6 +231,13 @@ the end never runs the closure. `sum` and `product` fold one element at a
 time as they pull, so an overflow of the running total panics before the
 source makes the next element.
 
+`flat_map` and `flatten` are lazy, see `iterator/flatten.rs`. The next outer item is pulled,
+and the closure of a `flat_map` called, only when the inner iterator before it is used up. A
+string `split`, `rsplit`, `splitn`, `matches` and `char_indices` cut their parts at once and
+hand them out as an iterator, so the adapters after them run item by item. A `rev` over a
+source with no back step drains it first and stays an iterator. `rposition` pulls from the
+back. A `scan` drops its last state with the iterator.
+
 `by_ref` hands out a borrowed view of the iterator. An adapter over the view, like `take`,
 pulls from the iterator and holds nothing itself, so the rest stays in the iterator when the
 adapter goes away. A range in a binding is a plain value. The first `next`, `next_back`, `nth`

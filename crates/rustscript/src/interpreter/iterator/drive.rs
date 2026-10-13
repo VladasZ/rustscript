@@ -308,6 +308,7 @@ impl Vm {
             Step::Scan(source, closure, state) => self.scan_next(&source, &closure, state),
             Step::MapWhile(source, closure) => self.map_while_next(&source, &closure),
             Step::Cycle(original, current) => self.cycle_next(iterator, &original, &current),
+            Step::Flatten => self.flatten_next(iterator),
             Step::SkipWhile(source, closure, skipping) => {
                 let mut still_skipping = skipping;
                 loop {
@@ -650,10 +651,16 @@ impl Vm {
             BuiltinId::Rev if supports_back(iterator) => wrap(IteratorState::Rev {
                 source: iterator.clone(),
             }),
+            // still an iterator, so the adapters after it run item by item
             BuiltinId::Rev => {
-                let mut items = self.drain_iterator(iterator)?;
-                items.reverse();
-                Value::vec(items)
+                let vec = owns_items(iterator);
+                let mut values = self.drain_iterator(iterator)?;
+                values.reverse();
+                wrap(IteratorState::Owned {
+                    values,
+                    index: 0,
+                    vec,
+                })
             }
             // `Chars::as_str` is the unconsumed tail, the capitalize idiom. Only a char iterator
             // still knows its source.

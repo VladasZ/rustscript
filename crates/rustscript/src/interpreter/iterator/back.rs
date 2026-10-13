@@ -29,6 +29,8 @@ enum Back {
     Zip(Handle, Handle),
     Forward(Handle),
     StepBy(Handle, usize, bool),
+    Peekable(Handle),
+    Flatten,
 }
 
 /// Whether every layer down to the source has a back step.
@@ -48,6 +50,8 @@ pub(super) fn supports_back(iterator: &Handle) -> bool {
         | IteratorState::Inspect { source, .. }
         | IteratorState::Cloned { source }
         | IteratorState::ByRef { source }
+        | IteratorState::Peekable { source, .. }
+        | IteratorState::Flatten { source, .. }
         | IteratorState::Rev { source } => supports_back(source),
         // these need the exact length of what is left
         IteratorState::Enumerate { source, .. }
@@ -179,6 +183,8 @@ fn back_step(state: &mut IteratorState) -> Result<Back> {
         IteratorState::Chain { left, right, .. } => Back::Chain(left.clone(), right.clone()),
         IteratorState::Zip { left, right } => Back::Zip(left.clone(), right.clone()),
         IteratorState::Rev { source } => Back::Forward(source.clone()),
+        IteratorState::Peekable { source, .. } => Back::Peekable(source.clone()),
+        IteratorState::Flatten { .. } => Back::Flatten,
         IteratorState::StepBy {
             source,
             step,
@@ -251,6 +257,15 @@ impl Vm {
             }
             Back::Plain(source) => self.iterator_next_back(&source),
             Back::Forward(source) => self.iterator_next(&source),
+            Back::Flatten => self.flatten_next_back(iterator),
+            // the peeked item is the front one, so it comes out last from the back
+            Back::Peekable(source) => match self.iterator_next_back(&source)? {
+                Some(value) => Ok(Some(value)),
+                None => Ok(match &mut *iterator.lock() {
+                    Native::Iterator(IteratorState::Peekable { buffered, .. }) => buffered.take(),
+                    _ => None,
+                }),
+            },
             Back::Chain(left, right) => match self.iterator_next_back(&right)? {
                 Some(value) => Ok(Some(value)),
                 None => self.iterator_next_back(&left),

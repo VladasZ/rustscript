@@ -6,6 +6,7 @@ mod exprs_calls;
 mod matches;
 mod pats;
 mod pipes;
+mod pipes_compose;
 mod refs;
 mod stmts;
 mod stmts_bind;

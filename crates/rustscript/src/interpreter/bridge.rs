@@ -593,8 +593,8 @@ fn path_constant(id: PathId) -> Option<Value> {
 }
 
 /// Flatten width tagged arguments to the i64 and f64 images the bridges compute in. Methods that hand
-/// arguments through or store them, like `unwrap_or`, `then_some`, `fold` and the containers,
-/// keep the tags.
+/// arguments through or store them, like `unwrap_or`, `then_some`, `fold`, `scan` and the
+/// containers, keep the tags.
 fn image_args(recv: &Value, name: &MethodName, args: &mut [Value]) -> Result<()> {
     // `bridge_image` saturates a count past `i64::MAX` to `isize::MAX`, and `"0".repeat(isize::MAX)`
     // is a failed allocation, not the `capacity overflow` panic the real count gives
@@ -617,7 +617,10 @@ fn image_args(recv: &Value, name: &MethodName, args: &mut [Value]) -> Result<()>
         recv,
         Value::Enum { .. } | Value::Bool(_) | Value::Vec(_) | Value::Map(..)
     ) || matches!(recv, Value::Native(n) if matches!(&*n.lock(), Native::Entry { .. }))
-        || name.id == BuiltinId::Fold;
+        || matches!(
+            name.id,
+            BuiltinId::Fold | BuiltinId::Scan | BuiltinId::NextIfEq
+        );
     if hands_args_through {
         return Ok(());
     }

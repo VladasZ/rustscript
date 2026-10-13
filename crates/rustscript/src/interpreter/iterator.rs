@@ -170,6 +170,16 @@ pub enum IteratorState {
         value: Value,
         remaining: Option<usize>,
     },
+    /// `flat_map` and `flatten`. `front` and `back` are the inner iterators in flight at each
+    /// end, the `frontiter` and `backiter` of std. `closure` is `None` for a `flatten`.
+    Flatten {
+        source: Handle,
+        closure: Option<Arc<ClosureData>>,
+        front: Option<Handle>,
+        back: Option<Handle>,
+        /// whether the inner iterator opened last hands out items of its own
+        owned: bool,
+    },
 }
 
 enum Step {
@@ -193,6 +203,7 @@ enum Step {
     Scan(Handle, Arc<ClosureData>, Arc<Mutex<Value>>),
     MapWhile(Handle, Arc<ClosureData>),
     Cycle(Handle, Handle),
+    Flatten,
 }
 
 pub(super) fn wrap(state: IteratorState) -> Value {
@@ -383,7 +394,7 @@ impl IteratorState {
     /// or set iterates pairs of shared handles either way, so it never owns.
     pub(super) fn owns_items(&self) -> bool {
         match self {
-            IteratorState::Values { owned, .. } => *owned,
+            IteratorState::Values { owned, .. } | IteratorState::Flatten { owned, .. } => *owned,
             IteratorState::Owned { vec, .. } => *vec,
             IteratorState::MutableValues { .. } | IteratorState::DrainingValues { .. } => false,
             // a fresh value per pull
@@ -458,8 +469,19 @@ impl IteratorState {
             | IteratorState::StepBy { source, .. }
             | IteratorState::TakeWhile { source, .. }
             | IteratorState::SkipWhile { source, .. }
-            | IteratorState::Scan { source, .. }
             | IteratorState::MapWhile { source, .. } => take_remaining_of(source),
+            // std declares the state after the source and the closure, so it drops last
+            IteratorState::Scan { source, state, .. } => {
+                let mut items = take_remaining_of(source);
+                items.push(std::mem::replace(&mut *state.lock(), Value::Unit));
+                items
+            }
+            IteratorState::Flatten {
+                source,
+                front,
+                back,
+                ..
+            } => flatten::remaining(source, front.as_ref(), back.as_ref()),
             // std declares the original before the running copy
             IteratorState::Cycle { original, current } => {
                 let mut items = take_remaining_of(original);
@@ -538,6 +560,7 @@ impl IteratorState {
             IteratorState::Cycle { original, current } => {
                 Step::Cycle(original.clone(), current.clone())
             }
+            IteratorState::Flatten { .. } => Step::Flatten,
             IteratorState::Repeat { value, remaining } => Step::Ready(match remaining {
                 None => Some(value.deep_clone()),
                 Some(0) => None,
@@ -759,9 +782,11 @@ mod arith;
 mod back;
 mod drive;
 mod extra;
+mod flatten;
 mod in_place;
 mod lending;
 mod reduce;
 
 pub(super) use arith::{Reducer, product_reducer, product_values, sum_reducer, sum_values};
 pub(super) use drive::{collect_inner, short_circuit_payload};
+pub(super) use extra::pieces;

@@ -1,7 +1,8 @@
 #!/usr/bin/env rust
 
-//! An adapter the interpreter runs eagerly hands a vec on. `chain`, `zip`, `step_by`, `scan`,
-//! `map_while`, `min_by`, `max_by`, `cycle` and `unzip` still work on what comes after it.
+//! A `flat_map` chain kept in a binding and cloned for each use. Every clone has a state of
+//! its own, and `chain`, `zip`, `step_by`, `scan`, `map_while`, `min_by`, `max_by`, `cycle`
+//! and `unzip` work on what comes after it.
 
 fn main() {
     let values = [5, 3, 8, 1];

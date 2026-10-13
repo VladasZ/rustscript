@@ -17,7 +17,18 @@ use crate::interpreter::shared::usize_value;
 use crate::interpreter::value::{ClosureData, Value, ValueRef};
 use crate::interpreter::vm::Vm;
 
-fn fork_handle(handle: &Handle) -> Result<Handle> {
+/// The parts a string method cut out, `split`, `matches` and the like. They are cut at once
+/// and handed out one by one, so the adapters after them run item by item like over the
+/// lazy iterator of std.
+pub(in crate::interpreter) fn pieces(values: Vec<Value>) -> Value {
+    wrap(IteratorState::Owned {
+        values,
+        index: 0,
+        vec: false,
+    })
+}
+
+pub(super) fn fork_handle(handle: &Handle) -> Result<Handle> {
     let state = match &*handle.lock() {
         Native::Iterator(state) => state.fork()?,
         other => bail!("{} can not be cloned for `cycle`", other.type_name()),
@@ -244,6 +255,7 @@ impl IteratorState {
                 original: fork_handle(original)?,
                 current: fork_handle(current)?,
             },
+            flatten @ IteratorState::Flatten { .. } => flatten.fork_flatten()?,
             _ => unreachable!("fork handles the sources itself"),
         })
     }
@@ -391,6 +403,8 @@ impl Vm {
                 original: fork_handle(iterator)?,
                 current: iterator.clone(),
             }),
+            // a clone has a state of its own, a copy of the handle would share one
+            BuiltinId::Clone => Value::Native(fork_handle(iterator)?),
             BuiltinId::NextIf => {
                 let closure = closure(0)?;
                 let keep = |vm: &Arc<Self>, item: &Value| {

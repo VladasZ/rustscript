@@ -186,6 +186,11 @@ impl Vm {
         {
             return self.run_extra_method(&iterator, name, args);
         }
+        if name == BuiltinId::Inspect
+            && let Value::Native(iterator) = super::iterator::value_iter(items.clone())
+        {
+            return self.iterator_higher_order(&iterator, name, args);
+        }
         Ok(None)
     }
 
