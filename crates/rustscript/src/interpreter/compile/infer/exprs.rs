@@ -111,6 +111,7 @@ impl Infer<'_, '_> {
                 let target = self.expr(&a.left, &Ty::Unknown);
                 let value = self.expr(&a.right, &target);
                 self.vars.unify(&target, &value);
+                self.refine_assigned(a, &value);
                 Ty::Unit
             }
             Expr::Cast(c) => {

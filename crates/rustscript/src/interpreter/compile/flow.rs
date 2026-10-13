@@ -381,7 +381,7 @@ impl Compiler<'_> {
         match self.resolve(&ident.to_string()) {
             NameLoc::Local(reg) => {
                 let state = self.cur();
-                state.borrow_params.contains(&reg) || state.ref_locals.contains(&reg)
+                state.shares_only(reg) || state.ref_holders.contains(&reg)
             }
             _ => false,
         }

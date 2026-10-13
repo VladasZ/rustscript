@@ -400,7 +400,7 @@ impl<'ast> Visit<'ast> for RefArgs<'_> {
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
         if (self.lends)(call) {
             for arg in &call.args {
-                if let Expr::Reference(r) = arg
+                if let Expr::Reference(r) = unparen(arg)
                     && r.mutability.is_some()
                     && let Expr::Path(p) = &*r.expr
                     && let Some(name) = p.path.get_ident()

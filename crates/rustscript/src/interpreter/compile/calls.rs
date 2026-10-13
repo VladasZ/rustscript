@@ -62,17 +62,22 @@ impl Compiler<'_> {
             Expr::MethodCall(_) => !self.arg_owned(elem),
             _ => false,
         };
-        borrows
-            && match self.types.of(elem) {
-                Ty::Vec(_)
-                | Ty::Set(..)
-                | Ty::Map(..)
-                | Ty::Struct(_)
-                | Ty::Enum(_)
-                | Ty::Result(..) => true,
-                ty @ (Ty::Tuple(_) | Ty::Option(_)) => !place::copies(&ty),
-                _ => false,
-            }
+        borrows && self.has_parts_to_drop(elem)
+    }
+
+    /// Whether a value of the type the pass gave the expression can hold something that
+    /// drops. A scalar or a string never does.
+    pub(super) fn has_parts_to_drop(&self, expr: &Expr) -> bool {
+        match self.types.of(expr) {
+            Ty::Vec(_)
+            | Ty::Set(..)
+            | Ty::Map(..)
+            | Ty::Struct(_)
+            | Ty::Enum(_)
+            | Ty::Result(..) => true,
+            ty @ (Ty::Tuple(_) | Ty::Option(_)) => !place::copies(&ty),
+            _ => false,
+        }
     }
 
     /// Arguments a native method reads in place and leaves in the window, so nothing may
@@ -121,7 +126,7 @@ impl Compiler<'_> {
             }
             // `f(&T::new())` lends a temporary that ends with the statement. A callee hands a
             // lent argument back into the window on return, so the drop finds it there.
-            if let Expr::Reference(r) = a
+            if let Expr::Reference(r) = unparen(a)
                 && self.temp_owned(&r.expr)
             {
                 self.cur().owned_temps.push(reg);
@@ -143,11 +148,14 @@ impl Compiler<'_> {
     /// A reference argument for a parameter the callee takes by value, `pick(&a, &b)` into
     /// `fn pick<T>(a: T, b: T)`. The callee owns its parameter and would drop it, or hand it
     /// back as its result for the caller to drop. So the window gets a borrow that drops
-    /// nothing, and a temporary behind it stays here until its statement ends.
+    /// nothing, and a temporary behind it stays here until its statement ends. A cast or a
+    /// branch that hands out a reference never holds a temporary of its own, the storage
+    /// behind it lives on somewhere else.
     fn compile_value_ref(&mut self, reg: Reg, value: Reg, arg: &Expr) -> Result<()> {
         self.compile_owned_into(value, arg)?;
-        let temporary = match arg {
+        let temporary = match unparen(arg) {
             Expr::Reference(r) => self.temp_owned(&r.expr),
+            Expr::Cast(_) | Expr::If(_) | Expr::Match(_) | Expr::Block(_) => false,
             other => self.arg_owned(other),
         };
         if temporary {

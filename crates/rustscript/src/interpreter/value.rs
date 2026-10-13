@@ -499,6 +499,7 @@ impl Value {
             Value::Bool(b) => MapKey::Bool(*b),
             Value::Int(i) => MapKey::Int(*i),
             Value::IntW(v, w) => MapKey::Wide(*v, *w),
+            Value::Big(v, w) => MapKey::Big(*v, *w),
             Value::Char(c) => MapKey::Char(*c),
             Value::Str(s) => MapKey::Str(s.clone()),
             Value::Unit => MapKey::Unit,

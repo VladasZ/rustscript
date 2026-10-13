@@ -74,6 +74,35 @@ pub(super) fn unparen(expr: &Expr) -> &Expr {
     }
 }
 
+/// The expression a block hands out, `None` when it ends in a statement. Also `None` when
+/// the block declares anything, its tail may then name a binding of the block itself, which
+/// a lookup from outside the block takes for an outer one of the same name.
+pub(super) fn block_tail(block: &syn::Block) -> Option<&Expr> {
+    match block.stmts.as_slice() {
+        [syn::Stmt::Expr(e, None)] => Some(e),
+        _ => None,
+    }
+}
+
+/// The value of the first branch of an `if`, `None` when the condition binds a name.
+pub(super) fn then_tail(branch: &syn::ExprIf) -> Option<&Expr> {
+    if flatten_and(&branch.cond)
+        .iter()
+        .any(|link| matches!(link, Expr::Let(_)))
+    {
+        return None;
+    }
+    block_tail(&branch.then_branch)
+}
+
+/// The value of the first arm of a `match`, `None` when its pattern binds a name.
+pub(super) fn first_arm(matched: &syn::ExprMatch) -> Option<&Expr> {
+    let arm = matched.arms.first()?;
+    let mut names = Vec::new();
+    super::collect_pattern_names(&arm.pat, &mut names);
+    names.is_empty().then_some(&*arm.body)
+}
+
 /// `<[T]>::len` as `Vec::len`
 pub(super) fn qualified_method_ref(p: &syn::ExprPath) -> Vec<String> {
     let owner = match p.qself.as_ref().map(|q| &*q.ty) {

@@ -219,6 +219,7 @@ impl<'a> Compiler<'a> {
                 });
             }
             // the binding comes last, a capture cell made at it must hold the retagged copy
+            let before = self.cur().scope_order.last().map_or(0, Vec::len);
             match p {
                 None => self.define("self", reg),
                 Some(Pat::Ident(id)) if id.subpat.is_none() => {
@@ -228,6 +229,12 @@ impl<'a> Compiler<'a> {
                     self.bind_pattern_irrefutable(pat, reg)?;
                     self.hold_wild_param(pat, reg);
                 }
+            }
+            // `o: Option<&T>` holds a borrowed part, so the function end drops nothing of it
+            if !borrows[i] && annotations[i].is_some_and(type_holds_ref) {
+                let f = self.cur();
+                let bound = f.scope_order.last().map_or(&[][..], |regs| &regs[before..]);
+                f.drop_exempt.extend(bound);
             }
         }
         Ok(())
@@ -661,7 +668,7 @@ use collect::{CollectInner, CollectTarget};
 use support::{
     FloatTy, NumericTy, bin_kind, collect_pattern_names, expr_kind, first_generic_type,
     inline_holes, int_literal, is_assign_op, macro_yields_value, numeric_annotation, parse_exprs,
-    parse_matches, parse_vec_repeat, type_head,
+    parse_matches, parse_vec_repeat, type_head, type_holds_ref,
 };
 
 impl Compiler<'_> {

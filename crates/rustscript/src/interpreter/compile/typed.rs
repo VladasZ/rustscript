@@ -39,7 +39,7 @@ impl Compiler<'_> {
     }
 
     /// The scalar a method carries at runtime. `parse` and the reductions carry their result,
-    /// `concat` and a script method on a builtin carry the receiver.
+    /// `concat`, `join` and a script method on a builtin carry the receiver.
     pub(super) fn method_scalar(&self, m: &syn::ExprMethodCall, method: &str) -> Option<ScalarTy> {
         let result = self.types.of_node(m);
         match method {
@@ -54,7 +54,7 @@ impl Compiler<'_> {
             | "collect_map" | "collect_set" | "collect_btree_map" | "collect_btree_set" => {
                 result.to_scalar()
             }
-            "concat" => self.types.of(&m.receiver).item().to_scalar(),
+            "concat" | "join" => self.types.of(&m.receiver).item().to_scalar(),
             name if self.ctx.method_atoms.contains_key(name) => {
                 self.types.of(&m.receiver).to_scalar()
             }

@@ -10,6 +10,7 @@ mod arrays;
 pub(crate) mod census;
 mod exprs;
 mod json_mask;
+mod late;
 mod macros;
 mod methods;
 mod methods_option;

@@ -11,6 +11,7 @@ use crate::interpreter::enum_def::{EnumDef, builtin_enum, prelude_variant};
 use crate::interpreter::numeric::IntWidth;
 use crate::interpreter::resolver::bare;
 
+use super::place::copies;
 use super::scrutinee::ShellHome;
 use super::support::{pattern_borrows, pattern_owns};
 use super::{Compiler, NameLoc, Res, collect_pattern_names, idx16};
@@ -36,7 +37,15 @@ impl Compiler<'_> {
         // The loads land right before the `TestBind` every caller emits next.
         let mut consts = Vec::new();
         let lowered = self.lower_pattern(pat, &mut consts);
+        let mut copied = Vec::new();
+        copy_bind_names(&lowered, &mut copied);
         let f = self.cur();
+        f.own_copies.extend(
+            binds
+                .iter()
+                .filter(|(name, _)| copied.contains(name))
+                .map(|(_, reg)| *reg),
+        );
         f.pats.push(PatInfo {
             pat: lowered,
             binds,
@@ -241,6 +250,12 @@ impl Compiler<'_> {
     }
 
     pub(super) fn lower_pattern(&mut self, pattern: &Pat, consts: &mut Vec<Reg>) -> PPat {
+        self.lower_pattern_at(pattern, consts, false)
+    }
+
+    /// `behind_ref` is set under a `&` pattern. A by value binding there is a copy of what
+    /// the reference points at, see `binds_a_copy`.
+    fn lower_pattern_at(&mut self, pattern: &Pat, consts: &mut Vec<Reg>, behind_ref: bool) -> PPat {
         match pattern {
             Pat::Wild(_) => PPat::Wild,
             Pat::Rest(_) => PPat::Rest,
@@ -249,20 +264,20 @@ impl Compiler<'_> {
             }
             Pat::Ident(ident) => PPat::Ident {
                 name: ident.ident.to_string(),
-                sub: ident
-                    .subpat
-                    .as_ref()
-                    .map(|subpattern| Box::new(self.lower_pattern(&subpattern.1, consts))),
+                sub: ident.subpat.as_ref().map(|subpattern| {
+                    Box::new(self.lower_pattern_at(&subpattern.1, consts, behind_ref))
+                }),
                 by_ref: ident.by_ref.is_some(),
+                copy: behind_ref && self.binds_a_copy(ident),
             },
             Pat::Lit(literal) => lower_literal(&literal.lit),
-            Pat::Paren(paren) => self.lower_pattern(&paren.pat, consts),
-            Pat::Reference(reference) => self.lower_pattern(&reference.pat, consts),
-            Pat::Type(typed) => self.lower_pattern(&typed.pat, consts),
-            Pat::Tuple(tuple) => PPat::Tuple(self.lower_patterns(&tuple.elems, consts)),
+            Pat::Paren(paren) => self.lower_pattern_at(&paren.pat, consts, behind_ref),
+            Pat::Reference(reference) => self.lower_pattern_at(&reference.pat, consts, true),
+            Pat::Type(typed) => self.lower_pattern_at(&typed.pat, consts, behind_ref),
+            Pat::Tuple(tuple) => PPat::Tuple(self.lower_patterns(&tuple.elems, consts, behind_ref)),
             Pat::TupleStruct(tuple) => PPat::TupleStruct {
                 tag: self.variant_tag(&tuple.path),
-                elems: self.lower_patterns(&tuple.elems, consts),
+                elems: self.lower_patterns(&tuple.elems, consts, behind_ref),
             },
             Pat::Path(path) => {
                 let segs = path_segments(&path.path);
@@ -282,12 +297,12 @@ impl Compiler<'_> {
                             syn::Member::Named(name) => field_name(name),
                             syn::Member::Unnamed(index) => index.index.to_string(),
                         };
-                        (name, self.lower_pattern(&field.pat, consts))
+                        (name, self.lower_pattern_at(&field.pat, consts, behind_ref))
                     })
                     .collect(),
             },
-            Pat::Or(or) => PPat::Or(self.lower_patterns(&or.cases, consts)),
-            Pat::Slice(slice) => PPat::Slice(self.lower_patterns(&slice.elems, consts)),
+            Pat::Or(or) => PPat::Or(self.lower_patterns(&or.cases, consts, behind_ref)),
+            Pat::Slice(slice) => PPat::Slice(self.lower_patterns(&slice.elems, consts, behind_ref)),
             Pat::Range(range) => lower_range(range),
             _ => PPat::Unsupported,
         }
@@ -297,10 +312,19 @@ impl Compiler<'_> {
         &mut self,
         pats: impl IntoIterator<Item = &'p Pat>,
         consts: &mut Vec<Reg>,
+        behind_ref: bool,
     ) -> Vec<PPat> {
         pats.into_iter()
-            .map(|p| self.lower_pattern(p, consts))
+            .map(|p| self.lower_pattern_at(p, consts, behind_ref))
             .collect()
+    }
+
+    /// Whether a by value binding behind a `&` pattern must copy what it binds. rustc takes
+    /// only a `Copy` value there. One with storage of its own, a tuple, an `Option` or a
+    /// `Copy` struct, would share that storage with the value behind the reference, and a
+    /// callee that drops or writes the binding would reach the original.
+    fn binds_a_copy(&self, ident: &syn::PatIdent) -> bool {
+        ident.by_ref.is_none() && self.copies_storage(&self.types.of_bind(ident))
     }
 
     /// A variant wins over a constant of the same name, then a constant compiles to an equality
@@ -390,21 +414,57 @@ impl Compiler<'_> {
             Pat::Wild(_) => Ok(None),
             Pat::Type(t) => self.bind_pattern_irrefutable(&t.pat, reg),
             Pat::Paren(p) => self.bind_pattern_irrefutable(&p.pat, reg),
-            Pat::Reference(r) => self.bind_pattern_irrefutable(&r.pat, reg),
-            _ => {
-                let matched = self.alloc();
-                let pidx = self.pattern_info(pat)?;
-                self.emit(Op::TestBind {
-                    val: reg,
-                    pat: pidx,
-                    dst: matched,
-                });
-                Ok(Some(pidx))
-            }
+            Pat::Reference(r) => match plain_binding(&r.pat) {
+                Some(Pat::Ident(id)) if self.binds_own_copy(id, reg) => {
+                    let own = self.alloc();
+                    self.emit(Op::Copy { dst: own, src: reg });
+                    self.define(&id.ident.to_string(), own);
+                    self.cur().own_copies.insert(own);
+                    Ok(None)
+                }
+                Some(inner) => self.bind_pattern_irrefutable(inner, reg),
+                // a pattern that destructures keeps its `&`, so its bindings copy too
+                None => self.bind_destructured(pat, reg),
+            },
+            _ => self.bind_destructured(pat, reg),
         }
     }
 
+    /// Whether `&name` over the value in `reg` gives the name a register of its own. A
+    /// `Copy` value with storage is copied out of the reference, see `binds_a_copy`. A
+    /// scalar behind a reference parameter is copied too, the name is a value then and not
+    /// the reference the parameter forwards.
+    fn binds_own_copy(&mut self, id: &syn::PatIdent, reg: Reg) -> bool {
+        if id.by_ref.is_some() {
+            return false;
+        }
+        let ty = self.types.of_bind(id);
+        self.copies_storage(&ty) || (self.cur().borrow_params.contains(&reg) && copies(&ty))
+    }
+
+    fn bind_destructured(&mut self, pat: &Pat, reg: Reg) -> Result<Option<u16>> {
+        let matched = self.alloc();
+        let pidx = self.pattern_info(pat)?;
+        self.emit(Op::TestBind {
+            val: reg,
+            pat: pidx,
+            dst: matched,
+        });
+        Ok(Some(pidx))
+    }
+
     // macros
+}
+
+/// The bare name or `_` a pattern comes down to, through parentheses and a type ascription.
+fn plain_binding(pat: &Pat) -> Option<&Pat> {
+    match pat {
+        Pat::Ident(id) if id.subpat.is_none() => Some(pat),
+        Pat::Wild(_) => Some(pat),
+        Pat::Paren(p) => plain_binding(&p.pat),
+        Pat::Type(t) => plain_binding(&t.pat),
+        _ => None,
+    }
 }
 
 // Real Rust tells a unit variant from a binding by name resolution, which we don't have. So an
@@ -505,28 +565,43 @@ pub(super) fn is_wild(pat: &Pat) -> bool {
 }
 
 fn ref_bind_names(pat: &PPat, out: &mut Vec<String>) {
+    bind_names_where(pat, &|by_ref, _| by_ref, out);
+}
+
+/// The names a `&` pattern binds to a copy, see `PPat::Ident`.
+fn copy_bind_names(pat: &PPat, out: &mut Vec<String>) {
+    bind_names_where(pat, &|_, copy| copy, out);
+}
+
+/// The bindings `pick` takes by their `by_ref` and `copy` flags.
+fn bind_names_where(pat: &PPat, pick: &dyn Fn(bool, bool) -> bool, out: &mut Vec<String>) {
     match pat {
-        PPat::Ident { name, sub, by_ref } => {
-            if *by_ref {
+        PPat::Ident {
+            name,
+            sub,
+            by_ref,
+            copy,
+        } => {
+            if pick(*by_ref, *copy) {
                 out.push(name.clone());
             }
             if let Some(sub) = sub {
-                ref_bind_names(sub, out);
+                bind_names_where(sub, pick, out);
             }
         }
         PPat::Tuple(items) | PPat::Or(items) | PPat::Slice(items) => {
             for item in items {
-                ref_bind_names(item, out);
+                bind_names_where(item, pick, out);
             }
         }
         PPat::TupleStruct { elems, .. } => {
             for item in elems {
-                ref_bind_names(item, out);
+                bind_names_where(item, pick, out);
             }
         }
         PPat::Struct { fields, .. } => {
             for (_, item) in fields {
-                ref_bind_names(item, out);
+                bind_names_where(item, pick, out);
             }
         }
         _ => {}
@@ -569,12 +644,14 @@ fn or_alternatives(pat: &PPat) -> Vec<PPat> {
             name,
             sub: Some(sub),
             by_ref,
+            copy,
         } => or_alternatives(sub)
             .into_iter()
             .map(|sub| PPat::Ident {
                 name: name.clone(),
                 sub: Some(Box::new(sub)),
                 by_ref: *by_ref,
+                copy: *copy,
             })
             .collect(),
         PPat::Tuple(elems) => alternatives_of_each(elems)

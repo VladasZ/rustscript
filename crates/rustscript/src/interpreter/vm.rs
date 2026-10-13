@@ -89,6 +89,14 @@ fn frame_line(chunk: &Chunk, ip: usize) -> FrameSite {
     }
 }
 
+/// Turns a tuple or an array literal real Rust had not built yet so that its drop runs the
+/// elements newest first, see `Chunk::unbuilt`.
+fn newest_first(value: &Value) {
+    if let Value::Vec(list) | Value::Tuple(list) = value {
+        list.lock().reverse();
+    }
+}
+
 /// Each slot has its own lock so tasks on different threads can read globals.
 pub enum GlobalSlot {
     Todo(Arc<Chunk>),
@@ -374,14 +382,7 @@ impl Vm {
             }
         })();
         result.map_err(|e| {
-            self.unwind_drops(
-                &at.chunk,
-                at.base,
-                at.owned_args,
-                &frames,
-                &local_cells,
-                stack,
-            );
+            self.unwind_drops(&at, &frames, &local_cells, stack);
             let trace = std::iter::once(frame_line(&at.chunk, at.ip)).chain(
                 frames
                     .iter()
@@ -439,22 +440,23 @@ impl Vm {
     /// inside a drop is reported and the original panic keeps going. Real Rust would abort there.
     fn unwind_drops(
         self: &Arc<Self>,
-        cur: &Arc<Chunk>,
-        base: usize,
-        owned_args: bool,
+        at: &Cursor,
         frames: &[Frame],
         local_cells: &FxHashMap<usize, Arc<Mutex<Value>>>,
         stack: &mut [Value],
     ) {
-        let spans: Vec<(usize, &Arc<Chunk>, bool)> = std::iter::once((base, cur, owned_args))
-            .chain(
-                frames
-                    .iter()
-                    .rev()
-                    .map(|f| (f.base, &f.chunk, f.owned_args)),
-            )
-            .collect();
-        for (depth, &(base, chunk, owned)) in spans.iter().enumerate() {
+        // each frame with the op it stopped at, the failing op or the call it was inside
+        let spans: Vec<(usize, &Arc<Chunk>, bool, usize)> =
+            std::iter::once((at.base, &at.chunk, at.owned_args, at.ip))
+                .chain(
+                    frames
+                        .iter()
+                        .rev()
+                        .map(|f| (f.base, &f.chunk, f.owned_args, f.ip.saturating_sub(1))),
+                )
+                .collect();
+        for (depth, &(base, chunk, owned, ip)) in spans.iter().enumerate() {
+            let ip = u32::try_from(ip).unwrap_or(u32::MAX);
             for &reg in chunk.droppable.iter() {
                 // a lent parameter belongs to the caller
                 if !owned && chunk.lent_params.contains(&reg) {
@@ -465,6 +467,13 @@ impl Vm {
                     continue;
                 }
                 let value = take_local(local_cells, stack, slot);
+                let unbuilt = chunk
+                    .unbuilt
+                    .iter()
+                    .any(|(held, from, to)| *held == reg && (*from..*to).contains(&ip));
+                if unbuilt {
+                    newest_first(&value);
+                }
                 if let Err(e) = self.run_user_drop(value) {
                     eprintln!("panic in drop during unwinding: {e:#}");
                 }

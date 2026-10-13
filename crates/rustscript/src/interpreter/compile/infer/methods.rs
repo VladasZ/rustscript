@@ -61,7 +61,9 @@ impl Infer<'_, '_> {
             full.extend(args.iter().copied());
             return self.sig_call(&sig, Some(&recv), &full, expected);
         }
-        self.builtin_method(&recv, &name, &args, turbofish, expected)
+        let out = self.builtin_method(&recv, &name, &args, turbofish, expected);
+        self.refine_receiver(m, &recv);
+        out
     }
 
     /// A method of a bridged or built in type, by the type of its receiver.
@@ -389,7 +391,11 @@ impl Infer<'_, '_> {
             }
             "join" => {
                 self.walk_all(args);
-                Ty::Str
+                // the rows of a vec of vecs join into one flat vec
+                match item {
+                    Ty::Vec(inner) => Ty::vec((**inner).clone()),
+                    _ => Ty::Str,
+                }
             }
             "concat" => match item {
                 Ty::Vec(inner) => Ty::vec((**inner).clone()),

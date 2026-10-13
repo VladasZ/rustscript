@@ -61,6 +61,16 @@ move is never copied. A `&mut` borrow works on the place itself. `Rc`, `Arc`,
 `RefCell`, `Cell` and `Mutex` are real shared cells. `*guard += n` is one
 fused op that holds the lock across the read-modify-write.
 
+A name bound by value behind a `&` pattern is a copy of its own. `|&x: &Option<i64>|`,
+`|&(k, v)|`, `for &x in`, `let &y = &o`, `if let Some(&x)`, a `match` arm and a
+`&x: &T` parameter all copy a tuple, an `Option` or a `Copy` struct out of the
+reference, so a drop of the copy never empties the item it came from. An owned read of
+such a `Copy` value out of a capture cell copies too.
+
+A method call leaves a borrowed argument with the caller. A native that keeps its
+argument, `held.push(&text)` or `map.insert(k, &v)`, takes the slot of the call, and
+the value the reference names stays where it was.
+
 A binding a closure writes lives in a capture cell from its `let` on. The
 compiler scans the body for the names its closures assign, borrow mutably,
 call a mutating method on or `write!` into, before it compiles a statement,
@@ -137,6 +147,24 @@ field, `[a.as_slice(), &b]` or `Some(a.as_slice())`, sits behind a reference
 value that drops nothing, so the owner keeps its items when the holder goes.
 A loop over such a slice hands out borrowed items, and `starts_with`,
 `ends_with`, `extend_from_slice` and `concat` read through the reference.
+
+A reference handed to a by value generic parameter drops nothing either. The compiler
+sees the reference through parentheses, a cast like `&[] as &[T]`, and an `if`, a
+`match` or a block that hands one out. The same holds for `v.first()`, `v.last()`,
+`v.get(i)` and `v.iter().next()`, for a parameter typed `Option<&T>` or `(&A, &B)`, for
+a binding that holds a reference and moves on, `let t = s;`, and for a
+`v.iter().collect::<Vec<_>>()`. A cast never owns a value. `let s = &vec![..][1..];`
+keeps its vec to the end of the scope. A `&mut` argument in parentheses writes back.
+A binding of an `Option`, a `Result`, a tuple or a collection of references is a value of
+its own. A read copies it and its scope end drops nothing, so a branch value it flowed
+into never empties it. The tail of a block counts as a reference only when the block
+declares nothing, a tail named like an outer local is the inner value.
+
+A store whose right side is a tuple literal or an array literal has not built that value
+while the place is evaluated. So when the place panics, `v[5] = (a, b)` on a short vec,
+the elements drop newest first, like the temporaries they still are. A struct literal, a
+call, a `vec![]` and a block are built by then and drop front to back.
+`Chunk::unbuilt` holds the register and the op range of such a store for the unwinder.
 
 A `RefCell` borrow is a guard value, and the live borrows of every cell sit in
 one table, so a second `borrow_mut` panics with the std message. The compiler
@@ -215,6 +243,14 @@ one too. The second pass seeds a literal typed by a later use, a pattern
 binding like the `port` of `if let Ok(port) = s.parse()`, and a closure local
 whose call site expects a return type. An `if` or `match` branch typed before
 a later branch named the type is walked again with it.
+
+A method that stores into a local fills in its type too. `let mut v = Vec::new()`
+then `v.push(x)` makes `v` a vec of the type of `x`, also when the `push` never runs.
+The same goes for `push_back`, `push_front`, `insert`, `extend`, `append`, `fill`,
+`resize`, `extend_from_slice` and `entry`, and for a plain `v = value`. So `concat`,
+`unwrap_or_default` and a trait method on an empty vec go by that type. `concat` and
+`join` on a vec of vecs give the flat vec, and `join` takes an item or a slice of items
+as the separator.
 
 `rust types FILE.rs` lists every call whose result this pass does not know, as
 `file:line receiver name`. A call by path, an imported name included, is typed
