@@ -54,6 +54,9 @@ pub(super) struct NextCall {
     pub(super) cell_refs: bool,
     /// The arguments that are references the callee takes by value, see `refs_by_value`.
     pub(super) value_refs: Vec<bool>,
+    /// The closure argument, by its address in the syntax tree, whose parameter at the index
+    /// gets a reference to an item, see `note_lent_refs`.
+    pub(super) lent_closure: Option<(usize, usize)>,
 }
 
 pub(super) struct FnState {
@@ -104,6 +107,10 @@ pub(super) struct FnState {
     pub(super) ref_holders: HashSet<Reg>,
     /// Bindings that hold a borrowed handle, so scope end must not drop them.
     pub(super) drop_exempt: HashSet<Reg>,
+    /// Bindings that hold a reference to an item of a collection, the `t` of `for t in &v`
+    /// and of `v.iter().map(|t| ..)`. A tuple or a collection that takes one in by its name
+    /// holds a reference, which drops nothing.
+    pub(super) lent_binds: HashSet<Reg>,
     /// Bindings that hold an iterator over items of its own, so what `next` hands out drops.
     pub(super) owning_iters: HashSet<Reg>,
     /// `let r = &mut v` aliases, access compiles as access to `v` itself
@@ -209,6 +216,7 @@ impl FnState {
             own_copies: HashSet::new(),
             ref_holders: HashSet::new(),
             drop_exempt: HashSet::new(),
+            lent_binds: HashSet::new(),
             owning_iters: HashSet::new(),
             aliases: HashMap::default(),
             alias_log: Vec::new(),

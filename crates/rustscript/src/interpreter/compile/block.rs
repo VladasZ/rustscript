@@ -139,15 +139,22 @@ impl Compiler<'_> {
             .as_ref()
             .expect("let-else always has an else block")
             .1;
-        let val = self.alloc();
         let borrows = pattern_borrows(&local.pat);
         let owned = pattern_owns(&local.pat) && !borrows;
         let temp_mark = self.cur().owned_temps.len();
-        if owned {
-            self.compile_owned_into(val, &init.expr)?;
+        // a `ref` binding over a place borrows it like `if let` does, so `*r += 1` lands in
+        // the place
+        let val = if borrows && is_place_expr(&init.expr) {
+            self.compile_scrutinee(&init.expr, false, true)?
         } else {
-            self.compile_into(val, &init.expr)?;
-        }
+            let val = self.alloc();
+            if owned {
+                self.compile_owned_into(val, &init.expr)?;
+            } else {
+                self.compile_into(val, &init.expr)?;
+            }
+            val
+        };
         let takes = owned && self.init_owned(&init.expr);
         // A pattern that binds nothing, `None` or `Some(_)`, leaves a fresh scrutinee a
         // temporary of the statement, nobody else drops it.

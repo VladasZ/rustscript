@@ -15,9 +15,7 @@ use super::iterator;
 use super::ops::compare_values;
 use super::value::{List, Value};
 
-pub(super) use super::map_methods::{
-    collect_map, collect_map_of, collect_set, collect_set_of, map_method,
-};
+pub(super) use super::map_methods::{collect_map, collect_set, map_method};
 
 pub(super) fn vec_method(v: &List, method: &MethodName, args: &mut [Value]) -> Result<Value> {
     if let Some(out) = deque_method(v, method.id, args)? {

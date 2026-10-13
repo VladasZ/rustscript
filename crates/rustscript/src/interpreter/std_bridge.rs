@@ -459,6 +459,14 @@ pub(super) fn path_method(
             Ok(full) => Value::ok(make_path(full.display().to_string())),
             Err(e) => Value::err(super::native::io_error_value(&e)),
         },
+        BuiltinId::Metadata => match p.metadata() {
+            Ok(found) => Value::ok(make_metadata(&found)),
+            Err(e) => Value::err(super::native::io_error_value(&e)),
+        },
+        BuiltinId::SymlinkMetadata => match p.symlink_metadata() {
+            Ok(found) => Value::ok(make_metadata(&found)),
+            Err(e) => Value::err(super::native::io_error_value(&e)),
+        },
         BuiltinId::FileName => match p.file_name() {
             Some(n) => Value::some(make_path(n.to_string_lossy().into_owned())),
             None => Value::none(),

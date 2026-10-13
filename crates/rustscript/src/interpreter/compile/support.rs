@@ -441,6 +441,35 @@ pub(super) fn type_holds_ref(ty: &syn::Type) -> bool {
     }
 }
 
+/// Whether the function returns a reference, or a value with a reference to something that
+/// can drop inside, `Option<&T>` or `Vec<&T>`. The caller gets storage someone else owns. A
+/// `&str` inside has nothing to drop, so a `Result<T, &str>` stays the caller's own.
+pub(super) fn returns_borrow(sig: &syn::Signature) -> bool {
+    fn lends_parts(ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::Reference(r) => {
+                !matches!(&*r.elem, syn::Type::Path(p) if p.path.is_ident("str"))
+            }
+            syn::Type::Paren(p) => lends_parts(&p.elem),
+            syn::Type::Group(g) => lends_parts(&g.elem),
+            syn::Type::Tuple(t) => t.elems.iter().any(lends_parts),
+            syn::Type::Array(a) => lends_parts(&a.elem),
+            syn::Type::Slice(s) => lends_parts(&s.elem),
+            syn::Type::Path(p) => p.path.segments.iter().any(|seg| match &seg.arguments {
+                syn::PathArguments::AngleBracketed(args) => args.args.iter().any(
+                    |arg| matches!(arg, syn::GenericArgument::Type(inner) if lends_parts(inner)),
+                ),
+                _ => false,
+            }),
+            _ => false,
+        }
+    }
+    match &sig.output {
+        syn::ReturnType::Type(_, ty) => matches!(&**ty, syn::Type::Reference(_)) || lends_parts(ty),
+        syn::ReturnType::Default => false,
+    }
+}
+
 /// Whether `rustc` promotes the expression to a static, an array or a tuple of literals. A
 /// borrow of it outlives the statement, `let it = [1, 2].iter();`, and it has nothing to drop.
 fn is_promoted(expr: &Expr) -> bool {
@@ -564,6 +593,10 @@ fn expr_is_fresh(expr: &Expr) -> bool {
                 | "concat"
                 | "repeat"
                 | "join"
+                // a count is a scalar
+                | "len"
+                | "is_empty"
+                | "count"
         ),
         _ => false,
     }
@@ -611,7 +644,14 @@ pub(super) fn init_is_owned(expr: &Expr, binding_owns: BindingOwns) -> bool {
             | "replace" | "swap_remove" | "split_off" | "into_inner" | "new" | "default"
             | "with_capacity" | "borrow" | "borrow_mut" | "try_borrow" | "try_borrow_mut"
             | "lock" | "concat" | "repeat" | "join" | "into_iter" | "into_keys" | "into_values"
-            | "drain" | "split_at" | "insert" | "then_some" | "then" | "into" => true,
+            | "drain" | "insert" | "then_some" | "then" | "into" => true,
+            // a closure that builds a fresh value makes one of the caller's own, also from a
+            // payload or an item that is only lent, `v.first().map(|t| t.clone())`
+            "map" | "and_then" | "filter_map" | "flat_map" | "map_while"
+                if m.args.first().is_some_and(closure_yields_fresh) =>
+            {
+                true
+            }
             // an adapter wraps the iterator it consumes, so it owns what that one owned
             "unwrap" | "expect" | "unwrap_or" | "unwrap_or_else" | "unwrap_or_default" | "ok"
             | "err" | "map" | "map_err" | "and_then" | "await" | "or" | "and" | "xor" | "zip"

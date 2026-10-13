@@ -49,6 +49,19 @@ impl MapStore {
         self.sorted
     }
 
+    /// A store with the same keys and the same order rule, each value made by `copy`. The
+    /// clone of a `BTreeMap` stays sorted on its next insert.
+    pub fn with_values(&self, copy: impl Fn(&Value) -> Value) -> Self {
+        MapStore {
+            entries: self
+                .entries
+                .iter()
+                .map(|(key, value)| (key.clone(), copy(value)))
+                .collect(),
+            sorted: self.sorted,
+        }
+    }
+
     /// Returns the old value of the key. Like std, a key already present keeps its place and
     /// its original key value.
     pub fn insert(&mut self, key: MapKey, value: Value) -> Option<Value> {

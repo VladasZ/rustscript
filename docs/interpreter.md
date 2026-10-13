@@ -160,6 +160,20 @@ its own. A read copies it and its scope end drops nothing, so a branch value it 
 into never empties it. The tail of a block counts as a reference only when the block
 declares nothing, a tail named like an outer local is the inner value.
 
+A reference that goes into a collection stays a reference. A map or set key made from a
+borrow is a `MapKey::Lent`. It compares, sorts and hashes like the key behind it, and the
+map never drops it. The compiler marks the names that hold a reference to an item, the
+variable of `for t in &v` and the closure parameter of `map`, `filter_map`, `flat_map`,
+`fold` and the like over a chain that only lends. Such a name goes into a tuple, a struct
+field, a `Some` or an argument of `push`, `insert` and `entry` behind a borrow that drops
+nothing. `collect` and `extend` lend the sides of `zip` and `enumerate` pairs the same way.
+A function that returns `Option<&T>`, `Vec<&T>` or `(&T, usize)` hands back a borrow too.
+The result of `map`, `and_then` or `filter_map` whose closure builds a fresh value is owned
+and drops, also over a payload that was only lent.
+
+A `ref` or `ref mut` binding borrows its place also when the inference does not know the
+type of the place, in `if let`, `match` and `let else`.
+
 A store whose right side is a tuple literal or an array literal has not built that value
 while the place is evaluated. So when the place panics, `v[5] = (a, b)` on a short vec,
 the elements drop newest first, like the temporaries they still are. A struct literal, a
@@ -322,6 +336,16 @@ User `Display`, `Debug`, operator and `Iterator` impls drive `{}`, `{:?}`,
 operators and for loops. Associated consts are `Type::NAME` globals. A trait
 impl on a builtin type is keyed by the written type, so `Vec<u8>` and
 `Vec<String>` keep separate bodies.
+
+A hand written `Ord` runs for a direct `cmp` call, for the methods `max`, `min` and
+`clamp`, for `Ord::max` and `Ord::min` by path, and for the `std::cmp` functions `max`,
+`min`, `max_by_key` and `min_by_key`. They ask through `partial_cmp` in the order std
+does. The operators, the sorts and the sorted collections do not run it yet, see
+`flaws.md`.
+
+`first_chunk`, `last_chunk`, `split_first_chunk` and `split_last_chunk` read their length
+from a number in a turbofish, `first_chunk::<3>()`, like `as_array`. Without it the script
+stops before the run with an `unsupported` error.
 
 `Drop` runs where real Rust runs it. Scope end in reverse order, explicit
 `drop`, each loop iteration, `break`, `continue`, `return`, `?` and panic

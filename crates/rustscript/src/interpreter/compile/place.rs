@@ -370,26 +370,6 @@ impl Compiler<'_> {
                 || self.user_method_call(expr))
     }
 
-    /// A call of a script function or method that returns a reference hands out storage
-    /// someone else owns, so nothing drops it here.
-    fn lends_result(&self, expr: &Expr) -> bool {
-        let returns_ref = |sig: &syn::Signature| matches!(&sig.output, syn::ReturnType::Type(_, ty) if matches!(&**ty, syn::Type::Reference(_)));
-        match unparen(expr) {
-            Expr::Call(call) => self.call_lends(call),
-            Expr::MethodCall(m) => {
-                let name = m.method.to_string();
-                let mut sigs = self
-                    .ctx
-                    .impl_sigs
-                    .iter()
-                    .filter(|((_, method), _)| *method == name)
-                    .peekable();
-                sigs.peek().is_some() && sigs.all(|(_, sig)| returns_ref(sig))
-            }
-            _ => false,
-        }
-    }
-
     pub(super) fn iterable_owned(&self, expr: &Expr) -> bool {
         iterable_is_owned(expr, &|name| self.binding_owns_items(name))
     }
@@ -478,11 +458,13 @@ impl Compiler<'_> {
     }
 
     /// Whether the value sits behind a shared handle a borrow can anchor into. A scalar or a
-    /// string is the register's own.
+    /// string is the register's own. A value the inference could not type may be either, and
+    /// a pattern that binds by `ref` inside it, `Some(ref mut r)`, needs the handle.
     fn has_storage(&self, expr: &Expr) -> bool {
         matches!(
             self.types.of(expr),
-            Ty::Vec(_)
+            Ty::Unknown
+                | Ty::Vec(_)
                 | Ty::Set(..)
                 | Ty::Map(..)
                 | Ty::Option(_)

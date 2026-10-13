@@ -760,6 +760,7 @@ mod back;
 mod drive;
 mod extra;
 mod in_place;
+mod lending;
 mod reduce;
 
 pub(super) use arith::{Reducer, product_reducer, product_values, sum_reducer, sum_values};

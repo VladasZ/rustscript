@@ -468,9 +468,24 @@ fn str_out(s: &RsStr, out: StrOut) -> Value {
     }
 }
 
+/// `cloned` on an `Option`. A payload that is a reference, the `&T` of an `Option<&T>` a
+/// tuple or a `Some(item)` holds, clones to the value behind it. `copied` keeps it, a value
+/// that can drop is never `Copy`, so there the payload is a `&&T`.
+pub(super) fn option_cloned(option: &Value) -> Value {
+    if let Some(Value::Ref(reference)) = option.some_payload()
+        && let Some(inner) = reference.lent()
+    {
+        return Value::some(inner.deep_clone());
+    }
+    option.deep_clone()
+}
+
 pub(super) fn opt_method(recv: &Value, method: &MethodName, args: &[Value]) -> Result<Value> {
     // the hot accessors dispatch on the id first, the payload is cloned only where it is handed out
-    if let BuiltinId::Clone | BuiltinId::Copied | BuiltinId::Cloned = method.id {
+    if method.id == BuiltinId::Cloned {
+        return Ok(option_cloned(recv));
+    }
+    if let BuiltinId::Clone | BuiltinId::Copied = method.id {
         return Ok(recv.deep_clone());
     }
     let (is_some, inner) = match recv {

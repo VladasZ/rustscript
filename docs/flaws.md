@@ -18,6 +18,49 @@ favour of tokio tasks, so those are not repeated here.
 
 Verified against `rustscript 0.6.8 (a17a006, built 2026-08-19)`.
 
+## A hand written `Ord` is ignored by the operators, the sorts and the sorted collections
+
+A type with its own `impl Ord` and `impl PartialOrd` is ordered by its fields in most
+places, as if the impls were derived. Only a direct `a.cmp(&b)` or `a.partial_cmp(&b)`
+call, and since 0.6.60 `max`, `min`, `clamp` and the `std::cmp` functions, run the hand
+written code.
+
+```rust
+#!/usr/bin/env rust
+
+use std::cmp::Ordering;
+
+#[derive(Debug, PartialEq, Eq)]
+struct Rev(i64);
+
+impl Ord for Rev {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other.0.cmp(&self.0)
+    }
+}
+
+impl PartialOrd for Rev {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn main() {
+    let mut items = vec![Rev(1), Rev(3), Rev(2)];
+    items.sort();
+    println!("{items:?} {}", Rev(1) < Rev(2));
+}
+```
+
+- `rustc` prints `[Rev(3), Rev(2), Rev(1)] false`.
+- `rust` prints `[Rev(1), Rev(2), Rev(3)] true`.
+
+Wrong the same way: `<`, `<=`, `>`, `>=`, `sort`, `sort_by_key` with such a key,
+`iter().max()`, `iter().min()`, `max_by_key`, a `BTreeMap` or `BTreeSet` key,
+`binary_search`, `is_sorted`, and any tuple, `Option` or derived struct that holds such
+a value. All of them go through `partial_compare` in `ops.rs`, a free function that can
+not run script code. `sort_by(|a, b| a.cmp(b))` is right, use it until this is fixed.
+
 ## A `const` as a match pattern never matches
 
 A named constant used as a pattern inside `match` compiles, runs, and simply

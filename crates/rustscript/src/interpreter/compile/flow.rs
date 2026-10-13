@@ -440,12 +440,7 @@ impl Compiler<'_> {
         let before = self.cur().scope_order.last().map_or(0, Vec::len);
         self.bind_pattern_irrefutable(&f.pat, val)?;
         if !owned {
-            let bound: Vec<Reg> = self
-                .cur()
-                .scope_order
-                .last()
-                .map_or(Vec::new(), |regs| regs[before..].to_vec());
-            self.cur().drop_exempt.extend(bound);
+            self.lend_loop_binds(&f.expr, borrowed, before);
         }
         let temp_depth = self.cur().owned_temps.len();
         self.loops.push(LoopCtx {

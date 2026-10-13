@@ -52,9 +52,16 @@ impl Infer<'_, '_> {
                 recv.clone()
             }
             "take" | "as_ref" | "as_mut" | "as_deref" | "as_deref_mut" | "cloned" | "copied"
-            | "clone" | "or" | "xor" | "or_else" | "replace" => {
+            | "clone" | "or" | "xor" | "or_else" => {
                 for arg in args {
                     self.expr(arg, recv);
+                }
+                recv.clone()
+            }
+            // the new payload, so a bare literal gets its width
+            "replace" => {
+                for arg in args {
+                    self.expr(arg, payload);
                 }
                 recv.clone()
             }
@@ -86,9 +93,16 @@ impl Infer<'_, '_> {
                 Ty::option(Ty::Tuple(vec![payload.clone(), other.payload()]))
             }
             "iter" | "into_iter" | "iter_mut" => Ty::iter(payload.clone()),
-            "get_or_insert_with" | "get_or_insert" | "insert" => {
+            "get_or_insert_with" => {
                 for arg in args {
                     self.expr(arg, &Ty::Closure(Vec::new(), Box::new(payload.clone())));
+                }
+                payload.clone()
+            }
+            // these take the value itself, so a bare literal gets the width of the payload
+            "get_or_insert" | "insert" => {
+                for arg in args {
+                    self.expr(arg, payload);
                 }
                 payload.clone()
             }

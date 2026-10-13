@@ -226,6 +226,12 @@ char::from
 char::from_digit
 char::from_u32
 cmp::Reverse
+cmp::max
+cmp::max_by
+cmp::max_by_key
+cmp::min
+cmp::min_by
+cmp::min_by_key
 consts::ARCH
 consts::E
 consts::EXE_EXTENSION

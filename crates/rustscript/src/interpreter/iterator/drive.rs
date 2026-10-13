@@ -7,9 +7,10 @@ use anyhow::{Result, anyhow, bail};
 
 use super::back::supports_back;
 use super::in_place;
+use super::lending::{cloned_item, handed_on};
 use super::{
-    Handle, IteratorState, Step, chars, int_arg, lends_vec_items, lines_next, option_inner,
-    owns_items, value_iter, wrap,
+    Handle, IteratorState, Step, chars, int_arg, lines_next, option_inner, owns_items, value_iter,
+    wrap,
 };
 use crate::interpreter::bytecode::{BuiltinId, DefaultIr, MethodName};
 use crate::interpreter::enum_def::{EnumKind, OK, SOME};
@@ -19,7 +20,7 @@ use crate::interpreter::value::{ClosureData, MapKind, Value, ValueRef};
 use crate::interpreter::vm::Vm;
 
 /// A scalar has nothing to drop and stays a plain value.
-fn lend(item: &Value) -> Value {
+pub(super) fn lend(item: &Value) -> Value {
     match item {
         Value::Vec(_)
         | Value::Tuple(_)
@@ -253,7 +254,9 @@ impl Vm {
             Step::Map(source, closure) => match self.iterator_next(&source)? {
                 Some(value) => {
                     let owned = owns_items(&source);
-                    Ok(Some(self.call_closure_with(&closure, &[value], owned)?))
+                    let lent = self.lent_item(&value, owned);
+                    let out = self.call_closure_with(&closure, &[value], owned)?;
+                    Ok(Some(handed_on(out, lent.as_ref())))
                 }
                 None => Ok(None),
             },
@@ -271,10 +274,11 @@ impl Vm {
                     return Ok(None);
                 };
                 let owned = owns_items(&source);
+                let lent = self.lent_item(&value, owned);
                 if let Some(inner) =
                     option_inner(&self.call_closure_with(&closure, &[value], owned)?)
                 {
-                    return Ok(Some(inner));
+                    return Ok(Some(handed_on(inner, lent.as_ref())));
                 }
             },
             Step::Inspect(source, closure) => match self.iterator_next(&source)? {
@@ -293,7 +297,10 @@ impl Vm {
             }
             Step::Take(source) => self.iterator_next(&source),
             Step::Rev(source) => self.iterator_next_back(&source),
-            Step::Cloned(source) => Ok(self.iterator_next(&source)?.map(|v| v.deep_clone())),
+            Step::Cloned(source) => {
+                let owned = owns_items(&source);
+                Ok(self.iterator_next(&source)?.map(|v| cloned_item(&v, owned)))
+            }
             Step::Stride(source, count) | Step::Skip(source, count) => {
                 self.skip_then_next(&source, count)
             }
@@ -504,7 +511,7 @@ impl Vm {
                 if in_place::collects_nothing(iterator, scalar) {
                     Value::vec(Vec::new())
                 } else {
-                    Value::vec(self.drain_iterator(iterator)?)
+                    Value::vec(self.drain_lending(iterator, false)?)
                 }
             }
             BuiltinId::CollectPathBuf => {
@@ -517,19 +524,15 @@ impl Vm {
                     .collect::<String>(),
             ),
             BuiltinId::CollectMap | BuiltinId::CollectBtreeMap => {
-                let lent = lends_vec_items(iterator);
-                crate::interpreter::vecmap::collect_map_of(
-                    self.drain_iterator(iterator)?,
+                crate::interpreter::vecmap::collect_map(
+                    self.drain_lending(iterator, true)?,
                     method.id == BuiltinId::CollectBtreeMap,
-                    lent,
                 )?
             }
             BuiltinId::CollectSet | BuiltinId::CollectBtreeSet => {
-                let lent = lends_vec_items(iterator);
-                crate::interpreter::vecmap::collect_set_of(
-                    self.drain_iterator(iterator)?,
+                crate::interpreter::vecmap::collect_set(
+                    self.drain_lending(iterator, true)?,
                     method.id == BuiltinId::CollectBtreeSet,
-                    lent,
                 )?
             }
             BuiltinId::CollectResult | BuiltinId::CollectOption => {

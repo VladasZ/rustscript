@@ -45,6 +45,8 @@ pub const BRIDGES: &[Bridge] = &[
     b("int_methods.rs", "int_query_method", "*"),
     b("int_methods/big.rs", "big_int_method", "*"),
     b("int_methods/ascii.rs", "int_ascii_family", "*"),
+    b("int_methods/extra.rs", "int_extra_family", "*"),
+    b("int_methods/extra.rs", "int_sign_family", "*"),
     // value methods
     b("methods.rs", "json_value_method", "*"),
     b("methods.rs", "str_method", "Str"),
@@ -66,6 +68,7 @@ pub const BRIDGES: &[Bridge] = &[
     b("vecmap.rs", "vec_method_by_name", "Vec"),
     b("vecmap.rs", "vec_removal", "Vec"),
     b("vec_edit.rs", "vec_edit", "Vec"),
+    b("vec_edit.rs", "chunk_edge", "Vec"),
     b("vecmap.rs", "vec_copy_from_slice", "Vec"),
     b("vecmap.rs", "vec_min_max", "Vec"),
     b("map_methods.rs", "map_method", "Map"),

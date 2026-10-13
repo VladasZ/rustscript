@@ -85,6 +85,18 @@ impl IntWidth {
         }
     }
 
+    /// The signed type of the same size, what `cast_signed` answers in.
+    pub fn signed(self) -> Self {
+        match self {
+            Self::U8 => Self::I8,
+            Self::U16 => Self::I16,
+            Self::U32 => Self::I32,
+            Self::U64 | Self::USize => Self::I64,
+            Self::U128 => Self::I128,
+            other => other,
+        }
+    }
+
     pub fn bits(self) -> u32 {
         match self {
             Self::U8 | Self::I8 => 8,
