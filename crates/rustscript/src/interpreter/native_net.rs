@@ -115,13 +115,26 @@ pub(super) fn net_native_method(handle: &Handle, method: &MethodName) -> Result<
             bail!("shutdown on {}", h.type_name());
         }
         BuiltinId::TryClone => {
-            let h = handle.lock();
-            match &*h {
+            let mut h = handle.lock();
+            match &mut *h {
                 Native::Stream(s) => {
                     return Ok(Some(io_err(s.try_clone(), |s| Native::Stream(s).wrap())));
                 }
                 Native::Udp(s) => {
                     return Ok(Some(io_err(s.try_clone(), |s| Native::Udp(s).wrap())));
+                }
+                Native::File(r) => {
+                    // Both handles share the OS position, so the read ahead
+                    // buffer is dropped first, or the clone would start past
+                    // bytes the original has not handed out yet.
+                    use std::io::{Seek, SeekFrom};
+                    let cloned = r
+                        .stream_position()
+                        .and_then(|pos| r.seek(SeekFrom::Start(pos)))
+                        .and_then(|_| r.get_ref().try_clone());
+                    return Ok(Some(io_err(cloned, |f| {
+                        Native::File(std::io::BufReader::new(f)).wrap()
+                    })));
                 }
                 _ => bail!("try_clone on {}", h.type_name()),
             }

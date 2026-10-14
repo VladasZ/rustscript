@@ -98,7 +98,7 @@ The `supported_page_is_current` test enforces it.
 
 ## Iterator
 
-`all`, `any`, `as_str`, `by_ref`, `chain`, `cloned`, `cmp`, `collect`, `collect_btree_map`, `collect_btree_set`, `collect_map`, `collect_option`, `collect_path_buf`, `collect_result`, `collect_set`, `collect_string`, `copied`, `count`, `cycle`, `enumerate`, `filter`, `filter_map`, `find`, `find_map`, `for_each`, `inspect`, `into_iter`, `is_empty`, `is_sorted`, `last`, `len`, `map`, `map_while`, `max`, `max_by`, `min`, `min_by`, `next`, `next_back`, `next_if`, `next_if_eq`, `nth`, `partial_cmp`, `peek`, `peekable`, `position`, `product`, `rev`, `rposition`, `scan`, `skip`, `skip_while`, `step_by`, `sum`, `take`, `take_while`, `to_vec`, `unzip`, `zip`
+`all`, `any`, `as_str`, `by_ref`, `chain`, `clone`, `cloned`, `cmp`, `collect`, `collect_btree_map`, `collect_btree_set`, `collect_map`, `collect_option`, `collect_path_buf`, `collect_result`, `collect_set`, `collect_string`, `copied`, `count`, `cycle`, `enumerate`, `filter`, `filter_map`, `find`, `find_map`, `for_each`, `inspect`, `into_iter`, `is_empty`, `is_sorted`, `last`, `len`, `map`, `map_while`, `max`, `max_by`, `min`, `min_by`, `next`, `next_back`, `next_if`, `next_if_eq`, `nth`, `partial_cmp`, `peek`, `peekable`, `position`, `product`, `rev`, `rposition`, `scan`, `skip`, `skip_while`, `step_by`, `sum`, `take`, `take_while`, `to_vec`, `unzip`, `zip`
 
 ## Line
 
