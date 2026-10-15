@@ -310,15 +310,16 @@ impl Infer<'_, '_> {
             )
             | ("DirEntry", "path") => Ty::named("PathBuf"),
             ("Path" | "PathBuf", "canonicalize") => io(Ty::named("PathBuf")),
+            ("Path" | "PathBuf", "try_exists") => io(Ty::Bool),
             ("Path" | "PathBuf", "strip_prefix") => {
                 Ty::result(Ty::named("Path"), Ty::named("StripPrefixError"))
             }
             ("Path" | "PathBuf", "push" | "set_file_name") | ("JoinHandle", "abort") => Ty::Unit,
             ("Path" | "PathBuf", "read_dir") => io(Ty::iter(io(Ty::named("DirEntry")))),
-            ("Path" | "PathBuf" | "DirEntry", "metadata")
+            ("Path" | "PathBuf" | "DirEntry" | "File", "metadata")
             | ("Path" | "PathBuf", "symlink_metadata") => io(Ty::named("Metadata")),
             ("DirEntry", "file_type") => io(Ty::named("FileType")),
-            ("Metadata", "len") | ("Duration", "as_secs") => Ty::Int(IntWidth::U64),
+            ("Metadata", "len" | "nlink") | ("Duration", "as_secs") => Ty::Int(IntWidth::U64),
             ("Metadata", "modified" | "created" | "accessed") => io(Ty::named("SystemTime")),
             _ => return None,
         })
@@ -372,7 +373,8 @@ impl Infer<'_, '_> {
             ("Duration", "subsec_millis" | "subsec_micros" | "subsec_nanos")
             | ("Child", "id")
             | ("DateTime", "month" | "day" | "hour" | "minute" | "second" | "ordinal")
-            | ("NaiveDate", "month" | "day" | "ordinal") => Ty::Int(IntWidth::U32),
+            | ("NaiveDate", "month" | "day" | "ordinal")
+            | ("Permissions", "mode") => Ty::Int(IntWidth::U32),
             ("Instant", "elapsed" | "duration_since") => Ty::named("Duration"),
             ("SystemTime", "duration_since" | "elapsed") => {
                 Ty::result(Ty::named("Duration"), Ty::named("SystemTimeError"))
@@ -386,7 +388,13 @@ impl Infer<'_, '_> {
                 Ty::named("OpenOptions")
             }
             ("OpenOptions", "open") => io(Ty::named("File")),
-            ("File", "set_modified") => io(Ty::Unit),
+            ("Metadata", "permissions") => Ty::named("Permissions"),
+            ("Permissions", "set_readonly") => Ty::Unit,
+            ("NamedTempFile", "path") => Ty::named("Path"),
+            ("NamedTempFile", "as_file" | "as_file_mut") => Ty::named("File"),
+            ("NamedTempFile", "persist") => {
+                Ty::result(Ty::named("File"), Ty::named("PersistError"))
+            }
             ("Command", "output") | ("Child", "wait_with_output") => io(Ty::named("Output")),
             ("Command", "status") | ("Child", "wait") => io(Ty::named("ExitStatus")),
             ("Command", "spawn") => io(Ty::named("Child")),
@@ -395,9 +403,11 @@ impl Infer<'_, '_> {
             ("Output", "stdout" | "stderr") => Ty::vec(Ty::Int(IntWidth::U8)),
             ("ExitStatus", "code") => Ty::option(Ty::Int(IntWidth::I32)),
             ("Child", "kill")
-            | ("File" | "Stdout" | "Stderr" | "BufWriter", "write_all" | "flush" | "sync_all") => {
-                io(Ty::Unit)
-            }
+            | ("File", "set_modified" | "set_permissions" | "set_len" | "sync_data")
+            | (
+                "File" | "NamedTempFile" | "Stdout" | "Stderr" | "BufWriter",
+                "write_all" | "flush" | "sync_all",
+            ) => io(Ty::Unit),
             ("Stdin", "lock") => Ty::named("Stdin"),
             ("Stdin" | "File" | "BufReader", "lines") => Ty::iter(io(Ty::Str)),
             ("Stdin" | "File" | "BufReader", "read_line" | "read_to_string") => io(Ty::usize()),
@@ -414,7 +424,9 @@ impl Infer<'_, '_> {
             ("HeaderMap", "get_all" | "values") => Ty::vec(Ty::named("HeaderValue")),
             ("HeaderMap", "iter") => Ty::vec(Ty::Tuple(vec![Ty::Str, Ty::named("HeaderValue")])),
             ("HeaderMap", "keys") => Ty::vec(Ty::Str),
-            ("HeaderMap", "append" | "contains_key" | "is_empty") => Ty::Bool,
+            ("HeaderMap", "append" | "contains_key" | "is_empty") | ("Permissions", "readonly") => {
+                Ty::Bool
+            }
             ("HeaderMap", "len" | "keys_len") => Ty::usize(),
             ("HeaderValue", "to_str") => Ty::result(Ty::Str, Ty::named("ToStrError")),
             (

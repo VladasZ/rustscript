@@ -139,7 +139,7 @@ pub(super) fn native_method(
     if let Some(v) = time_native_method(handle, method, args)? {
         return Ok(Some(v));
     }
-    temp_native_method(handle, method)
+    temp_native_method(handle, method, args)
 }
 
 pub(super) fn io_error_method(handle: &Handle, method: &MethodName) -> Option<Value> {
@@ -417,11 +417,26 @@ fn file_native_method(
             bail!("seek on non-file {}", h.type_name());
         }
         BuiltinId::SyncAll | BuiltinId::SyncData => {
-            let mut h = handle.lock();
-            if let Native::File(r) = &mut *h {
-                return Ok(Some(io_err(r.get_ref().sync_all(), |()| Value::Unit)));
+            let h = handle.lock();
+            if let Some(r) = os_file(&h, std::fs::File::sync_all) {
+                return Ok(Some(io_err(r, |()| Value::Unit)));
             }
             bail!("sync on non-file {}", h.type_name());
+        }
+        BuiltinId::SetPermissions => {
+            let h = handle.lock();
+            let set = |file: &std::fs::File| {
+                file.metadata().and_then(|m| {
+                    file.set_permissions(super::std_bridge::permissions_from(
+                        args.first(),
+                        m.permissions(),
+                    ))
+                })
+            };
+            if let Some(r) = os_file(&h, set) {
+                return Ok(Some(io_err(r, |()| Value::Unit)));
+            }
+            bail!("set_permissions on non-file {}", h.type_name());
         }
         BuiltinId::SetLen => {
             let n = as_int(args.first())
@@ -451,16 +466,23 @@ fn file_native_method(
         }
         BuiltinId::Metadata => {
             let h = handle.lock();
-            if let Native::File(r) = &*h {
-                return Ok(Some(io_err(r.get_ref().metadata(), |m| {
-                    super::std_bridge::make_metadata(&m)
-                })));
+            if let Some(r) = os_file(&h, std::fs::File::metadata) {
+                return Ok(Some(io_err(r, |m| super::std_bridge::make_metadata(&m))));
             }
             bail!("metadata on non-file {}", h.type_name());
         }
         _ => {}
     }
     Ok(None)
+}
+
+/// The OS file under a plain file or a `NamedTempFile`, the calls that take `&File`.
+fn os_file<T>(h: &Native, call: impl FnOnce(&std::fs::File) -> T) -> Option<T> {
+    match h {
+        Native::File(r) => Some(call(r.get_ref())),
+        Native::NamedTempFile(f) => Some(call(f.as_file())),
+        _ => None,
+    }
 }
 
 fn child_native_method(handle: &Handle, method: &MethodName) -> Result<Option<Value>> {
@@ -562,7 +584,11 @@ fn time_native_method(
     Ok(None)
 }
 
-fn temp_native_method(handle: &Handle, method: &MethodName) -> Result<Option<Value>> {
+fn temp_native_method(
+    handle: &Handle,
+    method: &MethodName,
+    args: &[Value],
+) -> Result<Option<Value>> {
     match method.id {
         BuiltinId::Path => {
             let h = handle.lock();
@@ -579,6 +605,27 @@ fn temp_native_method(handle: &Handle, method: &MethodName) -> Result<Option<Val
                 }
                 _ => {}
             }
+        }
+        // `as_file` lends the same handle, the file calls above accept a `NamedTempFile`
+        BuiltinId::AsFile | BuiltinId::AsFileMut => {
+            if matches!(&*handle.lock(), Native::NamedTempFile(_)) {
+                return Ok(Some(Value::Native(handle.clone())));
+            }
+        }
+        BuiltinId::Persist => {
+            if !matches!(&*handle.lock(), Native::NamedTempFile(_)) {
+                return Ok(None);
+            }
+            let target = super::std_bridge::path_like(&super::bridge::arg(args, 0)?);
+            let taken = std::mem::replace(&mut *handle.lock(), Native::Taken);
+            if let Native::NamedTempFile(f) = taken {
+                return Ok(Some(match f.persist(target) {
+                    Ok(file) => Value::ok(Native::File(std::io::BufReader::new(file)).wrap()),
+                    // the error hands the file back in real Rust, dropping it deletes it there too
+                    Err(e) => Value::err(super::native::io_error_value(&e.error)),
+                }));
+            }
+            bail!("persist on non-tempfile");
         }
         BuiltinId::Close => {
             if !matches!(&*handle.lock(), Native::TempDir(_)) {

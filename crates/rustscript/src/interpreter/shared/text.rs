@@ -117,6 +117,27 @@ fn str_repeat(s: &str, args: &impl Args) -> Result<String> {
     Ok(s.repeat(n))
 }
 
+/// `split`, `split_inclusive` and `split_terminator`. A char array splits on any of its members.
+fn split_by(s: &str, name: BuiltinId, args: &impl Args) -> Vec<String> {
+    let parts: Vec<&str> = if let Some(chars) = args.pattern_chars(0) {
+        let any = |c: char| chars.contains(&c);
+        match name {
+            BuiltinId::SplitInclusive => s.split_inclusive(any).collect(),
+            BuiltinId::SplitTerminator => s.split_terminator(any).collect(),
+            _ => s.split(any).collect(),
+        }
+    } else {
+        let text = args.text(0);
+        let pat = text.as_str();
+        match name {
+            BuiltinId::SplitInclusive => s.split_inclusive(pat).collect(),
+            BuiltinId::SplitTerminator => s.split_terminator(pat).collect(),
+            _ => s.split(pat).collect(),
+        }
+    };
+    parts.into_iter().map(str::to_string).collect()
+}
+
 /// Int first, then float, then bool.
 pub(crate) fn str_core(s: &str, name: BuiltinId, args: &impl Args) -> Result<Option<StrOut>> {
     let a = |i: usize| args.text(i);
@@ -188,15 +209,9 @@ pub(crate) fn str_core(s: &str, name: BuiltinId, args: &impl Args) -> Result<Opt
             s.rsplit_once(&a(0))
                 .map(|(x, y)| (x.to_string(), y.to_string())),
         ),
-        // a char array splits on any of its members
-        BuiltinId::Split => match args.pattern_chars(0) {
-            Some(chars) => StrOut::Strs(
-                s.split(|c: char| chars.contains(&c))
-                    .map(str::to_string)
-                    .collect(),
-            ),
-            None => StrOut::Strs(s.split(&a(0)).map(str::to_string).collect()),
-        },
+        BuiltinId::Split | BuiltinId::SplitInclusive | BuiltinId::SplitTerminator => {
+            StrOut::Strs(split_by(s, name, args))
+        }
         BuiltinId::Rsplit => StrOut::Strs(s.rsplit(&a(0)).map(str::to_string).collect()),
         BuiltinId::Splitn => {
             let n = usize_arg(args, 0)?;

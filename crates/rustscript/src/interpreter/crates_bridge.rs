@@ -112,6 +112,13 @@ pub(super) fn crate_bridge(id: PathId, args: &[Value]) -> Result<Option<Value>> 
         PathId::TempfileTempdir | PathId::TempfileTempfile | PathId::NamedTempFileNew => {
             env_aware(id, &s0())?
         }
+        PathId::NamedTempFileNewIn => {
+            let dir = super::std_bridge::path_like(&super::bridge::arg(args, 0)?);
+            match tempfile::NamedTempFile::new_in(dir) {
+                Ok(f) => Value::ok(Native::NamedTempFile(f).wrap()),
+                Err(e) => Value::err(super::native::io_error_value(&e)),
+            }
+        }
         // winreg
         PathId::RegKeyPredef => super::winreg_bridge::predef(args),
         // windows-service
