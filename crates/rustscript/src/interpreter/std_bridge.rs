@@ -76,10 +76,16 @@ fn fs_native_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
         PathId::FsSymlink | PathId::FsSymlinkFile | PathId::FsSymlinkDir => {
             wrap_unit(make_symlink(&s(0)?, &s(1)?))
         }
-        PathId::FsSetPermissions => wrap_unit(set_permissions_impl(
-            &s(0)?,
-            args.get(1).and_then(perm_mode),
-        )),
+        PathId::FsSetPermissions => {
+            let path = s(0)?;
+            wrap_unit(std::fs::metadata(&path).and_then(|m| {
+                std::fs::set_permissions(&path, permissions_from(args.get(1), m.permissions()))
+            }))
+        }
+        PathId::FsExists => match std::fs::exists(s(0)?) {
+            Ok(found) => Value::ok(Value::Bool(found)),
+            Err(e) => Value::err(super::native::io_error_value(&e)),
+        },
         _ => return Ok(None),
     }))
 }
@@ -96,9 +102,12 @@ pub(super) fn native_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
     };
     Ok(Some(match id {
         PathId::SerdeJsonFromStr
+        | PathId::SerdeJsonFromSlice
         | PathId::SerdeJsonFromValue
         | PathId::SerdeJsonToString
         | PathId::SerdeJsonToStringPretty
+        | PathId::SerdeJsonToVec
+        | PathId::SerdeJsonToVecPretty
         | PathId::SerdeJsonToValue => return bridge_serde_json(id, args).map(Some),
         PathId::EnvArgs => Value::vec(super::script_args().into_iter().map(Value::str).collect()),
         PathId::EnvVar => match super::env_overlay::var(&s(0)?) {
@@ -186,18 +195,30 @@ fn perm_mode(v: &Value) -> Option<u32> {
     None
 }
 
-fn set_permissions_impl(path: &str, mode: Option<u32>) -> std::io::Result<()> {
+/// The real `Permissions` a script value stands for, built on the current ones of the target.
+/// Unix takes the mode, `Windows` only has the read only flag.
+pub(super) fn permissions_from(
+    perm: Option<&Value>,
+    mut current: std::fs::Permissions,
+) -> std::fs::Permissions {
+    let mode = perm.and_then(perm_mode);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode.unwrap_or(0o644)))
+        current.set_mode(mode.unwrap_or(0o644));
     }
     #[cfg(windows)]
     {
-        let mut permissions = std::fs::metadata(path)?.permissions();
-        permissions.set_readonly(mode.is_some_and(|mode| mode & 0o222 == 0));
-        std::fs::set_permissions(path, permissions)
+        let readonly = match perm {
+            Some(Value::Struct(st)) => st.get("readonly").and_then(|r| match r {
+                Value::Bool(b) => Some(b),
+                _ => None,
+            }),
+            _ => None,
+        };
+        current.set_readonly(readonly.unwrap_or(mode.is_some_and(|mode| mode & 0o222 == 0)));
     }
+    current
 }
 
 /// A value nested in a struct field or a vec never passed through `bridge_image`, so it still
@@ -358,6 +379,10 @@ pub(super) fn make_metadata(m: &std::fs::Metadata) -> Value {
             Value::int_of_width(i128::from(m.gid()), IntWidth::U32),
         ));
         f.push(("mtime".into(), Value::Int(m.mtime())));
+        f.push((
+            "nlink".into(),
+            Value::int_of_width(i128::from(m.nlink()), IntWidth::U64),
+        ));
     }
     if let Ok(t) = m.modified() {
         f.push(("modified".into(), Native::SystemTime(t).wrap()));
@@ -455,6 +480,10 @@ pub(super) fn path_method(
         BuiltinId::IsFile => Value::Bool(p.is_file()),
         BuiltinId::IsAbsolute => Value::Bool(p.is_absolute()),
         BuiltinId::Exists => Value::Bool(p.exists()),
+        BuiltinId::TryExists => match p.try_exists() {
+            Ok(found) => Value::ok(Value::Bool(found)),
+            Err(e) => Value::err(super::native::io_error_value(&e)),
+        },
         BuiltinId::Canonicalize => match p.canonicalize() {
             Ok(full) => Value::ok(make_path(full.display().to_string())),
             Err(e) => Value::err(super::native::io_error_value(&e)),
@@ -616,7 +645,8 @@ pub(super) fn metadata_method(s: &Arc<StructData>, name: &MethodName) -> Result<
         | BuiltinId::Ino
         | BuiltinId::Uid
         | BuiltinId::Gid
-        | BuiltinId::Mtime => get(&name.text)?,
+        | BuiltinId::Mtime
+        | BuiltinId::Nlink => get(&name.text)?,
         BuiltinId::Permissions => Value::struct_of(
             "Permissions",
             [

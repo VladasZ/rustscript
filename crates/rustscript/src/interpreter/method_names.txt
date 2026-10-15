@@ -25,6 +25,8 @@ as_bytes
 as_deref
 as_deref_mut
 as_f64
+as_file
+as_file_mut
 as_i128
 as_i64
 as_int
@@ -408,6 +410,7 @@ next_if
 next_if_eq
 next_multiple_of
 next_power_of_two
+nlink
 normal
 nth
 num_days
@@ -452,6 +455,7 @@ peek
 peekable
 peer_addr
 permissions
+persist
 pointer
 pointer_mut
 pop mut
@@ -543,6 +547,7 @@ set_extension mut
 set_file_name mut
 set_len
 set_modified
+set_permissions
 set_raw_value
 set_readonly
 set_value
@@ -566,10 +571,12 @@ split
 split_at
 split_first
 split_first_chunk
+split_inclusive
 split_last
 split_last_chunk
 split_off mut
 split_once
+split_terminator
 split_whitespace
 splitn
 sqrt
@@ -651,6 +658,7 @@ truncate mut
 try_borrow
 try_borrow_mut
 try_clone
+try_exists
 try_into
 try_lock
 try_wait

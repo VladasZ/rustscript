@@ -114,7 +114,7 @@ The `supported_page_is_current` test enforces it.
 
 ## Metadata
 
-`accessed`, `created`, `dev`, `gid`, `ino`, `is_dir`, `is_file`, `is_symlink`, `len`, `mode`, `modified`, `mtime`, `permissions`, `readonly`, `uid`
+`accessed`, `created`, `dev`, `gid`, `ino`, `is_dir`, `is_file`, `is_symlink`, `len`, `mode`, `modified`, `mtime`, `nlink`, `permissions`, `readonly`, `uid`
 
 ## Modifier
 
@@ -130,7 +130,7 @@ The `supported_page_is_current` test enforces it.
 
 ## native handles (files, sockets, readers, processes)
 
-`accept`, `by_ref`, `close`, `collect`, `connect`, `duration_since`, `elapsed`, `flush`, `id`, `incoming`, `inner`, `into_inner`, `ip`, `is_cancelled`, `is_ipv4`, `is_ipv6`, `is_loopback`, `is_multicast`, `is_panic`, `is_terminal`, `is_unspecified`, `kill`, `kind`, `lines`, `local_addr`, `lock`, `metadata`, `next`, `pad`, `path`, `peer_addr`, `port`, `raw_os_error`, `read`, `read_exact`, `read_line`, `read_to_end`, `read_to_string`, `read_until`, `recv`, `recv_from`, `seek`, `send`, `send_to`, `set_broadcast`, `set_len`, `set_modified`, `shutdown`, `stderr`, `stdin`, `sync_all`, `sync_data`, `try_clone`, `try_wait`, `wait`, `wait_with_output`, `write`, `write_all`, `write_fmt`, `write_str`
+`accept`, `as_file`, `as_file_mut`, `by_ref`, `close`, `collect`, `connect`, `duration_since`, `elapsed`, `flush`, `id`, `incoming`, `inner`, `into_inner`, `ip`, `is_cancelled`, `is_ipv4`, `is_ipv6`, `is_loopback`, `is_multicast`, `is_panic`, `is_terminal`, `is_unspecified`, `kill`, `kind`, `lines`, `local_addr`, `lock`, `metadata`, `next`, `pad`, `path`, `peer_addr`, `persist`, `port`, `raw_os_error`, `read`, `read_exact`, `read_line`, `read_to_end`, `read_to_string`, `read_until`, `recv`, `recv_from`, `seek`, `send`, `send_to`, `set_broadcast`, `set_len`, `set_modified`, `set_permissions`, `shutdown`, `stderr`, `stdin`, `sync_all`, `sync_data`, `try_clone`, `try_wait`, `wait`, `wait_with_output`, `write`, `write_all`, `write_fmt`, `write_str`
 
 ## OpenOptions
 
@@ -154,7 +154,7 @@ The `supported_page_is_current` test enforces it.
 
 ## Path
 
-`ancestors`, `as_os_str`, `as_path`, `canonicalize`, `clone`, `components`, `display`, `ends_with`, `exists`, `extension`, `file_name`, `file_stem`, `into_os_string`, `into_string`, `is_absolute`, `is_dir`, `is_file`, `join`, `metadata`, `parent`, `pop`, `push`, `set_extension`, `set_file_name`, `starts_with`, `strip_prefix`, `symlink_metadata`, `to_owned`, `to_path_buf`, `to_str`, `to_string_lossy`, `with_extension`
+`ancestors`, `as_os_str`, `as_path`, `canonicalize`, `clone`, `components`, `display`, `ends_with`, `exists`, `extension`, `file_name`, `file_stem`, `into_os_string`, `into_string`, `is_absolute`, `is_dir`, `is_file`, `join`, `metadata`, `parent`, `pop`, `push`, `set_extension`, `set_file_name`, `starts_with`, `strip_prefix`, `symlink_metadata`, `to_owned`, `to_path_buf`, `to_str`, `to_string_lossy`, `try_exists`, `with_extension`
 
 ## RegKey
 
@@ -218,7 +218,7 @@ The `supported_page_is_current` test enforces it.
 
 ## String and str
 
-`as_bytes`, `as_ref`, `as_str`, `as_string`, `black`, `blue`, `bold`, `bright_blue`, `bright_cyan`, `bright_green`, `bright_red`, `bright_yellow`, `bytes`, `char_indices`, `chars`, `clear`, `clone`, `cmp`, `contains`, `context`, `count`, `cyan`, `dimmed`, `encode_utf16`, `ends_with`, `eq_ignore_ascii_case`, `expect`, `find`, `get`, `green`, `insert`, `insert_str`, `into_bytes`, `into_owned`, `into_string`, `is_ascii`, `is_char_boundary`, `is_empty`, `is_none`, `is_some`, `italic`, `len`, `lines`, `magenta`, `matches`, `normal`, `on_blue`, `on_green`, `on_red`, `parse`, `pop`, `purple`, `push`, `push_str`, `red`, `remove`, `repeat`, `replace`, `replace_range`, `replacen`, `retain`, `reversed`, `rfind`, `rsplit`, `rsplit_once`, `rsplitn`, `split`, `split_at`, `split_once`, `split_whitespace`, `splitn`, `starts_with`, `strip_prefix`, `strip_suffix`, `to_ascii_lowercase`, `to_ascii_uppercase`, `to_lowercase`, `to_owned`, `to_str`, `to_string`, `to_string_lossy`, `to_uppercase`, `trim`, `trim_end`, `trim_end_matches`, `trim_matches`, `trim_start`, `trim_start_matches`, `trim_string`, `truncate`, `underline`, `unwrap`, `unwrap_or`, `unwrap_or_default`, `unwrap_or_else`, `white`, `with_context`, `yellow`
+`as_bytes`, `as_ref`, `as_str`, `as_string`, `black`, `blue`, `bold`, `bright_blue`, `bright_cyan`, `bright_green`, `bright_red`, `bright_yellow`, `bytes`, `char_indices`, `chars`, `clear`, `clone`, `cmp`, `contains`, `context`, `count`, `cyan`, `dimmed`, `encode_utf16`, `ends_with`, `eq_ignore_ascii_case`, `expect`, `find`, `get`, `green`, `insert`, `insert_str`, `into_bytes`, `into_owned`, `into_string`, `is_ascii`, `is_char_boundary`, `is_empty`, `is_none`, `is_some`, `italic`, `len`, `lines`, `magenta`, `matches`, `normal`, `on_blue`, `on_green`, `on_red`, `parse`, `pop`, `purple`, `push`, `push_str`, `red`, `remove`, `repeat`, `replace`, `replace_range`, `replacen`, `retain`, `reversed`, `rfind`, `rsplit`, `rsplit_once`, `rsplitn`, `split`, `split_at`, `split_inclusive`, `split_once`, `split_terminator`, `split_whitespace`, `splitn`, `starts_with`, `strip_prefix`, `strip_suffix`, `to_ascii_lowercase`, `to_ascii_uppercase`, `to_lowercase`, `to_owned`, `to_str`, `to_string`, `to_string_lossy`, `to_uppercase`, `trim`, `trim_end`, `trim_end_matches`, `trim_matches`, `trim_start`, `trim_start_matches`, `trim_string`, `truncate`, `underline`, `unwrap`, `unwrap_or`, `unwrap_or_default`, `unwrap_or_else`, `white`, `with_context`, `yellow`
 
 ## Style
 

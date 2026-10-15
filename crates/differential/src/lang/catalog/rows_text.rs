@@ -151,6 +151,20 @@ pub(super) const ROWS: &[Method] = &[
         TyPat::Vec(STR_PAT),
         "{r}.split({0}).map(String::from).collect::<Vec<String>>()",
     )),
+    borrowing(m(
+        "split_inclusive_collect",
+        Str,
+        &[Exact(FStrRef)],
+        TyPat::Vec(STR_PAT),
+        "{r}.split_inclusive({0}).map(String::from).collect::<Vec<String>>()",
+    )),
+    borrowing(m(
+        "split_terminator_collect",
+        Str,
+        &[Exact(FStrRef)],
+        TyPat::Vec(STR_PAT),
+        "{r}.split_terminator({0}).map(String::from).collect::<Vec<String>>()",
+    )),
     m(
         "split_whitespace_collect",
         Str,

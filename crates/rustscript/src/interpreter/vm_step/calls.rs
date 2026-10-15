@@ -174,7 +174,10 @@ pub(super) fn call_path(
     if let Some(ty) = &path.coerce
         && matches!(
             path.id,
-            PathId::SerdeJsonFromStr | PathId::TomlFromStr | PathId::SerdeYamlFromStr
+            PathId::SerdeJsonFromStr
+                | PathId::SerdeJsonFromSlice
+                | PathId::TomlFromStr
+                | PathId::SerdeYamlFromStr
         )
     {
         return Ok(ctx.set(

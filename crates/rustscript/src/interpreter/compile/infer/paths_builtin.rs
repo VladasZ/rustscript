@@ -166,6 +166,10 @@ impl Infer<'_, '_> {
                 self.walk_args(args);
                 Ty::result(Ty::Str, Ty::named("FromUtf8Error"))
             }
+            ("str", "from_utf8") => {
+                self.walk_args(args);
+                Ty::result(Ty::Str, Ty::named("Utf8Error"))
+            }
             ("Box" | "Rc" | "Arc" | "RefCell" | "Cell" | "Mutex", "new")
             | ("Rc" | "Arc", "clone")
             | ("mem", "take")
@@ -241,6 +245,10 @@ impl Infer<'_, '_> {
                     Ty::named("io::Error"),
                 )
             }
+            ("fs", "exists") => {
+                self.walk_args(args);
+                Ty::result(Ty::Bool, Ty::named("io::Error"))
+            }
             ("fs", "metadata" | "symlink_metadata") => {
                 self.walk_args(args);
                 Ty::result(Ty::named("Metadata"), Ty::named("io::Error"))
@@ -269,7 +277,6 @@ impl Infer<'_, '_> {
                 self.walk_args(args);
                 Ty::named("Duration")
             }
-            ("File", "options") => Ty::named("OpenOptions"),
             ("Instant", "now") => Ty::named("Instant"),
             ("SystemTime", "now") => Ty::named("SystemTime"),
             ("Command", "new") => {
@@ -305,6 +312,22 @@ impl Infer<'_, '_> {
                 Ty::iter(item)
             }
             ("iter", "empty") => Ty::iter(expected.item()),
+            _ => return self.file_ctor_call(owner, last, args),
+        })
+    }
+
+    /// The file types made by an associated function, `File::options` and the temp files.
+    fn file_ctor_call(&mut self, owner: &str, last: &str, args: &[&Expr]) -> Option<Ty> {
+        Some(match (owner, last) {
+            ("File", "options") => Ty::named("OpenOptions"),
+            ("Permissions", "from_mode") => {
+                self.walk_args(args);
+                Ty::named("Permissions")
+            }
+            ("NamedTempFile", "new" | "new_in") => {
+                self.walk_args(args);
+                Ty::result(Ty::named("NamedTempFile"), Ty::named("io::Error"))
+            }
             _ => return None,
         })
     }
@@ -404,9 +427,10 @@ impl Infer<'_, '_> {
                 let target = fn_turbofish.unwrap_or_else(|| expected.payload());
                 Ty::result(target, Ty::named(&format!("{owner}::Error")))
             }
-            ("serde_json" | "serde_yaml" | "toml", "to_string" | "to_string_pretty") => {
+            ("serde_json" | "serde_yaml" | "toml", "to_string" | "to_string_pretty")
+            | ("serde_json", "to_vec" | "to_vec_pretty") => {
                 self.walk_args(args);
-                Ty::result(Ty::Str, Ty::named(&format!("{owner}::Error")))
+                serialized(owner, last)
             }
             ("serde_json", "to_value") => {
                 self.walk_args(args);
@@ -453,6 +477,16 @@ impl Infer<'_, '_> {
             _ => self.walk_args(args),
         }
     }
+}
+
+/// What `to_string` or `to_vec` of a serde format crate gives back.
+fn serialized(owner: &str, last: &str) -> Ty {
+    let ok = if last.starts_with("to_vec") {
+        Ty::vec(Ty::Int(IntWidth::U8))
+    } else {
+        Ty::Str
+    };
+    Ty::result(ok, Ty::named(&format!("{owner}::Error")))
 }
 
 /// `i32::MAX`, `u8::MIN`, `f64::EPSILON`, `f64::consts::PI` and the like, and `Duration::ZERO`.

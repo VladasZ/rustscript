@@ -70,9 +70,30 @@ fn conversion_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {
                 _ => Value::none(),
             }
         }
-        PathId::StringFromUtf8 => Value::ok(Value::str(bytes_to_string(args.first()))),
+        PathId::StringFromUtf8 | PathId::StrFromUtf8 => {
+            checked_utf8(args, id == PathId::StringFromUtf8)
+        }
         _ => return int_assoc(id, args),
     }))
+}
+
+/// `String::from_utf8` and `str::from_utf8`. Bytes that are not UTF-8 are an `Err` that prints
+/// like the real `FromUtf8Error` or `Utf8Error`.
+fn checked_utf8(args: &[Value], owned: bool) -> Value {
+    match String::from_utf8(super::native_methods::value_to_bytes(args.first())) {
+        Ok(text) => Value::ok(Value::str(text)),
+        Err(e) => Value::err(
+            Native::ParseErr {
+                display: e.to_string(),
+                debug: if owned {
+                    format!("{e:?}")
+                } else {
+                    format!("{:?}", e.utf8_error())
+                },
+            }
+            .wrap(),
+        ),
+    }
 }
 
 fn int_assoc(id: PathId, args: &[Value]) -> Result<Option<Value>> {

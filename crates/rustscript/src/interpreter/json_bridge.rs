@@ -280,6 +280,15 @@ impl Vm {
     ) -> Result<Value> {
         let owned;
         let text: &str = match args.first() {
+            _ if format == PathId::SerdeJsonFromSlice => {
+                match super::json_paths::slice_text(args) {
+                    Ok(text) => {
+                        owned = text;
+                        &owned
+                    }
+                    Err(e) => return Ok(Value::err(e)),
+                }
+            }
             Some(Value::Str(s)) => s,
             Some(other) => {
                 owned = other.display();
