@@ -2575,7 +2575,7 @@ dependencies = [
 
 [[package]]
 name = "run-rs"
-version = "0.6.62"
+version = "0.6.63"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
