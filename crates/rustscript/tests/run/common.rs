@@ -33,6 +33,35 @@ pub fn run(src: &str) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+/// `input` goes to the script's stdin, which `run` leaves inherited.
+pub fn run_with_stdin(src: &str, input: &[u8]) -> String {
+    use std::io::Write;
+    use std::process::Stdio;
+    let path = temp_script(src);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rust"))
+        .arg(&path)
+        .env("RUSTSCRIPT_SKIP_CHECK", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to launch rustscript");
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(input)
+        .expect("write stdin");
+    let out = child.wait_with_output().expect("wait for rustscript");
+    std::fs::remove_file(&path).unwrap();
+    assert!(
+        out.status.success(),
+        "script failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
 pub fn run_fail(src: &str) -> String {
     let path = temp_script(src);
     let out = Command::new(env!("CARGO_BIN_EXE_rust"))

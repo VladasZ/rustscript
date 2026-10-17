@@ -1,11 +1,12 @@
 //! Bridges for `std` paths.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use num_traits::AsPrimitive;
 
 use anyhow::{Result, anyhow, bail};
+use parking_lot::Mutex;
 
 use super::bytecode::{BuiltinId, MethodName, PathId};
 use super::crates_bridge::crate_bridge;
@@ -157,10 +158,7 @@ pub(super) fn native_call(id: PathId, args: &[Value]) -> Result<Option<Value>> {
         PathId::ProcessAbort => std::process::abort(),
         PathId::ProcessId => Value::int_of_width(i128::from(std::process::id()), IntWidth::U32),
         // io
-        PathId::IoStdin => make_std_stream(
-            "stdin",
-            Native::Reader(std::io::BufReader::new(Box::new(std::io::stdin()))),
-        ),
+        PathId::IoStdin => std_stream_of("stdin", Value::Native(STDIN.clone())),
         PathId::IoStdout => make_std_stream("stdout", Native::Writer(Box::new(std::io::stdout()))),
         PathId::IoStderr => make_std_stream("stderr", Native::Writer(Box::new(std::io::stderr()))),
         _ => return crate_bridge(id, args),
@@ -239,14 +237,23 @@ pub(super) fn path_like(v: &Value) -> String {
     }
 }
 
+/// One buffer for the whole process like the real `Stdin`. A buffer per `stdin()` call would keep
+/// bytes the next call never sees.
+static STDIN: LazyLock<native_methods::Handle> = LazyLock::new(|| {
+    Arc::new(Mutex::new(Native::Reader(std::io::BufReader::new(
+        Box::new(std::io::stdin()),
+    ))))
+});
+
 /// So `is_terminal` can name its stream.
 pub(super) fn make_std_stream(kind: &str, inner: Native) -> Value {
+    std_stream_of(kind, inner.wrap())
+}
+
+fn std_stream_of(kind: &str, inner: Value) -> Value {
     Value::struct_of(
         "StdStream",
-        [
-            ("kind".into(), Value::str(kind)),
-            ("inner".into(), inner.wrap()),
-        ],
+        [("kind".into(), Value::str(kind)), ("inner".into(), inner)],
     )
 }
 
@@ -267,6 +274,10 @@ pub(super) fn std_stream_method(
     }
     if matches!(name.id, BuiltinId::Lock | BuiltinId::ByRef) {
         return Ok(Value::Struct(s.clone()));
+    }
+    // the stream itself is the source, so `into_inner` gives back a stream
+    if name.id == BuiltinId::Take && args.len() == 1 {
+        return super::native_take::make_take(Value::Struct(s.clone()), args);
     }
     let inner = match s.get("inner") {
         Some(Value::Native(h)) => h.clone(),

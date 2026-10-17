@@ -39,6 +39,11 @@ pub enum Native {
     /// kept apart from `Reader` so `into_inner` can hand the socket back
     SocketReader(BufReader<TcpStream>),
     Writer(Box<dyn Write + Send>),
+    /// `Read::take` over a reader value, see `native_take`
+    Take {
+        source: Value,
+        limit: u64,
+    },
     Listener(TcpListener),
     Stream(TcpStream),
     Udp(UdpSocket),
@@ -117,6 +122,7 @@ impl Native {
             Native::Reader(_) => "Reader",
             Native::SocketReader(_) => "BufReader",
             Native::Writer(_) => "Writer",
+            Native::Take { .. } => "Take",
             Native::Listener(_) => "TcpListener",
             Native::Stream(_) => "TcpStream",
             Native::Udp(_) => "UdpSocket",
@@ -142,15 +148,6 @@ impl Native {
             Native::Json(_) | Native::Toml(_) => "Value",
             Native::TomlTable(_) => "Table",
             Native::Taken => "Taken",
-        }
-    }
-
-    pub fn as_read(&mut self) -> Option<&mut dyn Read> {
-        match self {
-            Native::File(r) => Some(r),
-            Native::Reader(r) => Some(r),
-            Native::SocketReader(r) => Some(r),
-            _ => None,
         }
     }
 

@@ -653,6 +653,7 @@ pub(super) mod infer;
 mod json_macro;
 mod liveness;
 mod macros;
+mod mem;
 mod method;
 mod names;
 mod pattern;
@@ -664,7 +665,6 @@ mod typed;
 mod walks;
 
 use collect::{CollectInner, CollectTarget};
-
 use support::{
     FloatTy, NumericTy, bin_kind, collect_pattern_names, expr_kind, first_generic_type,
     inline_holes, int_literal, is_assign_op, macro_yields_value, numeric_annotation, parse_exprs,

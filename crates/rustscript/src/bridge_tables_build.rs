@@ -114,6 +114,7 @@ pub const BRIDGES: &[Bridge] = &[
     b("std_bridge.rs", "std_stream_method", "Native"),
     b("std_bridge.rs", "openoptions_method", "OpenOptions"),
     // native handles
+    b("native_take.rs", "take_native_method", "Native"),
     b("native_methods.rs", "reader_native_method", "Native"),
     b("native_methods.rs", "writer_native_method", "Native"),
     b("native_methods.rs", "file_native_method", "Native"),
