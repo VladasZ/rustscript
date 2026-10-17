@@ -443,7 +443,8 @@ impl Vm {
             Value::Native(native) => {
                 // one lock to pick the family, the families lock again on their own
                 let family = match &*native.lock() {
-                    Native::Iterator(_) => NativeFamily::Iterator,
+                    // `iterator_next` pulls a `Lines` too, so `map`, `count` and the collects work
+                    Native::Iterator(_) | Native::Lines(_) => NativeFamily::Iterator,
                     Native::HttpClient(_) | Native::BlockingHttpClient(_) => NativeFamily::Http,
                     _ => NativeFamily::Other,
                 };

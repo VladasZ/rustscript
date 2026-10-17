@@ -9,6 +9,7 @@ use parking_lot::Mutex;
 use super::bytecode::{BuiltinId, MethodName};
 use super::enum_def::ERROR_KIND;
 use super::native::Native;
+use super::native_take::with_buf_read;
 use super::numeric::IntWidth;
 use super::std_bridge::as_i64;
 use super::value::Value;
@@ -118,6 +119,9 @@ pub(super) fn native_method(
     }
     // the families use disjoint names, handles that consume self move out of the Mutex inside
     // their helper
+    if let Some(v) = super::native_take::take_native_method(handle, method, args)? {
+        return Ok(Some(v));
+    }
     if let Some(v) = reader_native_method(handle, method, args)? {
         return Ok(Some(v));
     }
@@ -190,18 +194,18 @@ pub(super) fn fill_buffer(target: Option<&Value>, bytes: &[u8]) {
 
 /// `read_exact` fills the whole buffer or fails with `UnexpectedEof`.
 fn read_into(handle: &Handle, id: BuiltinId, args: &[Value]) -> Result<Value> {
-    let mut h = handle.lock();
-    let Some(r) = h.as_read() else {
-        bail!("{} on non-reader {}", id.name(), h.type_name());
-    };
     let len = buffer_len(args.first());
     let mut buf = vec![0u8; len];
-    let read = if id == BuiltinId::ReadExact {
-        r.read_exact(&mut buf).map(|()| None)
-    } else {
-        r.read(&mut buf).map(Some)
+    let read = with_buf_read(handle, &mut |r| {
+        if id == BuiltinId::ReadExact {
+            r.read_exact(&mut buf).map(|()| None)
+        } else {
+            r.read(&mut buf).map(Some)
+        }
+    });
+    let Some(read) = read else {
+        bail!("{} on non-reader {}", id.name(), handle.lock().type_name());
     };
-    drop(h);
     Ok(io_err(read, |n| {
         fill_buffer(args.first(), &buf[..n.unwrap_or(len)]);
         n.map_or(Value::Unit, |n| Value::Int(int_len(n)))
@@ -215,13 +219,10 @@ fn reader_native_method(
 ) -> Result<Option<Value>> {
     match method.id {
         BuiltinId::ReadLine => {
-            let mut h = handle.lock();
-            let Some(r) = h.as_buf_read() else {
-                bail!("read_line on non-reader {}", h.type_name());
-            };
             let mut buf = String::new();
-            let read = r.read_line(&mut buf);
-            drop(h);
+            let Some(read) = with_buf_read(handle, &mut |r| r.read_line(&mut buf)) else {
+                bail!("read_line on non-reader {}", handle.lock().type_name());
+            };
             return Ok(Some(io_err(read, |n| {
                 if let Some(t) = args.first_mut() {
                     append_string(t, &buf);
@@ -230,13 +231,10 @@ fn reader_native_method(
             })));
         }
         BuiltinId::ReadToString => {
-            let mut h = handle.lock();
-            let Some(r) = h.as_read() else {
-                bail!("read_to_string on non-reader {}", h.type_name());
-            };
             let mut buf = String::new();
-            let read = r.read_to_string(&mut buf);
-            drop(h);
+            let Some(read) = with_buf_read(handle, &mut |r| r.read_to_string(&mut buf)) else {
+                bail!("read_to_string on non-reader {}", handle.lock().type_name());
+            };
             return Ok(Some(io_err(read, |n| {
                 if let Some(t) = args.first_mut() {
                     append_string(t, &buf);
@@ -259,13 +257,10 @@ fn reader_native_method(
             });
         }
         BuiltinId::ReadToEnd => {
-            let mut h = handle.lock();
-            let Some(r) = h.as_read() else {
-                bail!("read_to_end on non-reader {}", h.type_name());
-            };
             let mut buf = Vec::new();
-            let read = r.read_to_end(&mut buf);
-            drop(h);
+            let Some(read) = with_buf_read(handle, &mut |r| r.read_to_end(&mut buf)) else {
+                bail!("read_to_end on non-reader {}", handle.lock().type_name());
+            };
             return Ok(Some(io_err(read, |n| {
                 if let Some(t) = args.first() {
                     append_bytes(t, &buf);
@@ -277,13 +272,10 @@ fn reader_native_method(
         // unterminated line
         BuiltinId::ReadUntil => {
             let delim = byte_arg(args.first(), "read_until")?;
-            let mut h = handle.lock();
-            let Some(r) = h.as_buf_read() else {
-                bail!("read_until on non-reader {}", h.type_name());
-            };
             let mut buf = Vec::new();
-            let read = r.read_until(delim, &mut buf);
-            drop(h);
+            let Some(read) = with_buf_read(handle, &mut |r| r.read_until(delim, &mut buf)) else {
+                bail!("read_until on non-reader {}", handle.lock().type_name());
+            };
             return Ok(Some(io_err(read, |n| {
                 if let Some(t) = args.get(1) {
                     append_bytes(t, &buf);
@@ -317,6 +309,12 @@ fn lines_native_method(handle: &Handle, method: &MethodName) -> Option<Value> {
                 Native::SocketReader(r) => {
                     use std::io::BufRead;
                     Box::new(r.lines())
+                }
+                take @ Native::Take { .. } => {
+                    let take: Handle = Arc::new(Mutex::new(take));
+                    Box::new(std::iter::from_fn(move || {
+                        super::native_take::take_line(&take)
+                    }))
                 }
                 other => {
                     *handle.lock() = other;

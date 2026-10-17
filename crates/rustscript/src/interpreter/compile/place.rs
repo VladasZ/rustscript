@@ -633,6 +633,9 @@ impl Compiler<'_> {
         kind: PathId,
         c: &syn::ExprCall,
     ) -> Result<bool> {
+        if super::mem::takes_ref_binding(kind, c) {
+            return self.compile_mem_through_ref(dst, kind, c);
+        }
         let strip = |e: &Expr| match e {
             Expr::Reference(r) if r.mutability.is_some() => Some(r.expr.clone()),
             _ => None,

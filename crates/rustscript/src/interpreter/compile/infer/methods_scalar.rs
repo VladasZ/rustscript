@@ -389,7 +389,7 @@ impl Infer<'_, '_> {
             }
             ("OpenOptions", "open") => io(Ty::named("File")),
             ("Metadata", "permissions") => Ty::named("Permissions"),
-            ("Permissions", "set_readonly") => Ty::Unit,
+            ("Permissions", "set_readonly") | ("Take", "set_limit") => Ty::Unit,
             ("NamedTempFile", "path") => Ty::named("Path"),
             ("NamedTempFile", "as_file" | "as_file_mut") => Ty::named("File"),
             ("NamedTempFile", "persist") => {
@@ -403,14 +403,19 @@ impl Infer<'_, '_> {
             ("Output", "stdout" | "stderr") => Ty::vec(Ty::Int(IntWidth::U8)),
             ("ExitStatus", "code") => Ty::option(Ty::Int(IntWidth::I32)),
             ("Child", "kill")
+            | ("Take", "read_exact")
             | ("File", "set_modified" | "set_permissions" | "set_len" | "sync_data")
             | (
                 "File" | "NamedTempFile" | "Stdout" | "Stderr" | "BufWriter",
                 "write_all" | "flush" | "sync_all",
             ) => io(Ty::Unit),
             ("Stdin", "lock") => Ty::named("Stdin"),
-            ("Stdin" | "File" | "BufReader", "lines") => Ty::iter(io(Ty::Str)),
-            ("Stdin" | "File" | "BufReader", "read_line" | "read_to_string") => io(Ty::usize()),
+            ("Stdin" | "File" | "BufReader" | "Take", "take") => Ty::named("Take"),
+            ("Take", "limit") => Ty::Int(IntWidth::U64),
+            ("Stdin" | "File" | "BufReader" | "Take", "lines") => Ty::iter(io(Ty::Str)),
+            ("Stdin" | "File" | "BufReader" | "Take", "read_line" | "read_to_string") => {
+                io(Ty::usize())
+            }
             ("Response", "status") => Ty::named("StatusCode"),
             ("Response", "text") => Ty::result(Ty::Str, Ty::named("reqwest::Error")),
             ("Response", "bytes") => {

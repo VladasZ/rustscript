@@ -1,6 +1,6 @@
 use pretty_assertions::assert_eq;
 
-use super::common::{run, run_fail};
+use super::common::{run, run_fail, run_with_stdin};
 
 #[test]
 fn fs_roundtrip() {
@@ -174,4 +174,27 @@ fn main() {
         err.contains("`std::thread::spawn` is not implemented by the interpreter"),
         "stderr was: {err}"
     );
+}
+
+/// The pen-guard hook reads its input this way, the limit must cut the stream like std.
+#[test]
+fn stdin_take_stops_at_the_limit() {
+    let out = run_with_stdin(
+        r#"
+use std::io::{BufRead, Read, stdin};
+fn main() -> anyhow::Result<()> {
+    let mut input = stdin().lock();
+    let mut line = String::new();
+    input.by_ref().take(3).read_line(&mut line)?;
+    let mut head = String::new();
+    let n = input.by_ref().take(5).read_to_string(&mut head)?;
+    let mut rest = String::new();
+    stdin().take(2_097_153).read_to_string(&mut rest)?;
+    println!("{line:?} {n} {head:?} {rest:?}");
+    Ok(())
+}
+"#,
+        b"abcdef\nghij\n",
+    );
+    assert_eq!(out, "\"abc\" 5 \"def\\ng\" \"hij\\n\"\n");
 }

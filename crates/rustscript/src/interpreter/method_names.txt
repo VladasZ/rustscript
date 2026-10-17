@@ -243,6 +243,7 @@ get_or_insert_with mut
 get_page_content
 get_pages
 get_raw_value
+get_ref
 get_text
 get_value
 gid
@@ -369,6 +370,7 @@ leading_ones
 leading_zeros
 len
 len_utf8
+limit
 lines
 ln
 local
@@ -546,6 +548,7 @@ set_broadcast
 set_extension mut
 set_file_name mut
 set_len
+set_limit mut
 set_modified
 set_permissions
 set_raw_value

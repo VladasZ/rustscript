@@ -34,6 +34,7 @@ mod methods;
 mod native;
 mod native_methods;
 mod native_net;
+mod native_take;
 mod numeric;
 mod ops;
 mod pattern;

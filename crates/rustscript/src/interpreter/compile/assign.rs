@@ -64,6 +64,25 @@ impl Compiler<'_> {
         self.deref_param_upvalue(name).then(|| name.to_string())
     }
 
+    /// Stores `val` through the `&mut` binding `r`, the way `*r = val` does.
+    pub(super) fn store_through(&mut self, r: &Expr, val: Reg) -> Result<()> {
+        if let Some(name) = place::single_path_name(r)
+            && let Some(target) = self.deref_write_target(&name)
+        {
+            let location = self.resolve_for_write(&target);
+            return self.emit_name_store(location, val, &target);
+        }
+        if let Some(cell) = self.deref_param_cell(r) {
+            self.emit(Op::StoreCell { cell, src: val });
+        } else if let Some(target) = self.deref_param_reg(r) {
+            self.emit(Op::SetDerefParam { target, val });
+        } else {
+            let target = self.compile_expr(r)?;
+            self.emit(Op::SetDeref { target, val });
+        }
+        Ok(())
+    }
+
     /// The caller's place in `pick(&mut n)` when `pick` hands that parameter back whole, see
     /// `collect_mut_arg_returns`. The call works on a copy it writes back into `n`, so a write
     /// through its result goes to `n` after the call.

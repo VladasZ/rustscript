@@ -51,7 +51,9 @@ impl Vm {
             Value::Map(map, kind) if name == BuiltinId::Retain => {
                 self.map_retain(map, *kind, args).map(Some)
             }
-            Value::Native(iterator) if matches!(&*iterator.lock(), Native::Iterator(_)) => {
+            Value::Native(iterator)
+                if matches!(&*iterator.lock(), Native::Iterator(_) | Native::Lines(_)) =>
+            {
                 self.iterator_higher_order(iterator, name, args)
             }
             Value::Enum { def, variant, data } if def.kind == EnumKind::Option => {
